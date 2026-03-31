@@ -64,7 +64,7 @@
     "eslint-plugin-jsx-a11y": "^6.10.2",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
-    "globals": "^16.5.0",
+    "globals": "^17.4.0",
     "happy-dom": "^20.8.9",
     "jsdom": "^27.2.0",
     "knip": "^5.86.0",

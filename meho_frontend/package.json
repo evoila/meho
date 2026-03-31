@@ -23,7 +23,7 @@
     "check": "npm run typecheck && npm run lint && npm run test:run"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.90.10",
+    "@tanstack/react-query": "^5.96.0",
     "@tanstack/react-table": "^8.21.3",
     "@xyflow/react": "^12.10.0",
     "axios": "^1.14.0",

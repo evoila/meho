@@ -1,0 +1,41 @@
+# Private planning and AI tool artifacts -- must NEVER appear in Docker images
+.planning/
+.claude/
+.cursor/
+
+# Git and CI -- not needed in Docker images
+.git/
+.github/
+.githooks/
+
+# Tests and scripts -- not needed in production images
+tests/
+scripts/
+docs/
+
+# Node modules (frontend has its own install step)
+node_modules/
+meho_frontend/node_modules/
+
+# Markdown files (except README and LICENSE)
+*.md
+!README.md
+!LICENSE
+
+# Environment files -- secrets must not be baked into images
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Code quality config
+sonar-project.properties
+vulture_whitelist.py
+
+# Subprojects
+meho-claude/

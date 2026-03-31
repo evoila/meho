@@ -1,0 +1,133 @@
+name: Frontend Tests
+
+on:
+  push:
+    paths:
+      - 'meho_frontend/**'
+      - '.github/workflows/frontend-tests.yml'
+    branches: [main, develop]
+  pull_request:
+    paths:
+      - 'meho_frontend/**'
+      - '.github/workflows/frontend-tests.yml'
+    branches: [main, develop]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+      
+      - name: Type check
+        working-directory: meho_frontend
+        run: npm run typecheck
+      
+      - name: Lint
+        working-directory: meho_frontend
+        run: npm run lint
+      
+      - name: Run unit & integration tests
+        working-directory: meho_frontend
+        run: npm run test:coverage
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: meho_frontend/coverage/coverage-final.json
+          flags: frontend
+          name: frontend-coverage
+          fail_ci_if_error: false
+      
+      - name: Build
+        working-directory: meho_frontend
+        run: npm run build
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+      
+      - name: Install Playwright browsers
+        working-directory: meho_frontend
+        run: npx playwright install --with-deps chromium
+      
+      - name: Run E2E tests
+        working-directory: meho_frontend
+        run: npm run test:e2e -- --project=chromium
+        env:
+          VITE_API_URL: ${{ secrets.STAGING_API_URL || 'http://localhost:8000' }}
+      
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: meho_frontend/playwright-report/
+          retention-days: 30
+      
+      - name: Upload test screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-screenshots
+          path: meho_frontend/test-results/
+          retention-days: 7
+
+  accessibility:
+    name: Accessibility Check
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+      
+      - name: Build
+        working-directory: meho_frontend
+        run: npm run build
+      
+      # Note: Add axe-core or pa11y for accessibility testing when ready
+      # - name: Run accessibility tests
+      #   working-directory: meho_frontend
+      #   run: npm run test:a11y
+

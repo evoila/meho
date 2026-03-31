@@ -1,0 +1,38 @@
+# Specialist Agent Configuration
+# Unified connector-scoped agent parameterized by injectable skills
+
+name: specialist
+description: "Unified connector-scoped agent parameterized by skill"
+
+# Model configuration - name resolved from LLM_MODEL env var via core/config.py
+model:
+  temperature: 0.0
+
+# System prompt - file reference (relative to agent folder)
+system_prompt_file: "prompts/system.md"
+
+# Tool configuration - same fixed meta-tool set for ALL connector types
+tools:
+  list_connectors:
+    enabled: false  # Not needed - connector is already scoped
+  search_operations:
+    enabled: true
+    default_limit: 10
+  call_operation:
+    enabled: true
+    require_approval_for_dangerous: true
+  search_types:
+    enabled: true
+  search_knowledge:
+    enabled: true
+    default_limit: 5
+  reduce_data:
+    enabled: true
+  lookup_topology:
+    enabled: true
+  invalidate_topology:
+    enabled: true
+
+# Agent-specific settings
+max_steps: 8  # Default budget: typical 3-6 steps, complex use extend_budget for +4 (cap: 12)
+window_size: 3  # Recent steps to keep at full detail (min: 2)

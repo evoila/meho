@@ -1,0 +1,109 @@
+# Dependency License Compliance Check
+#
+# Verifies all Python and npm dependencies are compatible with AGPL-3.0-only.
+# AGPL is copyleft: all dependencies must be AGPL-compatible (MIT, BSD, Apache-2.0,
+# LGPL, ISC, PSF, 0BSD are compatible; GPL-2.0-only without "or later" is NOT).
+#
+# Runs in WARN mode initially (continue-on-error: true). After the initial audit
+# and allowlist is built, switch to blocking by removing continue-on-error.
+#
+# All third-party actions are pinned to commit SHAs per supply chain best practice.
+
+name: License Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - 'meho_frontend/package.json'
+      - 'meho_frontend/package-lock.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - 'meho_frontend/package.json'
+      - 'meho_frontend/package-lock.json'
+
+# Prevent redundant checks on rapid pushes
+concurrency:
+  group: license-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python-licenses:
+    name: Python License Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true  # WARN mode -- remove after initial audit
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "."
+          pip install pip-licenses
+        env:
+          DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379"
+          CREDENTIAL_ENCRYPTION_KEY: "test-encryption-key-32-chars-minimum-length"
+          JWT_SECRET_KEY: "test-jwt-secret-key-32-characters-minimum"
+          APP_ENVIRONMENT: "test"
+          KEYCLOAK_URL: "http://localhost:8080"
+          KEYCLOAK_REALM: "test"
+          KEYCLOAK_CLIENT_ID: "test"
+
+      - name: Check Python dependency licenses
+        run: |
+          echo "=== All dependency licenses ==="
+          pip-licenses --format=table --with-urls
+
+          echo ""
+          echo "=== Checking for AGPL-incompatible licenses ==="
+          # Allow-list: licenses compatible with AGPL-3.0-only
+          # MIT, BSD (all variants), Apache-2.0, LGPL (all), ISC, PSF, 0BSD,
+          # MPL-2.0, Artistic-2.0, Unlicense, CC0, WTFPL, Zlib, Python-2.0
+          pip-licenses --allow-only="MIT License;BSD License;BSD-2-Clause;BSD-3-Clause;Apache Software License;Apache-2.0;ISC License (ISCL);ISC;PSF License;PSF;Python Software Foundation License;GNU Lesser General Public License v2 (LGPLv2);GNU Lesser General Public License v2 or later (LGPLv2+);GNU Lesser General Public License v3 (LGPLv3);GNU Lesser General Public License v3 or later (LGPLv3+);GNU Affero General Public License v3 (AGPLv3);GNU Affero General Public License v3 or later (AGPLv3+);Mozilla Public License 2.0 (MPL 2.0);The Unlicense (Unlicense);CC0 1.0 Universal (CC0 1.0) Public Domain Dedication;Zlib;Public Domain;Historical Permission Notice and Disclaimer (HPND)" \
+            --format=table \
+            || echo "::warning::Some Python packages have licenses not in the allow-list. Review the output above."
+
+  npm-licenses:
+    name: Frontend License Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true  # WARN mode -- remove after initial audit
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: Check npm dependency licenses
+        working-directory: meho_frontend
+        run: |
+          echo "=== All dependency licenses ==="
+          npx license-checker --summary
+
+          echo ""
+          echo "=== Checking for AGPL-incompatible licenses ==="
+          npx license-checker \
+            --onlyAllow "MIT;ISC;BSD-2-Clause;BSD-3-Clause;Apache-2.0;0BSD;CC0-1.0;Unlicense;CC-BY-4.0;CC-BY-3.0;Python-2.0;BlueOak-1.0.0" \
+            || echo "::warning::Some npm packages have licenses not in the allow-list. Review the output above."

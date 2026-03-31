@@ -1,0 +1,106 @@
+# MEHO Unified Application Dockerfile
+# Single backend service combining all modules (knowledge, openapi, agent, ingestion)
+#
+# Usage modes (same image, different CMD):
+#   API server (default):  docker run meho  (uses ENTRYPOINT + default CMD)
+#   Ingestion worker:      docker run meho python -m meho_app.worker
+#   Coordinator service:   docker run meho python -m meho_app.worker.coordinator
+#
+# Build variants:
+#   CPU (default, ~4 GB):   docker build -t meho .
+#   GPU (CUDA 12.4, ~8 GB): docker build --build-arg CUDA_ENABLED=true -t meho-gpu .
+#   Slim (lightweight ingestion, ~500 MB): docker build --build-arg INCLUDE_DOCLING=false -t meho-slim .
+#     Uses pymupdf4llm + pdfplumber instead of Docling. Sets MEHO_FEATURE_USE_DOCLING=false.
+#
+# GPU notes:
+#   - Cloud Run GPU instances provide the NVIDIA driver at runtime
+#   - The CUDA base image provides the toolkit; PyTorch CUDA wheel provides bindings
+#   - Docling's device='auto' detects CUDA automatically — no code changes needed
+
+# --- Multi-stage base image selection ---
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base-gpu
+FROM python:3.13-slim AS base-cpu
+
+# CUDA_ENABLED=true selects the GPU base with CUDA runtime
+ARG CUDA_ENABLED=false
+FROM base-cpu AS base-false
+FROM base-gpu AS base-true
+FROM base-${CUDA_ENABLED} AS base
+
+ARG INCLUDE_DOCLING=true
+
+# GPU base needs Python installed (CUDA image doesn't include it)
+RUN if command -v python3 > /dev/null 2>&1; then \
+      echo "Python already available"; \
+    else \
+      apt-get update && apt-get install -y \
+        python3.11 python3.11-venv python3-pip python3.11-dev \
+        && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+        && ln -sf /usr/bin/python3.11 /usr/bin/python \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+WORKDIR /app
+
+# Install system dependencies
+# libxcb1 + libgl1: required by OpenCV/Pillow for Docling PDF layout detection
+RUN apt-get update && apt-get install -y \
+    gcc \
+    postgresql-client \
+    curl \
+    libxcb1 \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project configuration
+COPY pyproject.toml ./
+COPY README.md ./
+
+# Copy unified application (includes core/ for shared utilities)
+COPY meho_app/ ./meho_app/
+
+# Copy configuration files
+COPY config/ ./config/
+
+# Copy scripts (for migrations and utilities)
+COPY scripts/ ./scripts/
+
+# Copy tests (includes tests/support/ for test utilities)
+COPY tests/ ./tests/
+
+# Install Python dependencies
+# Three modes:
+#   INCLUDE_DOCLING=true  + CUDA_ENABLED=false → CPU PyTorch (~4 GB image)
+#   INCLUDE_DOCLING=true  + CUDA_ENABLED=true  → CUDA PyTorch (~8 GB image, GPU acceleration)
+#   INCLUDE_DOCLING=false                      → No PyTorch/Docling (~500 MB image)
+ARG CUDA_ENABLED=false
+RUN if [ "$INCLUDE_DOCLING" = "false" ]; then \
+      pip install --no-cache-dir -e ".[dev]" && \
+      pip uninstall -y docling docling-core docling-parse torch torchvision torchaudio 2>/dev/null || true; \
+    elif [ "$CUDA_ENABLED" = "true" ]; then \
+      pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124 && \
+      pip install --no-cache-dir -e ".[dev]"; \
+    else \
+      pip install --no-cache-dir -e ".[dev]"; \
+    fi
+
+# Map Docker build arg to runtime feature flag
+# INCLUDE_DOCLING=false at build time -> MEHO_FEATURE_USE_DOCLING=false at runtime
+ENV MEHO_FEATURE_USE_DOCLING=${INCLUDE_DOCLING}
+
+# Expose port
+EXPOSE 8000
+
+# Copy and set up entrypoint (runs migrations before starting app)
+COPY docker/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Entrypoint runs migrations then exec's CMD
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["uvicorn", "meho_app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+

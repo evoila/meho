@@ -1,0 +1,24 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Navbar from '../components/Navbar.astro';
+import Hero from '../components/Hero.astro';
+import Features from '../components/Features.astro';
+import { InvestigationDemo } from '../components/InvestigationDemo';
+import HowItWorks from '../components/HowItWorks.astro';
+import Quickstart from '../components/Quickstart.astro';
+import Pricing from '../components/Pricing.astro';
+import Footer from '../components/Footer.astro';
+---
+
+<Layout title="MEHO.ai — AI-powered cross-system investigation for DevOps">
+  <Navbar />
+  <main>
+    <Hero />
+    <Features />
+    <InvestigationDemo client:visible />
+    <HowItWorks />
+    <Quickstart />
+    <Pricing />
+  </main>
+  <Footer />
+</Layout>

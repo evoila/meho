@@ -1,0 +1,11 @@
+# Dead code archives (old distributed-services architecture, not shipped)
+_archive/
+
+# Vite prebundle cache (generated/bundled third-party code)
+meho_frontend/.vite/
+
+# Separate subproject with its own CI pipeline
+meho-claude/
+
+# Test fixtures (mock data, not production code)
+tests/fixtures/

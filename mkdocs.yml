@@ -1,0 +1,100 @@
+# MEHO Documentation - MkDocs Material Configuration
+
+site_name: MEHO Documentation
+site_description: AI-powered diagnostic and operations platform for complex IT environments
+site_url: https://docs.meho.ai
+
+theme:
+  name: material
+  logo: img/logo.png
+  favicon: img/favicon.png
+  palette:
+    primary: custom
+    accent: custom
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.path
+    - content.code.copy
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search
+  - neoteroi.mkdocsoad:
+      use_pymdownx: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+extra_css:
+  - stylesheets/extra.css
+  - css/mkdocsoad.css
+
+nav:
+  - Overview: index.md
+  - Features: features.md
+  - How It Works: how-it-works.md
+  - Example Investigation: example-investigation.md
+  - Connectors:
+    - Infrastructure:
+      - Kubernetes: connectors/kubernetes.md
+      - VMware vSphere: connectors/vmware.md
+      - Proxmox VE: connectors/proxmox.md
+      - Google Cloud: connectors/gcp.md
+      - Amazon Web Services: connectors/aws.md
+      - Microsoft Azure: connectors/azure.md
+    - Observability:
+      - Prometheus: connectors/prometheus.md
+      - Loki: connectors/loki.md
+      - Tempo: connectors/tempo.md
+      - Alertmanager: connectors/alertmanager.md
+    - CI/CD:
+      - ArgoCD: connectors/argocd.md
+      - GitHub: connectors/github.md
+    - Collaboration:
+      - Jira: connectors/jira.md
+      - Confluence: connectors/confluence.md
+      - Slack: connectors/slack.md
+      - Email: connectors/email.md
+    - Integration:
+      - MCP Client: connectors/mcp-client.md
+      - MCP Server: connectors/mcp-server.md
+    - Generic:
+      - REST (OpenAPI): connectors/rest.md
+      - SOAP (WSDL): connectors/soap.md
+  - Architecture:
+    - System Overview: architecture/overview.md
+    - Adding a Connector: architecture/adding-connector.md
+  - Configuration:
+    - Feature Flags: configuration/feature-flags.md
+    - Events System: configuration/events.md
+    - CI Quality Gates: configuration/ci-quality-gates.md
+  - Network Diagnostics: features/network-diagnostics.md
+  - Knowledge: knowledge.md
+  - Trust & Safety: trust-and-safety.md
+  - Security: security.md
+  - Deployment: deployment.md
+  - API Reference: api-reference.md
+  - Troubleshooting: troubleshooting.md
+  - Roadmap: roadmap.md

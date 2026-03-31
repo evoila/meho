@@ -1,0 +1,444 @@
+[project]
+name = "meho"
+version = "0.1.0"
+description = "MEHO - Machine Enhanced Human Operator"
+requires-python = ">=3.13"
+authors = [
+    {name = "MEHO Team"}
+]
+readme = "README.md"
+license = "AGPL-3.0-only"
+
+dependencies = [
+    # Web Framework
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    
+    # Database
+    "sqlalchemy[asyncio]>=2.0.0",
+    "alembic>=1.12.0",
+    "asyncpg>=0.29.0",
+    
+    # Data Validation
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    
+    # AI/Agents
+    "pydantic-ai-slim[anthropic,openai,mcp]>=1.63.0",
+    "voyageai>=0.3.0",
+    
+    # Vector Store (PostgreSQL with pgvector)
+    "pgvector>=0.2.0",
+    
+    # Object Storage
+    "boto3>=1.29.0",
+    
+    # Cache
+    "redis>=5.0.0",
+    
+    # Rate Limiting
+    "slowapi>=0.1.9",
+    
+    # HTTP Client
+    "httpx>=0.25.0",
+    "aiohttp>=3.9.0",  # For async SOAP transport
+    
+    # SOAP/WSDL Support
+    "zeep>=4.2.0",  # SOAP client library for WSDL parsing and execution
+    
+    # VMware vSphere Support (TASK-97)
+    "pyvmomi>=8.0.0.0",  # VMware vSphere API Python SDK
+    
+    # Proxmox VE Support (TASK-100)
+    "proxmoxer>=2.0.0",  # Proxmox VE API Python SDK
+    
+    # Google Cloud Platform Support (TASK-102)
+    "google-cloud-compute>=1.14.0",    # Compute Engine SDK
+    "google-cloud-container>=2.32.0",  # GKE SDK
+    "google-cloud-monitoring>=2.18.0", # Cloud Monitoring SDK
+    "google-auth>=2.23.0",             # GCP Authentication
+    "google-cloud-build>=3.35.0",                # Cloud Build SDK
+    "google-cloud-artifact-registry>=1.20.0",    # Artifact Registry SDK
+    "google-cloud-run>=0.16.0",                   # Cloud Run Jobs SDK (ephemeral workers)
+    "google-cloud-storage>=2.14.0",              # Cloud Storage SDK (build logs)
+
+    # Azure Cloud Platform Support (Phase 92)
+    "azure-identity>=1.25.0",                    # Azure Authentication
+    "azure-mgmt-compute>=37.0.0",               # VMs, Disks
+    "azure-mgmt-monitor>=7.0.0",                # Metrics, Alerts
+    "azure-mgmt-containerservice>=41.0.0",      # AKS Clusters, Node Pools
+    "azure-mgmt-network>=30.0.0",               # VNets, NSGs, Load Balancers
+    "azure-mgmt-storage>=24.0.0",               # Storage Accounts
+    "azure-mgmt-web>=10.0.0",                   # App Service, Functions
+    "azure-mgmt-resource>=23.0.0",              # Resource Groups
+
+    # Kubernetes Support (TASK-159)
+    "kubernetes-asyncio>=24.2.0",      # Kubernetes async client
+    
+    # Web Crawling (URL ingestion for knowledge base)
+    "crawl4ai>=0.8.0",
+
+    # Container management (Docker backend for ephemeral workers)
+    "docker>=7.1.0",
+
+    # File Processing
+    "python-multipart>=0.0.6",
+    "docling>=2.80.0",
+
+    # Lightweight document ingestion (Phase 98 -- used when USE_DOCLING=false)
+    "pymupdf4llm>=1.27.0",              # PDF text + layout -> markdown (AGPL-3.0)
+    "pdfplumber>=0.11.0",               # PDF table extraction (MIT)
+    "rapidocr-onnxruntime>=1.4.0",      # OCR for scanned PDFs, no PyTorch (Apache-2.0)
+    "python-docx>=1.1.0",              # DOCX extraction (MIT)
+    "beautifulsoup4>=4.12.0",           # HTML extraction (MIT)
+    "lxml>=5.0.0",                      # HTML parser backend for bs4 (BSD)
+
+    # Templating
+    "jinja2>=3.1.0",
+    
+    # Tokenization
+    "tiktoken>=0.5.0",
+    
+    # Search & Retrieval
+    "rank-bm25>=0.2.2",
+    "nltk>=3.8.0",  # Porter Stemmer for BM25 tokenization
+    
+    # Data Processing
+    "duckdb>=1.4.3",  # SQL queries on Arrow tables (data reduction + jsonflux)
+    "pyarrow>=21.0.0",  # Parquet support for efficient Redis caching + jsonflux
+    
+    # JSON Structure Analysis (jsonflux)
+    "msgspec>=0.20.0",
+    "tabulate>=0.9.0",
+    
+    # OpenTelemetry (core)
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    
+    # OpenTelemetry instrumentation
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.48b0",
+    "opentelemetry-instrumentation-httpx>=0.48b0",
+    
+    # Utilities
+    "python-jose[cryptography]>=3.3.0",
+    "cryptography>=41.0.0",
+    "python-dotenv>=1.0.0",
+    
+    # Keycloak Integration (TASK-139)
+    "python-keycloak>=4.0.0",
+
+    # Scheduled Tasks (Phase 45)
+    "APScheduler>=3.11,<4",              # Cron scheduling with PostgreSQL persistence
+    "croniter>=6.0.0",                   # Cron expression parsing and validation
+    "psycopg2-binary>=2.9.0",           # Sync PostgreSQL driver for APScheduler's SQLAlchemyJobStore
+
+    # Slack Integration (Phase 94.1)
+    "slack-bolt>=1.27.0,<2.0.0",        # Slack app framework (handlers, Socket Mode, FastAPI adapter)
+    # Network Diagnostics (Phase 96.1)
+    "aiodns>=4.0.0",                     # Async DNS resolver for SRV/MX/CNAME record queries
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-timeout>=2.1.0",
+    "pytest-watch>=4.2.0",
+    "pytest-mock>=3.11.0",
+    "faker>=20.0.0",
+    "factory-boy>=3.3.0",
+    "httpx-sse>=0.4.0",  # For SSE testing in E2E tests
+]
+
+dev = [
+    "ruff>=0.15.0",
+    "mypy>=1.7.0",
+    "types-redis>=4.6.0",
+    "pre-commit>=3.5.0",
+    "ipython>=8.18.0",
+    "debugpy>=1.8.18",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "meho_app",  # Unified monolith application (includes core/ for shared utilities)
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "UP",    # pyupgrade
+    "S",     # flake8-bandit (security)
+    "ASYNC", # flake8-async
+    "PT",    # flake8-pytest-style
+    "DTZ",   # flake8-datetimez
+    "SIM",   # flake8-simplify
+    "RUF",   # Ruff-specific rules
+    "PERF",  # Perflint performance anti-patterns
+    "ERA",   # eradicate (commented-out code detection)
+    "TCH",   # flake8-type-checking (TYPE_CHECKING import optimization)
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+# --- Existing ignores ---
+"__init__.py" = ["F401"]
+"**/alembic/env.py" = ["E402"]
+"tests/**/*.py" = [
+    "S101",   # assert usage (standard in tests)
+    "S105",   # hardcoded password strings (test fixtures)
+    "S106",   # hardcoded password func args (test fixtures)
+    "S311",   # non-cryptographic random (tests don't need crypto)
+    "PERF",   # performance rules less critical in test code
+    "ERA",    # test comments describe setup/expected behavior (false positives)
+    "TCH",    # TYPE_CHECKING moves break test mocking patterns
+]
+# --- C901 complexity: functions exceeding max-complexity 15, need incremental refactoring ---
+"meho_app/api/connectors/operations/email.py" = ["C901"]
+"meho_app/api/connectors/operations/health.py" = ["C901"]
+"meho_app/api/connectors/operations/mcp.py" = ["C901"]
+"meho_app/api/connectors/operations/prometheus.py" = ["C901"]
+"meho_app/api/connectors/operations/tempo.py" = ["C901"]
+"meho_app/api/observability/router_explain.py" = ["C901"]
+"meho_app/api/routes_chat.py" = ["C901"]
+"meho_app/jsonflux/core/converter.py" = ["C901"]
+"meho_app/modules/agents/data_reduction/query_generator.py" = ["C901"]
+"meho_app/modules/agents/shared/handlers/endpoint_handlers.py" = ["C901"]
+"meho_app/modules/agents/shared/handlers/operation_handlers.py" = ["C901"]
+"meho_app/modules/agents/shared/handlers/tracing.py" = ["C901"]
+"meho_app/modules/agents/specialist_agent/nodes/select_operation.py" = ["C901"]
+"meho_app/modules/connectors/import_operations_sync.py" = ["C901"]
+"meho_app/modules/connectors/pool.py" = ["C901"]
+"meho_app/modules/connectors/rest/session_manager.py" = ["C901"]
+"meho_app/modules/connectors/soap/ingester.py" = ["C901"]
+"meho_app/modules/connectors/vmware/handlers/cluster_handlers.py" = ["C901"]
+"meho_app/modules/connectors/vmware/handlers/host_handlers.py" = ["C901"]
+"meho_app/modules/connectors/vmware/handlers/network_handlers.py" = ["C901"]
+"meho_app/modules/topology/service.py" = ["C901"]
+"meho_mcp_server/tools/chat.py" = ["C901"]
+# --- Files with multiple new rule violations (consolidated) ---
+"meho_app/api/connectors/operations/crud.py" = ["PERF"]
+"meho_app/api/connectors/operations/specs.py" = ["C901", "PERF"]
+"meho_app/api/mcp_server/server.py" = ["PERF"]
+"meho_app/api/observability/router.py" = ["ERA001"]
+"meho_app/api/routes_admin.py" = ["PERF", "TCH"]
+"meho_app/api/routes_audit.py" = ["TCH"]
+"meho_app/api/routes_knowledge.py" = ["PERF"]
+"meho_app/api/routes_orchestrator_skills.py" = ["PERF", "TCH"]
+"meho_app/api/routes_recipes.py" = ["TCH"]
+"meho_app/api/routes_scheduled_tasks.py" = ["TCH"]
+"meho_app/api/routes_tenants.py" = ["TCH"]
+"meho_app/core/__init__.py" = ["ERA001"]
+"meho_app/core/otel/exporters.py" = ["TCH"]
+"meho_app/core/otel/tracing.py" = ["TCH"]
+"meho_app/jsonflux/__init__.py" = ["C901", "PERF"]
+"meho_app/jsonflux/core/analyzer.py" = ["C901", "ERA001", "PERF", "TCH"]
+"meho_app/jsonflux/core/stats.py" = ["C901", "ERA001", "PERF"]
+"meho_app/jsonflux/query/engine.py" = ["C901", "PERF", "TCH"]
+"meho_app/jsonflux/utils/sampling.py" = ["TCH"]
+"meho_app/main.py" = ["C901", "E402"]
+"meho_app/modules/agents/adapter.py" = ["TCH"]
+"meho_app/modules/agents/base/agent.py" = ["TCH"]
+"meho_app/modules/agents/base/event_types.py" = ["C901", "TCH"]
+"meho_app/modules/agents/base/jsonflux_aggregate.py" = ["TCH"]
+"meho_app/modules/agents/data_reduction/adapter.py" = ["PERF"]
+"meho_app/modules/agents/dependencies.py" = ["C901", "TCH"]
+"meho_app/modules/agents/execution/cache.py" = ["ERA001", "PERF"]
+"meho_app/modules/agents/orchestrator/agent.py" = ["C901", "PERF", "TCH"]
+"meho_app/modules/agents/orchestrator/ask_mode.py" = ["PERF", "TCH"]
+"meho_app/modules/agents/orchestrator/contracts.py" = ["ERA001"]
+"meho_app/modules/agents/orchestrator/entity_routing.py" = ["PERF"]
+"meho_app/modules/agents/orchestrator/streaming.py" = ["TCH"]
+"meho_app/modules/agents/orchestrator/synthesis.py" = ["TCH"]
+"meho_app/modules/agents/orchestrator/synthesis_parser.py" = ["PERF"]
+"meho_app/modules/agents/orchestrator/topology_routing.py" = ["C901", "TCH"]
+"meho_app/modules/agents/persistence/event_factory.py" = ["TCH"]
+"meho_app/modules/agents/persistence/retention_service.py" = ["ERA001"]
+"meho_app/modules/agents/persistence/transcript_collector.py" = ["TCH"]
+"meho_app/modules/agents/persistence/transcript_models.py" = ["TCH"]
+"meho_app/modules/agents/persistence/transcript_query_builder.py" = ["TCH"]
+"meho_app/modules/agents/persistence/transcript_service.py" = ["TCH"]
+"meho_app/modules/agents/react_agent/agent.py" = ["C901", "TCH"]
+"meho_app/modules/agents/react_agent/nodes/__init__.py" = ["TCH"]
+"meho_app/modules/agents/react_agent/tools/__init__.py" = ["TCH"]
+"meho_app/modules/agents/react_agent/tools/dns_resolve.py" = ["PERF"]
+"meho_app/modules/agents/react_agent/tools/tls_check.py" = ["PERF"]
+"meho_app/modules/agents/recipes/capture.py" = ["PERF", "TCH"]
+"meho_app/modules/agents/recipes/executor.py" = ["TCH"]
+"meho_app/modules/agents/recipes/models.py" = ["PERF"]
+"meho_app/modules/agents/recipes/multi_step.py" = ["TCH"]
+"meho_app/modules/agents/recipes/repository.py" = ["TCH"]
+"meho_app/modules/agents/session_state.py" = ["ERA001"]
+"meho_app/modules/agents/shared/graph/graph_deps.py" = ["TCH"]
+"meho_app/modules/agents/shared/graph/graph_state.py" = ["TCH"]
+"meho_app/modules/agents/shared/graph/nodes/reason_node.py" = ["C901", "S608"]
+"meho_app/modules/agents/shared/graph/nodes/topology_lookup_node.py" = ["PERF"]
+"meho_app/modules/agents/shared/handlers/knowledge_handlers.py" = ["ERA001"]
+"meho_app/modules/agents/shared/topology_utils.py" = ["PERF"]
+"meho_app/modules/agents/specialist_agent/agent.py" = ["C901", "TCH"]
+"meho_app/modules/agents/specialist_agent/compressor.py" = ["PERF"]
+"meho_app/modules/agents/specialist_agent/state.py" = ["PERF"]
+"meho_app/modules/agents/sse/broadcaster.py" = ["TCH"]
+"meho_app/modules/agents/sse/emitter.py" = ["TCH"]
+"meho_app/modules/agents/unified_executor.py" = ["C901", "TCH"]
+"meho_app/modules/audit/service.py" = ["TCH"]
+"meho_app/modules/connectors/__init__.py" = ["ERA001"]
+"meho_app/modules/connectors/alertmanager/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/alertmanager/operations/__init__.py" = ["ERA001"]
+"meho_app/modules/connectors/alertmanager/serializers.py" = ["PERF"]
+"meho_app/modules/connectors/argocd/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/argocd/serializers.py" = ["ERA001"]
+"meho_app/modules/connectors/aws/handlers/cloudwatch_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/aws/serializers.py" = ["PERF"]
+"meho_app/modules/connectors/azure/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/azure/handlers/aks_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/azure/handlers/compute_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/azure/handlers/monitor_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/azure/handlers/network_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/azure/handlers/storage_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/azure/handlers/web_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/azure/serializers.py" = ["PERF"]
+"meho_app/modules/connectors/confluence/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/confluence/handlers/search_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/confluence/handlers/space_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/credential_resolver.py" = ["ERA001"]
+"meho_app/modules/connectors/email/connector.py" = ["TCH"]
+"meho_app/modules/connectors/gcp/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/gcp/handlers/artifact_registry_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/gcp/handlers/cloud_build_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/gcp/handlers/gke_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/gcp/serializers.py" = ["PERF"]
+"meho_app/modules/connectors/github/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/jira/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/jira/handlers/issue_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/jira/handlers/project_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/jira/handlers/search_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/kubernetes/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/kubernetes/handlers/deployment_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/kubernetes/handlers/namespace_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/kubernetes/handlers/node_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/kubernetes/handlers/pod_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/kubernetes/handlers/service_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/kubernetes/serializers.py" = ["PERF"]
+"meho_app/modules/connectors/loki/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/loki/operations/__init__.py" = ["ERA001"]
+"meho_app/modules/connectors/mcp/sync.py" = ["TCH"]
+"meho_app/modules/connectors/models.py" = ["ERA001"]
+"meho_app/modules/connectors/observability/data_reduction.py" = ["PERF"]
+"meho_app/modules/connectors/prometheus/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/prometheus/operations/__init__.py" = ["ERA001"]
+"meho_app/modules/connectors/prometheus/serializers.py" = ["PERF"]
+"meho_app/modules/connectors/proxmox/handlers/node_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/proxmox/handlers/storage_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/proxmox/operations/__init__.py" = ["ERA001"]
+"meho_app/modules/connectors/rest/knowledge_ingestion.py" = ["ERA001", "PERF"]
+"meho_app/modules/connectors/rest/repository.py" = ["PERF"]
+"meho_app/modules/connectors/rest/spec_parser.py" = ["TCH"]
+"meho_app/modules/connectors/router.py" = ["ERA001"]
+"meho_app/modules/connectors/schemas.py" = ["ERA001"]
+"meho_app/modules/connectors/services/operation_inheritance.py" = ["PERF", "TCH"]
+"meho_app/modules/connectors/skill_generation/generator.py" = ["TCH"]
+"meho_app/modules/connectors/tempo/connector.py" = ["ERA001"]
+"meho_app/modules/connectors/tempo/operations/__init__.py" = ["ERA001"]
+"meho_app/modules/connectors/tempo/serializers.py" = ["C901", "PERF"]
+"meho_app/modules/connectors/vmware/handlers/inventory_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/vmware/handlers/performance_handlers.py" = ["C901", "PERF"]
+"meho_app/modules/connectors/vmware/handlers/storage_handlers.py" = ["C901", "PERF"]
+"meho_app/modules/connectors/vmware/handlers/system_handlers.py" = ["PERF"]
+"meho_app/modules/connectors/vmware/handlers/vm_handlers.py" = ["C901", "ERA001"]
+"meho_app/modules/connectors/vmware/serializers.py" = ["C901"]
+"meho_app/modules/ingestion/alembic/env.py" = ["ERA001"]
+"meho_app/modules/ingestion/models.py" = ["ERA001"]
+"meho_app/modules/knowledge/bm25_hybrid_service.py" = ["TCH"]
+"meho_app/modules/knowledge/bm25_service.py" = ["TCH"]
+"meho_app/modules/knowledge/chunking.py" = ["PERF"]
+"meho_app/modules/knowledge/ingestion.py" = ["C901"]
+"meho_app/modules/knowledge/job_schemas.py" = ["ERA001"]
+"meho_app/modules/knowledge/postgres_fts.py" = ["PERF"]
+"meho_app/modules/knowledge/repository.py" = ["PERF"]
+"meho_app/modules/memory/context_builder.py" = ["PERF", "TCH"]
+"meho_app/modules/memory/repository.py" = ["PERF"]
+"meho_app/modules/orchestrator_skills/schemas.py" = ["TCH"]
+"meho_app/modules/orchestrator_skills/service.py" = ["TCH"]
+"meho_app/modules/scheduled_tasks/service.py" = ["TCH"]
+"meho_app/modules/topology/__init__.py" = ["ERA001"]
+"meho_app/modules/topology/auto_discovery/processor.py" = ["PERF"]
+"meho_app/modules/topology/auto_discovery/queue.py" = ["PERF"]
+"meho_app/modules/topology/context_node.py" = ["PERF", "TCH"]
+"meho_app/modules/topology/hostname_matcher.py" = ["PERF"]
+"meho_app/modules/topology/repository.py" = ["ERA001", "PERF"]
+"meho_app/modules/topology/resolution/matchers/hostname.py" = ["ERA001"]
+"meho_app/modules/topology/routes.py" = ["PERF", "TCH"]
+"meho_app/modules/topology/schema/base.py" = ["ERA001"]
+"meho_app/modules/topology/tool_nodes.py" = ["PERF"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+# Exclude auto-generated Alembic migrations
+exclude = [
+    "^.*/alembic/versions/.*\\.py$",
+    "^.*/alembic/env\\.py$"
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "qdrant_client.*",
+    "pydantic_ai.*",
+    "tiktoken.*",
+    "yaml.*",
+    "zeep.*",
+    "aiohttp.*",
+    "kubernetes_asyncio.*",
+    "slack_bolt.*",
+    "slack_sdk.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+
+[tool.vulture]
+min_confidence = 80
+paths = ["meho_app"]
+exclude = [
+    "meho_app/modules/*/alembic/",
+    ".venv/",
+    "test_venv/",
+]
+sort_by_size = true

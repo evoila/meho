@@ -1,0 +1,39 @@
+graph LR
+    subgraph kubernetes ["Kubernetes Cluster"]
+        POD["Pod<br/>payment-svc-7b9f4d-xk2p4"]
+        NODE["Node<br/>node-7"]
+    end
+
+    subgraph vmware ["VMware vCenter"]
+        VM["VM<br/>node-7"]
+        ESXI["ESXi Host<br/>esxi-prod-03"]
+    end
+
+    subgraph prometheus ["Prometheus"]
+        METRIC["Metric Target<br/>payment-svc:8080"]
+    end
+
+    subgraph argocd ["ArgoCD"]
+        APP["Application<br/>payment-svc"]
+    end
+
+    subgraph loki ["Loki"]
+        STREAM["Log Stream<br/>payment-svc"]
+    end
+
+    POD -- "runs_on" --> NODE
+    VM -- "runs_on" --> ESXI
+
+    NODE -. "SAME_AS<br/>(hostname match,<br/>confidence: 0.95)" .-> VM
+
+    POD -. "SAME_AS<br/>(name match)" .-> METRIC
+    POD -. "SAME_AS<br/>(name match)" .-> STREAM
+    APP -- "deployed_by" --> POD
+
+    style NODE fill:#3B82F6,color:#fff,stroke:#2563EB
+    style VM fill:#10B981,color:#fff,stroke:#059669
+    style POD fill:#3B82F6,color:#fff,stroke:#2563EB
+    style ESXI fill:#10B981,color:#fff,stroke:#059669
+    style METRIC fill:#E6522C,color:#fff,stroke:#C4411C
+    style APP fill:#F97316,color:#fff,stroke:#EA580C
+    style STREAM fill:#F9A825,color:#000,stroke:#D48F20

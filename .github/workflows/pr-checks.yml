@@ -1,0 +1,102 @@
+name: PR Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  pr-title-check:
+    name: Check PR Title Format
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check PR title follows conventional commits
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            chore
+            ci
+          requireScope: false
+
+  code-review-checklist:
+    name: Post Code Review Checklist
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      
+      - name: Comment checklist on PR
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const issue_number = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            
+            // Check if checklist already posted
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number
+            });
+            
+            const checklistExists = comments.data.some(comment => 
+              comment.body && comment.body.includes('Code Review Checklist')
+            );
+            
+            if (!checklistExists) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body: `## 📋 Code Review Checklist
+            
+            Please review the following before merging:
+            
+            ### Code Quality
+            - [ ] Code follows project style guide
+            - [ ] All tests pass (unit + integration)
+            - [ ] Test coverage ≥80% (or maintained)
+            - [ ] No linting errors
+            - [ ] Type hints are correct
+            
+            ### Documentation
+            - [ ] README updated if needed
+            - [ ] Task file updated with implementation notes
+            - [ ] Code comments for complex logic
+            - [ ] API changes documented
+            
+            ### Database
+            - [ ] Migrations included if schema changes
+            - [ ] Migrations tested (up and down)
+            - [ ] No breaking changes to existing data
+            
+            ### Security
+            - [ ] No secrets in code
+            - [ ] Authentication/authorization checked
+            - [ ] Input validation present
+            - [ ] SQL injection protection
+            
+            ### Testing
+            - [ ] Manual testing completed
+            - [ ] Edge cases considered
+            - [ ] Error handling tested
+            - [ ] Performance implications considered
+            
+            ### Breaking Changes
+            - [ ] No breaking changes (or documented and approved)
+            - [ ] Backward compatibility maintained
+            - [ ] Migration path provided if needed`
+              });
+            }
+

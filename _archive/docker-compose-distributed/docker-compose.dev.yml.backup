@@ -1,0 +1,241 @@
+# ==================================================================================
+# IMPORTANT: DO NOT USE docker-compose DIRECTLY!
+# 
+# Always use the helper script instead:
+#   ./scripts/dev-env.sh up      # Starts services + runs migrations
+#   ./scripts/dev-env.sh down    # Stops services
+#   ./scripts/dev-env.sh logs    # View logs
+# 
+# Using docker-compose directly WILL SKIP MIGRATIONS and cause failures!
+# 
+# If you accidentally used docker-compose, stop and run: ./scripts/dev-env.sh up
+# ==================================================================================
+
+name: meho  # Explicit project name prevents meho/mehox confusion
+
+x-common-env: &common-env
+  OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env}
+  CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}
+  OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-meho-dev-data}
+  OBJECT_STORAGE_ENDPOINT: http://minio:9000
+  OBJECT_STORAGE_ACCESS_KEY: minioadmin
+  OBJECT_STORAGE_SECRET_KEY: minioadmin
+  OBJECT_STORAGE_USE_SSL: "false"
+  REDIS_URL: redis://redis:6379/0
+  LOG_LEVEL: INFO
+  ENV: ${APP_ENVIRONMENT:-dev}
+  # LLM Model Configuration (configurable per use-case)
+  LLM_MODEL: ${LLM_MODEL:-openai:gpt-4.1-mini}
+  STREAMING_AGENT_MODEL: ${STREAMING_AGENT_MODEL:-openai:gpt-4.1-mini}
+  PLANNER_MODEL: ${PLANNER_MODEL:-openai:gpt-4.1-mini}
+  EXECUTOR_MODEL: ${EXECUTOR_MODEL:-openai:gpt-4.1-mini}
+  DATA_REDUCTION_MODEL: ${DATA_REDUCTION_MODEL:-openai:gpt-4.1-mini}
+  INSTRUCTION_GENERATOR_MODEL: ${INSTRUCTION_GENERATOR_MODEL:-openai:gpt-4.1-mini}
+  WORKFLOW_BUILDER_MODEL: ${WORKFLOW_BUILDER_MODEL:-openai:gpt-4.1-mini}
+  TRANSFORM_GENERATION_MODEL: ${TRANSFORM_GENERATION_MODEL:-openai:gpt-4.1-mini}
+  INTERPRETATION_MODEL: ${INTERPRETATION_MODEL:-openai:gpt-4.1-mini}
+  # Logfire Configuration (for PydanticAI LLM tracing)
+  LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+  LOGFIRE_ENABLED: ${LOGFIRE_ENABLED:-true}
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - meho-network
+
+services:
+  postgres:
+    <<: *service-defaults
+    image: pgvector/pgvector:pg15  # PostgreSQL with pgvector extension
+    environment:
+      POSTGRES_DB: meho
+      POSTGRES_USER: meho
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meho"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    <<: *service-defaults
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:9001
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+
+  redis:
+    <<: *service-defaults
+    image: redis:7-alpine
+    command: redis-server --save ""
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    <<: *service-defaults
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@meho.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - tools
+
+  meho-knowledge:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.meho-knowledge
+    ports:
+      - "8001:8001"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
+      SERVICE_NAME: meho-knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  meho-openapi:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.meho-openapi
+    ports:
+      - "8002:8002"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
+      SERVICE_NAME: meho-openapi
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  meho-agent:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.meho-agent
+    ports:
+      - "8003:8003"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
+      SERVICE_NAME: meho-agent
+      KNOWLEDGE_SERVICE_URL: http://meho-knowledge:8001
+      OPENAPI_SERVICE_URL: http://meho-openapi:8002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meho-knowledge:
+        condition: service_started
+      meho-openapi:
+        condition: service_started
+
+  meho-ingestion:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.meho-ingestion
+    ports:
+      - "8004:8004"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
+      SERVICE_NAME: meho-ingestion
+      KNOWLEDGE_SERVICE_URL: http://meho-knowledge:8001
+      OPENAPI_SERVICE_URL: http://meho-openapi:8002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meho-knowledge:
+        condition: service_started
+      meho-openapi:
+        condition: service_started
+
+  meho-api:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.meho-api
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
+      SERVICE_NAME: meho-api
+      KNOWLEDGE_SERVICE_URL: http://meho-knowledge:8001
+      OPENAPI_SERVICE_URL: http://meho-openapi:8002
+      AGENT_SERVICE_URL: http://meho-agent:8003
+      INGESTION_SERVICE_URL: http://meho-ingestion:8004
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-key-change-me}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
+    depends_on:
+      meho-knowledge:
+        condition: service_started
+      meho-openapi:
+        condition: service_started
+      meho-agent:
+        condition: service_started
+      meho-ingestion:
+        condition: service_started
+
+  meho-frontend:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.meho-frontend
+      args:
+        VITE_API_URL: ${FRONTEND_API_URL:-http://localhost:8000}
+    ports:
+      - "5173:5173"
+    depends_on:
+      meho-api:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  minio_data:
+  redis_data:
+  pgadmin_data:
+
+networks:
+  meho-network:
+    driver: bridge

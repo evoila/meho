@@ -1,0 +1,37 @@
+# React Agent Configuration
+# Generic ReAct agent for multi-system operations
+
+name: react
+description: "Generic ReAct agent for multi-system operations"
+
+# Model configuration - name resolved from LLM_MODEL env var via core/config.py
+model:
+  temperature: 0.0
+
+# System prompt - file reference (relative to agent folder)
+system_prompt_file: "prompts/system.md"
+
+# Tool configuration
+tools:
+  list_connectors:
+    enabled: true
+  search_operations:
+    enabled: true
+    default_limit: 10
+  call_operation:
+    enabled: true
+    require_approval_for_dangerous: true
+  search_types:
+    enabled: true
+  search_knowledge:
+    enabled: true
+    default_limit: 5
+  reduce_data:
+    enabled: true
+  lookup_topology:
+    enabled: true
+  invalidate_topology:
+    enabled: true
+
+# Agent-specific settings
+max_steps: 100

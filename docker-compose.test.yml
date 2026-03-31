@@ -1,0 +1,101 @@
+services:
+  # PostgreSQL Database (Test) with pgvector
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: meho-postgres-test
+    environment:
+      POSTGRES_DB: meho_test
+      POSTGRES_USER: meho
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data  # Ephemeral storage for tests
+    volumes:
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meho"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - meho-test-network
+
+  # Qdrant removed - using pgvector in PostgreSQL (Session 15)
+
+  # MinIO Object Storage (Test)
+  minio:
+    image: minio/minio:latest
+    container_name: meho-minio-test
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    tmpfs:
+      - /data  # Ephemeral storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - meho-test-network
+
+  # Redis Cache (Test)
+  redis:
+    image: redis:7-alpine
+    container_name: meho-redis-test
+    ports:
+      - "6379:6379"
+    command: redis-server --save ""  # Disable persistence
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - meho-test-network
+
+  # Keycloak Identity Provider (Test)
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: meho-keycloak-test
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: test
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak_test
+      KC_DB_USERNAME: meho
+      KC_DB_PASSWORD: password
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+      KC_PROXY: edge
+    command: start-dev --import-realm
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./tests/fixtures/keycloak:/opt/keycloak/data/import:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && timeout 1 cat <&3 | grep -q 'UP'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    networks:
+      - meho-test-network
+
+  # RabbitMQ removed - not used by any code (removed in Session 35)
+
+networks:
+  meho-test-network:
+    driver: bridge
+

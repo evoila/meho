@@ -32,7 +32,7 @@
     "js-yaml": "^4.1.0",
     "keycloak-js": "^26.2.2",
     "lucide-react": "^0.554.0",
-    "motion": "^12.35.2",
+    "motion": "^12.38.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-joyride": "^3.0.0",

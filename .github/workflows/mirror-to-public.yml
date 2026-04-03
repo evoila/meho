@@ -1,0 +1,77 @@
+# Mirror private repo to public repo
+#
+# Triggered after CI passes on main. Checks out the code, strips private
+# directories (.planning/, .claude/, .cursor/), and force-pushes to the
+# public evoila/meho repo. Uses a classic PAT (PUBLIC_REPO_PAT) with
+# public_repo scope. persist-credentials: false on checkout is critical
+# to prevent the default GITHUB_TOKEN from overriding the PAT.
+#
+# Current approach: orphan commit (single snapshot, no history).
+# This means the public repo always has exactly one commit -- no git log,
+# blame, or incremental diffs. Forks will see force-push conflicts on
+# every sync.
+#
+# Alternative: incremental history. Fetch the public repo's main, apply
+# the stripped tree on top as a new commit, and push. This preserves
+# commit history on the public repo but requires fetching from two remotes
+# and careful tree diffing. Switch to this if contributors need git history.
+#
+# This is the ONLY authorized path for code to reach the public repo.
+# Developers are blocked from pushing directly by the .githooks/pre-push hook.
+
+name: Mirror to Public
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    name: Mirror to Public Repo
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Strip private directories
+        run: |
+          rm -rf .planning/ .claude/ .cursor/ _archive/ meho-claude/
+
+          # Verify stripping was successful
+          REMAINING=$(find . -path './.git' -prune -o \( -name '.planning' -o -name '.claude' -o -name '.cursor' -o -name '_archive' -o -name 'meho-claude' \) -print)
+          if [ -n "$REMAINING" ]; then
+            echo "::error::Private directories still present after stripping: $REMAINING"
+            exit 1
+          fi
+          echo "Private directories stripped successfully."
+
+      - name: Push to public repo
+        run: |
+          SOURCE_SHA=$(git rev-parse --short HEAD)
+
+          git config user.name "damir-topic"
+          git config user.email "dtopic@evoila.com"
+
+          # Create an orphan branch so the public repo receives a self-contained
+          # commit with no parent references back to the private repo history.
+          git checkout --orphan mirror-staging
+          git add -A
+          git commit -m "mirror: sync from private ${SOURCE_SHA}"
+
+          # Force-push the orphan commit to the public repo
+          git remote add public "https://x-access-token:${{ secrets.PUBLIC_REPO_PAT }}@github.com/evoila/meho.git"
+          git push public mirror-staging:main --force

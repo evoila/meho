@@ -1,0 +1,55 @@
+/* evoila brand fonts — must precede tailwind import */
+@import url('https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;600;700&family=Lato:wght@300;400;700&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  /* evoila brand colors */
+  --color-evoila-green: #0FD8A2;
+  --color-evoila-light-blue: #1279D6;
+  --color-evoila-blue: #1D39AA;
+
+  /* evoila font colors */
+  --color-headline: #1B2C56;
+  --color-body: #6B7183;
+
+  /* evoila backgrounds */
+  --color-bg-light: #F4F2F2;
+  --color-bg-pastel: #B7D5EE;
+
+  /* MEHO brand */
+  --color-meho-purple: #8051B8;
+  --color-meho-purple-light: #A977C2;
+  --color-meho-purple-pale: #DBBDE3;
+  --color-meho-mint: #34D399;
+
+  /* Semantic */
+  --color-surface: #FFFFFF;
+  --color-surface-alt: #F8F9FC;
+  --color-border: #E2E8F0;
+  --color-border-hover: #CBD5E1;
+
+  /* Typography */
+  --font-heading: 'Rubik', sans-serif;
+  --font-body: 'Lato', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--color-body);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  color: var(--color-headline);
+  line-height: 1.2;
+  font-weight: 600;
+}

@@ -1,0 +1,34 @@
+sequenceDiagram
+    actor User
+    participant Orch as Orchestrator
+    participant Prom as Prometheus
+    participant K8s as Kubernetes
+    participant Loki as Loki
+    participant VMw as VMware
+    participant Argo as ArgoCD
+
+    User->>Orch: "The payment service has been slow for 30 minutes"
+
+    Note over Orch: ReAct: Reason about which systems to query
+
+    par Parallel Connector Dispatch
+        Orch->>Prom: Query payment-svc RED metrics
+        Orch->>K8s: Inspect pods on affected nodes
+        Orch->>Loki: Pull error logs from payment-svc
+        Orch->>VMw: Check node-7 VM and ESXi host
+        Orch->>Argo: Check recent deployments
+    end
+
+    Prom-->>Orch: p99 spiked 120ms -> 2.4s at 14:32 UTC
+    K8s-->>Orch: Pod OOMKilled 3x, node-7 memory pressure
+    Loki-->>Orch: 47x "Connection pool exhausted"
+    VMw-->>Orch: esxi-prod-03 at 92% memory, ballooning active
+    Argo-->>Orch: v2.4.0 deployed 14:28, added in-memory cache
+
+    Note over Orch: Entity Extraction: payment-svc, node-7, esxi-prod-03
+
+    Note over Orch: SAME_AS Resolution:<br/>K8s node-7 == VMware VM node-7<br/>(hostname match, confidence 0.95)
+
+    Note over Orch: Topology Traversal:<br/>Pod -> Node -> VM -> ESXi Host
+
+    Orch->>User: Root Cause: v2.4.0 unbounded cache +<br/>ESXi memory pressure = OOMKill cascade.<br/>p99 120ms -> 2.4s via connection pool exhaustion.

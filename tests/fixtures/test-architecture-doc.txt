@@ -1,0 +1,54 @@
+my-app Architecture Documentation
+
+Overview:
+my-app is a Python microservice deployed on Kubernetes cluster prod-01.
+It provides REST API for user management and data processing.
+
+Components:
+- Backend: Python Flask application running in Docker containers
+- Database: PostgreSQL 15 for persistent data storage
+- Cache: Redis for session management and caching
+- Deployment: ArgoCD manages deployments on Kubernetes
+- Source: GitHub repository at company/my-app
+
+Infrastructure:
+- Kubernetes namespace: production
+- Kubernetes cluster: prod-01
+- vSphere VMs: Running Kubernetes nodes
+- Load balancer: NGINX ingress controller
+
+Troubleshooting Guide:
+
+When my-app is not responding, check in this order:
+
+1. Check ArgoCD sync status
+   - Verify deployment status is Synced
+   - Check health status is Healthy
+   - Look for recent sync errors
+
+2. Verify Kubernetes pod health
+   - kubectl get pods -n production
+   - kubectl describe pod my-app-xxx
+   - Check pod events for issues
+
+3. Check PostgreSQL connectivity
+   - Verify database pod is running
+   - Test connection from app pod
+   - Check connection pool usage
+
+4. Review recent GitHub commits
+   - Look for changes in last deployment
+   - Check if new code introduced issues
+
+Common Issues:
+- Database connection pool exhaustion (increase pool size)
+- Redis cache full (increase memory limits)
+- Pod memory limits exceeded (check OOMKilled events)
+- Image pull errors (verify registry access)
+- Network policies blocking traffic
+
+Maintenance Procedures:
+- Weekly: Review pod resource usage
+- Monthly: Update base images
+- Quarterly: Review and update documentation
+

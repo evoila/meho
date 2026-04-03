@@ -1,0 +1,175 @@
+---
+
+---
+
+<section class="relative pt-32 pb-20 px-6 overflow-hidden">
+  <!-- Subtle gradient background -->
+  <div class="absolute inset-0 bg-gradient-to-b from-bg-pastel/20 to-transparent pointer-events-none"></div>
+
+  <div class="relative max-w-5xl mx-auto text-center">
+    <!-- Badge -->
+    <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-meho-purple/10 text-meho-purple text-sm font-medium mb-8">
+      <span class="w-2 h-2 rounded-full bg-evoila-green animate-pulse"></span>
+      Open Source &middot; AGPLv3
+    </div>
+
+    <!-- Heading -->
+    <h1 class="text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight mb-6">
+      Closing the<br/>
+      <span class="text-meho-purple">expertise gap.</span>
+    </h1>
+
+    <!-- Subheading -->
+    <p class="text-lg md:text-xl text-body max-w-2xl mx-auto mb-10 leading-relaxed">
+      MEHO connects to your entire infrastructure stack — Kubernetes, VMware, GCP, Prometheus, Loki, ArgoCD, and more — and reasons across all systems simultaneously. One question, every layer, actual root cause.
+    </p>
+
+    <!-- CTAs — GitHub primary (D-07), Get Started secondary (D-08) -->
+    <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
+      <a
+        href="https://github.com/evoila/meho"
+        target="_blank"
+        rel="noopener"
+        class="inline-flex items-center gap-2 px-8 py-3.5 rounded-lg bg-headline text-white font-semibold text-lg hover:bg-meho-purple transition-colors shadow-lg shadow-headline/25"
+      >
+        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        Star on GitHub
+      </a>
+      <a
+        href="#quickstart"
+        class="inline-flex items-center gap-2 px-8 py-3.5 rounded-lg border-2 border-meho-purple text-meho-purple font-semibold text-lg hover:bg-meho-purple hover:text-white transition-colors"
+      >
+        Get started
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+        </svg>
+      </a>
+    </div>
+
+    <!-- MEHO App UI Mockup -->
+    <div class="max-w-4xl mx-auto rounded-2xl border border-[#27272A] shadow-2xl overflow-hidden bg-[#0F0F12]">
+      <div class="flex h-[520px]">
+        <!-- Sidebar -->
+        <div class="hidden sm:flex flex-col w-56 border-r border-[#27272A] bg-[#18181B]/60 backdrop-blur-xl">
+          <div class="p-3">
+            <div class="px-3 py-2 rounded-xl bg-gradient-to-r from-[#8051B8] to-[#CDA3E0] text-white text-sm font-semibold text-center">+ New Chat</div>
+          </div>
+          <div class="px-3 mb-2">
+            <div class="px-3 py-1.5 rounded-xl bg-[#27272A] text-[#71717A] text-xs flex items-center gap-2">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+              Search chats...
+            </div>
+          </div>
+          <div class="px-3 text-[10px] text-[#71717A] uppercase tracking-wider mb-1">Today</div>
+          <div class="px-2">
+            <div class="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#8051B8]/10 text-[#8051B8] text-xs">
+              <div class="w-1 h-6 bg-[#8051B8] rounded-r-full"></div>
+              <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+              <span class="truncate">Checkout service slow</span>
+              <span class="ml-auto w-2 h-2 rounded-full bg-[#34D399] animate-pulse"></span>
+            </div>
+            <div class="flex items-center gap-2 px-3 py-2 text-[#A1A1AA] text-xs hover:bg-[#27272A]/50 rounded-xl mt-0.5">
+              <div class="w-1 h-6 opacity-0"></div>
+              <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+              <span class="truncate">GCP health check</span>
+            </div>
+            <div class="flex items-center gap-2 px-3 py-2 text-[#A1A1AA] text-xs hover:bg-[#27272A]/50 rounded-xl mt-0.5">
+              <div class="w-1 h-6 opacity-0"></div>
+              <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+              <span class="truncate">ArgoCD sync failures</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Main chat area -->
+        <div class="flex-1 flex flex-col">
+          <!-- Chat header -->
+          <div class="flex items-center justify-between px-4 py-3 border-b border-[#27272A] bg-[#18181B]/60 backdrop-blur-xl">
+            <div class="flex items-center gap-3">
+              <img src="/meho-logo.svg" class="w-8 h-8 rounded-full" alt="" />
+              <div>
+                <div class="text-sm font-semibold text-white">MEHO Assistant</div>
+                <div class="flex items-center gap-1.5 text-[10px] text-[#34D399]">
+                  <span class="w-1.5 h-1.5 rounded-full bg-[#34D399]" style="box-shadow: 0 0 6px rgba(34,197,94,0.5)"></span>
+                  Online
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Messages -->
+          <div class="flex-1 overflow-hidden p-4 space-y-4">
+            <!-- User message -->
+            <div class="flex justify-end">
+              <div class="max-w-xs px-4 py-2.5 rounded-2xl rounded-tr-sm bg-gradient-to-r from-[#8051B8] to-[#CDA3E0] text-white text-sm">
+                Why is the checkout service slow?
+              </div>
+            </div>
+
+            <!-- Connector cards (investigation progress) -->
+            <div class="flex gap-3 items-start">
+              <img src="/meho-logo.svg" class="w-7 h-7 rounded-full mt-1 shrink-0" alt="" />
+              <div class="space-y-2 flex-1 min-w-0">
+                <div class="text-xs text-[#A1A1AA] font-medium">Investigation in Progress</div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="px-3 py-2 rounded-lg border border-[#27272A] bg-[#18181B]">
+                    <div class="flex items-center gap-1.5 mb-1">
+                      <span class="w-1.5 h-1.5 rounded-full bg-[#34D399]"></span>
+                      <span class="text-[10px] font-semibold text-[#34D399]">Prometheus</span>
+                      <span class="text-[10px] text-[#71717A] ml-auto">1.2s</span>
+                    </div>
+                    <p class="text-[10px] text-[#A1A1AA] leading-snug">p99 latency 4.2s, error rate 12%</p>
+                  </div>
+                  <div class="px-3 py-2 rounded-lg border border-[#27272A] bg-[#18181B]">
+                    <div class="flex items-center gap-1.5 mb-1">
+                      <span class="w-1.5 h-1.5 rounded-full bg-[#34D399]"></span>
+                      <span class="text-[10px] font-semibold text-[#3B82F6]">Kubernetes</span>
+                      <span class="text-[10px] text-[#71717A] ml-auto">2.1s</span>
+                    </div>
+                    <p class="text-[10px] text-[#A1A1AA] leading-snug">Pod OOMKilled 3x, node-7 pressure</p>
+                  </div>
+                  <div class="px-3 py-2 rounded-lg border border-[#27272A] bg-[#18181B]">
+                    <div class="flex items-center gap-1.5 mb-1">
+                      <span class="w-1.5 h-1.5 rounded-full bg-[#34D399]"></span>
+                      <span class="text-[10px] font-semibold text-[#10B981]">VMware</span>
+                      <span class="text-[10px] text-[#71717A] ml-auto">1.8s</span>
+                    </div>
+                    <p class="text-[10px] text-[#A1A1AA] leading-snug">esxi-03 at 92% memory, ballooning</p>
+                  </div>
+                  <div class="px-3 py-2 rounded-lg border border-[#27272A] bg-[#18181B]">
+                    <div class="flex items-center gap-1.5 mb-1">
+                      <span class="w-1.5 h-1.5 rounded-full bg-[#34D399]"></span>
+                      <span class="text-[10px] font-semibold text-[#F9A825]">Loki</span>
+                      <span class="text-[10px] text-[#71717A] ml-auto">0.9s</span>
+                    </div>
+                    <p class="text-[10px] text-[#A1A1AA] leading-snug">47x OutOfMemoryError, pool exhausted</p>
+                  </div>
+                </div>
+
+                <!-- Root cause synthesis -->
+                <div class="px-4 py-3 rounded-2xl rounded-tl-sm bg-[#18181B] border border-[#27272A] text-sm">
+                  <p class="text-[#FAFAFA] font-semibold text-xs mb-2">Root Cause</p>
+                  <p class="text-[#A1A1AA] text-xs leading-relaxed">ESXi host <span class="text-white">esxi-prod-03</span> at 92% memory triggered ballooning on node-7, causing pod OOMKills on <span class="text-white">checkout-svc</span>. Connection pool exhaustion drove p99 from 200ms to 4.2s.</p>
+                  <div class="flex gap-2 mt-3">
+                    <span class="px-2 py-0.5 text-[10px] rounded-full border border-[#8051B8]/30 text-[#8051B8]/80">Increase pod memory limit</span>
+                    <span class="px-2 py-0.5 text-[10px] rounded-full border border-[#8051B8]/30 text-[#8051B8]/80">Rebalance ESXi host</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Input area -->
+          <div class="p-3 border-t border-[#27272A]">
+            <div class="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#18181B] border border-[#27272A]">
+              <span class="text-[#71717A] text-sm flex-1">Ask MEHO anything...</span>
+              <div class="w-8 h-8 rounded-lg bg-gradient-to-r from-[#8051B8] to-[#CDA3E0] flex items-center justify-center">
+                <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

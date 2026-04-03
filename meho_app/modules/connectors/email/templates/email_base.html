@@ -1,0 +1,58 @@
+{# meho_app/modules/connectors/email/templates/email_base.html #}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0f172a;">
+    <tr>
+      <td align="center" style="padding:40px 20px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#1e293b;border-radius:12px;overflow:hidden;">
+          {# Header with MEHO branding #}
+          <tr>
+            <td style="padding:24px 32px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:white;">
+              <h1 style="margin:0;font-size:20px;font-weight:600;">MEHO</h1>
+              <p style="margin:4px 0 0;font-size:13px;opacity:0.85;">Infrastructure Intelligence</p>
+            </td>
+          </tr>
+
+          {# Subject line #}
+          <tr>
+            <td style="padding:24px 32px 0;">
+              <h2 style="margin:0;font-size:18px;color:#e2e8f0;font-weight:600;">{{ subject }}</h2>
+            </td>
+          </tr>
+
+          {# Body content (rendered from markdown) #}
+          <tr>
+            <td style="padding:16px 32px;color:#cbd5e1;font-size:14px;line-height:1.6;">
+              {{ body_html | safe }}
+            </td>
+          </tr>
+
+          {# Session link button #}
+          {% if session_url %}
+          <tr>
+            <td style="padding:8px 32px 24px;">
+              <a href="{{ session_url }}" style="display:inline-block;padding:10px 24px;background-color:#3b82f6;color:white;text-decoration:none;border-radius:8px;font-size:14px;font-weight:500;">
+                View Full Investigation
+              </a>
+            </td>
+          </tr>
+          {% endif %}
+
+          {# Footer #}
+          <tr>
+            <td style="padding:16px 32px;border-top:1px solid #334155;color:#64748b;font-size:12px;">
+              <p style="margin:0;">Sent by MEHO at {{ sent_at }}</p>
+              <p style="margin:4px 0 0;">{{ connector_name }} &middot; {{ provider_type | upper }}</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

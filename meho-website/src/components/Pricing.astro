@@ -1,0 +1,148 @@
+---
+const communityFeatures = [
+  'All 15 connectors (Kubernetes, VMware, Prometheus, Loki, ArgoCD, etc.)',
+  'Cross-system investigation with ReAct reasoning',
+  'Topology auto-discovery and entity resolution',
+  'Knowledge base with hybrid search and AI reranking',
+  'Memory system (auto-extracted investigation context)',
+  'Trust model (READ/WRITE/DESTRUCTIVE tiers)',
+  'Multi-LLM support (Anthropic Claude, OpenAI, Ollama)',
+  'Local embeddings via TEI sidecar (no cloud dependency)',
+  'Dual-mode chat (Ask + Agent)',
+  'JSONFlux data pipeline with 81% token reduction',
+  'Generic REST (OpenAPI) and SOAP (WSDL) connectors',
+  'Docker Compose quickstart',
+  'Community support (GitHub + Discord)',
+];
+
+const enterpriseFeatures = [
+  'Everything in Community, plus:',
+  'Multi-tenancy (isolated realms per tenant)',
+  'SSO / SAML integration',
+  'Audit log export and compliance reporting',
+  'Group sessions and team collaboration',
+  'Priority support and SLA',
+];
+
+const faqs = [
+  {
+    question: 'What does AGPLv3 mean for my organization?',
+    answer: 'You can freely use, modify, and deploy MEHO on your own infrastructure. AGPL only requires sharing source code if you modify MEHO and offer it as a network service to others. Internal use has zero licensing obligations.',
+  },
+  {
+    question: 'Can I use the community edition in production?',
+    answer: 'Absolutely. The community edition is production-ready with all 15 connectors, cross-system reasoning, topology, knowledge base, and the full investigation engine. No artificial limits.',
+  },
+  {
+    question: 'What is the difference between Community and Enterprise?',
+    answer: 'Community solves the technical problem: a single engineer gets full cross-system investigation capability with all 15 connectors. Enterprise solves the organizational problem: when the whole team needs multi-tenancy, SSO, audit compliance, and collaborative sessions.',
+  },
+  {
+    question: 'Do I need a license key for community?',
+    answer: 'No. The community edition runs without any license key. Clone the repo, start Docker Compose, and connect your systems. A license key is only needed to unlock enterprise features.',
+  },
+  {
+    question: 'Which LLM providers are supported?',
+    answer: 'MEHO supports Anthropic Claude (recommended for best investigation quality), OpenAI (GPT-4o and newer), and Ollama (for fully local/air-gapped deployments). Switch providers by setting a single environment variable. A model compatibility matrix documents quality differences across providers.',
+  },
+  {
+    question: 'Can I run MEHO fully offline / air-gapped?',
+    answer: 'Yes. With Ollama for LLM inference and the built-in TEI embedding sidecar, MEHO runs completely offline with no external API calls. All reasoning and embedding computation happens on your hardware.',
+  },
+];
+---
+
+<section id="pricing" class="py-24 px-6 bg-surface-alt">
+  <div class="max-w-5xl mx-auto">
+    <div class="text-center mb-16">
+      <h2 class="text-3xl md:text-4xl font-bold mb-4">
+        Open core. No connector paywalls.
+      </h2>
+      <p class="text-lg text-body max-w-2xl mx-auto">
+        Every connector is open source. Enterprise adds team workflows and compliance -- not artificial limits on what you can monitor.
+      </p>
+    </div>
+
+    <!-- Pricing cards -->
+    <div class="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto mb-16">
+      <!-- Community -->
+      <div class="rounded-xl p-8 bg-surface border-2 border-evoila-green/30 relative">
+        <div class="absolute -top-3 left-6">
+          <span class="rounded-full bg-evoila-green px-3 py-1 text-xs font-bold text-white">RECOMMENDED</span>
+        </div>
+        <h3 class="text-2xl font-bold font-heading text-headline mt-2">Community</h3>
+        <div class="mt-4 mb-1">
+          <span class="text-4xl font-bold font-heading text-headline">Free</span>
+        </div>
+        <p class="text-sm mb-8 text-body">Open source under AGPLv3. Forever free.</p>
+
+        <a
+          href="https://github.com/evoila/meho"
+          target="_blank"
+          rel="noopener"
+          class="block w-full text-center py-3 rounded-lg font-semibold bg-headline text-white hover:bg-meho-purple transition-colors mb-8"
+        >
+          Get Started on GitHub
+        </a>
+
+        <ul class="space-y-3">
+          {communityFeatures.map(feature => (
+            <li class="flex items-start gap-3">
+              <svg class="w-5 h-5 mt-0.5 shrink-0 text-evoila-green" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+              </svg>
+              <span class="text-sm text-body">{feature}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <!-- Enterprise -->
+      <div class="rounded-xl p-8 bg-headline text-white ring-2 ring-meho-purple shadow-xl shadow-meho-purple/10">
+        <h3 class="text-2xl font-bold font-heading text-white">Enterprise</h3>
+        <div class="mt-4 mb-1">
+          <span class="text-4xl font-bold font-heading text-white">Custom</span>
+        </div>
+        <p class="text-sm mb-8 text-white/70">For teams needing multi-tenancy, SSO, and compliance.</p>
+
+        <a
+          href="mailto:meho@evoila.com"
+          class="block w-full text-center py-3 rounded-lg font-semibold bg-meho-purple text-white hover:bg-meho-purple-light transition-colors mb-8"
+        >
+          Contact Sales
+        </a>
+
+        <ul class="space-y-3">
+          {enterpriseFeatures.map((feature, i) => (
+            <li class="flex items-start gap-3">
+              <svg class={`w-5 h-5 mt-0.5 shrink-0 ${i === 0 ? 'text-evoila-green' : 'text-meho-purple-light'}`} fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d={i === 0 ? "M4.5 12.75l6 6 9-13.5" : "M12 4.5v15m7.5-7.5h-15"} />
+              </svg>
+              <span class={`text-sm ${i === 0 ? 'font-semibold text-white' : 'text-white/90'}`}>{feature}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+
+    <!-- FAQ -->
+    <div class="max-w-3xl mx-auto">
+      <h3 class="text-2xl font-bold text-center mb-8">Frequently Asked Questions</h3>
+      <div class="space-y-4">
+        {faqs.map(faq => (
+          <details class="group rounded-xl border border-border bg-surface">
+            <summary class="flex cursor-pointer items-center justify-between px-6 py-4 text-headline font-medium">
+              {faq.question}
+              <svg class="h-5 w-5 shrink-0 text-body transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </summary>
+            <div class="border-t border-border px-6 py-4">
+              <p class="text-sm leading-relaxed text-body">{faq.answer}</p>
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  </div>
+</section>

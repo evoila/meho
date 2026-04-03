@@ -1,0 +1,50 @@
+graph TD
+    UQ["User Question:<br/>'The payment service has been slow<br/>for the last 30 minutes'"]
+
+    UQ --> ORCH["Orchestrator<br/>(ReAct Loop)"]
+
+    subgraph dispatch ["Parallel Connector Dispatch"]
+        PROM["Prometheus<br/>Connector"]
+        K8S["Kubernetes<br/>Connector"]
+        LOKI["Loki<br/>Connector"]
+        VMW["VMware<br/>Connector"]
+        ARGO["ArgoCD<br/>Connector"]
+    end
+
+    ORCH --> PROM
+    ORCH --> K8S
+    ORCH --> LOKI
+    ORCH --> VMW
+    ORCH --> ARGO
+
+    subgraph results ["Raw Results (Data Preserved)"]
+        R_PROM["p99: 120ms -> 2.4s<br/>Error rate: 12.3%"]
+        R_K8S["Pod OOMKilled 3x<br/>node-7 memory pressure"]
+        R_LOKI["47x connection pool exhausted<br/>GC pause 340ms"]
+        R_VMW["esxi-prod-03: 92% memory<br/>Ballooning on 6 VMs"]
+        R_ARGO["v2.4.0 deployed 14:28<br/>Added in-memory cache"]
+    end
+
+    PROM --> R_PROM
+    K8S --> R_K8S
+    LOKI --> R_LOKI
+    VMW --> R_VMW
+    ARGO --> R_ARGO
+
+    subgraph resolution ["Resolution Pipeline"]
+        EXT["Entity Extraction<br/>(payment-svc, node-7, esxi-prod-03)"]
+        TOPO["Topology Graph<br/>Build/Update"]
+        SAME["SAME_AS Resolution<br/>(ProviderID > IP > Hostname)"]
+    end
+
+    R_PROM --> EXT
+    R_K8S --> EXT
+    R_LOKI --> EXT
+    R_VMW --> EXT
+    R_ARGO --> EXT
+
+    EXT --> TOPO
+    TOPO --> SAME
+
+    SAME --> SYNTH["Cross-System Synthesis"]
+    SYNTH --> ROOT["Root Cause Report:<br/>Unbounded cache + ESXi memory<br/>pressure = OOMKill cascade"]

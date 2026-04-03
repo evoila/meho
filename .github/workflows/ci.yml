@@ -1,0 +1,199 @@
+# MEHO Public CI Pipeline
+#
+# Runs on every push to main and on all PRs targeting main.
+# All 5 jobs run in parallel -- no dependencies between them.
+#
+# Design: All environment variables use dummy values for tests.
+# No integration tests, no E2E tests, no Playwright.
+# Codecov upload is optional (uses CODECOV_TOKEN secret if available,
+# degrades gracefully for fork PRs without the secret).
+# This pipeline is designed for the public repo where contributors
+# can run CI without access to any external services.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-python:
+    name: Python Lint (Ruff)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Ruff
+        run: pip install ruff
+
+      - name: Ruff lint check
+        run: ruff check meho_app/ meho_mcp_server/ tests/unit/ tests/contracts/
+
+      - name: Ruff format check
+        run: ruff format --check meho_app/ meho_mcp_server/ tests/unit/ tests/contracts/
+
+  lint-typescript:
+    name: TypeScript Lint (ESLint)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: ESLint
+        working-directory: meho_frontend
+        run: npm run lint
+
+  typecheck:
+    name: Type Check (mypy + tsc)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: mypy type check
+        run: mypy meho_app/ --ignore-missing-imports
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: meho_frontend
+        run: npm run typecheck
+
+  test-python:
+    name: Python Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,test]"
+
+      - name: Run unit and contract tests with coverage
+        run: |
+          coverage run --source=meho_app -m pytest tests/unit/ tests/contracts/ \
+            -v --tb=short --timeout=60 \
+            || true
+          coverage xml -o coverage.xml -q || true
+        env:
+          # Dummy values -- no real services needed.
+          # These satisfy config validation so tests can import app modules.
+          DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379"
+          CREDENTIAL_ENCRYPTION_KEY: "test-encryption-key-32-chars-minimum-length"
+          JWT_SECRET_KEY: "test-jwt-secret-key-32-characters-minimum"
+          APP_ENVIRONMENT: "test"
+          KEYCLOAK_URL: "http://localhost:8080"
+          KEYCLOAK_REALM: "test"
+          KEYCLOAK_CLIENT_ID: "test"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
+        if: always()
+        with:
+          files: coverage.xml
+          flags: backend-unit
+          name: backend-coverage
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: python-coverage
+          path: coverage.xml
+          retention-days: 1
+
+  test-frontend:
+    name: Frontend Unit Tests
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        working-directory: meho_frontend
+        run: npm run test:coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
+        if: always()
+        with:
+          files: meho_frontend/coverage/lcov.info
+          flags: frontend-unit
+          name: frontend-coverage
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

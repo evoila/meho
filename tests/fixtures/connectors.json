@@ -1,0 +1,40 @@
+[
+  {
+    "id": "connector-crm-demo",
+    "tenant_id": "demo-tenant",
+    "name": "Demo CRM System",
+    "description": "Mock CRM system for demonstrations",
+    "base_url": "http://localhost:8001",
+    "auth_type": "API_KEY",
+    "auth_config": {
+      "api_key": "demo-crm-key"
+    },
+    "credential_strategy": "SYSTEM",
+    "is_active": true
+  },
+  {
+    "id": "connector-vsphere-demo",
+    "tenant_id": "demo-tenant",
+    "name": "VMware vSphere",
+    "description": "VMware vCenter Server",
+    "base_url": "https://vcenter.example.com",
+    "auth_type": "BASIC",
+    "auth_config": {},
+    "credential_strategy": "USER_PROVIDED",
+    "is_active": true
+  },
+  {
+    "id": "connector-orders-demo",
+    "tenant_id": "demo-tenant",
+    "name": "Orders System",
+    "description": "Order management system",
+    "base_url": "http://localhost:8002",
+    "auth_type": "API_KEY",
+    "auth_config": {
+      "api_key": "demo-orders-key"
+    },
+    "credential_strategy": "SYSTEM",
+    "is_active": true
+  }
+]
+

@@ -1,0 +1,54 @@
+# Planning Guard -- rejects PRs containing private artifacts
+#
+# Runs on every PR targeting main. Checks for .planning/, .claude/, and
+# .cursor/ directories both in the working tree and in the PR diff.
+# Intended for the public repo where these directories must never appear.
+# Also useful on the private repo as a safety net for accidental inclusion.
+
+name: Planning Guard
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check-forbidden-paths:
+    name: Reject Private Artifacts
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Check for forbidden directories
+        run: |
+          FORBIDDEN=".planning .claude .cursor"
+          FOUND=""
+
+          # Check if forbidden directories exist in the working tree
+          for dir in $FORBIDDEN; do
+            if [ -d "$dir" ]; then
+              FOUND="$FOUND $dir"
+            fi
+          done
+
+          # Check if forbidden directories appear in the PR diff
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD 2>/dev/null || echo "")
+          for dir in $FORBIDDEN; do
+            if echo "$CHANGED" | grep -q "^${dir}/"; then
+              FOUND="$FOUND ${dir}(in-diff)"
+            fi
+          done
+
+          if [ -n "$FOUND" ]; then
+            echo "::error::Forbidden directories detected:$FOUND"
+            echo "These directories must not exist in the public repository."
+            echo "If you are contributing from a fork, ensure .planning/, .claude/, and .cursor/ are not included."
+            exit 1
+          fi
+
+          echo "No forbidden directories found."

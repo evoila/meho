@@ -1,0 +1,189 @@
+# ==================================================================================
+# MEHO Modular Monolith Docker Compose Configuration
+# 
+# IMPORTANT: DO NOT USE docker compose DIRECTLY!
+# 
+# Always use the helper script instead:
+#   ./scripts/dev-env.sh up      # Starts services + runs migrations
+#   ./scripts/dev-env.sh down    # Stops services
+#   ./scripts/dev-env.sh logs    # View logs
+# 
+# Using docker compose directly WILL SKIP MIGRATIONS and cause failures!
+# ==================================================================================
+
+name: meho  # Explicit project name prevents meho/mehox confusion
+
+x-common-env: &common-env
+  MEHO_LLM_PROVIDER: ${MEHO_LLM_PROVIDER:-anthropic}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}  # Optional: required only for MEHO_LLM_PROVIDER=anthropic
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}  # Optional: required only for MEHO_LLM_PROVIDER=openai
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}  # Optional: required only for MEHO_LLM_PROVIDER=ollama
+  VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}  # Optional: set for Voyage AI enterprise embeddings
+  CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}
+  OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-meho-dev-data}
+  OBJECT_STORAGE_ENDPOINT: http://minio:9000
+  OBJECT_STORAGE_ACCESS_KEY: minioadmin
+  OBJECT_STORAGE_SECRET_KEY: minioadmin
+  OBJECT_STORAGE_USE_SSL: "false"
+  REDIS_URL: redis://redis:6379/0
+  LOG_LEVEL: INFO
+  ENV: ${APP_ENVIRONMENT:-dev}
+  # LLM Model Configuration -- two-tier Anthropic defaults
+  # Heavy reasoning (Opus 4.6)
+  LLM_MODEL: ${LLM_MODEL:-anthropic:claude-opus-4-6}
+  STREAMING_AGENT_MODEL: ${STREAMING_AGENT_MODEL:-anthropic:claude-opus-4-6}
+  PLANNER_MODEL: ${PLANNER_MODEL:-anthropic:claude-opus-4-6}
+  EXECUTOR_MODEL: ${EXECUTOR_MODEL:-anthropic:claude-opus-4-6}
+  INTERPRETER_MODEL: ${INTERPRETER_MODEL:-anthropic:claude-opus-4-6}
+  # Utility tasks (Sonnet 4.6)
+  CLASSIFIER_MODEL: ${CLASSIFIER_MODEL:-anthropic:claude-sonnet-4-6}
+  DATA_EXTRACTOR_MODEL: ${DATA_EXTRACTOR_MODEL:-anthropic:claude-sonnet-4-6}
+  WORKFLOW_BUILDER_MODEL: ${WORKFLOW_BUILDER_MODEL:-anthropic:claude-sonnet-4-6}
+  TRANSFORM_GENERATION_MODEL: ${TRANSFORM_GENERATION_MODEL:-anthropic:claude-sonnet-4-6}
+  WORKFLOW_LLM_REPORT_MODEL: ${WORKFLOW_LLM_REPORT_MODEL:-anthropic:claude-sonnet-4-6}
+  # Embeddings
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-voyage-4-large}
+  TEI_EMBEDDING_URL: ${TEI_EMBEDDING_URL:-http://tei-embeddings:80}
+  TEI_RERANKER_URL: ${TEI_RERANKER_URL:-http://tei-reranker:80}
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks:
+    - meho-network
+
+services:
+  # =============================================================================
+  # Infrastructure Services
+  # =============================================================================
+
+  postgres:
+    <<: *service-defaults
+    image: pgvector/pgvector:pg15  # PostgreSQL with pgvector extension
+    environment:
+      POSTGRES_DB: meho
+      POSTGRES_USER: meho
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meho"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    <<: *service-defaults
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_BROWSER_REDIRECT_URL: http://localhost:9001
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+
+  redis:
+    <<: *service-defaults
+    image: redis:7-alpine
+    command: redis-server --save ""
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    <<: *service-defaults
+    image: dpage/pgadmin4:latest
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@meho.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - tools
+
+  # =============================================================================
+  # MEHO Unified Backend Service (replaces 5 distributed services)
+  # =============================================================================
+
+  meho:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.debug.meho
+    ports:
+      - "8000:8000"
+      - "5678:5678"
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
+      SERVICE_NAME: meho
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-key-change-me}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    # command: ["sh", "-c", "debugpy --wait-for-client --listen 0.0.0.0:5678 -m uvicorn meho_app.main:app --host 0.0.0.0 --port 8000 --reload"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    volumes:
+      - /app/.venv
+      - ./:/app/
+
+  # =============================================================================
+  # Frontend Service
+  # =============================================================================
+
+  meho-frontend:
+    <<: *service-defaults
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.meho-frontend
+      args:
+        VITE_API_URL: ${FRONTEND_API_URL:-http://localhost:8000}
+    ports:
+      - "5173:5173"
+    depends_on:
+      meho:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  minio_data:
+  redis_data:
+  pgadmin_data:
+
+networks:
+  meho-network:
+    driver: bridge
+

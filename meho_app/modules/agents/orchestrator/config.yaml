@@ -1,0 +1,91 @@
+# Orchestrator Agent Configuration
+# =================================
+#
+# This configuration controls the orchestrator agent behavior including
+# iteration limits, timeouts, LLM settings, dispatch rules, and streaming options.
+#
+# All settings can be overridden via environment variables:
+#   ORCHESTRATOR_MAX_ITERATIONS, ORCHESTRATOR_AGENT_TIMEOUT, etc.
+
+orchestrator:
+  # =========================================================================
+  # Iteration Limits
+  # =========================================================================
+  # Maximum number of iterations before forcing a response.
+  # Higher values allow more thorough exploration but increase latency.
+  max_iterations: 3
+
+  # =========================================================================
+  # Timeouts (seconds)
+  # =========================================================================
+  # Per-agent timeout: How long to wait for a single connector agent.
+  # If exceeded, agent is marked as "timeout" and orchestrator continues.
+  agent_timeout: 30.0
+
+  # Total iteration timeout: Maximum time for all agents in one iteration.
+  # If exceeded, remaining agents are cancelled and orchestrator proceeds.
+  total_timeout: 120.0
+
+  # =========================================================================
+  # Cross-System Diagnostic Rounds (Phase 32)
+  # =========================================================================
+  # Phase 32 legacy: deterministic entity-driven follow-ups.
+  # Phase 77 replaces this with topology-driven traversal controlled by investigation budget.
+  max_dispatch_rounds: 3
+
+  # Step budget for follow-up round agents (lower than Round 1).
+  # Follow-up agents have focused goals and need fewer steps.
+  followup_max_steps: 6
+
+  # =========================================================================
+  # LLM Settings (for routing/synthesis)
+  # =========================================================================
+  llm:
+    # Model is resolved from LLM_MODEL env var (single source of truth).
+    # Override here only if orchestrator should use a different model than specialists.
+    # temperature for routing decisions (lower = more deterministic)
+    temperature: 0.3
+
+  # =========================================================================
+  # Dispatch Settings
+  # =========================================================================
+  dispatch:
+    # Maximum connectors to query per iteration
+    # Higher values increase parallelism but may overload resources
+    max_connectors_per_iteration: 5
+    # Minimum relevance score for connector selection (0.0-1.0)
+    # Connectors below this threshold are not queried
+    min_relevance_score: 0.5
+    # Minimum connectors needed to proceed with a query action
+    min_connectors_for_query: 1
+
+  # =========================================================================
+  # Investigation Budget and Convergence (Phase 77)
+  # =========================================================================
+  # Global investigation budget counts specialist dispatches (not tool calls).
+  # Each _dispatch_parallel() call for N connectors counts as N dispatches.
+  investigation:
+    # Phase 99: Tiered step budgets per classification
+    # quick: max_steps=3, standard: max_steps=6, deep: max_steps=8 (default)
+    # These are set dynamically by the routing LLM per connector
+    # Budget for interactive sessions (human operator present)
+    budget_interactive: 30
+    # Budget for automated sessions (webhook/scheduled task triggered)
+    budget_automated: 20
+    # Number of consecutive no-novelty dispatch rounds before forcing synthesis
+    convergence_window: 2
+    # Maximum follow-up dispatch rounds per investigation (replaces max_dispatch_rounds for Phase 77 loop)
+    max_traversal_rounds: 10
+
+  # =========================================================================
+  # TTFUR Optimization (Time to First Useful Response)
+  # =========================================================================
+  streaming:
+    # Emit early_findings events as each agent completes
+    emit_early_findings: true
+    # Emit progress events (iteration_start, dispatch_start, etc.)
+    emit_progress_events: true
+    # Include findings preview in early_findings events
+    include_findings_preview: true
+    # Maximum preview length for findings (characters)
+    findings_preview_max_length: 200

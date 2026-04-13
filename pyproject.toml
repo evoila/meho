@@ -131,7 +131,7 @@ dependencies = [
 
     # Scheduled Tasks (Phase 45)
     "APScheduler>=3.11,<4",              # Cron scheduling with PostgreSQL persistence
-    "croniter>=6.0.0",                   # Cron expression parsing and validation
+    "croniter>=6.2.2",                   # Cron expression parsing and validation
     "psycopg2-binary>=2.9.0",           # Sync PostgreSQL driver for APScheduler's SQLAlchemyJobStore
 
     # Slack Integration (Phase 94.1)

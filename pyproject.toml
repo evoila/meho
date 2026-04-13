@@ -124,7 +124,7 @@ dependencies = [
     # Utilities
     "python-jose[cryptography]>=3.3.0",
     "cryptography>=41.0.0",
-    "python-dotenv>=1.0.0",
+    "python-dotenv>=1.2.2",
     
     # Keycloak Integration (TASK-139)
     "python-keycloak>=4.0.0",

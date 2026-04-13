@@ -156,7 +156,7 @@ dev = [
     "ruff>=0.15.0",
     "mypy>=1.7.0",
     "types-redis>=4.6.0",
-    "pre-commit>=3.5.0",
+    "pre-commit>=4.5.1",
     "ipython>=8.18.0",
     "debugpy>=1.8.18",
 ]

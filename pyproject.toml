@@ -114,7 +114,7 @@ dependencies = [
     # OpenTelemetry (core)
     "opentelemetry-api>=1.27.0",
     "opentelemetry-sdk>=1.27.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.41.0",
     
     # OpenTelemetry instrumentation
     "opentelemetry-instrumentation-fastapi>=0.48b0",

@@ -28,7 +28,7 @@ dependencies = [
     "voyageai>=0.3.0",
     
     # Vector Store (PostgreSQL with pgvector)
-    "pgvector>=0.2.0",
+    "pgvector>=0.4.2",
     
     # Object Storage
     "boto3>=1.29.0",

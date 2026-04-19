@@ -1,0 +1,294 @@
+@import "tailwindcss";
+
+@source "../src";
+
+/* =============================================================================
+   MEHO Design System - CSS Variables
+   
+   Extracted from Figma Brand Guidelines (ui-design/)
+   Primary: Purple Plum B | Font: Poppins
+   ============================================================================= */
+
+@theme {
+  /* ---------------------------------------------------------------------------
+     PRIMARY - Purple Plum B
+     The anchor color for MEHO brand. Use for buttons, CTAs, accents.
+     --------------------------------------------------------------------------- */
+  --color-primary-300: #DBBDE3;
+  --color-primary-400: #CDA3E0;
+  --color-primary-500: #A977C2;
+  --color-primary-800: #8051B8;
+  
+  --color-primary: #8051B8;
+  --color-primary-hover: #A977C2;
+  --color-primary-foreground: #ffffff;
+  
+  /* ---------------------------------------------------------------------------
+     SECONDARY COLORS
+     Use discretely to not overpower the primary purple.
+     --------------------------------------------------------------------------- */
+  
+  /* Mint Green - Success, healthy status */
+  --color-mint-300: #D1FAE5;
+  --color-mint-400: #6EE7B7;
+  --color-mint-500: #34D399;
+  --color-mint-800: #059669;
+  
+  /* Maize - Warnings, caution, in-progress */
+  --color-maize-300: #FEF3C7;
+  --color-maize-400: #FCD34D;
+  --color-maize-500: #FBBF24;
+  --color-maize-800: #B45309;
+  
+  /* True Blue - Information, links */
+  --color-blue-300: #DBEAFE;
+  --color-blue-400: #60A5FA;
+  --color-blue-500: #3B82F6;
+  --color-blue-800: #1E40AF;
+  
+  /* Brick Red - Errors, destructive, critical */
+  --color-red-300: #FECACA;
+  --color-red-400: #F87171;
+  --color-red-500: #EF4444;
+  --color-red-800: #991B1B;
+  
+  /* ---------------------------------------------------------------------------
+     NEUTRALS - Dark Theme
+     --------------------------------------------------------------------------- */
+  --color-background: #0F0F12;
+  --color-surface: #18181B;
+  --color-surface-hover: #27272A;
+  --color-surface-active: #3F3F46;
+  
+  --color-border: #27272A;
+  --color-border-hover: #3F3F46;
+  --color-border-focus: #8051B8;
+  
+  --color-text-primary: #FAFAFA;
+  --color-text-secondary: #A1A1AA;
+  --color-text-tertiary: #71717A;
+  --color-text-disabled: #52525B;
+  
+  /* ---------------------------------------------------------------------------
+     SEMANTIC COLORS
+     --------------------------------------------------------------------------- */
+  --color-success: #34D399;
+  --color-success-bg: #D1FAE5;
+  --color-warning: #FBBF24;
+  --color-warning-bg: #FEF3C7;
+  --color-error: #EF4444;
+  --color-error-bg: #FECACA;
+  --color-info: #3B82F6;
+  --color-info-bg: #DBEAFE;
+  
+  /* Legacy aliases for compatibility */
+  --color-secondary: #A977C2;
+  --color-accent: #CDA3E0;
+
+  /* ---------------------------------------------------------------------------
+     SHADOWS
+     --------------------------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5), 0 2px 4px -2px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -4px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 20px rgba(128, 81, 184, 0.3);
+  --shadow-glow-strong: 0 0 40px rgba(128, 81, 184, 0.5);
+
+  /* ---------------------------------------------------------------------------
+     ANIMATIONS
+     --------------------------------------------------------------------------- */
+  --animate-fade-in: fade-in 0.3s ease-out;
+  --animate-slide-up: slide-up 0.4s ease-out;
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-glow: glow 2s ease-in-out infinite alternate;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  
+  @keyframes slide-up {
+    from { transform: translateY(10px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  
+  @keyframes glow {
+    from { box-shadow: 0 0 10px rgba(128, 81, 184, 0.2); }
+    to { box-shadow: 0 0 20px rgba(128, 81, 184, 0.4); }
+  }
+
+  /* Investigation path ripple animation (Phase 61 Plan 03) */
+  @keyframes investigation-ripple {
+    0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.4); }
+    70% { box-shadow: 0 0 0 12px rgba(52, 211, 153, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+  }
+
+  --animate-investigation-ripple: investigation-ripple 1.5s infinite;
+}
+
+/* =============================================================================
+   BASE STYLES
+   ============================================================================= */
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+  font-family: 'Poppins', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Code/monospace elements */
+code, pre, .font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+/* =============================================================================
+   CUSTOM UTILITIES
+   ============================================================================= */
+
+@layer utilities {
+  /* Glass morphism effect */
+  .glass {
+    background: rgba(24, 24, 27, 0.7);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(128, 81, 184, 0.1);
+  }
+  
+  .glass-hover {
+    transition: all 0.2s ease;
+  }
+  
+  .glass-hover:hover {
+    background: rgba(39, 39, 42, 0.8);
+    border-color: rgba(128, 81, 184, 0.2);
+  }
+
+  /* Purple glow border effect (from brand guidelines) */
+  .glow-border {
+    border: 1px solid rgba(128, 81, 184, 0.3);
+    box-shadow: 0 0 20px rgba(128, 81, 184, 0.1);
+  }
+  
+  .glow-border:hover {
+    border-color: rgba(128, 81, 184, 0.5);
+    box-shadow: 0 0 30px rgba(128, 81, 184, 0.2);
+  }
+
+  /* Text gradient - purple theme */
+  .text-gradient {
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-image: linear-gradient(to right, var(--color-primary-400), var(--color-primary-800));
+  }
+  
+  /* Gradient backgrounds */
+  .bg-gradient-primary {
+    background: linear-gradient(135deg, var(--color-primary-800) 0%, var(--color-primary-500) 100%);
+  }
+  
+  .bg-gradient-surface {
+    background: linear-gradient(180deg, var(--color-surface) 0%, var(--color-background) 100%);
+  }
+
+  /* Hidden scrollbar */
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  /* Custom scrollbar - purple accent */
+  .scrollbar-purple::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  .scrollbar-purple::-webkit-scrollbar-track {
+    background: var(--color-surface);
+    border-radius: 3px;
+  }
+  
+  .scrollbar-purple::-webkit-scrollbar-thumb {
+    background: var(--color-primary-500);
+    border-radius: 3px;
+  }
+  
+  .scrollbar-purple::-webkit-scrollbar-thumb:hover {
+    background: var(--color-primary-400);
+  }
+
+  /* Focus ring - brand purple */
+  .focus-ring {
+    outline: none;
+  }
+  
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--color-primary-500);
+    outline-offset: 2px;
+  }
+}
+
+/* =============================================================================
+   COMPONENT BASE STYLES
+   ============================================================================= */
+
+@layer components {
+  /* Primary button */
+  .btn-primary {
+    @apply bg-primary-800 text-white px-4 py-2 rounded-lg font-medium;
+    @apply hover:bg-primary-500 transition-colors duration-200;
+    @apply focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-background;
+  }
+  
+  /* Secondary button */
+  .btn-secondary {
+    @apply bg-surface-hover text-text-primary px-4 py-2 rounded-lg font-medium;
+    @apply hover:bg-surface-active transition-colors duration-200;
+    @apply border border-border hover:border-border-hover;
+  }
+  
+  /* Ghost button */
+  .btn-ghost {
+    @apply bg-transparent text-text-secondary px-4 py-2 rounded-lg font-medium;
+    @apply hover:bg-surface-hover hover:text-text-primary transition-colors duration-200;
+  }
+  
+  /* Input field */
+  .input-base {
+    @apply bg-surface border border-border rounded-lg px-3 py-2;
+    @apply text-text-primary placeholder:text-text-tertiary;
+    @apply focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500;
+    @apply transition-colors duration-200;
+  }
+  
+  /* Card */
+  .card {
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 0.75rem;
+    padding: 1rem;
+  }
+  
+  .card-hover {
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 0.75rem;
+    padding: 1rem;
+    transition: all 0.2s ease;
+  }
+  
+  .card-hover:hover {
+    background-color: var(--color-surface-hover);
+    border-color: var(--color-border-hover);
+  }
+}

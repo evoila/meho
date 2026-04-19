@@ -1,0 +1,84 @@
+# Pre-commit hooks for MEHO
+# Install: pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Python code formatting with Ruff
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.4
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: [--fix]
+      # Run the formatter
+      - id: ruff-format
+
+  # Python type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.19.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-all]
+        args: [--ignore-missing-imports, --no-strict-optional]
+        exclude: ^(tests/|scripts/)
+
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+
+  # Frontend (ESLint) — local hook for flat config compatibility with ESLint 9.39+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: bash -c 'cd meho_frontend && npx eslint --fix'
+        language: system
+        files: '\.(ts|tsx)$'
+        pass_filenames: false
+
+  # Commit message format check
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [feat, fix, docs, style, refactor, perf, test, chore, ci]
+
+  # SPDX license header enforcement (Python files only)
+  - repo: local
+    hooks:
+      - id: spdx-check
+        name: SPDX Header Check
+        entry: bash -c 'for f in "$@"; do head -3 "$f" | grep -q "SPDX-License-Identifier" || { echo "Missing SPDX header: $f"; exit 1; }; done'
+        language: system
+        files: '\.py$'
+        exclude: '(node_modules|__pycache__|\.venv|alembic/versions)'
+
+  # Run critical tests before commit
+  - repo: local
+    hooks:
+      - id: smoke-tests
+        name: Smoke Tests
+        entry: bash -c 'source .venv/bin/activate && pytest tests/smoke/ -q --no-cov --tb=line'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [push]
+
+      - id: contract-tests
+        name: Contract Tests
+        entry: bash -c 'source .venv/bin/activate && pytest tests/contracts/ -q --no-cov --tb=line'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [push]

@@ -1,0 +1,51 @@
+# Planning Guard -- rejects PRs that touch files under private-only directories
+#
+# Runs on every PR targeting main. Fails the job if the PR diff contains
+# any changes under .planning/, .claude/, or .cursor/. These directories
+# legitimately exist on the private repo (planning artifacts, agent config),
+# so the check inspects only the PR diff, never the working tree.
+
+name: Planning Guard
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-private-path-changes:
+    name: Reject private-path changes in PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Reject private-path changes in PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          FORBIDDEN=".planning .claude .cursor"
+          CHANGED=$(gh pr diff --name-only "$PR_NUMBER")
+          FOUND=""
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            for dir in $FORBIDDEN; do
+              case "$path" in
+                "${dir}/"*)
+                  case " $FOUND " in *" $dir "*) ;; *) FOUND="$FOUND $dir" ;; esac
+                  ;;
+              esac
+            done
+          done <<< "$CHANGED"
+          if [ -n "$FOUND" ]; then
+            echo "::error::PR touches files under forbidden private directories:$FOUND"
+            echo "Files under .planning/, .claude/, and .cursor/ must not appear in PR diffs."
+            exit 1
+          fi
+          echo "No private-path changes detected."

@@ -1,0 +1,8 @@
+/* MEHO brand colors for MkDocs Material */
+
+:root > * {
+  --md-primary-fg-color:        #1a365d;
+  --md-primary-fg-color--light: #2a5298;
+  --md-primary-fg-color--dark:  #0d2137;
+  --md-accent-fg-color:         #3182ce;
+}

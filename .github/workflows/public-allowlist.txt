@@ -1,0 +1,73 @@
+# Allowlist of paths to mirror from the private repo to evoila/meho.
+#
+# Used by .github/workflows/mirror-to-public.yml as an rsync --files-from list.
+# One path per line, relative to the repo root. Lines starting with `#` and
+# blank lines are ignored.
+#
+# Whitelist semantics: ONLY paths listed here ship to the public repo.
+# Anything not listed is stripped by default. When adding a new top-level
+# file or directory to the repo, decide whether it is public and add it here
+# if so. Do not edit the mirror workflow itself for routine additions.
+#
+# Directories are mirrored recursively.
+
+# Product source
+meho_app
+meho_frontend
+meho_mcp_server
+
+# Tests and fixtures
+tests
+samplespecs
+
+# Docs and developer materials
+docs
+scripts
+config
+docker
+
+# CI, hooks, quality tooling
+.github
+.githooks
+.codecov.yml
+.coveragerc
+.pre-commit-config.yaml
+.semgrepignore
+sonar-project.properties
+
+# Build + dependency manifests
+pyproject.toml
+uv.lock
+pytest.ini
+Makefile
+mkdocs.yml
+
+# Runtime compose + nginx
+docker-compose.yml
+docker-compose.test.yml
+docker-compose.debug.yml
+nginx.conf
+nginx.conf.template
+
+# Repo hygiene files
+.gitignore
+.dockerignore
+
+# Example env files (no secrets)
+env.example
+.env.connectors.example
+
+# Top-level docs shipped to the community
+AGENTS.md
+CLAUDE.md
+README.md
+LICENSE
+CONTRIBUTING.md
+CLA.md
+SECURITY.md
+COVERAGE-DEBT.md
+
+# License inventories + dead-code tooling
+npm-licenses.csv
+python-licenses.csv
+vulture_whitelist.py

@@ -1,0 +1,107 @@
+# Mirror private repo to public repo.
+#
+# Triggered after CI passes on main. Checks out the code, copies only the
+# paths listed in .github/workflows/public-allowlist.txt into a clean
+# staging directory, then syncs to the public evoila/meho repo.
+#
+# Whitelist over blacklist: new top-level files/dirs are private by default.
+# To ship a new path publicly, add it to public-allowlist.txt.
+#
+# Mirror mode is controlled by GitHub variable PUBLIC_MIRROR_MODE:
+# - orphan (default): force-pushes a single orphan snapshot commit
+# - incremental: appends a normal commit on top of public/main
+#
+# Uses a classic PAT (PUBLIC_REPO_PAT). persist-credentials: false on checkout
+# is critical to prevent the default GITHUB_TOKEN from overriding the PAT.
+#
+# This is the ONLY authorized path for code to reach the public repo.
+# Developers are blocked from pushing directly by the .githooks/pre-push hook.
+
+name: Mirror to Public
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    name: Mirror to Public Repo
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout private repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assemble public tree from allowlist
+        id: assemble
+        run: |
+          STAGING=$(scripts/assemble-public-tree.sh)
+          echo "staging=$STAGING" >> "$GITHUB_OUTPUT"
+
+      - name: Push to public repo
+        env:
+          MIRROR_MODE: ${{ vars.PUBLIC_MIRROR_MODE }}
+          STAGING: ${{ steps.assemble.outputs.staging }}
+        run: |
+          SOURCE_SHA=$(git rev-parse --short HEAD)
+          MODE="${MIRROR_MODE:-orphan}"
+          MODE=$(echo "$MODE" | tr '[:upper:]' '[:lower:]')
+
+          if [ "$MODE" != "orphan" ] && [ "$MODE" != "incremental" ]; then
+            echo "::error::Invalid PUBLIC_MIRROR_MODE '$MODE' (expected orphan or incremental)"
+            exit 1
+          fi
+
+          echo "Mirror mode: $MODE"
+          echo "Source private SHA: $SOURCE_SHA"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add public "https://x-access-token:${{ secrets.PUBLIC_REPO_PAT }}@github.com/evoila/meho.git"
+
+          if [ "$MODE" = "orphan" ]; then
+            # Create an orphan branch so the public repo receives a self-contained
+            # commit with no parent references back to the private repo history.
+            git checkout --orphan mirror-staging
+
+            # Wipe the working tree, then overlay the staged allowlist tree.
+            # `find | rm -rf` removes both tracked and untracked files;
+            # preserving only .git is all we need before the rsync overlay.
+            find . -maxdepth 1 -mindepth 1 -not -name '.git' -exec rm -rf {} +
+            rsync -a --exclude '.git/' "$STAGING"/ ./
+
+            git add -A
+            git commit -m "mirror: sync from private ${SOURCE_SHA}"
+            git push public mirror-staging:main --force
+            exit 0
+          fi
+
+          # Incremental mode: preserve public history and append one commit per sync.
+          git fetch public main
+          git checkout -B mirror-incremental public/main
+
+          # Replace the working tree with the staged allowlist tree.
+          # --delete ensures files removed from the allowlist disappear from public.
+          rsync -a --delete --exclude '.git/' "$STAGING"/ ./
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No public changes detected after allowlist overlay. Nothing to push."
+            exit 0
+          fi
+
+          git commit -m "mirror: sync from private ${SOURCE_SHA}"
+          git push public mirror-incremental:main

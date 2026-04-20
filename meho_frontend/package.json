@@ -62,7 +62,7 @@
     "autoprefixer": "^10.4.22",
     "eslint": "^9.39.1",
     "eslint-plugin-jsx-a11y": "^6.10.2",
-    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
     "happy-dom": "^20.8.9",

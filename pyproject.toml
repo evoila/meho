@@ -525,7 +525,7 @@ test = [
 # Heavy optional dependency groups: opt-in via Docker --build-arg or
 # `uv sync --group <name>` for local development.
 docling-group = [
-    "docling==2.85.0",
+    "docling==2.91.0",
     "docling-core>=2.73.0",
     "docling-parse>=5.8.0",
     "pikepdf>=10.0.0",      # PDF splitter used by docling_wrapper.py

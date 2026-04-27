@@ -1,0 +1,129 @@
+# Pre-commit hooks for MEHO
+# Install: ./scripts/dev-setup.sh  (runs `pre-commit install --install-hooks`)
+# Run manually: pre-commit run --all-files
+
+default_install_hook_types: [pre-commit, pre-push, commit-msg]
+
+repos:
+  # Python code formatting with Ruff
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.4
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: [--fix]
+      # Run the formatter
+      - id: ruff-format
+
+  # Python type checking — local hook matching ci.yml:99 verbatim so pre-commit
+  # inherits pyproject.toml [tool.mypy] strict settings and the pydantic.mypy /
+  # sqlalchemy.ext.mypy.plugin plugins resolve from the project venv.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict, matches CI)
+        entry: uv run mypy meho_app/ --ignore-missing-imports
+        language: system
+        types: [python]
+        pass_filenames: false
+        exclude: ^(tests/|scripts/)
+
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+
+  # Frontend — all checks run as local hooks to inherit the frontend's
+  # tooling (ESLint flat config, TypeScript project references, Vitest).
+  # Invoked via `npm --prefix meho_frontend` (not `bash -c 'cd … && npm …'`)
+  # so hooks resolve Node scripts directly without depending on a POSIX
+  # shell being on PATH — portable to native Windows shells without Git Bash.
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: npm --prefix meho_frontend run lint:fix
+        language: system
+        files: '\.(ts|tsx)$'
+        pass_filenames: false
+
+      # Pre-commit: tsc -b catches type errors on any staged frontend change.
+      # Mirrors `.github/workflows/ci.yml` (`npm run typecheck`) so local pass
+      # equals CI pass. pass_filenames: false because tsc must see the full
+      # project reference graph, not only the staged file(s). files: triggers
+      # on TS sources plus tsconfig and package.json — type-check outcomes
+      # can shift from a compiler-options flip, a path-alias rename, or a
+      # @types/* devDependency bump without any .ts file being staged.
+      - id: frontend-typecheck
+        name: frontend typecheck (tsc -b, matches CI)
+        entry: npm --prefix meho_frontend run typecheck
+        language: system
+        files: '^meho_frontend/(.*\.(ts|tsx)|tsconfig.*\.json|package\.json)$'
+        pass_filenames: false
+
+      # Pre-push: full vitest suite. Files-gated on `^meho_frontend/` so
+      # backend-only pushes don't wait on the frontend suite (~15–30s saved
+      # per backend push). pass_filenames: false means when the hook does
+      # fire, it runs the full vitest suite, not just the changed files.
+      - id: frontend-tests
+        name: frontend vitest
+        entry: npm --prefix meho_frontend run test:run
+        language: system
+        files: '^meho_frontend/'
+        pass_filenames: false
+        stages: [pre-push]
+
+  # Commit message format check
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [feat, fix, docs, style, refactor, perf, test, chore, ci]
+
+  # SPDX license header enforcement (Python files only)
+  - repo: local
+    hooks:
+      - id: spdx-check
+        name: SPDX Header Check
+        entry: >-
+          bash -c 'for f in "$@"; do head -3 "$f" | grep -q "SPDX-License-Identifier" || { echo "Missing SPDX header: $f"; exit 1; }; done' --
+        language: system
+        files: '\.py$'
+        exclude: '(node_modules|__pycache__|\.venv|alembic/versions)'
+
+  # Run critical tests before commit
+  - repo: local
+    hooks:
+      - id: smoke-tests
+        name: Smoke Tests
+        entry: bash -c 'source .venv/bin/activate && pytest tests/smoke/ -q --no-cov --tb=line'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: contract-tests
+        name: Contract Tests
+        entry: bash -c 'source .venv/bin/activate && pytest tests/contracts/ -q --no-cov --tb=line'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: block-public-remote-push
+        name: Block push to public mirror
+        entry: scripts/hooks/block-public-remote-push.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

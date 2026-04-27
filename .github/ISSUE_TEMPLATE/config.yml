@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 evoila Group
+
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/evoila/meho/discussions
+    about: Ask questions or discuss ideas
+  - name: Security Vulnerability
+    url: https://github.com/evoila/meho/blob/main/SECURITY.md
+    about: Report security vulnerabilities (do NOT use public issues)

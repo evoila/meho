@@ -1,0 +1,79 @@
+# MEHO arm64 first-run regression
+#
+# Boots the full compose stack via the local-TEI fallback path on an
+# ubuntu-24.04-arm runner and asserts backend + frontend reachability.
+# Guards docs/codebase/first-run-experience.md and the `platform: linux/amd64`
+# directive on the tei-embeddings / tei-reranker services.
+#
+# Runs on:
+#   - PRs that touch the compose stack, Dockerfiles, arm64 docs, this
+#     workflow, or the test itself (path filter -- keeps CI cost bounded);
+#   - Weekly schedule (catches upstream drift, e.g. TEI image tag bumps);
+#   - Manual dispatch.
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 evoila Group
+
+name: arm64 first-run
+
+on:
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - "docker-compose.debug.yml"
+      - "docker/**"
+      - "docs/development/arm64-notes.md"
+      - "docs/codebase/first-run-experience.md"
+      - "tests/integration/test_first_run_arm64.py"
+      - ".github/workflows/arm64-first-run.yml"
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-first-run:
+    name: arm64 first-run (TEI fallback)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Register QEMU binfmt handlers for amd64 emulation
+        # TEI images are amd64-only; without this the containers fail with
+        # `exec format error` on arm64 Linux. macOS Docker Desktop uses
+        # Rosetta 2 instead -- see docs/development/arm64-notes.md.
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+          enable-cache: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+
+      - name: Install test dependencies
+        run: uv sync --group dev --group test
+
+      - name: Run arm64 first-run test
+        env:
+          CREDENTIAL_ENCRYPTION_KEY: arm64-first-run-test-fernet-key-32plus-chars
+        run: uv run pytest tests/integration/test_first_run_arm64.py -v -s --timeout=600
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: |
+          docker compose -p meho-firstrun-arm64-test logs --no-color || true
+          docker compose -p meho-firstrun-arm64-test ps || true
+
+      - name: Teardown (always)
+        if: always()
+        run: docker compose -p meho-firstrun-arm64-test down --volumes || true

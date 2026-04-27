@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 evoila Group
+
+name: Bug Report
+description: Report a bug in MEHO
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please fill out the form below to help us investigate.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+      placeholder: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of MEHO is affected?
+      options:
+        - Agent/Investigation
+        - Connectors
+        - Knowledge Base
+        - Topology
+        - Frontend UI
+        - Docker/Deployment
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Deployment details (Docker version, OS, browser, etc.)
+      placeholder: |
+        - MEHO version: v2.x.x
+        - Deployment: Docker Compose / Kubernetes
+        - OS: Ubuntu 22.04
+        - Browser: Chrome 120
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste any relevant log output here. This will be automatically formatted.
+      render: shell
+    validations:
+      required: false

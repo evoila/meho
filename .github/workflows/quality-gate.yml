@@ -1,0 +1,72 @@
+# SonarCloud Quality Gate
+#
+# Downloads coverage artifacts from the CI workflow instead of re-running tests.
+# This eliminates test duplication -- Python tests run once in ci.yml, coverage
+# is shared via artifacts. Frontend coverage is generated here since frontend-tests.yml
+# triggers only on frontend path changes.
+#
+# Uses "Clean as You Code" approach: quality gate applies to NEW code only,
+# so existing issues don't block PRs (per Pitfall 3 in research).
+#
+# Prerequisites:
+#   - SONAR_TOKEN secret configured in GitHub repo settings
+#   - SonarCloud organization and project created at sonarcloud.io
+#
+# IMPORTANT: Uses SonarSource/sonarqube-scan-action@v5 (not deprecated sonarcloud-github-action)
+# All third-party actions are pinned to commit SHAs per supply chain best practice.
+
+name: Quality Gate
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+# Prevent redundant quality gate runs on rapid pushes
+concurrency:
+  group: quality-gate-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write  # Required for SonarCloud PR decoration
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    # Only run if the CI workflow succeeded (tests passed)
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0  # Full history for accurate blame and new code detection
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Download Python coverage from CI workflow
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: python-coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true  # Coverage may not exist if tests failed
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install frontend deps and run coverage
+        working-directory: meho_frontend
+        run: |
+          npm ci
+          npm run test:coverage
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@2f77a1ec69fb1d595b06f35ab27e97605bdef703  # v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

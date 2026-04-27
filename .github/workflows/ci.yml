@@ -1,0 +1,220 @@
+# MEHO Public CI Pipeline
+#
+# Runs on every push to main and on all PRs targeting main.
+# All 6 jobs run in parallel -- no dependencies between them.
+#
+# Design: All environment variables use dummy values for tests.
+# No integration tests, no E2E tests, no Playwright.
+# Codecov upload is optional (uses CODECOV_TOKEN secret if available,
+# degrades gracefully for fork PRs without the secret).
+# This pipeline is designed for the public repo where contributors
+# can run CI without access to any external services.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-python:
+    name: Python Lint (Ruff)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+          enable-cache: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+
+      - name: Ruff lint check
+        run: uvx ruff check meho_app/ meho_mcp_server/ tests/unit/ tests/contracts/
+
+      - name: Ruff format check
+        run: uvx ruff format --check meho_app/ meho_mcp_server/ tests/unit/ tests/contracts/
+
+  lint-typescript:
+    name: TypeScript Lint (ESLint)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: ESLint
+        working-directory: meho_frontend
+        run: npm run lint
+
+  typecheck:
+    name: Type Check (mypy + tsc)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+          enable-cache: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+
+      - name: Install Python dependencies
+        # docling-group is required because meho_app imports docling at
+        # module level in the knowledge chain; mypy follows those imports.
+        run: uv sync --group dev --group docling-group
+
+      - name: mypy type check
+        # `uv run mypy` executes inside the project .venv (populated by the
+        # sync above), so the pydantic.mypy plugin declared in pyproject.toml
+        # can import pydantic. `uvx mypy` spawns a mypy-only ephemeral env
+        # and would fail with "Error importing plugin 'pydantic.mypy': No
+        # module named 'pydantic'".
+        run: uv run mypy meho_app/ --ignore-missing-imports
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: TypeScript type check
+        working-directory: meho_frontend
+        run: npm run typecheck
+
+  test-python:
+    name: Python Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+          enable-cache: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+
+      - name: Install Python dependencies
+        # docling-group is required because several unit / contract tests
+        # import meho_app.modules.knowledge.document_converter directly,
+        # which imports docling at module level.
+        run: uv sync --group dev --group test --group docling-group
+
+      - name: Run unit and contract tests with coverage
+        run: |
+          uv run pytest tests/unit/ tests/contracts/ \
+            -v --tb=short --timeout=60 \
+            --cov=meho_app --cov-report=xml:coverage.xml
+        env:
+          # Dummy values -- no real services needed.
+          # These satisfy config validation so tests can import app modules.
+          DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379"
+          CREDENTIAL_ENCRYPTION_KEY: "test-encryption-key-32-chars-minimum-length"
+          JWT_SECRET_KEY: "test-jwt-secret-key-32-characters-minimum"
+          APP_ENVIRONMENT: "test"
+          KEYCLOAK_URL: "http://localhost:8080"
+          KEYCLOAK_REALM: "test"
+          KEYCLOAK_CLIENT_ID: "test"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
+        if: always()
+        with:
+          files: coverage.xml
+          flags: backend-unit
+          name: backend-coverage
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: python-coverage
+          path: coverage.xml
+          retention-days: 1
+
+  test-frontend:
+    name: Frontend Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: Run unit tests with coverage
+        working-directory: meho_frontend
+        run: npm run test:coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
+        if: always()
+        with:
+          files: meho_frontend/coverage/lcov.info
+          flags: frontend-unit
+          name: frontend-coverage
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  test-scripts:
+    name: Shell Script Tests (bats)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Run bats test suite for assemble-public-tree.sh
+        run: bats tests/scripts/test_assemble_public_tree.bats

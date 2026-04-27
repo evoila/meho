@@ -47,7 +47,7 @@ jobs:
         # TEI images are amd64-only; without this the containers fail with
         # `exec format error` on arm64 Linux. macOS Docker Desktop uses
         # Rosetta 2 instead -- see docs/development/arm64-notes.md.
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: linux/amd64
 

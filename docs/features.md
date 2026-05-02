@@ -1,6 +1,6 @@
 # Features
 
-> Last verified: v2.3 (Phase 101)
+> Last verified: 0.1.0
 
 MEHO ships a comprehensive set of capabilities for AI-powered infrastructure diagnostics and operations. This page organizes features by capability area, not by release version.
 
@@ -13,10 +13,10 @@ MEHO's core value: diagnose problems across your entire stack in a single conver
 - **Cross-system entity resolution** linking entities across connectors (deterministic-first with LLM fallback)
 - **Cross-layer diagnostic traversal** via SAME_AS topology edges -- a Kubernetes pod maps to a VM maps to a hypervisor host
 - **Hypothesis tracking** with citations, confidence levels, and investigation breadcrumbs
-- **Routing classification** -- the orchestrator classifies every query as quick, standard, or deep in its existing routing LLM call (zero extra latency), adapting specialist count and step budgets per complexity tier (v2.3)
-- **Investigation plan visibility** -- before dispatching specialists, the orchestrator emits a visible plan showing classification, reasoning, planned systems, and estimated calls via a new `orchestrator_plan` SSE event (v2.3)
-- **Memory-as-tool** -- auto-extracted operator memories are removed from the specialist system prompt and available on-demand via a `recall_memory` tool, reducing prompt bloat while preserving memory access when needed. Operator-provided memories remain always in the prompt (v2.3)
-- **Budget-aware specialists** -- specialists self-regulate across 4 budget regimes based on remaining steps, balancing thoroughness with efficiency (v2.3)
+- **Routing classification** -- the orchestrator classifies every query as quick, standard, or deep in its existing routing LLM call (zero extra latency), adapting specialist count and step budgets per complexity tier
+- **Investigation plan visibility** -- before dispatching specialists, the orchestrator emits a visible plan showing classification, reasoning, planned systems, and estimated calls via a new `orchestrator_plan` SSE event
+- **Memory-as-tool** -- auto-extracted operator memories are removed from the specialist system prompt and available on-demand via a `recall_memory` tool, reducing prompt bloat while preserving memory access when needed. Operator-provided memories remain always in the prompt
+- **Budget-aware specialists** -- specialists self-regulate across 4 budget regimes based on remaining steps, balancing thoroughness with efficiency
 - **Investigation visualization** with three-layer density control, hypothesis display, and topology path animation
 - **Error classification system** for systematic categorization of infrastructure issues
 
@@ -30,9 +30,9 @@ Connect to any system in your infrastructure through typed connectors or generic
 - **Connector-scoped knowledge and memory** with auto-extraction from conversation context
 - **Connector-type operation sharing** with instance-level overrides for customization
 - **Orchestrator dispatches** queries to multiple connectors in parallel
-- **MCP Client connector** -- connect to any MCP server and dynamically discover its tools at runtime (v2.3)
-- **MCP Server endpoint** -- expose MEHO's investigation tools to other AI systems via the Model Context Protocol at `/mcp` (v2.3)
-- **VMware Cloud Foundation (VCF)** -- 209 operations across 10 categories including vSAN health, NSX micro-segmentation, SDDC lifecycle, and capacity planning with separate API credentials per subsystem (v2.3)
+- **MCP Client connector** -- connect to any MCP server and dynamically discover its tools at runtime
+- **MCP Server endpoint** -- expose MEHO's investigation tools to other AI systems via the Model Context Protocol at `/mcp`
+- **VMware Cloud Foundation (VCF)** -- 209 operations across 10 categories including vSAN health, NSX micro-segmentation, SDDC lifecycle, and capacity planning with separate API credentials per subsystem
 - **Generic REST connector** via OpenAPI spec ingestion -- connect to any REST API
 - **Generic SOAP connector** via WSDL service definitions -- connect to legacy enterprise systems
 
@@ -79,9 +79,9 @@ Three-tier knowledge system with hybrid search and AI-powered reranking.
 - **Day-one value** -- upload documentation and it's immediately available to all connectors of that type
 - **Hybrid search**: BM25 full-text + pgvector semantic search (Voyage AI voyage-4-large, 1024D embeddings)
 - **Voyage AI rerank-2.5** post-retrieval reranking for 15-30% precision improvement
-- **Docling-powered document processing** -- structure-aware chunking that preserves headings, sections, and tables with TOC filtering and heading path enrichment (v2.3)
-- **Lightweight CPU-only pipeline** -- `MEHO_FEATURE_USE_DOCLING=false` activates a PyTorch-free pipeline (pymupdf4llm + pdfplumber + RapidOCR) producing the same output shape as Docling, enabling ~500MB Docker images without GPU (v2.3)
-- **Ephemeral ingestion worker** -- optionally offload heavy Docling PDF processing to short-lived cloud workers (Cloud Run, K8s Jobs) while keeping the main MEHO container lightweight (v2.3)
+- **Docling-powered document processing** -- structure-aware chunking that preserves headings, sections, and tables with TOC filtering and heading path enrichment
+- **Lightweight CPU-only pipeline** -- `MEHO_FEATURE_USE_DOCLING=false` activates a PyTorch-free pipeline (pymupdf4llm + pdfplumber + RapidOCR) producing the same output shape as Docling, enabling ~500MB Docker images without GPU
+- **Ephemeral ingestion worker** -- optionally offload heavy Docling PDF processing to short-lived cloud workers (Cloud Run, K8s Jobs) while keeping the main MEHO container lightweight
 - **PDF and URL ingestion** -- upload PDFs or point to URLs for automatic knowledge extraction
 - **Auto-extraction** from conversation context -- MEHO learns from every interaction
 
@@ -135,7 +135,7 @@ Collaborative investigation sessions with real-time state.
 
 MEHO doesn't just respond -- it can act on triggers.
 
-- **Events system** -- receive HTTP events from any connected system and trigger investigations, with optional response channels to post results back (renamed from webhooks in v2.3)
+- **Events system** -- receive HTTP events from any connected system and trigger investigations, with optional response channels to post results back
 - **Scheduled tasks** with cron-based triggers -- MEHO creates sessions with prompts, the agent decides the action
 - **Agent-driven change correlation** -- skill-guided analysis, no separate correlation engine
 - **Feature flags** for module control -- disable optional modules (knowledge, topology, events, memory, scheduled tasks) at startup via environment variables

@@ -1,6 +1,6 @@
 # MEHO -- AI-Powered Diagnostic Platform for Complex IT Environments
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 MEHO (Machine Enhanced Human Operator) is an AI-powered diagnostic and operations platform that connects to every system in your infrastructure and reasons across all of them as a connected graph. Operators express intent in natural language; MEHO investigates using a ReAct reasoning loop that queries multiple systems, preserves raw data, and traces root causes across layers -- from application down to hypervisor -- in a single conversation.
 

@@ -8,8 +8,13 @@
 # To ship a new path publicly, add it to public-allowlist.txt.
 #
 # Mirror mode is controlled by GitHub variable PUBLIC_MIRROR_MODE:
-# - orphan (default): force-pushes a single orphan snapshot commit
-# - incremental: appends a normal commit on top of public/main
+# - incremental (default): appends a normal commit on top of public/main
+# - orphan: force-pushes a single orphan snapshot commit
+#
+# Orphan mode is reserved for one-time resets (initial OSS launch, deliberate
+# history rewrite). It is rejected at runtime if the public repo carries any
+# release tags matching v* — see the tag-guard below — to prevent an accidental
+# mode flip from force-replacing accumulated tagged history.
 #
 # Uses a classic PAT (PUBLIC_REPO_PAT). persist-credentials: false on checkout
 # is critical to prevent the default GITHUB_TOKEN from overriding the PAT.
@@ -36,6 +41,7 @@ jobs:
   mirror:
     name: Mirror to Public Repo
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
@@ -57,7 +63,7 @@ jobs:
           STAGING: ${{ steps.assemble.outputs.staging }}
         run: |
           SOURCE_SHA=$(git rev-parse --short HEAD)
-          MODE="${MIRROR_MODE:-orphan}"
+          MODE="${MIRROR_MODE:-incremental}"
           MODE=$(echo "$MODE" | tr '[:upper:]' '[:lower:]')
 
           if [ "$MODE" != "orphan" ] && [ "$MODE" != "incremental" ]; then
@@ -73,6 +79,28 @@ jobs:
           git remote add public "https://x-access-token:${{ secrets.PUBLIC_REPO_PAT }}@github.com/evoila/meho.git"
 
           if [ "$MODE" = "orphan" ]; then
+            # Tag-guard: orphan mode force-replaces public main, detaching any
+            # release tags reachable only via that history — they would still
+            # exist as refs but point to commits no longer reachable from main,
+            # leaving tagged releases and the default branch on divergent
+            # histories. Probe for v* tags on public; refuse if any exist or if
+            # the probe itself fails (fail-closed — a network/auth blip must not
+            # silently allow the destructive push). --refs suppresses the peeled
+            # ^{} lines git ls-remote emits for annotated tags so the count and
+            # printed list reflect the real tags. To intentionally reset a
+            # tagged public repo, delete the public tags first, then run with
+            # PUBLIC_MIRROR_MODE=orphan.
+            if ! TAG_REFS=$(git ls-remote --refs --tags public 'refs/tags/v*'); then
+              echo "::error::Could not query public repo for release tags. Refusing orphan mode."
+              exit 1
+            fi
+            if [ -n "$TAG_REFS" ]; then
+              TAG_COUNT=$(printf '%s\n' "$TAG_REFS" | wc -l | tr -d ' ')
+              echo "::error::Orphan mode would detach $TAG_COUNT public release tag(s) from main history. Refusing."
+              printf '%s\n' "$TAG_REFS"
+              exit 1
+            fi
+
             # Create an orphan branch so the public repo receives a self-contained
             # commit with no parent references back to the private repo history.
             git checkout --orphan mirror-staging

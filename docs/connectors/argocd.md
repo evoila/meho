@@ -1,6 +1,6 @@
 # ArgoCD
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 ArgoCD is the GitOps continuous delivery tool for Kubernetes. MEHO connects to ArgoCD to give operators visibility into application deployment state, sync status, resource health, and deployment history -- enabling cross-system tracing from a Git commit all the way through to running pods.
 

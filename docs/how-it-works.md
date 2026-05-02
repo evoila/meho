@@ -1,6 +1,6 @@
 # How MEHO Handles Data
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Most AI-powered tools send raw API responses directly to the LLM. This works fine for small responses, but infrastructure APIs routinely return megabytes of JSON -- a Kubernetes cluster with 200 pods, a Prometheus query spanning 24 hours, a VMware inventory with nested host and VM hierarchies. Sending all of that to the LLM wastes context window, increases cost, and leads to hallucination when the model loses track of details buried in thousands of lines.
 

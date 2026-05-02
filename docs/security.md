@@ -1,8 +1,8 @@
 # Security & Data Handling
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
-MEHO is designed for production environments where security is non-negotiable. This page documents the security posture hardened across v1.64-v1.72, covering authentication, authorization, transport security, data handling, and credential management.
+MEHO is designed for production environments where security is non-negotiable. This page documents MEHO's security posture, covering authentication, authorization, transport security, data handling, and credential management.
 
 For the operational trust model (READ/WRITE/DESTRUCTIVE classification and approval flow), see [Trust & Safety](trust-and-safety.md).
 

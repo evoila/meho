@@ -1,6 +1,6 @@
 # Jira
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Jira is the project tracking and issue management platform. MEHO connects to Jira Cloud to let operators search issues, create tickets from investigation findings, add comments with diagnostic results, and transition issue statuses -- all through natural language, without ever needing to write JQL.
 

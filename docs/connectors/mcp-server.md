@@ -1,6 +1,6 @@
 # MCP Server
 
-> Last verified: v2.3
+> Last verified: 0.1.0
 
 MEHO exposes its investigation capabilities as an [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server, allowing external AI agents, IDEs, and CI/CD pipelines to trigger MEHO investigations, search the knowledge base, query the topology graph, and list connectors -- all through the standard MCP tool protocol.
 

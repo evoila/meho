@@ -1,6 +1,6 @@
 # Amazon Web Services
 
-> Last verified: v2.3
+> Last verified: 0.1.0
 
 MEHO's AWS connector provides native integration with Amazon Web Services using the boto3 SDK. Covering CloudWatch metrics, EC2 instances, ECS container services, EKS managed Kubernetes, Lambda functions, RDS databases, S3 storage, and VPC networking, MEHO gives you cross-service visibility into your AWS infrastructure -- from virtual machines and container clusters to serverless functions and database instances.
 

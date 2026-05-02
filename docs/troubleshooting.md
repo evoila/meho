@@ -1,6 +1,6 @@
 # Troubleshooting
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Common issues, their causes, and how to fix them. Organized by problem category.
 

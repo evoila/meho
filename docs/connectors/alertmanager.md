@@ -1,6 +1,6 @@
 # Alertmanager
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Alertmanager handles alert routing, grouping, silencing, and notification for Prometheus-based monitoring stacks. MEHO's Alertmanager connector lets operators investigate active alerts, manage silences, and check cluster health through natural conversation -- including **WRITE operations** for creating and expiring silences with full trust model enforcement.
 

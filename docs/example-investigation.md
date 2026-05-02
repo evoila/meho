@@ -1,6 +1,6 @@
 # Example Investigation
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 This page demonstrates MEHO's core capability: tracing a problem across multiple systems in a single conversation. No context switching between tools, no copy-pasting between dashboards -- just natural language and cross-system reasoning.
 

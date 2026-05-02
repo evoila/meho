@@ -1,6 +1,6 @@
 # API Reference
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 !!! info "Auto-generated documentation"
     This reference is auto-generated from MEHO's OpenAPI specification. To regenerate with the latest API changes, run the app and export:

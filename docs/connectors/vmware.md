@@ -1,6 +1,6 @@
 # VMware vSphere
 
-> Last verified: v2.3
+> Last verified: 0.1.0
 
 MEHO's VMware connector provides deep vSphere and VMware Cloud Foundation (VCF) integration using `pyvmomi`, NSX Manager REST API, and SDDC Manager REST API. With 209 operations across 10 categories -- compute, storage, networking, monitoring, inventory, system, vSAN, NSX, SDDC, and capacity planning -- MEHO delivers comprehensive visibility and control over your entire VMware environment, from datacenter-level overview down to individual VM disk I/O metrics, NSX micro-segmentation, and VCF lifecycle management.
 

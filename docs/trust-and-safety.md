@@ -1,6 +1,6 @@
 # Trust & Safety
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 MEHO connects to production systems and executes operations on behalf of operators. The trust model ensures that **MEHO never modifies or destroys resources without explicit human approval**. Every operation is classified, every write requires confirmation, and every action is audited.
 

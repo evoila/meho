@@ -1,7 +1,5 @@
 # CI Quality Gates
 
-> Added in v2.3 (Phase 100)
-
 MEHO's CI pipeline enforces code quality, security, and compliance standards on every pull request. All checks run automatically via GitHub Actions.
 
 ## Overview
@@ -143,7 +141,7 @@ Coverage is collected from both Python and frontend test suites during the CI wo
 - **Patch coverage requirement**: 80% on changed lines
 - **Project coverage**: Auto baseline (compares to base commit, no fixed target)
 - **PR comments**: Coverage diff posted automatically
-- **Coverage scope**: `meho_app/` source paths (corrected from `meho_core/` in Phase 100)
+- **Coverage scope**: `meho_app/` source paths
 - **Coverage flags**: `backend-unit` flag for Python coverage
 
 ### Configuration

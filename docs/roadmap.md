@@ -1,14 +1,14 @@
 # Roadmap
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
-## Current State: v2.0
+## Current State: 0.1.0
 
-MEHO v2.0 represents a comprehensive platform with cross-system diagnostic intelligence, 15 connector types, and a production-ready deployment model.
+MEHO 0.1.0 represents a comprehensive platform with cross-system diagnostic intelligence, 15 connector types, and a production-ready deployment model.
 
 ### What's Shipped
 
-MEHO has gone through extensive development across 10 milestones, delivering:
+MEHO has gone through extensive private development before this initial public release, delivering:
 
 - **Cross-system reasoning** -- trace problems across Kubernetes, cloud infrastructure, observability stacks, CI/CD pipelines, and collaboration tools in a single conversation
 - **15 connector types** -- Infrastructure (Kubernetes, VMware, Proxmox, GCP), Observability (Prometheus, Loki, Tempo, Alertmanager), CI/CD (ArgoCD, GitHub), Collaboration (Jira, Confluence, Email), and Generic (REST via OpenAPI, SOAP via WSDL)
@@ -21,7 +21,7 @@ MEHO has gone through extensive development across 10 milestones, delivering:
 - **Security hardening** -- Content Security Policy, HSTS, CORS lockdown, memory-only auth tokens, Keycloak OIDC integration
 - **Investigation visualization** -- hypothesis tracking, citations, breadcrumb navigation, and topology animation showing investigation paths
 
-### v2.0 Stabilization
+### Stabilization
 
 The current stabilization milestone focused on hardening what's built:
 
@@ -38,8 +38,7 @@ The current stabilization milestone focused on hardening what's built:
 
 Expanding automated test coverage beyond the current baseline:
 
-- **End-to-end test suite** -- automated browser tests covering all user journeys (currently 5 Playwright specs, expanding to full coverage)
-- **CI pipeline** -- GitHub Actions with automated test gates, coverage thresholds, and deployment checks
+- **End-to-end test suite** -- expanding the Playwright spec suite toward full user-journey coverage
 - **LLM evaluation** -- automated assessment of agent response quality using LLM-as-judge evaluation pipelines
 - **Performance baselines** -- regression testing for critical paths (agent response time, data pipeline throughput)
 

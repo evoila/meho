@@ -1,6 +1,6 @@
 # Proxmox VE
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 MEHO's Proxmox connector provides native access to your Proxmox VE clusters using `proxmoxer`, the official Python SDK. With operations covering QEMU virtual machines, LXC containers, nodes, storage, and cluster management, MEHO gives you full visibility into your Proxmox infrastructure -- from cluster-wide resource overview down to individual container status.
 

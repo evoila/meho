@@ -1,6 +1,6 @@
 # Feature Flags
 
-> Last verified: v2.3 (Phase 101)
+> Last verified: 0.1.0
 
 MEHO uses feature flags to enable or disable optional modules at startup. Most flags default to `true` (enabled). Set a flag to `false` in your `.env` file or environment to disable the corresponding module entirely.
 

@@ -39,25 +39,40 @@ The workflow fails if any of these required paths are missing from the staged tr
 
 The mirror workflow supports two modes controlled by GitHub variable `PUBLIC_MIRROR_MODE`:
 
-- `orphan` (default): force-pushes a single snapshot commit to public `main`
-- `incremental`: appends one normal commit per successful private `main` CI run
+- `incremental` (default): appends one normal commit per successful private `main` CI run
+- `orphan`: force-pushes a single snapshot commit to public `main` — reserved for one-time resets
 
-If `PUBLIC_MIRROR_MODE` is unset, behavior defaults to `orphan`.
+If `PUBLIC_MIRROR_MODE` is unset, behavior defaults to `incremental`. Deleting the variable is safe.
 
-## Switching to Incremental History
+## Mode Invariant
 
-When ready to expose incremental public history:
+`incremental` is the permanent mode. The repository variable is set to `incremental`, and the workflow's
+own default is `incremental`, so unsetting or deleting the variable cannot accidentally fall back to
+the destructive force-push path.
 
-1. Set private-repo Actions variable `PUBLIC_MIRROR_MODE=incremental`
-2. Push/merge to private `main` and wait for CI + mirror workflow
-3. Verify public `main` receives a normal commit on top of prior public `main` (no force rewrite)
+The workflow additionally enforces a tag-guard: any orphan-mode run that finds release tags matching
+`v*` on public is rejected before the force-push. Even if a future operator deliberately sets
+`PUBLIC_MIRROR_MODE=orphan` after release tags have accumulated, the workflow will refuse rather than
+detach them from `main` history (the tag refs themselves survive a force-push of `main`, but the
+commits they point to become unreachable from the default branch).
 
-## Rollback to Orphan Mode
+## Falling Back to Orphan Mode
 
-If incremental mirroring needs to be reverted quickly:
+Orphan mode is appropriate only for one-time resets (initial OSS launch, deliberate history rewrite
+after an incident). To execute one:
 
-1. Set `PUBLIC_MIRROR_MODE=orphan` (or remove the variable)
-2. Next successful mirror run returns to snapshot force-push behavior
+1. **Delete release tags from public first** if any exist. From a maintainer checkout authenticated to
+   the public repo:
+   ```bash
+   git push public --delete v<x>.<y>.<z>
+   ```
+   The tag-guard rejects orphan mode while any `v*` tag exists on public; this step is mandatory
+   before the workflow will proceed.
+2. Set private-repo Actions variable `PUBLIC_MIRROR_MODE=orphan`.
+3. Trigger the next mirror run (re-run the latest CI on `main` from the Actions UI, or push a no-op
+   commit). The mirror workflow runs orphan and force-pushes a single snapshot.
+4. **Reset the variable to `incremental`** as soon as the orphan reset completes. Leaving it on
+   `orphan` would re-force-push every subsequent CI cycle.
 
 ## Developer Rules
 
@@ -117,7 +132,7 @@ The `--no-verify` flag bypasses the pre-push hook. Use sparingly.
 
 CLA signatures do not require a dedicated secret on either repo. The CLA workflow uses the default `GITHUB_TOKEN`, and writes target each repo's unprotected `cla-signatures` branch. See [Public-side CLA](#public-side-cla) and [docs/codebase/cla-verification.md](../codebase/cla-verification.md).
 
-`PUBLIC_REPO_PAT` is a GitHub **classic** personal access token with `public_repo` scope. Classic tokens cannot be scoped to a single repository — migration to a fine-grained PAT or a GitHub App installation token is tracked as a v2.3+ consideration in #257. Maximum lifetime is 1 year; see the [PAT Rotation](#pat-rotation) section below for the rotation procedure and calendar cadence.
+`PUBLIC_REPO_PAT` is a GitHub **classic** personal access token with `public_repo` scope. Classic tokens cannot be scoped to a single repository — migration to a fine-grained PAT or a GitHub App installation token is tracked as a future consideration in #257. Maximum lifetime is 1 year; see the [PAT Rotation](#pat-rotation) section below for the rotation procedure and calendar cadence.
 
 ## What Gets Shipped
 
@@ -155,27 +170,15 @@ If any item is a no, the release does not happen. Document the reason in the rel
 
 Three rollback cases, in order of severity. Always start with the least destructive option that actually fixes the problem.
 
-### Orphan mode — bad content pushed
+### Bad content pushed (incremental mode — routine path)
 
-Default `PUBLIC_MIRROR_MODE=orphan` force-pushes every sync, so any bad public content is one private fix away from being overwritten.
-
-1. Identify the bad content on public `main`.
-2. Fix the underlying issue on **private** `main` — revert the offending commit, fix the allowlist, whatever is correct.
-3. Wait for private CI to go green on the fix commit.
-4. The `mirror-to-public` workflow triggers automatically on `workflow_run: CI` success and force-pushes the corrected tree.
-5. Verify public `main` now reflects the fix. Commit SHA and file tree should match the local `scripts/assemble-public-tree.sh` output.
-
-No manual force-push is needed. The orphan mode's force-push behavior **is** the rollback mechanism.
-
-### Incremental mode — bad content pushed
-
-If `PUBLIC_MIRROR_MODE=incremental` is set, public history is preserved and a force-push would rewrite that history. Prefer a revert.
+Public history is preserved and a force-push would rewrite that history. Prefer a revert.
 
 1. On public `main`, create a revert commit: `git revert <bad-commit-sha>`.
 2. Push the revert to public `main` **via a PR on the public repo**, not directly. The local pre-push hook from `scripts/dev-setup.sh` blocks direct pushes for any maintainer who has run that setup, but the hook is client-side only — the "no direct pushes" rule is enforced by policy and local tooling, not by the server. Do not work around it even if your own clone has no hook installed.
 3. Merge the revert PR on public.
 4. Cherry-pick the revert back to private `main` (same flow as the "Handling External PRs" section above) so the next mirror sync is a no-op instead of re-applying the bad content.
-5. If the bad commit is truly unfixable and history rewrite is the only option, drop back to `PUBLIC_MIRROR_MODE=orphan`, push one snapshot, then decide whether to re-enable incremental afterwards. This is the nuclear option — document it in the incident postmortem.
+5. If the bad commit is truly unfixable and history rewrite is the only option, drop to orphan mode per the [Falling Back to Orphan Mode](#falling-back-to-orphan-mode) procedure — including the mandatory tag deletion step. This is the nuclear option; document it in the incident postmortem.
 
 ### Leaked private content
 
@@ -183,7 +186,7 @@ If `PUBLIC_MIRROR_MODE=incremental` is set, public history is preserved and a fo
 
 ## PAT Rotation
 
-`PUBLIC_REPO_PAT` is a GitHub **classic** personal access token. Classic tokens cannot be scoped to a single repo — the `public_repo` scope grants write to every public repo the token owner can reach. This is a known limitation; migration to a fine-grained PAT or a GitHub App installation token is tracked as a v2.3+ consideration in initiative #257.
+`PUBLIC_REPO_PAT` is a GitHub **classic** personal access token. Classic tokens cannot be scoped to a single repo — the `public_repo` scope grants write to every public repo the token owner can reach. This is a known limitation; migration to a fine-grained PAT or a GitHub App installation token is tracked as a future consideration in initiative #257.
 
 **Maximum lifetime**: classic PATs can be set to any expiration up to 1 year. The production PAT is created with 1-year expiration.
 
@@ -229,7 +232,7 @@ Triggered when any content has been pushed to `evoila/meho` that should not have
 
 1. **Rotate the leaked secret.** If the leak contains a credential, API key, PAT, password, or any other secret, **rotate it before doing anything else**. Assume every value in the leaked commit is compromised the moment it hit GitHub.
 2. **Stop the mirror.** Pause the `mirror-to-public` workflow in the private repo's Actions settings. This prevents a second bad sync while the first one is being investigated.
-3. **Force-push a clean state** (orphan mode). Push a known-good commit from private `main` that does *not* contain the leaked content. This shrinks the visible-on-public-`main` window but does **not** erase the leaked commit from GitHub — see the Reality check below.
+3. **Push a clean state to public.** First try a revert on public `main` via PR (incremental mode). If a force-push is genuinely required to scrub the visible default branch, follow the [Falling Back to Orphan Mode](#falling-back-to-orphan-mode) procedure — including the mandatory tag deletion step the workflow's tag-guard enforces — then push a known-good snapshot. Either path shrinks the visible-on-public-`main` window but does **not** erase the leaked commit from GitHub — see the Reality check below.
 4. **Confirm public `main` is clean.** Inspect `evoila/meho` in a browser. The leaked content must no longer be visible on the default branch. If it still is, escalate immediately.
 
 ### Within 1 hour

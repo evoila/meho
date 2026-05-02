@@ -1,6 +1,6 @@
 # Loki
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Loki is the log aggregation engine behind MEHO's log investigation capabilities. MEHO's Loki connector translates natural-language questions about logs into structured LogQL queries -- operators can search, filter, and analyze log data without learning LogQL syntax or knowing which labels are available.
 

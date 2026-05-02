@@ -1,6 +1,6 @@
 # Adding a New Connector
 
-> Last verified: v2.3
+> Last verified: 0.1.0
 
 This walkthrough guides you through creating a new MEHO connector from scratch, using the GCP connector as a reference implementation. By the end, your connector will be discoverable by the agent and integrated into the topology graph.
 

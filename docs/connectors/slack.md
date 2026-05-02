@@ -1,6 +1,6 @@
 # Slack
 
-> Last verified: v2.3
+> Last verified: 0.1.0
 
 MEHO's Slack connector enables querying channel history, searching messages, posting replies, and adding reactions -- giving investigations access to team communication context. The agent can pull Slack messages as a data source during cross-system investigations, and post investigation results back to channels.
 

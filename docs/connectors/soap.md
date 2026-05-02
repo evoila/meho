@@ -1,6 +1,6 @@
 # SOAP (WSDL)
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 The SOAP connector extends MEHO's reach into enterprise systems that expose WSDL-based APIs. Many critical enterprise platforms -- VMware vSphere, ServiceNow, SAP, and legacy banking systems -- use SOAP web services. MEHO automatically discovers operations from WSDL definitions, maps XML Schema types to JSON for unified handling, and manages complex authentication patterns like WS-Security and session-based login flows.
 

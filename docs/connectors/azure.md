@@ -1,6 +1,6 @@
 # Microsoft Azure
 
-> Last verified: v2.3
+> Last verified: 0.1.0
 
 MEHO's Azure connector provides native integration with Microsoft Azure using the official Azure SDK for Python with first-class async support. Covering Compute (VMs, disks), Azure Monitor (metrics, alerts, activity log), AKS (managed Kubernetes), Networking (VNets, NSGs, load balancers), Storage (accounts, blob containers), and Web (App Service, Function Apps), MEHO gives you cross-service visibility into your Azure infrastructure.
 

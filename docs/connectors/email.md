@@ -1,6 +1,6 @@
 # Email
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 The Email connector enables MEHO to send branded HTML notifications to your team. When MEHO completes an investigation, diagnoses an issue, or needs to escalate a finding, it can compose and send a professional email summary with a link back to the investigation session. Supports multiple email providers: SMTP, SendGrid, Mailgun, Amazon SES, and Generic HTTP.
 

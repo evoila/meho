@@ -1,9 +1,6 @@
 # Events System
 
-> Last verified: v2.3
-
-!!! info "Renamed in v2.3"
-    The webhook system was renamed to "events" in v2.3. If upgrading from a previous version, see the [Migration from Webhooks](#migration-from-webhooks) section below.
+> Last verified: 0.1.0
 
 MEHO's events system allows external systems to trigger investigations and receive results. Events can come from CI/CD pipelines, monitoring alerts, ticketing systems, or any HTTP source. When an event arrives, MEHO matches it to a registered event pattern, creates an investigation session, and optionally posts results back via a response channel.
 
@@ -48,7 +45,7 @@ Investigate this issue and provide a root cause analysis.
 
 ## Response Channels
 
-New in v2.3, response channels allow MEHO to post investigation results back to the system that triggered the event. This is configured via the `response_config` field on an event registration.
+Response channels allow MEHO to post investigation results back to the system that triggered the event. This is configured via the `response_config` field on an event registration.
 
 ### Configuration
 
@@ -106,24 +103,6 @@ The events system is controlled by `MEHO_FEATURE_EVENTS`. When set to `false`:
 # Disable the events system
 MEHO_FEATURE_EVENTS=false
 ```
-
-## Migration from Webhooks
-
-If upgrading from a version prior to v2.3, the following changes apply:
-
-| What Changed | Before (< v2.3) | After (v2.3+) |
-|--------------|------------------|---------------|
-| Database tables | `webhook_registrations` | `event_registrations` |
-| | `webhook_events` | `event_history` |
-| API routes | `POST /api/webhooks/{webhook_id}` | `POST /api/events/{event_id}` |
-| | `/api/connectors/{id}/operations/webhooks` | `/api/connectors/{id}/operations/events` |
-| Feature flag | `MEHO_FEATURE_WEBHOOKS` | `MEHO_FEATURE_EVENTS` |
-| Frontend tab | "Webhooks" | "Events" |
-| Internal classes | `WebhookRegistrationModel` | `EventRegistrationModel` |
-| | `WebhookEventModel` | `EventHistoryModel` |
-| | `WebhookExecutor` | `EventExecutor` |
-
-The database migration renames tables automatically. Existing registrations, secrets, and event history are preserved. External systems that POST to the old `/api/webhooks/` URL must be updated to use `/api/events/`.
 
 ## Troubleshooting
 

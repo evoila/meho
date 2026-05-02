@@ -11,7 +11,7 @@ _No unreleased changes yet. New entries land here under Keep a Changelog
 subsections (Added, Changed, Deprecated, Removed, Fixed, Security) and
 graduate to a versioned section at the next release._
 
-## [2.2.0] - 2026-05-01
+## [0.1.0] - 2026-05-02
 
 Initial public release under AGPLv3. MEHO (Machine Enhanced Human Operator) is
 an AI-powered diagnostic and operations platform that reasons across an entire
@@ -114,7 +114,7 @@ rather than enumerating every private milestone that preceded it.
   require explicit approval, with full audit trail
 - Memory-only auth tokens (no `localStorage`), CSP, HSTS, and standard
   security headers on the frontend
-- HMAC-SHA256 signature verification on inbound webhook endpoints
+- HMAC-SHA256 signature verification on inbound event endpoints
 
-[Unreleased]: https://github.com/evoila/meho/compare/v2.2.0...HEAD
-[2.2.0]: https://github.com/evoila/meho/releases/tag/v2.2.0
+[Unreleased]: https://github.com/evoila/meho/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/evoila/meho/releases/tag/v0.1.0

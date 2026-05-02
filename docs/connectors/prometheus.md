@@ -1,6 +1,6 @@
 # Prometheus
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Prometheus is the metrics backbone of modern infrastructure monitoring. MEHO's Prometheus connector translates natural-language questions about CPU, memory, disk, network, and service health into precise PromQL queries -- so operators can diagnose performance issues without memorizing metric names or query syntax.
 

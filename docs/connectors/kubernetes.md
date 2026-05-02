@@ -1,6 +1,6 @@
 # Kubernetes
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 MEHO's Kubernetes connector provides native API access to your clusters using `kubernetes-asyncio`. With 40+ operations spanning pods, deployments, services, storage, and events, MEHO can diagnose issues, inspect workloads, and take corrective action across your entire Kubernetes estate -- all from a single conversation.
 

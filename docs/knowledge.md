@@ -1,6 +1,6 @@
 # Knowledge Base
 
-> Last verified: v2.3 (Phase 101)
+> Last verified: 0.1.0
 
 MEHO's knowledge system lets operators upload documents that become searchable by the agent during investigations. Documents are processed through a structure-aware pipeline using [IBM Docling](https://github.com/DS4SD/docling) for intelligent chunking that preserves document hierarchy.
 
@@ -52,8 +52,6 @@ The summary generation uses the first ~16,000 characters of the document (coveri
 Enriched chunks (heading path + summary prefix + chunk content) are embedded using the configured embedding provider and stored in PostgreSQL with pgvector for semantic search and GIN indexes for BM25 full-text search.
 
 ## Lightweight Pipeline (CPU-Only)
-
-> Added in v2.3 (Phase 98)
 
 When `MEHO_FEATURE_USE_DOCLING=false`, MEHO uses a lightweight document processing pipeline that requires no PyTorch, GPU, or ML models. This pipeline is ideal for:
 
@@ -129,15 +127,3 @@ This scoping provides day-one value: upload a Kubernetes troubleshooting guide o
 | `EMBEDDING_MODEL` | Embedding model name (default: `voyage-4-large`). |
 | `VOYAGE_API_KEY` | API key for Voyage AI embeddings (not needed if using local TEI). |
 | `MEHO_FEATURE_USE_DOCLING` | Set to `false` to use the lightweight CPU-only pipeline instead of Docling. Default: `true`. |
-
-## What Changed in v2.3
-
-The v2.3 knowledge pipeline is a significant upgrade from the previous version:
-
-- **Docling replaces pypdf** -- Structure-aware document conversion instead of raw text extraction. PDF processing now understands headings, sections, tables, and document hierarchy.
-- **Heading path enrichment** -- Every chunk carries its hierarchical position in the document, improving search relevance for nested content.
-- **TOC filtering** -- Table of contents entries, page headers, and page footers are filtered out before chunking, eliminating noise from search results.
-- **Document summaries** -- LLM-generated summaries provide document-level context to every chunk embedding, improving cross-document retrieval.
-- **HybridChunker** -- Docling's structure-aware chunker replaces fixed-size text splitting, producing more semantically coherent chunks.
-- **Chunk prefix enrichment** -- Connector type, connector name, and document summary are prepended to each chunk before embedding for richer context.
-- **Lightweight pipeline option** -- Setting `MEHO_FEATURE_USE_DOCLING=false` activates a CPU-only pipeline using pymupdf4llm, pdfplumber, and RapidOCR. No PyTorch or GPU required. Produces the same output shape as Docling for seamless downstream compatibility.

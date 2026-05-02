@@ -2,6 +2,8 @@
 
 **AI-powered diagnostic and operations platform that reasons across your entire infrastructure stack.**
 
+> **Pre-1.0 stability**: MEHO is in the SemVer `0.x` series. Per [Semantic Versioning §4](https://semver.org/spec/v2.0.0.html#spec-item-4), the public API is not yet stable — API endpoints, configuration keys, license-token payload schemas, and image-tag conventions may change between any two `0.MINOR` releases. For production deployments, pin to a specific `<major>.<minor>.<patch>` image tag (e.g. `ghcr.io/evoila/meho-backend:0.1.0`) rather than `latest` or a floating `0.1` tag. Breaking changes are documented in [CHANGELOG.md](CHANGELOG.md).
+
 [![CI](https://github.com/evoila/meho/actions/workflows/ci.yml/badge.svg)](https://github.com/evoila/meho/actions/workflows/ci.yml)
 [![Security Scan](https://github.com/evoila/meho/actions/workflows/security-scan.yml/badge.svg)](https://github.com/evoila/meho/actions/workflows/security-scan.yml)
 [![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=evoila_meho&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=evoila_meho)

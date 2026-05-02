@@ -335,8 +335,6 @@ The Docker Compose development setup is not production-ready as-is. For producti
 
 ## Slim Docker Image
 
-> Added in v2.3 (Phase 98)
-
 MEHO supports a slim Docker build that excludes PyTorch and Docling, reducing image size from ~4 GB to ~500 MB. The slim image uses the lightweight document ingestion pipeline (pymupdf4llm, pdfplumber, RapidOCR) instead of Docling.
 
 ### When to Use Slim
@@ -380,8 +378,6 @@ GPU builds opt in additionally with `--build-arg TARGETBASE=base-gpu --build-arg
     The slim image has all MEHO features except ML-powered document ingestion. Connectors, agent investigation, topology, knowledge search, and all other capabilities work identically.
 
 ## Ephemeral Ingestion Worker
-
-> Added in v2.3 (Phase 97.1)
 
 For environments that need Docling's ML-powered quality but cannot run PyTorch in the main MEHO container, an ephemeral ingestion worker can offload PDF conversion to a separate, short-lived process (e.g., Google Cloud Run job, Kubernetes Job).
 

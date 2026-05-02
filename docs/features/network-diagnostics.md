@@ -1,7 +1,5 @@
 # Network Diagnostic Tools
 
-> Added in v2.3 (Phase 96.1)
-
 MEHO includes built-in network diagnostic tools that the investigation agent uses during connectivity troubleshooting. These tools work without any connector configuration -- the agent can probe endpoints directly from the MEHO server.
 
 ## Available Tools

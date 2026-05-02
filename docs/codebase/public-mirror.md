@@ -91,32 +91,14 @@ forget, and forgetting was silent.
    directories (e.g. a sample spec that happens to contain a `.vscode/` folder) are
    not false-positives.
 8. **Push**: the workflow picks a push strategy based on the `PUBLIC_MIRROR_MODE`
-   GitHub Actions variable, defaulting to `orphan`.
+   GitHub Actions variable, defaulting to `incremental` if the variable is unset.
 
 ## Mirror modes
 
 Two modes share all of the staging logic and differ only in how the resulting tree
 is pushed to public `main`:
 
-### Orphan mode (default)
-
-Creates an orphan branch locally (`git checkout --orphan mirror-staging`), wipes the
-working tree, overlays the staged allowlist tree with `rsync -a --exclude '.git/'`,
-commits once, and force-pushes to public `main`. The public repo ends up with a
-single commit whose parent chain does not reach back into private history.
-
-Appropriate when:
-
-- The public repo is a snapshot distribution, not a living history.
-- External PRs are not yet accepted (they would be obliterated by the next sync).
-- The team wants to avoid committing to specific public SHAs before OSS launch.
-
-The force-push is the most dangerous single operation in this area — a bug in
-staging will overwrite the public repo's main branch with whatever broken content
-the staging tree contains. The defensive gates earlier in the workflow exist
-specifically because this push cannot be undone.
-
-### Incremental mode
+### Incremental mode (default, permanent)
 
 Fetches `public/main`, creates a local branch anchored at its tip, overlays the
 staged tree with `rsync -a --delete --exclude '.git/'`, and pushes a normal commit
@@ -128,16 +110,53 @@ A guard before committing (`git diff --cached --quiet`) skips empty pushes, so
 private-only changes (e.g. edits inside `.planning/`) do not produce empty public
 commits.
 
-Appropriate when:
+This is the permanent mode. Public history is preserved across runs so that
+release tags, GitHub Releases, and external contributors' SHAs all reference
+durable commits.
 
-- The public repo should have a living history contributors can reason about.
-- External PRs are accepted and merged on the public side (then cherry-picked back
-  into private).
-- Force-push hazards are no longer tolerable.
+### Orphan mode (one-time resets only)
+
+Creates an orphan branch locally (`git checkout --orphan mirror-staging`), wipes the
+working tree, overlays the staged allowlist tree with `rsync -a --exclude '.git/'`,
+commits once, and force-pushes to public `main`. The public repo ends up with a
+single commit whose parent chain does not reach back into private history.
+
+Reserved for one-time resets — the initial OSS-launch bootstrap, or a deliberate
+history rewrite after an incident. **Not** appropriate as a routine setting: the
+force-push detaches any release tags reachable only via the previous public
+history. The tag refs themselves remain on the remote, but the commits they point
+to are no longer reachable from `main`, leaving tagged releases and the default
+branch on divergent histories.
+
+The force-push is the most dangerous single operation in this area — a bug in
+staging will overwrite the public repo's main branch with whatever broken content
+the staging tree contains. The defensive gates earlier in the workflow exist
+specifically because this push cannot be undone.
+
+#### Tag-guard
+
+Before any orphan-mode push the workflow probes the public remote for refs
+matching `refs/tags/v*` via `git ls-remote --refs --tags public 'refs/tags/v*'`.
+The `--refs` flag suppresses the peeled `^{}` lines `git ls-remote` emits for
+annotated tags so the count and list reflect the real tags. The run fails fast
+if:
+
+- the probe itself errors (network failure, expired PAT) — fail-closed: an
+  unverifiable safety check is treated as a refusal, not as permission;
+- any matching tag is returned — at least one release tag would be detached
+  from `main` history by the force-push.
+
+To intentionally reset a tagged public repo, delete the offending public tags
+first (`git push public --delete v<x>.<y>.<z>` per tag from a maintainer
+checkout), then re-run the mirror workflow with `PUBLIC_MIRROR_MODE=orphan`.
+
+### Switching modes
 
 Mode is toggled via the `PUBLIC_MIRROR_MODE` repository-level variable with no
 workflow edits required. The workflow validates the value as either `orphan` or
-`incremental` (case-insensitively) and aborts on anything else.
+`incremental` (case-insensitively) and aborts on anything else. If the variable
+is unset, behaviour defaults to `incremental` — so deletion of the variable is
+safe.
 
 ## Authentication
 

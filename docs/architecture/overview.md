@@ -1,6 +1,6 @@
 # System Architecture
 
-> Last verified: v2.3 (Phase 101)
+> Last verified: 0.1.0
 
 MEHO (Machine Enhanced Human Operator) is an AI-powered diagnostic and operations platform for complex IT environments. It connects to external systems -- Kubernetes, VMware, GCP, AWS, Azure, Prometheus, Loki, and more -- via typed connectors, then reasons across all of them using an LLM-powered agent. Operators express intent in natural language; the agent investigates using a ReAct loop that preserves raw data from every system it queries.
 

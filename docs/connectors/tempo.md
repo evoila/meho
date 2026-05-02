@@ -1,6 +1,6 @@
 # Tempo
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Tempo is the distributed tracing backend that gives MEHO visibility into request flows across microservices. MEHO's Tempo connector translates natural-language questions about traces into precise API calls -- operators can find slow traces, error traces, and service dependencies without writing TraceQL or navigating trace waterfalls manually.
 

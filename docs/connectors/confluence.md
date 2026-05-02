@@ -1,6 +1,6 @@
 # Confluence
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 Confluence is the knowledge management and documentation platform. MEHO connects to Confluence Cloud to let operators search for runbooks, retrieve page content, create documentation from investigation findings, and check for recent documentation changes -- turning your team's knowledge base into a live resource during incident response.
 

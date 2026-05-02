@@ -1,6 +1,6 @@
 # GitHub
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 GitHub is the source code and CI/CD platform. MEHO connects to GitHub to give operators visibility into repositories, commits, pull requests, workflow runs, deployments, and CI/CD status -- completing the deployment pipeline tracing story from code change to production.
 

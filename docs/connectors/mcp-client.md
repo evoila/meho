@@ -1,6 +1,6 @@
 # MCP Client
 
-> Last verified: v2.3
+> Last verified: 0.1.0
 
 MEHO's MCP Client connector connects to external [Model Context Protocol](https://modelcontextprotocol.io/) servers, discovers their tools at runtime, and makes them available to the MEHO agent during investigations. Unlike static connectors with predefined operations, the MCP Client dynamically discovers what an external server offers and registers those tools as MEHO operations -- enabling the agent to use any MCP-compatible tool server as part of a cross-system investigation.
 

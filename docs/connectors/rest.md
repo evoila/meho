@@ -1,6 +1,6 @@
 # REST (OpenAPI)
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 The REST connector is MEHO's extensibility story. Connect **any system with an OpenAPI specification** to MEHO, and it automatically discovers all available API endpoints, generates callable operations, and enables the agent to interact with the system through natural language. No custom connector code required.
 

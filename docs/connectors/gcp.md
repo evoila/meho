@@ -1,6 +1,6 @@
 # Google Cloud Platform
 
-> Last verified: v2.0
+> Last verified: 0.1.0
 
 MEHO's GCP connector provides native integration with Google Cloud using the official Python SDKs. Covering Compute Engine, GKE, networking, Cloud Monitoring, Cloud Build, and Artifact Registry, MEHO gives you cross-service visibility into your Google Cloud infrastructure -- from VM instances and Kubernetes clusters to CI/CD pipelines and container images.
 

@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+<head>
+  <title>Silent SSO Check</title>
+</head>
+<body>
+  <script>
+    // This page is used by Keycloak for silent SSO checks.
+    // It posts the current URL (containing auth params) back to the parent window.
+    parent.postMessage(location.href, location.origin);
+  </script>
+</body>
+</html>
+

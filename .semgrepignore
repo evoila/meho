@@ -1,0 +1,26 @@
+# Dead code archives (old distributed-services architecture, not shipped)
+_archive/
+
+# Vite prebundle cache (generated/bundled third-party code)
+meho_frontend/.vite/
+
+# Separate subproject with its own CI pipeline
+meho-claude/
+
+# Test fixtures (mock data, not production code)
+tests/fixtures/
+
+# Python virtualenv (third-party site-packages, never MEHO source).
+# Keeps the docs cadence dry-run command in
+# docs/configuration/ci-quality-gates.md § Semgrep SAST useful for
+# contributors running `semgrep scan` locally — without this, a synced
+# uv venv produces ~200 phantom ERROR findings from third-party packages.
+# CI's Semgrep job runs in a fresh container with no .venv, so this is
+# strictly a local-dev quality-of-life entry, never reachable in CI.
+.venv/
+
+# Frontend node_modules (third-party JS, never MEHO source).
+# Same rationale as .venv/: locally-installed deps would otherwise
+# generate ERROR findings against vendored package code.
+node_modules/
+meho_frontend/node_modules/

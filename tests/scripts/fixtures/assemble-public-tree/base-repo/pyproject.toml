@@ -1,0 +1,3 @@
+[tool.fixture]
+name = "assemble-public-tree-test-fixture"
+description = "Minimal pyproject for bats test isolation. Not a real package."

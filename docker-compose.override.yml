@@ -1,0 +1,23 @@
+# =============================================================================
+# Auto-loaded development overlay (debug build + debugger port).
+#
+# Compose loads docker-compose.override.yml automatically alongside
+# docker-compose.yml, so `docker compose up` from a fresh clone gives you
+# a debuggable container by default.
+#
+# To run the production target locally (no debugger, smaller image), opt
+# out of the override explicitly:
+#
+#     docker compose -f docker-compose.yml up
+#
+# This file replaces the pre-#304 standalone docker-compose.debug.yml,
+# which was a 350-line copy of the base. Anything not listed here is
+# inherited verbatim from docker-compose.yml.
+# =============================================================================
+
+services:
+  meho:
+    build:
+      target: debug
+    ports:
+      - "5678:5678"  # debugpy listens here when MEHO_DEBUG_WAIT=1

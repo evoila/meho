@@ -1,0 +1,96 @@
+# syntax=docker/dockerfile:1.6
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 evoila Group
+
+# --- Base stages: CPU default, GPU opt-in via --build-arg TARGETBASE=base-gpu ---
+ARG TARGETBASE=base-cpu
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base-gpu
+FROM python:3.13-slim AS base-cpu
+FROM ${TARGETBASE} AS base
+
+# Heavy-group opt-in flags. Declared here so subsequent RUN layers see them.
+# --build-arg INCLUDE_DOCLING=true  -> add docling-group (docling-core + PyTorch)
+# --build-arg CUDA_ENABLED=true     -> add torch-group   (PyTorch alone, for GPU-only paths)
+ARG INCLUDE_DOCLING=false
+ARG CUDA_ENABLED=false
+
+# Runtime feature flag: mirrors the build-time INCLUDE_DOCLING decision so the
+# app's flag-gated Docling import in meho_app.modules.knowledge.ingestion
+# does not try to `import docling` on images that did not install it.
+ENV MEHO_FEATURE_USE_DOCLING=${INCLUDE_DOCLING}
+
+# Minimal runtime apt dependencies. No compilers / -dev headers: `uv sync
+# --frozen` installs from the lockfile against prebuilt wheels.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl \
+      libexpat1 \
+      libxcb1 \
+      libgl1 \
+      libglib2.0-0 \
+      postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# uv as a single static binary from the official image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# --- Dependency layer (cached; cache-busted only by pyproject.toml / uv.lock) ---
+COPY pyproject.toml uv.lock README.md ./
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project \
+      $([ "$INCLUDE_DOCLING" = "true" ] && echo "--group docling-group") \
+      $([ "$CUDA_ENABLED"    = "true" ] && echo "--group torch-group")
+
+# --- Project layer (cache-busted by source changes) ---
+COPY meho_app/ ./meho_app/
+COPY config/   ./config/
+COPY scripts/  ./scripts/
+COPY tests/    ./tests/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen \
+      $([ "$INCLUDE_DOCLING" = "true" ] && echo "--group docling-group") \
+      $([ "$CUDA_ENABLED"    = "true" ] && echo "--group torch-group")
+
+# Shared entrypoint: runs migrations then execs CMD
+COPY docker/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+ENTRYPOINT ["/docker-entrypoint.sh"]
+
+
+# --- Production target (default) ---
+FROM base AS prod
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+CMD ["uv", "run", "uvicorn", "meho_app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+# --- Debug target (local development) ---
+#
+# Layered on top of `base` so migrations still run via the shared entrypoint.
+# Adds the `dev` group (ruff, mypy, pytest-watch, ipython, debugpy) for an
+# interactive working environment. Does NOT pass --no-editable: the debug
+# compose mounts the source tree as a volume, and editable install is what
+# makes live reload actually pick up edits.
+FROM base AS debug
+
+# --inexact preserves any heavy groups installed in `base` when the image
+# was built with --build-arg INCLUDE_DOCLING=true / CUDA_ENABLED=true.
+# Without it, `uv sync --group dev` would reconcile the venv to exactly
+# the `dev` group and drop docling/torch from the debug image.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --group dev --inexact
+
+EXPOSE 8000 5678
+
+# debugpy listens on 5678 for IDE attach; uvicorn --reload picks up edits to
+# the volume-mounted source tree. Both can be used independently.
+CMD ["uv", "run", "python", "-m", "debugpy", \
+     "--listen", "0.0.0.0:5678", \
+     "-m", "uvicorn", "meho_app.main:app", \
+     "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -1,0 +1,8 @@
+# fake workflow for fixture — not executed
+name: Placeholder
+on: [push]
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "true"

@@ -1,0 +1,194 @@
+# Security Scanning Pipeline
+#
+# Runs Semgrep SAST, pip-audit, and npm audit on every push to main and PR.
+# Three independent jobs run in parallel. Semgrep uploads SARIF to GitHub
+# Code Scanning. pip-audit and npm audit block PRs with HIGH/CRITICAL vulns.
+#
+# IMPORTANT: Do NOT use container-scanning GitHub Actions with known supply
+# chain compromises (March 2026). Use Semgrep for code scanning instead.
+#
+# All third-party actions are pinned to commit SHAs per supply chain best practice.
+
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Prevent redundant scans on rapid pushes to the same branch
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write  # Required for SARIF upload to GitHub Code Scanning
+
+jobs:
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      # Pinned per docs/configuration/ci-quality-gates.md § Semgrep SAST.
+      # Bump cadence: monthly review or on advisory.
+      image: semgrep/semgrep:1.160.0
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Run Semgrep
+        run: >
+          semgrep scan
+          --config p/python
+          --config p/typescript
+          --config p/security-audit
+          --config p/owasp-top-ten
+          --sarif
+          -o semgrep-results.sarif
+          --error
+          --severity ERROR
+        # --error + --severity ERROR = fail on ERROR-level findings.
+        # Per-finding exemptions live inline as `# nosemgrep: <rule-id>` with a
+        # rationale — see docs/configuration/ci-quality-gates.md.
+
+      - name: Upload SARIF as job artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: semgrep-sarif
+          path: semgrep-results.sarif
+          retention-days: 14
+
+      - name: Upload SARIF to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699  # v3
+        if: always()
+        continue-on-error: true  # Graceful fallback if Code Scanning not enabled
+        with:
+          sarif_file: semgrep-results.sarif
+
+  pip-audit:
+    name: Python Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+          enable-cache: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+
+      - name: Audit Python dependencies
+        run: |
+          uv run --no-dev --with pip-audit pip-audit \
+            --desc \
+            --skip-editable \
+            --ignore-vuln CVE-2026-3219 \
+            --ignore-vuln CVE-2024-23342 \
+            --ignore-vuln CVE-2026-39373 \
+            --ignore-vuln CVE-2026-41066 \
+            --ignore-vuln GHSA-xqmj-j6mv-4862
+        env:
+          DATABASE_URL: "postgresql+asyncpg://test:test@localhost:5432/test"
+          REDIS_URL: "redis://localhost:6379"
+          CREDENTIAL_ENCRYPTION_KEY: "test-encryption-key-32-chars-minimum-length"
+          JWT_SECRET_KEY: "test-jwt-secret-key-32-characters-minimum"
+          APP_ENVIRONMENT: "test"
+          KEYCLOAK_URL: "http://localhost:8080"
+          KEYCLOAK_REALM: "test"
+          KEYCLOAK_CLIENT_ID: "test"
+        # uv run --no-dev provisions MEHO's production venv and adds pip-audit on top.
+        # pip-audit with no --path/--requirement audits the active Python environment,
+        # which is that same venv -- covering all ~150 production packages.
+        # --skip-editable: the project itself is installed editable; it has no PyPI
+        # vulnerability metadata so pip-audit would error without this flag.
+        #
+        # Each --ignore-vuln below is load-bearing: an upstream-unfixed-or-unreachable
+        # CVE that we cannot resolve by version bump, paired with explicit reachability
+        # evidence (file:line) and a semantic revisit trigger so the suppression decays
+        # automatically when the underlying condition changes. Adding an --ignore-vuln
+        # for a reachable CVE is signal decay -- if reachability flips positive, the
+        # answer is to switch the underlying library, not to extend this list.
+        #
+        # CVE-2026-3219: pip's tar+ZIP archive-type confusion. Not in MEHO's
+        # runtime/process surface: pip is only present in pip-audit's own
+        # tool venv, never imported by MEHO (verified: `rg -l "import pip|from
+        # pip\b" meho_app/ meho_mcp_server/` -> zero hits). No fix version
+        # published as of 2026-04-22. Kept preemptively in case the runner's
+        # pip-audit env still ships the affected pip version. Revisit when pip
+        # ships a fix.
+        #
+        # CVE-2024-23342: Minerva timing side-channel attack on python-ecdsa P-256
+        # signing. Upstream WONTFIX -- python-ecdsa SECURITY.md explicitly excludes
+        # side-channel attacks ("a pure-Python implementation cannot prevent them")
+        # and recommends pyca/cryptography for security-critical work. Pulled
+        # transitively by python-jose. MEHO uses python-jose with algorithms=["RS256"]
+        # only -- see meho_app/api/auth.py:229 -- which never exercises the ecdsa
+        # codepath. Revisit if MEHO's JWT algorithm set ever includes ES256, ES384,
+        # or ES512.
+        #
+        # CVE-2026-39373: jwcrypto vulnerability with no upstream fix as of
+        # 2026-04-28. Pulled transitively by python-keycloak; importing the
+        # `keycloak` package runs its `__init__.py`, which loads `keycloak_openid`,
+        # which `from jwcrypto import jwk, jwt` -- so jwcrypto IS in-process.
+        # Reachability is functional, not import-level: MEHO never CALLS any
+        # KeycloakOpenID methods (verified via `rg "KeycloakOpenID" meho_app/
+        # meho_mcp_server/` -> zero hits; only `KeycloakAdmin` and
+        # `keycloak.exceptions` are referenced), so the vulnerable jwcrypto
+        # codepath is not exercised. Revisit when jwcrypto ships a fix or
+        # python-keycloak switches its JOSE backend off jwcrypto.
+        #
+        # CVE-2026-41066: lxml XXE in iterparse() and ETCompatXMLParser() defaults.
+        # Fixed in lxml 6.1.0 but unreachable today: crawl4ai (currently locked at
+        # 0.8.0; latest 0.8.6) pins `lxml~=5.3`, capping at <6.0. Bumping crawl4ai
+        # to 0.8.6 also swaps `litellm` for the `unclecode-litellm` fork -- a
+        # meaningful resolution-graph change tracked separately, not done here.
+        # MEHO uses lxml only as the bs4 HTML parser backend (BeautifulSoup(html,
+        # "lxml")) -- see meho_app/modules/knowledge/lightweight_converter.py:432
+        # -- and never invokes iterparse() or ETCompatXMLParser() with untrusted
+        # XML. Revisit when crawl4ai relaxes its lxml pin (track upstream
+        # releases) -- the lxml direct-dep constraint at pyproject.toml:97 should
+        # widen to >=6.0.0 at the same time.
+        #
+        # GHSA-xqmj-j6mv-4862: LiteLLM Proxy server-side template injection in
+        # POST /prompts/test. Fixed in litellm 1.83.7+ but unreachable today:
+        # litellm 1.83.7-1.83.14 hard-pin transitive deps (click==8.1.8,
+        # pydantic==2.12.5, ...) which conflict with MEHO's resolution graph,
+        # so uv settles on 1.83.0. Not in MEHO's runtime/process surface: MEHO
+        # never imports litellm (verified: `rg "from litellm|import litellm"
+        # meho_app/ meho_mcp_server/` -> zero hits) and never starts the
+        # LiteLLM Proxy server, so the vulnerable POST /prompts/test endpoint
+        # is not exposed. litellm is in-process only transitively via crawl4ai
+        # for completion calls; the proxy server is a separate entrypoint we
+        # never invoke. Revisit when upstream relaxes the pins (track litellm
+        # releases for resolvable fix versions).
+
+  npm-audit:
+    name: Frontend Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: meho_frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: meho_frontend
+        run: npm ci
+
+      - name: Audit npm dependencies
+        working-directory: meho_frontend
+        run: npm audit --audit-level=high
+        # --audit-level=high = only fail on HIGH and CRITICAL severity
+        # MODERATE and LOW are reported but don't block

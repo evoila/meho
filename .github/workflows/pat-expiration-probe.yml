@@ -1,0 +1,69 @@
+# PAT expiration probe
+#
+# Weekly authenticated probe against evoila/meho using PUBLIC_REPO_PAT.
+# A classic PAT expires silently — the first sign of trouble today is a 403
+# on the next mirror push. This probe runs every Monday and fails loudly
+# if the token is invalid or expired, giving up to 6 days of warning before
+# a release cut hits the broken mirror.
+#
+# Guarded to the private repo via `if: github.repository == ...` so the
+# workflow file ships publicly but is a zero-runner-minute no-op when the
+# private-only secret PUBLIC_REPO_PAT doesn't exist on the public side.
+#
+# On failure, follow docs/development/dual-repo-workflow.md#pat-rotation.
+
+name: PAT Expiration Probe
+
+on:
+  schedule:
+    - cron: "17 9 * * 1"   # Monday 09:17 UTC (off-peak minute for scheduled-workflow reliability)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pat-expiration-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Probe PUBLIC_REPO_PAT
+    if: github.repository == 'evoila-bosnia/MEHO.X'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe PUBLIC_REPO_PAT against evoila/meho
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::PUBLIC_REPO_PAT is unset. This workflow only runs on the private repo — check the job-level if: guard."
+            exit 1
+          fi
+
+          # --include prints response headers to stdout alongside the body so we
+          # can inspect X-Oauth-Scopes for the scope-regression failure mode that
+          # a plain validity check would miss: evoila/meho is a public repo, so a
+          # scopeless or scope-revoked token still returns 200 on GET but would
+          # 403 on the mirror push. Catch that here, not at release time.
+          if ! gh api --include repos/evoila/meho >/tmp/gh-response 2>/tmp/gh-error; then
+            echo "::error::PUBLIC_REPO_PAT appears invalid or expired. gh api repos/evoila/meho failed. Rotate per docs/development/dual-repo-workflow.md#pat-rotation"
+            echo "--- gh error output ---"
+            cat /tmp/gh-error
+            exit 1
+          fi
+
+          scopes=$( { grep -i '^x-oauth-scopes:' /tmp/gh-response || true; } | head -1 | sed 's/^[^:]*:[[:space:]]*//;s/[[:space:]]*$//')
+
+          # Accept either `public_repo` (minimum) or `repo` (superset). GitHub
+          # returns the granted scopes verbatim, not the expanded set, so a
+          # `repo`-scoped token reports `repo` and must match explicitly.
+          if ! printf '%s' "$scopes" | grep -qE '(^|,[[:space:]]*)(public_repo|repo)([[:space:]]*,|$)'; then
+            echo "::error::PUBLIC_REPO_PAT is valid but lacks public_repo (or repo) scope. Observed scopes: '${scopes:-<none>}'. Rotate per docs/development/dual-repo-workflow.md#pat-rotation"
+            exit 1
+          fi
+
+          echo "PUBLIC_REPO_PAT is valid and carries the required scope ('${scopes}'). evoila/meho responded to an authenticated GET."

@@ -1,0 +1,47 @@
+[
+  {
+    "id": "chunk-intro-001",
+    "text": "MEHO is a Machine Enhanced Human Operator system that helps users interact with multiple external systems using natural language.",
+    "tenant_id": null,
+    "system_id": null,
+    "user_id": null,
+    "roles": [],
+    "groups": [],
+    "tags": ["intro", "definition", "global"],
+    "source_uri": "s3://meho-storage/docs/introduction.md"
+  },
+  {
+    "id": "chunk-report-001",
+    "text": "To generate a quarterly report: 1. Collect all revenue data from the orders system. 2. Filter by date range. 3. Calculate totals by region. 4. Export to PDF format.",
+    "tenant_id": "demo-tenant",
+    "system_id": "orders-system",
+    "user_id": null,
+    "roles": [],
+    "groups": [],
+    "tags": ["procedure", "reports", "quarterly"],
+    "source_uri": "s3://meho-storage/docs/procedures/reports.pdf#page=3"
+  },
+  {
+    "id": "chunk-vsphere-001",
+    "text": "When connecting to VMware vSphere, always use your personal credentials. Do not share credentials. MEHO will authenticate as you to maintain proper audit trails.",
+    "tenant_id": "demo-tenant",
+    "system_id": "vsphere",
+    "user_id": null,
+    "roles": [],
+    "groups": [],
+    "tags": ["security", "credentials", "vsphere"],
+    "source_uri": "s3://meho-storage/docs/security/vsphere-auth.md"
+  },
+  {
+    "id": "chunk-user-note-001",
+    "text": "Personal note: Always check EU compliance before running reports for European customers.",
+    "tenant_id": "demo-tenant",
+    "system_id": null,
+    "user_id": "demo-user",
+    "roles": [],
+    "groups": [],
+    "tags": ["personal", "compliance", "eu"],
+    "source_uri": "user://demo-user/notes/compliance.txt"
+  }
+]
+

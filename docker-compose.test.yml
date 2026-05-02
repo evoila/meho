@@ -1,0 +1,62 @@
+# =============================================================================
+# Test override -- ephemeral storage, separate test databases.
+#
+# Use with the base compose file:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+#
+# Differences from the base stack:
+#   * Different project name (`meho-test`) so the dev stack can keep
+#     running side-by-side without container/volume name collisions.
+#   * Postgres + MinIO use tmpfs at the data path -- nothing persists
+#     across container restarts.
+#   * Keycloak uses a separate database name and the test realm import
+#     directory.
+#   * The `meho` and `meho-frontend` application services are disabled
+#     via the `disabled` profile -- pytest runs the application code
+#     directly against these test infra services.
+#   * Heavy observability + auxiliary services (seq, pgadmin, ollama,
+#     tei-embeddings, tei-reranker) are unused by integration tests and
+#     not reactivated; they do not run unless their profile is opted
+#     into explicitly.
+# =============================================================================
+
+name: meho-test
+
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: meho_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes: !reset
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+
+  minio:
+    tmpfs:
+      - /data
+    volumes: !reset []
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save ""
+    volumes: !reset []
+
+  keycloak:
+    environment:
+      KEYCLOAK_ADMIN_PASSWORD: test
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak_test
+    volumes: !override
+      - ./tests/fixtures/keycloak:/opt/keycloak/data/import:ro
+
+  meho:
+    profiles:
+      - disabled
+
+  meho-frontend:
+    profiles:
+      - disabled
+
+  seq:
+    profiles:
+      - disabled

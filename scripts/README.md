@@ -52,7 +52,6 @@ because they are still safe to run.
 | `init-db.sql` | Postgres image initdb hook (creates `keycloak`/`keycloak_test`) | `docker-compose.yml` |
 | `migrate_to_unified_alembic.py` | One-shot rescue that stamps existing 9-tree deployments at the unified head (#300) | Operators of pre-#299 deployments |
 | `preflight.sh` | Pre-bootstrap environment checks (#261) | Developers, CI smoke |
-| `push-orphan.sh` | Force-pushes the assembled public tree | `mirror-to-public.yml` workflow |
 | `run-migrations-monolith.sh` | Runs `alembic -c meho_app/alembic.ini upgrade head` | `docker-entrypoint.sh`, `dev-env.sh` |
 | `setup-keycloak.sh` | Imports the realm + creates a service account for first-run users | Developers / operators on first run |
 | `validate-install.sh` | Smoke test that exercises the bootstrap end-to-end (#261) | Developers, CI smoke |

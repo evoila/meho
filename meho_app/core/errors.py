@@ -19,7 +19,7 @@ def get_current_trace_id() -> str | None:
         ctx = span.get_span_context()
         if ctx and ctx.trace_id:
             return format(ctx.trace_id, "032x")
-    except Exception:  # noqa: S110 -- intentional silent exception handling
+    except Exception:  # noqa: BLE001, S110 -- silent fallback when OTEL span context is unavailable
         pass
     return None
 

@@ -137,6 +137,32 @@ and do **not** flip the row to `failed`, because writing a terminal state
 from here would race the worker that is still writing progress. A Redis
 pub/sub signal is a future improvement.
 
+## HTTP routes
+
+Two FastAPI routers serve the knowledge domain today, and both are mounted in
+`meho_app/main.py` (lines 704-711):
+
+- `meho_app/modules/knowledge/routes.py` — mounted at `/knowledge/`. 17 routes,
+  primarily admin and probe surface (`/ping`, `/health`, `/debug/chunk/{id}`,
+  `/debug/recent-chunks`, plus chunk and family CRUD).
+- `meho_app/api/routes_knowledge.py` — mounted at `/api/knowledge/`. ~25
+  routes, the user-facing surface (search, upload, jobs, tree, document
+  detail, ingest-text, ingest-document). The frontend client at
+  `meho_frontend/src/api/clients/knowledge.ts` talks exclusively to this one.
+
+The split is historical drift, not design. New routes have been landing under
+`api/routes_knowledge.py` since v2.1; the bare `/knowledge/` mount survives
+under a comment in `main.py` referring to "internal APIs for backwards
+compatibility" — a posture predating the OSS launch. A repository-wide grep
+finds zero non-test, non-`meho_app/` callers of the bare `/knowledge/`
+prefix.
+
+The canonical location for any new knowledge route is
+`meho_app/api/routes_knowledge.py`. Consolidation is tracked under Initiative
+#489 (with parent Goal #255). Until that Initiative completes, the rule for
+new routes is: file them in `routes_knowledge.py`; do not extend
+`modules/knowledge/routes.py` further.
+
 ## File Reference
 
 | File | Responsibility |
@@ -147,7 +173,8 @@ pub/sub signal is a future improvement.
 | `meho_app/modules/knowledge/answer.py` | Grounded-answer prompt, sanitization, citations |
 | `meho_app/modules/knowledge/family_repository.py` | Document family lookups and uniqueness helpers |
 | `meho_app/modules/knowledge/job_repository.py` | Ingestion job CRUD + atomic `mark_resuming` |
-| `meho_app/api/routes_knowledge.py` | REST surface for upload, versions, jobs, search |
+| `meho_app/api/routes_knowledge.py` | REST surface for upload, versions, jobs, search (canonical location) |
+| `meho_app/modules/knowledge/routes.py` | Legacy route file scheduled for consolidation under Initiative #489 |
 
 ## Error handling
 

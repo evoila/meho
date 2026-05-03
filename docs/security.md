@@ -124,6 +124,121 @@ Audit entries are append-only and immutable. They cannot be modified or deleted 
 
 See [Trust & Safety](trust-and-safety.md) for the full approval flow and audit schema.
 
+## Supply chain & image provenance
+
+MEHO container images are cryptographically signed at build time so self-hosters
+can prove an image came from the official CI workflow before deploying it.
+Verification is keyless — there is no private signing key for an attacker to
+exfiltrate, and no certificate for evoila to rotate.
+
+### What is signed
+
+Every release publishes three images to GHCR:
+
+- `ghcr.io/evoila/meho-backend:<version>` (full)
+- `ghcr.io/evoila/meho-backend-slim:<version>`
+- `ghcr.io/evoila/meho-frontend:<version>`
+
+Each image is signed by the manifest digest (the `sha256:...` produced by the
+build), not the tag. A subsequent tag-overwrite cannot silently revalidate
+against an old signature: the new bytes have a new digest, the old signature
+no longer applies.
+
+A CycloneDX SBOM is also generated per image and attached to every public
+GitHub Release as a downloadable asset (`sbom-backend-full-*.json`,
+`sbom-backend-slim-*.json`, `sbom-frontend-*.json`).
+
+### How signing works (keyless OIDC)
+
+The release pipeline uses [Sigstore](https://sigstore.dev/) cosign with the
+GitHub Actions OIDC token as the identity anchor. When `release.yml` runs:
+
+1. GitHub mints a short-lived OIDC token whose claims include the workflow's
+   repository, workflow path, and triggering ref.
+2. cosign hands that token to **Fulcio** (Sigstore's certificate authority).
+   Fulcio verifies the token, then issues a 10-minute X.509 certificate whose
+   `Subject Alternative Name` is the workflow URL.
+3. cosign signs the image digest with the certificate's keypair.
+4. The signature, certificate, and a timestamp are published to **Rekor** —
+   Sigstore's public append-only transparency log.
+5. The certificate's keypair is discarded. The transparency-log entry is the
+   only artifact that survives.
+
+There is no long-lived signing key on evoila's side. The cryptographic
+identity of every published image is "this image was built by workflow X on
+repo Y at tag Z" — verifiable mathematically, with no trust delegated to a
+private credential.
+
+### Verifying an image
+
+Install cosign once:
+
+```bash
+# macOS
+brew install cosign
+
+# Linux (latest release from the cosign repo)
+gh release download -R sigstore/cosign --pattern '*-linux-amd64*' \
+  && chmod +x cosign-linux-amd64 \
+  && sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+```
+
+Then verify any published tag (substituting the version you pulled):
+
+```bash
+cosign verify \
+  --certificate-identity "https://github.com/evoila-bosnia/MEHO.X/.github/workflows/release.yml@refs/tags/v0.1.0" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/evoila/meho-backend:0.1.0
+```
+
+A successful verify prints `Verified OK` plus the matched certificate identity
+and OIDC issuer. A tampered or unsigned image fails non-zero. The same
+command works for `meho-backend-slim` and `meho-frontend` — only the image
+reference changes.
+
+The verify block on every public GitHub Release at `evoila/meho` carries the
+exact command for that release, so operators can copy-paste rather than
+reconstruct the URL.
+
+### Why the certificate identity references `evoila-bosnia/MEHO.X`
+
+The Sigstore certificate's `Subject Alternative Name` reflects the workflow
+that performed the OIDC exchange. MEHO's release pipeline runs on the
+**private** CI repository (`evoila-bosnia/MEHO.X`) and pushes the resulting
+tag and Release to the **public** mirror (`evoila/meho`) via a personal
+access token. The cosign signature is therefore anchored to the private-repo
+URL, not the public mirror URL. This is a cryptographic anchor, not a source
+pointer — verification works fully against the public Rekor log without any
+private-repo access. The contributable, auditable source lives at
+[evoila/meho](https://github.com/evoila/meho); the workflow URL embedded in
+the cert is just the immutable identifier of where the build happened.
+
+### What verification proves (and what it doesn't)
+
+A successful `cosign verify` proves:
+
+- The image bytes are exactly what the workflow signed (manifest digest match).
+- The signature was created by a CI run on the named repository at the named
+  ref — no other workflow could mint a certificate with that SAN.
+- The signing certificate was issued by Fulcio and recorded in the public
+  transparency log (anyone can audit Rekor independently).
+
+It does **not** prove:
+
+- That the source code at the named ref does what evoila claims it does — read
+  the source, the SBOM, or the CHANGELOG for that.
+- That dependencies inside the image are free of known CVEs — use the attached
+  CycloneDX SBOM, scan with `trivy sbom <file>` or your tool of choice.
+- That GitHub Actions runners or Sigstore infrastructure are uncompromised —
+  these are trust roots; the framework documents their threat model.
+
+### References
+
+- [Sigstore documentation](https://docs.sigstore.dev/) — keyless signing concepts and threat model
+- [SLSA framework](https://slsa.dev/) — the broader supply-chain provenance model
+- [`docs/codebase/release-and-deployment.md`](codebase/release-and-deployment.md) — internal architecture: how the release pipeline implements signing, the dual-trigger guard, action pinning conventions
+
 ## Observability
 
 MEHO integrates with **OpenTelemetry** for distributed tracing and structured logging:
@@ -150,3 +265,5 @@ MEHO integrates with **OpenTelemetry** for distributed tracing and structured lo
 | OpenTelemetry integration | Implemented | Distributed tracing + structured logging |
 | Rate limiting | Implemented | Configurable via `ENABLE_RATE_LIMITING` |
 | Session-scoped data caching | Implemented | Parquet files tied to session lifecycle |
+| Cosign keyless image signing | Implemented | Sigstore OIDC via GitHub Actions; verifiable per release |
+| CycloneDX SBOM per published image | Implemented | Attached to every public GitHub Release as a downloadable asset |

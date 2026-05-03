@@ -291,6 +291,13 @@ one-way and avoids duplicating tree-assembly logic that could drift.
 
 ### Image signing with cosign
 
+> **Operator-facing companion**: end users verifying a pulled image should
+> read [Security & Data Handling § Supply chain & image provenance](../security.md#supply-chain--image-provenance)
+> instead of this section — the operator doc covers cosign install, verify
+> commands, and what verification proves. This section covers the
+> implementation details a maintainer needs to extend or audit the
+> signing pipeline.
+
 Every image published by `release.yml` is signed with cosign keyless OIDC
 ([sigstore.dev](https://docs.sigstore.dev/)). No private key is generated,
 stored, or rotated by the publisher — the GitHub-issued OIDC token (granted

@@ -50,6 +50,17 @@ jobs:
           uv sync --group dev
           uv run python scripts/check-env-example-sync.py
 
+      - name: Guard against license-key placeholder reintroduction
+        # The original development placeholder for _PUBLIC_KEY_B64 must never
+        # reappear in licensing.py once a real key has been embedded. If grep
+        # finds it, the verifier would silently accept tokens signed by a
+        # non-existent private key.
+        run: |
+          if grep -q "VbBoUWJAXqZH9i9R_dS_F_oTi621bfknNu1poul2dis" meho_app/core/licensing.py; then
+            echo "::error file=meho_app/core/licensing.py::License-key placeholder reintroduced. Set a real Ed25519 public key in _PUBLIC_KEY_B64 (or, if running a fork with its own keypair, remove this guard from .github/workflows/ci.yml)."
+            exit 1
+          fi
+
   lint-typescript:
     name: TypeScript Lint (ESLint)
     runs-on: ubuntu-latest

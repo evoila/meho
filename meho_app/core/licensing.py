@@ -29,8 +29,11 @@ logger = logging.getLogger(__name__)
 # Grace period: enterprise mode continues for this many days after license expiry
 GRACE_PERIOD_DAYS = 30
 
-# Production public key (replace during release build)
-_PUBLIC_KEY_B64 = "VbBoUWJAXqZH9i9R_dS_F_oTi621bfknNu1poul2dis"
+# Production public key (Ed25519, base64url, 32 bytes raw, no padding).
+# Generated 2026-05-03. The matching private key is held in a
+# maintainer-managed secrets vault; the custody runbook lives outside
+# the public mirror.
+_PUBLIC_KEY_B64 = "yRf9VubT4122iRW7KuMQCNK6H1HC4guyqFFQKbBTZbw"
 
 # Test public key (used when MEHO_LICENSE_ENV=test)
 _TEST_PUBLIC_KEY_B64 = "FqC74x-mlaoRPvJDg_2fS4zLZrnIXVgd1ytVAMbkebo"

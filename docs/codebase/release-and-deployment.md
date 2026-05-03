@@ -625,6 +625,89 @@ The grace period trusts the system clock; an attacker setting the clock back can
 extend it indefinitely. This is acceptable for the threat model — the goal is to
 remind honest customers, not to stop a determined adversary.
 
+### License-issuance audit log
+
+Every signed enterprise token minted by `scripts/issue-license.py` (when that
+script lands; see Initiative #505 Task #519) is recorded in an append-only
+`license_issuance` Postgres table. The table is the authoritative compliance
+record: it answers *"which licenses have been issued, when, by whom, to whom,
+and for how long"* without trusting any state that lives outside the database.
+
+**Schema** (`meho_app/alembic/versions/0010_license_issuance_audit.py`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `license_id` | TEXT PRIMARY KEY | Mirrors `LicensePayload.license_id`; idempotency contract |
+| `org` | TEXT NOT NULL | Customer organization |
+| `tier` | TEXT NOT NULL | License tier (e.g. `enterprise`) |
+| `features` | JSONB NOT NULL | Enabled feature list |
+| `issued_at` | TIMESTAMPTZ NOT NULL | License claim time |
+| `expires_at` | TIMESTAMPTZ | NULL = perpetual |
+| `max_tenants` | INTEGER | Tenant cap |
+| `issuer` | TEXT NOT NULL | Identity of the principal minting the token |
+| `issuer_type` | TEXT NOT NULL | `user` or `service_account` (validated at the repository boundary) |
+| `revoked_at` | TIMESTAMPTZ | Reserved for future revocation tooling |
+| `revocation_reason` | TEXT | Reserved for future revocation tooling |
+| `created_at` | TIMESTAMPTZ NOT NULL | Server clock at row insert (forensic) |
+
+**Indexes**:
+
+- `license_issuance_pkey` (`license_id`) — automatic from PK; satisfies `find_by_license_id`.
+- `ix_license_issuance_org_issued_at` (`org`, `issued_at`) — composite, satisfies `list_by_org` (filter + order) without a sort step. Postgres uses a backwards btree scan for `ORDER BY issued_at DESC`.
+- `ix_license_issuance_issued_at` (`issued_at`) — supports cross-org date-range reporting that v0.2 compliance work will likely add.
+
+`license_id` is the primary key, so a duplicate write raises a SQLSTATE
+`23505` violation that the repository surfaces as `DuplicateLicenseIDError`.
+The split between `issued_at` (license claim) and `created_at` (server
+clock at row insert) is forensic signal — divergence indicates clock skew
+on the issuance host. Required string fields (`license_id`, `org`, `tier`,
+`issuer`) are non-empty-validated at the repository boundary, and
+`issuer_type` is validated against `{"user", "service_account"}` so a
+typo never reaches the permanent compliance record.
+
+**Repository** (`meho_app/modules/licensing/audit.py`):
+
+```python
+class LicenseAuditRepository:
+    async def record_issuance(
+        self,
+        payload: LicensePayload,
+        *,
+        issuer: str,
+        issuer_type: str,
+    ) -> LicenseIssuance: ...
+
+    async def find_by_license_id(self, license_id: str) -> LicenseIssuance | None: ...
+    async def list_by_org(
+        self, org: str, *, limit: int = 50, offset: int = 0
+    ) -> list[LicenseIssuance]: ...
+```
+
+`record_issuance` owns its transaction: `commit()` on success, `rollback()`
+on **any** commit failure (not just `IntegrityError`). A connection-level
+failure at commit time — e.g. the backend gets terminated, the network
+drops, or a statement times out — leaves the underlying SQLAlchemy
+`AsyncSession` in a `PendingRollbackError` state that any subsequent write
+on the same session would surface; rolling back universally guarantees the
+session is reusable when the method returns. The caller is the issuance
+CLI process, not a request handler sharing a session, so transaction
+ownership lives here. The fail-closed contract is enforced at the
+boundary: any exception raised by `record_issuance` aborts the issuance
+flow before the signed token is returned to the customer.
+
+**Caller integration** is the responsibility of `scripts/issue-license.py`
+(Task #519, not yet shipped). The contract is: call `record_issuance`
+*before* the function returns the signed token; treat any exception as
+fatal; never hand a customer a token whose issuance row is not durable.
+
+**Out of scope at this layer**:
+
+- Revocation tooling — columns are reserved; the CLI to set them is not
+  built. Revocation is deferred until v0.2 (Goal #503 §"Out of scope").
+- Customer-facing license-status endpoint.
+- Retention pruning — the table is treated as append-only at v0.1.0
+  scale.
+
 ## Known issues
 
 ### Linked to GitHub issues

@@ -39,6 +39,7 @@ import meho_app.modules.connectors.soap.db_models  # noqa: E402, F401
 import meho_app.modules.ingestion.models  # noqa: E402, F401
 import meho_app.modules.knowledge.job_models  # noqa: E402, F401
 import meho_app.modules.knowledge.models  # noqa: E402, F401
+import meho_app.modules.licensing.models  # noqa: E402, F401
 import meho_app.modules.memory.models  # noqa: E402, F401
 import meho_app.modules.orchestrator_skills.models  # noqa: E402, F401
 import meho_app.modules.scheduled_tasks.models  # noqa: E402, F401

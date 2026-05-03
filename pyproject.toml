@@ -634,7 +634,7 @@ dev = [
 ]
 
 test = [
-    "pytest>=7.4.0",
+    "pytest>=9.0.3",
     "pytest-asyncio>=0.21.0,<1.0",
     "pytest-cov>=5.0.0",
     "pytest-timeout>=2.1.0",

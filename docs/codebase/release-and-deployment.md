@@ -122,6 +122,14 @@ a release across all four is a manual maintainer responsibility today (see
     Legacy escape hatch only.
   The public key is always printed to stdout (it is not a secret) along with
   the line to paste into `_PUBLIC_KEY_B64`.
+- **Maintainer-only custody runbook** — operational details for the production
+  private key (vault location, active-key fingerprint, rotation, compromise,
+  recovery procedures) live in a runbook outside this repo's public mirror.
+  Maintainers find it in the private repo at `.claude/operations/license-key-custody.md`;
+  it is intentionally excluded from the mirror because it documents the vault
+  layout. OSS forks running their own deployment generate their own keypair
+  per [scripts/generate-license-keypair.py](../../scripts/generate-license-keypair.py)
+  and write their own runbook.
 
 ### Absent surfaces (gaps)
 

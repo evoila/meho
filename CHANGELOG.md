@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
-_No unreleased changes yet. New entries land here under Keep a Changelog
-subsections (Added, Changed, Deprecated, Removed, Fixed, Security) and
-graduate to a versioned section at the next release._
+### Added
+
+- CycloneDX JSON SBOM artifacts attached to every public GitHub Release —
+  one per published image (`meho-backend-<version>.cdx.json`,
+  `meho-backend-slim-<version>.cdx.json`,
+  `meho-frontend-<version>.cdx.json`). Generated with Syft against the
+  pushed multi-arch manifest; single `linux/amd64` platform per SBOM
+  (per-platform SBOMs deferred — see
+  `docs/codebase/release-and-deployment.md § Multi-arch caveat`).
 
 ## [0.1.0] - 2026-05-02
 

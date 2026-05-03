@@ -195,6 +195,32 @@ jobs:
           done <<< "$TAGS"
           cosign sign --yes "${images[@]}"
 
+      # SBOM is generated against the just-pushed multi-arch manifest. Syft
+      # (the engine behind anchore/sbom-action) selects a single platform from
+      # the manifest list and defaults to the runner's architecture
+      # (linux/amd64). The component list for arm64 differs only in the binary
+      # wheel selection — package names and versions are the same — so a single
+      # amd64 SBOM is sufficient for the dependency-audit use case. Per-platform
+      # SBOMs are deferred (see docs/codebase/release-and-deployment.md).
+      # `upload-artifact: false` disables the action's auto-upload so the
+      # explicit upload-artifact step below controls the workflow-artifact
+      # name, which must be unique per matrix variant.
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          image: ghcr.io/evoila/meho-backend${{ matrix.suffix }}:${{ steps.meta.outputs.version }}
+          format: cyclonedx-json
+          output-file: meho-backend${{ matrix.suffix }}-${{ steps.meta.outputs.version }}.cdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM as workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: sbom-backend-${{ matrix.variant }}
+          path: meho-backend${{ matrix.suffix }}-${{ steps.meta.outputs.version }}.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
   build-frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -263,6 +289,24 @@ jobs:
             [ -n "$tag" ] && images+=("${tag}@${DIGEST}")
           done <<< "$TAGS"
           cosign sign --yes "${images[@]}"
+
+      # See SBOM commentary in build-backend above — same multi-arch caveat
+      # applies (single amd64 SBOM per published manifest).
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          image: ghcr.io/evoila/meho-frontend:${{ steps.meta.outputs.version }}
+          format: cyclonedx-json
+          output-file: meho-frontend-${{ steps.meta.outputs.version }}.cdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM as workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: sbom-frontend
+          path: meho-frontend-${{ steps.meta.outputs.version }}.cdx.json
+          if-no-files-found: error
+          retention-days: 90
 
   publish-to-public-repo:
     # Pushes the release tag and creates the GitHub Release on evoila/meho
@@ -433,14 +477,52 @@ jobs:
           EOF
           } > /tmp/release-notes.md
 
-      - name: Create GitHub Release on public repo
+      # Download SBOMs *before* creating the Release so the next step can
+      # attach them atomically. Same-run artifact downloads use
+      # ACTIONS_RUNTIME_TOKEN, which is independent of the workflow's
+      # `permissions:` block. `merge-multiple` collapses each `sbom-*`
+      # artifact's directory into the working dir so the create step below
+      # can glob a flat file list.
+      - name: Download all SBOM artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          pattern: sbom-*
+          merge-multiple: true
+
+      - name: Create draft GitHub Release on public repo with notes and SBOMs
         env:
           # gh authenticates against evoila/meho with the cross-repo PAT;
           # GITHUB_TOKEN cannot write to a different repository.
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
           TAG: ${{ github.ref_name }}
         run: |
+          # --draft keeps the Release invisible to non-collaborators and
+          # suppresses the `release.published` webhook until the un-draft
+          # step below succeeds. Positional file args attach the three
+          # SBOMs as Release assets in the same gh-CLI invocation, so a
+          # transient asset-upload failure aborts the whole step and leaves
+          # the draft for manual cleanup — fail-closed against publishing
+          # an incomplete Release. Globs are bash-expanded with nullglob
+          # off, so an unmatched pattern reaches `gh` literally and the
+          # command exits non-zero with "file not found" — protects against
+          # the download step silently dropping any of the three SBOMs.
+          # Notes come from the Compose-release-notes step's output file
+          # (auto-generated changelog + cosign verify block); --notes-file
+          # is mutually exclusive with --generate-notes.
           gh release create "$TAG" \
             --repo evoila/meho \
             --title "MEHO $TAG" \
-            --notes-file /tmp/release-notes.md
+            --notes-file /tmp/release-notes.md \
+            --draft \
+            meho-backend-*.cdx.json meho-frontend-*.cdx.json
+
+      - name: Publish Release (un-draft)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Final atomic-publish step. Only runs if the previous step
+          # successfully created the draft and uploaded all three SBOM
+          # assets. Flipping --draft=false fires the `release.published`
+          # webhook and makes the Release visible to subscribers.
+          gh release edit "$TAG" --repo evoila/meho --draft=false

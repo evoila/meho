@@ -49,6 +49,9 @@ docker-compose.test.yml
 nginx.conf
 nginx.conf.template
 
+# Kubernetes deployment artifacts
+deploy/helm
+
 # Repo hygiene files
 .gitignore
 .dockerignore

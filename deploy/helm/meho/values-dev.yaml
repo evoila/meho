@@ -1,0 +1,31 @@
+# Development / evaluator overlay.
+#
+# Usage:
+#   helm install meho ./deploy/helm/meho \
+#     --values ./deploy/helm/meho/values-dev.yaml
+#
+# This overlay is for laptops, kind clusters, and demos. It bundles
+# Postgres + Redis subcharts so the operator does not need an
+# external database. NOT for production — see `values-prod.yaml`
+# for the production starting point.
+
+image:
+  variant: slim
+  pullPolicy: Always
+
+backend:
+  replicaCount: 1
+frontend:
+  replicaCount: 1
+
+resources:
+  backend:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+embedded:
+  enabled: true

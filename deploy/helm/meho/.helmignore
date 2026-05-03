@@ -1,0 +1,37 @@
+# Patterns excluded when packaging this chart with `helm package`.
+# Same syntax as .gitignore. Standard helm create pattern, plus a
+# few MEHO-specific entries.
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+*~
+.idea/
+.vscode/
+*.tmproj
+
+# VCS metadata
+.git/
+.gitignore
+.bzr/
+.hg/
+.hgignore
+.svn/
+
+# Helm packaging output
+*.tgz
+
+# Repository CI / contributor metadata that has no role at install time
+.github/
+.githooks/
+OWNERS
+OWNERS_ALIASES
+
+# In-tree tests and fixtures (none today; pre-empted for future
+# CI smoke-test layout)
+tests/
+ci/

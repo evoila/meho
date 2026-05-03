@@ -1,0 +1,30 @@
+apiVersion: v2
+name: meho
+description: MEHO — AI-powered diagnostic and operations platform
+type: application
+
+# version: chart version (SemVer 2). Bumped on every chart change,
+# independent of the application version below.
+version: 0.1.0
+
+# appVersion: the MEHO image tag this chart targets. String per Helm
+# convention so leading zeros and pre-release identifiers survive YAML
+# parsing.
+appVersion: "0.1.0"
+
+home: https://meho.ai
+sources:
+  - https://github.com/evoila/meho
+
+maintainers:
+  - name: evoila Group
+    url: https://meho.ai
+
+icon: https://meho.ai/favicon.png
+
+keywords:
+  - ai
+  - operations
+  - observability
+  - kubernetes
+  - diagnostic

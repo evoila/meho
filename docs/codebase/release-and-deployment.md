@@ -100,9 +100,25 @@ a release across all four is a manual maintainer responsibility today (see
   `Edition.COMMUNITY` or `Edition.ENTERPRISE` with a 30-day post-expiry grace period.
   Singleton via `@lru_cache`.
 - [scripts/generate-license-keypair.py](../../scripts/generate-license-keypair.py) —
-  one-shot Ed25519 keypair generator. Prints both halves to stdout; the maintainer
-  is expected to copy the public half into `licensing.py` and store the private half
-  in a vault.
+  one-shot Ed25519 keypair generator. Safe-by-default: refuses to emit the
+  private key without an explicit output flag. Exactly one of three flags must
+  be given:
+  - `--vault-write projects/<PROJECT>/secrets/<NAME>` — writes the private key
+    directly to GCP Secret Manager (preferred). Strict path validation
+    (exactly four `/`-separated segments — versioned paths like
+    `…/versions/latest` are rejected). Bare `<NAME>` is accepted if
+    `GOOGLE_CLOUD_PROJECT` is set. Pre-flights via `get_secret(name=parent)`
+    *before* generating the keypair so a missing secret resource, IAM gap,
+    or transient error never silently discards a freshly-minted private key.
+    Lazy-imports `google-cloud-secret-manager`, which is not a project
+    dependency — install on the maintainer's machine only
+    (`uv pip install 'google-cloud-secret-manager>=2.0.0'`).
+  - `--output-private FILE` — writes the private key to `FILE` with mode
+    `0600`, atomically via `O_EXCL`; refuses to overwrite an existing file.
+  - `--unsafe-stdout` — prints the private key to stdout with a warning.
+    Legacy escape hatch only.
+  The public key is always printed to stdout (it is not a secret) along with
+  the line to paste into `_PUBLIC_KEY_B64`.
 
 ### Absent surfaces (gaps)
 

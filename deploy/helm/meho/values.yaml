@@ -1,0 +1,84 @@
+# Default values for the MEHO Helm chart.
+#
+# This file is the public contract of the chart. Downstream chart
+# releases extend the keys defined here; keys use camelCase per
+# Helm convention.
+#
+# Override at install time with `--set key=value` or
+# `--values <file>`. See `values-dev.yaml` and `values-prod.yaml`
+# for starter overlays.
+
+# image: backend container image coordinates. The tag defaults to
+# `.Chart.AppVersion` when left empty so chart consumers pin via
+# `appVersion` unless they explicitly override.
+image:
+  registry: ghcr.io
+  repository: evoila/meho-backend
+  tag: ""
+  # variant: "full" pulls `meho-backend`; "slim" pulls
+  # `meho-backend-slim` (no docling / no torch). The Deployment
+  # template implements the repository switch.
+  variant: full
+  pullPolicy: IfNotPresent
+
+# frontend: SPA + nginx image coordinates plus Deployment knobs.
+# Same tag-defaults-to-`.Chart.AppVersion` contract as the backend.
+frontend:
+  image:
+    registry: ghcr.io
+    repository: evoila/meho-frontend
+    tag: ""
+    pullPolicy: IfNotPresent
+  # frontend.replicaCount: number of frontend pods.
+  replicaCount: 1
+
+# backend: backend Deployment knobs.
+backend:
+  replicaCount: 1
+
+# resources: backend resource requests / limits.
+resources:
+  backend:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+# postgres: production deployments default to an external Postgres
+# (RDS, Cloud SQL, Aiven, etc.). The DSN is required when
+# `embedded.enabled=false`.
+postgres:
+  external:
+    # postgres.external.dsn: full Postgres DSN as accepted by
+    # asyncpg, e.g. postgresql+asyncpg://user:pass@host:5432/db
+    dsn: ""
+
+# redis: same external-by-default pattern as Postgres.
+redis:
+  external:
+    # redis.external.url: Redis connection URL,
+    # e.g. redis://host:6379/0
+    url: ""
+
+# embedded: opt-in bundling of Postgres + Redis subcharts for
+# evaluators and dev clusters. NEVER enable in production —
+# bundled subcharts have no production-grade backup, monitoring,
+# or upgrade story.
+embedded:
+  enabled: false
+
+# nameOverride / fullnameOverride: chart-name customization. Both
+# default to empty so the helpers fall back to `.Chart.Name` and
+# `<release>-<chart>` respectively.
+nameOverride: ""
+fullnameOverride: ""
+
+# serviceAccount: ServiceAccount used by Pods. Set `create: true`
+# to have the chart create its own; set `create: false` and `name:
+# <existing>` to bind an existing one. When both are unset, Pods
+# run under the namespace's `default` ServiceAccount.
+serviceAccount:
+  create: false
+  name: ""

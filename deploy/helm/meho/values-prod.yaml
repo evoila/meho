@@ -1,0 +1,36 @@
+# Production overlay.
+#
+# Usage:
+#   helm install meho ./deploy/helm/meho \
+#     --values ./deploy/helm/meho/values-prod.yaml \
+#     --set-string postgres.external.dsn="$POSTGRES_DSN" \
+#     --set-string redis.external.url="$REDIS_URL"
+#
+# `--set-string` (not `--set`) avoids Helm's value-parser splitting
+# on commas / equals inside connection strings. For real production
+# wire the DSN and URL through a Secret reference rather than a
+# command-line flag — never commit credentials into a values file.
+
+image:
+  variant: full
+  pullPolicy: IfNotPresent
+
+backend:
+  replicaCount: 2
+frontend:
+  replicaCount: 2
+
+resources:
+  backend:
+    requests:
+      cpu: 1000m
+      memory: 2Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+# Production MUST use external managed Postgres and Redis. The
+# bundled subcharts have no production-grade backup, monitoring,
+# or upgrade story.
+embedded:
+  enabled: false

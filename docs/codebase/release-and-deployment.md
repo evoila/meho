@@ -513,6 +513,41 @@ Per `release.yml` and the `docker/metadata-action` configuration:
 
 The slim variant intentionally does not get `latest` — slim users must pin a version.
 
+### `latest` policy for the 0.x series
+
+**Decision**: keep `:latest` on `meho-backend` (full) and `meho-frontend` for the
+entire 0.x series; warn loudly in `README.md` that production must pin.
+
+The DevOps-pack axiom is *"no `:latest` tags in production compose files"* — the
+risk of pulling a breaking change unintentionally outweighs the usability win.
+SemVer 0.x makes this risk explicit: per
+[SemVer 2.0.0 §4](https://semver.org/spec/v2.0.0.html#spec-item-4), any 0.MINOR
+bump may break consumers. `:latest` would silently surface that.
+
+We chose to keep `:latest` anyway because:
+
+1. **Users will pull `:latest` regardless.** Removing the tag from `release.yml`
+   doesn't stop a `docker pull ghcr.io/evoila/meho-backend` (which resolves to
+   `:latest` by default) — it just means the resolved tag is whichever historic
+   tag the registry still has marked, leading to *worse* surprises.
+2. **The smoke-test path benefits.** Anyone evaluating MEHO via
+   `docker compose up` against a curl'd compose snippet wants the latest stable
+   working build without needing to know the current version number.
+3. **The slim variant guards production users.** `meho-backend-slim` —
+   intended for lean production deployments — never gets `:latest`. Users on
+   the slim path must pin a `<major>.<minor>.<patch>` tag, the operational
+   pattern we want production consumers on.
+
+The user-facing warning lives in `README.md`'s top-of-file Pre-1.0 stability
+callout (added in Initiative #504 alongside the version reset to 0.1.0):
+
+> For production deployments, pin to a specific `<major>.<minor>.<patch>` image
+> tag (e.g. `ghcr.io/evoila/meho-backend:0.1.0`) rather than `latest` or a
+> floating `0.1` tag.
+
+This decision is revisited at the 1.0 cut. Once API stability is committed,
+`:latest` becomes the right default and the warning rotates out.
+
 ### CHANGELOG.md graduation pattern
 
 The `[Unreleased]` heading at the top accumulates entries under Keep a Changelog

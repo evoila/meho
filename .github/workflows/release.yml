@@ -75,7 +75,7 @@ jobs:
             exit 1
           fi
 
-      - name: Verify CHANGELOG entry exists
+      - name: Verify CHANGELOG entry exists and has content
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -88,6 +88,18 @@ jobs:
           # requiring whole-line equality.
           if ! awk -v prefix="## [$TAG_VERSION]" 'index($0, prefix) == 1 { found=1 } END { exit !found }' CHANGELOG.md; then
             echo "::error::CHANGELOG.md has no '## [${TAG_VERSION}]' heading. Graduate [Unreleased] first."
+            exit 1
+          fi
+          # Heading exists; require non-empty content under it. Catches the
+          # mistake where a maintainer adds the heading but forgets to move
+          # the [Unreleased] body. Shares one extraction implementation with
+          # publish-to-public-repo via scripts/extract-changelog-section.sh —
+          # any drift would surface as an empty release body, but the shared
+          # script removes the drift surface entirely. Failing here saves
+          # ~30 min of image builds.
+          BODY=$(scripts/extract-changelog-section.sh "$TAG_VERSION")
+          if ! printf '%s' "$BODY" | grep -q '[^[:space:]]'; then
+            echo "::error::CHANGELOG.md '## [${TAG_VERSION}]' section has no content. Graduate [Unreleased] entries into it first."
             exit 1
           fi
 
@@ -353,18 +365,15 @@ jobs:
           git push public "${PUBLIC_COMMIT}:refs/tags/${TAG}"
 
       - name: Compose release notes
-        # Combines GitHub's auto-generated PR/commit summary with a
-        # copy-pastable cosign verify block for every image variant. We
-        # cannot use `gh release create --generate-notes` directly because
-        # it is mutually exclusive with `--notes-file`; instead we POST to
-        # the generate-notes endpoint to compute the same content as a
-        # string, then concatenate. Task #514 will swap the auto-generated
-        # half for a CHANGELOG.md-section extractor and MUST preserve the
-        # verify block.
+        # CHANGELOG section + cosign verify block. The PR-summary half
+        # (previously fetched via `POST /releases/generate-notes`) is
+        # replaced by a curated extraction from CHANGELOG.md so the
+        # release body reflects the maintainer's Keep a Changelog 1.1.0
+        # entry rather than raw PR titles. The cosign verify block is
+        # preserved verbatim — Initiative #504 DoD requires it on every
+        # public release.
         env:
-          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
           TAG: ${{ github.ref_name }}
-          PUBLIC_COMMIT: ${{ steps.locate.outputs.public_commit }}
         run: |
           TAG_VERSION="${TAG#v}"
           # The full cert identity URL is fully known at release time —
@@ -375,19 +384,21 @@ jobs:
           # regex semantics anywhere here.
           CERT_ID="https://github.com/evoila-bosnia/MEHO.X/.github/workflows/release.yml@refs/tags/${TAG}"
 
-          # Auto-generated notes via the public repo's REST API. Falls back
-          # to an empty string on any error so a generate-notes hiccup never
-          # ships a release without the verify instructions.
-          GENERATED=$(gh api -X POST \
-            "repos/evoila/meho/releases/generate-notes" \
-            -f tag_name="$TAG" \
-            -f target_commitish="$PUBLIC_COMMIT" \
-            --jq .body 2>/dev/null || true)
+          # Same extraction validate-tag uses; see the helper script for
+          # the awk semantics (literal-prefix match, h2 + link-ref
+          # terminators).
+          CHANGELOG_BODY=$(scripts/extract-changelog-section.sh "$TAG_VERSION")
+
+          # Defence-in-depth: validate-tag already rejects empty sections,
+          # but a corrupted checkout or future workflow refactor could let
+          # an empty body through. Failing here is cheap.
+          if ! printf '%s' "$CHANGELOG_BODY" | grep -q '[^[:space:]]'; then
+            echo "::error::Extracted release notes are empty for ${TAG_VERSION}."
+            exit 1
+          fi
 
           {
-            if [ -n "$GENERATED" ]; then
-              printf '%s\n\n' "$GENERATED"
-            fi
+            printf '%s\n\n' "$CHANGELOG_BODY"
             cat <<EOF
           ## Verify image signatures (cosign)
 

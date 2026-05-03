@@ -1,0 +1,23 @@
+{{/*
+Backend Service.
+
+ClusterIP — internal cluster traffic only. External exposure is
+the frontend Ingress's job (sibling task #526). The selector
+matches the Deployment's selector labels; both resources rely on
+`meho.backend.selectorLabels` to stay aligned forever.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "meho.backend.fullname" . }}
+  labels:
+    {{- include "meho.backend.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "meho.backend.selectorLabels" . | nindent 4 }}

@@ -72,8 +72,11 @@ a release across all four is a manual maintainer responsibility today (see
   workflow. Four jobs in three phases: `validate-tag` (pre-flight gate; see
   [Tag-validation pre-flight](#tag-validation-pre-flight)), then `build-backend`
   (matrix: `full` / `slim`) and `build-frontend` in parallel, then
-  `create-release`. Multi-arch builds (`linux/amd64`, `linux/arm64`) via QEMU +
-  Buildx. Cache backed by GitHub Actions cache (`type=gha,mode=max`).
+  `publish-to-public-repo`. Multi-arch builds (`linux/amd64`, `linux/arm64`)
+  via QEMU + Buildx. Cache backed by GitHub Actions cache (`type=gha,mode=max`).
+  The publish job pushes the tag and creates the GitHub Release on
+  `evoila/meho` (the public OSS surface) — see
+  [How public-repo tagging works](#how-public-repo-tagging-works) below.
 - [docker/Dockerfile.meho](../../docker/Dockerfile.meho) — backend image. Multi-stage:
   `base-cpu` (default) or `base-gpu` (NVIDIA CUDA 12.4) → `base` → `prod` (default)
   or `debug`. Build args: `INCLUDE_DOCLING=true|false` (heavy ML deps),
@@ -125,8 +128,18 @@ a release across all four is a manual maintainer responsibility today (see
 - **No `RELEASING.md`** — maintainer release procedure is undocumented.
 - **No production license issuance** — there is no script to mint a signed license
   token for a customer. Keypair generation exists; token issuance does not.
-- **No K8s manifests / Helm chart** — self-hosters running on Kubernetes must hand-roll
-  Deployments, Services, and Ingress from `docker-compose.yml`.
+- **Helm chart partial** — chart skeleton (`deploy/helm/meho/Chart.yaml`,
+  `values.yaml`, `values-{dev,prod}.yaml`, README) and the backend Deployment +
+  Service templates exist. Every install — production *and* evaluator —
+  requires a pre-existing Secret named `<release>-backend` (or whatever
+  `backend.existingSecret` overrides to) carrying `MEHO_LICENSE_KEY`,
+  `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `DATABASE_URL`, `REDIS_URL`,
+  and `KEYCLOAK_*`; the backend Deployment references that Secret
+  unconditionally via `envFrom.secretRef`, so without it backend pods stay in
+  `CreateContainerConfigError`. The Secret template lands in #528. Frontend
+  Deployment + Service + Ingress (#526), Postgres/Redis subchart wiring
+  (#527), helm-test CI workflow (#529), and the operator runbook (#530) are
+  still pending under Initiative #506.
 - **No image signing** — GHCR images are not signed by cosign or any provenance tooling.
 - **No SBOM artifact** — release artifacts include no CycloneDX or SPDX SBOM.
 
@@ -163,9 +176,13 @@ a release across all four is a manual maintainer responsibility today (see
    - `build-frontend` — builds the SPA + nginx image, pushes to
      `ghcr.io/evoila/meho-frontend:<tag>` (plus `<major>.<minor>` and `latest`).
 5. Each build is multi-arch (`linux/amd64,linux/arm64`) via QEMU emulation.
-6. After all three image jobs succeed, `create-release` runs `gh release create
-   <tag> --generate-notes` on the workflow's repository — which today is the
-   private repo. The public repo receives no Release object.
+6. After all three image jobs succeed, `publish-to-public-repo` runs. It
+   locates the public commit on `evoila/meho/main` whose body references the
+   tagged private SHA (the mirror writes `mirror: sync from private <short>`
+   into every projection commit), pushes the tag to `evoila/meho`, and runs
+   `gh release create <tag> --repo evoila/meho --generate-notes`. The
+   private workflow repo no longer receives a Release. See
+   [How public-repo tagging works](#how-public-repo-tagging-works).
 
 ### Tag-validation pre-flight
 
@@ -198,6 +215,52 @@ Each check uses `::error::` workflow commands so failures surface as red
 errors in the run UI, not buried in step output. The job runs with explicit
 `permissions: contents: read` (least privilege) and a 5-minute timeout.
 
+### How public-repo tagging works
+
+The release tag and GitHub Release land on `evoila/meho` — the public OSS
+surface — even though the workflow itself runs on the private repo. There is
+no SHA correspondence between the two repos: every commit on `evoila/meho`
+is produced by `mirror-to-public.yml` as a *new* commit, not a copy of a
+private commit. To tag a public commit for the release, the
+`publish-to-public-repo` job has to find which public commit corresponds to
+the tagged private SHA.
+
+The lookup uses the mirror commit message as the bridge. The mirror runs
+`git commit -m "mirror: sync from private <short-sha>"` — a single-line
+message, so the marker is the commit subject — where `<short-sha>` is the
+private `HEAD` at mirror time. `git log --grep` matches against the whole
+commit message, so a subject-only marker is sufficient. The publish job:
+
+1. Computes the 7-character prefix of the tagged private SHA
+   (`github.sha`). 7 chars is git's default `--short` length, which is what
+   the mirror writes into commit messages. As the repo grows git may extend
+   the abbreviation, but the 7-char prefix is still a substring of the
+   longer form so `git log --grep` matches either way.
+2. Adds `evoila/meho` as a remote authenticated by `secrets.PUBLIC_REPO_PAT`.
+3. Polls `git fetch public main --depth=50 --no-tags` + `git log
+   public/main --grep="mirror: sync from private <short>"` for up to 5
+   minutes (30 attempts × 10s). `--depth=50` keeps the bandwidth bill
+   bounded as public history grows; `--no-tags` avoids fetching public's
+   tag refs into the local repo, which would conflict with the local tag
+   `actions/checkout` populated for the triggering tag.
+4. On match: pushes the located public SHA directly to a remote tag
+   refspec (`git push public <sha>:refs/tags/<tag>` — no local tag
+   mutation, since `actions/checkout` already created the local tag at
+   the *private* commit), then runs `gh release create --repo evoila/meho`.
+5. On timeout: fails the job with an `::error::` annotation. Fail-closed,
+   never silently tag the wrong commit.
+
+The 5-minute window matters operationally: the mirror normally lands within
+~1 minute of CI green on `main`, and the preceding image-build jobs in
+`release.yml` take ~30 minutes, so the matching public commit is virtually
+always already on `public/main` by the time this job runs. The poll exists
+purely to absorb backed-up mirror queues.
+
+This implementation chose post-mirror lookup over self-computing the public
+commit via `scripts/assemble-public-tree.sh` because the mirror is the
+single producer of public commits — reusing its output keeps the contract
+one-way and avoids duplicating tree-assembly logic that could drift.
+
 ### License verification (per app startup)
 
 1. The container starts; `meho_app/main.py` initialises the application.
@@ -222,9 +285,11 @@ errors in the run UI, not buried in step output. The job runs with explicit
 - **GHCR** (`ghcr.io`) — container registry for published images. Authentication via
   `GITHUB_TOKEN` (workflow-issued) for the release workflow.
 - **`PUBLIC_REPO_PAT`** — repository secret. Classic PAT with `public_repo` scope. Used
-  by the mirror workflow to push to `evoila/meho`. Not used directly by the release
-  pipeline today (will be needed once the release pipeline coupling to public repo
-  is implemented).
+  by the mirror workflow to push commits to `evoila/meho`, by `release.yml`'s
+  `publish-to-public-repo` job to push tags and create Releases on
+  `evoila/meho`, and by `pat-expiration-probe.yml` to monitor token validity.
+  Cross-repo authentication is independent of the workflow's `permissions:`
+  block — the PAT carries the user's permissions, not the workflow's.
 - **`MEHO_LICENSE_KEY`** — runtime env var, sourced from operator deployment. Optional;
   unset means community mode.
 - **GitHub Container Registry storage** — image layers, manifests.
@@ -357,17 +422,23 @@ issues are filed.
 - The release pipeline does not sign published images. Self-hosters cannot
   cryptographically verify image provenance.
 - The release pipeline does not produce SBOM artifacts.
-- The release pipeline creates the GitHub Release on the private repo, not the
-  public mirror — OSS users see no releases.
+- ~~The release pipeline creates the GitHub Release on the private repo, not the
+  public mirror — OSS users see no releases.~~ Resolved by the
+  `publish-to-public-repo` job (see
+  [How public-repo tagging works](#how-public-repo-tagging-works) below).
 - ~~The release pipeline does not validate that the pushed tag matches `pyproject.toml`
   or the `CHANGELOG.md`.~~ Resolved by the `validate-tag` pre-flight job (see
   [Tag-validation pre-flight](#tag-validation-pre-flight) above).
-- The mirror workflow runs in `orphan` mode, which discards public history every
-  run. Tags cannot accumulate on the public repo until this flips to `incremental`.
+- ~~The mirror workflow runs in `orphan` mode, which discards public history every
+  run. Tags cannot accumulate on the public repo until this flips to `incremental`.~~
+  Resolved: `PUBLIC_MIRROR_MODE` defaults to `incremental` and orphan mode is
+  guarded against tag loss in `mirror-to-public.yml`.
 - No production license issuance pipeline exists. Customer onboarding is
   fully manual.
 - No `RELEASING.md` runbook exists for maintainers cutting a release.
-- No K8s manifests or Helm chart for self-hosters running on Kubernetes.
+- Helm chart at `deploy/helm/meho/` is partial — backend Deployment + Service
+  templates exist; frontend, Postgres/Redis, Secret, helm-test CI, and the
+  operator runbook remain pending under Initiative #506.
 - The `Dockerfile.meho` and `Dockerfile.meho-frontend` images run as root.
 - Several base images and GitHub Actions are pinned by tag, not by digest.
 - `license-check.yml` is in WARN mode (`continue-on-error: true`); the gate does

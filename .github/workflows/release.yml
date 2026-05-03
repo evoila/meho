@@ -2,7 +2,8 @@
 #
 # Publishes Docker images to GHCR on tagged releases (v*).
 # Builds backend (full + slim variants) and frontend images for linux/amd64 and linux/arm64.
-# Creates a GitHub Release with auto-generated notes after all images are pushed.
+# Pushes the tag and creates a GitHub Release on the PUBLIC repo (evoila/meho)
+# after all images are pushed — never on the private workflow repo.
 #
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 evoila Group
@@ -13,8 +14,12 @@ on:
   push:
     tags: ['v*']
 
+# `contents: read` is sufficient: this workflow does not write to its own
+# repository. GHCR push uses `packages: write`. Tag push and Release creation
+# go to evoila/meho via secrets.PUBLIC_REPO_PAT — independent of these
+# workflow-scoped permissions.
 permissions:
-  contents: write    # GitHub Release creation
+  contents: read
   packages: write    # GHCR push
 
 env:
@@ -181,20 +186,116 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  create-release:
-    name: GitHub Release
+  publish-to-public-repo:
+    # Pushes the release tag and creates the GitHub Release on evoila/meho
+    # (the public OSS surface) — never on the private workflow repo. The tag
+    # cannot be pushed by SHA from private to public because public commits
+    # are produced by mirror-to-public.yml as new commits with no SHA
+    # relationship to private. We instead locate the public commit whose
+    # commit message references this tag's private SHA (the mirror writes
+    # "mirror: sync from private <short-sha>" as a single-line message) and
+    # push the tag at that commit.
+    #
+    # Timing: image builds in the preceding jobs take ~30 minutes. The mirror
+    # workflow normally lands within ~1 minute of CI green on main, so by
+    # the time this job runs the matching public commit is almost always
+    # already on public/main. The poll loop covers backed-up mirror queues;
+    # a missing match after the timeout is fail-closed (better to fail
+    # noisily than silently tag the wrong commit).
+    name: Publish tag and release to public repo
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [build-backend, build-frontend]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # `persist-credentials: false` prevents git's credential helper from
+          # latching onto the ambient GITHUB_TOKEN, which would otherwise
+          # override the URL-embedded PAT on push and produce a 403. Same
+          # reason the mirror workflow sets it — see
+          # docs/codebase/public-mirror.md § Authentication.
+          persist-credentials: false
 
-      - name: Create GitHub Release
+      - name: Locate public commit for tagged private SHA
+        id: locate
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          PAT: ${{ secrets.PUBLIC_REPO_PAT }}
+          TAGGED_SHA: ${{ github.sha }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            --title "MEHO $RELEASE_TAG" \
+          # 7-char prefix matches git's default --short form, which is what
+          # mirror-to-public.yml writes into the commit message via
+          # `git rev-parse --short HEAD` (single-line `git commit -m`, so
+          # the marker lives in the subject — `git log --grep` matches the
+          # whole message either way). As the repo grows git may extend the
+          # abbreviation to keep prefixes unique, but a 7-char prefix is
+          # still a substring of the longer form so --grep matches.
+          SHORT_SHA="${TAGGED_SHA:0:7}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add public "https://x-access-token:${PAT}@github.com/evoila/meho.git"
+
+          ATTEMPTS=0
+          MAX_ATTEMPTS=30  # 30 * 10s = 5 minutes
+          PUBLIC_COMMIT=""
+          while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
+            # --depth=50 keeps the bandwidth bill bounded as public history
+            # grows; the matching mirror commit is virtually always within
+            # the most recent few commits since image builds run for ~30 min
+            # while the mirror lands within ~1 min of CI green. --no-tags
+            # avoids fetching public's tag refs into the local repo, which
+            # would conflict with the local tag actions/checkout already
+            # populated for this workflow's triggering tag.
+            git fetch public main --depth=50 --no-tags --quiet
+            PUBLIC_COMMIT=$(git log public/main \
+              --grep="mirror: sync from private ${SHORT_SHA}" \
+              --format='%H' -n1)
+            if [ -n "$PUBLIC_COMMIT" ]; then
+              break
+            fi
+            ATTEMPTS=$((ATTEMPTS + 1))
+            echo "Attempt ${ATTEMPTS}/${MAX_ATTEMPTS}: no public commit yet for ${SHORT_SHA}; sleeping 10s"
+            sleep 10
+          done
+
+          if [ -z "$PUBLIC_COMMIT" ]; then
+            echo "::error::No public commit found referencing private ${SHORT_SHA} after ${MAX_ATTEMPTS} attempts. Verify mirror-to-public.yml has run for this commit."
+            exit 1
+          fi
+
+          echo "Located public commit ${PUBLIC_COMMIT} for private ${SHORT_SHA}"
+          echo "public_commit=${PUBLIC_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Push tag to public repo
+        env:
+          TAG: ${{ github.ref_name }}
+          PUBLIC_COMMIT: ${{ steps.locate.outputs.public_commit }}
+        run: |
+          # Push the public SHA directly to the remote tag refspec — no
+          # local tag mutation. `actions/checkout@v4` already populated
+          # `refs/tags/${TAG}` locally pointing at the *private* commit
+          # (its default refspec for tag-push triggers is
+          # `+refs/tags/${TAG}:refs/tags/${TAG}`), so a plain
+          # `git tag ${TAG} ${PUBLIC_COMMIT}` would exit 128 with
+          # "tag already exists". Pushing `<sha>:refs/tags/<name>`
+          # creates the tag on the remote without touching local refs.
+          # No `--force`: if the public tag already exists from a prior
+          # partial publish, fail-closed rather than diverge release
+          # artifacts from caches that may have already pulled the tag.
+          git push public "${PUBLIC_COMMIT}:refs/tags/${TAG}"
+
+      - name: Create GitHub Release on public repo
+        env:
+          # gh authenticates against evoila/meho with the cross-repo PAT;
+          # GITHUB_TOKEN cannot write to a different repository.
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # --generate-notes is a temporary measure for v0.1.0; Task #514
+          # replaces this with --notes-file extracted from CHANGELOG.md.
+          gh release create "$TAG" \
+            --repo evoila/meho \
+            --title "MEHO $TAG" \
             --generate-notes

@@ -13,6 +13,12 @@ image:
   variant: slim
   pullPolicy: Always
 
+# appEnvironment: override the chart-default `prod` so the
+# evaluator path renders `ENV=dev` inside the backend container.
+# Without this override, `helm install ... --values values-dev.yaml`
+# would silently run the app in production mode.
+appEnvironment: dev
+
 backend:
   replicaCount: 1
 frontend:

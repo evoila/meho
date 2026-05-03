@@ -35,6 +35,21 @@ frontend:
 # backend: backend Deployment knobs.
 backend:
   replicaCount: 1
+  # backend.existingSecret: name of an externally managed Secret
+  # carrying the backend's environment (`MEHO_LICENSE_KEY`,
+  # `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `DATABASE_URL`,
+  # `REDIS_URL`, `KEYCLOAK_*`, ...). Empty defaults the reference to
+  # `<release-fullname>-backend`, the name the chart's own Secret
+  # template (sibling task) will use.
+  existingSecret: ""
+
+# appEnvironment: value for the `ENV` environment variable inside
+# the backend container. Pydantic's `Config.env` field
+# (`Literal["dev", "test", "prod"]`) reads this. The values key
+# stays `appEnvironment` to match the alias `env.example`
+# documents; only the rendered container-side variable name is
+# `ENV`.
+appEnvironment: prod
 
 # resources: backend resource requests / limits.
 resources:

@@ -126,7 +126,7 @@ The `--no-verify` flag bypasses the pre-push hook. Use sparingly.
 
 | Secret | Location | Purpose |
 |--------|----------|---------|
-| `PUBLIC_REPO_PAT` | Private repo secrets | Mirror workflow pushes to public repo |
+| `PUBLIC_REPO_PAT` | Private repo secrets | Mirror workflow pushes commits, release workflow pushes tags + creates Releases on public repo |
 | `SONAR_TOKEN` | Both repos | SonarCloud quality gate |
 | `CODECOV_TOKEN` | Both repos | Coverage reporting |
 

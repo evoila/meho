@@ -1,0 +1,67 @@
+{{/*
+Backend Deployment.
+
+The image repository switches between the full and slim variants
+based on `image.variant`. Both probes target `/health`, the
+zero-I/O liveness endpoint, on purpose: routing readiness to
+`/ready` (which checks Postgres / Redis / Keycloak) would drop
+every backend pod from the Service simultaneously when a shared
+dependency hiccups, causing a cascade. Operators who want
+dependency-aware readiness can switch the path in a fork — the
+default keeps the cluster stable.
+
+The `envFrom: secretRef` references a Secret defined by the
+sibling task #528. `helm install` against this chart will only
+succeed once that Secret resource (or an externally created
+equivalent) exists.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "meho.backend.fullname" . }}
+  labels:
+    {{- include "meho.backend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "meho.backend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "meho.backend.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "meho.serviceAccountName" . }}
+      containers:
+        - name: backend
+          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}{{ if eq .Values.image.variant "slim" }}-slim{{ end }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: {{ include "meho.backend.secretName" . }}
+          env:
+            # `ENV` matches the Pydantic Settings field name. See
+            # the `appEnvironment` key in values.yaml for the
+            # alias rationale.
+            - name: ENV
+              value: {{ .Values.appEnvironment | quote }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources.backend | nindent 12 }}

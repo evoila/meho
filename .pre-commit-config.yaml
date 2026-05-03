@@ -45,6 +45,9 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # Helm templates embed `{{ ... }}` directives that fail strict YAML
+        # parsing. `helm lint` covers them in CI (#529).
+        exclude: '^deploy/helm/.*/templates/.*\.ya?ml$'
       - id: check-json
       - id: check-added-large-files
         args: [--maxkb=1000]

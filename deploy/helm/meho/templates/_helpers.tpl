@@ -71,3 +71,48 @@ when relying on the namespace default.
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end -}}
+
+{{/*
+Backend resource name — `<release-fullname>-backend`, truncated to
+fit RFC 1123 limits. Used by the backend Deployment, Service, and
+the Secret reference in `meho.backend.secretName`.
+*/}}
+{{- define "meho.backend.fullname" -}}
+{{- printf "%s-backend" (include "meho.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Backend selector labels — stable across upgrades (no version, no
+chart hash). The Deployment's `selector.matchLabels` and the
+Service's `selector` invoke this; both must agree forever for a
+given release.
+*/}}
+{{- define "meho.backend.selectorLabels" -}}
+{{ include "meho.selectorLabels" . }}
+app.kubernetes.io/component: backend
+{{- end -}}
+
+{{/*
+Backend common labels — selector labels plus the
+chart/version/managed-by trio that may rotate across upgrades.
+Applied to the Deployment metadata and Service metadata.
+*/}}
+{{- define "meho.backend.labels" -}}
+helm.sh/chart: {{ include "meho.chart" . }}
+{{ include "meho.backend.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+
+{{/*
+Backend Secret name — defaults to `<backend-fullname>` when the
+operator does not supply one. The Secret resource itself ships in
+a sibling task (#528); the Deployment's `envFrom` references this
+name unconditionally so the chart's secret-reference layout is
+locked in even before the resource lands.
+*/}}
+{{- define "meho.backend.secretName" -}}
+{{- default (include "meho.backend.fullname" .) .Values.backend.existingSecret -}}
+{{- end -}}

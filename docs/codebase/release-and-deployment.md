@@ -27,11 +27,13 @@ The release/deployment surface is split across **four loosely coupled systems**:
    gates enterprise features.
 
 The four systems share **no automatic version contract**. Tag pushes are invisible to
-the mirror; the mirror runs against `main` whenever CI completes. The release pipeline
-reads the version from the git tag, never from `pyproject.toml` or `CHANGELOG.md`. The
-licensing system has no version concept at all. Coordinating a release across all four
-is a manual maintainer responsibility today (see [RELEASING.md](../../RELEASING.md)
-once it exists, otherwise this document).
+the mirror; the mirror runs against `main` whenever CI completes. The release
+pipeline's `validate-tag` pre-flight job (see
+[Tag-validation pre-flight](#tag-validation-pre-flight)) is the only place the three
+version sources — git tag, `pyproject.toml`, and `CHANGELOG.md` — are reconciled, and
+only at release time. The licensing system has no version concept at all. Coordinating
+a release across all four is a manual maintainer responsibility today (see
+[RELEASING.md](../../RELEASING.md) once it exists, otherwise this document).
 
 ## Key files
 
@@ -67,10 +69,11 @@ once it exists, otherwise this document).
 ### Release pipeline
 
 - [.github/workflows/release.yml](../../.github/workflows/release.yml) — tag-driven
-  workflow. Three jobs in two phases: `build-backend` (matrix: `full` / `slim`),
-  `build-frontend`, then `create-release`. Multi-arch builds (`linux/amd64`,
-  `linux/arm64`) via QEMU + Buildx. Cache backed by GitHub Actions cache
-  (`type=gha,mode=max`).
+  workflow. Four jobs in three phases: `validate-tag` (pre-flight gate; see
+  [Tag-validation pre-flight](#tag-validation-pre-flight)), then `build-backend`
+  (matrix: `full` / `slim`) and `build-frontend` in parallel, then
+  `create-release`. Multi-arch builds (`linux/amd64`, `linux/arm64`) via QEMU +
+  Buildx. Cache backed by GitHub Actions cache (`type=gha,mode=max`).
 - [docker/Dockerfile.meho](../../docker/Dockerfile.meho) — backend image. Multi-stage:
   `base-cpu` (default) or `base-gpu` (NVIDIA CUDA 12.4) → `base` → `prod` (default)
   or `debug`. Build args: `INCLUDE_DOCLING=true|false` (heavy ML deps),
@@ -130,7 +133,11 @@ once it exists, otherwise this document).
 1. Maintainer creates a release tag on the **private** repo:
    `git tag v<version> && git push origin v<version>`.
 2. `release.yml` triggers via `on: push: tags: ['v*']`.
-3. Three matrix jobs run in parallel:
+3. `validate-tag` runs first (see
+   [Tag-validation pre-flight](#tag-validation-pre-flight)). If the tag is
+   malformed, drifts from `pyproject.toml`, or has no `CHANGELOG.md` entry,
+   the workflow fails before any image is built.
+4. After `validate-tag` passes, three matrix jobs run in parallel:
    - `build-backend` variant `full` — builds with `INCLUDE_DOCLING=true`,
      pushes to `ghcr.io/evoila/meho-backend:<tag>` (plus `<major>.<minor>` and
      `latest`).
@@ -139,10 +146,41 @@ once it exists, otherwise this document).
      no `latest`).
    - `build-frontend` — builds the SPA + nginx image, pushes to
      `ghcr.io/evoila/meho-frontend:<tag>` (plus `<major>.<minor>` and `latest`).
-4. Each build is multi-arch (`linux/amd64,linux/arm64`) via QEMU emulation.
-5. After all three image jobs succeed, `create-release` runs `gh release create
+5. Each build is multi-arch (`linux/amd64,linux/arm64`) via QEMU emulation.
+6. After all three image jobs succeed, `create-release` runs `gh release create
    <tag> --generate-notes` on the workflow's repository — which today is the
    private repo. The public repo receives no Release object.
+
+### Tag-validation pre-flight
+
+The `validate-tag` job in `release.yml` runs before any build job and gates them
+via `needs: [validate-tag]`. It enforces three independent checks against the
+pushed tag (`github.ref_name`):
+
+1. **Tag shape** — must match the canonical SemVer 2.0 regex from
+   [semver.org/spec/v2.0.0.html](https://semver.org/spec/v2.0.0.html), with the
+   leading `v` prefix and build metadata via `+` deliberately excluded:
+
+   ```regex
+   ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[a-zA-Z-][a-zA-Z0-9-]*)(\.(0|[1-9][0-9]*|[a-zA-Z-][a-zA-Z0-9-]*))*))?$
+   ```
+
+   This rejects leading zeros (`v01.2.3` per SemVer §2), empty pre-release
+   identifiers (`v1.2.3-..` per SemVer §9), numeric pre-release identifiers
+   with leading zeros (`v1.2.3-01`), and build metadata (`v1.2.3+build.1`).
+   The `+` exclusion exists because Docker image tags cannot contain `+` and
+   the downstream `docker/metadata-action` would silently mangle it.
+2. **`pyproject.toml` version match** — the tag with the leading `v` stripped
+   must equal the `[project] version` value in `pyproject.toml`. Catches the
+   "tagged a release without bumping the manifest" mistake.
+3. **`CHANGELOG.md` entry exists** — there must be a `## [<version>]` heading
+   in `CHANGELOG.md` for the tag's version. `[Unreleased]` does not satisfy
+   the check; the maintainer must graduate it first per the
+   [CHANGELOG.md graduation pattern](#changelogmd-graduation-pattern) above.
+
+Each check uses `::error::` workflow commands so failures surface as red
+errors in the run UI, not buried in step output. The job runs with explicit
+`permissions: contents: read` (least privilege) and a 5-minute timeout.
 
 ### License verification (per app startup)
 
@@ -241,8 +279,11 @@ the maintainer:
    - `[Unreleased]: https://github.com/evoila/meho/compare/v<version>...HEAD`
    - `[<version>]: https://github.com/evoila/meho/releases/tag/v<version>`
 
-The CHANGELOG.md entry must exist before the tag is pushed. The release pipeline does
-not currently enforce this, but a future tag-validation job will.
+The CHANGELOG.md entry must exist before the tag is pushed. The release pipeline
+enforces this via the `validate-tag` pre-flight job (see
+[Tag-validation pre-flight](#tag-validation-pre-flight) above): a tag whose
+version has no `## [<version>]` heading in `CHANGELOG.md` fails the workflow
+before any image is built.
 
 ## Licensing model
 
@@ -302,8 +343,9 @@ issues are filed.
 - The release pipeline does not produce SBOM artifacts.
 - The release pipeline creates the GitHub Release on the private repo, not the
   public mirror — OSS users see no releases.
-- The release pipeline does not validate that the pushed tag matches `pyproject.toml`
-  or the `CHANGELOG.md`.
+- ~~The release pipeline does not validate that the pushed tag matches `pyproject.toml`
+  or the `CHANGELOG.md`.~~ Resolved by the `validate-tag` pre-flight job (see
+  [Tag-validation pre-flight](#tag-validation-pre-flight) above).
 - The mirror workflow runs in `orphan` mode, which discards public history every
   run. Tags cannot accumulate on the public repo until this flips to `incremental`.
 - No production license issuance pipeline exists. Customer onboarding is

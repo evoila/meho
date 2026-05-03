@@ -25,9 +25,62 @@ concurrency:
   cancel-in-progress: false  # Never cancel a release
 
 jobs:
+  validate-tag:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Validate tag shape
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Canonical SemVer 2.0 regex from https://semver.org/spec/v2.0.0.html
+          # (BNF in the annex), with the leading 'v' added and build metadata
+          # via '+' deliberately excluded — Docker image tags cannot contain '+'
+          # and docker/metadata-action would silently mangle it.
+          SEMVER='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[a-zA-Z-][a-zA-Z0-9-]*)(\.(0|[1-9][0-9]*|[a-zA-Z-][a-zA-Z0-9-]*))*))?$'
+          if ! echo "$TAG" | grep -qE "$SEMVER"; then
+            echo "::error::Tag '$TAG' does not match SemVer 2.0 'v<MAJOR>.<MINOR>.<PATCH>(-<prerelease>)'. Build metadata via '+' is rejected for image-tag compatibility; leading zeros and empty pre-release identifiers are rejected per SemVer 2.0 §2 and §9."
+            exit 1
+          fi
+
+      - name: Verify pyproject version match
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TAG_VERSION="${TAG#v}"
+          PYPROJECT_VERSION=$(grep -E '^version = ' pyproject.toml | head -1 | sed -E 's/version = "(.+)"/\1/')
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag version '$TAG_VERSION' does not match pyproject.toml '$PYPROJECT_VERSION'"
+            exit 1
+          fi
+
+      - name: Verify CHANGELOG entry exists
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TAG_VERSION="${TAG#v}"
+          # awk literal prefix-match — TAG_VERSION contains regex metacharacters
+          # (dots in versions, optional dots/hyphens in pre-release identifiers)
+          # that would behave as wildcards in a grep -E pattern. Keep a Changelog
+          # 1.1.0 headings have trailing content (`## [<version>] - <date>`), so
+          # we match against the literal prefix anchored at column 1 rather than
+          # requiring whole-line equality.
+          if ! awk -v prefix="## [$TAG_VERSION]" 'index($0, prefix) == 1 { found=1 } END { exit !found }' CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${TAG_VERSION}]' heading. Graduate [Unreleased] first."
+            exit 1
+          fi
+
   build-backend:
     name: Backend (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    needs: [validate-tag]
     timeout-minutes: 60
 
     strategy:
@@ -86,6 +139,7 @@ jobs:
   build-frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    needs: [validate-tag]
     timeout-minutes: 30
 
     steps:

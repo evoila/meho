@@ -140,7 +140,6 @@ a release across all four is a manual maintainer responsibility today (see
   Deployment + Service + Ingress (#526), Postgres/Redis subchart wiring
   (#527), helm-test CI workflow (#529), and the operator runbook (#530) are
   still pending under Initiative #506.
-- **No image signing** — GHCR images are not signed by cosign or any provenance tooling.
 - **No SBOM artifact** — release artifacts include no CycloneDX or SPDX SBOM.
 
 ## Control flow
@@ -176,13 +175,21 @@ a release across all four is a manual maintainer responsibility today (see
    - `build-frontend` — builds the SPA + nginx image, pushes to
      `ghcr.io/evoila/meho-frontend:<tag>` (plus `<major>.<minor>` and `latest`).
 5. Each build is multi-arch (`linux/amd64,linux/arm64`) via QEMU emulation.
-6. After all three image jobs succeed, `publish-to-public-repo` runs. It
+6. Each image job signs its just-published image(s) with cosign keyless OIDC
+   (`sigstore/cosign-installer` + `cosign sign --yes <tag>@<digest>`). Signing
+   happens immediately after build-and-push, scoped to the immutable digest
+   the registry just accepted. See
+   [Image signing with cosign](#image-signing-with-cosign).
+7. After all three image jobs succeed, `publish-to-public-repo` runs. It
    locates the public commit on `evoila/meho/main` whose body references the
    tagged private SHA (the mirror writes `mirror: sync from private <short>`
    into every projection commit), pushes the tag to `evoila/meho`, and runs
-   `gh release create <tag> --repo evoila/meho --generate-notes`. The
-   private workflow repo no longer receives a Release. See
-   [How public-repo tagging works](#how-public-repo-tagging-works).
+   `gh release create <tag> --repo evoila/meho --notes-file <generated>`.
+   The notes file concatenates GitHub's auto-generated PR/commit summary
+   (computed via `POST /repos/evoila/meho/releases/generate-notes`) with a
+   copy-pastable `cosign verify` block for every image variant. The
+   private workflow repo no longer receives a Release.
+   See [How public-repo tagging works](#how-public-repo-tagging-works).
 
 ### Tag-validation pre-flight
 
@@ -260,6 +267,79 @@ This implementation chose post-mirror lookup over self-computing the public
 commit via `scripts/assemble-public-tree.sh` because the mirror is the
 single producer of public commits — reusing its output keeps the contract
 one-way and avoids duplicating tree-assembly logic that could drift.
+
+### Image signing with cosign
+
+Every image published by `release.yml` is signed with cosign keyless OIDC
+([sigstore.dev](https://docs.sigstore.dev/)). No private key is generated,
+stored, or rotated by the publisher — the GitHub-issued OIDC token (granted
+to `build-backend` and `build-frontend` via per-job `id-token: write`) is
+exchanged for a short-lived Fulcio certificate, used to sign the image
+digest, and the signature plus certificate are recorded in the Sigstore
+Rekor public transparency log.
+
+The signing step runs immediately after `docker/build-push-action`, scoped
+to the digest the registry just accepted (`steps.build.outputs.digest`).
+Iterating over the metadata-action's tag list and signing `<tag>@<digest>`
+ensures every published tag (`<version>`, `<major>.<minor>`, `latest`)
+points at a verifiable signature for the same digest. A subsequent
+tag-overwrite attack does not silently revalidate.
+
+#### Certificate identity (the gotcha)
+
+The Fulcio certificate's `Subject Alternative Name` carries a URL of the
+form `https://github.com/<owner>/<repo>/.github/workflows/<workflow>@<ref>`,
+reflecting the workflow run that requested the OIDC token. Because
+`release.yml` runs on the **private** CI repository
+(`evoila-bosnia/MEHO.X`) — even though the source self-hosters audit lives
+on the public mirror (`evoila/meho`) — the cert identity reads:
+
+```
+https://github.com/evoila-bosnia/MEHO.X/.github/workflows/release.yml@refs/tags/<tag>
+```
+
+Self-hosters verify against that identity. The signature is publicly
+verifiable on Sigstore Rekor without needing read access to the private
+repo; the URL is a cryptographic anchor, not a source pointer. The verify
+block in the public Release body uses `--certificate-identity` (exact
+match), not `--certificate-identity-regexp`: the full URL is fully known
+at release time, and exact-match avoids the trap that any unescaped `.`
+in a SemVer tag (every tag, but especially prereleases like
+`v1.2.3-rc.1`) would silently broaden a regex anchor to a wildcard.
+
+#### Verify command
+
+```bash
+cosign verify \
+  --certificate-identity "https://github.com/evoila-bosnia/MEHO.X/.github/workflows/release.yml@refs/tags/<tag>" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/evoila/meho-backend:<version>
+```
+
+A successful verify prints `Verified OK` plus the matched cert identity
+and OIDC issuer. A tampered or unsigned image fails non-zero. The full
+templated block lives in the Release body on `evoila/meho` and covers
+all three published images (`meho-backend`, `meho-backend-slim`,
+`meho-frontend`).
+
+#### Dual-trigger guard
+
+`release.yml` is mirrored to `evoila/meho` via the public-allowlist
+`.github/` entry. The tag that `publish-to-public-repo` pushes to public
+via `PUBLIC_REPO_PAT` would re-trigger the entire workflow on the public
+mirror with a competing cosign cert identity (`evoila/meho/...`),
+producing two signatures whose identities disagree and only one of which
+the verify block in the Release body would accept. `validate-tag` carries
+an `if: github.repository == 'evoila-bosnia/MEHO.X'` guard; every other
+job chains via `needs:` so guarding the head job is sufficient. The
+public-mirrored workflow short-circuits with all jobs skipped.
+
+#### Action pinning
+
+`sigstore/cosign-installer` is pinned by SHA, not tag, per the project
+convention: `@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003` (= v4.1.1, defaults
+to cosign v3.0.5). v4 changed `cosign sign-blob` to require `--bundle`, but
+container-image `cosign sign` is unchanged from v2.
 
 ### License verification (per app startup)
 
@@ -419,8 +499,10 @@ issues are filed.
 
 - The production public key embedded in `licensing.py` is a one-shot placeholder; no
   vault-backed private key exists to mint matching tokens.
-- The release pipeline does not sign published images. Self-hosters cannot
-  cryptographically verify image provenance.
+- ~~The release pipeline does not sign published images. Self-hosters cannot
+  cryptographically verify image provenance.~~ Resolved: `release.yml` signs
+  every published image with cosign keyless OIDC (see
+  [Image signing with cosign](#image-signing-with-cosign) above).
 - The release pipeline does not produce SBOM artifacts.
 - ~~The release pipeline creates the GitHub Release on the private repo, not the
   public mirror — OSS users see no releases.~~ Resolved by the

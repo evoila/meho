@@ -17,7 +17,9 @@ on:
 # `contents: read` is sufficient: this workflow does not write to its own
 # repository. GHCR push uses `packages: write`. Tag push and Release creation
 # go to evoila/meho via secrets.PUBLIC_REPO_PAT — independent of these
-# workflow-scoped permissions.
+# workflow-scoped permissions. The `id-token: write` permission needed for
+# cosign keyless OIDC signing is granted per-job on build-backend and
+# build-frontend only — least privilege.
 permissions:
   contents: read
   packages: write    # GHCR push
@@ -33,6 +35,13 @@ jobs:
   validate-tag:
     name: Validate tag
     runs-on: ubuntu-latest
+    # Run only on the canonical CI repo. `release.yml` is mirrored to
+    # `evoila/meho` via the public-allowlist `.github/` entry, so the tag
+    # `publish-to-public-repo` pushes to public would otherwise re-trigger
+    # this whole workflow there with a competing cosign cert identity
+    # (`evoila/meho/...`). Every other job chains via `needs:` so guarding
+    # validate-tag is sufficient.
+    if: github.repository == 'evoila-bosnia/MEHO.X'
     timeout-minutes: 5
     permissions:
       contents: read
@@ -88,6 +97,14 @@ jobs:
     needs: [validate-tag]
     timeout-minutes: 60
 
+    # `id-token: write` is required for cosign keyless OIDC signing
+    # (sigstore/cosign-installer + `cosign sign --yes`). Scoped to this job
+    # only — validate-tag and publish-to-public-repo never need it.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +145,7 @@ jobs:
             type=raw,value=latest,enable=${{ matrix.variant == 'full' }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
         with:
           context: .
@@ -141,11 +159,40 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+
+      - name: Sign published image
+        # Keyless OIDC signing — no private key custody. The GitHub-issued
+        # OIDC token (id-token: write) is exchanged for a short-lived Fulcio
+        # certificate; the signature is recorded in the Sigstore Rekor public
+        # transparency log. Verifiers later assert the cert's identity matches
+        # this workflow's URL at the triggering ref. We sign every tag pushed
+        # by the build step, scoped to the immutable digest the registry just
+        # accepted (so a tag-overwrite attack would not silently revalidate).
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # docker/metadata-action emits one tag per line; build an array so
+          # quoting stays shellcheck-clean (SC2086) without losing the
+          # one-arg-per-image semantics cosign needs.
+          images=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && images+=("${tag}@${DIGEST}")
+          done <<< "$TAGS"
+          cosign sign --yes "${images[@]}"
+
   build-frontend:
     name: Frontend
     runs-on: ubuntu-latest
     needs: [validate-tag]
     timeout-minutes: 30
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write    # cosign keyless OIDC
 
     steps:
       - name: Checkout code
@@ -175,6 +222,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6.15.0
         with:
           context: .
@@ -185,6 +233,24 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003  # v4.1.1
+
+      - name: Sign published image
+        # See build-backend's matching step for the keyless-OIDC rationale.
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # docker/metadata-action emits one tag per line; build an array so
+          # quoting stays shellcheck-clean (SC2086) without losing the
+          # one-arg-per-image semantics cosign needs.
+          images=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && images+=("${tag}@${DIGEST}")
+          done <<< "$TAGS"
+          cosign sign --yes "${images[@]}"
 
   publish-to-public-repo:
     # Pushes the release tag and creates the GitHub Release on evoila/meho
@@ -286,6 +352,76 @@ jobs:
           # artifacts from caches that may have already pulled the tag.
           git push public "${PUBLIC_COMMIT}:refs/tags/${TAG}"
 
+      - name: Compose release notes
+        # Combines GitHub's auto-generated PR/commit summary with a
+        # copy-pastable cosign verify block for every image variant. We
+        # cannot use `gh release create --generate-notes` directly because
+        # it is mutually exclusive with `--notes-file`; instead we POST to
+        # the generate-notes endpoint to compute the same content as a
+        # string, then concatenate. Task #514 will swap the auto-generated
+        # half for a CHANGELOG.md-section extractor and MUST preserve the
+        # verify block.
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
+          TAG: ${{ github.ref_name }}
+          PUBLIC_COMMIT: ${{ steps.locate.outputs.public_commit }}
+        run: |
+          TAG_VERSION="${TAG#v}"
+          # The full cert identity URL is fully known at release time —
+          # static workflow path + the literal tag. Use --certificate-identity
+          # (exact match), not --certificate-identity-regexp: the latter
+          # would require escaping every '.' in TAG (e.g. v1.2.3-rc.1 → the
+          # '.' chars are regex wildcards), and we don't actually need
+          # regex semantics anywhere here.
+          CERT_ID="https://github.com/evoila-bosnia/MEHO.X/.github/workflows/release.yml@refs/tags/${TAG}"
+
+          # Auto-generated notes via the public repo's REST API. Falls back
+          # to an empty string on any error so a generate-notes hiccup never
+          # ships a release without the verify instructions.
+          GENERATED=$(gh api -X POST \
+            "repos/evoila/meho/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$PUBLIC_COMMIT" \
+            --jq .body 2>/dev/null || true)
+
+          {
+            if [ -n "$GENERATED" ]; then
+              printf '%s\n\n' "$GENERATED"
+            fi
+            cat <<EOF
+          ## Verify image signatures (cosign)
+
+          Every published image is signed with cosign keyless OIDC. The
+          signing certificate's identity references the CI workflow that
+          built the image — the private CI repo (\`evoila-bosnia/MEHO.X\`)
+          — even though the source mirrors to \`evoila/meho\`. The
+          signature is publicly verifiable via Sigstore Rekor without any
+          private-repo access. Verify before deploying:
+
+          \`\`\`bash
+          cosign verify \\
+            --certificate-identity "${CERT_ID}" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ghcr.io/evoila/meho-backend:${TAG_VERSION}
+
+          cosign verify \\
+            --certificate-identity "${CERT_ID}" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ghcr.io/evoila/meho-backend-slim:${TAG_VERSION}
+
+          cosign verify \\
+            --certificate-identity "${CERT_ID}" \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ghcr.io/evoila/meho-frontend:${TAG_VERSION}
+          \`\`\`
+
+          A successful verify prints \`Verified OK\` plus the matched
+          certificate identity and OIDC issuer. A tampered or unsigned image
+          fails with a non-zero exit. Install cosign:
+          [docs.sigstore.dev/cosign/installation](https://docs.sigstore.dev/cosign/installation/).
+          EOF
+          } > /tmp/release-notes.md
+
       - name: Create GitHub Release on public repo
         env:
           # gh authenticates against evoila/meho with the cross-repo PAT;
@@ -293,9 +429,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_PAT }}
           TAG: ${{ github.ref_name }}
         run: |
-          # --generate-notes is a temporary measure for v0.1.0; Task #514
-          # replaces this with --notes-file extracted from CHANGELOG.md.
           gh release create "$TAG" \
             --repo evoila/meho \
             --title "MEHO $TAG" \
-            --generate-notes
+            --notes-file /tmp/release-notes.md

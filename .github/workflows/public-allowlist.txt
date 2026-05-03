@@ -70,6 +70,7 @@ CLA.md
 SECURITY.md
 CHANGELOG.md
 COVERAGE-DEBT.md
+RELEASING.md
 
 # License inventories + dead-code tooling
 npm-licenses.csv

@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to MEHO! This document provides guidelines and information for contributors.
 
-> **Note for maintainers:** MEHO uses a dual-repo development model — development happens in a private repo and is mirrored here on every green build of `main`. If you have access to the private repo, see [docs/development/dual-repo-workflow.md](docs/development/dual-repo-workflow.md) for the pipeline, release procedure, and incident playbook. External contributors can continue below without any extra setup.
+> **Note for maintainers:** MEHO uses a dual-repo development model — development happens in a private repo and is mirrored here on every green build of `main`. If you have access to the private repo, see [docs/development/dual-repo-workflow.md](docs/development/dual-repo-workflow.md) for the mirror pipeline, [RELEASING.md](RELEASING.md) for the maintainer release runbook (pre-flight, tag, verify, rollback, key rotation), and the incident playbook. External contributors can continue below without any extra setup.
 
 ## How to Contribute
 

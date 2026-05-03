@@ -156,7 +156,7 @@ Then visit [http://localhost:8001](http://localhost:8001).
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on reporting issues, submitting changes, code style, and our Contributor License Agreement. New contributors should also read [docs/getting-started.md](docs/getting-started.md) for the 15-minute onboarding walkthrough and [docs/contributing/migrations.md](docs/contributing/migrations.md) before authoring their first database migration.
 
-MEHO is developed in a private repository and mirrored here on every green build of `main`. Maintainers with access to the private repo should read [docs/development/dual-repo-workflow.md](docs/development/dual-repo-workflow.md) for the mirror pipeline, release procedure, and incident playbook.
+MEHO is developed in a private repository and mirrored here on every green build of `main`. Maintainers with access to the private repo should read [docs/development/dual-repo-workflow.md](docs/development/dual-repo-workflow.md) for the mirror pipeline, [RELEASING.md](RELEASING.md) for the maintainer release runbook (pre-flight, tag, verify, rollback, key rotation), and the incident playbook.
 
 ## License
 

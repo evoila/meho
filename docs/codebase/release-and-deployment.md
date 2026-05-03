@@ -134,8 +134,12 @@ a release across all four is a manual maintainer responsibility today (see
 ### Absent surfaces (gaps)
 
 - **No `RELEASING.md`** — maintainer release procedure is undocumented.
-- **No production license issuance** — there is no script to mint a signed license
-  token for a customer. Keypair generation exists; token issuance does not.
+- ~~**No production license issuance** — there is no script to mint a signed license
+  token for a customer. Keypair generation exists; token issuance does not.~~
+  Resolved: `scripts/issue-license.py` mints signed enterprise tokens against
+  the production Ed25519 key, with fail-closed audit logging via
+  `meho_app/modules/licensing/audit.py` (see [Issuance CLI](#issuance-cli)
+  below).
 - **Helm chart partial** — chart skeleton (`deploy/helm/meho/Chart.yaml`,
   `values.yaml`, `values-{dev,prod}.yaml`, README) and the backend Deployment +
   Service templates exist. Every install — production *and* evaluator —
@@ -625,11 +629,75 @@ The grace period trusts the system clock; an attacker setting the clock back can
 extend it indefinitely. This is acceptable for the threat model — the goal is to
 remind honest customers, not to stop a determined adversary.
 
+### Issuance CLI
+
+Production license tokens are minted by `scripts/issue-license.py` — a
+maintainer-operated Typer CLI that reads the private signing key from
+1Password, signs with Ed25519, records an audit-log row, and returns the token.
+Three subcommands:
+
+| Subcommand | Purpose |
+|---|---|
+| `issue` | Mint a signed token. Records the audit-log row before returning. Fail-closed. |
+| `verify` | Validate a token against the embedded public key. Dev-sanity tool. |
+| `decode` | Inspect a token's payload without verifying. For support cases. |
+
+**Vault retrieval.** `issue` shells out to
+`op read --no-newline <secret-ref>` for the private key, where `<secret-ref>`
+is read from the `MEHO_LICENSE_SIGNING_KEY_REF` environment variable.
+The production secret reference is documented in the maintainer custody
+runbook (`.claude/operations/license-key-custody.md`); the runbook is
+intentionally excluded from the public mirror so the URI does not appear in
+this document, in the script source, or in CI logs. Pre-flight checks `op` on
+PATH and an active session via `op whoami` so a missing CLI or expired session
+fails before any keypair work. The retrieved value is held in process memory,
+used to sign once, and dropped — never written to disk, never logged, never
+echoed.
+
+**Audit-log fail-closed.** `issue` calls
+`LicenseAuditRepository.record_issuance(payload, issuer=<--issuer>, issuer_type="user")`
+*before* returning the token. Any exception (DB unreachable, duplicate
+`license_id`, validation failure) propagates out and aborts the issuance:
+nothing is written to stdout, nothing to the `--output` file. `issuer_type`
+is hardcoded to `"user"` because the issuance flow is maintainer-operated by
+design — the custody runbook is the source of truth for who is allowed to run
+the script, gated by 1Password vault membership.
+
+**Output handling.** Without `--output`, the token is written to stdout (one
+line, trailing newline) so it can be piped or captured. With `--output FILE`,
+the token is written to FILE atomically at mode `0600` via `os.open` with
+`O_WRONLY | O_CREAT | O_EXCL` plus an explicit mode argument; the call refuses
+to overwrite an existing file. In both modes the `license_id` is surfaced to
+stderr for the operator to record.
+
+**Invocation.** Requires `op` on PATH, an active 1Password session for the
+maintainer vault, `MEHO_LICENSE_SIGNING_KEY_REF` exported, and `DATABASE_URL`
+pointing at a database with the `license_issuance` migration applied:
+
+```bash
+export MEHO_LICENSE_SIGNING_KEY_REF="<see-custody-runbook>"
+uv run python scripts/issue-license.py issue \
+  --org "Acme Corp" \
+  --tier enterprise \
+  --features multi_tenant,sso \
+  --expires-at 2027-05-01 \
+  --max-tenants 50 \
+  --issuer "$(op whoami --format=json | jq -r .user.email)" \
+  --output /secure/path/acme.token
+```
+
+**Out of scope at this layer:**
+
+- Customer-facing self-service portal (deferred to v0.2).
+- Bulk issuance from CSV (file follow-up if demand surfaces).
+- Revocation tooling (audit-log columns reserved; CLI not built — v0.2).
+- Authentication for who can run the CLI (handled by 1Password vault
+  membership, not by the script).
+
 ### License-issuance audit log
 
-Every signed enterprise token minted by `scripts/issue-license.py` (when that
-script lands; see Initiative #505 Task #519) is recorded in an append-only
-`license_issuance` Postgres table. The table is the authoritative compliance
+Every signed enterprise token minted by `scripts/issue-license.py` is
+recorded in an append-only `license_issuance` Postgres table. The table is the authoritative compliance
 record: it answers *"which licenses have been issued, when, by whom, to whom,
 and for how long"* without trusting any state that lives outside the database.
 
@@ -695,10 +763,11 @@ ownership lives here. The fail-closed contract is enforced at the
 boundary: any exception raised by `record_issuance` aborts the issuance
 flow before the signed token is returned to the customer.
 
-**Caller integration** is the responsibility of `scripts/issue-license.py`
-(Task #519, not yet shipped). The contract is: call `record_issuance`
-*before* the function returns the signed token; treat any exception as
-fatal; never hand a customer a token whose issuance row is not durable.
+**Caller integration** is implemented in `scripts/issue-license.py` (see the
+[Issuance CLI](#issuance-cli) subsection above). The contract is: call
+`record_issuance` *before* the function returns the signed token; treat any
+exception as fatal; never hand a customer a token whose issuance row is not
+durable.
 
 **Out of scope at this layer**:
 
@@ -733,8 +802,10 @@ issues are filed.
   run. Tags cannot accumulate on the public repo until this flips to `incremental`.~~
   Resolved: `PUBLIC_MIRROR_MODE` defaults to `incremental` and orphan mode is
   guarded against tag loss in `mirror-to-public.yml`.
-- No production license issuance pipeline exists. Customer onboarding is
-  fully manual.
+- ~~No production license issuance pipeline exists. Customer onboarding is
+  fully manual.~~ Resolved: `scripts/issue-license.py` mints signed
+  enterprise tokens against the production Ed25519 key with fail-closed
+  audit logging (see [Issuance CLI](#issuance-cli) above).
 - No `RELEASING.md` runbook exists for maintainers cutting a release.
 - Helm chart at `deploy/helm/meho/` is partial — backend Deployment + Service
   templates exist; frontend, Postgres/Redis, Secret, helm-test CI, and the

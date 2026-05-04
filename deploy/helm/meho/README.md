@@ -6,16 +6,12 @@ backend (full or slim variant), frontend SPA, and the supporting
 services (Postgres, Redis) MEHO depends on.
 
 > **Status — `0.1.0` partial.** This release ships the backend
-> Deployment + Service, the frontend Deployment + Service + optional
-> Ingress, and optional embedded Postgres + Redis subcharts. The
-> chart's own backend Secret template (#528), the helm-test CI
-> workflow (#529), and the operator runbook (#530) are still pending
-> under Initiative #506. Until #528 lands, every install needs a
-> pre-existing backend Secret resolved from `meho.backend.secretName`
-> (see `values.yaml: backend.existingSecret`) carrying the runtime
-> credentials, otherwise backend pods stay in
-> `CreateContainerConfigError`. Use the SemVer 0.x channel — anything
-> may change between minor versions.
+> Deployment + Service + chart-managed Secret, the frontend
+> Deployment + Service + optional Ingress, and optional embedded
+> Postgres + Redis subcharts. The helm-test CI workflow (#529) and
+> the operator runbook (#530) are still pending under Initiative
+> #506. Use the SemVer 0.x channel — anything may change between
+> minor versions.
 >
 > **Requires Helm 3 or later.** The chart declares
 > `apiVersion: v2`.
@@ -137,6 +133,97 @@ runtime). The chart's defence against that footgun is Helm's
 — `helm install` fails before any pod starts when those keys are
 empty. Detection of partially-rendered placeholders inside the
 served file is a Docker `HEALTHCHECK` concern owned by Task #535.
+
+## Secrets
+
+Backend runtime credentials (`JWT_SECRET_KEY`,
+`CREDENTIAL_ENCRYPTION_KEY`, `MEHO_LICENSE_KEY`, `KEYCLOAK_*`) flow
+into the backend container via `envFrom: secretRef`. The chart
+supports two install paths:
+
+### Chart-managed Secret (evaluator default)
+
+`values-dev.yaml` ships with `secrets.create=true` and deterministic
+dev values for the two required keys, so a single `helm install
+--values values-dev.yaml` works end to end. The values flow through
+`helm install --set` and live in Helm's release history — fine for
+laptops and demos, **never for production**.
+
+### External Secrets Operator (production)
+
+For any non-laptop deployment, the operator pre-creates the backend
+Secret out-of-band — typically via [External Secrets
+Operator](https://external-secrets.io) projecting from the cluster's
+secret store (GCP Secret Manager, AWS Secrets Manager, Vault, …) —
+and the chart references it by name. The values never appear in
+Helm's release history.
+
+```yaml
+# 1. SecretStore — authentication to the external secret store.
+#    One-time cluster setup, lives outside this chart.
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: meho-secret-store
+spec:
+  provider:
+    # Replace with your provider stanza (gcpsm / aws / vault / …).
+    gcpsm:
+      projectID: "my-gcp-project"
+---
+# 2. ExternalSecret — declares which keys to fetch and where to
+#    project them. The operator reconciles this into a native
+#    Kubernetes Secret named `meho-backend`, which the chart
+#    references via `secrets.existingSecret=meho-backend`.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: meho-backend
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: meho-secret-store
+    kind: SecretStore
+  target:
+    name: meho-backend
+    creationPolicy: Owner
+  data:
+    - secretKey: JWT_SECRET_KEY
+      remoteRef:
+        key: meho-jwt-secret
+    - secretKey: CREDENTIAL_ENCRYPTION_KEY
+      remoteRef:
+        key: meho-credential-encryption-key
+    - secretKey: MEHO_LICENSE_KEY
+      remoteRef:
+        key: meho-license-key
+    # Add KEYCLOAK_* and any other backend env vars the same way.
+```
+
+```bash
+kubectl apply -f external-secret.yaml
+helm install meho ./deploy/helm/meho \
+  --values ./deploy/helm/meho/values-prod.yaml \
+  --set image.tag=0.1.0 \
+  --set secrets.existingSecret=meho-backend \
+  --set ingress.host=meho.example.com \
+  --set-string postgres.external.dsn='postgresql+asyncpg://user:pass@host:5432/meho' \
+  --set-string redis.external.url='redis://host:6379/0'
+```
+
+`secrets.existingSecret` taking precedence over `secrets.create` is
+deliberate: a stray `secrets.create=true` in a values overlay never
+silently overwrites an operator-managed Secret. Sealed-secrets
+(Bitnami), `sops`-encrypted Secrets, and plain `kubectl create
+secret generic` all interoperate the same way — pre-create the
+Secret, point `secrets.existingSecret` at it.
+
+`DATABASE_URL` and `REDIS_URL` are owned by the chart (rendered
+from `postgres.external.dsn` / `redis.external.url`, or the
+embedded subcharts), not by the backend Secret — explicit `env:`
+entries on the Deployment take precedence over `envFrom`, so any
+same-named keys an operator's external Secret carries are silently
+overridden.
 
 ## Ingress
 

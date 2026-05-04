@@ -108,13 +108,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
 {{/*
 Backend Secret name — defaults to `<backend-fullname>` when the
-operator does not supply one. The Secret resource itself ships in
-a sibling task (#528); the Deployment's `envFrom` references this
-name unconditionally so the chart's secret-reference layout is
-locked in even before the resource lands.
+operator does not supply one. Both the chart-managed Secret
+template (`templates/secret.yaml`) and the backend Deployment's
+`envFrom: secretRef` resolve through this helper, so a rename here
+keeps producer and consumer in lock-step.
 */}}
 {{- define "meho.backend.secretName" -}}
-{{- default (include "meho.backend.fullname" .) .Values.backend.existingSecret -}}
+{{- default (include "meho.backend.fullname" .) .Values.secrets.existingSecret -}}
 {{- end -}}
 
 {{/*

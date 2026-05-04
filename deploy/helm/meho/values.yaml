@@ -28,7 +28,7 @@ image:
 # rendered by the frontend container's entrypoint into
 # `/usr/share/nginx/html/config.js`, which the SPA fetches on boot.
 # These are *public* values — they ship to every browser. Do NOT
-# put secrets here; use `backend.existingSecret` for those.
+# put secrets here; use the `secrets` section below.
 frontend:
   image:
     registry: ghcr.io
@@ -67,19 +67,72 @@ frontend:
 # backend: backend Deployment knobs.
 backend:
   replicaCount: 1
-  # backend.existingSecret: name of an externally managed Secret
-  # carrying the backend's environment (`MEHO_LICENSE_KEY`,
-  # `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `KEYCLOAK_*`,
-  # ...). `DATABASE_URL` and `REDIS_URL` are NOT consumed from this
-  # Secret — they are templated into explicit `env:` entries on the
-  # backend Deployment from `postgres.external.dsn` /
-  # `redis.external.url` (or from the embedded subcharts when
-  # `embedded.enabled=true`) and override any same-named keys here.
-  # Empty defaults the reference to `meho.backend.fullname` (e.g.
-  # `meho-backend` for release `meho`, `<release>-meho-backend`
-  # otherwise), the name the chart's own Secret template (sibling
-  # task) will use.
+
+# secrets: backend runtime credentials. Two install paths:
+#
+#   1. Chart-managed (`secrets.create=true`, `existingSecret=""`) —
+#      the chart renders a `Secret` named `meho.backend.secretName`
+#      (e.g. `meho-backend` for release `meho`,
+#      `<release>-meho-backend` otherwise — the helper collapses
+#      double-naming when the release name already contains `meho`)
+#      populated from the `jwtSecretKey` / `credentialEncryptionKey`
+#      / `licenseKey` keys below. Values flow through `helm install
+#      --set` and live in Helm's release history; suitable for
+#      evaluators only.
+#
+#   2. External (`secrets.existingSecret=<name>`) — the operator
+#      pre-creates the named Secret out-of-band (External Secrets
+#      Operator, sealed-secrets, sops-encrypted Secret, plain
+#      `kubectl apply`, …). The chart never sees the values. This is
+#      the production path; see the chart README `## Secrets`
+#      section for the canonical ESO manifest.
+#
+# `secrets.existingSecret` taking precedence over `secrets.create` is
+# intentional: an explicit external name is always honoured, so a
+# stray `secrets.create=true` left in a values overlay never silently
+# overwrites a Secret the operator manages.
+#
+# `DATABASE_URL` and `REDIS_URL` are NOT carried by this Secret —
+# they are templated into explicit `env:` entries on the backend
+# Deployment from `postgres.external.dsn` / `redis.external.url`
+# (or from the embedded subcharts when `embedded.enabled=true`).
+# Explicit `env:` entries take precedence over `envFrom`, so any
+# same-named keys an operator's external Secret happens to carry are
+# silently overridden by the chart-owned values.
+#
+# `KEYCLOAK_*` (admin user / password / realm credentials the backend
+# reads at boot) is NOT in the chart-managed Secret today; operators
+# needing those must use the external path with their own Secret.
+secrets:
+  # secrets.create: render the chart's own Secret resource. When
+  # `false` (or when `existingSecret` is set), no Secret is rendered
+  # and the operator must supply one named `secrets.existingSecret`
+  # before the backend pod can start.
+  create: true
+  # secrets.existingSecret: name of an externally managed Secret
+  # carrying the backend runtime environment. When set, the chart
+  # never renders its own Secret regardless of `secrets.create`.
   existingSecret: ""
+
+  # The keys below are consumed only when the chart renders its own
+  # Secret (chart-managed path). External-Secret installs leave them
+  # empty; the values come from the external store via the operator.
+
+  # secrets.jwtSecretKey: signing key for the backend's JWT issuer.
+  # REQUIRED when `secrets.create=true` and `existingSecret` is empty
+  # — `helm install` fails with a clear error otherwise.
+  jwtSecretKey: ""
+  # secrets.credentialEncryptionKey: key the backend uses to encrypt
+  # connector credentials at rest. REQUIRED on the chart-managed
+  # path with a 32-character minimum — the chart's Secret template
+  # fails fast via `fail` + `len` at install time, mirroring the
+  # backend's own length check at startup
+  # (`meho_app/core/config.py`).
+  credentialEncryptionKey: ""
+  # secrets.licenseKey: enterprise license token (optional). When
+  # empty, the backend boots in community edition. Production
+  # license tokens are minted via `scripts/issue-license.py`.
+  licenseKey: ""
 
 # appEnvironment: value for the `ENV` environment variable inside
 # the backend container. Pydantic's `Config.env` field

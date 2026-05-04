@@ -175,20 +175,26 @@ a release across all four is a manual maintainer responsibility today (see
   create`-skeleton `*.tgz` pattern: in Helm 4 that pattern filters out the
   subchart archives `helm dependency update` writes into `charts/`,
   breaking `helm template` with "found in Chart.yaml, but missing in
-  charts/ directory". Every install still requires a pre-existing Secret
-  resolved from `meho.backend.secretName` (default:
+  charts/ directory". The backend Secret is chart-managed by default
+  (`templates/secret.yaml` renders when `secrets.create=true` and
+  `secrets.existingSecret` is empty), populated from `secrets.jwtSecretKey`
+  / `secrets.credentialEncryptionKey` (both `required`-validated) and the
+  optional `secrets.licenseKey`. Production deployments project the Secret
+  from a cluster secret store via External Secrets Operator (or any
+  equivalent — sealed-secrets, sops, raw `kubectl`) and point
+  `secrets.existingSecret` at the operator-created name; the chart-managed
+  template is skipped to keep credentials out of `helm history`. The Secret
+  name resolves through `meho.backend.secretName` (default:
   `meho.backend.fullname` — `<release>-meho-backend` *unless* the release
   name already contains `meho`, in which case it collapses to
   `<release>-backend`; the helper avoids double-naming for the canonical
-  `helm install meho` case). That Secret carries `MEHO_LICENSE_KEY`,
-  `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, and `KEYCLOAK_*`;
-  `DATABASE_URL` and `REDIS_URL` are NOT consumed from it (the chart
-  templates them explicitly into the backend Deployment, see above). The
-  backend Deployment references the Secret unconditionally via
-  `envFrom.secretRef`, so without it backend pods stay in
-  `CreateContainerConfigError`. The Secret template lands in #528.
-  Helm-test CI workflow (#529) and the operator runbook (#530) are still
-  pending under Initiative #506.
+  `helm install meho` case). The Secret carries `JWT_SECRET_KEY`,
+  `CREDENTIAL_ENCRYPTION_KEY`, optional `MEHO_LICENSE_KEY`, plus any
+  `KEYCLOAK_*` keys the operator's external Secret supplies; `DATABASE_URL`
+  and `REDIS_URL` are NOT consumed from it (the chart templates them
+  explicitly into the backend Deployment, see above). Helm-test CI workflow
+  (#529) and the operator runbook (#530) are still pending under Initiative
+  #506.
 ## Control flow
 
 ### Quality gates (per push to main / per PR)
@@ -851,9 +857,9 @@ issues are filed.
   audit logging (see [Issuance CLI](#issuance-cli) above).
 - No `RELEASING.md` runbook exists for maintainers cutting a release.
 - Helm chart at `deploy/helm/meho/` is partial — backend Deployment +
-  Service, frontend Deployment + Service + (optional) Ingress, and
-  Postgres/Redis subchart wiring all exist; Secret template (#528),
-  helm-test CI workflow (#529), and the operator runbook (#530) remain
+  Service + chart-managed Secret, frontend Deployment + Service +
+  (optional) Ingress, and Postgres/Redis subchart wiring all exist;
+  helm-test CI workflow (#529) and the operator runbook (#530) remain
   pending under Initiative #506.
 - The `Dockerfile.meho` and `Dockerfile.meho-frontend` images run as root.
 - Several base images and GitHub Actions are pinned by tag, not by digest.

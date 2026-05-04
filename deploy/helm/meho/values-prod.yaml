@@ -62,3 +62,23 @@ ingress:
   enabled: true
   className: nginx
   host: meho.example.com
+
+# Production defaults to operator-managed Secrets — never let the
+# chart render runtime credentials in a real cluster. The
+# recommended pattern is External Secrets Operator: the operator
+# pre-creates a Kubernetes Secret named `meho.backend.secretName`
+# (e.g. `meho-backend` for release `meho`, `<release>-meho-backend`
+# otherwise; or whatever `secrets.existingSecret` overrides to)
+# from the cluster's secret store; `helm install` then references
+# it without ever seeing the values. See the chart README
+# `## Secrets` section for the canonical ExternalSecret manifest.
+#
+# Production overlays MUST set `secrets.existingSecret` to the
+# operator-supplied name. This file leaves it empty so `helm
+# template --values values-prod.yaml` still renders for CI smoke
+# testing (`secrets.create=false` skips the chart-managed Secret;
+# the deployment references the not-yet-existing
+# `meho.backend.secretName`, which the operator creates pre-install).
+secrets:
+  create: false
+  existingSecret: ""

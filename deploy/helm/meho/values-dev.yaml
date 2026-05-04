@@ -55,6 +55,17 @@ ingress:
 embedded:
   enabled: true
 
+# Chart-managed backend Secret with deterministic dev values so
+# `helm install --values values-dev.yaml` works without extra
+# `--set` flags. NEVER use these credentials in production — they
+# are checked into the public chart and visible to every evaluator.
+# `licenseKey` is left empty: the dev install runs in community
+# edition.
+secrets:
+  create: true
+  jwtSecretKey: "meho-dev-jwt-secret"
+  credentialEncryptionKey: "meho-dev-encryption-key-32-chars"
+
 # Deterministic evaluator passwords — never use these in production.
 # They exist so `helm install ... --values values-dev.yaml` works
 # without extra `--set-string` flags and so the rendered DSN/URL are

@@ -10,10 +10,11 @@ dependency hiccups, causing a cascade. Operators who want
 dependency-aware readiness can switch the path in a fork — the
 default keeps the cluster stable.
 
-The `envFrom: secretRef` references a Secret defined by the
-sibling task #528. `helm install` against this chart will only
-succeed once that Secret resource (or an externally created
-equivalent) exists.
+The `envFrom: secretRef` resolves through `meho.backend.secretName`.
+The chart renders its own Secret by default (see `secrets.create`
+in values.yaml); operators integrating External Secrets Operator
+or supplying a hand-rolled Secret set `secrets.existingSecret` to
+the pre-created name and the chart-managed template is skipped.
 */}}
 apiVersion: apps/v1
 kind: Deployment

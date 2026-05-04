@@ -11,12 +11,22 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from meho_app.core.licensing import Edition, LicenseService, _validate_license_key
+from meho_app.core.licensing import (
+    Edition,
+    LicenseInfo,
+    LicensePayload,
+    LicenseService,
+    _community_info,
+    _compute_edition_from_payload,
+    _validate_license_key,
+)
 
 
 class TestCommunityDefault:
@@ -134,6 +144,97 @@ class TestHasFeature:
         svc = LicenseService()
         assert svc.has_feature("multi_tenancy") is False
         assert svc.has_feature("anything") is False
+
+
+def _make_payload(
+    *,
+    org: str = "Test Org",
+    tier: str = "enterprise",
+    features: list[str] | None = None,
+    expires_at: str | None = None,
+    max_tenants: int | None = 10,
+    license_id: str = "unit-test-001",
+) -> LicensePayload:
+    """Build a LicensePayload directly — exercises the helper without the validation pipeline."""
+    return LicensePayload(
+        org=org,
+        tier=tier,
+        features=features if features is not None else ["multi_tenancy", "sso"],
+        issued_at=datetime.now(UTC).isoformat(),
+        expires_at=expires_at,
+        max_tenants=max_tenants,
+        license_id=license_id,
+    )
+
+
+class TestCommunityInfo:
+    """_community_info returns the canonical no-license state."""
+
+    def test_returns_community_edition(self):
+        info = _community_info()
+        assert isinstance(info, LicenseInfo)
+        assert info.edition == Edition.COMMUNITY
+        assert info.features == frozenset()
+        assert info.org is None
+        assert info.expires_at is None
+        assert info.max_tenants == 1
+        assert info.in_grace_period is False
+
+
+class TestComputeEditionFromPayload:
+    """Tests for the extracted edition-derivation helper.
+
+    The helper reads ``datetime.now(UTC)`` and emits ``logger.warning`` calls,
+    so it is not a pure function — these tests exercise it with controlled
+    relative-to-now inputs and accept the resulting clock-dependent behaviour.
+    """
+
+    def test_no_expiry_yields_perpetual_enterprise(self):
+        """Payload without expires_at -> ENTERPRISE, no grace, expires_at=None."""
+        payload = _make_payload(expires_at=None)
+        info = _compute_edition_from_payload(payload)
+        assert info.edition == Edition.ENTERPRISE
+        assert info.in_grace_period is False
+        assert info.expires_at is None
+        assert info.org == "Test Org"
+        assert info.max_tenants == 10
+
+    def test_expired_within_grace_yields_enterprise_in_grace(self):
+        """Expired 3 days ago (within 30-day grace) -> ENTERPRISE, in_grace_period=True."""
+        expired = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+        info = _compute_edition_from_payload(_make_payload(expires_at=expired))
+        assert info.edition == Edition.ENTERPRISE
+        assert info.in_grace_period is True
+        assert info.expires_at is not None
+
+    def test_expired_past_grace_drops_to_community_but_retains_payload_fields(self):
+        """Expired 35 days ago -> COMMUNITY, but org/features/max_tenants carried from payload."""
+        expired = (datetime.now(UTC) - timedelta(days=35)).isoformat()
+        info = _compute_edition_from_payload(
+            _make_payload(expires_at=expired, features=["sso", "audit"], max_tenants=42)
+        )
+        assert info.edition == Edition.COMMUNITY
+        assert info.in_grace_period is False
+        # Forensic fields preserved so operator can see which expired license was last in effect
+        assert info.org == "Test Org"
+        assert info.features == frozenset({"sso", "audit"})
+        assert info.max_tenants == 42
+        assert info.expires_at is not None
+
+    def test_invalid_expires_at_format_logs_warning_and_treats_as_no_expiry(self, caplog):
+        """Malformed expires_at -> warning logged, treated as no expiry, ENTERPRISE."""
+        with caplog.at_level(logging.WARNING, logger="meho_app.core.licensing"):
+            info = _compute_edition_from_payload(_make_payload(expires_at="not-a-date"))
+        assert info.edition == Edition.ENTERPRISE
+        assert info.in_grace_period is False
+        assert info.expires_at is None
+        assert any("Invalid expires_at format" in record.message for record in caplog.records)
+
+    def test_no_features_yields_empty_frozenset(self):
+        """Payload with no features -> ENTERPRISE with empty features frozenset."""
+        info = _compute_edition_from_payload(_make_payload(features=[]))
+        assert info.edition == Edition.ENTERPRISE
+        assert info.features == frozenset()
 
 
 def _sign_payload(payload: dict | list | str | int, private_key: Ed25519PrivateKey) -> str:

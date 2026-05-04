@@ -122,6 +122,69 @@ def _validate_license_key(key: str) -> LicensePayload | None:
         return None
 
 
+def _community_info() -> LicenseInfo:
+    """Build the canonical community-edition state with no payload context."""
+    return LicenseInfo(
+        edition=Edition.COMMUNITY,
+        features=frozenset(),
+        org=None,
+        expires_at=None,
+        max_tenants=1,
+        in_grace_period=False,
+    )
+
+
+def _compute_edition_from_payload(payload: LicensePayload) -> LicenseInfo:
+    """
+    Derive the runtime LicenseInfo from a validated payload.
+
+    Past-grace tokens drop to COMMUNITY edition but retain the payload's
+    org / features / max_tenants / expires_at — the operator can still see
+    which expired license was last in effect.
+    """
+    expires_at: datetime | None = None
+    in_grace_period = False
+    edition = Edition.ENTERPRISE
+
+    if payload.expires_at:
+        try:
+            expires_at = datetime.fromisoformat(payload.expires_at)
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+        except ValueError:
+            logger.warning(f"Invalid expires_at format in license: {payload.expires_at}")
+            expires_at = None
+
+    if expires_at is not None:
+        now = datetime.now(UTC)
+        if now > expires_at:
+            grace_end = expires_at + timedelta(days=GRACE_PERIOD_DAYS)
+            if now <= grace_end:
+                remaining = (grace_end - now).days
+                in_grace_period = True
+                edition = Edition.ENTERPRISE
+                logger.warning(
+                    f"License expired on {expires_at.date()} -- "
+                    f"grace period active ({remaining} days remaining)"
+                )
+            else:
+                edition = Edition.COMMUNITY
+                in_grace_period = False
+                logger.warning(
+                    f"License expired on {expires_at.date()} -- "
+                    f"grace period ended, community edition active"
+                )
+
+    return LicenseInfo(
+        edition=edition,
+        features=frozenset(payload.features),
+        org=payload.org,
+        expires_at=expires_at,
+        max_tenants=payload.max_tenants,
+        in_grace_period=in_grace_period,
+    )
+
+
 class LicenseService:
     """
     Validates and caches license state. Initialized once at startup.
@@ -131,76 +194,20 @@ class LicenseService:
         svc = LicenseService(key="...")   # validates key, determines edition
     """
 
-    def __init__(self, license_key: str | None = None) -> None:  # NOSONAR (cognitive complexity)
+    def __init__(self, license_key: str | None = None) -> None:
         if not license_key:
-            self._info = LicenseInfo(
-                edition=Edition.COMMUNITY,
-                features=frozenset(),
-                org=None,
-                expires_at=None,
-                max_tenants=1,
-                in_grace_period=False,
-            )
+            self._info = _community_info()
             logger.info("Community edition -- enterprise routers excluded")
             return
 
         payload = _validate_license_key(license_key)
         if payload is None:
-            self._info = LicenseInfo(
-                edition=Edition.COMMUNITY,
-                features=frozenset(),
-                org=None,
-                expires_at=None,
-                max_tenants=1,
-                in_grace_period=False,
-            )
+            self._info = _community_info()
             logger.warning("Invalid license key -- falling back to community edition")
             return
 
-        # Parse expiry and apply grace period logic
-        expires_at: datetime | None = None
-        in_grace_period = False
-        edition = Edition.ENTERPRISE
-
-        if payload.expires_at:
-            try:
-                expires_at = datetime.fromisoformat(payload.expires_at)
-                if expires_at.tzinfo is None:
-                    expires_at = expires_at.replace(tzinfo=UTC)
-            except ValueError:
-                logger.warning(f"Invalid expires_at format in license: {payload.expires_at}")
-                expires_at = None
-
-        if expires_at is not None:
-            now = datetime.now(UTC)
-            if now > expires_at:
-                grace_end = expires_at + timedelta(days=GRACE_PERIOD_DAYS)
-                if now <= grace_end:
-                    remaining = (grace_end - now).days
-                    in_grace_period = True
-                    edition = Edition.ENTERPRISE
-                    logger.warning(
-                        f"License expired on {expires_at.date()} -- "
-                        f"grace period active ({remaining} days remaining)"
-                    )
-                else:
-                    edition = Edition.COMMUNITY
-                    in_grace_period = False
-                    logger.warning(
-                        f"License expired on {expires_at.date()} -- "
-                        f"grace period ended, community edition active"
-                    )
-
-        self._info = LicenseInfo(
-            edition=edition,
-            features=frozenset(payload.features),
-            org=payload.org,
-            expires_at=expires_at,
-            max_tenants=payload.max_tenants,
-            in_grace_period=in_grace_period,
-        )
-
-        if edition == Edition.ENTERPRISE and not in_grace_period:
+        self._info = _compute_edition_from_payload(payload)
+        if self._info.edition == Edition.ENTERPRISE and not self._info.in_grace_period:
             logger.info(f"Enterprise edition active (org={payload.org})")
 
     @property

@@ -49,36 +49,72 @@ sonar.typescript.lcov.reportPaths=meho_frontend/coverage/lcov.info
 
 ## Semgrep SAST
 
-Static Application Security Testing using Semgrep with Python, TypeScript, security-audit, and OWASP Top Ten rulesets.
+Static Application Security Testing using Semgrep with a curated, vendored snapshot of the Python, TypeScript, security-audit, and OWASP Top Ten rule packs.
 
 - **Workflow**: `.github/workflows/security-scan.yml`
 - **Trigger**: Every push to main and all PRs targeting main
-- **Rulesets**: `p/python`, `p/typescript`, `p/security-audit`, `p/owasp-top-ten`
+- **Rulesets**: vendored under `.semgrep/rules/` — three files (`python.yml`, `frontend.yml`, `cross-cutting.yml`) holding a deduplicated, curated subset of `p/python` + `p/typescript` + `p/security-audit` + `p/owasp-top-ten`. Rules whose first-segment language is one MEHO does not use (Java, Go, Ruby, Scala, Kotlin, Swift, C/C++, C#, PHP, Terraform, Solidity, Clojure, Rust, OCaml, Dart, Elixir) are filtered out by `scripts/refresh-semgrep-rules.py`.
 - **Severity filter**: Only ERROR-level findings block PRs (WARNING-level reported but non-blocking)
 - **SARIF output**: Always uploaded as a `semgrep-sarif` job artifact (14-day retention) for offline diagnosis. Also uploaded to GitHub Code Scanning for inline annotations when supported (best-effort in forks)
-- **Per-finding exemptions**: Inline `# nosemgrep: <full-rule-id>` comment on the match line or the line above, always paired with a short rationale (false positive, intentional test input, etc.). Rule IDs must be fully namespaced — e.g. `python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text`. Pack-level rule disables require written justification on an issue.
-- **Container**: Runs in `semgrep/semgrep:1.160.0`, pinned in `.github/workflows/security-scan.yml` (search for `image: semgrep/semgrep:`). Numeric version tags on `semgrep/semgrep` are immutable per the Docker Hub repo policy ("Tags cannot be overwritten in this Repository"), so the pin is reproducible without an additional digest pin.
-- **Upgrade cadence**: Review monthly or on a Semgrep advisory. Before bumping the pin, run the same command CI runs against the candidate image on a clean `main`:
+- **Per-finding exemptions**: Inline `# nosemgrep: <full-rule-id>` comment on the match line or the line above. Rationale lives in a regular comment on the line above the suppression — never on the same line as the rule ID, because trailing text after the ID has historically broken matching in some Semgrep versions. Rule IDs must be fully namespaced — e.g. `python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text`. Pack-level rule disables require editing the curation script's KEEP/DROP filters and re-running it; never silently delete vendored YAML.
+- **Container**: Runs in `semgrep/semgrep:1.160.0`, pinned in `.github/workflows/security-scan.yml`. Numeric version tags on `semgrep/semgrep` are immutable per the Docker Hub repo policy ("Tags cannot be overwritten in this Repository"), so the pin is reproducible without an additional digest pin.
+- **`.semgrepignore`**: excludes `.semgrep/` itself (the vendored rule files contain example payloads that would otherwise self-match), `.venv/` and `node_modules/` (third-party code), `_archive/`, `meho-claude/`, `tests/fixtures/`.
 
-  ```bash
-  docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:<new-version> \
-    semgrep scan \
-    --config p/python --config p/typescript \
-    --config p/security-audit --config p/owasp-top-ten \
-    --error --severity ERROR
-  ```
+### Why rules are vendored, not pulled from the registry
 
-  Exit 0 with every existing inline `# nosemgrep` annotation honored is the green light. If a suppression stops working on the new tag, fix the suppression on the same PR as the bump (reposition or restate the annotation, preserving the rule-ID-specific form). Never silently delete an annotation, and never disable a pack to dodge the finding — those are signal decay.
-
-### Diagnostic context for the 1.160.0 pin
-
-This pin closes a recurring drift episode that played out across 2026-04 and the start of 2026-05:
+`--config p/<pack>` resolves the rule pack from the Semgrep registry **at scan time**. The image pin only freezes the binary — registry-side rule changes go right past it. This produced a recurring drift episode across 2026-04 and the start of 2026-05:
 
 1. The `# nosemgrep` annotations triaged in commit `e11d3dd9` (closing #333) were placed on the line preceding the matched call. That form was honored by the `:latest` image at the time.
 2. Around Semgrep 1.79, preceding-line annotations with trailing rationale text after the rule ID stopped suppressing multi-line matches in some configurations. PRs #475 / #476 / #496 / #498 each carried inline workarounds; PR #501 consolidated them.
-3. Before #501 merged, the `:latest` image moved again — to 1.160.0 — and *re-honored* the original preceding-line form. Commit `cd8ca8df` reverted PR #501's defensive workarounds in `tests/unit/test_keycloak_validator.py` and `tests/integration/conftest.py` after empirical re-test against 1.160.0 returned exit 0 with every suppression tagged `{"kind": "inSource"}` in SARIF.
+3. Before #501 merged, the `:latest` image moved again — to 1.160.0 — and *re-honored* the original preceding-line form. Commit `cd8ca8df` reverted PR #501's defensive workarounds after empirical re-test against 1.160.0 returned exit 0.
+4. After PR #559 landed (audit-log integration test), CI started failing again with 4 ERROR findings on `main` — same pre-existing annotations, same pinned image, but the registry packs had drifted server-side. The image pin alone could not prevent this.
 
-So the *rule pack* did not change; the *annotation parser* did. The pin removes that variable. When the next bump lands, the candidate-image dry-run above tells the reviewer immediately whether it has reverted the parser change a second time. If it has, the right answer is to switch the affected sites to inline form (rule ID on the matched call's line) on the same PR — not to revert the bump or to widen rule-ignore lists.
+Vendoring the rule packs into the repo (`scripts/refresh-semgrep-rules.py` + `.semgrep/rules/`) removes the registry as a moving target. Suppressions verified working at refresh time stay working until the next deliberate refresh.
+
+### Refresh procedure
+
+Refresh on a maintainer's machine; commit the resulting diff:
+
+```bash
+uv run python scripts/refresh-semgrep-rules.py
+# Refresh is non-zero if the registry has added a rule family with an
+# unrecognized first-segment prefix -- handle the listed IDs (extend
+# KEEP_LANGS / DROP_LANGS / ROUTE in the script) and re-run.
+
+git add .semgrep/rules/
+git diff --stat HEAD~1     # sanity-check the size
+docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.160.0 \
+  semgrep scan --config .semgrep/rules/ --error --severity ERROR
+# Expect: exit 0. If new findings appear, triage each with an inline
+# `# nosemgrep` annotation + rationale comment, OR drop the offending
+# rule family by editing the curation script's language-level filter
+# constants below — never edit the vendored YAML by hand.
+```
+
+**Cadence**: review monthly or on a Semgrep advisory. The refresh PR is its own scope — never bundled with feature work or refactors. Bundling tempts out-of-scope reverts (see the 4 `revert(ci): drop out-of-scope semgrep fixes from <X>` commits on `main` for prior art).
+
+**Filter constants** in [`scripts/refresh-semgrep-rules.py`](../../scripts/refresh-semgrep-rules.py) are the contract for what the snapshot includes — adjust them, not the vendored YAML directly:
+
+- `KEEP_LANGS` — first-segment language prefixes to keep (`python`, `javascript`, `typescript`, `generic`, `yaml`, `dockerfile`, `bash`, `json`, `html`).
+- `DROP_LANGS` — first-segment prefixes to drop (Java, Go, Ruby, Scala, etc.).
+- `DROP_SUBLANG_TOKENS` — sub-language tokens that mark a `problem-based-packs.*` rule for drop.
+- `DROP_GENERIC_SUBLANGS` — narrows the broad `generic.*` keep filter for technologies MEHO does not use (e.g. `generic.visualforce.*`).
+- `ROUTE` — maps each kept language prefix to its output file (`python.yml`, `frontend.yml`, `cross-cutting.yml`).
+
+These are language- or sub-namespace-level filters. Per-rule disables (single rule from an otherwise-kept family) are not supported by them; suppress at every call site with `# nosemgrep` instead, or curate a custom rule pack outside this snapshot.
+
+The script regenerates `.semgrep/rules/` wholesale: it deletes every pre-existing `*.yml` in that directory before writing, so renamed or retired buckets cannot linger as orphans CI would still load via `--config .semgrep/rules/`. Each output file's rules are sorted by ID so the registry's own iteration order cannot produce large reorder-only diffs.
+
+### Bumping the container image
+
+Same upgrade cadence: monthly or on advisory. Run the candidate image against the *current* vendored rules:
+
+```bash
+docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:<new-version> \
+  semgrep scan --config .semgrep/rules/ --error --severity ERROR
+```
+
+Exit 0 with every existing `# nosemgrep` annotation honored is the green light. If a suppression stops working on the new tag, fix the suppression on the same PR as the bump (use the inline-on-matched-line form, rule ID with no trailing text). Never silently delete an annotation.
 
 ## Dependency Vulnerability Scanning
 

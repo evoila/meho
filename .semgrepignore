@@ -24,3 +24,9 @@ tests/fixtures/
 # generate ERROR findings against vendored package code.
 node_modules/
 meho_frontend/node_modules/
+
+# Vendored Semgrep rule packs themselves -- their YAML files contain
+# example payloads (e.g. `bash_reverse_shell` test cases) that Semgrep
+# matches against its own rules. Source of truth for these files is
+# `scripts/refresh-semgrep-rules.py`; do NOT scan them.
+.semgrep/

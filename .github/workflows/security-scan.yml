@@ -41,15 +41,17 @@ jobs:
       - name: Run Semgrep
         run: >
           semgrep scan
-          --config p/python
-          --config p/typescript
-          --config p/security-audit
-          --config p/owasp-top-ten
+          --config .semgrep/rules/
           --sarif
           -o semgrep-results.sarif
           --error
           --severity ERROR
         # --error + --severity ERROR = fail on ERROR-level findings.
+        # Rule packs are vendored under .semgrep/rules/ (curated subset of
+        # p/python + p/typescript + p/security-audit + p/owasp-top-ten;
+        # see docs/configuration/ci-quality-gates.md § Semgrep SAST and
+        # scripts/refresh-semgrep-rules.py) so registry-side rule-pack
+        # changes cannot silently break suppressions between scans.
         # Per-finding exemptions live inline as `# nosemgrep: <rule-id>` with a
         # rationale — see docs/configuration/ci-quality-gates.md.
 

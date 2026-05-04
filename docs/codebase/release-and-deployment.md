@@ -455,7 +455,13 @@ enterprise demand surfaces; the workflow comments mark the entry point.
 4. If the env var is set → `_validate_license_key()` parses the
    `header.payload.signature` triple, decodes base64url, verifies the signature
    against the embedded `_PUBLIC_KEY_B64`, parses the payload as
-   `LicensePayload`. On any error → community fallback with a warning log.
+   `LicensePayload`. Any expected validation error (bad signature, base64 or
+   JSON decode failure, non-mapping payload, or `LicensePayload` schema
+   mismatch) is debug-logged and returns `None`; `LicenseService.__init__`
+   then sees `payload is None`, logs a warning, and falls back to community
+   edition. Unexpected errors (e.g. a programmer error inside the verifier)
+   propagate uncaught so they fail loud during development rather than
+   silently masking a broken release.
 5. If valid and not expired → `Edition.ENTERPRISE`, all features enabled.
 6. If valid but expired within 30 days → `Edition.ENTERPRISE` with
    `in_grace_period=True`, warning logged with day count remaining.

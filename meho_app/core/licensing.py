@@ -22,7 +22,7 @@ from functools import lru_cache
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +109,15 @@ def _validate_license_key(key: str) -> LicensePayload | None:
         # Decode and validate payload
         payload_json = base64.urlsafe_b64decode(payload_b64 + "==")
         data = json.loads(payload_json)
+        # Guard explicitly: a valid-JSON non-mapping (list/scalar) would raise
+        # TypeError on **unpack, which we don't want to catch broadly because
+        # TypeError elsewhere in this function indicates a programmer error
+        # that should fail loud.
+        if not isinstance(data, dict):
+            return None
         return LicensePayload(**data)
 
-    except (InvalidSignature, ValueError, json.JSONDecodeError, Exception) as e:
+    except (InvalidSignature, ValueError, json.JSONDecodeError, ValidationError) as e:
         logger.debug(f"License key validation failed: {e}")
         return None
 

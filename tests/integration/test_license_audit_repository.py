@@ -314,6 +314,9 @@ async def test_record_issuance_rollback_on_connection_failure(db_session) -> Non
     killer_engine = create_async_engine(db_url, poolclass=NullPool)
     try:
         async with killer_engine.connect() as conn:
+            # pid is a Postgres-generated integer from pg_backend_pid() above;
+            # never user input. Safe under f-string.
+            # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
             await conn.execute(text(f"SELECT pg_terminate_backend({pid})"))
             await conn.commit()
     finally:

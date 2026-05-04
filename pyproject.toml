@@ -500,7 +500,6 @@ max-complexity = 15
 # Note: meho_app/core/errors.py:get_current_trace_id uses an inline `# noqa: BLE001, S110`
 # at the actual catch site (silent OTEL fallback) instead of a per-file exemption.
 "meho_app/core/health.py" = ["BLE001"]
-"meho_app/core/licensing.py" = ["BLE001"]
 # --- BLE001: ingestion module (cleanup tracked in #265) ---
 "meho_app/modules/ingestion/processor.py" = ["BLE001"]
 "meho_app/modules/ingestion/routes.py" = ["BLE001"]

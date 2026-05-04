@@ -21,7 +21,7 @@ on:
 jobs:
   lint-python:
     name: Python Lint (Ruff)
-    runs-on: ubuntu-latest
+    runs-on: meho-x-runners
 
     steps:
       - name: Checkout code
@@ -63,7 +63,7 @@ jobs:
 
   lint-typescript:
     name: TypeScript Lint (ESLint)
-    runs-on: ubuntu-latest
+    runs-on: meho-x-runners
 
     steps:
       - name: Checkout code
@@ -86,7 +86,7 @@ jobs:
 
   typecheck:
     name: Type Check (mypy + tsc)
-    runs-on: ubuntu-latest
+    runs-on: meho-x-runners
 
     steps:
       - name: Checkout code
@@ -131,7 +131,7 @@ jobs:
 
   test-python:
     name: Python Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: meho-x-runners
     timeout-minutes: 20
 
     steps:
@@ -191,7 +191,7 @@ jobs:
 
   test-frontend:
     name: Frontend Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: meho-x-runners
 
     steps:
       - name: Checkout code
@@ -225,7 +225,7 @@ jobs:
 
   test-scripts:
     name: Shell Script Tests (bats)
-    runs-on: ubuntu-latest
+    runs-on: meho-x-runners
     timeout-minutes: 5
 
     steps:

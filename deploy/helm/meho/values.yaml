@@ -23,6 +23,12 @@ image:
 
 # frontend: SPA + nginx image coordinates plus Deployment knobs.
 # Same tag-defaults-to-`.Chart.AppVersion` contract as the backend.
+#
+# The runtime-config keys below (`apiUrl`, `keycloakUrl`, ...) are
+# rendered by the frontend container's entrypoint into
+# `/usr/share/nginx/html/config.js`, which the SPA fetches on boot.
+# These are *public* values — they ship to every browser. Do NOT
+# put secrets here; use `backend.existingSecret` for those.
 frontend:
   image:
     registry: ghcr.io
@@ -31,16 +37,48 @@ frontend:
     pullPolicy: IfNotPresent
   # frontend.replicaCount: number of frontend pods.
   replicaCount: 1
+  # frontend.apiUrl: browser-reachable backend HTTP base URL.
+  # REQUIRED — `helm install` fails when empty (template uses Helm's
+  # `required` function). The SPA fetches `/config.js` from the
+  # browser, then makes API calls to this URL, so cluster-internal
+  # Service DNS (e.g. http://meho-backend:8000) only works when the
+  # browser sits inside the cluster network. Typical values:
+  # https://meho.example.com (same-origin behind Ingress) or
+  # http://localhost:8000 (port-forward dev workflow).
+  apiUrl: ""
+  # frontend.keycloakUrl: browser-reachable Keycloak server URL.
+  # REQUIRED — same `required` enforcement as `apiUrl`. The SPA
+  # redirects the browser here for the auth flow, so the URL must
+  # be reachable from outside the cluster.
+  keycloakUrl: ""
+  # frontend.keycloakRealm: Keycloak realm name.
+  keycloakRealm: meho
+  # frontend.keycloakClientId: Keycloak client ID for the SPA. Public
+  # by design (every browser sees it); the client SECRET is on the
+  # backend only.
+  keycloakClientId: meho-frontend
+  # frontend.allowedOrigins: CORS allow-list passed to nginx via
+  # envsubst into the rendered nginx.conf.
+  allowedOrigins: ""
+  # frontend.keycloakOrigin: Keycloak origin (scheme + host + port)
+  # added to nginx's CORS allow-list so token requests succeed.
+  keycloakOrigin: ""
 
 # backend: backend Deployment knobs.
 backend:
   replicaCount: 1
   # backend.existingSecret: name of an externally managed Secret
   # carrying the backend's environment (`MEHO_LICENSE_KEY`,
-  # `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `DATABASE_URL`,
-  # `REDIS_URL`, `KEYCLOAK_*`, ...). Empty defaults the reference to
-  # `<release-fullname>-backend`, the name the chart's own Secret
-  # template (sibling task) will use.
+  # `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `KEYCLOAK_*`,
+  # ...). `DATABASE_URL` and `REDIS_URL` are NOT consumed from this
+  # Secret — they are templated into explicit `env:` entries on the
+  # backend Deployment from `postgres.external.dsn` /
+  # `redis.external.url` (or from the embedded subcharts when
+  # `embedded.enabled=true`) and override any same-named keys here.
+  # Empty defaults the reference to `meho.backend.fullname` (e.g.
+  # `meho-backend` for release `meho`, `<release>-meho-backend`
+  # otherwise), the name the chart's own Secret template (sibling
+  # task) will use.
   existingSecret: ""
 
 # appEnvironment: value for the `ENV` environment variable inside
@@ -51,7 +89,7 @@ backend:
 # `ENV`.
 appEnvironment: prod
 
-# resources: backend resource requests / limits.
+# resources: per-component requests / limits.
 resources:
   backend:
     requests:
@@ -60,6 +98,38 @@ resources:
     limits:
       cpu: 2000m
       memory: 4Gi
+  frontend:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ingress: HTTP routing for the frontend Service. The frontend
+# template renders an `Ingress` only when `enabled: true`. Operators
+# bringing their own LoadBalancer / Service-mesh Gateway should set
+# `enabled: false` and route traffic separately.
+ingress:
+  enabled: true
+  # ingress.className: name of an IngressClass installed in the
+  # cluster (the controller does the actual L7 routing). Leaving
+  # this empty falls back to the cluster's default IngressClass.
+  className: nginx
+  # ingress.host: virtual host the Ingress matches.
+  # REQUIRED when `ingress.enabled=true` — `helm install` fails
+  # when empty (template uses Helm's `required` function). Set to
+  # the public hostname operators will browse to (e.g.
+  # meho.acmecorp.com).
+  host: ""
+  # ingress.annotations: free-form annotations on the Ingress
+  # resource — controller-specific (cert-manager, nginx tuning,
+  # rate-limiting, ...).
+  annotations: {}
+  # ingress.tls: TLS configuration as accepted by Kubernetes
+  # Ingress; an array of `{hosts: [...], secretName: ...}`. Empty
+  # disables TLS (HTTP only).
+  tls: []
 
 # postgres: production deployments default to an external Postgres
 # (RDS, Cloud SQL, Aiven, etc.). The DSN is required when
@@ -83,6 +153,52 @@ redis:
 # or upgrade story.
 embedded:
   enabled: false
+
+# embeddedpostgres: pass-through values for the Bitnami `postgresql`
+# subchart, included only when `embedded.enabled=true`. Key matches the
+# `Chart.yaml` dependency `alias` (lower-case to satisfy RFC 1123 on
+# the rendered resource names — see Chart.yaml for the rationale).
+#
+# Default architecture is `standalone` — the evaluator path does not
+# need replication, and standalone keeps the manifest set minimal.
+# `auth.password` left empty: the Bitnami subchart auto-generates a
+# random alphanumeric (URL-safe) password and stores it under key
+# `password` in the emitted Secret `<release>-embeddedpostgres`. The
+# backend container reads it at runtime via `valueFrom: secretKeyRef`
+# (see `backend-deployment.yaml`). Operators who need to connect a
+# psql client retrieve it via:
+#   kubectl get secret <release>-embeddedpostgres \
+#     -o jsonpath='{.data.password}' | base64 -d
+# Override the auto-gen with `--set-string embeddedpostgres.auth.password=<pw>`,
+# or supply a pre-created Secret via `auth.existingSecret`.
+embeddedpostgres:
+  architecture: standalone
+  auth:
+    username: meho
+    database: meho
+    password: ""
+    # existingSecret: name of a pre-created Secret with key `password`
+    # carrying the user-level credential. Set this to keep the
+    # password out of values.yaml entirely.
+    existingSecret: ""
+
+# embeddedredis: pass-through values for the Bitnami `redis` subchart,
+# included only when `embedded.enabled=true`. Same lower-case-alias
+# rule as `embeddedpostgres`.
+#
+# Standalone architecture (master only, no replicas) — same evaluator
+# rationale. `auth.password` left empty: the Bitnami subchart
+# auto-generates a random password under key `redis-password` in the
+# emitted Secret `<release>-embeddedredis`. Retrieval is the same
+# pattern as Postgres above (with `redis-password` as the key).
+embeddedredis:
+  architecture: standalone
+  auth:
+    enabled: true
+    password: ""
+    # existingSecret: name of a pre-created Secret with key
+    # `redis-password`.
+    existingSecret: ""
 
 # nameOverride / fullnameOverride: chart-name customization. Both
 # default to empty so the helpers fall back to `.Chart.Name` and

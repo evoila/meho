@@ -116,3 +116,37 @@ locked in even before the resource lands.
 {{- define "meho.backend.secretName" -}}
 {{- default (include "meho.backend.fullname" .) .Values.backend.existingSecret -}}
 {{- end -}}
+
+{{/*
+Frontend resource name — `<release-fullname>-frontend`, truncated
+to fit RFC 1123 limits. Used by the frontend Deployment, Service,
+and Ingress.
+*/}}
+{{- define "meho.frontend.fullname" -}}
+{{- printf "%s-frontend" (include "meho.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Frontend selector labels — stable across upgrades (no version, no
+chart hash). The Deployment's `selector.matchLabels`, the Service's
+`selector`, and the Ingress's backend-Service reference all rely on
+this; once a Deployment is created, its selector is immutable.
+*/}}
+{{- define "meho.frontend.selectorLabels" -}}
+{{ include "meho.selectorLabels" . }}
+app.kubernetes.io/component: frontend
+{{- end -}}
+
+{{/*
+Frontend common labels — selector labels plus the
+chart/version/managed-by trio that may rotate across upgrades.
+Applied to the Deployment, Service, and Ingress metadata.
+*/}}
+{{- define "meho.frontend.labels" -}}
+helm.sh/chart: {{ include "meho.chart" . }}
+{{ include "meho.frontend.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}

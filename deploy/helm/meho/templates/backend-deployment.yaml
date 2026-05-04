@@ -43,12 +43,41 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "meho.backend.secretName" . }}
+          # Explicit `env:` entries take precedence over the same key
+          # from `envFrom`, so DATABASE_URL / REDIS_URL resolved here
+          # always win over any value the operator's backend Secret
+          # may carry — the chart owns these two keys.
+          #
+          # Embedded mode adds POSTGRES_PASSWORD / REDIS_PASSWORD
+          # entries first so the `$(VAR)` placeholders inside the DSN
+          # / URL helper output expand at pod start. K8s env-var
+          # expansion processes the list iteratively and fills
+          # `$(VAR)` references using earlier entries — including
+          # `valueFrom: secretKeyRef` ones. Ordering matters: the
+          # password entry must precede the URL entry that references
+          # it.
           env:
             # `ENV` matches the Pydantic Settings field name. See
             # the `appEnvironment` key in values.yaml for the
             # alias rationale.
             - name: ENV
               value: {{ .Values.appEnvironment | quote }}
+            {{- if .Values.embedded.enabled }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-embeddedpostgres" .Release.Name) .Values.embeddedpostgres.auth.existingSecret }}
+                  key: password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-embeddedredis" .Release.Name) .Values.embeddedredis.auth.existingSecret }}
+                  key: redis-password
+            {{- end }}
+            - name: DATABASE_URL
+              value: {{ include "meho.postgres.dsn" . | quote }}
+            - name: REDIS_URL
+              value: {{ include "meho.redis.url" . | quote }}
           livenessProbe:
             httpGet:
               path: /health

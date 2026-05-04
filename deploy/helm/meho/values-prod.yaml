@@ -19,6 +19,16 @@ backend:
   replicaCount: 2
 frontend:
   replicaCount: 2
+  # Placeholder values that satisfy the chart's `required` checks
+  # so `helm template --values values-prod.yaml` works for CI smoke
+  # testing. Operators MUST replace `meho.example.com` and
+  # `auth.meho.example.com` with their real hostnames before
+  # production install — install proceeds with the placeholders
+  # but the SPA will fail to reach the backend / Keycloak.
+  apiUrl: https://meho.example.com
+  keycloakUrl: https://auth.meho.example.com
+  allowedOrigins: https://meho.example.com
+  keycloakOrigin: https://auth.meho.example.com
 
 resources:
   backend:
@@ -28,9 +38,27 @@ resources:
     limits:
       cpu: 4000m
       memory: 8Gi
+  frontend:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 # Production MUST use external managed Postgres and Redis. The
 # bundled subcharts have no production-grade backup, monitoring,
 # or upgrade story.
 embedded:
   enabled: false
+
+# `ingress.host` set to a placeholder so the prod overlay renders
+# without operator intervention (CI smoke testing). Operators MUST
+# replace with their real public hostname before production install.
+# `ingress.tls` MUST be populated when serving over HTTPS — leaving
+# it empty downgrades the Ingress to plain HTTP, regardless of how
+# requests reach the cluster.
+ingress:
+  enabled: true
+  className: nginx
+  host: meho.example.com

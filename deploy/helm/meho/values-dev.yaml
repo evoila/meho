@@ -23,6 +23,19 @@ backend:
   replicaCount: 1
 frontend:
   replicaCount: 1
+  # Browser-reachable URLs assuming the standard evaluator workflow:
+  # port-forward each Service to localhost, then open the SPA.
+  #   kubectl port-forward svc/meho-frontend  8080:80   &
+  #   kubectl port-forward svc/meho-backend   8000:8000 &
+  #   kubectl port-forward svc/meho-keycloak  8081:8080 &
+  #   open http://localhost:8080
+  # Cluster-internal Service DNS (e.g. http://meho-backend:8000)
+  # would NOT work here — the browser, not a pod, performs these
+  # fetches and can't resolve cluster DNS.
+  apiUrl: http://localhost:8000
+  keycloakUrl: http://localhost:8081
+  allowedOrigins: http://localhost:8080
+  keycloakOrigin: http://localhost:8081
 
 resources:
   backend:
@@ -33,5 +46,32 @@ resources:
       cpu: 1000m
       memory: 2Gi
 
+# Evaluator clusters (kind / minikube) typically have no Ingress
+# controller installed. Operators reach the SPA via
+# `kubectl port-forward svc/<release>-frontend 8080:80`.
+ingress:
+  enabled: false
+
 embedded:
   enabled: true
+
+# Deterministic evaluator passwords — never use these in production.
+# They exist so `helm install ... --values values-dev.yaml` works
+# without extra `--set-string` flags and so the rendered DSN/URL are
+# stable across re-installs (predictable for `psql` / `redis-cli`
+# debugging on a kind cluster). The Bitnami subcharts pick these up
+# from `auth.password` and emit their own Secrets
+# (`<release>-embeddedpostgres` key `password`,
+# `<release>-embeddedredis` key `redis-password`); the backend
+# Deployment reads from those Secrets at runtime via
+# `valueFrom: secretKeyRef` and substitutes the value into
+# `DATABASE_URL` / `REDIS_URL` via K8s `$(VAR)` env-var expansion.
+# These passwords are unrelated to #528's backend Secret, which
+# carries the license key, JWT secret, encryption key, and Keycloak
+# credentials.
+embeddedpostgres:
+  auth:
+    password: "meho-dev-pg-password"
+embeddedredis:
+  auth:
+    password: "meho-dev-redis-password"

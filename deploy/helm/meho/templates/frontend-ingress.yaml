@@ -1,0 +1,51 @@
+{{/*
+Frontend Ingress.
+
+Rendered only when `ingress.enabled=true`. Routes the configured
+`ingress.host` to the frontend Service on port 80.
+
+`spec.ingressClassName` (top-level field) is the current API for
+selecting an Ingress controller, replacing the deprecated
+`kubernetes.io/ingress.class` annotation. Leaving `className`
+empty in values falls back to the cluster's default IngressClass.
+
+`pathType: Prefix` with `path: /` matches every URL the SPA owns
+(including client-side routes that nginx falls back to
+`index.html` for via the `try_files` directive in nginx.conf).
+
+TLS is *passed through* operator-supplied — the chart does not
+issue certificates. Operators integrate cert-manager (or similar)
+out-of-band and reference the resulting Secret via
+`ingress.tls[*].secretName`.
+*/}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "meho.frontend.fullname" . }}
+  labels:
+    {{- include "meho.frontend.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ required "ingress.host is required when ingress.enabled=true (replace the meho.example.com placeholder with your real public hostname)" .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "meho.frontend.fullname" . }}
+                port:
+                  number: 80
+{{- end }}

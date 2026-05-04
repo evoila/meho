@@ -22,8 +22,13 @@
 .hgignore
 .svn/
 
-# Helm packaging output
-*.tgz
+# Helm packaging output: do NOT add `*.tgz` here. The default
+# `helm create` skeleton ships that pattern, but it filters out the
+# subchart archives `helm dependency update` writes to `charts/`,
+# breaking `helm template` with "found in Chart.yaml, but missing in
+# charts/ directory". Helm 4 enforces this strictly. The packaged
+# chart this directory itself produces lives outside the chart tree
+# (e.g. in CI artifacts) and never needs an .helmignore entry.
 
 # Repository CI / contributor metadata that has no role at install time
 .github/

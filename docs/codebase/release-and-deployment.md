@@ -141,17 +141,54 @@ a release across all four is a manual maintainer responsibility today (see
   `meho_app/modules/licensing/audit.py` (see [Issuance CLI](#issuance-cli)
   below).
 - **Helm chart partial** — chart skeleton (`deploy/helm/meho/Chart.yaml`,
-  `values.yaml`, `values-{dev,prod}.yaml`, README) and the backend Deployment +
-  Service templates exist. Every install — production *and* evaluator —
-  requires a pre-existing Secret named `<release>-backend` (or whatever
-  `backend.existingSecret` overrides to) carrying `MEHO_LICENSE_KEY`,
-  `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `DATABASE_URL`, `REDIS_URL`,
-  and `KEYCLOAK_*`; the backend Deployment references that Secret
-  unconditionally via `envFrom.secretRef`, so without it backend pods stay in
-  `CreateContainerConfigError`. The Secret template lands in #528. Frontend
-  Deployment + Service + Ingress (#526), Postgres/Redis subchart wiring
-  (#527), helm-test CI workflow (#529), and the operator runbook (#530) are
-  still pending under Initiative #506.
+  `values.yaml`, `values-{dev,prod}.yaml`, README), the backend Deployment +
+  Service, the frontend Deployment + Service + (optional) Ingress, and the
+  Postgres/Redis subchart wiring all exist. The frontend Ingress is gated
+  by `ingress.enabled` and uses the current `networking.k8s.io/v1` API
+  (`spec.ingressClassName` rather than the deprecated annotation). The
+  frontend's `readinessProbe` targets `/config.js` to confirm both that
+  nginx is up and that the entrypoint's envsubst step actually finished
+  writing the runtime-config asset (a `/` probe would only prove nginx
+  itself started). The probe does *not* detect missing or empty env vars
+  — `envsubst` substitutes unset variables as empty strings and exits 0 —
+  so the chart additionally uses Helm's `required` on `frontend.apiUrl`,
+  `frontend.keycloakUrl`, and (when `ingress.enabled=true`) `ingress.host`;
+  `helm install` fails before any pod starts when those keys are empty.
+  Detection of partially-rendered placeholders inside the served
+  `config.js` is a Docker `HEALTHCHECK` concern owned by Task #535. The
+  Postgres/Redis path follows the production-OSS convention used by Argo
+  CD, Grafana, and Sentry: production deployments default to
+  operator-supplied external services (`postgres.external.dsn`,
+  `redis.external.url` — required at template time via Helm's `required`);
+  evaluators set `embedded.enabled=true` to pull in Bitnami's `postgresql`
+  (chart 13.4.x → PG 16) and `redis` (chart 20.x → Redis 7.4) subcharts
+  under lower-case aliases (`embeddedpostgres`, `embeddedredis` —
+  upper-case aliases produce RFC-1123-invalid resource names). Two helper
+  templates (`templates/_postgres-dsn.tpl`, `templates/_redis-url.tpl`)
+  resolve the right `DATABASE_URL` / `REDIS_URL` per mode and inject them
+  as explicit `env:` entries on the backend Deployment, which take
+  precedence over the same keys from the operator's backend Secret.
+  Embedded mode uses `$(VAR)` env-var expansion to pull the Bitnami-emitted
+  password from a sibling `valueFrom: secretKeyRef` entry — ordering
+  matters in the env list (password entry must precede the URL entry that
+  references it). `.helmignore` does **not** carry the `helm
+  create`-skeleton `*.tgz` pattern: in Helm 4 that pattern filters out the
+  subchart archives `helm dependency update` writes into `charts/`,
+  breaking `helm template` with "found in Chart.yaml, but missing in
+  charts/ directory". Every install still requires a pre-existing Secret
+  resolved from `meho.backend.secretName` (default:
+  `meho.backend.fullname` — `<release>-meho-backend` *unless* the release
+  name already contains `meho`, in which case it collapses to
+  `<release>-backend`; the helper avoids double-naming for the canonical
+  `helm install meho` case). That Secret carries `MEHO_LICENSE_KEY`,
+  `JWT_SECRET_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, and `KEYCLOAK_*`;
+  `DATABASE_URL` and `REDIS_URL` are NOT consumed from it (the chart
+  templates them explicitly into the backend Deployment, see above). The
+  backend Deployment references the Secret unconditionally via
+  `envFrom.secretRef`, so without it backend pods stay in
+  `CreateContainerConfigError`. The Secret template lands in #528.
+  Helm-test CI workflow (#529) and the operator runbook (#530) are still
+  pending under Initiative #506.
 ## Control flow
 
 ### Quality gates (per push to main / per PR)
@@ -813,9 +850,11 @@ issues are filed.
   enterprise tokens against the production Ed25519 key with fail-closed
   audit logging (see [Issuance CLI](#issuance-cli) above).
 - No `RELEASING.md` runbook exists for maintainers cutting a release.
-- Helm chart at `deploy/helm/meho/` is partial — backend Deployment + Service
-  templates exist; frontend, Postgres/Redis, Secret, helm-test CI, and the
-  operator runbook remain pending under Initiative #506.
+- Helm chart at `deploy/helm/meho/` is partial — backend Deployment +
+  Service, frontend Deployment + Service + (optional) Ingress, and
+  Postgres/Redis subchart wiring all exist; Secret template (#528),
+  helm-test CI workflow (#529), and the operator runbook (#530) remain
+  pending under Initiative #506.
 - The `Dockerfile.meho` and `Dockerfile.meho-frontend` images run as root.
 - Several base images and GitHub Actions are pinned by tag, not by digest.
 - `license-check.yml` is in WARN mode (`continue-on-error: true`); the gate does

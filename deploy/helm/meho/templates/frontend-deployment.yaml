@@ -1,0 +1,94 @@
+{{/*
+Frontend Deployment.
+
+The frontend image (Vite SPA + nginx) listens on container port
+5173. nginx serves the SPA plus `/config.js`, a runtime-config
+asset that the container's entrypoint renders from
+`config.js.template` via envsubst before nginx starts.
+
+`readinessProbe` deliberately targets `/config.js` rather than `/`:
+it confirms nginx is up *and* that the runtime-config asset is
+actually being served. A `/` probe only proves nginx itself
+started; `/config.js` proves the entrypoint completed its
+file-rendering step too. `livenessProbe` uses `/` because by the
+time nginx is serving, the entrypoint has already done its work —
+we don't want a transient `/config.js` fetch failure to restart
+the container.
+
+This probe does **not** detect missing or empty env vars: the
+current image's `envsubst` substitutes unset variables with empty
+strings and exits 0, so `/config.js` is still served (just with
+empty values, breaking the SPA at runtime). Detection of
+unsubstituted/empty placeholders is a Docker `HEALTHCHECK`
+concern owned by Task #535 (`grep -v '\${'` over the rendered
+config.js); the chart's defence here is `required` on the
+genuinely-mandatory keys below — `helm install` fails before any
+pod starts when `frontend.apiUrl` or `frontend.keycloakUrl` is
+empty.
+
+Frontend env vars are *public* runtime configuration (rendered into
+JavaScript every browser receives); they live in `env:` directly,
+not in a Secret. Operator-supplied secrets stay on the backend.
+The two truly optional vars (`ALLOWED_ORIGINS`, `KEYCLOAK_ORIGIN`)
+are conditionally emitted so they only appear in the rendered
+manifest when the operator sets them — keeps `kubectl describe
+pod` output honest.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "meho.frontend.fullname" . }}
+  labels:
+    {{- include "meho.frontend.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "meho.frontend.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "meho.frontend.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "meho.serviceAccountName" . }}
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image.registry }}/{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5173
+              protocol: TCP
+          env:
+            - name: API_URL
+              value: {{ required "frontend.apiUrl is required (set the browser-reachable backend URL via --set, --values, or one of the starter overlays)" .Values.frontend.apiUrl | quote }}
+            - name: KEYCLOAK_URL
+              value: {{ required "frontend.keycloakUrl is required (set the browser-reachable Keycloak URL)" .Values.frontend.keycloakUrl | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ .Values.frontend.keycloakRealm | quote }}
+            - name: KEYCLOAK_CLIENT_ID
+              value: {{ .Values.frontend.keycloakClientId | quote }}
+            {{- with .Values.frontend.allowedOrigins }}
+            - name: ALLOWED_ORIGINS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.frontend.keycloakOrigin }}
+            - name: KEYCLOAK_ORIGIN
+              value: {{ . | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /config.js
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources.frontend | nindent 12 }}

@@ -1,0 +1,26 @@
+{{/*
+Frontend Service.
+
+ClusterIP — internal cluster traffic only. External exposure is
+the Ingress's job (rendered when `ingress.enabled=true`). The
+selector matches the Deployment's selector labels; both rely on
+`meho.frontend.selectorLabels` to stay aligned forever.
+
+Service port 80 is the conventional in-cluster HTTP port; the
+container itself listens on 5173 via the named target `http`.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "meho.frontend.fullname" . }}
+  labels:
+    {{- include "meho.frontend.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "meho.frontend.selectorLabels" . | nindent 4 }}

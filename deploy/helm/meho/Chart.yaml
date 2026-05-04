@@ -28,3 +28,24 @@ keywords:
   - observability
   - kubernetes
   - diagnostic
+
+# dependencies: subcharts pulled in only when `embedded.enabled=true`.
+# Production deployments default to operator-supplied managed Postgres
+# and Redis (RDS / Cloud SQL / ElastiCache / Memorystore); the embedded
+# subcharts are evaluator-only and have no production-grade backup,
+# monitoring, or upgrade story.
+#
+# Aliases are lower-case on purpose: Bitnami subcharts derive resource
+# names from `<release>-<alias>`, and Kubernetes resource names must be
+# RFC 1123 lower-case (no upper-case letters).
+dependencies:
+  - name: postgresql
+    version: "13.4.4"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: embedded.enabled
+    alias: embeddedpostgres
+  - name: redis
+    version: "20.13.4"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: embedded.enabled
+    alias: embeddedredis

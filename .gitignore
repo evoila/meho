@@ -99,3 +99,12 @@ ui-design/
 # MkDocs build output
 # =============================================================================
 site/
+
+# =============================================================================
+# Helm — `helm dependency update` artefacts. The packaged subchart
+# archives and the resolved lockfile are reproducible from Chart.yaml
+# and the Bitnami repo; checking them in just adds binary churn and
+# couples the repo to a chart-mirror moment-in-time.
+# =============================================================================
+deploy/helm/*/charts/
+deploy/helm/*/Chart.lock

@@ -3,7 +3,7 @@
 # Builds a static SPA with Vite, served by nginx.
 # Environment variables are injected at container startup via envsubst.
 # node:20-alpine as of 2026-05-04
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
+FROM node:26-alpine@sha256:30f5a66e7265ef70aac56b4753ffa7905e54eca1084bc25503893ad8e9273f05 AS builder
 
 WORKDIR /app
 

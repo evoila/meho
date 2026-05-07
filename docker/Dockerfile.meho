@@ -5,7 +5,7 @@
 
 # --- Base stage: CPU only (no PyTorch, no GPU) ---
 # python:3.13-slim as of 2026-05-04
-FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS base
+FROM python:3.14-slim@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS base
 
 # Minimal runtime apt dependencies. No compilers / -dev headers: `uv sync
 # --frozen` installs from the lockfile against prebuilt wheels.

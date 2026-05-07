@@ -15,10 +15,11 @@ For the operator-facing image-verification doc, see
 [`docs/security.md` § Supply chain & image provenance](docs/security.md#supply-chain--image-provenance).
 
 > **First-time release on the new pipeline.** v0.1.0 is the first release
-> through the cosign-signed, public-mirrored, CHANGELOG-driven pipeline. Some
-> steps are documented as conditional ("if the Helm chart is complete") because
-> their dependent infrastructure is in flight under sibling Initiatives. Each
-> conditional carries the issue number that, when closed, lifts the condition.
+> through the cosign-signed, public-mirrored, CHANGELOG-driven pipeline.
+> Most sibling-initiative dependencies are now in place (Helm chart shipping
+> per Initiative #506; cosign signing + SBOMs per the release pipeline);
+> any remaining conditional carries the issue number that, when closed,
+> lifts the condition.
 
 ## At a glance
 
@@ -281,33 +282,29 @@ curl -fsS http://localhost:8000/health
 # Expect: 200 OK with body {"status":"ok"}
 ```
 
-### 7.2 Helm install smoke (conditional — see #526, #527, #528)
+### 7.2 Helm install smoke
 
-> **Conditional**: this section runs only when the Helm chart is complete.
-> At v0.1.0 the chart skeleton has the backend Deployment + Service
-> (#525), but frontend Deployment + Service + Ingress (#526), Postgres /
-> Redis subchart wiring (#527), and the Secret template (#528) are still
-> in flight under [Initiative #506](https://github.com/evoila-bosnia/MEHO.X/issues/506).
-> Skip until those land — the next release after that becomes the
-> first to exercise the full Helm smoke.
-
-When the chart is complete:
+The Helm chart at `deploy/helm/meho/` is shipping as of Initiative
+#506 (chart skeleton, backend + frontend templates, Postgres/Redis
+subcharts, Secret template, helm-test CI workflow, and operator
+runbook all landed). Run the smoke against a kind / minikube
+cluster:
 
 ```bash
-# Against a kind/minikube cluster
-helm install meho-test ./deploy/helm/meho \
-  -f deploy/helm/meho/values-dev.yaml \
-  --set backend.image.tag=<version> \
-  --set frontend.image.tag=<version>
+helm dependency update deploy/helm/meho
+helm install meho-test deploy/helm/meho \
+  --values deploy/helm/meho/values-dev.yaml \
+  --set image.tag=<version>
 
 kubectl rollout status deploy/meho-test-backend --timeout=5m
 kubectl rollout status deploy/meho-test-frontend --timeout=5m
-helm test meho-test
 helm uninstall meho-test
 ```
 
-A failed `helm test` or rollout stuck at "waiting for replicas" is a
-smoke failure — see step 8 (rollback) before announcing.
+A rollout stuck at "waiting for replicas" is a smoke failure — see
+step 8 (rollback) before announcing. For full operator-facing
+install / upgrade / troubleshoot procedures see
+[docs/deployment/kubernetes.md](docs/deployment/kubernetes.md).
 
 ---
 

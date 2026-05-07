@@ -32,29 +32,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# uv as a single static binary from the official image
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN groupadd -r meho --gid 1000 \
+    && useradd -r -g meho --uid 1000 --home-dir /app meho \
+    && chown meho:meho /app
+
+# uv binary lands in /bin (root-owned); meho can exec it but not modify it.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# --- Dependency layer (cached; cache-busted only by pyproject.toml / uv.lock) ---
-COPY pyproject.toml uv.lock README.md ./
+USER meho
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project \
+# --- Dependency layer (cached; cache-busted only by pyproject.toml / uv.lock) ---
+# UV_LINK_MODE=copy: avoids hardlink fallback into the cache mount and ensures
+# /app/.venv is a self-contained tree owned by meho, not symlinks into /root/.
+COPY --chown=meho:meho pyproject.toml uv.lock README.md ./
+
+RUN --mount=type=cache,target=/app/.cache/uv,uid=1000,gid=1000 \
+    UV_LINK_MODE=copy uv sync --frozen --no-install-project \
       $([ "$INCLUDE_DOCLING" = "true" ] && echo "--group docling-group") \
       $([ "$CUDA_ENABLED"    = "true" ] && echo "--group torch-group")
 
 # --- Project layer (cache-busted by source changes) ---
-COPY meho_app/ ./meho_app/
-COPY config/   ./config/
-COPY scripts/  ./scripts/
-COPY tests/    ./tests/
+COPY --chown=meho:meho meho_app/ ./meho_app/
+COPY --chown=meho:meho config/   ./config/
+COPY --chown=meho:meho scripts/  ./scripts/
+COPY --chown=meho:meho tests/    ./tests/
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen \
+RUN --mount=type=cache,target=/app/.cache/uv,uid=1000,gid=1000 \
+    UV_LINK_MODE=copy uv sync --frozen \
       $([ "$INCLUDE_DOCLING" = "true" ] && echo "--group docling-group") \
       $([ "$CUDA_ENABLED"    = "true" ] && echo "--group torch-group")
 
-# Shared entrypoint: runs migrations then execs CMD
+# Shared entrypoint: runs migrations then execs CMD.
+# Owned by root (mode 755) intentionally — part of the image, not runtime state.
+USER root
 COPY docker/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 ENTRYPOINT ["/docker-entrypoint.sh"]
@@ -67,6 +80,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -fsS http://localhost:8000/health || exit 1
 
+USER meho
 CMD ["uv", "run", "uvicorn", "meho_app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 
@@ -79,12 +93,15 @@ CMD ["uv", "run", "uvicorn", "meho_app.main:app", "--host", "0.0.0.0", "--port",
 # makes live reload actually pick up edits.
 FROM base AS debug
 
+# base ends with USER root (entrypoint copy). Debug keeps root for live
+# volume-mount editing and debugpy attachment — do not set USER meho here.
+
 # --inexact preserves any heavy groups installed in `base` when the image
 # was built with --build-arg INCLUDE_DOCLING=true / CUDA_ENABLED=true.
 # Without it, `uv sync --group dev` would reconcile the venv to exactly
 # the `dev` group and drop docling/torch from the debug image.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --group dev --inexact
+RUN --mount=type=cache,target=/app/.cache/uv,uid=1000,gid=1000 \
+    UV_LINK_MODE=copy uv sync --frozen --group dev --inexact
 
 EXPOSE 8000 5678
 

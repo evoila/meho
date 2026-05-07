@@ -4,6 +4,8 @@
 
 This guide covers running MEHO in Docker for development and testing. MEHO ships as a Docker Compose stack with a unified backend service, React frontend, and supporting infrastructure (PostgreSQL, Redis, MinIO, Keycloak, Seq).
 
+> **Deploying on Kubernetes?** Skip to [deployment/kubernetes.md](deployment/kubernetes.md) — the operator runbook for the Helm chart at `deploy/helm/meho/`, covering install, license activation, upgrade, and troubleshooting.
+
 > **What changed in Goal #294.** The nine per-module Alembic trees were merged into a single tree at `meho_app/alembic/`. `docker-compose.yml` is now an authoritative base file with two thin overrides (`docker-compose.override.yml` for development, `docker-compose.test.yml` for integration tests). The bash `dev-env.sh` wrapper has been replaced by a Typer CLI shipped with the wheel as `meho-dev`. `scripts/dev-env.sh` is kept as a thin compatibility shim that delegates to `meho-dev`.
 
 ## Prerequisites

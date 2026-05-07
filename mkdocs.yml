@@ -97,7 +97,9 @@ nav:
   - Knowledge: knowledge.md
   - Trust & Safety: trust-and-safety.md
   - Security: security.md
-  - Deployment: deployment.md
+  - Deployment:
+    - Docker Compose: deployment.md
+    - Kubernetes: deployment/kubernetes.md
   - API Reference: api-reference.md
   - Troubleshooting: troubleshooting.md
   - Roadmap: roadmap.md

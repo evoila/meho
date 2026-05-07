@@ -1,17 +1,13 @@
-# ==================================================================================
-# MEHO Docker Compose Configuration (Community Edition Default)
-#
 # Quick start:
-#   docker compose up              # Starts full community stack (no .env needed)
-#   ./scripts/dev-env.sh up        # Development mode (runs migrations)
+#   cp env.example .env                            # copy config template
+#   ./scripts/generate-encryption-key.sh >> .env   # generate CREDENTIAL_ENCRYPTION_KEY
+#   docker compose up              # Recommended: Voyage embeddings path
+#   docker compose --profile tei up   # Fallback: local TEI embeddings (x86_64 or Rosetta)
+#
+# ./scripts/dev-env.sh up auto-activates the tei profile when VOYAGE_API_KEY is not set.
+# The README presents the two compose commands explicitly so both paths work without reading dev-env.sh.
 #
 # Default credentials: admin / admin (change immediately in production!)
-# Set ANTHROPIC_API_KEY in .env to enable LLM features.
-#
-# TEI sidecars (bge-m3 embeddings + bge-reranker-v2-m3) require the "tei" profile.
-# dev-env.sh auto-activates this profile only when VOYAGE_API_KEY is not set.
-# Manual: docker compose --profile tei up
-# ==================================================================================
 
 name: meho  # Explicit project name prevents meho/mehox confusion
 
@@ -20,7 +16,7 @@ x-common-env: &common-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}  # Optional: required only for MEHO_LLM_PROVIDER=anthropic
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}  # Optional: required only for MEHO_LLM_PROVIDER=openai
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}  # Optional: required only for MEHO_LLM_PROVIDER=ollama
-  VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}  # Optional: set for Voyage AI enterprise embeddings
+  VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}  # Recommended: set for Voyage AI embeddings (omit to use local TEI fallback)
   # No default on purpose. Generate a fresh key with:
   #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # then export it as CREDENTIAL_ENCRYPTION_KEY (or put it in .env).
@@ -258,7 +254,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ${HF_HOME:-~/.cache/huggingface}:/app/.cache/huggingface
     environment:
       <<: *common-env
       DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
@@ -342,4 +338,3 @@ volumes:
 networks:
   meho-network:
     driver: bridge
-

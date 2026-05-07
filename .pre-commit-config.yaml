@@ -44,10 +44,27 @@ repos:
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
+      # Default safe YAML check for everything except files that carry
+      # custom YAML tags requiring --unsafe (mkdocs.yml's
+      # `!!python/name:...`, docker-compose.test.yml's Compose `!reset`)
+      # and Helm templates (`{{ ... }}` directives that fail strict YAML
+      # parsing — `helm lint` covers them in CI via
+      # .github/workflows/helm-test.yml).
       - id: check-yaml
-        # Helm templates embed `{{ ... }}` directives that fail strict YAML
-        # parsing. `helm lint` covers them in CI (#529).
-        exclude: '^deploy/helm/.*/templates/.*\.ya?ml$'
+        alias: check-yaml-strict
+        exclude: '^(mkdocs\.yml|docker-compose\.test\.yml|deploy/helm/.*/templates/.*\.ya?ml)$'
+      # Scoped --unsafe pass for the two files that legitimately carry
+      # custom YAML tags: mkdocs.yml
+      # (`!!python/name:pymdownx.superfences.fence_code_format` for
+      # Mermaid superfences) and docker-compose.test.yml (Compose v2
+      # `!reset` tag for dropping inherited service volumes). Scope is
+      # narrowed via `files:` so the broader repo keeps the safe
+      # parser; --unsafe would otherwise allow arbitrary Python object
+      # construction across any YAML the hook touches.
+      - id: check-yaml
+        alias: check-yaml-unsafe
+        args: [--unsafe]
+        files: '^(mkdocs\.yml|docker-compose\.test\.yml)$'
       - id: check-json
       - id: check-added-large-files
         args: [--maxkb=1000]
@@ -140,3 +157,10 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-push]
+
+      - id: check-action-pins
+        name: GitHub Actions SHA pin check
+        entry: bash scripts/check-action-pins.sh
+        language: system
+        files: '^\.github/workflows/.*\.ya?ml$'
+        pass_filenames: false

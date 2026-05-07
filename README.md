@@ -24,13 +24,36 @@ Think Claude Code, but instead of reasoning across files in a codebase, MEHO rea
 
 ## Quick Start
 
-**Prerequisites:** Docker and Docker Compose, plus an LLM API key (Anthropic recommended; OpenAI and Ollama also supported).
+**Prerequisites:** Docker and Docker Compose, an Anthropic API key (or OpenAI/Ollama), and — for the recommended path — a [Voyage AI API key](https://www.voyageai.com/).
+
+**Hardware support.** MEHO runs natively on x86_64 and arm64 (Apple Silicon, ARM Linux). The recommended Voyage path works on any hardware. The local-TEI fallback path uses an x86_64-only image that runs under Rosetta 2 emulation on Apple Silicon — it works but first boot is noticeably slower. See [docs/troubleshooting.md](docs/troubleshooting.md#arm64--apple-silicon-first-run-issues) for details.
+
+**One-time setup** (do this once, then pick a path below):
 
 ```bash
 git clone https://github.com/evoila/meho.git
 cd meho
-cp env.example .env                       # add your LLM API key + run scripts/generate-encryption-key.sh
-docker compose up                         # base + auto-loaded docker-compose.override.yml
+cp env.example .env
+./scripts/generate-encryption-key.sh >> .env   # appends CREDENTIAL_ENCRYPTION_KEY
+./scripts/preflight.sh                          # verify host and repo state
+```
+
+### Path 1: Voyage (recommended)
+
+Works on any hardware, fastest first run. Requires a Voyage AI API key.
+
+```bash
+# Edit .env: set ANTHROPIC_API_KEY and VOYAGE_API_KEY
+docker compose up
+```
+
+### Path 2: Fully local (fallback)
+
+No Voyage account required. Embeddings run locally via a TEI sidecar. First boot downloads ~2 GB of model weights. On Apple Silicon, runs under Rosetta 2 emulation.
+
+```bash
+# Edit .env: set ANTHROPIC_API_KEY
+docker compose --profile tei up
 ```
 
 Open [http://localhost:5173](http://localhost:5173) and start investigating.
@@ -97,7 +120,7 @@ Each connector provides typed operations with trust classification (READ/WRITE/D
 | **Cache** | Redis |
 | **Auth** | Keycloak OIDC with JWT validation |
 | **Topology** | React Flow + elkjs layout engine |
-| **Embeddings** | Local TEI (bge-m3) by default, Voyage AI optional |
+| **Embeddings** | Voyage AI (recommended) with local TEI (bge-m3) fallback |
 | **Storage** | MinIO (S3-compatible) for document uploads |
 
 ## LLM Providers
@@ -120,7 +143,7 @@ See `env.example` for the full configuration reference.
 - **Trust model** -- three-tier operation classification (READ/WRITE/DESTRUCTIVE) with approval workflows and audit trail
 - **Dual-mode chat** -- Ask mode for knowledge base Q&A, Agent mode for cross-system investigation
 - **Three-tier knowledge** -- global, connector-type, and connector-instance scoped knowledge with hybrid search (BM25 + semantic) and reranking
-- **Local embeddings** -- TEI sidecar with bge-m3 runs locally by default. No cloud embedding service required.
+- **Local embedding fallback** -- TEI sidecar with bge-m3 runs locally when no Voyage key is configured.
 
 ## Community vs Enterprise
 

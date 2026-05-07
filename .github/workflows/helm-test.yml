@@ -1,0 +1,192 @@
+# Helm chart smoke test.
+#
+# Renders deploy/helm/meho/ under both supported value-overlay paths
+# (external Postgres/Redis and embedded Bitnami subcharts) and validates
+# the resulting manifests against the Kubernetes API schema. The
+# required-fail job locks the contract that helm template aborts when a
+# mandatory value is missing — protects against accidental removal of a
+# `required` gate in a chart template.
+#
+# kubeconform is the maintainer-recommended replacement for the
+# deprecated kubeval (https://github.com/instrumenta/kubeval — archived
+# 2021). Same `-strict` / `-summary` flag surface; ships current
+# K8s API schemas kubeval has not tracked since 2021.
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2026 evoila Group
+
+name: Helm chart smoke test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm-test.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm-test.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HELM_VERSION: v3.20.2
+  KUBECONFORM_VERSION: v0.7.0
+
+jobs:
+  helm-lint:
+    name: helm lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm dependency update
+        working-directory: deploy/helm/meho
+        run: helm dependency update .
+
+      - name: helm lint
+        working-directory: deploy/helm/meho
+        run: helm lint .
+
+  helm-template-external:
+    name: helm template — external services path
+    runs-on: ubuntu-latest
+    needs: helm-lint
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm dependency update
+        working-directory: deploy/helm/meho
+        run: helm dependency update .
+
+      - name: Render with external services
+        working-directory: deploy/helm/meho
+        # frontend.apiUrl / frontend.keycloakUrl / ingress.host are
+        # `required` in the chart templates; the placeholder values
+        # match what the chart's own error messages document.
+        run: |
+          helm template meho . \
+            --set postgres.external.dsn=postgresql+asyncpg://user:pass@host:5432/db \
+            --set redis.external.url=redis://host:6379 \
+            --set secrets.create=true \
+            --set secrets.jwtSecretKey=test-jwt-32-chars-minimum-length \
+            --set secrets.credentialEncryptionKey=test-enc-32-chars-minimum-length \
+            --set frontend.apiUrl=https://meho.example.com \
+            --set frontend.keycloakUrl=https://keycloak.example.com \
+            --set ingress.host=meho.example.com \
+            > /tmp/manifests.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz kubeconform
+          ./kubeconform -v
+
+      - name: Validate with kubeconform
+        run: ./kubeconform -strict -summary /tmp/manifests.yaml
+
+  helm-template-embedded:
+    name: helm template — embedded services path
+    runs-on: ubuntu-latest
+    needs: helm-lint
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm dependency update
+        working-directory: deploy/helm/meho
+        run: helm dependency update .
+
+      - name: Render with embedded services
+        working-directory: deploy/helm/meho
+        run: |
+          helm template meho . \
+            --set embedded.enabled=true \
+            --set secrets.create=true \
+            --set secrets.jwtSecretKey=test-jwt-32-chars-minimum-length \
+            --set secrets.credentialEncryptionKey=test-enc-32-chars-minimum-length \
+            --set frontend.apiUrl=https://meho.example.com \
+            --set frontend.keycloakUrl=https://keycloak.example.com \
+            --set ingress.host=meho.example.com \
+            > /tmp/manifests.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz kubeconform
+          ./kubeconform -v
+
+      - name: Validate with kubeconform
+        run: ./kubeconform -strict -summary /tmp/manifests.yaml
+
+  helm-template-required-fail:
+    name: helm template — required values fail-loud check
+    runs-on: ubuntu-latest
+    needs: helm-lint
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm dependency update
+        working-directory: deploy/helm/meho
+        run: helm dependency update .
+
+      - name: Confirm template fails with a required-value error
+        # No --set flags — every `required` gate in the chart should
+        # short-circuit. Verify (a) the render fails AND (b) the failure
+        # mentions a required-value error string ("is required" / "must
+        # be set" — the chart's `required`-helper messages all use one
+        # of these phrasings). Exit-code-only checks are too loose: an
+        # unrelated rendering error (broken template syntax, missing
+        # helper include, dependency resolution failure) would also
+        # trip a bare exit-code guard, leaving the workflow green on a
+        # chart that's actually broken in a completely different way.
+        working-directory: deploy/helm/meho
+        run: |
+          set +e
+          output=$(helm template meho . 2>&1)
+          ec=$?
+          set -e
+          if [ "$ec" -eq 0 ]; then
+            echo "::error::helm template should have failed without required values (frontend.apiUrl, ingress.host, secrets.*, postgres.external.dsn, ...). A required-value gate has been silently removed from the chart."
+            exit 1
+          fi
+          if ! grep -qE "is required|must be set" <<< "$output"; then
+            echo "::error::helm template failed (exit $ec), but not because of a required-value gate. Output:"
+            echo "$output"
+            exit 1
+          fi
+          echo "Confirmed: required-value gate fired"

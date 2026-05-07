@@ -82,7 +82,7 @@ a release across all four is a manual maintainer responsibility today (see
   or `debug`. Build args: `INCLUDE_DOCLING=true|false` (heavy ML deps),
   `CUDA_ENABLED=true|false` (PyTorch alone), `TARGETBASE=base-cpu|base-gpu`.
 - [docker/Dockerfile.meho-frontend](../../docker/Dockerfile.meho-frontend) — Vite SPA
-  built by `node:20-alpine`, served by `nginx:alpine`. Two envsubst calls at startup
+  built by `node:20-alpine`, served by `nginxinc/nginx-unprivileged:alpine` (runs as `nginx`, uid 101). Two envsubst calls at startup
   process `nginx.conf.template` (CORS / Keycloak origin) and `config.js.template`
   (frontend runtime config — `API_URL`, `KEYCLOAK_*`). The `config.js` runtime-config
   cache contract is documented in [first-run-experience.md](first-run-experience.md).
@@ -192,9 +192,17 @@ a release across all four is a manual maintainer responsibility today (see
   `CREDENTIAL_ENCRYPTION_KEY`, optional `MEHO_LICENSE_KEY`, plus any
   `KEYCLOAK_*` keys the operator's external Secret supplies; `DATABASE_URL`
   and `REDIS_URL` are NOT consumed from it (the chart templates them
-  explicitly into the backend Deployment, see above). Helm-test CI workflow
-  (#529) and the operator runbook (#530) are still pending under Initiative
-  #506.
+  explicitly into the backend Deployment, see above). The helm-test CI
+  workflow ships in [.github/workflows/helm-test.yml](../../.github/workflows/helm-test.yml)
+  — `helm lint` plus `helm template` against both the external and
+  embedded value paths, validated with `kubeconform -strict` (the
+  maintained replacement for the deprecated kubeval), plus a
+  required-fail job that locks in the chart's `required`-value contract.
+  The operator runbook lives at
+  [docs/deployment/kubernetes.md](../deployment/kubernetes.md) — install,
+  license, upgrade, and troubleshooting flows for self-hosters running
+  the chart against a real cluster.
+
 ## Control flow
 
 ### Quality gates (per push to main / per PR)
@@ -856,13 +864,16 @@ issues are filed.
   enterprise tokens against the production Ed25519 key with fail-closed
   audit logging (see [Issuance CLI](#issuance-cli) above).
 - No `RELEASING.md` runbook exists for maintainers cutting a release.
-- Helm chart at `deploy/helm/meho/` is partial — backend Deployment +
-  Service + chart-managed Secret, frontend Deployment + Service +
-  (optional) Ingress, and Postgres/Redis subchart wiring all exist;
-  helm-test CI workflow (#529) and the operator runbook (#530) remain
-  pending under Initiative #506.
-- The `Dockerfile.meho` and `Dockerfile.meho-frontend` images run as root.
-- Several base images and GitHub Actions are pinned by tag, not by digest.
+- Helm chart at `deploy/helm/meho/` covers backend + frontend
+  Deployment / Service / (optional) Ingress, the chart-managed
+  backend Secret, the Postgres/Redis subchart wiring, the helm-test
+  CI workflow, and an operator runbook at
+  [docs/deployment/kubernetes.md](../deployment/kubernetes.md).
+  Outstanding chart work (HA topology, Prometheus annotations,
+  multi-cluster, ChartMuseum / OCI publication) is deferred to v0.2;
+  Initiative #506 wraps once the runbook PR lands.
+- ~~The `Dockerfile.meho` and `Dockerfile.meho-frontend` images run as root.~~ Resolved by #531: backend runs as `meho` (uid 1000), frontend on `nginxinc/nginx-unprivileged` (nginx uid 101).
+- ~~GitHub Actions steps are pinned by tag, not by SHA.~~ Resolved by #537: all actions in `.github/workflows/` are now pinned to full commit SHAs; a pre-commit hook and CI job enforce the invariant going forward. Container image digest pinning (Dockerfile base images, workflow `image:` fields) is tracked separately under #532.
 - `license-check.yml` is in WARN mode (`continue-on-error: true`); the gate does
   not actually block license-incompatible dependencies.
 - The workflow filename `license-check.yml` is ambiguous against the customer-license
@@ -908,6 +919,80 @@ calling `KeycloakOpenID` methods.
 This pattern — reachability evidence + revisit triggers — is the project standard
 for any pip-audit suppression and should be matched in any future addition.
 
+## Container images
+
+MEHO ships two images, both built from the repo root as the Docker build context.
+
+| Image | Dockerfile | Default port |
+|---|---|---|
+| `meho` (backend) | `docker/Dockerfile.meho` | 8000 |
+| `meho-frontend` | `docker/Dockerfile.meho-frontend` | 5173 |
+
+### Multi-stage backend build (`Dockerfile.meho`)
+
+The backend Dockerfile has three named stages:
+
+- **`base`** — installs system deps, creates the `meho` OS user (uid/gid 1000), installs Python deps via `uv sync --frozen`, copies source, runs the shared entrypoint setup.
+- **`prod`** (default target) — inherits `base`, sets `USER meho`, exposes 8000, declares the healthcheck and uvicorn CMD.
+- **`debug`** — inherits `base`, adds the `dev` dependency group, exposes 8000+5678 for debugpy. Runs as root to allow live volume-mount editing.
+
+Build-time ARGs control optional heavy groups:
+
+```bash
+docker build --build-arg INCLUDE_DOCLING=true -f docker/Dockerfile.meho --target prod -t meho:latest .
+docker build --build-arg CUDA_ENABLED=true    -f docker/Dockerfile.meho --target prod -t meho:gpu .
+```
+
+### Non-root user (backend)
+
+The `meho` OS user (uid 1000, gid 1000) is created in the `base` stage. `USER meho` is set immediately after user creation — before any `uv sync` — so the venv is created meho-owned from the start. No `chown -R` is needed; all COPY instructions use `--chown=meho:meho`. The uv cache mount uses `uid=1000,gid=1000` so meho can write to it. `UV_LINK_MODE=copy` ensures the venv is a self-contained tree, not hardlinks back into the cache. The `prod` stage sets `USER meho` again before the CMD (the shared entrypoint setup in `base` temporarily switches back to root to copy and chmod the entrypoint script).
+
+Port 8000 is an unprivileged port (>1024), so the non-root user can bind it without capability grants.
+
+The entrypoint at `/docker-entrypoint.sh` is owned by root (mode 755); the `meho` user can execute but not modify it. This is intentional — the entrypoint is part of the image, not runtime state.
+
+HuggingFace model cache: the user's home directory is set to `/app`, so the default `~/.cache/huggingface` resolves to `/app/.cache/huggingface`. Mount the host HF cache there:
+
+```yaml
+volumes:
+  - ${HF_HOME:-~/.cache/huggingface}:/app/.cache/huggingface
+```
+
+The `debug` stage runs as root (`HOME=/root`), so `docker-compose.debug.yml` correctly mounts the cache at `/root/.cache/huggingface`. This is intentional — the debug stage keeps root to allow live volume-mount editing and debugpy attachment.
+
+### Frontend image (`Dockerfile.meho-frontend`)
+
+Two-stage build: Node 20 Alpine builder → `nginxinc/nginx-unprivileged:alpine` production stage.
+
+The unprivileged nginx image runs as the `nginx` user (uid 101). Because the startup CMD writes to `/etc/nginx/conf.d/default.conf` and `/usr/share/nginx/html/config.js` via `envsubst` redirections, all files copied into those directories carry `--chown=nginx:nginx` in the `COPY` instructions.
+
+The nginx configuration (`nginx.conf`) explicitly listens on port 5173. This overrides the nginx-unprivileged image's built-in default of 8080 — no port-mapping change is required in `docker-compose.yml`.
+
+## docker-compose (local development)
+
+`docker-compose.yml` at the repo root starts the full stack. Key port mappings:
+
+| Service | Host port | Container port |
+|---|---|---|
+| Backend | 8000 | 8000 |
+| Frontend | 5173 | 5173 |
+| Keycloak | 8080 | 8080 |
+| PostgreSQL | 5432 | 5432 |
+| Redis | 6379 | 6379 |
+| MinIO API | 9000 | 9000 |
+| Seq (observability) | 5341 | 80 |
+
+## Known container hardening items
+
+The following hardening items are tracked in Initiative #507:
+
+- [ ] Digest-pin all base images (Task #532)
+- [x] Add `PYTHONDONTWRITEBYTECODE=1` and `PYTHONUNBUFFERED=1` to backend image (Task #533)
+- [ ] Move frontend startup logic into `docker-frontend-entrypoint.sh` with exec-form ENTRYPOINT (Task #534)
+- [ ] Strengthen frontend HEALTHCHECK to detect unsubstituted envsubst placeholders (Task #535)
+- Read-only root filesystem (`securityContext.readOnlyRootFilesystem`) — deferred post-v0.1.0
+- Kubernetes `runAsNonRoot: true` pod spec — pending Helm chart work (sibling initiative)
+
 ## References
 
 - [public-mirror.md](public-mirror.md) — sister document; covers the orthogonal
@@ -922,3 +1007,5 @@ for any pip-audit suppression and should be matched in any future addition.
 - [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/)
 - [SLSA — Supply-chain Levels for Software Artifacts](https://slsa.dev/) — the
   framework cosign + SBOM + provenance attestations target.
+- [nginxinc/nginx-unprivileged](https://github.com/nginxinc/docker-nginx-unprivileged)
+- Initiative #507 — full container hardening scope

@@ -120,7 +120,8 @@ Each connector provides typed operations with trust classification (READ/WRITE/D
 | **Cache** | Redis |
 | **Auth** | Keycloak OIDC with JWT validation |
 | **Topology** | React Flow + elkjs layout engine |
-| **Embeddings** | Voyage AI (recommended) with local TEI (bge-m3) fallback |
+| **Embeddings** | In-process [fastembed](https://qdrant.github.io/fastembed/) (ONNX, CPU-only, MiniLM-L12 multilingual, 384-D). Single container — no sidecars, no PyTorch, no transformers. |
+| **Retrieval** | Hybrid BM25 + pgvector with reciprocal rank fusion. (Cross-encoder reranking returns when MEHO.Knowledge takes over remote retrieval.) |
 | **Storage** | MinIO (S3-compatible) for document uploads |
 
 ## LLM Providers
@@ -142,8 +143,8 @@ See `env.example` for the full configuration reference.
 - **Topology auto-discovery** -- builds a connected infrastructure graph with cross-system entity resolution via SAME_AS edges
 - **Trust model** -- three-tier operation classification (READ/WRITE/DESTRUCTIVE) with approval workflows and audit trail
 - **Dual-mode chat** -- Ask mode for knowledge base Q&A, Agent mode for cross-system investigation
-- **Three-tier knowledge** -- global, connector-type, and connector-instance scoped knowledge with hybrid search (BM25 + semantic) and reranking
-- **Local embedding fallback** -- TEI sidecar with bge-m3 runs locally when no Voyage key is configured.
+- **Three-tier knowledge** -- global, connector-type, and connector-instance scoped knowledge with hybrid search (BM25 + pgvector RRF)
+- **Local embeddings** -- in-process fastembed (ONNX, CPU-only multilingual MiniLM-L12). No sidecars, no PyTorch, no cloud embedding service.
 
 ## Community vs Enterprise
 

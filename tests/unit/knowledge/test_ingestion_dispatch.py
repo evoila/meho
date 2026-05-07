@@ -4,7 +4,7 @@
 
 Verifies that IngestionService routes documents to the ephemeral worker
 when the feature flag is enabled and page count exceeds the threshold,
-and falls back to local DoclingWrapperAdapter path otherwise.
+and falls back to the in-process lightweight converter otherwise.
 """
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ class TestImportArrowChunks:
                     },
                 )
             )
-            embeddings.append([float(i)] * 1024)
+            embeddings.append([float(i)] * 384)
 
         arrow_bytes = serialize_chunks(chunks, embeddings)
         from meho_app.worker.arrow_codec import deserialize_chunks
@@ -200,7 +200,7 @@ class TestImportArrowChunks:
         assert len(batch_arg) == 2
         _chunk_create, embedding = batch_arg[0]
         assert embedding is not None
-        assert len(embedding) == 1024
+        assert len(embedding) == 384
 
     @pytest.mark.asyncio
     async def test_import_uses_acl_from_request(self) -> None:
@@ -280,7 +280,7 @@ class TestDispatchToWorker:
 
         # Mock Arrow results download and import
         chunks = [("chunk text", {"chapter": "Ch1", "section": "S1"})]
-        embeddings = [[0.1] * 1024]
+        embeddings = [[0.1] * 384]
         arrow_bytes = serialize_chunks(chunks, embeddings)
         svc.object_storage.download_document = MagicMock(return_value=arrow_bytes)
 
@@ -329,7 +329,7 @@ class TestDispatchToWorker:
         mock_dispatcher_cls.return_value = mock_instance
 
         chunks = [("chunk", {})]
-        embeddings = [[0.0] * 1024]
+        embeddings = [[0.0] * 384]
         arrow_bytes = serialize_chunks(chunks, embeddings)
         svc.object_storage.download_document = MagicMock(return_value=arrow_bytes)
 
@@ -421,7 +421,7 @@ class TestIngestDocumentRouting:
     @pytest.mark.asyncio
     @patch("meho_app.modules.knowledge.ingestion.get_feature_flags")
     async def test_flag_off_uses_existing_path(self, mock_flags: MagicMock) -> None:
-        """When feature flag is off, ingest_document uses local DoclingWrapper path."""
+        """When feature flag is off, ingest_document uses the in-process converter."""
         mock_flags.return_value = MagicMock(ephemeral_ingestion=False)
 
         from meho_app.modules.knowledge.ingestion import IngestionService
@@ -434,14 +434,11 @@ class TestIngestDocumentRouting:
         svc.chunker = MagicMock()
         svc.metadata_extractor = MagicMock()
 
-        # Mock the DoclingWrapperAdapter
-        mock_result = MagicMock()
-        svc.docling_converter = MagicMock()
-        svc.docling_converter.convert_file_async = AsyncMock(return_value=mock_result)
-        svc.docling_converter.get_full_text = MagicMock(return_value="text")
-        svc.docling_converter.chunk_document = MagicMock(
-            return_value=[("chunk text", {"chapter": "Ch1"})]
-        )
+        mock_doc = MagicMock()
+        svc.converter = MagicMock()
+        svc.converter.convert_file = MagicMock(return_value=mock_doc)
+        svc.converter.get_full_text = MagicMock(return_value="text")
+        svc.converter.chunk_document = MagicMock(return_value=[("chunk text", {"chapter": "Ch1"})])
 
         # The _should_offload should return False, so _dispatch_to_worker should NOT be called
         svc._should_offload = MagicMock(return_value=(False, 0))

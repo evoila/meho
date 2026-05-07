@@ -160,7 +160,7 @@ def _get_knowledge_store(session: AsyncSession) -> "KnowledgeStore | None":
         from meho_app.modules.knowledge.repository import KnowledgeRepository
 
         knowledge_repo = KnowledgeRepository(session)
-        embedding_provider = get_embedding_provider()  # Voyage AI 1024D singleton
+        embedding_provider = get_embedding_provider()  # fastembed MiniLM-L12 384-D singleton
         return KnowledgeStore(
             repository=knowledge_repo,
             embedding_provider=embedding_provider,

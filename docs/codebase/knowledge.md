@@ -17,7 +17,7 @@ touching ingestion, retrieval, or the grounded-answer layer.
 Upload (REST)
   -> IngestionJob row (status=pending)
   -> background asyncio task
-     -> conversion         (Docling / lightweight converter)
+     -> conversion         (lightweight converter)
      -> markdown persist   (MinIO .md)
      -> chunking           (HierarchicalChunker | TextChunker)
      -> checkpoint         (MinIO .chunks.json)
@@ -112,11 +112,12 @@ ranked chunks. The contract, implemented in
 
 Search defaults to `score_threshold=0.0` (see
 `KnowledgeStore.search_cross_connector` and friends). The agent prefers to
-see the top-K ranked chunks with their reranker scores and decide per chunk
-whether they are relevant, rather than getting short-circuited by a hard
-similarity cutoff. When the reranker is disabled the ranker still applies an
-internal `retrieval_threshold` in `PostgresFTSHybridService`, so noise is
-filtered before results reach the API.
+see the top-K ranked chunks and decide per chunk whether they are relevant,
+rather than getting short-circuited by a hard similarity cutoff. There is no
+cross-encoder reranker in this preview path — it returns when MEHO.Knowledge
+takes over remote retrieval. RRF fusion of BM25 and vector results still
+applies an internal `retrieval_threshold` in `PostgresFTSHybridService` so
+noise is filtered before results reach the API.
 
 ## Trust and Access Control
 

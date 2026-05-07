@@ -36,20 +36,19 @@ of patience before deciding whether to continue.
 - [meho_app/modules/knowledge/embeddings.py](../../meho_app/modules/knowledge/embeddings.py) —
   the runtime embedding-provider selection lives in `get_embedding_provider()`.
 
-## Design principle: Voyage-primary, local TEI fallback
+## Design principle: in-process embeddings, no external account
 
-MEHO is built around Voyage AI as the primary embeddings provider. Voyage gives
-the fastest first run, works identically on every host architecture, and is the
-path an operator with a production budget is expected to use. The local TEI
-fallback exists for evaluators who are unwilling or unable to create a Voyage
-account — it keeps MEHO self-contained and usable offline, at the cost of
-slower first boot and limited architecture support.
+MEHO embeds text in-process via
+[fastembed](https://qdrant.github.io/fastembed/)
+(`paraphrase-multilingual-MiniLM-L12-v2`, ONNX, CPU-only, ~220 MB). No API
+key, no model-hosting account, and no GPU are needed. The model downloads from
+Hugging Face Hub into the `fastembed_cache` Docker volume on first boot and is
+reused on all subsequent boots. It runs natively on both x86_64 and arm64.
 
-This framing is asymmetric on purpose. Plan A is the path the product is built
-for; the fallback is a labeled alternative, not a default. Documentation should
-reflect the asymmetry explicitly: evaluators who follow the happy path should
-end up on Voyage, and the fallback should be surfaced as a deliberate choice
-with understood trade-offs.
+`docker compose up` is the only required command regardless of host
+architecture. The heavy ML/GPU stack (Docling, PyTorch, reranker, remote
+embedding sidecars) lives in the separately deployable MEHO.Knowledge service
+and is not part of the MEHO.X container image.
 
 ## The evaluator funnel
 
@@ -67,23 +66,12 @@ the system produces an unexpected state:
 Goal #254 is about plugging leaks at the first two stages. Everything after is
 covered by product quality, not onboarding.
 
-## The two-axis decision matrix
+## Platform support
 
-Two axes determine the correct command for an evaluator:
-
-- **Hardware**: x86_64 (Intel Mac, Linux, Windows WSL) vs arm64 (Apple
-  Silicon, ARM Linux).
-- **Provider**: Voyage (plan A, requires API key) vs fully local (uses the
-  TEI fallback, no external account).
-
-These combine into four cells:
-
-| | Voyage | Fully local |
-|---|---|---|
-| **x86_64** | Fastest path. `docker compose up` with both API keys set. | Works natively. `docker compose --profile tei up`. First boot downloads ~2 GB of model weights. |
-| **arm64** | Identical to x86_64. Voyage is architecture-agnostic. | Works under Rosetta 2 emulation. TEI image is x86_64-only today; Rosetta translates it transparently but model loading is slower and memory overhead is higher. Native arm64 TEI is deferred to a post-launch follow-up. |
-
-The README should expose this matrix explicitly so evaluators can self-select.
+fastembed ships native ONNX runtimes for both x86_64 and arm64. Every image
+in the compose stack is multi-arch. `docker compose up` is the single command
+on all platforms — no profile flag, no architecture-specific step, no
+emulation required.
 
 ## What `docker compose up` does today
 
@@ -92,68 +80,34 @@ The default compose profile starts every service that does **not** declare a
 
 - **Started by default**: `postgres`, `minio`, `redis`, `keycloak`, `seq`,
   `meho`, `meho-frontend`.
-- **Skipped by default**: `tei-embeddings` (`profiles: ["tei"]`),
-  `tei-reranker` (`profiles: ["tei"]`), `pgadmin` (`profiles: ["tools"]`),
+- **Skipped by default**: `pgadmin` (`profiles: ["tools"]`),
   `ollama` (`profiles: ["ollama"]`).
 
-An evaluator who runs the literal `docker compose up` command with no Voyage
-key gets a stack where the embeddings backend is not running. The backend
-auto-selects TEI based on the absence of `VOYAGE_API_KEY`, tries to reach
-`http://tei-embeddings:80`, and fails on the first knowledge query with a
-connection-refused error surfaced as a generic backend 500.
-
-The path that works today without tribal knowledge is either of:
-
-- `docker compose up` with `VOYAGE_API_KEY` set in `.env`.
-- `docker compose --profile tei up` with only `ANTHROPIC_API_KEY` set.
-
-The README should present these as two explicitly labeled paths rather than
-implying a single "just run compose up" command.
+`docker compose up` is the only path. Embeddings run in-process via
+[fastembed](https://qdrant.github.io/fastembed/) (ONNX, CPU-only). The
+default model — `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+— is ~220 MB and is downloaded from Hugging Face Hub on first use into the
+`fastembed_cache` Docker volume; subsequent boots skip the download.
 
 ## Provider selection at runtime
 
 `get_embedding_provider()` in
 [meho_app/modules/knowledge/embeddings.py](../../meho_app/modules/knowledge/embeddings.py)
-selects a provider once per process and caches the result:
-
-- If `VOYAGE_API_KEY` is set in config → `VoyageAIEmbeddings` is instantiated
-  with the key and the `EMBEDDING_MODEL` name (`voyage-4-large` by default).
-- Otherwise → `TEIEmbeddings` is instantiated against `TEI_EMBEDDING_URL`
-  (which defaults to `http://tei-embeddings:80` inside the compose network).
-
-This logic is correct and stable. The failure mode in the "default profile"
-case is not that selection is broken — it is that the TEI service itself is
-never started, so the selected `TEIEmbeddings` client has nothing to talk to.
+returns a singleton `FastEmbedEmbeddings` instance configured from
+`config.fastembed_embedding_model` and `config.fastembed_cache_dir`. The
+underlying `fastembed.TextEmbedding` is lazy-loaded on first embed call
+(single-flight via an `asyncio.Lock`) and lives in the API process for the
+rest of the run. There is no separate reranker provider in this preview
+path — cross-encoder reranking returns when MEHO.Knowledge takes over
+remote retrieval.
 
 ## Architecture support
 
-Every base image in the compose stack ships native arm64 **except** the TEI
-embedding/reranker image:
-
-| Service | Image | Native arm64? |
-|---|---|---|
-| postgres | `pgvector/pgvector:pg15` | yes |
-| minio | `minio/minio:latest` | yes |
-| redis | `redis/redis-stack-server:latest` | yes |
-| keycloak | `quay.io/keycloak/keycloak:24.0` | yes |
-| seq | `datalust/seq:latest` | yes |
-| pgadmin | `dpage/pgadmin4:latest` | yes |
-| ollama | `ollama/ollama:latest` | yes |
-| **tei-embeddings / tei-reranker** | `ghcr.io/huggingface/text-embeddings-inference:cpu-1.9` | **no — x86_64 only** |
-
-The arm64 story is entirely about one image. The rest of the stack runs
-natively on Apple Silicon without special configuration. TEI is pulled as an
-amd64 image and executed under Docker Desktop's Rosetta 2 emulation on arm64
-Macs. Rosetta is **disabled by default** in recent Docker Desktop releases —
-evaluators must enable it in Settings > General > "Use Rosetta for x86_64/amd64
-emulation on Apple Silicon" before the TEI profile will run. The
-`docker-compose.yml` TEI service blocks declare `platform: linux/amd64`
-explicitly so Docker pulls the correct manifest on arm64 hosts (without this
-directive, `docker compose --profile tei up` fails immediately with
-`no matching manifest for linux/arm64/v8`). Measured baselines — first-boot
-time, steady-state latency, peak memory — live in
-[docs/development/arm64-notes.md](../development/arm64-notes.md); the
-troubleshooting doc covers the Rosetta enablement flow.
+Every image in the compose stack ships native arm64. The MEHO API image is
+built locally by Compose from `docker/Dockerfile.meho` and inherits the
+host architecture from BuildKit automatically — native arm64 on an arm64
+host. There are no x86_64-only sidecars; the previous `tei-embeddings` /
+`tei-reranker` containers are gone, replaced by in-process fastembed.
 
 `meho` and `meho-frontend` are built locally by Compose from the unified
 `docker/Dockerfile.meho` (backend) and `docker/Dockerfile.meho-frontend`

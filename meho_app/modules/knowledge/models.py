@@ -60,8 +60,8 @@ class KnowledgeChunkModel(Base):
     tags = Column(JSONB, nullable=False, default=list)  # List of tag strings
     source_uri = Column(Text, nullable=True)  # e.g., s3://bucket/doc.pdf#page=3
 
-    # Vector embedding for semantic search (1024 dimensions for Voyage AI voyage-4-large)
-    embedding = Column(Vector(1024), nullable=True)  # Populated during ingestion
+    # Vector embedding for semantic search (384-dim, fastembed MiniLM-L12 multilingual)
+    embedding = Column(Vector(384), nullable=True)  # Populated during ingestion
 
     # Rich metadata for enhanced retrieval
     search_metadata = Column(

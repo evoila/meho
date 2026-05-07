@@ -163,7 +163,7 @@ check_host_arch() {
       pass "Host arch: ${arch}"
       if [[ "$kernel" == "Darwin" ]]; then
         warn "Cannot programmatically verify Rosetta 2 is enabled in Docker Desktop" \
-             "If using TEI fallback (no VOYAGE_API_KEY), enable: Docker Desktop > Settings > General > 'Use Rosetta for x86_64/amd64 emulation on Apple Silicon'. See docs/troubleshooting.md."
+             "TEI sidecars are amd64; enable Docker Desktop > Settings > General > 'Use Rosetta for x86_64/amd64 emulation on Apple Silicon'. See docs/troubleshooting.md."
       fi
       ;;
     x86_64|amd64)
@@ -339,22 +339,8 @@ check_env_encryption_key() {
 }
 
 check_env_provider_path() {
-  local voyage
-  voyage=$(env_value "VOYAGE_API_KEY")
-  # Voyage keys are ~40+ chars; same placeholder guard as the LLM providers
-  # so `VOYAGE_API_KEY=your-voyage-key-here` doesn't silently claim the Voyage
-  # path and disable the TEI port checks.
-  if ! is_placeholder_value "$voyage" 20; then
-    info "Embeddings path: Voyage AI (VOYAGE_API_KEY set)"
-  else
-    if [[ -n "$voyage" ]]; then
-      warn "VOYAGE_API_KEY is set but looks like a placeholder — treating as unset" \
-           "Embeddings will fall back to local TEI. Set a real key or clear the variable."
-    fi
-    info "Embeddings path: local TEI fallback (no VOYAGE_API_KEY)"
-    info "  → Requires: docker compose --profile tei up  (or use ./scripts/dev-env.sh)"
-    NEED_TEI_PORTS=1
-  fi
+  info "Embeddings path: local TEI sidecars (bge-m3 + bge-reranker-v2-m3)"
+  NEED_TEI_PORTS=1
 }
 
 # --- Port checks --------------------------------------------------------------

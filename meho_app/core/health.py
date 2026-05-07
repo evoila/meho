@@ -268,7 +268,7 @@ _CONFIG_GROUPS = {
         "critical": True,
     },
     "Embeddings": {
-        "vars": ["voyage_api_key"],
+        "vars": ["fastembed_embedding_model", "fastembed_cache_dir"],
         "critical": False,
     },
     "Storage": {

@@ -57,7 +57,7 @@ MODEL_TYPE_PATTERNS: dict[str, ModelType] = {
     "gemma2": "instruct",
     "mistral": "instruct",
     "mixtral": "instruct",
-    # Embeddings handled via separate Voyage AI pipeline, not this config
+    # Embeddings handled via fastembed in-process (no sidecar), not this config
 }
 
 

@@ -65,8 +65,11 @@ meho_app/
       kubernetes/        # Kubernetes connector
       ...
     knowledge/           # Knowledge base
-      document_converter.py  # Docling-based document processing
-      lightweight_converter.py  # CPU-only pipeline (pymupdf4llm, pdfplumber, RapidOCR)
+      lightweight_converter.py  # CPU-only converter (pymupdf4llm, pdfplumber, RapidOCR)
+      chunking.py        # Heading-aware Markdown chunker (512w / 64w overlap)
+      bm25_service.py    # Redis-cached BM25 lexical retrieval
+      hybrid_search.py   # BM25 + pgvector RRF fusion + cross-encoder rerank
+      embeddings.py      # In-process fastembed (ONNX, MiniLM-L12 multilingual, 384-D)
       ingestion.py       # Ingestion orchestration
       knowledge_store.py # Chunk storage and hybrid search
     topology/            # Entity graph and cross-system correlation
@@ -88,7 +91,6 @@ Each module under `modules/` is self-contained. Optional modules can be disabled
 | `MEHO_FEATURE_MCP_CLIENT` | `true` | MCP client connector |
 | `MEHO_FEATURE_MCP_SERVER` | `true` | MCP server endpoint |
 | `MEHO_FEATURE_EPHEMERAL_INGESTION` | `false` | Ephemeral ingestion workers |
-| `MEHO_FEATURE_USE_DOCLING` | `true` | ML-powered document ingestion (false = CPU-only) |
 
 Feature flags are defined in [`meho_app/core/feature_flags.py`](../../meho_app/core/feature_flags.py) using `pydantic-settings`. They are immutable after startup -- a restart is required to change them.
 
@@ -219,29 +221,27 @@ The knowledge system lets operators upload documents (PDF, DOCX, HTML) that beco
 
 ```mermaid
 flowchart TD
-    Upload[Document Upload] --> Convert[Docling Converter]
-    Convert --> Filter[TOC / Header / Footer Filtering]
-    Filter --> Chunk[HybridChunker]
-    Chunk --> Enrich[Heading Path Enrichment]
-    Enrich --> Summary[Document Summary Generation]
+    Upload[Document Upload] --> Convert[Lightweight Converter]
+    Convert --> Chunk[Heading-aware Chunker]
+    Chunk --> Summary[Document Summary Generation]
     Summary --> Prefix[Chunk Prefix: connector context + summary]
-    Prefix --> Embed[Embedding + Storage]
-    Embed --> Search[Hybrid Search: Semantic + BM25]
+    Prefix --> Embed[fastembed MiniLM-L12 Embedding + Storage]
+    Embed --> Search[Hybrid Search: BM25 + pgvector RRF]
 ```
 
-The pipeline, implemented in [`meho_app/modules/knowledge/document_converter.py`](../../meho_app/modules/knowledge/document_converter.py) and [`meho_app/modules/knowledge/ingestion.py`](../../meho_app/modules/knowledge/ingestion.py):
+The pipeline, implemented in [`meho_app/modules/knowledge/lightweight_converter.py`](../../meho_app/modules/knowledge/lightweight_converter.py), [`meho_app/modules/knowledge/chunking.py`](../../meho_app/modules/knowledge/chunking.py), and [`meho_app/modules/knowledge/ingestion.py`](../../meho_app/modules/knowledge/ingestion.py):
 
-1. **Docling conversion:** IBM Docling parses the document into a structured representation with element-type labels (headings, paragraphs, tables, TOC entries, page headers/footers).
+1. **Lightweight conversion:** PDFs go through `pymupdf4llm` (text + layout) and `pdfplumber` (table extraction); scanned pages are OCR'd with `rapidocr-onnxruntime`. DOCX uses `python-docx`, HTML uses BeautifulSoup. No PyTorch.
 
-2. **Filtering:** TOC entries, page headers, and page footers are excluded before chunking to reduce noise.
+2. **Heading-aware chunking:** ATX heading hierarchy is tracked (`#` through `######`) and chunks are bounded by 512 words with 64-word tail overlap. Each chunk carries its hierarchical heading path as metadata.
 
-3. **HybridChunker:** Creates semantic chunks (max 512 tokens) that respect document structure -- chunks don't split mid-paragraph or mid-table. Peer sections are merged when they fit within the token budget.
+3. **Document summary:** A 1–2 sentence summary is generated via LLM (Sonnet 4.6) from the first ~16K characters. The summary is prepended to each chunk as context.
 
-4. **Heading path enrichment:** Each chunk is contextualized with its heading ancestry (e.g., "Chapter 3 > Networking > Firewall Rules > ...").
+4. **Embedding:** Chunks are embedded in-process by [fastembed](https://qdrant.github.io/fastembed/) running `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-dim, ONNX, CPU-only). Single API container, no sidecar.
 
-5. **Document summary:** A 1-2 sentence summary is generated via LLM (Sonnet 4.6) from the first ~16K characters. This summary is prepended to each chunk as context.
+5. **Storage:** Chunks land in PostgreSQL with pgvector at `Vector(384)`. Redis holds the BM25 token cache.
 
-6. **Embedding and storage:** Chunks are embedded and stored. At query time, hybrid search combines semantic similarity with BM25 keyword matching.
+6. **Hybrid search:** BM25 + pgvector run in parallel and are fused via reciprocal rank fusion (`k=60`). Cross-encoder reranking is intentionally absent in this preview path and returns when MEHO.Knowledge takes over remote retrieval.
 
 Knowledge is scoped at three tiers: **global** (available to all connectors), **connector-type** (e.g., all Kubernetes connectors), and **connector-instance** (specific to one connector).
 
@@ -263,9 +263,9 @@ Skills are markdown files that inject domain expertise into the agent's system p
 
 ### New Knowledge Source
 
-Add support for new document types in the knowledge pipeline. The Docling converter currently supports PDF, DOCX, and HTML.
+Add support for new document types in the knowledge pipeline. The lightweight converter currently supports PDF, DOCX, and HTML.
 
-**Where:** `meho_app/modules/knowledge/document_converter.py` (extend `_MIME_TO_FORMAT` mapping)
+**Where:** `meho_app/modules/knowledge/lightweight_converter.py` (extend `SUPPORTED_MIME_TYPES` and add a converter method)
 
 ### New Topology Entity Type
 

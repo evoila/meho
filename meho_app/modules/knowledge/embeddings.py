@@ -3,169 +3,120 @@
 """
 Embedding generation for knowledge chunks.
 
-Provides embedding providers for knowledge base and topology:
-- VoyageAIEmbeddings: Enterprise mode (when VOYAGE_API_KEY is set)
-- TEIEmbeddings: Community mode (local TEI sidecar, default when no Voyage key)
+Embeddings are produced in-process by `fastembed <https://qdrant.github.io/fastembed/>`_,
+which runs quantized ONNX models on the CPU. No PyTorch, no transformers, no
+GPU. The default model is the 384-dim multilingual MiniLM
+(`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`); the model is
+pulled from Hugging Face on first use and cached on disk under
+``config.fastembed_cache_dir``.
+
+This is the preview path. When MEHO.Knowledge takes over remote
+embedding/reranking, swap :class:`FastEmbedEmbeddings` for an HTTP client
+implementation of the same Protocol.
 """
 
+from __future__ import annotations
+
+import asyncio
 from typing import Any, Protocol, cast
 
-import httpx
-
 from meho_app.core.config import get_config
+from meho_app.core.otel import get_logger
+
+logger = get_logger(__name__)
 
 
 class EmbeddingProvider(Protocol):
-    """Protocol for embedding providers"""
+    """Protocol for embedding providers."""
 
-    async def embed_text(self, text: str, input_type: str = "query") -> list[float]:
-        """
-        Generate embedding vector for text.
+    dimension: int
 
-        Args:
-            text: Text to embed
-            input_type: Embedding mode ("query" or "document" for Voyage AI)
-
-        Returns:
-            Embedding vector as list of floats
-        """
+    async def embed_text(self, text: str) -> list[float]:
+        """Generate embedding vector for a single text."""
         ...
 
-    async def embed_batch(
-        self, texts: list[str], input_type: str = "document"
-    ) -> list[list[float]]:
-        """
-        Generate embeddings for multiple texts (batch operation).
-
-        Args:
-            texts: List of texts to embed
-            input_type: Embedding mode ("document" for indexing by default)
-
-        Returns:
-            List of embedding vectors
-        """
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for a list of texts."""
         ...
 
 
-class VoyageAIEmbeddings:
-    """Voyage AI embedding provider with input_type support for better retrieval."""
+class FastEmbedEmbeddings:
+    """In-process fastembed (ONNX) embedding provider."""
 
-    def __init__(self, api_key: str, model: str = "voyage-4-large") -> None:
-        import voyageai  # Lazy import -- not needed in community mode
+    def __init__(
+        self,
+        model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        cache_dir: str | None = None,
+        dimension: int = 384,
+    ) -> None:
+        self.model_name = model_name
+        self.cache_dir = cache_dir
+        self.dimension = dimension
+        self._model: Any | None = None
+        self._lock = asyncio.Lock()
 
-        self.client = voyageai.AsyncClient(api_key=api_key)
-        self.model = model
-        self.dimension = 1024  # Voyage 4 models default to 1024D
+    async def _ensure_loaded(self) -> Any:
+        """Lazy-load the ONNX model on first use, single-flight via the lock."""
+        if self._model is not None:
+            return self._model
+        async with self._lock:
+            if self._model is None:
+                logger.info(
+                    "fastembed_loading_model",
+                    model=self.model_name,
+                    cache_dir=self.cache_dir,
+                )
+                self._model = await asyncio.to_thread(self._build_model)
+                logger.info("fastembed_model_loaded", model=self.model_name)
+        return self._model
 
-    async def embed_text(self, text: str, input_type: str = "query") -> list[float]:
-        """Generate embedding for single text.
+    def _build_model(self) -> Any:
+        # Imported lazily so the dependency is only paid when an embedding is
+        # actually requested (e.g. tests mocking the provider don't trigger
+        # an ONNX download).
+        from fastembed import TextEmbedding
 
-        Args:
-            text: Text to embed
-            input_type: "query" for search queries, "document" for indexing
-        """
-        result = await self.client.embed(
-            [text],
-            model=self.model,
-            input_type=input_type,
-        )
-        embedding: list[float] = [float(x) for x in result.embeddings[0]]
-        return embedding
+        kwargs: dict[str, Any] = {"model_name": self.model_name}
+        if self.cache_dir:
+            kwargs["cache_dir"] = self.cache_dir
+        return TextEmbedding(**kwargs)
 
-    async def embed_batch(
-        self, texts: list[str], input_type: str = "document"
-    ) -> list[list[float]]:
-        """Generate embeddings for multiple texts.
+    async def embed_text(self, text: str, **_kwargs: Any) -> list[float]:
+        model = await self._ensure_loaded()
+        # fastembed's `.embed()` returns a generator of numpy arrays; we coerce
+        # to a plain list[float] for JSON / pgvector compatibility.
+        result = await asyncio.to_thread(lambda: list(model.embed([text])))
+        return [float(x) for x in result[0]]
 
-        Voyage AI supports max 1000 items per request.
-        Defaults to input_type="document" for batch operations (typically indexing).
-        """
+    async def embed_batch(self, texts: list[str], **_kwargs: Any) -> list[list[float]]:
         if not texts:
             return []
-        all_embeddings: list[list[float]] = []
-        # Voyage AI max batch size is 1000
-        for i in range(0, len(texts), 1000):
-            batch = texts[i : i + 1000]
-            result = await self.client.embed(
-                batch,
-                model=self.model,
-                input_type=input_type,
-            )
-            all_embeddings.extend([[float(x) for x in emb] for emb in result.embeddings])
-        return all_embeddings
+        model = await self._ensure_loaded()
+        result = await asyncio.to_thread(lambda: list(model.embed(texts)))
+        return [[float(x) for x in vec] for vec in result]
 
 
-class TEIEmbeddings:
-    """Local TEI embedding provider using bge-m3 via HTTP."""
-
-    def __init__(self, base_url: str = "http://tei-embeddings:80") -> None:
-        self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
-        self.dimension = 1024  # bge-m3 produces 1024D vectors (matches Voyage AI)
-        self._batch_size = 32  # TEI default --max-client-batch-size
-
-    async def embed_text(self, text: str, **kwargs: Any) -> list[float]:
-        """Generate embedding for single text.
-
-        input_type kwarg is accepted but ignored (Voyage-specific concept).
-        bge-m3 does not distinguish query vs document embeddings.
-        """
-        response = await self.client.post(
-            "/embed",
-            json={"inputs": text, "normalize": True, "truncate": True},
-        )
-        response.raise_for_status()
-        result: list[float] = response.json()[0]
-        return result
-
-    async def embed_batch(self, texts: list[str], **kwargs: Any) -> list[list[float]]:
-        """Generate embeddings for batch.
-
-        Chunks at 32 items (TEI default max-client-batch-size).
-        input_type kwarg is accepted but ignored.
-        """
-        if not texts:
-            return []
-        all_embeddings: list[list[float]] = []
-        for i in range(0, len(texts), self._batch_size):
-            batch = texts[i : i + self._batch_size]
-            response = await self.client.post(
-                "/embed",
-                json={"inputs": batch, "normalize": True, "truncate": True},
-            )
-            response.raise_for_status()
-            all_embeddings.extend(response.json())
-        return all_embeddings
-
-
-# Singleton instance
 _embedding_provider: EmbeddingProvider | None = None
 
 
 def get_embedding_provider() -> EmbeddingProvider:
-    """
-    Get embedding provider singleton.
-
-    TEI when no Voyage key (community mode), Voyage AI when key present (enterprise).
-    """
+    """Get the embedding provider singleton (in-process fastembed)."""
     global _embedding_provider
 
     if _embedding_provider is None:
         config = get_config()
-        if config.voyage_api_key:
-            _embedding_provider = VoyageAIEmbeddings(
-                api_key=config.voyage_api_key, model=config.embedding_model
-            )
-        else:
-            _embedding_provider = cast(
-                "EmbeddingProvider",
-                TEIEmbeddings(base_url=config.tei_embedding_url),  # type: ignore[attr-defined]  # Config field defined via pydantic-settings env var
-            )
+        _embedding_provider = cast(
+            "EmbeddingProvider",
+            FastEmbedEmbeddings(
+                model_name=config.fastembed_embedding_model,
+                cache_dir=config.fastembed_cache_dir,
+            ),
+        )
 
     return _embedding_provider
 
 
 def reset_embedding_provider() -> None:
-    """Reset embedding provider singleton (for testing)"""
+    """Reset embedding provider singleton (for testing)."""
     global _embedding_provider
     _embedding_provider = None

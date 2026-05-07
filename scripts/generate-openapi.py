@@ -45,7 +45,6 @@ sys.path.insert(0, _project_root)
 # instance which requires these fields (no defaults in the Pydantic model):
 #   DATABASE_URL, REDIS_URL, ANTHROPIC_API_KEY,
 #   CREDENTIAL_ENCRYPTION_KEY (>= 32 chars)
-# VOYAGE_API_KEY is optional (None = community mode with TEI embeddings).
 #
 # os.environ.setdefault only sets them if not already present, so a real
 # .env or pre-set env vars take precedence.
@@ -54,7 +53,6 @@ _DUMMY_ENV = {
     "DATABASE_URL": "postgresql+asyncpg://dummy:dummy@localhost:5432/dummy",
     "REDIS_URL": "redis://localhost:6379/0",
     "ANTHROPIC_API_KEY": "sk-ant-dummy-key-for-openapi-generation",
-    "VOYAGE_API_KEY": "pa-dummy-key-for-openapi-generation",
     "CREDENTIAL_ENCRYPTION_KEY": "dummy-encryption-key-for-openapi-spec-generation-only",
 }
 

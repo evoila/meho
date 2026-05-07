@@ -20,8 +20,8 @@ import pyarrow.ipc as ipc
 # Increment when adding/removing/renaming columns.
 SCHEMA_VERSION: int = 1
 
-# Embedding dimension matches Voyage AI voyage-4-large (1024D).
-_EMBEDDING_DIM: int = 1024
+# Embedding dimension matches fastembed paraphrase-multilingual-MiniLM-L12-v2 (384-D).
+_EMBEDDING_DIM: int = 384
 
 # Arrow schema for the chunk transfer format.
 # Columns map to ChunkMetadata fields plus chunk_text and embedding.

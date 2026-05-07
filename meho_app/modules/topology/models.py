@@ -118,7 +118,7 @@ class TopologyEmbeddingModel(Base):
     entity_id: Mapped[uuid.UUID] = Column(
         UUID(as_uuid=True), ForeignKey(FK_TOPOLOGY_ENTITY_ID, ondelete="CASCADE"), primary_key=True
     )
-    embedding: Mapped[Any] = Column(Vector(1024), nullable=True)  # Voyage AI voyage-4-large
+    embedding: Mapped[Any] = Column(Vector(384), nullable=True)  # fastembed MiniLM-L12
 
     # Relationship back to entity
     entity: Mapped["TopologyEntityModel"] = relationship(

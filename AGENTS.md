@@ -31,7 +31,7 @@ These are hard constraints. Violating any of them will break the build, introduc
 
 **Frontend:** React 19 with TypeScript strict mode, Vite bundler, TailwindCSS v4 for styling, Zustand v5 for state management. Feature stores live in `meho_frontend/src/features/`.
 
-**Data pipeline:** PostgreSQL with pgvector for vector search, Redis for caching and BM25 indices, Apache Arrow for in-memory data, DuckDB for analytical queries. No pandas.
+**Data pipeline:** PostgreSQL with pgvector (384-D) for vector search, Redis for caching and the BM25 token index, Apache Arrow for in-memory data, DuckDB for analytical queries. Embeddings run in-process via fastembed (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, ONNX, CPU-only) — no sidecars, no PyTorch, no transformers. The cross-encoder reranker is intentionally absent in this preview path and returns when MEHO.Knowledge takes over remote retrieval. No pandas.
 
 **Agent:** A ReAct (Reason-Act-Observe) loop powered by PydanticAI. The specialist agent calls connector operations, searches the knowledge base, and traverses the topology graph to investigate infrastructure issues. Skills (markdown instructions) are injected per-connector.
 

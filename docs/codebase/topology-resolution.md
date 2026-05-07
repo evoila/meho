@@ -42,7 +42,7 @@ created in the unified initial migration
 | Table | Role |
 |---|---|
 | `topology_entities` | Every discovered resource. Connector-owned (pod, VM) or external (URL). |
-| `topology_embeddings` | 1024-D Voyage AI vector per entity. HNSW index with cosine-ops. |
+| `topology_embeddings` | 384-D fastembed MiniLM vector per entity. HNSW index with cosine-ops. |
 | `topology_relationships` | Directed within-connector edges (e.g. `Pod -runs_on-> Node`). |
 | `topology_same_as` | Confirmed cross-connector correlations. |
 | `topology_same_as_suggestion` | Pending correlations awaiting a verdict. |

@@ -44,7 +44,7 @@ A clean-clone run of MEHO.X goes through nine stages. Each stage has a single jo
 |---|---|---|---|
 | 1 | Environment file present | `.env` exists with required variables, valid Fernet `CREDENTIAL_ENCRYPTION_KEY` | Developer (manual copy of `env.example`) |
 | 2 | Images built | Backend image (`Dockerfile.meho`) compiled, Python deps installed | `docker compose build` |
-| 3 | Infrastructure started | postgres, redis, minio, keycloak (and optionally seq, TEI sidecars) | `docker compose up -d` |
+| 3 | Infrastructure started | postgres, redis, minio, keycloak (and optionally seq) | `docker compose up -d` |
 | 4 | First-boot SQL | `keycloak` and `keycloak_test` databases created inside postgres | `scripts/init-db.sql` mounted at `/docker-entrypoint-initdb.d/` (runs once per volume) |
 | 5 | Health gates | `pg_isready`, `redis-cli ping`, keycloak `/health/ready` all return OK | Compose healthchecks |
 | 6 | Migrations applied | All schema changes materialized in postgres | `scripts/run-migrations-monolith.sh` → per-module `alembic upgrade head` |
@@ -145,11 +145,9 @@ Stale legacy scripts (`reset-db.sh`, `migrate-down.sh`, `migrate_knowledge_alemb
 
 A single Dockerfile at `docker/Dockerfile.meho` builds every backend image via multi-stage targets:
 
-- `base` — shared stage. Installs apt deps, drops in the `uv` static binary, runs `uv sync --frozen --no-install-project` for optimal layer caching, copies the project source, runs `uv sync --frozen` to finalize the project install, and declares the shared `ENTRYPOINT ["/docker-entrypoint.sh"]`. Optional heavy dependency groups are gated by `ARG INCLUDE_DOCLING=false` and `ARG CUDA_ENABLED=false`, passed at build time via `--build-arg`. The runtime env var `MEHO_FEATURE_USE_DOCLING` is wired to `INCLUDE_DOCLING` so the app's flag-gated Docling import behaves correctly without additional configuration.
+- `base` — shared stage. Installs apt deps, drops in the `uv` static binary, runs `uv sync --frozen --no-install-project` for optimal layer caching, copies the project source, runs `uv sync --frozen` to finalize the project install, and declares the shared `ENTRYPOINT ["/docker-entrypoint.sh"]`. The image is CPU-only and single-container by design — embeddings run in-process via fastembed (ONNX); document conversion uses the lightweight `pymupdf4llm` + `pdfplumber` pipeline.
 - `prod` — production image. Inherits `base`. `CMD` runs uvicorn directly. Defines a `HEALTHCHECK` that polls `/health`.
 - `debug` — development image. Inherits `base`. Adds `uv sync --frozen --group dev` for ruff/mypy/pytest-watch/ipython/debugpy. `CMD` wraps uvicorn in debugpy on port 5678 with `--reload` against the volume-mounted source tree. No `--no-editable`, so edits land immediately.
-
-CPU vs GPU is a separate axis, selected by `--build-arg TARGETBASE=base-cpu` (default, `python:3.13-slim`) or `base-gpu` (`nvidia/cuda:12.4.1-runtime-ubuntu22.04`).
 
 The frontend has its own Dockerfile (`docker/Dockerfile.meho-frontend`) which has no database touchpoint and is not discussed here.
 
@@ -157,7 +155,7 @@ The frontend has its own Dockerfile (`docker/Dockerfile.meho-frontend`) which ha
 
 Three compose files exist, in a base + override layout (consolidated under #304):
 
-- `docker-compose.yml` — the authoritative base for every environment. Defines all services (postgres, redis-stack-server, minio, keycloak, seq, meho, meho-frontend, optional TEI sidecars), mounts `init-db.sql`, and uses Compose's required-variable syntax for `CREDENTIAL_ENCRYPTION_KEY` (`${VAR:?...}`). Builds `docker/Dockerfile.meho` with `target: prod`. Single source of truth.
+- `docker-compose.yml` — the authoritative base for every environment. Defines all services (postgres, redis-stack-server, minio, keycloak, seq, meho, meho-frontend), mounts `init-db.sql`, and uses Compose's required-variable syntax for `CREDENTIAL_ENCRYPTION_KEY` (`${VAR:?...}`). Builds `docker/Dockerfile.meho` with `target: prod`. Single source of truth.
 - `docker-compose.override.yml` — auto-loaded development overlay (replaces the pre-#304 standalone `docker-compose.debug.yml`). About 10 lines: switches `target` from `prod` to `debug` and adds the 5678 debugpy port. Everything else is inherited from the base. Run `docker compose -f docker-compose.yml up` to opt out of it.
 - `docker-compose.test.yml` — explicit test overlay (paired with the base via `docker compose -f docker-compose.yml -f docker-compose.test.yml`). Adds `tmpfs` for postgres and minio, switches the keycloak DB to `keycloak_test`, the postgres DB to `meho_test`, points keycloak at the `tests/fixtures/keycloak` realm, and disables `meho`/`meho-frontend`/`seq` via the `disabled` profile so pytest can run application code directly against the infrastructure.
 

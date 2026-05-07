@@ -2,71 +2,24 @@
 
 > Last verified: 0.1.0
 
-MEHO's knowledge system lets operators upload documents that become searchable by the agent during investigations. Documents are processed through a structure-aware pipeline using [IBM Docling](https://github.com/DS4SD/docling) for intelligent chunking that preserves document hierarchy.
+MEHO's knowledge system lets operators upload documents that become searchable by the agent during investigations. Documents go through a CPU-only pipeline (no PyTorch, no GPU, no sidecars) that extracts markdown, splits it into heading-aware chunks, embeds the chunks via [fastembed](https://qdrant.github.io/fastembed/) (ONNX in-process), and stores them in PostgreSQL with pgvector.
+
+This is the preview retrieval stack. A future opt-in to MEHO.Knowledge will move embedding + cross-encoder reranking out-of-process to a dedicated service; until then, MEHO.X stays single-container.
 
 ## Document Processing Pipeline
 
-When a document is uploaded, MEHO processes it through a multi-stage pipeline:
-
 ```
-Upload --> Docling Conversion --> TOC Filtering --> HybridChunker
-    --> Heading Path Enrichment --> Summary Generation --> Embedding --> Storage
+Upload → Format Detection → Lightweight Conversion → Heading-Aware Chunking
+       → Summary Generation → fastembed (ONNX) → Storage
 ```
 
-### Stage 1: Document Conversion
+### Stage 1: Format Detection
 
-Docling converts uploaded files into a structured `DoclingDocument` representation that preserves headings, sections, tables, lists, and other document elements with their semantic labels.
+The uploader detects the MIME type from the URL extension and the file's magic bytes. Supported formats are listed in [Supported Formats](#supported-formats).
 
-### Stage 2: TOC and Noise Filtering
+### Stage 2: Conversion
 
-Before chunking, the pipeline filters out noise elements that would pollute search results. The following element types are excluded:
-
-- **Document Index** (table of contents entries)
-- **Page Headers** (repeated header text)
-- **Page Footers** (repeated footer text)
-
-A chunk is excluded only if *all* of its source elements have excluded labels. Mixed chunks (some content + some noise) are preserved.
-
-### Stage 3: Structure-Aware Chunking
-
-The `HybridChunker` creates semantic chunks that respect document structure. Unlike naive text splitting, HybridChunker:
-
-- Keeps related paragraphs together within heading sections.
-- Merges small peer elements (adjacent paragraphs under the same heading).
-- Respects a configurable token limit per chunk (default: 512 tokens).
-
-### Stage 4: Heading Path Enrichment
-
-Each chunk is enriched with its heading path -- the hierarchical chain of headings leading to the chunk's location in the document. For example, a chunk under "Chapter 3 > Networking > DNS Configuration" carries that full path as context.
-
-This heading path is prepended to the chunk text before embedding, ensuring the embedding vector captures the chunk's position in the document hierarchy -- not just its content.
-
-### Stage 5: Document Summary Generation
-
-An LLM generates a 1-2 sentence summary of each document, focusing on what systems, technologies, or procedures it covers. This summary is prepended to every chunk as additional context for the embedding model.
-
-The summary generation uses the first ~16,000 characters of the document (covering the title, table of contents, and introduction) and runs with a 15-second timeout. If generation fails, ingestion continues without a summary.
-
-### Stage 6: Embedding and Storage
-
-Enriched chunks (heading path + summary prefix + chunk content) are embedded using the configured embedding provider and stored in PostgreSQL with pgvector for semantic search and GIN indexes for BM25 full-text search.
-
-## Lightweight Pipeline (CPU-Only)
-
-When `MEHO_FEATURE_USE_DOCLING=false`, MEHO uses a lightweight document processing pipeline that requires no PyTorch, GPU, or ML models. This pipeline is ideal for:
-
-- **Open-source deployments** where GPU resources are unavailable
-- **Slim Docker images** (~500 MB vs ~4 GB with Docling)
-- **Development environments** where fast startup matters more than maximum extraction quality
-
-### Pipeline Architecture
-
-```
-Upload --> Format Detection --> Handler Selection --> Markdown Extraction
-    --> TextChunker (heading-aware) --> Embedding --> Storage
-```
-
-### Format Handlers
+The lightweight converter (`meho_app.modules.knowledge.lightweight_converter.LightweightDocumentConverter`) extracts markdown text + per-page metadata using:
 
 | Format | Library | Capabilities |
 |--------|---------|-------------|
@@ -74,48 +27,50 @@ Upload --> Format Detection --> Handler Selection --> Markdown Extraction
 | DOCX | python-docx | Heading structure, paragraphs, tables |
 | HTML | BeautifulSoup | Semantic structure extraction |
 
-### Quality Comparison
+The whole pipeline fits in ~250 MB of dependencies, no PyTorch.
 
-| Aspect | Docling (default) | Lightweight |
-|--------|-------------------|-------------|
-| PDF text extraction | ML-powered layout detection | pymupdf4llm heuristic layout |
-| Table extraction | Deep learning table structure | pdfplumber rule-based detection |
-| OCR (scanned PDFs) | Built-in ML OCR | RapidOCR (CPU-only) |
-| Heading detection | Element classification model | Regex/font-size heuristic |
-| Memory usage | 6-22 GB peak (per page accumulation) | ~250 MB total |
-| Docker image size | ~4 GB (with PyTorch) | ~500 MB |
-| GPU required | Optional (recommended) | No |
+### Stage 3: Heading-Aware Chunking
 
-The lightweight pipeline produces the same output shape (markdown text + chunks) as Docling, so downstream processing (embedding, search, agent retrieval) works identically regardless of which pipeline is active.
+`meho_app.modules.knowledge.chunking.TextChunker` splits the markdown into chunks bounded by **512 words** with **64-word tail overlap** for context continuity. Chunks are paragraph-aware (split on blank lines) and the **ATX heading hierarchy** (`#` through `######`) is tracked, so each chunk carries its hierarchical heading path (e.g., `["Chapter 3", "Networking", "DNS Configuration"]`) as metadata.
+
+### Stage 4: Document Summary Generation
+
+An LLM generates a 1–2 sentence summary of each document. The summary is prepended to every chunk as additional context for the embedding model. Generation runs with a 15-second timeout; on failure, ingestion continues without a summary.
+
+### Stage 5: Embedding and Storage
+
+Each chunk's "retrieval text" (heading path + summary prefix + chunk content) is embedded by **fastembed** running `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-D, multilingual, ~220 MB ONNX). The model is downloaded from Hugging Face Hub on first use and cached on disk under `FASTEMBED_CACHE_DIR` (default `/var/cache/fastembed`, persisted via the `fastembed_cache` Docker volume). Embedding runs in the API process — no HTTP hop, no separate container.
+
+Vectors land in PostgreSQL with `pgvector` at `Vector(384)`. BM25 lexical retrieval runs on top of the same chunk text via a Redis-backed index ([`bm25_service.py`](https://github.com/evoila-bosnia/MEHO.X/blob/main/meho_app/modules/knowledge/bm25_service.py)).
 
 ## Supported Formats
 
-| Format | Docling Engine | Lightweight Engine | Notes |
-|--------|--------|---------|-------|
-| PDF | Docling (ML layout) | pymupdf4llm + pdfplumber + RapidOCR | Lightweight: rule-based layout, adequate for most docs |
-| DOCX | Docling | python-docx | Both preserve heading structure |
-| HTML | Docling | BeautifulSoup | Both extract semantic structure |
-| Plain text | TextChunker (fallback) | TextChunker (fallback) | Same path for both |
-| URL | Docling (HTML/PDF) or TextChunker | Lightweight (HTML/PDF) or TextChunker | Routed by content type |
-
-PDF is the primary optimized path. Docling's PDF processing provides the richest structural information, including element-type classification that enables TOC filtering and accurate heading path extraction. The lightweight pipeline provides adequate quality for most documents without requiring PyTorch or GPU resources.
+| Format | Engine | Notes |
+|--------|--------|-------|
+| PDF | pymupdf4llm + pdfplumber + RapidOCR | Rule-based layout, adequate for most docs; OCR for scanned pages |
+| DOCX | python-docx | Heading structure preserved |
+| HTML | BeautifulSoup | Semantic structure extraction |
+| Plain text | TextChunker | Heading-aware Markdown chunking |
+| URL | Lightweight (HTML/PDF) or TextChunker | Routed by Content-Type |
 
 ## Search
 
-Knowledge search uses a hybrid approach combining two retrieval methods:
+Knowledge search runs **hybrid retrieval** that fuses two ranked candidate lists:
 
-- **Semantic search** -- pgvector cosine similarity on chunk embeddings finds conceptually related content even when exact terms differ.
-- **Keyword search** -- PostgreSQL full-text search (BM25 via GIN index) finds exact term matches, important for technical identifiers, error codes, and configuration keys.
+- **BM25** — Redis-cached lexical search via `rank_bm25` + Porter stemmer. Excels at exact-term queries (model numbers, error codes, configuration keys).
+- **Vector** — pgvector cosine similarity over the fastembed MiniLM-L12 embeddings. Good baseline for paraphrased / semantic queries.
 
-Results from both methods are merged, deduplicated, and optionally reranked using Voyage AI rerank-2.5 for 15-30% precision improvement. Each result includes the chunk content with its heading path context, helping the agent understand where in the document the information comes from.
+The two lists are fused with **reciprocal rank fusion** (`k=60`, weighted by `bm25_weight` / `semantic_weight`).
+
+There is **no cross-encoder reranker in the preview path** — it returns when MEHO.Knowledge takes over remote retrieval and brings back a heavier (multilingual) cross-encoder. The `KnowledgeService.search_with_rerank` and `adaptive_search` entry points still exist; they delegate to the plain hybrid retrieval flow so callers stay backwards-compatible.
 
 ### Three-Tier Scoping
 
 Knowledge is scoped at three levels:
 
-- **Global** -- Available to all connectors and investigations.
-- **Connector type** -- Available to all connectors of a specific type (e.g., all Kubernetes connectors share Kubernetes documentation).
-- **Connector instance** -- Available only to a specific connector instance.
+- **Global** — Available to all connectors and investigations.
+- **Connector type** — Available to all connectors of a specific type (e.g., all Kubernetes connectors share Kubernetes documentation).
+- **Connector instance** — Available only to a specific connector instance.
 
 This scoping provides day-one value: upload a Kubernetes troubleshooting guide once, and it is immediately available to every Kubernetes connector.
 
@@ -124,6 +79,5 @@ This scoping provides day-one value: upload a Kubernetes troubleshooting guide o
 | Setting | Description |
 |---------|-------------|
 | `MEHO_FEATURE_KNOWLEDGE` | Set to `false` to disable the knowledge module entirely. |
-| `EMBEDDING_MODEL` | Embedding model name (default: `voyage-4-large`). |
-| `VOYAGE_API_KEY` | API key for Voyage AI embeddings (not needed if using local TEI). |
-| `MEHO_FEATURE_USE_DOCLING` | Set to `false` to use the lightweight CPU-only pipeline instead of Docling. Default: `true`. |
+| `FASTEMBED_EMBEDDING_MODEL` | fastembed model name. Default: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`. Must be one of the models in fastembed's catalog. Changing this typically requires a new Alembic migration to match the embedding dimension. |
+| `FASTEMBED_CACHE_DIR` | Directory where fastembed caches downloaded ONNX weights. Default: `/var/cache/fastembed`. Persist via a Docker volume to skip the first-boot download on subsequent runs. |

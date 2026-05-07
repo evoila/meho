@@ -349,14 +349,14 @@ class TestKubernetesBackendDispatch:
                 input_url="s3://bucket/input.pdf",
                 output_url="s3://bucket/output.arrow",
                 profile=_TEST_PROFILE,
-                env_overrides={"VOYAGE_API_KEY": "secret", "CUSTOM_VAR": "val"},
+                env_overrides={"FASTEMBED_EMBEDDING_MODEL": "secret", "CUSTOM_VAR": "val"},
             )
 
         call_args = mock_api.create_namespaced_job.call_args
         job_body = call_args.kwargs.get("body") or call_args[1].get("body")
         container = job_body.spec.template.spec.containers[0]
         env_dict: dict[str, str] = {e.name: e.value for e in container.env}
-        assert env_dict["VOYAGE_API_KEY"] == "secret"
+        assert env_dict["FASTEMBED_EMBEDDING_MODEL"] == "secret"
         assert env_dict["CUSTOM_VAR"] == "val"
 
     @pytest.mark.asyncio
@@ -586,7 +586,7 @@ class TestCloudRunBackendDispatch:
                 input_url="gs://bucket/input.pdf",
                 output_url="gs://bucket/output.arrow",
                 profile=_TEST_PROFILE,
-                env_overrides={"VOYAGE_API_KEY": "secret"},
+                env_overrides={"FASTEMBED_EMBEDDING_MODEL": "secret"},
             )
 
         call_args = mock_client.run_job.call_args
@@ -600,7 +600,7 @@ class TestCloudRunBackendDispatch:
         assert env_dict["WORKER_INPUT_URL"] == "gs://bucket/input.pdf"
         assert env_dict["OMP_NUM_THREADS"] == "4"
         assert env_dict["MALLOC_TRIM_THRESHOLD_"] == "131072"
-        assert env_dict["VOYAGE_API_KEY"] == "secret"
+        assert env_dict["FASTEMBED_EMBEDDING_MODEL"] == "secret"
 
     @pytest.mark.asyncio
     async def test_dispatch_sets_timeout(self) -> None:
@@ -837,7 +837,7 @@ class TestDockerBackendDispatch:
                 input_url="s3://bucket/input.pdf",
                 output_url="s3://bucket/output.arrow",
                 profile=_TEST_PROFILE,
-                env_overrides={"VOYAGE_API_KEY": "secret"},
+                env_overrides={"FASTEMBED_EMBEDDING_MODEL": "secret"},
             )
 
         call_kwargs = mock_client.containers.run.call_args.kwargs
@@ -845,7 +845,7 @@ class TestDockerBackendDispatch:
         assert env["WORKER_JOB_ID"] == "test-job-12345678"
         assert env["OMP_NUM_THREADS"] == "4"
         assert env["MALLOC_TRIM_THRESHOLD_"] == "131072"
-        assert env["VOYAGE_API_KEY"] == "secret"
+        assert env["FASTEMBED_EMBEDDING_MODEL"] == "secret"
 
     @pytest.mark.asyncio
     async def test_dispatch_uses_ssh_client(self) -> None:

@@ -191,7 +191,7 @@ Common issues, their causes, and how to fix them. Organized by problem category.
 1. **Missing `.env` file:** Copy `env.example` to `.env` and set the required secrets:
     ```bash
     cp env.example .env
-    # Edit .env: set ANTHROPIC_API_KEY, VOYAGE_API_KEY, CREDENTIAL_ENCRYPTION_KEY
+    # Edit .env: set ANTHROPIC_API_KEY and CREDENTIAL_ENCRYPTION_KEY
     ```
 
 2. **Port conflicts:** Check that ports 5432, 6379, 8000, 8080, 5173, 9000, 5341 are not in use:
@@ -256,33 +256,13 @@ Common issues, their causes, and how to fix them. Organized by problem category.
     ./scripts/dev-env.sh up --build
     ```
 
-### arm64 / Apple Silicon first-run issues
+### arm64 / Apple Silicon first-run notes
 
-!!! warning "Symptom"
-    On an Apple Silicon Mac, `docker compose --profile tei up` starts the TEI containers but they exit within seconds with `exec format error`, SIGILL, or a generic non-zero status.
+Embeddings now run in-process via fastembed (ONNX). The MiniLM-L12 multilingual model (~220 MB) is downloaded into the `fastembed_cache` Docker volume on first boot. There are no architecture-specific sidecars — the `meho` image runs natively on arm64 hosts.
 
-    (On MEHO versions before the `platform: linux/amd64` fix on TEI services, or on a custom compose that drops that directive, the containers instead fail at pull time with `no matching manifest for linux/arm64/v8 in the manifest list entries`.)
+If your first request after a fresh start hangs for ~10–30 seconds, that's the model warm-up: fastembed lazy-loads on the first embed call. Subsequent requests are fast.
 
-**Cause:** The `ghcr.io/huggingface/text-embeddings-inference:cpu-1.9` image is x86_64-only. On arm64 hosts it must run under Docker Desktop's Rosetta 2 emulation, and Rosetta is **disabled by default** in recent Docker Desktop releases. The compose file declares `platform: linux/amd64` on the TEI services so the amd64 image is pulled on arm64 hosts, but without Rosetta the emulated binary cannot execute.
-
-**Fix:**
-
-1. Open **Docker Desktop > Settings > General**.
-2. Ensure **Choose virtual machine manager** is set to **Apple Virtualization framework** (Rosetta is only available under this VMM).
-3. Enable **Use Rosetta for x86_64/amd64 emulation on Apple Silicon**.
-4. Click **Apply & restart**.
-5. Re-run `./scripts/dev-env.sh up` (preferred — also runs migrations) or `docker compose --profile tei up` directly.
-
-!!! tip "Faster path on arm64: use Voyage"
-    The TEI fallback works on arm64 under Rosetta, but cold-boot takes ~5 minutes, observed idle memory is ~12 GiB for the embeddings service alone, and steady-state latency is higher than native. If you have (or can create) a Voyage AI account, set `VOYAGE_API_KEY` in `.env` and run the plain `docker compose up` — this path is architecture-agnostic and is the recommended plan A on arm64. Measured numbers live in [docs/development/arm64-notes.md](development/arm64-notes.md).
-
-!!! info "Expected TEI first-boot time under Rosetta"
-    On a clean arm64 host, cold-start of `tei-embeddings` takes ~5m 20s (22s image pull + ~5 min model download + load). `tei-reranker` adds another ~7 min for its own model download when launched after embeddings. Subsequent boots reuse the `meho_tei_models` Docker volume and are much faster. See [arm64-notes.md](development/arm64-notes.md) for the full table.
-
-!!! danger "Docker Desktop memory may be insufficient"
-    The TEI embeddings service consumes ~12 GiB under Rosetta (inflated vs native amd64 due to the Rosetta translation layer and emulated heap). If the full stack is unstable on arm64, raise Docker Desktop's memory allocation to **at least 16 GB** (Docker Desktop > Settings > Resources > Memory). The 4 GB default from the deployment-issues guidance above is too low for arm64 + TEI.
-
-**Reference:** [Docker Desktop Mac settings](https://docs.docker.com/desktop/settings/mac/) · [docs/codebase/first-run-experience.md](codebase/first-run-experience.md#architecture-support) · [docs/development/arm64-notes.md](development/arm64-notes.md)
+**Reference:** [docs/codebase/first-run-experience.md](codebase/first-run-experience.md)
 
 ---
 

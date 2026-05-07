@@ -20,14 +20,14 @@ class TestSerializeDeserializeRoundTrip:
     def test_single_chunk_round_trip(self) -> None:
         """serialize_chunks + deserialize_chunks preserves text, embedding, and metadata."""
         chunks = [("hello world", {"chapter": "Ch1"})]
-        embeddings = [[0.1] * 1024]
+        embeddings = [[0.1] * 384]
 
         data = serialize_chunks(chunks, embeddings)
         table = deserialize_chunks(data)
 
         assert table.num_rows == 1
         assert table.column("chunk_text")[0].as_py() == "hello world"
-        assert len(table.column("embedding")[0].as_py()) == 1024
+        assert len(table.column("embedding")[0].as_py()) == 384
         assert table.column("chapter")[0].as_py() == "Ch1"
 
     def test_empty_chunks_round_trip(self) -> None:
@@ -48,11 +48,11 @@ class TestSerializeDeserializeRoundTrip:
         assert metadata[b"schema_version"] == str(SCHEMA_VERSION).encode()
 
     def test_embedding_dimension_mismatch_raises(self) -> None:
-        """Embedding dimension mismatch (e.g., 512D) raises ValueError."""
+        """Embedding dimension mismatch (e.g., 1024D) raises ValueError."""
         chunks = [("text", {})]
-        embeddings = [[0.1] * 512]  # Wrong dimension
+        embeddings = [[0.1] * 1024]  # Wrong dimension
 
-        with pytest.raises(ValueError, match="1024"):
+        with pytest.raises(ValueError, match="384"):
             serialize_chunks(chunks, embeddings)
 
     def test_multiple_chunks_round_trip(self) -> None:
@@ -77,7 +77,7 @@ class TestSerializeDeserializeRoundTrip:
             )
             for i in range(100)
         ]
-        embeddings = [[float(i) * 0.001] * 1024 for i in range(100)]
+        embeddings = [[float(i) * 0.001] * 384 for i in range(100)]
 
         data = serialize_chunks(chunks, embeddings)
         table = deserialize_chunks(data)
@@ -99,14 +99,14 @@ class TestSerializeDeserializeRoundTrip:
     def test_zstd_compression_reduces_size(self) -> None:
         """zstd compression actually reduces size vs uncompressed."""
         chunks = [(f"chunk {i} with some text content", {}) for i in range(50)]
-        embeddings = [[float(i) * 0.001] * 1024 for i in range(50)]
+        embeddings = [[float(i) * 0.001] * 384 for i in range(50)]
 
         compressed = serialize_chunks(chunks, embeddings)
 
         # Build uncompressed for comparison
         arrays = {
             "chunk_text": pa.array([c[0] for c in chunks], type=pa.utf8()),
-            "embedding": pa.array(embeddings, type=pa.list_(pa.float32(), 1024)),
+            "embedding": pa.array(embeddings, type=pa.list_(pa.float32(), 384)),
             "heading_stack": pa.array([[] for _ in chunks], type=pa.list_(pa.utf8())),
             "page_numbers": pa.array([[] for _ in chunks], type=pa.list_(pa.int32())),
             "document_name": pa.array([None for _ in chunks], type=pa.utf8()),
@@ -140,6 +140,6 @@ class TestSchemaVersion:
         assert SCHEMA_VERSION >= 1
 
     def test_arrow_schema_has_embedding_column(self) -> None:
-        """ARROW_SCHEMA has a fixed-size 1024D float32 embedding column."""
+        """ARROW_SCHEMA has a fixed-size 384-D float32 embedding column."""
         field = ARROW_SCHEMA.field("embedding")
-        assert field.type == pa.list_(pa.float32(), 1024)
+        assert field.type == pa.list_(pa.float32(), 384)

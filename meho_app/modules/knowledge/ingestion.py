@@ -18,12 +18,16 @@ from typing import TYPE_CHECKING, Any
 from meho_app.core.config import get_config
 from meho_app.core.feature_flags import get_feature_flags
 from meho_app.core.otel import get_logger
-from meho_app.modules.knowledge.chunking import (
-    TextChunker,
-)  # Still needed for ingest_text()
+from meho_app.modules.knowledge.chunking import TextChunker
 from meho_app.modules.knowledge.job_models import IngestionStage
 from meho_app.modules.knowledge.job_repository import IngestionJobRepository
 from meho_app.modules.knowledge.knowledge_store import KnowledgeStore
+from meho_app.modules.knowledge.lightweight_converter import (
+    SUPPORTED_MIME_TYPES,
+    LightweightDocumentConverter,
+    build_chunk_prefix,
+    generate_document_summary,
+)
 from meho_app.modules.knowledge.metadata_extraction import MetadataExtractor
 from meho_app.modules.knowledge.object_storage import ObjectStorage
 from meho_app.modules.knowledge.schemas import (
@@ -33,27 +37,6 @@ from meho_app.modules.knowledge.schemas import (
 )
 
 CHUNK_MAX_RETRIES = 3
-
-# Flag-based converter selection: when use_docling=false, avoid importing
-# docling_adapter.py (which imports Docling/PyTorch at module level).
-_use_docling = get_feature_flags().use_docling
-
-if _use_docling:
-    from meho_app.modules.knowledge.docling_adapter import (
-        SUPPORTED_MIME_TYPES,
-        DoclingWrapperAdapter,
-    )
-    from meho_app.modules.knowledge.document_converter import (
-        build_chunk_prefix,
-        generate_document_summary,
-    )
-else:
-    from meho_app.modules.knowledge.lightweight_converter import (
-        SUPPORTED_MIME_TYPES,
-        LightweightDocumentConverter,
-        build_chunk_prefix,
-        generate_document_summary,
-    )
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -102,18 +85,8 @@ class IngestionService:
         self.knowledge_store = knowledge_store
         self.object_storage = object_storage
         self.job_repository = job_repository
-        self.chunker = chunker or TextChunker()  # Used by ingest_text()
-        if _use_docling:
-            config = get_config()
-            self.docling_converter = DoclingWrapperAdapter(
-                ocr_enabled=config.ingestion_ocr_enabled,
-                device=config.ingestion_device,
-                num_threads=config.ingestion_num_threads,
-                pdf_chunk_pages=config.ingestion_page_batch_size,
-                max_workers=config.ingestion_max_workers,
-            )
-        else:
-            self.docling_converter = LightweightDocumentConverter()  # type: ignore[assignment]
+        self.chunker = chunker or TextChunker()
+        self.converter = LightweightDocumentConverter()
         self.metadata_extractor = MetadataExtractor()
 
     async def _update_job_stage(
@@ -633,55 +606,44 @@ class IngestionService:
         file_bytes: bytes,
         filename: str,
         mime_type: str,
-    ) -> tuple[str, Any | None, Any | None, bool]:
-        """Run the appropriate text-extraction path for this document.
+    ) -> tuple[str, Any | None, bool]:
+        """Run the text-extraction path for this document.
 
-        Returns ``(document_text, docling_result, lightweight_doc, is_structured)``.
-        Exactly one of ``docling_result`` / ``lightweight_doc`` is populated for
-        structured content; both are ``None`` for plain text.
+        Returns ``(document_text, converted_doc, is_structured)``.
+        ``converted_doc`` is the lightweight converter document for structured
+        content, ``None`` for plain text.
         """
         is_structured = mime_type in SUPPORTED_MIME_TYPES
-        docling_result: Any | None = None
-        lightweight_doc: Any | None = None
+        converted_doc: Any | None = None
 
-        if is_structured and _use_docling:
-            docling_result = await self.docling_converter.convert_file_async(
-                file_bytes, filename, mime_type
+        if is_structured:
+            converted_doc = await asyncio.to_thread(
+                self.converter.convert_file, file_bytes, filename, mime_type
             )
-            document_text = self.docling_converter.get_full_text(docling_result)
-        elif is_structured:
-            lightweight_doc = self.docling_converter.convert_file(file_bytes, filename, mime_type)
-            document_text = self.docling_converter.get_full_text(lightweight_doc)
+            assert converted_doc is not None  # noqa: S101 -- branch invariant
+            document_text = self.converter.get_full_text(converted_doc)
         else:
             try:
                 document_text = file_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 document_text = file_bytes.decode("latin-1")
 
-        return document_text, docling_result, lightweight_doc, is_structured
+        return document_text, converted_doc, is_structured
 
     def _chunk_document_text(
         self,
         *,
         document_text: str,
-        docling_result: Any | None,
-        lightweight_doc: Any | None,
+        converted_doc: Any | None,
         document_name: str,
         chunk_prefix: str,
         is_structured: bool,
     ) -> list[tuple[str, dict[str, Any]]]:
-        """Chunk the extracted text with the appropriate chunker.
-
-        Raises ``ValueError`` if no chunks were produced.
-        """
-        if is_structured and _use_docling and docling_result is not None:
-            chunks_with_context = self.docling_converter.chunk_document(
-                docling_result,
-                chunk_prefix=chunk_prefix,
-            )
-        elif lightweight_doc is not None:
-            chunks_with_context = self.docling_converter.chunk_document(
-                lightweight_doc, chunk_prefix=chunk_prefix
+        """Chunk the extracted text with the appropriate chunker."""
+        del is_structured  # presence of converted_doc is the discriminator
+        if converted_doc is not None:
+            chunks_with_context = self.converter.chunk_document(
+                converted_doc, chunk_prefix=chunk_prefix
             )
         else:
             chunks_with_context = self.chunker.chunk_document_with_structure(
@@ -965,8 +927,8 @@ class IngestionService:
             is_structured = mime_type in SUPPORTED_MIME_TYPES
 
             # Ephemeral-worker offload: short-circuit for large PDFs when the
-            # feature flag + non-local backend + page-count heuristic agree.
-            if is_structured and _use_docling:
+            # backend + page-count heuristic agree.
+            if is_structured:
                 offloaded_ids = await self._maybe_offload_to_worker(
                     file_bytes=file_bytes,
                     filename=filename,
@@ -991,8 +953,7 @@ class IngestionService:
 
             (
                 document_text,
-                docling_result,
-                lightweight_doc,
+                converted_doc,
                 is_structured,
             ) = await self._prepare_conversion(
                 file_bytes=file_bytes, filename=filename, mime_type=mime_type
@@ -1034,8 +995,7 @@ class IngestionService:
 
             chunks_with_context = self._chunk_document_text(
                 document_text=document_text,
-                docling_result=docling_result,
-                lightweight_doc=lightweight_doc,
+                converted_doc=converted_doc,
                 document_name=filename,
                 chunk_prefix=chunk_prefix,
                 is_structured=is_structured,
@@ -1542,21 +1502,12 @@ class IngestionService:
             )
 
             if is_structured:
-                # HTML/PDF: Use converter for structure-aware conversion + chunking
                 mime = CONTENT_TYPE_PDF if CONTENT_TYPE_PDF in content_type else "text/html"
-
-                if _use_docling:
-                    # DoclingWrapper handles subprocess isolation internally
-                    url_result = await self.docling_converter.convert_file_async(
-                        response.content, url, mime
-                    )
-                    document_text = self.docling_converter.get_full_text(url_result)
-                else:
-                    # Lightweight path: direct in-process conversion (no PyTorch, no subprocess)
-                    doc = self.docling_converter.convert_file(response.content, url, mime)
-                    document_text = self.docling_converter.get_full_text(doc)
+                doc = await asyncio.to_thread(
+                    self.converter.convert_file, response.content, url, mime
+                )
+                document_text = self.converter.get_full_text(doc)
             else:
-                # Plain text: no Docling needed
                 document_text = response.text
                 doc = None
 
@@ -1596,24 +1547,14 @@ class IngestionService:
                 message="Chunking content...",
             )
 
-            if is_structured and _use_docling:
-                # DoclingWrapper HierarchicalChunker with prefix enrichment
-                chunks_with_context = self.docling_converter.chunk_document(
-                    url_result,
-                    chunk_prefix=chunk_prefix,
-                )
-            elif is_structured:
+            if is_structured:
                 if doc is None:
-                    raise ValueError(f"Lightweight converter returned no document for URL {url}")
-                chunks_with_context = self.docling_converter.chunk_document(
-                    doc, chunk_prefix=chunk_prefix
-                )
+                    raise ValueError(f"Converter returned no document for URL {url}")
+                chunks_with_context = self.converter.chunk_document(doc, chunk_prefix=chunk_prefix)
             else:
-                # Plain text: use TextChunker with metadata-only enrichment
-                raw_chunks = self.chunker.chunk_document_with_structure(
+                chunks_with_context = self.chunker.chunk_document_with_structure(
                     text=document_text, document_name=url, detect_headings=True
                 )
-                chunks_with_context = raw_chunks
 
             if not chunks_with_context:
                 raise ValueError(f"No text extracted from URL {url}")

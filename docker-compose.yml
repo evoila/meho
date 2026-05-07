@@ -8,6 +8,12 @@
 # The README presents the two compose commands explicitly so both paths work without reading dev-env.sh.
 #
 # Default credentials: admin / admin (change immediately in production!)
+# Set ANTHROPIC_API_KEY in .env to enable LLM features.
+#
+# Embeddings run in-process via fastembed (ONNX, CPU-only). The MiniLM-L12
+# multilingual model is downloaded on first boot into the fastembed_cache
+# volume. No sidecar embedding services.
+# ==================================================================================
 
 name: meho  # Explicit project name prevents meho/mehox confusion
 
@@ -16,7 +22,6 @@ x-common-env: &common-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}  # Optional: required only for MEHO_LLM_PROVIDER=anthropic
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}  # Optional: required only for MEHO_LLM_PROVIDER=openai
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}  # Optional: required only for MEHO_LLM_PROVIDER=ollama
-  VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}  # Recommended: set for Voyage AI embeddings (omit to use local TEI fallback)
   # No default on purpose. Generate a fresh key with:
   #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
   # then export it as CREDENTIAL_ENCRYPTION_KEY (or put it in .env).
@@ -42,10 +47,9 @@ x-common-env: &common-env
   WORKFLOW_BUILDER_MODEL: ${WORKFLOW_BUILDER_MODEL:-anthropic:claude-sonnet-4-6}
   TRANSFORM_GENERATION_MODEL: ${TRANSFORM_GENERATION_MODEL:-anthropic:claude-sonnet-4-6}
   WORKFLOW_LLM_REPORT_MODEL: ${WORKFLOW_LLM_REPORT_MODEL:-anthropic:claude-sonnet-4-6}
-  # Embeddings
-  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-voyage-4-large}
-  TEI_EMBEDDING_URL: ${TEI_EMBEDDING_URL:-http://tei-embeddings:80}
-  TEI_RERANKER_URL: ${TEI_RERANKER_URL:-http://tei-reranker:80}
+  # Embeddings (in-process via fastembed; ONNX, CPU-only, 384-dim multilingual)
+  FASTEMBED_EMBEDDING_MODEL: ${FASTEMBED_EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+  FASTEMBED_CACHE_DIR: ${FASTEMBED_CACHE_DIR:-/var/cache/fastembed}
   # OpenTelemetry Configuration
   OTEL_SERVICE_NAME: meho
   OTEL_EXPORTER_OTLP_ENDPOINT: http://seq:80/ingest/otlp
@@ -184,60 +188,6 @@ services:
       retries: 3
 
   # =============================================================================
-  # TEI Embedding & Reranking Sidecars (profile: tei)
-  # Only started when VOYAGE_API_KEY is not set (auto-detected by dev-env.sh).
-  # Models download from HuggingFace Hub on first boot (~2-4 min).
-  # Manual start: docker compose --profile tei up
-  # For GPU: replace cpu-1.9 with 1.9 and add deploy.resources.reservations.devices
-  #
-  # Architecture: x86_64 only. On arm64 / Apple Silicon this image runs under
-  # Docker Desktop's Rosetta 2 emulation -- enable it in Settings > General >
-  # "Use Rosetta for x86_64/amd64 emulation on Apple Silicon" (disabled by
-  # default). Voyage is the recommended path on arm64; the measured Rosetta
-  # baseline is in docs/development/arm64-notes.md.
-  # =============================================================================
-
-  tei-embeddings:
-    <<: *service-defaults
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
-    # Image is x86_64-only; declare platform so compose pulls amd64 on arm64
-    # hosts (runs under Rosetta 2) instead of failing with `no matching
-    # manifest for linux/arm64/v8`.
-    platform: linux/amd64
-    command: --model-id BAAI/bge-m3 --port 80
-    ports:
-      - "8090:80"
-    volumes:
-      - tei_models:/data
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:80/health"]
-      interval: 15s
-      timeout: 10s
-      retries: 12
-      start_period: 120s
-    profiles: ["tei"]
-
-  tei-reranker:
-    <<: *service-defaults
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
-    # Image is x86_64-only; declare platform so compose pulls amd64 on arm64
-    # hosts (runs under Rosetta 2) instead of failing with `no matching
-    # manifest for linux/arm64/v8`.
-    platform: linux/amd64
-    command: --model-id BAAI/bge-reranker-v2-m3 --port 80
-    ports:
-      - "8091:80"
-    volumes:
-      - tei_models:/data
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:80/health"]
-      interval: 15s
-      timeout: 10s
-      retries: 12
-      start_period: 120s
-    profiles: ["tei"]
-
-  # =============================================================================
   # MEHO Unified Backend Service (replaces 5 distributed services)
   # =============================================================================
 
@@ -254,13 +204,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ${HF_HOME:-~/.cache/huggingface}:/app/.cache/huggingface
+      - fastembed_cache:/var/cache/fastembed
     environment:
       <<: *common-env
       DATABASE_URL: postgresql+asyncpg://meho:password@postgres:5432/meho
       SERVICE_NAME: meho
-      INGESTION_MEMORY_LIMIT_MB: ${INGESTION_MEMORY_LIMIT_MB:-8192}
-      INGESTION_PAGE_BATCH_SIZE: ${INGESTION_PAGE_BATCH_SIZE:-50}
       INGESTION_OCR_ENABLED: ${INGESTION_OCR_ENABLED:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
       # Keycloak configuration (required for authentication)
@@ -332,8 +280,8 @@ volumes:
   redis_data:
   pgadmin_data:
   seq_data:
-  tei_models:  # Shared cache for TEI model downloads (bge-m3 + bge-reranker-v2-m3)
-  ollama_data:  # Ollama model cache (persistent across restarts)
+  fastembed_cache:  # Cached ONNX weights for fastembed (downloaded on first boot)
+  ollama_data:      # Ollama model cache (persistent across restarts)
 
 networks:
   meho-network:

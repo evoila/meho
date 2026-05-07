@@ -32,7 +32,6 @@ from meho_app.modules.knowledge.schemas import (
 
 if TYPE_CHECKING:
     from meho_app.modules.knowledge.hybrid_search import PostgresFTSHybridService
-    from meho_app.modules.knowledge.reranker import RerankerProvider
 
 logger = get_logger(__name__)
 RERANK_CANDIDATE_MULTIPLIER = 5
@@ -69,9 +68,8 @@ class KnowledgeStore:
         if hybrid_search_service is None:
             logger.warning(
                 "KnowledgeStore created without hybrid_search_service. "
-                "Search will use semantic embeddings only (no reranker-backed compatibility path). "
-                "This is OK for read-only operations, but production should include the unified "
-                "semantic ranker + reranker service."
+                "Search will use semantic embeddings only (no BM25 fusion). "
+                "Production should pass a PostgresFTSHybridService."
             )
 
     async def add_chunk(self, chunk_create: KnowledgeChunkCreate) -> KnowledgeChunk:
@@ -117,10 +115,7 @@ class KnowledgeStore:
                 retrieval_text = truncate_text_to_token_limit(retrieval_text)
 
             # 1. Generate embedding
-            embedding = await self.embedding_provider.embed_text(
-                retrieval_text,
-                input_type="document",
-            )
+            embedding = await self.embedding_provider.embed_text(retrieval_text)
 
             # 2. Create in database with embedding (single atomic operation!)
             chunk = await self.repository.create_chunk(chunk_create, embedding=embedding)
@@ -182,7 +177,7 @@ class KnowledgeStore:
         )
 
         # 1. Generate query embedding
-        query_embedding = await self.embedding_provider.embed_text(query, input_type="query")
+        query_embedding = await self.embedding_provider.embed_text(query)
 
         # 2. Search PostgreSQL with pgvector (handles ACL + metadata filtering)
         chunks_with_scores = await self.repository.search_by_embedding(
@@ -275,11 +270,15 @@ class KnowledgeStore:
         # Already ACL-filtered and ordered by semantic ranker + reranker relevance
         return chunks[:top_k]
 
-    def _get_reranker(self) -> "RerankerProvider | None":
-        """Resolve the reranker from the configured hybrid service, if available."""
-        if self.hybrid_search_service is None:
-            return None
-        return getattr(self.hybrid_search_service, "reranker", None)
+    def _get_reranker(self) -> Any | None:
+        """Cross-encoder reranker is intentionally absent in the preview path.
+
+        The signature is kept so the conditional branches in the search
+        methods continue to compile and short-circuit cleanly. When
+        MEHO.Knowledge takes over remote embedding/reranking the reranker
+        will return as a real provider behind this method.
+        """
+        return None
 
     @staticmethod
     def _metadata_to_dict(raw_metadata: Any) -> dict[str, Any]:
@@ -408,7 +407,7 @@ class KnowledgeStore:
         doc_version: str | None = None,
     ) -> list[dict[str, Any]]:
         """Run Farseer-style semantic ranking followed by optional reranking."""
-        query_embedding = await self.embedding_provider.embed_text(query, input_type="query")
+        query_embedding = await self.embedding_provider.embed_text(query)
         rerank_candidates = min(
             max(top_k * RERANK_CANDIDATE_MULTIPLIER, top_k),
             RERANK_CANDIDATE_LIMIT,

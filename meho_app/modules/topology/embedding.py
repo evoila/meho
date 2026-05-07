@@ -7,7 +7,7 @@ Generates embeddings for entity descriptions to enable:
 1. Semantic search of entities
 2. Cross-connector correlation discovery (SAME_AS)
 
-Reuses the Voyage AI embedding infrastructure from the knowledge module.
+Reuses the fastembed embedding infrastructure from the knowledge module.
 """
 
 from meho_app.core.otel import get_logger
@@ -23,7 +23,7 @@ class TopologyEmbeddingService:
     """
     Service for generating embeddings for topology entities.
 
-    Uses the same embedding model as the knowledge module (Voyage AI voyage-4-large, 1024D)
+    Uses the same embedding model as the knowledge module (fastembed MiniLM-L12, 384-D)
     to ensure consistent semantic similarity across the system.
 
     Usage:
@@ -39,7 +39,7 @@ class TopologyEmbeddingService:
 
         Args:
             embedding_provider: Optional provider override (for testing).
-                              If not provided, uses the default Voyage AI provider.
+                              If not provided, uses the default fastembed provider.
         """
         self._provider = embedding_provider
 

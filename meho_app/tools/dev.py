@@ -52,27 +52,9 @@ ALEMBIC_INI = REPO_ROOT / "meho_app" / "alembic.ini"
 PROJECT_NAME = "meho"
 
 
-def _needs_tei_profile() -> bool:
-    """TEI sidecars run only when ``VOYAGE_API_KEY`` is unset everywhere."""
-    if os.environ.get("VOYAGE_API_KEY"):
-        return False
-    if not ENV_FILE.exists():
-        return True
-    for line in ENV_FILE.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith("VOYAGE_API_KEY="):
-            return not stripped.split("=", 1)[1].strip()
-    return True
-
-
 def _compose_args() -> list[str]:
     """Build the standard ``docker compose ...`` invocation prefix."""
-    args = ["docker", "compose", "-p", PROJECT_NAME, "-f", str(COMPOSE_FILE)]
-    if _needs_tei_profile():
-        args.extend(["--profile", "tei"])
-    return args
+    return ["docker", "compose", "-p", PROJECT_NAME, "-f", str(COMPOSE_FILE)]
 
 
 def _compose(*subargs: str, check: bool = False) -> subprocess.CompletedProcess[str]:

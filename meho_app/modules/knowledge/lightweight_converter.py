@@ -5,9 +5,8 @@ Lightweight document conversion without PyTorch/Docling.
 
 Uses pymupdf4llm for PDF text/layout, pdfplumber for table extraction,
 RapidOCR for scanned PDF OCR, python-docx for DOCX, and BeautifulSoup for HTML.
-No GPU required. ~250MB total vs Docling's 2-4GB.
-
-Activated when MEHO_FEATURE_USE_DOCLING=false.
+No GPU required. ~250 MB total — the only document converter shipped with
+the OSS image.
 """
 
 from __future__ import annotations
@@ -558,7 +557,7 @@ async def generate_document_summary(
     try:
         result = await asyncio.wait_for(agent.run(text_preview), timeout=15.0)
         return str(result.output).strip()
-    except (TimeoutError, Exception) as e:
+    except Exception as e:
         logger.warning("document_summary_generation_failed", error=str(e))
         return ""  # Fallback: no summary, still use connector context
 

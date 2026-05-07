@@ -84,10 +84,10 @@ rather than enumerating every private milestone that preceded it.
   and guided tour
 - Multi-LLM routing — Anthropic Claude, OpenAI, and Ollama via a centralized
   model-settings factory
-- Local embeddings via Text Embeddings Inference (`bge-m3`) and a local
-  reranker — no cloud dependency required
-- Ephemeral cloud ingestion worker for Docling PDF conversion, offloaded via
-  GCS-mediated Cloud Run Jobs to reclaim PyTorch memory reliably
+- Local embeddings via in-process fastembed (`paraphrase-multilingual-MiniLM-L12-v2`,
+  ONNX, CPU-only, 384-dim) — single container, no sidecar, no PyTorch, no GPU
+- Ephemeral cloud ingestion worker for PDF conversion, offloaded via
+  GCS-mediated Cloud Run Jobs to keep peak API memory bounded
 - Three-tier health monitoring (`/health`, `/ready`, `/status`) with
   connector reachability badges
 - Business-logic observability via OpenTelemetry span hierarchy with

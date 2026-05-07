@@ -13,7 +13,7 @@ updates:
       - "python"
     commit-message:
       prefix: "chore(deps)"
-  
+
   # Frontend dependencies
   - package-ecosystem: "npm"
     directory: "/meho_frontend"
@@ -27,7 +27,7 @@ updates:
       - "frontend"
     commit-message:
       prefix: "chore(deps)"
-  
+
   # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -40,7 +40,7 @@ updates:
       - "github-actions"
     commit-message:
       prefix: "chore(deps)"
-  
+
   # Docker
   - package-ecosystem: "docker"
     directory: "/docker"
@@ -53,4 +53,3 @@ updates:
       - "docker"
     commit-message:
       prefix: "chore(deps)"
-

@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 evoila Group
-"""Tests for Farseer-aligned retrieval text, ranking, and reranking."""
+"""Tests for retrieval-text alignment between indexing and search.
+
+The cross-encoder reranker is intentionally absent in the fastembed
+preview path. These tests cover that the retrieval text MEHO indexes is
+the same shape MEHO surfaces back to callers, and that connector-scoped
+retrieval correctly filters at the repository layer.
+"""
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
@@ -13,16 +19,6 @@ from meho_app.modules.knowledge.hybrid_search import PostgresFTSHybridService
 from meho_app.modules.knowledge.knowledge_store import KnowledgeStore
 from meho_app.modules.knowledge.retrieval_context import build_retrieval_text
 from meho_app.modules.knowledge.schemas import ChunkMetadata, KnowledgeChunk, KnowledgeChunkCreate
-
-
-class _ExecuteResult:
-    """Minimal SQLAlchemy result stub for connector lookups."""
-
-    def __init__(self, rows):
-        self._rows = rows
-
-    def all(self):
-        return self._rows
 
 
 def _make_chunk(
@@ -57,8 +53,8 @@ def _make_chunk(
 
 
 @pytest.mark.asyncio
-async def test_add_chunk_embeds_retrieval_text_with_document_input_type() -> None:
-    """Indexing should embed Farseer-style retrieval text as a document."""
+async def test_add_chunk_embeds_retrieval_text() -> None:
+    """Indexing should embed the Farseer-style retrieval text."""
     metadata = ChunkMetadata(
         document_name="soccer.pdf",
         heading_hierarchy=["11 Conclusion"],
@@ -95,120 +91,16 @@ async def test_add_chunk_embeds_retrieval_text_with_document_input_type() -> Non
         page_start=11,
         page_end=11,
     )
-    embedding_provider.embed_text.assert_awaited_once_with(
-        expected_text,
-        input_type="document",
-    )
+    embedding_provider.embed_text.assert_awaited_once_with(expected_text)
 
 
 @pytest.mark.asyncio
-async def test_search_cross_connector_uses_reranker_order_and_retrieval_text() -> None:
-    """Cross-connector search should rerank the same retrieval text MEHO indexed."""
-    connector_a = str(uuid4())
-    connector_b = str(uuid4())
-    chunk_a = _make_chunk(
-        text="Match Result (3-way), Correct Score",
-        source_uri="s3://bucket/documents/soccer.pdf",
-        connector_id=connector_a,
-        metadata=ChunkMetadata(
-            document_name="soccer.pdf",
-            heading_hierarchy=["9 Odds Construction"],
-            page_number=9,
-            page_numbers=[9],
-            page_start=9,
-            page_end=9,
-        ),
-    )
-    chunk_b = _make_chunk(
-        text="Hence the 3-way market probabilities. Fair odds are 1 / P(H), 1 / P(D), 1 / P(A).",
-        source_uri="s3://bucket/documents/soccer.pdf",
-        connector_id=connector_b,
-        metadata=ChunkMetadata(
-            document_name="soccer.pdf",
-            heading_hierarchy=["9 Odds Construction"],
-            page_number=8,
-            page_numbers=[8],
-            page_start=8,
-            page_end=8,
-        ),
-    )
+async def test_search_by_connector_passes_connector_filter() -> None:
+    """Connector-scoped retrieval should filter at the repository layer.
 
-    repository = Mock()
-    repository.search_by_embedding = AsyncMock(return_value=[(chunk_a, 0.41), (chunk_b, 0.39)])
-    repository.session = Mock()
-    repository.session.execute = AsyncMock(
-        return_value=_ExecuteResult(
-            [
-                (connector_a, "Connector A", "vmware"),
-                (connector_b, "Connector B", "vmware"),
-            ]
-        )
-    )
-
-    embedding_provider = Mock()
-    embedding_provider.embed_text = AsyncMock(return_value=[0.2, 0.4, 0.6])
-    reranker = Mock()
-    reranker.rerank = AsyncMock(
-        return_value=[
-            {"index": 1, "relevance_score": 0.91},
-            {"index": 0, "relevance_score": 0.74},
-        ]
-    )
-    hybrid_search_service = Mock()
-    hybrid_search_service.reranker = reranker
-
-    store = KnowledgeStore(
-        repository=repository,
-        embedding_provider=embedding_provider,
-        hybrid_search_service=hybrid_search_service,
-    )
-    user_context = UserContext(
-        tenant_id="tenant-1",
-        user_id="user-1",
-        roles=["admin"],
-        groups=[],
-    )
-
-    results = await store.search_cross_connector(
-        query="who is the favorite",
-        user_context=user_context,
-        top_k=2,
-    )
-
-    assert [result["id"] for result in results] == [chunk_b.id, chunk_a.id]
-    assert [result["score"] for result in results] == [0.91, 0.74]
-    assert results[0]["filename"] == "soccer.pdf"
-    assert results[0]["heading_path"] == ["9 Odds Construction"]
-    assert results[0]["page_start"] == 8
-    assert results[0]["page_end"] == 8
-    assert results[0]["source_chunk_index"] is None
-    repository.search_by_embedding.assert_awaited_once()
-    assert repository.search_by_embedding.await_args.kwargs["score_threshold"] == 0.0
-
-    rerank_call = reranker.rerank.await_args
-    assert rerank_call.kwargs["documents"] == [
-        build_retrieval_text(
-            chunk_a.text,
-            filename="soccer.pdf",
-            heading_path=["9 Odds Construction"],
-            page_number=9,
-            page_start=9,
-            page_end=9,
-        ),
-        build_retrieval_text(
-            chunk_b.text,
-            filename="soccer.pdf",
-            heading_path=["9 Odds Construction"],
-            page_number=8,
-            page_start=8,
-            page_end=8,
-        ),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_search_by_connector_passes_connector_filter_to_ranker() -> None:
-    """Connector-scoped retrieval should filter before reranking."""
+    With the reranker absent in the preview, ``score_threshold`` is passed
+    through unchanged (no widening to 0.0 to feed a cross-encoder).
+    """
     connector_id = str(uuid4())
     chunk = _make_chunk(
         text="Connector-specific chunk",
@@ -222,7 +114,6 @@ async def test_search_by_connector_passes_connector_filter_to_ranker() -> None:
     embedding_provider = Mock()
     embedding_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
     hybrid_search_service = Mock()
-    hybrid_search_service.reranker = Mock()
 
     store = KnowledgeStore(
         repository=repository,
@@ -244,15 +135,16 @@ async def test_search_by_connector_passes_connector_filter_to_ranker() -> None:
         score_threshold=0.6,
     )
 
-    assert [chunk.id for chunk in results] == [chunk.id]
+    assert [c.id for c in results] == [chunk.id]
     repository.search_by_embedding.assert_awaited_once()
     assert repository.search_by_embedding.await_args.kwargs["connector_id"] == connector_id
-    assert repository.search_by_embedding.await_args.kwargs["score_threshold"] == 0.0
+    # No reranker -> threshold passes through unchanged.
+    assert repository.search_by_embedding.await_args.kwargs["score_threshold"] == 0.6
 
 
 @pytest.mark.asyncio
 async def test_search_ranked_by_connector_returns_metadata_and_score() -> None:
-    """Connector-scoped ranked results should expose retrieval metadata for UI use."""
+    """Connector-scoped ranked results expose retrieval metadata for UI use."""
     connector_id = str(uuid4())
     chunk = _make_chunk(
         text="Restart the connector if sync stalls.",
@@ -302,8 +194,8 @@ async def test_search_ranked_by_connector_returns_metadata_and_score() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hybrid_service_adaptive_search_uses_semantic_rank_and_rerank() -> None:
-    """Legacy hybrid entrypoint should delegate to the Farseer-style flow."""
+async def test_hybrid_adaptive_search_returns_rrf_fused_results() -> None:
+    """``adaptive_search`` runs BM25 + vector RRF (no cross-encoder rerank)."""
     chunk_a = _make_chunk(
         text="Match Result (3-way), Correct Score",
         source_uri="s3://bucket/documents/soccer.pdf",
@@ -317,7 +209,7 @@ async def test_hybrid_service_adaptive_search_uses_semantic_rank_and_rerank() ->
         ),
     )
     chunk_b = _make_chunk(
-        text="Hence the 3-way market probabilities. Fair odds are 1 / P(H), 1 / P(D), 1 / P(A).",
+        text="Hence the 3-way market probabilities.",
         source_uri="s3://bucket/documents/soccer.pdf",
         metadata=ChunkMetadata(
             document_name="soccer.pdf",
@@ -331,20 +223,18 @@ async def test_hybrid_service_adaptive_search_uses_semantic_rank_and_rerank() ->
 
     repository = Mock()
     repository.search_by_embedding = AsyncMock(return_value=[(chunk_a, 0.41), (chunk_b, 0.39)])
+    repository.session = Mock()
+
     embedding_provider = Mock()
     embedding_provider.embed_text = AsyncMock(return_value=[0.2, 0.4, 0.6])
-    reranker = Mock()
-    reranker.rerank = AsyncMock(
-        return_value=[
-            {"index": 1, "relevance_score": 0.93},
-            {"index": 0, "relevance_score": 0.71},
-        ]
-    )
+
+    bm25_service = Mock()
+    bm25_service.search = AsyncMock(return_value=[])
 
     service = PostgresFTSHybridService(
         repository=repository,
         embeddings=embedding_provider,
-        reranker=reranker,
+        bm25_service=bm25_service,
     )
     user_context = UserContext(
         tenant_id="tenant-1",
@@ -360,30 +250,9 @@ async def test_hybrid_service_adaptive_search_uses_semantic_rank_and_rerank() ->
         score_threshold=0.6,
     )
 
-    assert [result["id"] for result in results] == [chunk_b.id, chunk_a.id]
-    assert [result["score"] for result in results] == [0.93, 0.71]
-    embedding_provider.embed_text.assert_awaited_once_with(
-        "who is the favorite",
-        input_type="query",
-    )
+    # Reranker is absent -> RRF order matches the underlying semantic order.
+    assert [r["id"] for r in results] == [str(chunk_a.id), str(chunk_b.id)]
+    embedding_provider.embed_text.assert_awaited_once_with("who is the favorite")
     repository.search_by_embedding.assert_awaited_once()
-    assert repository.search_by_embedding.await_args.kwargs["score_threshold"] == 0.0
-    rerank_call = reranker.rerank.await_args
-    assert rerank_call.kwargs["documents"] == [
-        build_retrieval_text(
-            chunk_a.text,
-            filename="soccer.pdf",
-            heading_path=["9 Odds Construction"],
-            page_number=9,
-            page_start=9,
-            page_end=9,
-        ),
-        build_retrieval_text(
-            chunk_b.text,
-            filename="soccer.pdf",
-            heading_path=["9 Odds Construction"],
-            page_number=8,
-            page_start=8,
-            page_end=8,
-        ),
-    ]
+    bm25_service.search.assert_awaited_once()
+    assert service.reranker is None

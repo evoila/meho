@@ -14,7 +14,7 @@ import pytest
 from openai import APIError, APITimeoutError, RateLimitError
 
 # VectorStore removed - using pgvector in PostgreSQL
-from meho_app.modules.knowledge.embeddings import VoyageAIEmbeddings
+from meho_app.modules.knowledge.embeddings import FastEmbedEmbeddings
 from meho_app.modules.knowledge.knowledge_store import KnowledgeStore
 from meho_app.modules.knowledge.repository import KnowledgeRepository
 from meho_app.modules.knowledge.schemas import KnowledgeChunkCreate
@@ -37,7 +37,7 @@ async def test_openai_rate_limit_error_handling(db_session):
     repository = KnowledgeRepository(db_session)
 
     # Mock embedding provider that raises rate limit
-    mock_embedder = Mock(spec=VoyageAIEmbeddings)
+    mock_embedder = Mock(spec=FastEmbedEmbeddings)
     mock_embedder.embed_text = AsyncMock(
         side_effect=RateLimitError(
             "Rate limit exceeded. Please try again later.",
@@ -76,7 +76,7 @@ async def test_openai_timeout_error_handling(db_session):
     repository = KnowledgeRepository(db_session)
 
     # Mock embedding provider that times out
-    mock_embedder = Mock(spec=VoyageAIEmbeddings)
+    mock_embedder = Mock(spec=FastEmbedEmbeddings)
     mock_embedder.embed_text = AsyncMock(side_effect=APITimeoutError("Request timed out"))
 
     knowledge_store = KnowledgeStore(repository=repository, embedding_provider=mock_embedder)
@@ -109,7 +109,7 @@ async def test_openai_invalid_api_key_error(db_session):
     repository = KnowledgeRepository(db_session)
 
     # Create embedder with invalid key
-    mock_embedder = Mock(spec=VoyageAIEmbeddings)
+    mock_embedder = Mock(spec=FastEmbedEmbeddings)
     mock_embedder.embed_text = AsyncMock(
         side_effect=APIError(
             "Incorrect API key provided",
@@ -147,7 +147,7 @@ async def test_malformed_embedding_response(db_session):
     repository = KnowledgeRepository(db_session)
 
     # Mock embedder that returns wrong dimensions
-    mock_embedder = Mock(spec=VoyageAIEmbeddings)
+    mock_embedder = Mock(spec=FastEmbedEmbeddings)
     mock_embedder.embed_text = AsyncMock(return_value=[0.1] * 512)  # Wrong size!
 
     knowledge_store = KnowledgeStore(repository=repository, embedding_provider=mock_embedder)

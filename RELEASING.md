@@ -263,7 +263,6 @@ cp /path/to/MEHO.X/env.example .env
 
 # Set the bare minimum required env (adjust for your test setup)
 # - ANTHROPIC_API_KEY
-# - VOYAGE_API_KEY
 # - CREDENTIAL_ENCRYPTION_KEY (run scripts/generate-encryption-key.sh)
 
 docker run --rm --env-file .env -p 8000:8000 \

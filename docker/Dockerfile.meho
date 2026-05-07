@@ -3,24 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 evoila Group
 
-# --- Base stages: CPU default, GPU opt-in via --build-arg TARGETBASE=base-gpu ---
-ARG TARGETBASE=base-cpu
-# nvidia/cuda:12.4.1-runtime-ubuntu22.04 as of 2026-05-04
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9 AS base-gpu
+# --- Base stage: CPU only (no PyTorch, no GPU) ---
 # python:3.13-slim as of 2026-05-04
-FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS base-cpu
-FROM ${TARGETBASE} AS base
-
-# Heavy-group opt-in flags. Declared here so subsequent RUN layers see them.
-# --build-arg INCLUDE_DOCLING=true  -> add docling-group (docling-core + PyTorch)
-# --build-arg CUDA_ENABLED=true     -> add torch-group   (PyTorch alone, for GPU-only paths)
-ARG INCLUDE_DOCLING=false
-ARG CUDA_ENABLED=false
-
-# Runtime feature flag: mirrors the build-time INCLUDE_DOCLING decision so the
-# app's flag-gated Docling import in meho_app.modules.knowledge.ingestion
-# does not try to `import docling` on images that did not install it.
-ENV MEHO_FEATURE_USE_DOCLING=${INCLUDE_DOCLING}
+FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS base
 
 # Minimal runtime apt dependencies. No compilers / -dev headers: `uv sync
 # --frozen` installs from the lockfile against prebuilt wheels.
@@ -40,7 +25,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN groupadd -r meho --gid 1000 \
     && useradd -r -g meho --uid 1000 --home-dir /app meho \
-    && chown meho:meho /app
+    && chown meho:meho /app \
+    && mkdir -p /var/cache/fastembed \
+    && chown -R meho:meho /var/cache/fastembed
 
 # uv binary lands in /bin (root-owned); meho can exec it but not modify it.
 # ghcr.io/astral-sh/uv:latest (v0.11.8) as of 2026-05-04
@@ -54,9 +41,7 @@ USER meho
 COPY --chown=meho:meho pyproject.toml uv.lock README.md ./
 
 RUN --mount=type=cache,target=/app/.cache/uv,uid=1000,gid=1000 \
-    UV_LINK_MODE=copy uv sync --frozen --no-install-project \
-      $([ "$INCLUDE_DOCLING" = "true" ] && echo "--group docling-group") \
-      $([ "$CUDA_ENABLED"    = "true" ] && echo "--group torch-group")
+    UV_LINK_MODE=copy uv sync --frozen --no-install-project
 
 # --- Project layer (cache-busted by source changes) ---
 COPY --chown=meho:meho meho_app/ ./meho_app/
@@ -65,9 +50,7 @@ COPY --chown=meho:meho scripts/  ./scripts/
 COPY --chown=meho:meho tests/    ./tests/
 
 RUN --mount=type=cache,target=/app/.cache/uv,uid=1000,gid=1000 \
-    UV_LINK_MODE=copy uv sync --frozen \
-      $([ "$INCLUDE_DOCLING" = "true" ] && echo "--group docling-group") \
-      $([ "$CUDA_ENABLED"    = "true" ] && echo "--group torch-group")
+    UV_LINK_MODE=copy uv sync --frozen
 
 # Shared entrypoint: runs migrations then execs CMD.
 # Owned by root (mode 755) intentionally — part of the image, not runtime state.
@@ -100,12 +83,8 @@ FROM base AS debug
 # base ends with USER root (entrypoint copy). Debug keeps root for live
 # volume-mount editing and debugpy attachment — do not set USER meho here.
 
-# --inexact preserves any heavy groups installed in `base` when the image
-# was built with --build-arg INCLUDE_DOCLING=true / CUDA_ENABLED=true.
-# Without it, `uv sync --group dev` would reconcile the venv to exactly
-# the `dev` group and drop docling/torch from the debug image.
 RUN --mount=type=cache,target=/app/.cache/uv,uid=1000,gid=1000 \
-    UV_LINK_MODE=copy uv sync --frozen --group dev --inexact
+    UV_LINK_MODE=copy uv sync --frozen --group dev
 
 EXPOSE 8000 5678
 

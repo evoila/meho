@@ -13,7 +13,8 @@ This guide covers running MEHO in Docker for development and testing. MEHO ships
 - **Docker** 24+ with Docker Compose v2
 - **Git** for cloning the repository
 - An **Anthropic API key** (Claude Opus 4.6 / Sonnet 4.6)
-- A **Voyage AI API key** (for embeddings and reranking)
+
+Embeddings run in-process via [fastembed](https://qdrant.github.io/fastembed/) (ONNX, CPU-only). No sidecars, no third-party AI key required for retrieval.
 
 ## Quick Start
 
@@ -25,9 +26,8 @@ cd MEHO.X
 # Copy environment file and set required secrets
 cp env.example .env
 
-# Edit .env -- set these three required values:
+# Edit .env -- set these two required values:
 #   ANTHROPIC_API_KEY=sk-ant-your-key-here
-#   VOYAGE_API_KEY=your-voyage-key-here
 #   CREDENTIAL_ENCRYPTION_KEY=$(./scripts/generate-encryption-key.sh --raw)
 #
 # Or append the full assignment directly to .env (no substitution needed):
@@ -97,7 +97,6 @@ These must be set in `.env` -- Docker Compose will refuse to start without them.
 | Variable | Description |
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude models (Opus 4.6, Sonnet 4.6) |
-| `VOYAGE_API_KEY` | Voyage AI API key for embeddings (voyage-4-large) and reranking (rerank-2.5) |
 | `CREDENTIAL_ENCRYPTION_KEY` | Fernet symmetric key for encrypting connector credentials at rest |
 
 ### LLM Models (Anthropic)
@@ -116,7 +115,13 @@ Two-tier model configuration: Opus 4.6 for heavy reasoning, Sonnet 4.6 for utili
 | `WORKFLOW_BUILDER_MODEL` | `anthropic:claude-sonnet-4-6` | Workflow generation |
 | `TRANSFORM_GENERATION_MODEL` | `anthropic:claude-sonnet-4-6` | Transform generation |
 | `WORKFLOW_LLM_REPORT_MODEL` | `anthropic:claude-sonnet-4-6` | Workflow reports |
-| `EMBEDDING_MODEL` | `voyage-4-large` | Voyage AI embedding model (1024D) |
+
+### Embeddings (in-process fastembed)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `FASTEMBED_EMBEDDING_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | fastembed model name (must be in fastembed's catalog). 384-D multilingual ONNX, ~220 MB on disk. Changing this typically requires a new Alembic migration to match the embedding dimension. |
+| `FASTEMBED_CACHE_DIR` | `/var/cache/fastembed` | On-disk cache for downloaded ONNX weights. The compose stack persists this via the `fastembed_cache` volume so subsequent boots skip the download. |
 
 ### Database (PostgreSQL)
 
@@ -196,7 +201,6 @@ Defaults work with the Docker Compose stack. Override only for external database
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MEHO_FEATURE_USE_DOCLING` | `true` | Document ingestion backend. `true` = Docling (ML-powered, needs PyTorch/GPU, ~4 GB image). `false` = lightweight pipeline (pymupdf4llm + pdfplumber + RapidOCR, CPU-only, ~500 MB image). |
 | `MEHO_FEATURE_EPHEMERAL_INGESTION` | `false` | When `true`, large PDF ingestion is offloaded to ephemeral cloud workers (e.g., Cloud Run) instead of running in-process. Requires coordinator backend configuration. |
 
 ## Service Architecture
@@ -302,7 +306,7 @@ The Docker Compose development setup is not production-ready as-is. For producti
 
 ### Secrets Management
 
-- Move `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, and `CREDENTIAL_ENCRYPTION_KEY` to a secrets manager (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault).
+- Move `ANTHROPIC_API_KEY` and `CREDENTIAL_ENCRYPTION_KEY` to a secrets manager (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault).
 - Replace the default PostgreSQL password (`password`) and Keycloak admin password (`admin`).
 - Do not use the default MinIO credentials in production.
 
@@ -335,59 +339,26 @@ The Docker Compose development setup is not production-ready as-is. For producti
 - Set `OTEL_TRACE_LEVEL=summary` in production to reduce trace payload size.
 - Set `MEHO_LOG_LEVEL=WARNING` for reduced log volume.
 
-## Slim Docker Image
+## Image Footprint
 
-MEHO supports a slim Docker build that excludes PyTorch and Docling, reducing image size from ~4 GB to ~500 MB. The slim image uses the lightweight document ingestion pipeline (pymupdf4llm, pdfplumber, RapidOCR) instead of Docling.
-
-### When to Use Slim
-
-- **Open-source deployments** without GPU resources
-- **Development environments** where fast builds and startup matter
-- **Resource-constrained environments** (4-8 GB pod memory limits)
-- **CI/CD pipelines** where image pull time impacts deployment speed
-
-### Building the Slim Image
+The MEHO API image is CPU-only and ships ~1 GB to disk:
 
 ```bash
-# Build slim image (no PyTorch, no Docling) — INCLUDE_DOCLING defaults to false
-docker build -f docker/Dockerfile.meho --target prod -t meho:slim .
-
-# Build full image (adds docling-group: docling-core, docling-parse, PyTorch)
-docker build -f docker/Dockerfile.meho --target prod --build-arg INCLUDE_DOCLING=true -t meho:full .
+docker build -f docker/Dockerfile.meho --target prod -t meho:latest .
 ```
 
-The `INCLUDE_DOCLING` build arg controls what ships in the image:
-
-- **Default (`INCLUDE_DOCLING=false`)** — slim image, ~500 MB. No PyTorch, Docling, or ML model dependencies. Ingestion falls back to the lightweight `pymupdf4llm` + `pdfplumber` path. Runtime env is `MEHO_FEATURE_USE_DOCLING=false`. Suitable for open-source deployments, CI pipelines, and resource-constrained hosts.
-- **Opt-in (`INCLUDE_DOCLING=true`)** — full image, ~4 GB. Adds the `docling-group` dependency group (docling, docling-core, docling-parse, PyTorch, torchaudio, torchvision) and sets `MEHO_FEATURE_USE_DOCLING=true` at runtime. Required for Docling-based PDF layout parsing and heading-aware chunking.
-
-GPU builds opt in additionally with `--build-arg TARGETBASE=base-gpu --build-arg CUDA_ENABLED=true` (CUDA 12.4.1 / Ubuntu 22.04). GPU and Docling are orthogonal — any combination is valid.
-
-### Slim vs Full Comparison
-
-| Aspect | Full Image | Slim Image |
-|--------|-----------|------------|
-| Image size | ~4 GB | ~500 MB |
-| PyTorch included | Yes | No |
-| PDF extraction | ML-powered (Docling) | Rule-based (pymupdf4llm) |
-| Table extraction | Deep learning | Rule-based (pdfplumber) |
-| OCR capability | Docling built-in | RapidOCR (CPU-only) |
-| Memory (idle) | ~500 MB | ~200 MB |
-| Memory (PDF processing) | 6-22 GB peak | ~250 MB |
-| All other features | Full | Full |
-
-!!! note "Slim image is fully functional"
-    The slim image has all MEHO features except ML-powered document ingestion. Connectors, agent investigation, topology, knowledge search, and all other capabilities work identically.
+PDF extraction uses `pymupdf4llm` + `pdfplumber` + `rapidocr-onnxruntime`. DOCX uses `python-docx`. HTML uses BeautifulSoup. Embeddings run in-process via fastembed (ONNX, MiniLM-L12 multilingual, 384-D). There is no PyTorch, no transformers, no GPU, no sidecar. Single API container.
 
 ## Ephemeral Ingestion Worker
 
-For environments that need Docling's ML-powered quality but cannot run PyTorch in the main MEHO container, an ephemeral ingestion worker can offload PDF conversion to a separate, short-lived process (e.g., Google Cloud Run job, Kubernetes Job).
+For environments that need to keep the main MEHO container small even during heavy PDF processing, the ephemeral ingestion worker offloads conversion to a short-lived process (Google Cloud Run job, Kubernetes Job, or local Docker container).
 
 Enable with `MEHO_FEATURE_EPHEMERAL_INGESTION=true`. See [Document Ingestion Worker Architecture](architecture/document-ingestion-worker.md) for the full design.
 
 The worker:
 
-- Runs Docling with PyTorch in a dedicated container with 16-32 GB memory
+- Runs the same lightweight converter as the API
 - Receives PDFs via object storage (MinIO/S3), converts them, writes chunks back
+- Embeds in-process via fastembed (set `FASTEMBED_EMBEDDING_MODEL` and `FASTEMBED_CACHE_DIR` in `env_overrides`); when the model is unset the worker emits zero vectors and the API regenerates embeddings
 - Terminates after completion (no persistent resource cost)
 - Uses Bearer token authentication for coordinator communication

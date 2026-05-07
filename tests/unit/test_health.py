@@ -30,7 +30,10 @@ def app():
         mock_cfg.anthropic_api_key = "sk-test"
         mock_cfg.credential_encryption_key = "a" * 44
         mock_cfg.openai_api_key = "sk-openai-test"
-        mock_cfg.voyage_api_key = "vk-test"
+        mock_cfg.fastembed_embedding_model = (
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+        )
+        mock_cfg.fastembed_cache_dir = "/var/cache/fastembed"
         mock_cfg.env = "test"
         mock_cfg.cors_origins = ["*"]
         mock_cfg.enable_rate_limiting = False

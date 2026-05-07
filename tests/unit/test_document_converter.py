@@ -4,8 +4,7 @@
 Unit tests for document_converter shared utilities.
 
 Tests cover SUPPORTED_MIME_TYPES, build_chunk_prefix, and
-generate_document_summary (the remaining utilities after
-DoclingDocumentConverter was replaced by DoclingWrapperAdapter).
+generate_document_summary used by the lightweight converter ingestion path.
 """
 
 from __future__ import annotations

@@ -77,11 +77,10 @@ Three-tier knowledge system with hybrid search and AI-powered reranking.
 
 - **Three-tier scoping**: global knowledge, connector-type knowledge, and connector-instance knowledge
 - **Day-one value** -- upload documentation and it's immediately available to all connectors of that type
-- **Hybrid search**: BM25 full-text + pgvector semantic search (Voyage AI voyage-4-large, 1024D embeddings)
-- **Voyage AI rerank-2.5** post-retrieval reranking for 15-30% precision improvement
-- **Docling-powered document processing** -- structure-aware chunking that preserves headings, sections, and tables with TOC filtering and heading path enrichment
-- **Lightweight CPU-only pipeline** -- `MEHO_FEATURE_USE_DOCLING=false` activates a PyTorch-free pipeline (pymupdf4llm + pdfplumber + RapidOCR) producing the same output shape as Docling, enabling ~500MB Docker images without GPU
-- **Ephemeral ingestion worker** -- optionally offload heavy Docling PDF processing to short-lived cloud workers (Cloud Run, K8s Jobs) while keeping the main MEHO container lightweight
+- **Hybrid search**: BM25 (Redis-cached) + pgvector cosine similarity, fused with reciprocal rank fusion. Embeddings are 384-D from in-process [fastembed](https://qdrant.github.io/fastembed/) running `paraphrase-multilingual-MiniLM-L12-v2` (ONNX, CPU-only). Single container — no sidecars, no PyTorch, no transformers, no GPU. Cross-encoder reranking returns when MEHO.Knowledge takes over remote retrieval.
+- **CPU-only document pipeline** -- `pymupdf4llm` + `pdfplumber` + `rapidocr-onnxruntime` for PDFs, `python-docx` for DOCX, BeautifulSoup for HTML. No PyTorch; main image stays slim.
+- **Heading-aware chunking** -- 512-word chunks with 64-word tail overlap; ATX heading hierarchy attached to every chunk's metadata.
+- **Ephemeral ingestion worker** -- optionally offload heavy PDF processing to short-lived cloud workers (Cloud Run, K8s Jobs) while keeping the main MEHO container lightweight.
 - **PDF and URL ingestion** -- upload PDFs or point to URLs for automatic knowledge extraction
 - **Auto-extraction** from conversation context -- MEHO learns from every interaction
 

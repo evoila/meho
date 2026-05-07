@@ -18,7 +18,7 @@ This page is the onboarding walkthrough. For deep architecture and deployment op
 
 You do **not** need Python, Node.js, or `uv` installed for the basic walkthrough. They are only required for the [hot-reload mode](#hot-reload-development-mode) below.
 
-On Apple Silicon, also enable **Use Rosetta for x86_64/amd64 emulation** in Docker Desktop (Settings → General). The Voyage embeddings path skips Rosetta entirely; the local TEI fallback needs it.
+On Apple Silicon, also enable **Use Rosetta for x86_64/amd64 emulation** in Docker Desktop (Settings → General). The TEI embeddings + reranker sidecars ship as amd64-only images and run under Rosetta on arm64.
 
 ## Step 1 -- clone and configure (3 minutes)
 
@@ -28,11 +28,10 @@ cd meho
 cp env.example .env
 ```
 
-Open `.env` in your editor and fill in three required values:
+Open `.env` in your editor and fill in two required values:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...                      # or OPENAI_API_KEY / OLLAMA_BASE_URL
-VOYAGE_API_KEY=...                                # optional, but the fast first-run path
 CREDENTIAL_ENCRYPTION_KEY=                        # generate with the helper below
 ```
 
@@ -164,7 +163,7 @@ Keycloak's first boot can take 60-90s on a normal machine and longer on Docker D
 
 ### TEI embeddings container OOMs or hangs on Apple Silicon
 
-The local TEI fallback runs under Rosetta on arm64 and is slow. If you have a Voyage AI account, set `VOYAGE_API_KEY` in `.env` and run plain `docker compose up` -- the TEI profile won't auto-activate, the stack stays light, and embeddings work natively. See [docs/troubleshooting.md#arm64--apple-silicon-first-run-issues](troubleshooting.md#arm64--apple-silicon-first-run-issues) for measured numbers.
+Embeddings now run in-process via fastembed (ONNX). The MiniLM-L12 model (~220 MB) is downloaded into the `fastembed_cache` Docker volume on first boot. No sidecar containers, no Rosetta caveats.
 
 ### The frontend loads but every API call returns 401
 

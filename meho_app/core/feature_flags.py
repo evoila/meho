@@ -45,11 +45,6 @@ class FeatureFlags(BaseSettings):
         default=False,
         description="Enable ephemeral ingestion worker dispatch (requires backend config)",
     )
-    use_docling: bool = Field(
-        default=True,
-        description="Use Docling for document ingestion (requires PyTorch/GPU). "
-        "Set to false for lightweight CPU-only ingestion via pymupdf4llm.",
-    )
 
 
 @lru_cache

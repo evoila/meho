@@ -15,10 +15,9 @@
 #   * The `meho` and `meho-frontend` application services are disabled
 #     via the `disabled` profile -- pytest runs the application code
 #     directly against these test infra services.
-#   * Heavy observability + auxiliary services (seq, pgadmin, ollama,
-#     tei-embeddings, tei-reranker) are unused by integration tests and
-#     not reactivated; they do not run unless their profile is opted
-#     into explicitly.
+#   * Heavy observability + auxiliary services (seq, pgadmin, ollama)
+#     are unused by integration tests and not reactivated; they do not
+#     run unless their profile is opted into explicitly.
 # =============================================================================
 
 name: meho-test

@@ -1,63 +1,78 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 evoila Group
 """
-Compatibility search service for MEHO knowledge retrieval.
+Hybrid retrieval over the knowledge base.
 
-The legacy `PostgresFTSHybridService` name is retained for compatibility, but the
-implementation now follows the Farseer-style retrieval path:
+Combines two retrieval signals:
 
-1. semantic vector ranking via pgvector
-2. optional Voyage/TEI reranking on retrieval text
+1. **BM25** - Redis-cached lexical search via :class:`BM25Service` (rank_bm25 +
+   Porter stemmer). Excels at exact-term queries (model numbers, error codes).
+2. **Vector** - pgvector cosine similarity over the chunk embeddings. Excels
+   at paraphrased / semantic queries.
 
-The older PostgreSQL FTS + RRF path has been removed to avoid ranking drift.
+The two ranked candidate lists are fused with **reciprocal rank fusion**
+(``score = sum(weight / (k + rank))``, ``k=60``).
+
+The cross-encoder reranker is intentionally absent from this preview path -
+it returns when MEHO.Knowledge takes over remote retrieval. The
+:meth:`search_with_rerank` and :meth:`adaptive_search` methods are retained
+as thin wrappers around :meth:`search` so callers in ``service.py`` and
+``ask_mode.py`` stay backwards-compatible.
+
+The class name :class:`PostgresFTSHybridService` is preserved for callers
+that import it from earlier revisions.
 """
 
-from typing import Any
+from __future__ import annotations
 
-from meho_app.core.auth_context import UserContext
+import asyncio
+from typing import TYPE_CHECKING, Any
+
 from meho_app.core.otel import get_logger
 
-from .embeddings import EmbeddingProvider
-from .repository import KnowledgeRepository
-from .reranker import RerankerProvider
+from .bm25_service import BM25Service
 from .retrieval_context import build_retrieval_text_from_metadata
 
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from redis.asyncio import Redis
+
+    from meho_app.core.auth_context import UserContext
+
+    from .embeddings import EmbeddingProvider
+    from .repository import KnowledgeRepository
+
 logger = get_logger(__name__)
+
 RERANK_CANDIDATE_MULTIPLIER = 5
 RERANK_CANDIDATE_LIMIT = 100
+# Constant from the canonical RRF paper (Cormack et al., SIGIR 2009).
+# Damps the effect of low-rank items so the top-of-list dominates.
+_RRF_K = 60
 
 
 class PostgresFTSHybridService:
-    """
-    Legacy compatibility wrapper for the current semantic ranker + reranker flow.
-
-    The class name remains stable to avoid widespread call-site churn, but it no
-    longer performs PostgreSQL full-text search or reciprocal rank fusion.
-    """
+    """Hybrid BM25 + pgvector retrieval (no cross-encoder reranker in this preview)."""
 
     def __init__(
         self,
         repository: KnowledgeRepository,
         embeddings: EmbeddingProvider,
-        reranker: RerankerProvider | None = None,
+        bm25_service: BM25Service | None = None,
+        redis: Redis | None = None,
     ) -> None:
-        """
-        Initialize compatibility search service.
-
-        Args:
-            repository: Knowledge repository (provides DB session)
-            embeddings: Embedding provider for semantic search
-            reranker: Optional reranker for post-retrieval precision boost
-        """
         self.repository = repository
         self.embeddings = embeddings
-        self.reranker = reranker
+        self.bm25_service = bm25_service or BM25Service(repository.session, redis=redis)
+        # Backwards-compat attribute for callers that introspected this:
+        # the reranker is gone in the preview, so it's always None.
+        self.reranker: Any | None = None
 
         logger.info(
-            "postgres_fts_hybrid_search_service_initialized",
-            search_type="semantic_rank_rerank",
-            reranker_available=reranker is not None,
-            legacy_class_name=True,
+            "hybrid_search_initialized",
+            search_type="bm25_vector_rrf",
+            reranker_available=False,
         )
 
     async def search(
@@ -66,40 +81,108 @@ class PostgresFTSHybridService:
         user_context: UserContext,
         filters: dict[str, Any] | None = None,
         top_k: int = 10,
-        score_threshold: float = 0.7,
+        score_threshold: float = 0.0,
         bm25_weight: float = 0.5,
         semantic_weight: float = 0.5,
     ) -> list[dict[str, Any]]:
-        """
-        Rank candidates semantically without reranking.
-
-        Args:
-            query: Search query
-            user_context: User context for ACL
-            filters: Metadata filters (applied to semantic search)
-            top_k: Number of final results
-            score_threshold: Minimum similarity score for semantic search
-            bm25_weight: Ignored legacy parameter retained for compatibility
-            semantic_weight: Ignored legacy parameter retained for compatibility
-
-        Returns:
-            Semantically ranked results
-        """
-        logger.info(
-            "hybrid_search_started",
-            query=query,
-            tenant_id=user_context.tenant_id,
-            top_k=top_k,
-            bm25_weight=bm25_weight,
-            semantic_weight=semantic_weight,
-            search_mode="semantic_rank_only",
-        )
-
+        """Run BM25 + vector retrieval in parallel and fuse with RRF."""
         if not user_context.tenant_id:
             raise ValueError("tenant_id is required for hybrid search")
 
-        query_vector = await self.embeddings.embed_text(query, input_type="query")
-        semantic_results_tuples = await self.repository.search_by_embedding(
+        candidate_k = min(max(top_k * RERANK_CANDIDATE_MULTIPLIER, top_k), RERANK_CANDIDATE_LIMIT)
+
+        vector_task = self._vector_search(
+            query=query,
+            user_context=user_context,
+            filters=filters,
+            top_k=candidate_k,
+            score_threshold=score_threshold,
+        )
+        bm25_task = self._bm25_search(
+            tenant_id=user_context.tenant_id,
+            query=query,
+            top_k=candidate_k,
+            metadata_filters=filters,
+        )
+
+        vector_results, bm25_results = await asyncio.gather(vector_task, bm25_task)
+
+        fused = _reciprocal_rank_fusion(
+            vector_results=vector_results,
+            bm25_results=bm25_results,
+            bm25_weight=bm25_weight,
+            semantic_weight=semantic_weight,
+        )
+
+        logger.info(
+            "hybrid_search_completed",
+            query=query,
+            tenant_id=str(user_context.tenant_id),
+            vector_hits=len(vector_results),
+            bm25_hits=len(bm25_results),
+            fused_hits=len(fused),
+            top_k=top_k,
+        )
+
+        return fused[:top_k]
+
+    async def search_with_rerank(
+        self,
+        query: str,
+        user_context: UserContext,
+        top_k: int = 10,
+        rerank_candidates: int = 50,  # noqa: ARG002 -- preserved for API stability
+        filters: dict[str, Any] | None = None,
+        score_threshold: float = 0.0,
+        bm25_weight: float = 0.5,
+        semantic_weight: float = 0.5,
+    ) -> list[dict[str, Any]]:
+        """Backwards-compat wrapper around :meth:`search`.
+
+        The cross-encoder reranker is absent in this preview, so this
+        method delegates to plain hybrid retrieval.
+        """
+        return await self.search(
+            query=query,
+            user_context=user_context,
+            filters=filters,
+            top_k=top_k,
+            score_threshold=score_threshold,
+            bm25_weight=bm25_weight,
+            semantic_weight=semantic_weight,
+        )
+
+    async def adaptive_search(
+        self,
+        query: str,
+        user_context: UserContext,
+        filters: dict[str, Any] | None = None,
+        top_k: int = 10,
+        score_threshold: float = 0.0,
+    ) -> list[dict[str, Any]]:
+        """Hybrid retrieval sized for typical UI use; no reranker in the preview."""
+        return await self.search(
+            query=query,
+            user_context=user_context,
+            filters=filters,
+            top_k=top_k,
+            score_threshold=score_threshold,
+        )
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    async def _vector_search(
+        self,
+        query: str,
+        user_context: UserContext,
+        filters: dict[str, Any] | None,
+        top_k: int,
+        score_threshold: float,
+    ) -> list[dict[str, Any]]:
+        query_vector = await self.embeddings.embed_text(query)
+        rows = await self.repository.search_by_embedding(
             query_embedding=query_vector,
             user_context=user_context,
             top_k=top_k,
@@ -107,8 +190,8 @@ class PostgresFTSHybridService:
             metadata_filters=filters,
         )
 
-        results: list[dict[str, Any]] = []
-        for chunk, similarity in semantic_results_tuples:
+        out: list[dict[str, Any]] = []
+        for chunk, similarity in rows:
             raw_metadata: Any = chunk.search_metadata or {}
             metadata = (
                 raw_metadata.model_dump()
@@ -117,9 +200,9 @@ class PostgresFTSHybridService:
                 if isinstance(raw_metadata, dict)
                 else {}
             )
-            results.append(
+            out.append(
                 {
-                    "id": chunk.id,
+                    "id": str(chunk.id),
                     "text": chunk.text,
                     "metadata": metadata,
                     "source_uri": chunk.source_uri,
@@ -134,115 +217,77 @@ class PostgresFTSHybridService:
                     ),
                 }
             )
+        return out
 
-        logger.info(
-            "hybrid_search_completed",
-            query=query,
-            num_results=len(results[:top_k]),
-            top_score=results[0]["similarity"] if results else 0,
-            search_mode="semantic_rank_only",
-        )
-
-        return results[:top_k]
-
-    async def search_with_rerank(
+    async def _bm25_search(
         self,
+        tenant_id: UUID | str,
         query: str,
-        user_context: UserContext,
-        top_k: int = 10,
-        rerank_candidates: int = 50,
-        filters: dict[str, Any] | None = None,
-        score_threshold: float = 0.7,
+        top_k: int,
+        metadata_filters: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
-        """
-        Semantic ranking with post-retrieval reranking.
-
-        Retrieves a wider set of candidates via semantic ranking, then uses
-        Voyage AI rerank-2.5 cross-encoder to re-score and select the best top_k.
-        Falls back to unreranked results when reranker is unavailable.
-
-        Args:
-            query: Search query
-            user_context: User context for ACL
-            top_k: Number of final results after reranking
-            rerank_candidates: Number of candidates to retrieve before reranking (default 50)
-            filters: Optional metadata filters
-            score_threshold: Minimum similarity score for semantic search
-
-        Returns:
-            Reranked results (same dict format as search(), with added rerank_score field)
-        """
-        retrieval_threshold = 0.0 if self.reranker is not None else score_threshold
-        candidates = await self.search(
-            query=query,
-            user_context=user_context,
-            filters=filters,
-            top_k=rerank_candidates,
-            score_threshold=retrieval_threshold,
-        )
-
-        if not candidates:
+        try:
+            return await self.bm25_service.search(
+                tenant_id=tenant_id,
+                query=query,
+                top_k=top_k,
+                metadata_filters=metadata_filters,
+            )
+        except Exception as exc:  # noqa: BLE001 -- BM25 errors degrade gracefully to vector-only
+            logger.warning("bm25_search_failed", error=str(exc), error_type=type(exc).__name__)
             return []
 
-        # Step 2: If no reranker or only 1 candidate, return as-is
-        if self.reranker is None or len(candidates) <= 1:
-            logger.debug(
-                "search_with_rerank_skip",
-                reason="no_reranker" if self.reranker is None else "single_candidate",
-                num_candidates=len(candidates),
-            )
-            return candidates[:top_k]
 
-        document_texts = [c["retrieval_text"] for c in candidates]
-        rerank_results = await self.reranker.rerank(
-            query=query,
-            documents=document_texts,
-            top_k=top_k,
-        )
+def _reciprocal_rank_fusion(
+    vector_results: list[dict[str, Any]],
+    bm25_results: list[dict[str, Any]],
+    bm25_weight: float,
+    semantic_weight: float,
+) -> list[dict[str, Any]]:
+    """Fuse two ranked lists using reciprocal rank fusion (k=60).
 
-        reranked = []
-        for rr in rerank_results:
-            original_idx = rr["index"]
-            if original_idx < len(candidates):
-                candidate = candidates[original_idx].copy()
-                candidate["rerank_score"] = rr["relevance_score"]
-                candidate["score"] = rr["relevance_score"]
-                reranked.append(candidate)
+    The contribution of each list is weighted by ``semantic_weight`` /
+    ``bm25_weight``. Equal weights (0.5/0.5) recover plain RRF.
+    """
+    by_id: dict[str, dict[str, Any]] = {}
 
-        logger.info(
-            "search_with_rerank_completed",
-            query=query,
-            candidates_retrieved=len(candidates),
-            reranked_results=len(reranked),
-            top_rerank_score=reranked[0]["rerank_score"] if reranked else 0,
-            search_mode="semantic_rank_rerank",
-        )
+    for rank, hit in enumerate(vector_results):
+        chunk_id = str(hit["id"])
+        contribution = semantic_weight / (_RRF_K + rank + 1)
+        entry = by_id.setdefault(chunk_id, dict(hit))
+        entry["rrf_score"] = entry.get("rrf_score", 0.0) + contribution
+        entry["semantic_score"] = hit.get("semantic_score", hit.get("similarity", 0.0))
 
-        return reranked
+    for rank, hit in enumerate(bm25_results):
+        chunk_id = str(hit["id"])
+        contribution = bm25_weight / (_RRF_K + rank + 1)
+        if chunk_id in by_id:
+            entry = by_id[chunk_id]
+            entry["rrf_score"] = entry.get("rrf_score", 0.0) + contribution
+            entry["bm25_score"] = hit.get("bm25_score", 0.0)
+        else:
+            metadata = hit.get("metadata") or {}
+            entry = {
+                "id": chunk_id,
+                "text": hit.get("text", ""),
+                "metadata": metadata,
+                "source_uri": hit.get("source_uri"),
+                "tags": hit.get("tags", []),
+                "similarity": 0.0,
+                "semantic_score": 0.0,
+                "bm25_score": hit.get("bm25_score", 0.0),
+                "rrf_score": contribution,
+                "retrieval_text": build_retrieval_text_from_metadata(
+                    text=hit.get("text", ""),
+                    source_uri=hit.get("source_uri"),
+                    metadata=metadata,
+                ),
+            }
+            by_id[chunk_id] = entry
 
-    async def adaptive_search(
-        self,
-        query: str,
-        user_context: UserContext,
-        filters: dict[str, Any] | None = None,
-        top_k: int = 10,
-        score_threshold: float = 0.7,
-    ) -> list[dict[str, Any]]:
-        """
-        Legacy compatibility entry point.
+    fused = list(by_id.values())
+    for entry in fused:
+        entry["score"] = entry["rrf_score"]
 
-        The former adaptive BM25/semantic weighting behavior has been removed.
-        This now delegates directly to the semantic ranker + reranker path.
-        """
-        rerank_candidates = min(
-            max(top_k * RERANK_CANDIDATE_MULTIPLIER, top_k),
-            RERANK_CANDIDATE_LIMIT,
-        )
-        return await self.search_with_rerank(
-            query=query,
-            user_context=user_context,
-            filters=filters,
-            top_k=top_k,
-            rerank_candidates=rerank_candidates,
-            score_threshold=score_threshold,
-        )
+    fused.sort(key=lambda e: e["rrf_score"], reverse=True)
+    return fused

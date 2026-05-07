@@ -32,7 +32,7 @@ class MemoryRepository:
 
         Args:
             memory: Memory creation data
-            embedding: Vector embedding (1024 dimensions for Voyage AI)
+            embedding: Vector embedding (384 dimensions, fastembed MiniLM-L12)
 
         Returns:
             Created ConnectorMemoryModel instance

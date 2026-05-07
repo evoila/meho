@@ -133,7 +133,7 @@ def create_agent_dependencies(
     # Create knowledge store with all required components
     knowledge_repo = KnowledgeRepository(session)
 
-    # Create embedding provider (Voyage AI 1024D singleton)
+    # Create embedding provider (fastembed MiniLM-L12 384-D singleton)
     embedding_provider = get_embedding_provider()
 
     # Create hybrid search service

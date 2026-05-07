@@ -20,7 +20,6 @@ Disabling a module prevents its API routes from being registered, its background
 | `MEHO_FEATURE_MCP_CLIENT` | `true` | MCP client connector for external tool servers |
 | `MEHO_FEATURE_MCP_SERVER` | `true` | MCP server exposing MEHO tools to external clients |
 | `MEHO_FEATURE_EPHEMERAL_INGESTION` | `false` | Offload large PDFs to ephemeral cloud workers (requires backend config) |
-| `MEHO_FEATURE_USE_DOCLING` | `true` | Document ingestion backend: `true` = Docling (GPU/PyTorch), `false` = lightweight CPU-only pipeline |
 
 ## How Feature Flags Work
 
@@ -48,7 +47,6 @@ class FeatureFlags(BaseSettings):
     mcp_client: bool = Field(default=True)
     mcp_server: bool = Field(default=True)
     ephemeral_ingestion: bool = Field(default=False)
-    use_docling: bool = Field(default=True)
 ```
 
 ## Usage
@@ -87,7 +85,6 @@ services:
 | `MEHO_FEATURE_MCP_CLIENT` | MCP client connector not available. Cannot connect to external MCP servers. Existing MCP connector configurations are preserved. |
 | `MEHO_FEATURE_MCP_SERVER` | MCP server endpoint (`/mcp`) not registered. External tools cannot trigger MEHO investigations via MCP protocol. |
 | `MEHO_FEATURE_EPHEMERAL_INGESTION` | Large PDF ingestion runs in-process instead of offloading to ephemeral workers. This is the default behavior when disabled. |
-| `MEHO_FEATURE_USE_DOCLING` | Document ingestion uses lightweight CPU-only pipeline (pymupdf4llm, pdfplumber, RapidOCR) instead of Docling. No PyTorch or GPU required. Image quality slightly reduced but adequate for most documents. |
 
 !!! warning "Non-standard defaults"
     `MEHO_FEATURE_EPHEMERAL_INGESTION` defaults to `false` (unlike all other flags which default to `true`). Ephemeral ingestion requires a configured cloud coordinator backend -- it is opt-in, not opt-out.

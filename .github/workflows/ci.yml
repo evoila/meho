@@ -102,9 +102,7 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
 
       - name: Install Python dependencies
-        # docling-group is required because meho_app imports docling at
-        # module level in the knowledge chain; mypy follows those imports.
-        run: uv sync --group dev --group docling-group
+        run: uv sync --group dev
 
       - name: mypy type check
         # `uv run mypy` executes inside the project .venv (populated by the
@@ -148,10 +146,7 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
 
       - name: Install Python dependencies
-        # docling-group is required because several unit / contract tests
-        # import meho_app.modules.knowledge.document_converter directly,
-        # which imports docling at module level.
-        run: uv sync --group dev --group test --group docling-group
+        run: uv sync --group dev --group test
 
       - name: Run unit and contract tests with coverage
         run: |

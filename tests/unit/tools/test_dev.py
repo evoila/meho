@@ -141,34 +141,15 @@ class TestEnvFileGate:
         assert "Missing .env" in result.stdout
 
 
-class TestTeiProfileToggle:
-    """``--profile tei`` must appear iff ``VOYAGE_API_KEY`` is unset everywhere."""
+class TestComposeArgs:
+    """``_compose_args`` returns the static compose invocation prefix."""
 
-    def test_profile_added_when_voyage_key_absent(
-        self,
-        mock_subprocess_run: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path,
-    ) -> None:
-        monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-        with patch("meho_app.tools.dev.ENV_FILE", tmp_path / "missing.env"):
-            from meho_app.tools.dev import _compose_args
+    def test_compose_args_no_profile(self, mock_subprocess_run: MagicMock) -> None:
+        del mock_subprocess_run
+        from meho_app.tools.dev import _compose_args
 
-            argv = _compose_args()
-        assert "--profile" in argv
-        assert "tei" in argv
-
-    def test_profile_skipped_when_voyage_key_in_env(
-        self,
-        mock_subprocess_run: MagicMock,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path,
-    ) -> None:
-        monkeypatch.setenv("VOYAGE_API_KEY", "sk-test")
-        with patch("meho_app.tools.dev.ENV_FILE", tmp_path / "missing.env"):
-            from meho_app.tools.dev import _compose_args
-
-            argv = _compose_args()
+        argv = _compose_args()
+        assert argv[:3] == ["docker", "compose", "-p"]
         assert "--profile" not in argv
 
 

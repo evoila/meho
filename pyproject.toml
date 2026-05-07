@@ -22,7 +22,6 @@ dependencies = [
     "pydantic-settings>=2.1.0",
     # AI/Agents
     "pydantic-ai-slim[anthropic,openai,mcp]>=1.63.0",
-    "voyageai>=0.3.0",
     # Vector Store (PostgreSQL with pgvector)
     "pgvector>=0.2.0",
     # Object Storage
@@ -66,10 +65,9 @@ dependencies = [
     "docker>=7.1.0",
     # File Processing
     "python-multipart>=0.0.6",
-    # PDF primitive (used by the lightweight ingestion path regardless of
-    # docling opt-in; see meho_app/modules/knowledge/lightweight_converter.py).
+    # PDF primitive (page-count probe in the lightweight ingestion path).
     "pypdfium2>=5.6.0",
-    # Lightweight document ingestion (Phase 98 -- used when USE_DOCLING=false)
+    # Lightweight CPU-only document ingestion (PDF/DOCX/HTML).
     "pymupdf4llm>=1.27.0", # PDF text + layout -> markdown (AGPL-3.0)
     "pdfplumber>=0.11.0", # PDF table extraction (MIT)
     "rapidocr-onnxruntime>=1.2.0", # OCR for scanned PDFs, no PyTorch (Apache-2.0)
@@ -78,11 +76,12 @@ dependencies = [
     "lxml>=5.0.0", # HTML parser backend for bs4 (BSD)
     # Templating
     "jinja2>=3.1.0",
-    # Tokenization
-    "tiktoken>=0.5.0",
-    # Search & Retrieval
+    # Search & Retrieval (BM25 lexical + Porter stemmer)
     "rank-bm25>=0.2.2",
-    "nltk>=3.8.0", # Porter Stemmer for BM25 tokenization
+    "nltk>=3.8.0",
+    # Embeddings (in-process ONNX via fastembed; CPU-only, no PyTorch/transformers)
+    "fastembed>=0.7.0",
+    "tiktoken>=0.7.0",  # BPE token counting for text_validation (approximate guard for MiniLM inputs)
     # Data Processing
     "duckdb>=1.4.3", # SQL queries on Arrow tables (data reduction + jsonflux)
     "pyarrow>=21.0.0", # Parquet support for efficient Redis caching + jsonflux
@@ -505,8 +504,6 @@ max-complexity = 15
 "meho_app/modules/ingestion/routes.py" = ["BLE001"]
 "meho_app/modules/ingestion/template_renderer.py" = ["BLE001"]
 # --- BLE001: knowledge module (cleanup tracked in #265) ---
-"meho_app/modules/knowledge/docling_adapter.py" = ["BLE001"]
-"meho_app/modules/knowledge/docling_wrapper.py" = ["BLE001"]
 "meho_app/modules/knowledge/document_converter.py" = ["BLE001"]
 "meho_app/modules/knowledge/knowledge_store.py" = ["BLE001"]
 "meho_app/modules/knowledge/lightweight_converter.py" = ["BLE001"]
@@ -561,7 +558,6 @@ init_typed = true
 module = [
     "qdrant_client.*",
     "pydantic_ai.*",
-    "tiktoken.*",
     "yaml.*",
     "zeep.*",
     "aiohttp.*",
@@ -644,21 +640,3 @@ test = [
     "httpx-sse>=0.4.0",  # For SSE testing in E2E tests
 ]
 
-# Heavy optional dependency groups: opt-in via Docker --build-arg or
-# `uv sync --group <name>` for local development.
-docling-group = [
-    "docling==2.85.0",
-    "docling-core>=2.73.0",
-    "docling-parse>=5.8.0",
-    "pikepdf>=10.0.0",      # PDF splitter used by docling_wrapper.py
-    "psutil>=7.0.0",         # subprocess memory monitoring in docling_wrapper.py
-    "torch>=2.11.0",
-    "torchaudio>=2.11.0",
-    "torchvision>=0.26.0",
-]
-
-torch-group = [
-    "torch>=2.11.0",
-    "torchaudio>=2.11.0",
-    "torchvision>=0.26.0",
-]

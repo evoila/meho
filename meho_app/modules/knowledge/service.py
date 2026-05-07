@@ -15,7 +15,6 @@ from .embeddings import EmbeddingProvider, get_embedding_provider
 from .hybrid_search import PostgresFTSHybridService
 from .knowledge_store import KnowledgeStore
 from .repository import KnowledgeRepository
-from .reranker import get_reranker
 from .schemas import (
     KnowledgeChunk,
     KnowledgeChunkFilter,
@@ -79,11 +78,9 @@ class KnowledgeService:
             self.session = session
             self.repository = repository or KnowledgeRepository(session)  # type: ignore[assignment]
             self.embedding_provider = embedding_provider or get_embedding_provider()
-            self.reranker = get_reranker()
             self.hybrid_search = hybrid_search or PostgresFTSHybridService(
                 repository=self.repository,  # type: ignore[arg-type]
                 embeddings=self.embedding_provider,
-                reranker=self.reranker,
             )
             self.store = KnowledgeStore(  # type: ignore[assignment]
                 repository=self.repository,  # type: ignore[arg-type]
@@ -201,10 +198,10 @@ class KnowledgeService:
         metadata_filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
-        Search with Voyage AI reranking for improved precision.
+        Search with optional reranking for improved precision.
 
         Retrieves rerank_candidates via hybrid search, then reranks to top_k
-        using Voyage AI rerank-2.5 cross-encoder.
+        if a reranker is available.
 
         Falls back to unreranked hybrid search if reranker is unavailable.
 

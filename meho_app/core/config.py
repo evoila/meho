@@ -48,38 +48,15 @@ class Config(BaseSettings):
     )
     object_storage_use_ssl: bool = Field(default=False)
 
-    # Knowledge Ingestion Safety (Phase 90.2)
-    ingestion_memory_limit_mb: int = Field(
-        default=8192,
-        description="Memory limit in MB for document conversion subprocess (Linux only, ignored on macOS)",
-    )
+    # Knowledge Ingestion Safety
     ingestion_max_file_size_mb: int = Field(
         default=200,
         description="Maximum upload file size in MB. Files exceeding this are rejected before processing.",
     )
-    ingestion_page_batch_size: int = Field(
-        default=100,
-        description="Number of PDF pages to process per Docling batch. Limits peak memory for large documents.",
-    )
     ingestion_ocr_enabled: bool = Field(
         default=False,
-        description="Enable OCR for scanned PDFs. Disabled by default to save ~500MB memory. "
-        "Text-native PDFs extract text without OCR.",
-    )
-    ingestion_max_workers: int = Field(
-        default=4,
-        description="Number of parallel subprocess workers for PDF page-splitting in DoclingWrapper.",
-    )
-    ingestion_num_threads: int = Field(
-        default=4,
-        description="Thread count for Docling's AcceleratorOptions (torch model inference). "
-        "Docling's official container default is 4. Higher values cause contention in "
-        "CPU-limited containers. Also respects OMP_NUM_THREADS / DOCLING_NUM_THREADS env vars.",
-    )
-    ingestion_device: str = Field(
-        default="auto",
-        description="Accelerator device for Docling models: 'auto' probes MPS/CUDA/CPU, "
-        "or set 'mps', 'cuda', 'cpu' directly.",
+        description="Enable OCR for scanned PDFs via rapidocr-onnxruntime. Disabled by default; "
+        "text-native PDFs extract text without OCR.",
     )
 
     # Ephemeral Ingestion Worker (Phase 97.1)
@@ -166,16 +143,16 @@ class Config(BaseSettings):
         default=None,
         description="Anthropic API key (required for LLM features, optional for startup)",
     )
-    voyage_api_key: str | None = Field(
-        default=None,
-        description="Voyage AI API key for embeddings (optional -- uses local TEI when unset)",
+    # Embeddings (in-process via fastembed; ONNX, CPU-only, 384-dim multilingual).
+    # Preview path; the cross-encoder reranker is intentionally absent and will
+    # come back when MEHO.Knowledge takes over remote embedding/reranking.
+    fastembed_embedding_model: str = Field(
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        description="fastembed text embedding model (must be in fastembed's catalog)",
     )
-
-    # Embedding Model
-    # Using Voyage AI voyage-4-large (1024D) -- fits pgvector HNSW 2000D limit comfortably
-    embedding_model: str = Field(
-        default="voyage-4-large",
-        description="Voyage AI embedding model for knowledge base and topology",
+    fastembed_cache_dir: str = Field(
+        default="/var/cache/fastembed",
+        description="Directory where fastembed caches downloaded ONNX weights",
     )
 
     # LLM Models for Different Use Cases

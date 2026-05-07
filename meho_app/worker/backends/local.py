@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 evoila Group
-"""Local subprocess backend for ingestion.
+"""Local in-process backend for ingestion.
 
-Wraps DoclingWrapperAdapter as an asyncio.Task with JobStatus tracking.
-The "worker" runs in the same process as the API; DoclingWrapper handles
-subprocess isolation for the actual Docling conversion internally.
+Wraps the lightweight document converter as an asyncio.Task with JobStatus
+tracking. The "worker" runs in the same process as the API.
 """
 
 from __future__ import annotations
@@ -22,10 +21,9 @@ from meho_app.worker.backends.protocol import (
 class LocalBackend:
     """IngestionBackend that processes documents locally using asyncio tasks.
 
-    Each dispatch() call creates an asyncio.Task that wraps the existing
-    subprocess converter. The task downloads the input file, runs Docling
-    conversion in a subprocess, chunks and serializes the output as Arrow
-    IPC, and writes it to the output path.
+    Each dispatch() call creates an asyncio.Task that runs the lightweight
+    converter, chunks and serializes the output as Arrow IPC, and writes it
+    to the output path.
 
     Attributes:
         _tasks: Map from execution_id to the asyncio.Task running the job.
@@ -92,26 +90,17 @@ class LocalBackend:
 
     async def _process(
         self,
-        job_id: str,
+        job_id: str,  # noqa: ARG002 -- kept for interface compat
         input_url: str,
         output_url: str,
         profile: ResourceProfile,  # noqa: ARG002 -- kept for interface compat
     ) -> None:
-        """Process a document locally using DoclingWrapperAdapter.
-
-        Reads the source file, runs conversion via the adapter (which
-        handles subprocess isolation internally), chunks the result,
-        serializes to Arrow IPC, and writes to output.
-
-        Args:
-            job_id: Unique job identifier.
-            input_url: Source document path or URL.
-            output_url: Output Arrow IPC path or URL.
-            profile: Resource requirements (timeout managed by wrapper).
-        """
+        """Process a document locally using the lightweight converter."""
         import pathlib
 
-        from meho_app.modules.knowledge.docling_adapter import DoclingWrapperAdapter
+        from meho_app.modules.knowledge.lightweight_converter import (
+            LightweightDocumentConverter,
+        )
         from meho_app.worker.arrow_codec import serialize_chunks
 
         input_path = input_url.removeprefix("file://")
@@ -121,12 +110,9 @@ class LocalBackend:
             "application/pdf" if filename.lower().endswith(".pdf") else "application/octet-stream"
         )
 
-        adapter = DoclingWrapperAdapter(
-            pdf_chunk_pages=0,
-            max_workers=1,
-        )
-        result = await adapter.convert_file_async(file_bytes, filename, mime_type)
-        chunks = adapter.chunk_document(result)
+        converter = LightweightDocumentConverter()
+        doc = await asyncio.to_thread(converter.convert_file, file_bytes, filename, mime_type)
+        chunks = converter.chunk_document(doc)
 
         embeddings = [[0.0] * 1024 for _ in chunks]
         output_bytes = serialize_chunks(chunks, embeddings)

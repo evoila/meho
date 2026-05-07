@@ -1,14 +1,14 @@
 # MEHO arm64 first-run regression
 #
-# Boots the full compose stack via the local-TEI fallback path on an
-# ubuntu-24.04-arm runner and asserts backend + frontend reachability.
-# Guards docs/codebase/first-run-experience.md and the `platform: linux/amd64`
-# directive on the tei-embeddings / tei-reranker services.
+# Boots the full compose stack on an ubuntu-24.04-arm runner and asserts
+# backend + frontend reachability. Guards docs/codebase/first-run-experience.md
+# and the natively-arm64 stack (no x86_64-only sidecars after the fastembed
+# in-process embedding switch).
 #
 # Runs on:
 #   - PRs that touch the compose stack, Dockerfiles, arm64 docs, this
 #     workflow, or the test itself (path filter -- keeps CI cost bounded);
-#   - Weekly schedule (catches upstream drift, e.g. TEI image tag bumps);
+#   - Weekly schedule (catches upstream image drift);
 #   - Manual dispatch.
 #
 # SPDX-License-Identifier: AGPL-3.0-only

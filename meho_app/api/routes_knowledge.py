@@ -436,16 +436,11 @@ async def search_knowledge(
     from meho_app.modules.knowledge.hybrid_search import PostgresFTSHybridService
     from meho_app.modules.knowledge.knowledge_store import KnowledgeStore
     from meho_app.modules.knowledge.repository import KnowledgeRepository
-    from meho_app.modules.knowledge.reranker import get_reranker
 
     try:
         repository = KnowledgeRepository(session)
         embeddings = get_embedding_provider()
-        hybrid_search = PostgresFTSHybridService(
-            repository,
-            embeddings,
-            get_reranker(),
-        )
+        hybrid_search = PostgresFTSHybridService(repository, embeddings)
         knowledge_store = KnowledgeStore(repository, embeddings, hybrid_search)
 
         user_ctx = UserContext(

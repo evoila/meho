@@ -89,9 +89,8 @@ class MemoryService:
         Returns:
             MemoryResponse (merged=True if merged, False if new)
         """
-        # Generate embedding — MUST use input_type="document" for storage
         embed_text = f"{memory_create.title}\n{memory_create.body}"
-        embedding = await self.embedding_provider.embed_text(embed_text, input_type="document")
+        embedding = await self.embedding_provider.embed_text(embed_text)
 
         # Look up per-type dedup threshold
         threshold = DEDUP_THRESHOLDS.get(memory_create.memory_type, DEFAULT_THRESHOLD)
@@ -181,11 +180,8 @@ class MemoryService:
             existing.body = incoming.body
             existing.confidence_level = incoming_conf_value
 
-            # Re-embed with new content — input_type="document"
             new_text = f"{incoming.title}\n{incoming.body}"
-            new_embedding = await self.embedding_provider.embed_text(
-                new_text, input_type="document"
-            )
+            new_embedding = await self.embedding_provider.embed_text(new_text)
             existing.embedding = new_embedding
 
             logger.info(
@@ -277,8 +273,7 @@ class MemoryService:
         Returns:
             List of MemorySearchResult ordered by final_score descending
         """
-        # Generate query embedding — MUST use input_type="query" for search
-        query_embedding = await self.embedding_provider.embed_text(query, input_type="query")
+        query_embedding = await self.embedding_provider.embed_text(query)
 
         # Fetch 2x for reranking headroom
         raw_results = await self.repository.search_by_embedding(
@@ -397,7 +392,7 @@ def get_memory_service(session: AsyncSession) -> MemoryService:
     """
     Factory to create a MemoryService with wired dependencies.
 
-    Reuses the shared Voyage AI embedding provider singleton.
+    Reuses the shared fastembed MiniLM-L12 embedding provider singleton.
     """
     from meho_app.modules.knowledge.embeddings import get_embedding_provider
 

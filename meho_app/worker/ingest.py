@@ -3,20 +3,21 @@
 """Ephemeral ingestion worker pipeline.
 
 Stateless worker that processes a single document end-to-end:
-download -> convert (Docling) -> chunk -> embed -> serialize (Arrow IPC) -> upload -> exit.
+download -> convert (lightweight) -> chunk -> embed (in-process fastembed)
+-> serialize -> upload -> exit.
 
 Invoked as ``python -m meho_app.worker`` by all container-based backends.
-Process termination reclaims all Docling/PyTorch memory (the whole point
-of the ephemeral architecture -- see CONTEXT.md for measured evidence).
+The worker reads env vars directly (no app config stack):
 
 Environment variables:
     WORKER_JOB_ID (required): Unique job identifier from MEHO knowledge module.
     WORKER_INPUT_URL (required): Signed URL or file:// path to source document.
     WORKER_OUTPUT_URL (required): Signed URL or file:// path for Arrow IPC output.
-    VOYAGE_API_KEY (optional): If set, generate Voyage AI embeddings. Otherwise zero vectors.
-    WORKER_CHUNK_PREFIX (optional): Context prefix for each chunk (connector + summary).
+    FASTEMBED_EMBEDDING_MODEL (optional): fastembed model name. If unset, the
+        worker emits zero vectors and the API regenerates embeddings on its side.
+    FASTEMBED_CACHE_DIR (optional): On-disk cache directory for ONNX weights.
+    WORKER_CHUNK_PREFIX (optional): Context prefix for each chunk.
     WORKER_OCR_ENABLED (optional): Enable OCR for scanned PDFs (default "false").
-    WORKER_PAGE_BATCH_SIZE (optional): Max pages per batch for large PDFs (default "50").
 """
 
 from __future__ import annotations
@@ -30,95 +31,44 @@ from typing import Any
 
 import httpx
 
-# Conditional import: use lightweight converter when MEHO_FEATURE_USE_DOCLING=false.
-# Worker reads env vars directly (no app config stack).
-_use_docling = os.environ.get("MEHO_FEATURE_USE_DOCLING", "true").lower() != "false"
-
-if _use_docling:
-    from meho_app.modules.knowledge.docling_adapter import DoclingWrapperAdapter
-else:
-    from meho_app.modules.knowledge.lightweight_converter import (
-        LightweightDocumentConverter,
-    )
-
-from meho_app.modules.knowledge.embeddings import VoyageAIEmbeddings
+from meho_app.modules.knowledge.lightweight_converter import LightweightDocumentConverter
 from meho_app.modules.knowledge.retrieval_context import build_retrieval_text_from_metadata
 from meho_app.worker.arrow_codec import serialize_chunks
 
-# Use stdlib logging directly to avoid pulling in meho_app.core.otel
-# (which imports the full app config stack with Pydantic, Redis, etc.)
 logger = logging.getLogger("meho_app.worker.ingest")
 
 CONTENT_TYPE_PDF = "application/pdf"
 FILE_URI_PREFIX = "file://"
 
-# Embedding dimension matches Voyage AI voyage-4-large (1024D).
-_EMBEDDING_DIM: int = 1024
-
-# Maximum number of texts per Voyage AI embed_batch call to avoid OOM.
-_EMBEDDING_BATCH_SIZE: int = 100
-
-
-# ---------------------------------------------------------------------------
-# MIME type detection
-# ---------------------------------------------------------------------------
+# Embedding dimension for the default fastembed multilingual MiniLM-L12 model.
+_EMBEDDING_DIM: int = 384
 
 
 def _detect_mime_type(url: str, file_bytes: bytes) -> str:
-    """Detect MIME type from URL extension or file magic bytes.
-
-    Args:
-        url: Source URL or file path.
-        file_bytes: Raw file content (first bytes checked for magic).
-
-    Returns:
-        MIME type string (e.g., CONTENT_TYPE_PDF).
-    """
-    # Try URL extension first
-    path = url.split("?")[0]  # Strip query params from signed URLs
+    """Detect MIME type from URL extension or file magic bytes."""
+    path = url.split("?")[0]
     mime, _ = mimetypes.guess_type(path)
     if mime:
         return mime
 
-    # Magic byte detection for common formats
     if file_bytes[:5] == b"%PDF-":
         return CONTENT_TYPE_PDF
     if file_bytes[:4] == b"PK\x03\x04":
-        # ZIP-based: could be DOCX, XLSX, etc.
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     if file_bytes[:5] in (b"<html", b"<!DOC", b"<!doc"):
         return "text/html"
 
-    # Default to PDF (most common ingestion format)
     return CONTENT_TYPE_PDF
 
 
-# ---------------------------------------------------------------------------
-# Download / Upload
-# ---------------------------------------------------------------------------
-
-
 async def _download_document(url: str) -> bytes:
-    """Download document from signed URL or local filesystem.
-
-    Args:
-        url: HTTP(S) URL, file:// URL, or absolute filesystem path.
-
-    Returns:
-        Raw file bytes.
-
-    Raises:
-        httpx.HTTPStatusError: On HTTP error responses.
-        FileNotFoundError: If local file does not exist.
-    """
-    # Local filesystem: file:// URL or absolute path
+    """Download document from signed URL or local filesystem."""
     if url.startswith(FILE_URI_PREFIX):
-        local_path = url[7:]  # Strip file:// prefix
+        local_path = url[7:]
         return await asyncio.to_thread(pathlib.Path(local_path).read_bytes)
     if url.startswith("/"):
         return await asyncio.to_thread(pathlib.Path(url).read_bytes)
 
-    # HTTP download
     async with httpx.AsyncClient(timeout=600.0) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -126,109 +76,60 @@ async def _download_document(url: str) -> bytes:
 
 
 async def _upload_results(url: str, data: bytes) -> None:
-    """Upload Arrow IPC bytes to signed URL or local filesystem.
-
-    Args:
-        url: HTTP(S) URL, file:// URL, or absolute filesystem path.
-        data: Serialized Arrow IPC bytes to upload.
-
-    Raises:
-        httpx.HTTPStatusError: On HTTP error responses.
-    """
-    # Local filesystem: file:// URL or absolute path
+    """Upload Arrow IPC bytes to signed URL or local filesystem."""
     if url.startswith(FILE_URI_PREFIX):
-        local_path = url[7:]  # Strip file:// prefix
+        local_path = url[7:]
         await asyncio.to_thread(pathlib.Path(local_path).write_bytes, data)
         return
     if url.startswith("/"):
         await asyncio.to_thread(pathlib.Path(url).write_bytes, data)
         return
 
-    # HTTP upload
     async with httpx.AsyncClient(timeout=600.0) as client:
         response = await client.put(url, content=data)
         response.raise_for_status()
 
 
-# ---------------------------------------------------------------------------
-# Embedding generation
-# ---------------------------------------------------------------------------
-
-
 async def _generate_embeddings(
     texts: list[str],
-    voyage_api_key: str | None,
+    model_name: str | None,
+    cache_dir: str | None,
 ) -> list[list[float]]:
-    """Generate embeddings for chunk texts.
+    """Generate embeddings via fastembed in-process.
 
-    If VOYAGE_API_KEY is set, uses Voyage AI cloud embeddings in batches
-    of _EMBEDDING_BATCH_SIZE. Otherwise returns zero vectors (on-prem will
-    regenerate using local TEI).
-
-    Args:
-        texts: List of chunk texts to embed.
-        voyage_api_key: Voyage AI API key, or None for zero vectors.
-
-    Returns:
-        List of embedding vectors (1024D float32).
+    If ``model_name`` is unset, returns zero vectors so the API can
+    regenerate embeddings after the worker completes.
     """
     if not texts:
         return []
 
-    if not voyage_api_key:
-        logger.info("no_voyage_api_key: using zero vectors for embeddings")
+    if not model_name:
+        logger.info("no_fastembed_model: returning zero vectors for embeddings")
         return [[0.0] * _EMBEDDING_DIM for _ in texts]
 
-    provider = VoyageAIEmbeddings(api_key=voyage_api_key)
+    from meho_app.modules.knowledge.embeddings import FastEmbedEmbeddings
 
-    all_embeddings: list[list[float]] = []
-    for i in range(0, len(texts), _EMBEDDING_BATCH_SIZE):
-        batch = texts[i : i + _EMBEDDING_BATCH_SIZE]
-        batch_embeddings = await provider.embed_batch(batch, input_type="document")
-        all_embeddings.extend(batch_embeddings)
-
-    return all_embeddings
-
-
-# ---------------------------------------------------------------------------
-# Document processing pipeline
-# ---------------------------------------------------------------------------
+    provider = FastEmbedEmbeddings(model_name=model_name, cache_dir=cache_dir)
+    return await provider.embed_batch(texts)
 
 
 async def _process(
     input_url: str,
     output_url: str,
     job_id: str,
-    voyage_api_key: str | None = None,
+    model_name: str | None = None,
+    cache_dir: str | None = None,
     chunk_prefix: str = "",
     ocr_enabled: bool = False,
-    page_batch_size: int = 50,
 ) -> None:
-    """Main async processing pipeline.
-
-    Downloads document, converts with Docling (chapter-aware batching for
-    large PDFs), chunks, generates embeddings, serializes as Arrow IPC + zstd,
-    and uploads results.
-
-    Args:
-        input_url: Signed URL or file path to source document.
-        output_url: Signed URL or file path for Arrow IPC output.
-        job_id: Unique job identifier for logging.
-        voyage_api_key: Optional Voyage AI API key for cloud embeddings.
-        chunk_prefix: Context prefix for each chunk.
-        ocr_enabled: Whether to enable OCR.
-        page_batch_size: Max pages per conversion batch for large PDFs.
-    """
-    # Step 1: Download document
+    """Main async processing pipeline."""
     logger.info("downloading_document", extra={"job_id": job_id, "input_url": input_url})
     file_bytes = await _download_document(input_url)
     logger.info("document_downloaded", extra={"job_id": job_id, "size_bytes": len(file_bytes)})
 
-    # Step 2: Detect MIME type
     mime_type = _detect_mime_type(input_url, file_bytes)
     logger.info("mime_type_detected", extra={"job_id": job_id, "mime_type": mime_type})
 
-    # Step 3: Convert and chunk
     filename = _extract_filename(input_url)
     chunks = _convert_and_chunk(
         file_bytes=file_bytes,
@@ -236,24 +137,23 @@ async def _process(
         mime_type=mime_type,
         chunk_prefix=chunk_prefix,
         ocr_enabled=ocr_enabled,
-        page_batch_size=page_batch_size,
         job_id=job_id,
     )
     logger.info("chunks_produced", extra={"job_id": job_id, "num_chunks": len(chunks)})
 
-    # Step 4: Generate embeddings
     retrieval_texts = [
         build_retrieval_text_from_metadata(text=text, source_uri=filename, metadata=meta)
         for text, meta in chunks
     ]
-    embeddings = await _generate_embeddings(retrieval_texts, voyage_api_key)
-    logger.info("embeddings_generated", extra={"job_id": job_id, "num_embeddings": len(embeddings)})
+    embeddings = await _generate_embeddings(retrieval_texts, model_name, cache_dir)
+    logger.info(
+        "embeddings_generated",
+        extra={"job_id": job_id, "num_embeddings": len(embeddings)},
+    )
 
-    # Step 5: Serialize as Arrow IPC + zstd
     arrow_data = serialize_chunks(chunks, embeddings)
     logger.info("arrow_serialized", extra={"job_id": job_id, "size_bytes": len(arrow_data)})
 
-    # Step 6: Upload results
     logger.info("uploading_results", extra={"job_id": job_id, "output_url": output_url})
     await _upload_results(output_url, arrow_data)
     logger.info("results_uploaded", extra={"job_id": job_id})
@@ -265,93 +165,34 @@ def _convert_and_chunk(
     mime_type: str,
     chunk_prefix: str,
     ocr_enabled: bool,
-    page_batch_size: int,
     job_id: str,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Convert document and produce chunks.
-
-    DoclingWrapperAdapter handles subprocess isolation, PDF page-splitting,
-    and memory management internally. Inside an ephemeral container we
-    disable page-splitting (pdf_chunk_pages=0) since the container IS
-    the isolation boundary, but keep the adapter for consistent chunking.
-
-    Args:
-        file_bytes: Raw document bytes.
-        filename: Original filename.
-        mime_type: Detected MIME type.
-        chunk_prefix: Context prefix for each chunk.
-        ocr_enabled: Whether to enable OCR.
-        page_batch_size: Max pages per batch (passed to wrapper's pdf_chunk_pages).
-        job_id: Job ID for logging.
-
-    Returns:
-        List of (text, metadata) chunk tuples.
-    """
-    if not _use_docling:
-        converter = LightweightDocumentConverter(ocr_enabled=ocr_enabled)
-        doc = converter.convert_file(file_bytes, filename, mime_type)
-        return converter.chunk_document(doc, chunk_prefix=chunk_prefix)
-
-    adapter = DoclingWrapperAdapter(
-        ocr_enabled=ocr_enabled,
-        pdf_chunk_pages=0,
-        max_workers=1,
-    )
-    result = adapter.convert_file(file_bytes, filename, mime_type)
-    chunks = adapter.chunk_document(result, chunk_prefix=chunk_prefix)
-
+    """Convert document and produce chunks via the lightweight converter."""
+    converter = LightweightDocumentConverter(ocr_enabled=ocr_enabled)
+    doc = converter.convert_file(file_bytes, filename, mime_type)
+    chunks = converter.chunk_document(doc, chunk_prefix=chunk_prefix)
     logger.info(
-        "docling_wrapper_conversion_complete",
-        extra={
-            "job_id": job_id,
-            "pages": result.pages,
-            "elapsed": result.elapsed,
-            "mem_peak_mb": result.mem_peak_mb,
-            "num_chunks": len(chunks),
-        },
+        "lightweight_conversion_complete",
+        extra={"job_id": job_id, "num_chunks": len(chunks)},
     )
-
     return chunks
 
 
 def _extract_filename(url: str) -> str:
-    """Extract filename from URL or path.
-
-    Args:
-        url: HTTP URL, file:// URL, or filesystem path.
-
-    Returns:
-        Filename component (e.g., "document.pdf").
-    """
-    # Strip query parameters from signed URLs
+    """Extract filename from URL or path."""
     path = url.split("?")[0]
-    # Handle file:// prefix
     if path.startswith(FILE_URI_PREFIX):
         path = path[7:]
     return pathlib.Path(path).name or "document"
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
-
-
 def run_worker() -> int:
-    """Run the ephemeral ingestion worker.
-
-    Reads job parameters from environment variables, executes the async
-    processing pipeline, and returns an exit code.
-
-    Returns:
-        0 on success, 1 on any failure.
-    """
-    # Configure logging for worker context
+    """Run the ephemeral ingestion worker."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    # Read required env vars
     job_id = os.environ.get("WORKER_JOB_ID")
     input_url = os.environ.get("WORKER_INPUT_URL")
     output_url = os.environ.get("WORKER_OUTPUT_URL")
@@ -366,11 +207,10 @@ def run_worker() -> int:
         logger.error("WORKER_OUTPUT_URL environment variable is required")
         return 1
 
-    # Read optional env vars
-    voyage_api_key = os.environ.get("VOYAGE_API_KEY")
+    model_name = os.environ.get("FASTEMBED_EMBEDDING_MODEL")
+    cache_dir = os.environ.get("FASTEMBED_CACHE_DIR")
     chunk_prefix = os.environ.get("WORKER_CHUNK_PREFIX", "")
     ocr_enabled = os.environ.get("WORKER_OCR_ENABLED", "false").lower() == "true"
-    page_batch_size = int(os.environ.get("WORKER_PAGE_BATCH_SIZE", "50"))
 
     logger.info(
         "worker_starting",
@@ -378,9 +218,8 @@ def run_worker() -> int:
             "job_id": job_id,
             "input_url": input_url,
             "output_url": output_url,
-            "has_voyage_key": bool(voyage_api_key),
+            "fastembed_model": model_name,
             "ocr_enabled": ocr_enabled,
-            "page_batch_size": page_batch_size,
         },
     )
 
@@ -390,10 +229,10 @@ def run_worker() -> int:
                 input_url=input_url,
                 output_url=output_url,
                 job_id=job_id,
-                voyage_api_key=voyage_api_key,
+                model_name=model_name,
+                cache_dir=cache_dir,
                 chunk_prefix=chunk_prefix,
                 ocr_enabled=ocr_enabled,
-                page_batch_size=page_batch_size,
             )
         )
         logger.info("worker_completed_successfully", extra={"job_id": job_id})

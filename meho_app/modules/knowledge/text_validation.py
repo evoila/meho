@@ -3,15 +3,16 @@
 """
 Text validation utilities for knowledge chunks.
 
-Validates text size to prevent embedding API errors.
-The token limit applies to Voyage AI and similar embedding models.
+Validates text size to prevent embedding overflow.
+The limit targets fastembed MiniLM-L12-v2 (512 WordPiece tokens).
+tiktoken cl100k_base is an approximation — BPE tends to produce fewer tokens
+than WordPiece, so the guard is slightly conservative.
 """
 
 import tiktoken
 
-# Embedding model token limits
-# Most embedding models (Voyage AI, etc.) support ~8191 tokens per input
-MAX_EMBEDDING_TOKENS = 8000  # Safety margin below 8191
+# fastembed paraphrase-multilingual-MiniLM-L12-v2 has a 512-token BERT context window.
+MAX_EMBEDDING_TOKENS = 512
 
 
 def validate_text_for_embedding(

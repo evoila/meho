@@ -37,7 +37,7 @@ class KnowledgeRepository:
 
         Args:
             chunk: Chunk data without ID
-            embedding: Optional vector embedding (1024 dimensions for Voyage AI)
+            embedding: Optional vector embedding (384 dimensions, fastembed MiniLM-L12)
 
         Returns:
             Created chunk with ID and timestamps
@@ -264,7 +264,7 @@ class KnowledgeRepository:
         Semantic search using pgvector cosine similarity.
 
         Args:
-            query_embedding: Query vector (1024 dimensions for Voyage AI)
+            query_embedding: Query vector (384 dimensions, fastembed MiniLM-L12)
             user_context: User context for ACL filtering
             top_k: Maximum results to return
             score_threshold: Minimum similarity score (0-1)

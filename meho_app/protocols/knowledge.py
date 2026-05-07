@@ -6,12 +6,42 @@ Protocol definitions for the Knowledge module.
 These protocols define the interfaces that knowledge components must implement.
 """
 
-from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 # Avoid circular imports - use string annotations
 if TYPE_CHECKING:
     from meho_app.core.auth_context import UserContext
+    from meho_app.modules.knowledge.lightweight_converter import LightweightDocument
     from meho_app.modules.knowledge.schemas import KnowledgeChunk, KnowledgeChunkCreate
+
+
+@runtime_checkable
+class IDocumentConverter(Protocol):
+    """
+    Protocol for document conversion (PDF/DOCX/HTML -> markdown + chunks).
+
+    Implementations:
+        - LightweightDocumentConverter (in-process, CPU-only, OSS default)
+
+    Future implementations may proxy to a remote MEHO.Knowledge service so
+    that the heavy converters can be hosted out-of-process.
+    """
+
+    def convert_file(
+        self, file_bytes: bytes, filename: str, mime_type: str
+    ) -> "LightweightDocument":
+        """Convert raw file bytes into a markdown document with page metadata."""
+        ...
+
+    def get_full_text(self, doc: "LightweightDocument") -> str:
+        """Return the full document markdown."""
+        ...
+
+    def chunk_document(
+        self, doc: "LightweightDocument", chunk_prefix: str = ""
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Split a converted document into ``(text, metadata)`` chunks."""
+        ...
 
 
 @runtime_checkable
@@ -29,7 +59,7 @@ class IKnowledgeRepository(Protocol):
         """Create a new knowledge chunk with optional embedding."""
         ...
 
-    async def get_chunk(self, chunk_id: str) -> Optional["KnowledgeChunk"]:
+    async def get_chunk(self, chunk_id: str) -> "KnowledgeChunk | None":
         """Get a chunk by ID (no ACL check)."""
         ...
 

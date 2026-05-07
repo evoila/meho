@@ -120,14 +120,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [full, slim]
+        variant: [slim]
         include:
-          - variant: full
-            build_args: "INCLUDE_DOCLING=true"
-            suffix: ""
           - variant: slim
-            build_args: "INCLUDE_DOCLING=false"
-            suffix: "-slim"
+            suffix: ""
 
     steps:
       - name: Checkout code
@@ -154,7 +150,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ matrix.variant == 'full' }}
+            type=raw,value=latest
 
       - name: Build and push
         id: build
@@ -167,7 +163,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: ${{ matrix.build_args }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

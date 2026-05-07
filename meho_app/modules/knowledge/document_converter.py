@@ -3,15 +3,9 @@
 """
 Shared document conversion utilities.
 
-Provides SUPPORTED_MIME_TYPES, document summary generation, and
-chunk prefix building used by both DoclingWrapperAdapter and
-LightweightDocumentConverter ingestion paths.
-
-NOTE: The DoclingDocumentConverter class that previously lived here
-has been replaced by DoclingWrapperAdapter (docling_adapter.py), which
-uses DoclingWrapper for subprocess-isolated conversion with
-HierarchicalChunker. The old TOC/batch splitting functions have been
-removed -- DoclingWrapper handles PDF splitting internally via pikepdf.
+Provides ``SUPPORTED_MIME_TYPES``, document-summary generation, and chunk-prefix
+building used by :class:`LightweightDocumentConverter`. Conversion itself lives
+in ``lightweight_converter.py``.
 """
 
 from meho_app.core.otel import get_logger
@@ -59,7 +53,7 @@ async def generate_document_summary(
     try:
         result = await asyncio.wait_for(agent.run(text_preview), timeout=15.0)
         return str(result.output).strip()
-    except (TimeoutError, Exception) as e:
+    except Exception as e:
         logger.warning("document_summary_generation_failed", error=str(e))
         return ""
 

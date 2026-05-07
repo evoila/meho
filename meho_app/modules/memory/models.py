@@ -82,8 +82,8 @@ class ConnectorMemoryModel(Base):
     last_accessed = Column(TIMESTAMP(timezone=True), nullable=True)
     last_seen = Column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
 
-    # Vector embedding for semantic search (1024 dimensions for Voyage AI voyage-4-large)
-    embedding = Column(Vector(1024), nullable=True)
+    # Vector embedding for semantic search (384-dim, fastembed MiniLM-L12 multilingual)
+    embedding = Column(Vector(384), nullable=True)
 
     # Timestamps
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(UTC))

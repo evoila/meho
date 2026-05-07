@@ -6,7 +6,7 @@
 # --- Base stages: CPU default, GPU opt-in via --build-arg TARGETBASE=base-gpu ---
 ARG TARGETBASE=base-cpu
 # nvidia/cuda:12.4.1-runtime-ubuntu22.04 as of 2026-05-04
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9 AS base-gpu
+FROM nvidia/cuda:13.2.1-runtime-ubuntu22.04@sha256:f48aa5c157006835b67f43e77bea3dfe32a7d9a46eeb2de3f8af1b5a464d0334 AS base-gpu
 # python:3.13-slim as of 2026-05-04
 FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS base-cpu
 FROM ${TARGETBASE} AS base

@@ -1,7 +1,9 @@
+# syntax=docker/dockerfile:1.6
 # MEHO Frontend Dockerfile
 # Builds a static SPA with Vite, served by nginx.
 # Environment variables are injected at container startup via envsubst.
-FROM node:20-alpine AS builder
+# node:20-alpine as of 2026-05-04
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS builder
 
 WORKDIR /app
 
@@ -14,24 +16,24 @@ COPY meho_frontend/ ./
 RUN npm run build
 
 # Production stage
-FROM nginxinc/nginx-unprivileged:alpine
+# nginxinc/nginx-unprivileged:alpine as of 2026-05-04
+FROM nginxinc/nginx-unprivileged:alpine@sha256:53ffe9cc959fc72aeed04a85d517099a42bfcc5f5f0b07a2b1048e08abf2f1eb
 
 COPY --chown=nginx:nginx --from=builder /app/dist /usr/share/nginx/html
 
 # nginx config: default.conf is the fallback (local/non-Docker use),
 # default.conf.template is processed by envsubst at container startup.
-# --chown=nginx:nginx: the startup CMD overwrites these files via envsubst
+# --chown=nginx:nginx: the entrypoint overwrites these files via envsubst
 # redirection; the nginx user must own them to write at runtime.
 COPY --chown=nginx:nginx nginx.conf /etc/nginx/conf.d/default.conf
 COPY --chown=nginx:nginx nginx.conf.template /etc/nginx/conf.d/default.conf.template
+
+COPY --chmod=0755 docker/docker-frontend-entrypoint.sh /docker-frontend-entrypoint.sh
 
 EXPOSE 5173
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://127.0.0.1:5173 || exit 1
 
-# At startup:
-# 1. Process nginx.conf.template with envsubst (explicit var list to preserve $uri, $host, etc.)
-# 2. Generate config.js from environment variables
-# 3. Start nginx
-CMD ["/bin/sh", "-c", "envsubst '$ALLOWED_ORIGINS $KEYCLOAK_ORIGIN' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && envsubst < /usr/share/nginx/html/config.js.template > /usr/share/nginx/html/config.js && nginx -g 'daemon off;'"]
+ENTRYPOINT ["/docker-frontend-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]

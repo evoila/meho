@@ -51,7 +51,9 @@ a release across all four is a manual maintainer responsibility today (see
 - [.github/workflows/license-check.yml](../../.github/workflows/license-check.yml) —
   validates that every Python and npm dependency has a license compatible with
   AGPL-3.0-only. **Note**: this workflow checks *dependency* licenses (SPDX), not
-  customer license tokens. Currently in WARN mode (`continue-on-error: true`).
+  customer license tokens. Blocking mode (WARN mode lifted in #538 after the
+  initial audit and allow-list reconciliation in #648 — see `python-licenses.csv`
+  and `npm-licenses.csv`).
 - [.github/workflows/secret-scan.yml](../../.github/workflows/secret-scan.yml) —
   gitleaks against the diff.
 - [.github/workflows/dead-code-check.yml](../../.github/workflows/dead-code-check.yml) —
@@ -211,8 +213,10 @@ a release across all four is a manual maintainer responsibility today (see
 2. `ci.yml`, `security-scan.yml`, `license-check.yml`, `secret-scan.yml`,
    `dead-code-check.yml`, `frontend-tests.yml`, and `planning-guard.yml` run in
    parallel. Each is independent — no `needs:` chain.
-3. Required checks gate the merge. Optional checks (license-check today) run with
-   `continue-on-error: true` and report-only.
+3. Required checks gate the merge. `license-check.yml` blocks on failure —
+   WARN mode (`continue-on-error: true`) was removed in #538. Note:
+   `dead-code-check.yml` and `secret-scan.yml` still run in informational
+   mode (`continue-on-error: true`) and do not block merge.
 4. On merge to `main`, CI re-runs against the merged commit. If it passes,
    `mirror-to-public.yml` triggers via `workflow_run` (see
    [public-mirror.md](public-mirror.md)).
@@ -873,9 +877,9 @@ issues are filed.
   multi-cluster, ChartMuseum / OCI publication) is deferred to v0.2;
   Initiative #506 wraps once the runbook PR lands.
 - ~~The `Dockerfile.meho` and `Dockerfile.meho-frontend` images run as root.~~ Resolved by #531: backend runs as `meho` (uid 1000), frontend on `nginxinc/nginx-unprivileged` (nginx uid 101).
+- ~~Several base images are pinned by tag, not by digest.~~ Resolved by #532: all Dockerfile base images are digest-pinned; Dependabot docker watches `/docker`.
 - ~~GitHub Actions steps are pinned by tag, not by SHA.~~ Resolved by #537: all actions in `.github/workflows/` are now pinned to full commit SHAs; a pre-commit hook and CI job enforce the invariant going forward. Container image digest pinning (Dockerfile base images, workflow `image:` fields) is tracked separately under #532.
-- `license-check.yml` is in WARN mode (`continue-on-error: true`); the gate does
-  not actually block license-incompatible dependencies.
+- ~~`license-check.yml` is in WARN mode (`continue-on-error: true`); the gate does not actually block license-incompatible dependencies.~~ Resolved by #538 (and #648 allow-list reconciliation).
 - The workflow filename `license-check.yml` is ambiguous against the customer-license
   concept; should be renamed for clarity.
 
@@ -986,7 +990,7 @@ The nginx configuration (`nginx.conf`) explicitly listens on port 5173. This ove
 
 The following hardening items are tracked in Initiative #507:
 
-- [ ] Digest-pin all base images (Task #532)
+- [x] Digest-pin all base images (Task #532)
 - [x] Add `PYTHONDONTWRITEBYTECODE=1` and `PYTHONUNBUFFERED=1` to backend image (Task #533)
 - [ ] Move frontend startup logic into `docker-frontend-entrypoint.sh` with exec-form ENTRYPOINT (Task #534)
 - [ ] Strengthen frontend HEALTHCHECK to detect unsubstituted envsubst placeholders (Task #535)

@@ -4,8 +4,9 @@
 # AGPL is copyleft: all dependencies must be AGPL-compatible (MIT, BSD, Apache-2.0,
 # LGPL, ISC, PSF, 0BSD are compatible; GPL-2.0-only without "or later" is NOT).
 #
-# Runs in WARN mode initially (continue-on-error: true). After the initial audit
-# and allowlist is built, switch to blocking by removing continue-on-error.
+# Blocking mode: WARN mode lifted after the initial audit (python-licenses.csv,
+# npm-licenses.csv) and allow-list reconciliation (#648) confirmed the current
+# dep tree is AGPL-compatible.
 #
 # All third-party actions are pinned to commit SHAs per supply chain best practice.
 
@@ -24,6 +25,7 @@ on:
       - 'pyproject.toml'
       - 'meho_frontend/package.json'
       - 'meho_frontend/package-lock.json'
+  workflow_dispatch:
 
 # Prevent redundant checks on rapid pushes
 concurrency:
@@ -38,7 +40,6 @@ jobs:
     name: Python License Check
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true  # WARN mode -- remove after initial audit
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
@@ -99,14 +100,12 @@ jobs:
           uv run --with "pip-licenses<5.0" pip-licenses \
             --allow-only="MIT License;MIT;BSD License;BSD-2-Clause;BSD-3-Clause;3-Clause BSD License;BSD-3-Clause, Apache-2.0, dependency licenses;Apache Software License;Apache-2.0;Apache 2.0;Apache License 2.0;Apache2.0;Apache-2.0 AND MIT;ISC License (ISCL);Python Software Foundation License;LGPLv3+;GNU Library or Lesser General Public License (LGPL);Mozilla Public License 2.0 (MPL 2.0);The Unlicense (Unlicense);UNKNOWN;Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License;Apache Software License; BSD License;Apache Software License; MIT License;Apache Software License; MIT License; Mozilla Public License 2.0 (MPL 2.0);MIT License; Mozilla Public License 2.0 (MPL 2.0)" \
             --ignore-packages meho pymupdf-layout tiktoken \
-            --format=plain \
-            || echo "::warning::Some Python packages have licenses not in the allow-list. Review the output above."
+            --format=plain
 
   npm-licenses:
     name: Frontend License Check
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true  # WARN mode -- remove after initial audit
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
@@ -125,7 +124,7 @@ jobs:
         working-directory: meho_frontend
         run: |
           echo "=== All dependency licenses ==="
-          npx license-checker --summary
+          npx license-checker@25.0.1 --summary
 
           echo ""
           echo "=== Checking for AGPL-incompatible licenses ==="
@@ -134,7 +133,6 @@ jobs:
           # MIT-0: @csstools/* — MIT variant with no attribution requirement.
           # EPL-2.0: elkjs — GPL-compatible per FSF; AGPL-3.0 is a GPL superset.
           # (MIT OR CC0-1.0): type-fest — SPDX dual-license; both sides are permissive.
-          npx license-checker \
+          npx license-checker@25.0.1 \
             --onlyAllow "MIT;ISC;BSD-2-Clause;BSD-3-Clause;Apache-2.0;0BSD;CC0-1.0;Unlicense;CC-BY-4.0;CC-BY-3.0;Python-2.0;BlueOak-1.0.0;MPL-2.0;MIT-0;EPL-2.0;(MIT OR CC0-1.0)" \
-            --excludePackages "meho_frontend@0.0.0" \
-            || echo "::warning::Some npm packages have licenses not in the allow-list. Review the output above."
+            --excludePackages "meho_frontend@0.0.0"

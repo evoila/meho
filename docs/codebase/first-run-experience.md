@@ -178,9 +178,10 @@ The pipeline has two boundaries, not one:
    filename carries a content hash — any change to the underlying value
    produces a new filename, so `Cache-Control: public, immutable` with a
    one-year expiry is correct.
-2. **Container startup (envsubst).** The `CMD` in
+2. **Container startup (envsubst).** The exec-form `ENTRYPOINT` in
    [docker/Dockerfile.meho-frontend](../../docker/Dockerfile.meho-frontend)
-   rewrites `config.js.template` into `/usr/share/nginx/html/config.js`
+   delegates to [docker/docker-frontend-entrypoint.sh](../../docker/docker-frontend-entrypoint.sh),
+   which rewrites `config.js.template` into `/usr/share/nginx/html/config.js`
    using the live environment variables. The filename is stable across
    deploys, so the browser must be told to refetch on every page load.
 

@@ -18,9 +18,10 @@ server {
     # location block below for the required repetition.
     #
     # NOTE: This is the envsubst TEMPLATE. Variables ${ALLOWED_ORIGINS} and
-    # ${KEYCLOAK_ORIGIN} are substituted at container startup. The Dockerfile
-    # CMD passes an explicit variable list to envsubst so that nginx built-in
-    # variables like $uri and $host are NOT replaced.
+    # ${KEYCLOAK_ORIGIN} are substituted at container startup. The container
+    # entrypoint (docker/docker-frontend-entrypoint.sh) passes an explicit
+    # variable list to envsubst so that nginx built-in variables like $uri
+    # and $host are NOT replaced.
     # =========================================================================
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;

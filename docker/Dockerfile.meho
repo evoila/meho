@@ -1,11 +1,14 @@
-# syntax=docker/dockerfile:1.6
+# syntax=docker/dockerfile:1.6@sha256:ac85f380a63b13dfcefa89046420e1781752bab202122f8f50032edf31be0021
+# docker/dockerfile:1.6 as of 2026-05-04
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (c) 2026 evoila Group
 
 # --- Base stages: CPU default, GPU opt-in via --build-arg TARGETBASE=base-gpu ---
 ARG TARGETBASE=base-cpu
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base-gpu
-FROM python:3.13-slim AS base-cpu
+# nvidia/cuda:12.4.1-runtime-ubuntu22.04 as of 2026-05-04
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04@sha256:517da2300c184c9999ec203c2665244bdebd3578d12fcc7065e83667932643d9 AS base-gpu
+# python:3.13-slim as of 2026-05-04
+FROM python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS base-cpu
 FROM ${TARGETBASE} AS base
 
 # Heavy-group opt-in flags. Declared here so subsequent RUN layers see them.
@@ -40,7 +43,8 @@ RUN groupadd -r meho --gid 1000 \
     && chown meho:meho /app
 
 # uv binary lands in /bin (root-owned); meho can exec it but not modify it.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# ghcr.io/astral-sh/uv:latest (v0.11.8) as of 2026-05-04
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:3b7b60a81d3c57ef471703e5c83fd4aaa33abcd403596fb22ab07db85ae91347 /uv /uvx /bin/
 
 USER meho
 

@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Placeholder CI workflow.
+#
+# Until application code lands (Goals 3+), this workflow is a shell
+# that lints whatever exists and runs whatever tests exist, exiting
+# cleanly when the repo has no Python or no test invocation yet.
+# The shape is intentional: when code lands, the gates are already
+# wired (pinned action SHAs, minimum permissions, concurrency
+# cancellation, per-job timeouts).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-python:
+    name: Python lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.13"
+      - name: Install ruff
+        run: pip install ruff==0.9.6
+      - name: Ruff check
+        run: |
+          if find . -name '*.py' -not -path './.git/*' | grep -q .; then
+            ruff check .
+            ruff format --check .
+          else
+            echo "No Python files yet; skipping ruff."
+          fi
+
+  placeholder-tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Placeholder
+        run: |
+          if [ -f pyproject.toml ] || [ -f package.json ]; then
+            echo "TODO: wire actual test invocation when code lands."
+          fi
+          echo "Placeholder: CI alive."

@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# SonarCloud quality gate.
+#
+# Triggers via workflow_run after CI succeeds. Downloads Python coverage
+# from CI's artifacts (when CI starts producing them), then runs the
+# SonarCloud scan. The "Clean as You Code" model applies the gate to
+# new code only — existing issues don't block PRs.
+#
+# After the orphan-commit reset, SonarCloud sees a fresh single-commit
+# history. The project (evoila_meho on org evoila) persists across the
+# reset — it's external state keyed by repo identifier — so the same
+# project picks up the new commits and resets the baseline naturally.
+#
+# Prerequisite: SONAR_TOKEN repo secret. Verified present pre-merge.
+#
+# IMPORTANT: Uses SonarSource/sonarqube-scan-action@v5 (NOT the
+# deprecated sonarcloud-github-action). All third-party actions are
+# pinned to commit SHAs.
+
+name: Quality Gate
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+concurrency:
+  group: quality-gate-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write  # required for PR decoration (Sonar comment with the gate result)
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0  # full history for accurate blame + new-code detection
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Download Python coverage from CI workflow
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: python-coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true  # coverage artifact may not exist yet (no tests)
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@2f77a1ec69fb1d595b06f35ab27e97605bdef703  # v5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

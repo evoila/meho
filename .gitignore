@@ -1,10 +1,15 @@
 # =============================================================================
-# Private companion repo content — must NEVER land in public history
+# Private companion repo content — must NEVER land in public history.
+# Patterns intentionally have NO trailing slash so they match both real
+# directories AND symlinks-to-directories. The meho-init script in
+# evoila-bosnia/meho-internal creates `.claude` as a symlink into the
+# private repo; with a trailing-slash pattern, gitignore wouldn't catch
+# the symlink and the symlinked content could leak into public history.
 # =============================================================================
-.claude/
-.planning/
-.cursor/
-.vscode/
+.claude
+.planning
+.cursor
+.vscode
 
 # =============================================================================
 # Secrets / env

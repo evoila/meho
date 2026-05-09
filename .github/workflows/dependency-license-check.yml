@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Dependency license check.
+#
+# Verifies all Python and npm dependencies are compatible with the
+# project's outbound license: **Apache 2.0** (per evoila-bosnia/MEHO.X
+# decision #701 / #727). Apache 2.0 is permissive and combines cleanly
+# with most permissive and weak-copyleft licenses; the explicit forbid
+# list is AGPL (would force the combined work to AGPL), proprietary
+# EULAs, SSPL, BUSL, Elastic License v2, CC-BY-NC.
+#
+# Both jobs guard with hashFiles() so the workflow no-ops on the
+# placeholder repo (no pyproject.toml / package.json yet). When
+# manifests land, the checks fire automatically.
+#
+# When the dependency graph reveals license identifiers not in the
+# allow-list (e.g. `Apache Software License` vs `Apache-2.0` — pip
+# emits various forms), expand the allow-list specifically rather
+# than broadening it.
+
+name: Dependency License Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '.github/workflows/dependency-license-check.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '.github/workflows/dependency-license-check.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: dependency-license-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python-licenses:
+    name: Python License Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: hashFiles('pyproject.toml') != ''
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: "3.13"
+      - name: Install pip-licenses
+        run: pip install pip-licenses==5.0.0
+      - name: Install project deps
+        run: pip install -e .
+      - name: Verify license compatibility
+        # Apache 2.0 outbound: permissive + weak-copyleft inbound is fine.
+        # AGPL inbound is forbidden (would flip combined work to AGPL).
+        # Multiple identifier forms covered because pip-licenses falls back
+        # from PEP 639 License-Expression to Classifier to raw License field.
+        run: >
+          pip-licenses --format=plain --allow-only="
+          Apache Software License;
+          Apache-2.0;
+          Apache 2.0;
+          Apache License 2.0;
+          MIT License;
+          MIT;
+          BSD License;
+          BSD-2-Clause;
+          BSD-3-Clause;
+          3-Clause BSD License;
+          ISC License (ISCL);
+          ISC;
+          Python Software Foundation License;
+          PSF-2.0;
+          0BSD;
+          The Unlicense (Unlicense);
+          Unlicense;
+          Mozilla Public License 2.0 (MPL 2.0);
+          MPL-2.0;
+          CC0-1.0;
+          "
+
+  npm-licenses:
+    name: NPM License Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: hashFiles('**/package-lock.json') != ''
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "20"
+      - name: Install license-checker
+        run: npm install -g license-checker@25.0.1
+      - name: Verify license compatibility
+        run: >
+          license-checker --onlyAllow "Apache-2.0;MIT;BSD-2-Clause;BSD-3-Clause;ISC;CC0-1.0;0BSD;Unlicense;MPL-2.0"
+          --excludePrivatePackages

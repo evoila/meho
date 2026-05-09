@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Pre-commit hooks.
+#
+# Install:  pre-commit install --install-hooks
+# Run:      pre-commit run --all-files
+#
+# Initial scope: stack-neutral hygiene (file-format, secret detection).
+# Language-specific hooks (ruff, mypy, eslint, vitest) land when the
+# language code lands.
+
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  # Standard hygiene hooks — universal across stacks.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: mixed-line-ending
+
+  # Secret scanning. CI also runs TruffleHog on full history
+  # (.github/workflows/secret-scan.yml); this hook is the local
+  # pre-commit version that catches secrets before they reach the
+  # remote.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # Conventional Commits enforcement on commit messages.
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [feat, fix, chore, docs, refactor, test, ci, build, perf, revert]
+
+  # When Python lands, add ruff pinned to the same version pyproject.toml uses.
+  # When frontend lands, add eslint via npm-prefix or local hook.
+  # When mypy/typecheck thresholds matter, add as `local` hooks invoking
+  # the project's venv / node_modules so configuration matches CI.

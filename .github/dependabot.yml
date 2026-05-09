@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Dependabot configuration.
+#
+# Initial v0.1 scope: GitHub Actions only. Pip / npm / docker
+# ecosystems land when their manifests do (pyproject.toml,
+# package.json, Dockerfile). Adding them now would silently no-op
+# but invites confusion when manifests appear later — the schedule
+# would already be running.
+
+version: 2
+updates:
+  # Pin-bumps for third-party Actions used in .github/workflows/.
+  # Runs weekly; PRs land with `chore(deps):` prefix matching the
+  # repo's Conventional Commits convention.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # When language manifests land, add per-ecosystem blocks below.
+  # Reference (MEHO.X conventions):
+  #
+  # - package-ecosystem: "pip"
+  #   directory: "/"
+  #   schedule:
+  #     interval: "weekly"
+  #     day: "monday"
+  #   labels: ["dependencies", "python"]
+  #   commit-message:
+  #     prefix: "chore(deps)"
+  #
+  # - package-ecosystem: "npm"
+  #   directory: "/<frontend-path>"
+  #   schedule:
+  #     interval: "weekly"
+  #     day: "monday"
+  #   labels: ["dependencies", "frontend"]
+  #   commit-message:
+  #     prefix: "chore(deps)"
+  #
+  # - package-ecosystem: "docker"
+  #   directory: "/<docker-context>"
+  #   schedule:
+  #     interval: "weekly"
+  #     day: "monday"
+  #   labels: ["dependencies", "docker"]
+  #   commit-message:
+  #     prefix: "chore(deps)"

@@ -25,14 +25,14 @@ on:
   push:
     branches: [main]
     paths:
-      - 'pyproject.toml'
+      - '**/pyproject.toml'
       - '**/package.json'
       - '**/package-lock.json'
       - '.github/workflows/dependency-license-check.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'pyproject.toml'
+      - '**/pyproject.toml'
       - '**/package.json'
       - '**/package-lock.json'
       - '.github/workflows/dependency-license-check.yml'
@@ -50,17 +50,21 @@ jobs:
     name: Python License Check
     runs-on: meho-runners
     timeout-minutes: 10
-    if: hashFiles('pyproject.toml') != ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        if: hashFiles('**/pyproject.toml') != ''
         with:
           python-version: "3.13"
       - name: Install pip-licenses
+        if: hashFiles('**/pyproject.toml') != ''
         run: pip install pip-licenses==5.0.0
       - name: Install project deps
-        run: pip install -e .
+        if: hashFiles('**/pyproject.toml') != ''
+        # Only Python project today is backend/. Promote to a matrix when more land.
+        run: pip install -e ./backend
       - name: Verify license compatibility
+        if: hashFiles('**/pyproject.toml') != ''
         # Apache 2.0 outbound: permissive + weak-copyleft inbound is fine.
         # AGPL inbound is forbidden (would flip combined work to AGPL).
         # Multiple identifier forms covered because pip-licenses falls back
@@ -93,15 +97,17 @@ jobs:
     name: NPM License Check
     runs-on: meho-runners
     timeout-minutes: 10
-    if: hashFiles('**/package-lock.json') != ''
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        if: hashFiles('**/package-lock.json') != ''
         with:
           node-version: "20"
       - name: Install license-checker
+        if: hashFiles('**/package-lock.json') != ''
         run: npm install -g license-checker@25.0.1
       - name: Verify license compatibility
+        if: hashFiles('**/package-lock.json') != ''
         run: >
           license-checker --onlyAllow "Apache-2.0;MIT;BSD-2-Clause;BSD-3-Clause;ISC;CC0-1.0;0BSD;Unlicense;MPL-2.0"
           --excludePrivatePackages

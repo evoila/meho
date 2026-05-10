@@ -146,6 +146,31 @@ this stage it exposes:
   revert + forward-compat schema discipline, per Goal #11 DoD bullet
   3); the first migration's `downgrade()` legitimately drops the
   table it just created and a flat scan would trip on it.
+* Forward-compat regression test (Task #30) —
+  `backend/tests/test_migration_rollback.py` is the unit-test-level
+  proof of Goal #11 DoD bullet 3's *code-side* discipline: the
+  running backplane image must tolerate a schema *ahead* of it
+  (revision N+1 columns the revision-N image doesn't know about).
+  The test spins up `postgres:16-alpine` via testcontainers, runs
+  `alembic upgrade head` to revision N, applies a synthetic
+  additive migration from
+  `backend/tests/fixtures/synthetic_n_plus_1.py` (two columns —
+  `future_field text` and `future_jsonb_field jsonb`, both with
+  PostgreSQL-side defaults), then drives a real authenticated
+  `GET /api/v1/health` request through the production app. The
+  load-bearing assertion is **negative**: the synthetic columns
+  hold their PG-side defaults verbatim, proving the revision-N
+  ORM/middleware never wrote to columns it should not know about
+  (the property a `SELECT *`-shaped query or a future-aware column
+  list would falsify). The synthetic migration deliberately lives
+  outside `backend/alembic/versions/` so the production migration
+  graph and the CI guard's path filter stay undisturbed. The test
+  skips on agent sandboxes without Docker (same heuristic as
+  `tests.test_db_engine.TestPostgresIntegration`); CI runs it on
+  the runner pool that provisions Docker. The cluster-level proof
+  of the same property — exercising real `helm rollback` against a
+  running deployment — is Goal #11's G2.8-T3, intentionally out of
+  scope here.
 * Audit middleware (Task #28) — `backend/src/meho_backplane/audit.py`
   defines the **pure-ASGI** `AuditMiddleware` that writes one row to
   `audit_log` per authenticated request **before** the response yields

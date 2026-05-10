@@ -123,7 +123,7 @@ def _isolated_jwks_cache() -> Iterator[None]:
 
 
 @pytest.fixture
-def _audit_db_url(tmp_path: Path) -> str:
+def _audit_db_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """Resolve the per-test SQLite URL and run ``alembic upgrade head``.
 
     The Alembic upgrade is split into a *synchronous* fixture because
@@ -133,9 +133,20 @@ def _audit_db_url(tmp_path: Path) -> str:
     ``RuntimeError: asyncio.run() cannot be called from a running
     event loop``. Pytest-asyncio's auto-mode lets a sync fixture feed
     its return value into an async test, which is the seam we use here.
+
+    ``DATABASE_URL`` is set **before** ``command.upgrade`` runs so the
+    inner :mod:`backend.alembic.env` (which reads
+    ``os.environ.get("DATABASE_URL")`` and overrides
+    ``cfg.set_main_option("sqlalchemy.url", ...)``) targets *this*
+    fixture's DB rather than any value inherited from the parent
+    process. The ``_settings_env`` autouse fixture already pins
+    ``DATABASE_URL`` to the same path, but pinning here too keeps the
+    ordering invariant local — if a future caller stops depending on
+    that autouse fixture the migration still hits the right DB.
     """
     db_path = tmp_path / "audit.db"
     url = f"sqlite+aiosqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", url)
 
     cfg = alembic_config()
     cfg.set_main_option("sqlalchemy.url", url)
@@ -505,6 +516,68 @@ async def test_audit_write_failure_converts_request_to_500(
     # still injects X-Request-Id. The header is the operator's only
     # crumb to correlate the failure with backplane logs.
     assert response.headers.get("x-request-id")
+
+
+@pytest.mark.asyncio
+async def test_handler_exception_writes_audit_row_with_status_500(
+    isolated_audit_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handler exception still produces an audit row with ``status=500``.
+
+    The pre-fix middleware called ``await self.app(...)`` outside any
+    try/except, so an unhandled handler exception propagated to the
+    outer :class:`starlette.middleware.errors.ServerErrorMiddleware`
+    *before* the audit branch ran — the row was never written and the
+    operator's failed action left no trace. The fix wraps the inner
+    call in ``try/except Exception`` (CancelledError still propagates),
+    forces ``status_code=500``, writes the row, then re-raises so
+    ServerErrorMiddleware builds the canonical 500 response.
+
+    Patches ``_probe_vault_federation`` at the
+    :mod:`meho_backplane.api.v1.health` import site so the inner
+    handler body raises *after* ``verify_jwt_and_bind`` has bound
+    ``operator_sub``. Without that binding the skip rule would short-
+    circuit before the audit write — the test would prove the wrong
+    branch.
+
+    ``TestClient`` is constructed with ``raise_server_exceptions=False``
+    so the re-raised handler exception surfaces as the 500 the
+    operator would actually see in production rather than failing the
+    test with a propagated exception.
+    """
+    import meho_backplane.api.v1.health as health_module
+
+    key = _make_rsa_keypair("kid-D")
+    token = _mint_token(key, sub="op-500")
+    _install_fake_vault(monkeypatch)
+
+    async def _raising_probe(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("simulated upstream failure")
+
+    monkeypatch.setattr(health_module, "_probe_vault_federation", _raising_probe)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    # Outer ServerErrorMiddleware converts the re-raised handler
+    # exception into a 500 response with Starlette's generic body —
+    # which is exactly what an unaudited handler crash should produce
+    # in production.
+    assert response.status_code == 500
+
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.operator_sub == "op-500"
+    assert row.method == "GET"
+    assert row.path == "/api/v1/health"
+    assert row.status_code == 500
 
 
 @pytest.mark.asyncio

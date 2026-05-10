@@ -148,6 +148,61 @@ async def _write_audit_row(
         await session.commit()
 
 
+async def _run_inner_app_buffered(
+    app: ASGIApp,
+    scope: Scope,
+    receive: Receive,
+    buffered: list[Message],
+) -> tuple[int, BaseException | None]:
+    """Invoke the inner app capturing its send messages.
+
+    Returns ``(status_code, handler_exc)``. When the inner app raises a
+    non-cancellation :class:`Exception`, the buffered messages are
+    cleared (a partially-emitted response cannot be safely forwarded)
+    and ``status_code`` is synthesised to 500 so the audit row reflects
+    Starlette's :class:`~starlette.middleware.errors.ServerErrorMiddleware`
+    eventual verdict. ``CancelledError`` is intentionally *not* caught
+    so client disconnects still cancel the task tree cleanly.
+    """
+    status_code: int = 0
+
+    async def buffered_send(message: Message) -> None:
+        nonlocal status_code
+        if message["type"] == _RESPONSE_START:
+            status_code = int(message.get("status", 0))
+        buffered.append(message)
+
+    try:
+        await app(scope, receive, buffered_send)
+    except Exception as exc:
+        buffered.clear()
+        return 500, exc
+    return status_code, None
+
+
+def _resolve_request_metadata(
+    scope: Scope,
+) -> tuple[str, str, uuid.UUID | None]:
+    """Pull ``method`` / ``path`` / ``request_id`` out of scope + contextvars.
+
+    Centralised so :meth:`AuditMiddleware.__call__` does not need to
+    inline three separate ``isinstance(...) else ""`` defences. The
+    request_id is coerced from the ``request_id`` contextvar bound by
+    :class:`~meho_backplane.middleware.RequestContextMiddleware`; opaque
+    values land as ``None`` rather than failing the insert.
+    """
+    request_id = _coerce_request_id(
+        structlog.contextvars.get_contextvars().get("request_id"),
+    )
+    method = scope.get("method", "")
+    if not isinstance(method, str):
+        method = ""
+    path = scope.get("path", "")
+    if not isinstance(path, str):
+        path = ""
+    return method, path, request_id
+
+
 async def _send_audit_failure_response(send: Send) -> None:
     """Emit the canonical fail-closed 500 ``{"detail": "audit_write_failed"}``.
 
@@ -197,39 +252,34 @@ class AuditMiddleware:
         # Buffer the inner app's send messages so we can decide, after
         # the audit insert, whether to forward them or replace with a
         # fresh 500. v0.1 routes return single-shot JSON responses; the
-        # buffer is small.
+        # buffer is small. The inner-app invocation is wrapped so a
+        # handler exception still produces an audit row for the failed
+        # action (the audit row is the operator-facing trace of "this
+        # action was attempted"); see :func:`_run_inner_app_buffered`.
         buffered: list[Message] = []
-        status_code: int = 0
-
-        async def buffered_send(message: Message) -> None:
-            nonlocal status_code
-            if message["type"] == _RESPONSE_START:
-                status_code = int(message.get("status", 0))
-            buffered.append(message)
-
-        await self.app(scope, receive, buffered_send)
+        status_code, handler_exc = await _run_inner_app_buffered(
+            self.app,
+            scope,
+            receive,
+            buffered,
+        )
 
         duration_ms = round((time.monotonic() - start) * 1000, 2)
-
-        ctx = structlog.contextvars.get_contextvars()
-        operator_sub = ctx.get("operator_sub")
+        operator_sub = structlog.contextvars.get_contextvars().get("operator_sub")
 
         if not isinstance(operator_sub, str) or not operator_sub:
             # No operator to attribute. Skip the audit write entirely
             # (public surfaces, 401s, and any other unauthenticated
-            # path land here); forward the buffered response unchanged.
+            # path land here); forward the buffered response unchanged
+            # — or, if the handler raised, re-raise so the outer
+            # ServerErrorMiddleware builds the 500.
+            if handler_exc is not None:
+                raise handler_exc
             for message in buffered:
                 await send(message)
             return
 
-        request_id = _coerce_request_id(ctx.get("request_id"))
-        method = scope.get("method", "")
-        if not isinstance(method, str):
-            method = ""
-        path = scope.get("path", "")
-        if not isinstance(path, str):
-            path = ""
-
+        method, path, request_id = _resolve_request_metadata(scope)
         log = structlog.get_logger()
         try:
             await _write_audit_row(
@@ -254,9 +304,28 @@ class AuditMiddleware:
                 status_code=status_code,
                 duration_ms=duration_ms,
             )
+            # If the handler itself also raised, the audit-failure
+            # response cannot be sent (the outer ServerErrorMiddleware
+            # is about to take over); prefer surfacing the original
+            # handler exception so the 500 carries the upstream
+            # context rather than a misleading audit_write_failed.
+            # ``from None`` suppresses the active audit-write exception
+            # as the implicit ``__context__`` so the operator-facing
+            # 500 doesn't conflate the two distinct failure modes.
+            if handler_exc is not None:
+                raise handler_exc from None
             await _send_audit_failure_response(send)
             return
 
-        # Audit committed. Forward the buffered response verbatim.
+        # Audit row was committed. If the handler raised, re-raise so
+        # the outer ServerErrorMiddleware builds the canonical 500;
+        # the audit row attributing the failed action is already
+        # persisted, satisfying the "every authenticated action gets
+        # exactly one row" contract for the 5xx path.
+        if handler_exc is not None:
+            raise handler_exc
+
+        # Audit committed and handler succeeded — forward the buffered
+        # response verbatim.
         for message in buffered:
             await send(message)

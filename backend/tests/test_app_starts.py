@@ -9,10 +9,17 @@ route returns the expected identity payload. Health / version / ready
 behaviour is covered in :mod:`tests.test_health` once Task #19 lands.
 """
 
+import tomllib
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from meho_backplane import __version__
 from meho_backplane.main import app
+
+# Resolve the backend project root from the test file location:
+#   backend/tests/test_app_starts.py → parents[1] == backend/
+_PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
 def test_root_returns_identity_payload() -> None:
@@ -29,6 +36,10 @@ def test_version_constant_matches_pyproject() -> None:
 
     Acts as a tripwire: bumping the version in ``pyproject.toml``
     without bumping :mod:`meho_backplane.__init__` (or vice versa)
-    breaks this test, making the drift visible in CI.
+    breaks this test, making the drift visible in CI. The check parses
+    ``pyproject.toml`` directly so the invariant promised in the
+    docstring is actually enforced (rather than asserted against a
+    duplicated literal).
     """
-    assert __version__ == "0.1.0-dev"
+    pyproject = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    assert __version__ == pyproject["project"]["version"]

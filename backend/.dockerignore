@@ -34,8 +34,10 @@ htmlcov/
 build/
 dist/
 
-# Documentation source.
-README.md
+# Documentation source. README.md is intentionally NOT excluded — hatchling's
+# `project.readme` metadata in pyproject.toml requires it at wheel-build time;
+# excluding it makes `uv sync --locked --no-dev --no-editable` fail inside the
+# Docker builder with `OSError: Readme file does not exist: README.md`.
 
 # Secrets — defence in depth even though they should never be committed.
 .env

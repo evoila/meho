@@ -11,7 +11,7 @@ Stack choices are locked in [ADR
 
 ## Layout
 
-```
+```text
 backend/
 ├── pyproject.toml              # uv-managed; locks deps + tool configs
 ├── Dockerfile                  # multi-stage uv build, non-root uid 1001

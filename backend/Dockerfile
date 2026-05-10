@@ -42,9 +42,19 @@ FROM python:3.12-slim AS runtime
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).
 RUN useradd --system --uid 1001 --gid 0 --no-create-home --shell /usr/sbin/nologin meho
 
+# Build-identity stamps surfaced via GET /version. CI passes these via
+# `docker build --build-arg GIT_SHA=$(git rev-parse HEAD) \
+#                --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`
+# (G2.4 will pin that exact invocation). When unset, /version falls back
+# to "unknown" so locally-built images don't crash on startup.
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    GIT_SHA=${GIT_SHA} \
+    BUILD_DATE=${BUILD_DATE}
 
 WORKDIR /app
 

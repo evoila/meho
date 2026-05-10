@@ -8,12 +8,14 @@
 `backend/` houses the MEHO governance-layer backplane — a FastAPI
 service that mediates every operation an AI agent runs against shared
 infrastructure (policy gating, audit, federation, observability). At
-this Goal-#11 chassis stage it serves only a single identity route on
-`/`; health, readiness, metrics, structured logging, JWT validation,
-Vault federation, and database persistence land progressively in
-subsequent G2.1 / G2.2 / G2.3 Tasks. The stack (FastAPI, Pydantic v2,
-SQLAlchemy 2.x async, Alembic, structlog, prometheus_client) is locked
-by [ADR 0004](https://github.com/evoila-bosnia/meho-internal/issues/13).
+this Goal-#11 chassis stage it exposes the public operator surface
+(`/`, `/healthz`, `/version`, `/ready`) and a pluggable readiness-probe
+registry (empty by default, fail-closed on `/ready`); metrics,
+structured logging, JWT validation, Vault federation, and database
+persistence land progressively in subsequent G2.1 / G2.2 / G2.3 Tasks.
+The stack (FastAPI, Pydantic v2, SQLAlchemy 2.x async, Alembic,
+structlog, prometheus_client) is locked by
+[ADR 0004](https://github.com/evoila-bosnia/meho-internal/issues/13).
 
 The project follows the modern src-layout
 (`backend/src/meho_backplane/...`) so tests resolve only the installed
@@ -26,21 +28,33 @@ PYTHONPATH-leak imports.
 | --- | --- | --- |
 | `app` (`fastapi.FastAPI`) | `src/meho_backplane/main.py` | ASGI application instance consumed by uvicorn / k8s probes. Title and `version` are populated from `__version__` so OpenAPI metadata stays in lock-step with the package. |
 | `__version__` (`str`) | `src/meho_backplane/__init__.py` | Single source of truth for the running app version. The pyproject `[project].version` field mirrors this constant; the `test_version_constant_matches_pyproject` test acts as a tripwire if the two drift. |
-| `root` (route) | `src/meho_backplane/main.py` | `GET /` returning `{"name": "meho-backplane", "version": "<x>"}`. Smoke-probe surface until `/healthz` is wired in Task #19. |
+| `root` (route) | `src/meho_backplane/main.py` | `GET /` returning `{"name": "meho-backplane", "version": "<x>"}`. Identity smoke-probe; coexists with `/healthz`. |
+| `ProbeResult` (`dataclass`) | `src/meho_backplane/health.py` | Frozen record `(name, ok, detail)` returned by every readiness probe. Surfaced verbatim in the `/ready` response body. |
+| `register_probe` / `run_probes` / `clear_probes` | `src/meho_backplane/health.py` | Public registry API. G2.2 (Vault, Keycloak) and G2.3 (DB migrations) call `register_probe` at startup; `clear_probes` is test-only. |
+| `health.router` (`/healthz`, `/ready`) | `src/meho_backplane/health.py` | Liveness and readiness endpoints. `/healthz` is unconditional 200; `/ready` aggregates the probe registry and **fails closed on the empty default** (vacuous-truth trap explicitly guarded). |
+| `version.router` (`/version`) | `src/meho_backplane/version.py` | Build identity. Reads `GIT_SHA` and `BUILD_DATE` env vars (injected via `docker build --build-arg`); falls back to `"unknown"` when unset or empty. `chart_version` is `None` until G2.5. |
 
 ## Control flow
 
 1. The container's `CMD` invokes
    `uvicorn meho_backplane.main:app --host 0.0.0.0 --port 8000`.
 2. uvicorn imports `meho_backplane.main`, which constructs the
-   `FastAPI` instance and registers the `root` coroutine.
+   `FastAPI` instance, mounts the `health` and `version` routers via
+   `include_router`, and registers the `root` coroutine.
 3. uvicorn binds to `:8000` and starts the ASGI event loop.
-4. Each `GET /` request is dispatched to `root()`, which returns a
-   plain `dict`; FastAPI serialises it to JSON.
+4. Each request is dispatched to its route handler:
+   - `GET /` → `root()` returns the identity dict.
+   - `GET /healthz` → `healthz()` returns `{"status": "ok"}` with 200.
+   - `GET /version` → reads `GIT_SHA` / `BUILD_DATE` env vars per
+     request (cheap; no caching needed).
+   - `GET /ready` → calls `run_probes()` and translates the aggregate
+     into a 200 / 503 `JSONResponse`.
 
 There is no startup or shutdown machinery yet — the FastAPI
 [lifespan](https://fastapi.tiangolo.com/advanced/events/) hook is
-introduced when DB/Vault wiring lands (G2.2 / G2.3).
+introduced when DB/Vault wiring lands (G2.2 / G2.3). Downstream
+probes will be registered from those lifespans:
+`register_probe("vault", check_vault)`.
 
 ## Dependencies
 
@@ -66,10 +80,12 @@ top of their own changes, which keeps the per-Task PR diffs focused.
 
 ## Known issues
 
-None at the chassis stage. `/ready` does not exist yet, so kubernetes
-readiness probes pointed at it during initial helm-chart development
-will 404 until Task #19 lands; that's by design and tracked in #19's
-acceptance criteria.
+`/ready` returns 503 in the default chassis state because the probe
+registry is empty — this is **fail-closed by design**, not a bug. The
+chassis flips to readiness-ready only once G2.2 (Vault/Keycloak) and
+G2.3 (Alembic migrations) call `register_probe`. Helm charts pointing
+their kubernetes readiness probe at `/ready` before those Initiatives
+land will see pods stay `NotReady`; that's the intended contract.
 
 ## References
 

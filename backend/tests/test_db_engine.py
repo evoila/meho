@@ -239,6 +239,45 @@ def test_find_alembic_ini_resolves_packaged_path() -> None:
     assert path.name == "alembic.ini"
 
 
+def test_find_alembic_ini_honours_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``$ALEMBIC_CONFIG`` wins over package / cwd / source-tree probes.
+
+    Ops can override the file location for non-standard deployments
+    (mounted ConfigMaps, k8s init-containers, etc.) by setting the env
+    var; the override must take precedence over every other resolution
+    rule and the resolver must return that path verbatim.
+    """
+    custom_ini = tmp_path / "custom-alembic.ini"
+    custom_ini.write_text("[alembic]\nscript_location = /nowhere\n")
+    monkeypatch.setenv("ALEMBIC_CONFIG", str(custom_ini))
+
+    resolved = find_alembic_ini()
+    assert resolved == custom_ini
+
+
+def test_find_alembic_ini_env_override_missing_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``$ALEMBIC_CONFIG`` pointing at a non-existent path raises clearly.
+
+    Falling back to the cwd / source-tree probes when the operator
+    explicitly set ``ALEMBIC_CONFIG`` would mask a typo and load the
+    *wrong* migration tree. Surface the error instead so the operator
+    sees the typo immediately.
+    """
+    missing = tmp_path / "does-not-exist.ini"
+    monkeypatch.setenv("ALEMBIC_CONFIG", str(missing))
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        find_alembic_ini()
+    assert "ALEMBIC_CONFIG" in str(exc_info.value)
+    assert str(missing) in str(exc_info.value)
+
+
 # ---------------------------------------------------------------------------
 # Optional testcontainers-PG suite
 # ---------------------------------------------------------------------------
@@ -273,8 +312,7 @@ class TestPostgresIntegration:
     why and points at the CI environment that does provision Docker.
     """
 
-    @pytest.mark.asyncio
-    async def test_alembic_upgrade_head_against_real_pg(
+    def test_alembic_upgrade_head_against_real_pg(
         self,
         isolated_engine_cache: None,
         monkeypatch: pytest.MonkeyPatch,
@@ -285,6 +323,14 @@ class TestPostgresIntegration:
         completes cleanly. With an empty ``versions/`` directory, no
         ``alembic_version`` row is created (Alembic skips the table
         when there is nothing to stamp), but the command must not raise.
+
+        The test is **synchronous** for the same reason the SQLite
+        sibling at lines 188-232 is synchronous: ``alembic.command.upgrade``
+        drives :func:`asyncio.run` itself (via the env.py
+        ``run_migrations_online`` entry point), and ``asyncio.run`` cannot
+        be re-entered from inside a running loop. Decorating this test
+        with ``@pytest.mark.asyncio`` would crash with a ``RuntimeError``
+        the moment Docker is available and the container starts.
         """
         from testcontainers.postgres import PostgresContainer
 

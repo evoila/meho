@@ -85,6 +85,28 @@ class Settings(BaseModel):
         fail-closed quickly rather than starve request capacity. The
         v0.1 dogfood load is per-request login, so the timeout governs
         worst-case request latency directly.
+    database_url:
+        SQLAlchemy URL for the PostgreSQL database, e.g.
+        ``postgresql+asyncpg://meho:<password>@<host>:5432/meho``.
+        Required — the backplane refuses to start without it. The
+        ``+asyncpg`` driver is mandatory (per ADR 0004); a sync URL
+        would silently work for the engine factory but the per-request
+        session dependency would block the FastAPI event loop on every
+        I/O call. Required also for Alembic — ``env.py`` reads this
+        value rather than the static ``[alembic]`` ini setting so the
+        migration runner's URL stays in lock-step with the running
+        backplane.
+    database_pool_size:
+        Maximum number of connections SQLAlchemy keeps idle in the
+        pool. Default 10 follows SQLAlchemy 2.x's published guidance
+        for a single-replica web service; raise it when sustained
+        request concurrency exceeds the default.
+    database_pool_timeout:
+        Seconds to wait for an available pool connection before
+        raising :class:`sqlalchemy.exc.TimeoutError`. Default 30s
+        gives a real PG outage time to recover before requests start
+        failing fast; tune downward for traffic shapes where
+        backpressure is preferred to long latency.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -96,6 +118,9 @@ class Settings(BaseModel):
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
+    database_url: str = Field(min_length=1)
+    database_pool_size: int = Field(default=10, gt=0)
+    database_pool_timeout: float = Field(default=30.0, gt=0)
 
 
 @lru_cache(maxsize=1)
@@ -135,5 +160,10 @@ def get_settings() -> Settings:
         vault_namespace=vault_namespace_env if vault_namespace_env else None,
         vault_timeout_seconds=float(
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
+        ),
+        database_url=os.environ["DATABASE_URL"],
+        database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
+        database_pool_timeout=float(
+            os.environ.get("DATABASE_POOL_TIMEOUT", "30.0"),
         ),
     )

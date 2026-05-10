@@ -104,6 +104,27 @@ SECRET_LEAK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 
 
 @pytest.fixture(autouse=True)
+def _default_database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Provide a default ``DATABASE_URL`` so :class:`Settings` constructs.
+
+    Every existing test file pins ``KEYCLOAK_ISSUER_URL`` / ``VAULT_ADDR``
+    in its own per-file fixture; ``DATABASE_URL`` is the third required
+    field added in T27. Pinning the default here (an aiosqlite URL,
+    intentionally not a real PG host) avoids a 7-file diff chasing every
+    settings-using fixture and keeps the failure shape obvious if a test
+    actually needs a live PG: the test resets ``DATABASE_URL`` itself or
+    constructs an engine directly. Tests that exercise the
+    DB-migration-state probe override this default with a testcontainers
+    PG URL or a ``aiosqlite:///<tmp>`` file path.
+    """
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "sqlite+aiosqlite:///:memory:",
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_secret_leak_sweep(
     caplog: pytest.LogCaptureFixture,
     capfd: pytest.CaptureFixture[str],

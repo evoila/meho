@@ -119,6 +119,33 @@ this stage it exposes:
   branching the column shape itself. The
   `meho_backplane.db.models.AuditLog` ORM model carries the same
   field set with `Mapped[...]` typed-mapped annotations.
+* Migration runner + CI guard (Task #29) — `backend/src/meho_backplane/db/migrate.py`
+  is the one-file CLI entrypoint the Helm pre-install / pre-upgrade Job
+  (G2.5-T3) runs before the Deployment rolls forward; it reuses
+  `alembic_config()` from `db/migrations.py` so the migration that
+  *applies* and the readiness probe that *verifies* never disagree on
+  which `alembic.ini` they targeted, then calls
+  `alembic.command.upgrade(cfg, "head")` and exits 0 on success or 1
+  on failure (with a `migration_failed: <ExcClass>: <msg>` line on
+  stderr). The Dockerfile keeps a single `CMD ["uvicorn", ...]` for
+  the serve mode; the migrate mode is reached by the Helm Job
+  overriding `command: ["python"]; args: ["-m", "meho_backplane.db.migrate"]`
+  — no second image, no second entrypoint script. The CI guard at
+  `scripts/ci/check_migration_compat.py` runs on every PR touching
+  `backend/alembic/versions/**` (`.github/workflows/migration-compat.yml`)
+  and rejects destructive patterns inside the `upgrade()` function:
+  `op.drop_column` / `op.drop_table` / `op.rename_table`,
+  `op.alter_column(..., new_column_name=...)`,
+  `op.alter_column(..., nullable=False)`, and any
+  `op.execute(...)` whose payload matches `DROP COLUMN` /
+  `DROP TABLE` / `RENAME TABLE` / `RENAME COLUMN` /
+  `ALTER ... SET NOT NULL`. Detection is a dual AST-plus-regex pass
+  so f-string and variable-arg payloads can't smuggle destructive
+  SQL past the AST. `downgrade()` is intentionally exempt because
+  production never invokes `alembic downgrade` (rollback is image-
+  revert + forward-compat schema discipline, per Goal #11 DoD bullet
+  3); the first migration's `downgrade()` legitimately drops the
+  table it just created and a flat scan would trip on it.
 * Audit middleware (Task #28) — `backend/src/meho_backplane/audit.py`
   defines the **pure-ASGI** `AuditMiddleware` that writes one row to
   `audit_log` per authenticated request **before** the response yields
@@ -187,6 +214,8 @@ PYTHONPATH-leak imports.
 | `Base` / `AuditLog` | `src/meho_backplane/db/models.py` | SQLAlchemy 2.x `DeclarativeBase` plus the v0.1 `AuditLog` model (Task #28). Columns use portable `Uuid` and `JSON().with_variant(JSONB(), "postgresql")` types so the model and migration run cleanly on both PG (production) and SQLite (dev/test). Indexes on `occurred_at` and `operator_sub` are declared in `__table_args__`. |
 | `AuditMiddleware` | `src/meho_backplane/audit.py` | Pure-ASGI middleware (Task #28). For every authenticated request (`operator_sub` present in contextvars) writes one `audit_log` row synchronously before yielding the response back to the send chain. Buffers `http.response.start`/`http.response.body` messages so the fail-closed path can replace them with a 500 `{"detail": "audit_write_failed"}` when the audit insert raises. Skips public surfaces and 401 paths by keying on the contextvar's presence rather than path-matching. |
 | `0001_create_audit_log` | `backend/alembic/versions/0001_create_audit_log.py` | First migration on the schema (Task #28). Creates the `audit_log` table plus `audit_log_occurred_at_idx` and `audit_log_operator_sub_idx`. PG gets `gen_random_uuid()` / `now()` / `'{}'::jsonb` server defaults; SQLite branches skip them and rely on the ORM Python-side defaults. Downgrade drops the table — the only revertible operation here because no production data exists yet; subsequent migrations land under the additive-only discipline enforced by Task #29's CI guard. |
+| `meho_backplane.db.migrate.main` | `backend/src/meho_backplane/db/migrate.py` | Helm pre-install / pre-upgrade Job entrypoint (Task #29). Calls `alembic.command.upgrade(cfg, "head")` against the `alembic_config()` resolved by `db/migrations.py`. Returns 0 on success / 1 on failure with `migration_failed: <ExcClass>: <msg>` on stderr. No CLI flags by design — schema target is always `head`, and forward-only is enforced by not exposing `downgrade`. |
+| `check_migration_compat` | `scripts/ci/check_migration_compat.py` | CI guard (Task #29). Scans every `backend/alembic/versions/*.py` migration's `upgrade()` function for destructive patterns via a dual AST + regex detector; exit 0 on a clean tree, 1 on any violation. Honours an optional positional argument (a versions directory) so the test suite can point the guard at synthetic fixtures without monkeypatching module state. Workflow trigger is path-filtered to `backend/alembic/versions/**` plus the script itself. |
 | `backend/alembic.ini` + `backend/alembic/env.py` + `backend/alembic/script.py.mako` | repo paths | Alembic configuration (Task #27). `env.py` follows the upstream async cookbook: `async_engine_from_config` + `connection.run_sync(do_run_migrations)`. URL is sourced from `DATABASE_URL` so the migration runner and the running backplane share one knob. `versions/` ships empty; first migration lands in T28. |
 | `Operator` | `src/meho_backplane/auth/operator.py` | Frozen pydantic v2 model carrying validated claims (`sub`, `name`, `email`, `raw_jwt`). Returned by `verify_jwt`; consumed by every authenticated route from G2.2-T3 onward. `raw_jwt` is preserved verbatim for G2.2-T2's Vault forward-auth. |
 | `verify_jwt` | `src/meho_backplane/auth/jwt.py` | FastAPI dependency: parses `Authorization: Bearer ...`, fetches/caches Keycloak's JWKS, validates signature + `iss` + `aud` + `exp` (with leeway), refreshes JWKS on a kid miss, and returns an `Operator`. Every failure mode collapses to a terse 401. |
@@ -341,6 +370,7 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #25 — Federation-chain failure-mode test suite + always-on secret-leak sweep
 - Task #27 — PG connection pool + Alembic wiring + DB-migration-state readiness probe
 - Task #28 — Audit table schema + synchronous audit-write middleware
+- Task #29 — Migration runner entrypoint + CI guard rejecting destructive migration patterns
 - [SQLAlchemy 2.x async overview](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
 - [SQLAlchemy 2.x pool / pre-ping disconnect handling](https://docs.sqlalchemy.org/en/20/core/pooling.html#disconnect-handling-pessimistic)
 - [Alembic async migrations cookbook](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic)

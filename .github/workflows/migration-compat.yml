@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Backward-compat migration guard.
+#
+# Goal #11 DoD bullet 3 says ``helm rollback`` works without manual DB
+# intervention. The only way that holds at the schema layer is if every
+# migration is purely additive — adds tables / columns (nullable or with
+# default) / indexes; never DROPs, never RENAMEs, never adds NOT NULL to
+# existing columns without a documented nullable-phase-in shim.
+#
+# ``scripts/ci/check_migration_compat.py`` enforces that contract by
+# scanning ``backend/alembic/versions/`` for destructive patterns inside
+# ``upgrade()`` (downgrade() is intentionally exempt — see the script's
+# docstring). The workflow runs on every PR that touches the migrations
+# directory, so a PR that introduces a destructive pattern fails the
+# required check and cannot merge.
+#
+# Required status check in branch protection (added when this lands).
+# No ``continue-on-error`` — the gate is strict by design.
+
+name: migration-compat
+
+on:
+  pull_request:
+    paths:
+      - 'backend/alembic/versions/**'
+      - 'scripts/ci/check_migration_compat.py'
+      - '.github/workflows/migration-compat.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Backward-compat migration guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: '3.12'
+
+      - name: Run migration-compat check
+        run: python scripts/ci/check_migration_compat.py

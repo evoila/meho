@@ -66,5 +66,30 @@ USER 1001:0
 
 EXPOSE 8000
 
+# Two execution modes share this image:
+#
+# 1. **Serve** (default) — uvicorn runs the FastAPI app on :8000. This
+#    is what the Deployment rolls; the CMD below is the unmodified
+#    invocation.
+#
+# 2. **Migrate** — the Helm pre-install / pre-upgrade Job (G2.5-T3)
+#    overrides the container command to run
+#    ``python -m meho_backplane.db.migrate`` before the Deployment
+#    rolls forward, so the schema is at ``alembic upgrade head`` by
+#    the time pods come up. No additional Dockerfile entrypoint is
+#    needed: ``/app/.venv/bin`` is on PATH (set above), the
+#    ``meho_backplane`` package is installed into the venv via the
+#    builder stage, and ``alembic.ini`` + the ``alembic/`` tree ship
+#    as wheel package data (force-included by ``pyproject.toml``) so
+#    ``meho_backplane.db.migrate`` resolves the config via
+#    ``importlib.resources`` without needing the source tree on disk.
+#
+#    The Helm Job spec passes:
+#        command: ["python"]
+#        args: ["-m", "meho_backplane.db.migrate"]
+#    plus ``env: [{name: DATABASE_URL, valueFrom: ...}]``. The runner
+#    exits 0 on success, 1 on failure; ``backoffLimit`` on the Job
+#    handles retries.
+#
 # Exec form forwards SIGTERM cleanly to uvicorn (k8s pod-shutdown contract).
 CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000"]

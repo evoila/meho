@@ -8,21 +8,29 @@
 `backend/` houses the MEHO governance-layer backplane — a FastAPI
 service that mediates every operation an AI agent runs against shared
 infrastructure (policy gating, audit, federation, observability). At
-this Goal-#11 chassis stage it exposes:
+this stage it exposes:
 
 * The identity route at `/`.
 * The public operator surfaces — `/healthz`, `/version`, `/ready` —
-  backed by a pluggable readiness-probe registry that is empty by
-  default and **fails closed on `/ready`** (Task #19).
+  backed by a pluggable readiness-probe registry. The chassis defaults
+  to an empty registry that **fails closed on `/ready`** (Task #19);
+  the lifespan hook now registers the Keycloak readiness probe
+  (Task #22) so `/ready` flips green only when Keycloak's JWKS is
+  reachable.
 * Observability primitives — Prometheus metrics on `/metrics`,
   structured JSON logs to stdout via structlog, and a `request_id`
   correlation identifier propagated across every HTTP request via the
   request-context middleware (Task #20).
+* Operator authentication — the `verify_jwt` FastAPI dependency
+  validates `Authorization: Bearer <jwt>` against Keycloak's JWKS
+  (cached, kid-rotation aware) and yields a frozen `Operator` model
+  (Task #22). No protected routes are mounted yet; consumers land in
+  G2.2-T3 (`/api/v1/health`).
 
-JWT validation, Vault federation, and database persistence land
-progressively in subsequent G2.2 / G2.3 Tasks. The stack (FastAPI,
-Pydantic v2, SQLAlchemy 2.x async, Alembic, structlog,
-prometheus_client) is locked by
+Vault federation and database persistence land progressively in
+subsequent G2.2 / G2.3 Tasks. The stack (FastAPI, Pydantic v2,
+SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
+for JOSE) is locked by
 [ADR 0004](https://github.com/evoila-bosnia/meho-internal/issues/13).
 
 The project follows the modern src-layout
@@ -48,6 +56,11 @@ PYTHONPATH-leak imports.
 | `SENSITIVE_HEADERS` | `src/meho_backplane/middleware.py` | `frozenset({b"authorization", b"cookie", b"x-api-key"})`. The middleware never logs the values of these headers; redaction is enforced by *not* logging request headers at all in v0.1, with a `tests/test_observability.py` regression test. |
 | `HTTP_REQUESTS_TOTAL` | `src/meho_backplane/metrics.py` | Module-level `prometheus_client.Counter` registered against the default registry. Labels: `method`, `path`, `status`. `path` is the matched FastAPI route template when available, bounding label cardinality. |
 | `render_metrics` | `src/meho_backplane/metrics.py` | Returns `(body, content_type)` for the `/metrics` route. Pins `text/plain; version=0.0.4; charset=utf-8` — the legacy Prometheus format every scraper accepts (`prometheus_client>=0.21` advertises 1.0.0 in `CONTENT_TYPE_LATEST`, but 0.0.4 stays universally compatible). |
+| `Settings` / `get_settings` | `src/meho_backplane/settings.py` | Pydantic v2 model + `lru_cache`-singleton accessor for the Keycloak knobs (`KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_JWKS_CACHE_TTL_SECONDS`, `KEYCLOAK_JWT_LEEWAY_SECONDS`). Tests reset via `get_settings.cache_clear()`. |
+| `Operator` | `src/meho_backplane/auth/operator.py` | Frozen pydantic v2 model carrying validated claims (`sub`, `name`, `email`, `raw_jwt`). Returned by `verify_jwt`; consumed by every authenticated route from G2.2-T3 onward. `raw_jwt` is preserved verbatim for G2.2-T2's Vault forward-auth. |
+| `verify_jwt` | `src/meho_backplane/auth/jwt.py` | FastAPI dependency: parses `Authorization: Bearer ...`, fetches/caches Keycloak's JWKS, validates signature + `iss` + `aud` + `exp` (with leeway), refreshes JWKS on a kid miss, and returns an `Operator`. Every failure mode collapses to a terse 401. |
+| `keycloak_readiness_probe` | `src/meho_backplane/auth/jwt.py` | Synchronous probe registered with the readiness registry at app lifespan startup. Hits `{issuer}/.well-known/openid-configuration` then `jwks_uri`; failure detail surfaces only the exception class name to avoid leaking issuer URLs into 503 payloads. |
+| JWKS cache | `src/meho_backplane/auth/jwt.py` (`_jwks_cache`, `_jwks_fetched_at`, `_jwks_lock`) | Module-level dict + monotonic-fetched timestamp + asyncio lock. TTL-bounded (default 5 min) and kid-rotation refreshed (one forced re-fetch per request on a kid miss). Single-worker design; v0.2 may move to Redis when multi-worker uvicorn is needed. |
 
 ## Control flow
 
@@ -103,20 +116,35 @@ Pinned-floor declarations; exact versions resolved into `uv.lock`.
 | `pydantic` | ≥ 2.6 | Pulled transitively by FastAPI; pinned explicitly so v1 can't be substituted. |
 | `structlog` | ≥ 24.1 | JSON-to-stdout logging + `contextvars`-based `request_id` propagation. |
 | `prometheus-client` | ≥ 0.20 | Default process / GC collectors + the `http_requests_total` counter exposed on `/metrics`. |
+| `pydantic[email]` | ≥ 2.6 | Frozen `Operator` model uses `EmailStr`, which pulls `email-validator` via the `email` extra. |
+| `authlib` | ≥ 1.3 | JWS / JWK / JWT primitives for Keycloak token verification. The `authlib.jose` namespace is deprecated in favour of `joserfc` (same maintainer, clean rewrite); migration to `joserfc` is tracked as a v0.2 candidate. |
+| `httpx` | ≥ 0.27 | Async + sync HTTP client for the OIDC discovery doc and JWKS endpoint. (Also used as the `fastapi.testclient.TestClient` backend.) |
 | (dev) `pytest` ≥ 8 | | Test runner. |
 | (dev) `pytest-asyncio` ≥ 0.23 | | Async test support; `asyncio_mode = "auto"` in pyproject. |
-| (dev) `httpx` ≥ 0.27 | | Backend for `fastapi.testclient.TestClient`. |
+| (dev) `cryptography` ≥ 42.0 | | RSA keypair generation in test fixtures (authlib pulls it transitively in production). |
+| (dev) `respx` ≥ 0.21 | | httpx-native mock router used to stub Keycloak's discovery + JWKS endpoints in `tests/test_auth_jwt.py`. |
 | (dev) `ruff` ≥ 0.5 | | Lint + format. |
 | (dev) `mypy` ≥ 1.10 | | Strict type checking. |
 
 ## Known issues
 
-`/ready` returns 503 in the default chassis state because the probe
-registry is empty — this is **fail-closed by design**, not a bug. The
-chassis flips to readiness-ready only once G2.2 (Vault/Keycloak) and
-G2.3 (Alembic migrations) call `register_probe`. Helm charts pointing
-their kubernetes readiness probe at `/ready` before those Initiatives
-land will see pods stay `NotReady`; that's the intended contract.
+`/ready` returns 503 until at least one passing probe is registered.
+After Task #22 the lifespan hook registers the Keycloak probe, so a
+running app with a reachable Keycloak realm reports 200. Without
+Keycloak (or before Vault lands in G2.2-T2 and DB migrations land in
+G2.3) `/ready` stays 503 by design. Helm charts pointing their
+kubernetes readiness probe at `/ready` before those Initiatives land
+will see pods stay `NotReady`; that's the intended contract.
+
+`authlib.jose` emits an `AuthlibDeprecationWarning` at first import,
+recommending `joserfc` (the same maintainer's clean rewrite). The
+warning shows up once in every pytest run because authlib's own
+`authlib/deprecate.py` calls `warnings.simplefilter("always",
+AuthlibDeprecationWarning)` at import time, overriding any nested
+`warnings.catch_warnings()` context. We intentionally leave the
+warning visible — it's the migration breadcrumb for the v0.2
+`joserfc` switch — and the published API stays stable until
+authlib 2.0.
 
 The `Authorization` / `Cookie` / `X-API-Key` redaction guarantee in
 `RequestContextMiddleware` is enforced *by omission*: the middleware
@@ -142,10 +170,15 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #18 — this chassis bootstrap
 - Task #19 — public health + version + readiness endpoints
 - Task #20 — observability primitives (`/metrics`, structlog, middleware)
+- Task #22 — Keycloak JWT validation + readiness probe
 - [FastAPI tutorial](https://fastapi.tiangolo.com/tutorial/)
 - [FastAPI lifespan API](https://fastapi.tiangolo.com/advanced/events/)
+- [FastAPI dependencies (`Depends`)](https://fastapi.tiangolo.com/tutorial/dependencies/)
 - [Starlette middleware (pure ASGI vs BaseHTTPMiddleware)](https://www.starlette.io/middleware/)
 - [structlog contextvars](https://www.structlog.org/en/stable/contextvars.html)
 - [prometheus_client](https://github.com/prometheus/client_python)
+- [authlib JOSE / JWT docs](https://docs.authlib.org/en/latest/jose/jwt.html)
+- [respx mock router](https://lundberg.github.io/respx/)
+- [OIDC core — token validation](https://openid.net/specs/openid-connect-core-1_0.html#TokenResponseValidation)
 - [uv project structure](https://docs.astral.sh/uv/concepts/projects/)
 - [uv production Docker pattern](https://docs.astral.sh/uv/guides/integration/docker/)

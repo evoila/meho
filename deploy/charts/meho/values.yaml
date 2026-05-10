@@ -85,7 +85,10 @@ ingress:
   # -- IngressClass name. Empty = let the cluster's default IngressClass apply.
   # Typical values: "nginx" (RKE2 bundled), "traefik", a private class name.
   className: ""
-  # -- Hostname the Ingress publishes — MUST be set; empty fails the schema.
+  # -- Hostname the Ingress publishes. Required (non-empty + RFC 1123 hostname)
+  # by the schema only when `ingress.enabled: true` (the default); when
+  # `ingress.enabled: false` the template skips the Ingress resource and
+  # this field may be left blank.
   host: ""
   # -- Path rules. Default routes every path to the backplane Service.
   path: /
@@ -96,10 +99,11 @@ ingress:
   annotations: {}
   tls:
     enabled: true
-    # -- Name of the Kubernetes Secret holding the TLS certificate — MUST be
-    # set when `ingress.tls.enabled: true`. When cert-manager owns the
-    # certificate lifecycle, this is the Secret cert-manager creates from the
-    # Certificate resource (or from the Ingress annotations on first reconcile).
+    # -- Name of the Kubernetes Secret holding the TLS certificate. Required
+    # (non-empty) by the schema only when both `ingress.enabled` and
+    # `ingress.tls.enabled` are true. When cert-manager owns the certificate
+    # lifecycle, this is the Secret cert-manager creates from the Certificate
+    # resource (or from the Ingress annotations on first reconcile).
     secretName: ""
 
 # -- Container probes. Both probes target endpoints shipped by the backplane's
@@ -234,12 +238,13 @@ networkPolicy:
   # -- Namespace label value selecting the ingress controller. RKE2 ships with
   # `ingress-nginx`; override per-cluster.
   ingressControllerNamespace: ingress-nginx
-  # -- PostgreSQL egress CIDR — MUST be set. Empty fails the schema; the
-  # rendered NetworkPolicy refuses to ship a wide subnet by accident.
+  # -- PostgreSQL egress CIDR. Required and pattern-validated by the schema
+  # only when `networkPolicy.enabled: true` (the default); when disabled the
+  # template skips the NetworkPolicy resource and this field may be left blank.
   postgresCIDR: ""
-  # -- Vault egress CIDR — MUST be set.
+  # -- Vault egress CIDR. Same conditional rules as postgresCIDR.
   vaultCIDR: ""
-  # -- Keycloak egress CIDR — MUST be set.
+  # -- Keycloak egress CIDR. Same conditional rules as postgresCIDR.
   keycloakCIDR: ""
 
 # -- Node selector applied to the Pod template.

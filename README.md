@@ -86,15 +86,15 @@ Operator-required (MUST be set; the schema rejects empty defaults):
 | Path | Type | Notes |
 | --- | --- | --- |
 | `image.tag` | string | Immutable tag (`sha-<git-sha>` or `v<x.y.z>`); never `:latest`. |
-| `ingress.host` | string (`hostname`) | External hostname the chart publishes. |
-| `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). |
+| `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
+| `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
 | `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
 | `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. |
 | `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
 | `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
 | `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
 | `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. |
-| `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. |
+| `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
 | `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
 | `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |
 

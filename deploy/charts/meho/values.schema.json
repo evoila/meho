@@ -19,8 +19,8 @@
         "repository": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$",
-          "description": "OCI image repository (host + path). Pattern matches the lowercase / hyphen / underscore / dot / slash grammar OCI image references use."
+          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$",
+          "description": "OCI image repository (host + path). Pattern matches the lowercase / hyphen / underscore / dot / slash grammar OCI image references use, with an optional `:<port>` segment after the host for private registries (e.g. `registry.example.com:5000/team/meho`)."
         },
         "tag": {
           "type": "string",
@@ -92,15 +92,12 @@
     "ingress": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["host"],
       "properties": {
         "enabled": { "type": "boolean" },
         "className": { "type": "string" },
         "host": {
           "type": "string",
-          "minLength": 1,
-          "format": "hostname",
-          "description": "Hostname the Ingress publishes — required."
+          "description": "Hostname the Ingress publishes. Required and shape-validated (non-empty + RFC 1123 hostname) when ingress.enabled is true — enforced by the allOf below. When ingress.enabled is false the template skips the Ingress resource entirely and host may be left blank."
         },
         "path": { "type": "string", "minLength": 1 },
         "pathType": {
@@ -119,7 +116,7 @@
             "enabled": { "type": "boolean" },
             "secretName": {
               "type": "string",
-              "description": "Kubernetes Secret name holding the TLS certificate. Required (non-empty) when tls.enabled is true — enforced by the allOf below."
+              "description": "Kubernetes Secret name holding the TLS certificate. Required (non-empty) when both ingress.enabled and ingress.tls.enabled are true — enforced by the allOf below."
             }
           }
         }
@@ -127,13 +124,30 @@
       "allOf": [
         {
           "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["host"],
             "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "format": "hostname"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enabled": { "const": true },
               "tls": {
                 "properties": { "enabled": { "const": true } },
                 "required": ["enabled"]
               }
             },
-            "required": ["tls"]
+            "required": ["enabled", "tls"]
           },
           "then": {
             "properties": {
@@ -286,7 +300,6 @@
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["postgresCIDR", "vaultCIDR", "keycloakCIDR"],
       "properties": {
         "enabled": { "type": "boolean" },
         "ingressControllerNamespace": {
@@ -297,21 +310,45 @@
         },
         "postgresCIDR": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$",
-          "description": "PostgreSQL egress CIDR (IPv4). Required and shape-validated — the rendered NetworkPolicy refuses to ship a wide subnet by accident."
+          "description": "PostgreSQL egress CIDR (IPv4). Required and shape-validated (non-empty IPv4 CIDR) when networkPolicy.enabled is true — the rendered NetworkPolicy refuses to ship a wide subnet by accident. When networkPolicy.enabled is false the template skips the NetworkPolicy resource entirely and this field may be left blank."
         },
         "vaultCIDR": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+          "description": "Vault egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
         },
         "keycloakCIDR": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+          "description": "Keycloak egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["postgresCIDR", "vaultCIDR", "keycloakCIDR"],
+            "properties": {
+              "postgresCIDR": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+              },
+              "vaultCIDR": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+              },
+              "keycloakCIDR": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+              }
+            }
+          }
+        }
+      ]
     },
     "nodeSelector": {
       "type": "object",

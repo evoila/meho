@@ -56,20 +56,25 @@ deploy/charts/meho/
 
 ### Image reference
 
-The Deployment renders `{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}`.
-That gives consumers three idiomatic ways to pin the image:
+The Deployment renders `{{ .Values.image.repository }}:{{ .Values.image.tag }}`
+with **no `.Chart.AppVersion` fallback**. `values.schema.json` rejects an
+empty `image.tag` (`minLength: 1`), so every install pins the tag
+operator-supplied at `helm install` / `helm upgrade` time. Goal #11's
+deploy discipline forbids moving references (including a chart-`appVersion`
+shadow), and the chart enforces that contract at the schema layer rather
+than relying on consumers to remember to `--set image.tag`.
 
-1. **Pin via `--set image.tag=<sha>`** — typical CI flow; `image.tag` wins.
-2. **Pin via `appVersion` rewrite** — the publish workflow rewrites
-   `Chart.yaml.appVersion` to the git sha at OCI push time; consumers
-   who omit `image.tag` get that pin automatically.
-3. **Override `image.repository`** — consumers mirroring through a private
-   registry point the chart at their mirror.
+`image.repository` accepts the lowercase OCI grammar including an optional
+`:<port>` segment after the host, so private registries like
+`registry.example.com:5000/team/meho` are valid. The pattern enforces the
+shape; the operator picks the value.
 
 `imagePullSecrets` is a values-configurable list, empty by default. The
 backplane image is pushed to **public GHCR** (Goal #11's locked artefact-
 distribution principle), so no pull secret is required in the default
-deployment path.
+deployment path. Consumers mirroring through a private registry override
+`image.repository` to point at their mirror and (if needed) populate
+`imagePullSecrets`.
 
 ### Probes
 
@@ -131,9 +136,20 @@ Ingress is permitted only from the namespace whose
 RKE2's bundled controller).
 
 The three egress CIDR fields ship **empty** in `values.yaml` and are
-required-with-shape-validation in the schema. The chart will not render
-without explicit per-environment CIDR overrides — defense-in-depth against
-accidentally allowing a wide subnet because a typo silently fell through.
+required-with-shape-validation in the schema **when
+`networkPolicy.enabled: true`**. The chart will not render with the
+default `enabled: true` without explicit per-environment CIDR overrides
+— defense-in-depth against accidentally allowing a wide subnet because
+a typo silently fell through.
+
+Operators on clusters running an equivalent mesh-level policy (Istio
+`AuthorizationPolicy`, Cilium `CiliumNetworkPolicy`, etc.) can set
+`networkPolicy.enabled: false` to skip the chart's NetworkPolicy
+entirely; the schema's conditional `if/then` relaxes the CIDR
+requirements in that mode so the values overlay does not need to
+populate them. Disabling without a replacement policy in place removes
+the chart's least-privilege egress story — only do it when an
+equivalent control is enforced upstream.
 
 ### Safe-by-default values
 
@@ -144,13 +160,13 @@ values overlay:
 | Field | Why blank |
 | --- | --- |
 | `image.tag` | Goal #11 deploy discipline: every install pins an immutable tag, never a moving reference |
-| `ingress.host` | Per-environment; no generic placeholder is correct |
-| `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned) |
+| `ingress.host` | Per-environment; no generic placeholder is correct. Required only when `ingress.enabled: true` (the default) — relaxed when ingress is disabled |
+| `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true |
 | `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production) |
 | `vault.address` | Per-environment Vault endpoint |
 | `keycloak.issuer` | Per-environment Keycloak issuer URL |
 | `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract) |
-| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream |
+| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled |
 
 A blank field falls into the typed-schema contract immediately — `helm
 install` fails before a single Kubernetes resource is created. The

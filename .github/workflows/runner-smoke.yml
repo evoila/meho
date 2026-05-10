@@ -1,0 +1,24 @@
+name: meho-runners smoke
+# Verifies the meho-runners self-hosted runner pool can pick up + run a job
+# end-to-end. Filed alongside the pool's first deploy (claude-rdc-hetzner-dc#262).
+# Triggered manually; no `push:` / `pull_request:` so it never runs accidentally
+# on regular CI traffic.
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: meho-runners
+    timeout-minutes: 5
+    steps:
+      - name: Identify the runner
+        run: |
+          echo "host: $(hostname)"
+          echo "uname: $(uname -a)"
+          echo "os:"
+          cat /etc/os-release | head -5
+          echo "---"
+          echo "GITHUB_ACTIONS=$GITHUB_ACTIONS"
+          echo "RUNNER_NAME=$RUNNER_NAME"
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=$RUNNER_ARCH"

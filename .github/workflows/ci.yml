@@ -28,7 +28,7 @@ concurrency:
 jobs:
   lint-python:
     name: Python lint (ruff)
-    runs-on: [self-hosted, meho-runners]
+    runs-on: meho-runners
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -48,7 +48,7 @@ jobs:
 
   placeholder-tests:
     name: Tests
-    runs-on: [self-hosted, meho-runners]
+    runs-on: meho-runners
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

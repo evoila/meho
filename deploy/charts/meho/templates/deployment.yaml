@@ -31,7 +31,11 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: backplane
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          # Image reference deliberately offers no `default .Chart.AppVersion`
+          # fallback: the values schema rejects empty `image.tag` so every
+          # install pins the tag explicitly. Goal #11's deploy discipline
+          # forbids any moving reference (including a chart-appVersion shadow).
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -47,20 +51,21 @@ spec:
                   name: {{ .Values.postgres.credentialsSecret }}
                   key: url
             # Other operator-supplied secrets (Keycloak client secret, Vault
-            # role bindings) come via ESO-synced Kubernetes Secrets; G2.5-T2
-            # wires the references when the typed values contract lands.
-          {{- if .Values.probes.liveness.enabled }}
+            # role bindings) come via ESO-synced Kubernetes Secrets; G2.6
+            # wires the references when each surface lands.
+          # Probes target the backplane's chassis health endpoints (Task #19,
+          # `backend/src/meho_backplane/health.py`): `/healthz` for liveness
+          # (returns 200 unconditionally; failure → pod restart) and `/ready`
+          # for readiness (registry of dependency probes — 503 until G2.2 /
+          # G2.3 register concrete probes; failure → pod removed from Service
+          # endpoints, no restart). Probes always render — disabling them
+          # would mask startup deadlocks and let an unready Pod accept
+          # traffic. Every probe field is operator-tunable via
+          # `.Values.probes.<kind>.<field>`.
           livenessProbe:
-            {{- toYaml (omit .Values.probes.liveness "enabled") | nindent 12 }}
-          {{- end }}
-          {{- if .Values.probes.readiness.enabled }}
+            {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
-            {{- toYaml (omit .Values.probes.readiness "enabled") | nindent 12 }}
-          {{- end }}
-          {{- if .Values.probes.startup.enabled }}
-          startupProbe:
-            {{- toYaml (omit .Values.probes.startup "enabled") | nindent 12 }}
-          {{- end }}
+            {{- toYaml .Values.probes.readiness | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

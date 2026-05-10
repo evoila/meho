@@ -1,24 +1,33 @@
 # Default values for the meho chart.
 #
-# This file is a **scaffold** in G2.5-T1 — every key shipped here exists so
-# `helm template` renders the core six resources for shape verification.
-# G2.5-T2 will replace these placeholders with safe-by-default values and
-# add `values.schema.json` typing. Until then, callers MUST override the
-# placeholder strings via `--set` or a values overlay; nothing here is
-# production-safe.
+# This file ships **safe-by-default** values: every field that the backplane
+# cannot start without (Vault address, Keycloak issuer, DB credentials secret
+# name, NetworkPolicy egress CIDRs, image tag, Ingress host + TLS secret) is
+# **blank**. The companion `values.schema.json` typed contract rejects empty
+# values at `helm install` / `helm upgrade` / `helm template` time with a
+# clear error, so a misconfigured release fails up-front instead of
+# silently connecting to the wrong system or CrashLoopBackOff'ing at first
+# request. Lines tagged `MUST be set` below identify the operator-supplied
+# fields the schema enforces.
+#
+# v0.1 deliberately ships single-replica (HA + PodDisruptionBudget +
+# topologySpreadConstraints are explicitly deferred to v0.2 per Goal #11
+# scope). Resource requests/limits are conservative production baselines
+# suitable for the chassis-stage backplane; tune via overrides for higher-
+# throughput deployments.
 
-# -- Number of replicas. v0.1 is single-replica; HA lands in v0.2.
+# -- Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2.
 replicaCount: 1
 
 image:
   # -- Image repository. The G2.4 pipeline publishes to `ghcr.io/evoila/meho`.
   repository: ghcr.io/evoila/meho
+  # -- Image tag — MUST be set; empty fails the schema at install time. CI
+  # typically passes `--set image.tag=sha-<git-sha>`; Goal #11's deploy
+  # discipline forbids the `:latest` tag entirely.
+  tag: ""
   # -- Image pull policy.
   pullPolicy: IfNotPresent
-  # -- Image tag. When empty, the Deployment falls back to `.Chart.AppVersion`
-  # (per the standard Helm convention from `helm create`). Pinning the tag
-  # in CI / install command (`--set image.tag=<sha>`) is the supported flow.
-  tag: ""
 
 # -- Image pull secrets when consumers mirror through a private registry.
 # Public GHCR pulls (Goal #11's locked artefact-distribution principle) need
@@ -74,41 +83,71 @@ service:
 ingress:
   enabled: true
   # -- IngressClass name. Empty = let the cluster's default IngressClass apply.
+  # Typical values: "nginx" (RKE2 bundled), "traefik", a private class name.
   className: ""
-  # -- Annotations applied to the Ingress. The cert-manager line below assumes
-  # a ClusterIssuer is provisioned in the cluster; override `cluster-issuer`
-  # to match the consumer's environment.
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-  # -- Hostname the Ingress publishes. Placeholder; override via values overlay.
-  host: meho.local
+  # -- Hostname the Ingress publishes — MUST be set; empty fails the schema.
+  host: ""
   # -- Path rules. Default routes every path to the backplane Service.
   path: /
   pathType: Prefix
+  # -- Annotations applied to the Ingress. Defaults are empty; consumers add
+  # cert-manager / ingress-controller-specific annotations as needed (e.g.
+  # `cert-manager.io/cluster-issuer: letsencrypt-prod`).
+  annotations: {}
   tls:
     enabled: true
-    # -- Name of the Kubernetes Secret holding the TLS certificate. When
-    # `cert-manager.io/cluster-issuer` is set above, cert-manager creates this
-    # Secret on first reconciliation; for manual TLS, pre-create the Secret.
-    secretName: meho-tls
+    # -- Name of the Kubernetes Secret holding the TLS certificate — MUST be
+    # set when `ingress.tls.enabled: true`. When cert-manager owns the
+    # certificate lifecycle, this is the Secret cert-manager creates from the
+    # Certificate resource (or from the Ingress annotations on first reconcile).
+    secretName: ""
 
-# -- Probe configuration. Stubbed in G2.5-T1; G2.5-T2 wires the real endpoints
-# (`/healthz` / `/ready` / `/version`) per the backplane's chassis. Keeping
-# `enabled: false` here means the rendered Deployment omits the probe blocks
-# entirely until T2 lands, avoiding a half-configured probe that would mark
-# the pod NotReady on first start.
+# -- Container probes. Both probes target endpoints shipped by the backplane's
+# chassis (`backend/src/meho_backplane/health.py`, Task #19 / G2.1-T2):
+#
+# * `/healthz` — process-up only; returns 200 unconditionally. Used by
+#   `livenessProbe`. Failure → pod restart.
+# * `/ready` — readiness registry; returns 200 only when every registered
+#   probe (Vault/Keycloak in G2.2, Alembic migrations in G2.3) reports OK.
+#   Empty registry returns 503 by design — the backplane fails-closed at the
+#   chassis stage. Used by `readinessProbe`. Failure → pod removed from
+#   Service endpoints but NOT restarted.
+#
+# Timings follow the issue body's specification: liveness allows 30s for
+# the FastAPI app to start before the first check then 1s timeout × 3
+# failures (30s detection window); readiness is faster (5s initial, 5s
+# period, 2s timeout × 3 failures = 15s detection window) so a flaky
+# dependency removes the pod from rotation promptly without triggering a
+# restart. Every field is operator-tunable.
 probes:
   liveness:
-    enabled: false
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
   readiness:
-    enabled: false
-  startup:
-    enabled: false
+    httpGet:
+      path: /ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
 
-resources: {}
-  # The defaults are intentionally empty; G2.5-T2 picks safe baselines after
-  # measuring chassis idle. Documented comparable: cert-manager ships with
-  # `requests: {cpu: 10m, memory: 32Mi}` + `limits: {memory: 64Mi}` by default.
+# -- Container resources. Conservative production baselines for the v0.1
+# chassis backplane — sized for steady-state authn/authz traffic plus the
+# audit-write fanout. Tune the limits up for higher-throughput deployments;
+# the requests should always reflect observed steady-state usage.
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
 
 # -- ConfigMap-sourced environment variables (non-secret).
 # These map 1:1 to `backend/src/meho_backplane/settings.py` env-var contract.
@@ -127,23 +166,81 @@ config:
   databasePoolTimeout: "30.0"
 
 postgres:
-  # -- Name of the Kubernetes Secret holding the DATABASE_URL value at key `url`.
-  # Synced from Vault by ESO (External Secrets Operator) in production; the
-  # consumer pre-provisions it before `helm install`.
-  credentialsSecret: meho-postgres
+  # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
+  # explicitly excludes a bundled PG subchart); typically reached over the
+  # network at the cluster boundary. Empty in defaults — consumers override.
+  host: ""
+  # -- PostgreSQL port. 5432 is the upstream default; override only when the
+  # operator's PG cluster listens on a non-standard port.
+  port: 5432
+  # -- Database name. Defaults to `meho`; override if the operator's PG
+  # cluster hosts multiple MEHO releases on the same instance with different
+  # logical databases.
+  database: meho
+  # -- Name of the Kubernetes Secret holding the DATABASE_URL value at key
+  # `url` — MUST be set. Synced from Vault by External Secrets Operator (ESO)
+  # in production; the consumer pre-provisions it before `helm install`.
+  credentialsSecret: ""
+
+vault:
+  # -- Vault address (e.g. `https://vault.example.org`) — MUST be set; empty
+  # fails the schema. Goal #11 cross-repo dependency: the consumer's Vault
+  # must have the `meho-mcp` JWT/OIDC role bound to the Keycloak issuer
+  # configured below.
+  address: ""
+  # -- Vault auth method used by the backplane (`oidc` is the JWT/OIDC method).
+  authMethod: oidc
+  # -- Vault role name (matches Goal #11's `meho-mcp` cross-repo convention).
+  role: meho-mcp
+  paths:
+    # -- KV v2 mount + base path for operator secrets. Federation-proof reads
+    # happen under `<paths.kv>/test/federation` (see backend health.py).
+    kv: secret/meho
+
+keycloak:
+  # -- Keycloak issuer URL — MUST be set; empty fails the schema. The JWT
+  # validator uses this as the `iss` claim expectation and to discover JWKS.
+  issuer: ""
+  # -- Keycloak audience (= the client ID in Keycloak that fronts the
+  # backplane). The JWT `aud` claim must contain this value.
+  audience: meho-backplane
+  # -- Vault path the chart's downstream automation reads to recover the
+  # Keycloak client secret (v0.2 wiring; v0.1 uses ESO directly).
+  clientSecretSyncFromVault: secret/meho/keycloak/client_secret
+
+audit:
+  # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store
+  # mirror is explicitly v0.2 per Goal #11 spec.
+  postgresOnly: true
+
+broadcast:
+  redis:
+    # -- v0.1: the chart deploys its own Redis subchart (G2.5-T3 #39 adds
+    # the dependency + values plumbing). `bundled: false` would let a
+    # consumer point at an external Redis; not used in v0.1.
+    bundled: true
+
+connectors:
+  # -- v0.1 ships the chassis with no connectors enabled. The connector
+  # surface lands post-Goal-2 with the first product ticket.
+  enabled: []
 
 networkPolicy:
+  # -- Whether to ship the default-deny NetworkPolicy. Disable only on
+  # clusters running an equivalent mesh-level policy (Istio AuthorizationPolicy
+  # etc.) — disabling without a replacement removes the chart's least-
+  # privilege egress story.
   enabled: true
   # -- Namespace label value selecting the ingress controller. RKE2 ships with
   # `ingress-nginx`; override per-cluster.
   ingressControllerNamespace: ingress-nginx
-  # -- Egress CIDRs. Placeholders; the consumer overrides each from their
-  # environment's actual subnet allocations. The chart refuses to render an
-  # over-broad `0.0.0.0/0` egress — defense-in-depth against accidental
-  # exfiltration paths from a compromised backplane Pod.
-  postgresCIDR: 10.0.0.0/32
-  vaultCIDR: 10.0.0.0/32
-  keycloakCIDR: 10.0.0.0/32
+  # -- PostgreSQL egress CIDR — MUST be set. Empty fails the schema; the
+  # rendered NetworkPolicy refuses to ship a wide subnet by accident.
+  postgresCIDR: ""
+  # -- Vault egress CIDR — MUST be set.
+  vaultCIDR: ""
+  # -- Keycloak egress CIDR — MUST be set.
+  keycloakCIDR: ""
 
 # -- Node selector applied to the Pod template.
 nodeSelector: {}

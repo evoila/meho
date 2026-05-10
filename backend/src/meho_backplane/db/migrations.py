@@ -27,6 +27,8 @@ References
 from __future__ import annotations
 
 import logging
+import os
+from importlib import resources
 from pathlib import Path
 
 from alembic.config import Config
@@ -50,34 +52,72 @@ _log = logging.getLogger(__name__)
 #: so an ops-time relocation only requires one knob change.
 _ALEMBIC_INI_NAME: str = "alembic.ini"
 
+#: Env-var ops can set to point the probe / migration runner at an
+#: arbitrary ``alembic.ini`` — escape hatch for deployments where the
+#: file lives outside both the working directory and the installed
+#: package (e.g. mounted from a ConfigMap in Kubernetes).
+_ALEMBIC_CONFIG_ENV_VAR: str = "ALEMBIC_CONFIG"
+
 
 def find_alembic_ini() -> Path:
     """Resolve the on-disk path to ``alembic.ini``.
 
-    Looks two places in order:
+    Looks four places in order so the helper works in every deployment
+    shape — operator override, installed wheel, source-tree dev, and
+    arbitrary-cwd test runners:
 
-    1. The current working directory. This matches the ``alembic ...``
-       CLI's own resolution rule and is the path the migration runner
-       hits in containers (where ``WORKDIR`` is ``/app/backend``).
-    2. The package layout — walks up from ``meho_backplane.db`` to
-       find the ``backend/`` directory containing ``alembic.ini``.
-       This is what the readiness probe hits when running under
-       ``pytest`` from arbitrary cwds.
+    1. ``$ALEMBIC_CONFIG`` env var — explicit ops override; used as-is
+       (no existence check beyond the final :class:`FileNotFoundError`
+       message), which lets operators get an actionable error message
+       when they typo the path.
+    2. Package data — :func:`importlib.resources.files` against
+       :mod:`meho_backplane`. This is the path installed-wheel
+       deployments hit; ``alembic.ini`` is shipped as package data
+       via ``[tool.hatch.build.targets.wheel.force-include]`` in
+       ``pyproject.toml``.
+    3. The current working directory. Matches the ``alembic ...`` CLI's
+       own resolution rule and is the path the migration runner hits
+       in containers (where ``WORKDIR`` is ``/app/backend``).
+    4. The source-tree layout — walks up from
+       :mod:`meho_backplane.db` to find the ``backend/`` directory
+       containing ``alembic.ini``. This is what the readiness probe
+       hits when running under ``pytest`` from arbitrary cwds against
+       an editable install.
 
-    Raises :class:`FileNotFoundError` when neither location holds the
-    file; callers translate that to ``ok=False`` with a stable detail
-    string.
+    Raises :class:`FileNotFoundError` naming the env var and the
+    package lookup when no candidate resolves.
     """
+    env_override = os.environ.get(_ALEMBIC_CONFIG_ENV_VAR)
+    if env_override:
+        env_candidate = Path(env_override)
+        if env_candidate.is_file():
+            return env_candidate
+        raise FileNotFoundError(
+            f"alembic.ini not found at {env_candidate} (set via ${_ALEMBIC_CONFIG_ENV_VAR})",
+        )
+    # ``importlib.resources.files`` returns a ``Traversable``; for the
+    # editable / unpacked-wheel case it is a real :class:`Path`. We
+    # only honour it when it actually points at an existing file so
+    # editable installs (where the package data is *not* materialised
+    # adjacent to the package source) fall through to the cwd /
+    # source-tree probes below.
+    package_traversable = resources.files("meho_backplane").joinpath(_ALEMBIC_INI_NAME)
+    package_candidate = Path(str(package_traversable))
+    if package_candidate.is_file():
+        return package_candidate
     cwd_candidate = Path.cwd() / _ALEMBIC_INI_NAME
     if cwd_candidate.is_file():
         return cwd_candidate
     # ``__file__`` is .../backend/src/meho_backplane/db/migrations.py;
     # parents[3] resolves to .../backend, which is where alembic.ini lives.
-    package_candidate = Path(__file__).resolve().parents[3] / _ALEMBIC_INI_NAME
-    if package_candidate.is_file():
-        return package_candidate
+    source_tree_candidate = Path(__file__).resolve().parents[3] / _ALEMBIC_INI_NAME
+    if source_tree_candidate.is_file():
+        return source_tree_candidate
     raise FileNotFoundError(
-        f"alembic.ini not found at {cwd_candidate} or {package_candidate}",
+        f"alembic.ini not found via ${_ALEMBIC_CONFIG_ENV_VAR}, "
+        f"importlib.resources('meho_backplane') ({package_candidate}), "
+        f"cwd ({cwd_candidate}), "
+        f"or source tree ({source_tree_candidate})",
     )
 
 

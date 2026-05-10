@@ -78,7 +78,12 @@ this stage it exposes:
   registered as **async** against the readiness registry, which now
   accepts both sync and async probes via `register_probe` and is
   evaluated by `run_probes_async()` from `/ready`. The lifespan
-  shutdown path now `await`s `dispose_engine()` so the asyncpg pool
+  hook also **eagerly** instantiates the SQLAlchemy async engine
+  (`get_engine()` is called before `yield`) so the pool is built and
+  `DATABASE_URL` is validated at process boot rather than on the
+  first incoming request — without the pre-warm the very first
+  `/ready` poll would absorb the engine-construction cost. The
+  shutdown path `await`s `dispose_engine()` so the asyncpg pool
   closes cleanly. `/api/v1/health.db.migrated` is no longer
   hardcoded `null`: it carries the probe's `ok` value (G2.2-T3's
   forward-looking placeholder is now wired through).
@@ -90,7 +95,17 @@ this stage it exposes:
   `DATABASE_URL` env var the running backplane reads, so the
   migration runner and the request hot path can never drift. The
   `versions/` directory ships empty in T27 — T28 lands the first
-  migration (the audit log table).
+  migration (the audit log table). `alembic.ini` and the `alembic/`
+  tree are also shipped as package data under `meho_backplane/` (via
+  the `[tool.hatch.build.targets.wheel.force-include]` table in
+  `backend/pyproject.toml`) so installed-wheel deployments resolve
+  them via `importlib.resources.files('meho_backplane')` rather than
+  needing the source tree on disk. The `find_alembic_ini` resolver
+  walks four locations in order: `$ALEMBIC_CONFIG` env-var override
+  (ops escape hatch), `importlib.resources` package data (wheel
+  layout), the current working directory (matches the `alembic` CLI's
+  rule), and the source-tree layout (`__file__.parents[3]` for the
+  editable-install dev case).
 
 Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
@@ -122,7 +137,7 @@ PYTHONPATH-leak imports.
 | `SENSITIVE_HEADERS` | `src/meho_backplane/middleware.py` | `frozenset({b"authorization", b"cookie", b"x-api-key"})`. The middleware never logs the values of these headers; redaction is enforced by *not* logging request headers at all in v0.1, with a `tests/test_observability.py` regression test. |
 | `HTTP_REQUESTS_TOTAL` | `src/meho_backplane/metrics.py` | Module-level `prometheus_client.Counter` registered against the default registry. Labels: `method`, `path`, `status`. `path` is the matched FastAPI route template when available, bounding label cardinality. |
 | `render_metrics` | `src/meho_backplane/metrics.py` | Returns `(body, content_type)` for the `/metrics` route. Pins `text/plain; version=0.0.4; charset=utf-8` — the legacy Prometheus format every scraper accepts (`prometheus_client>=0.21` advertises 1.0.0 in `CONTENT_TYPE_LATEST`, but 0.0.4 stays universally compatible). |
-| `Settings` / `get_settings` | `src/meho_backplane/settings.py` | Pydantic v2 model + `lru_cache`-singleton accessor for the Keycloak knobs (`KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_JWKS_CACHE_TTL_SECONDS`, `KEYCLOAK_JWT_LEEWAY_SECONDS`), the Vault knobs (`VAULT_ADDR`, `VAULT_OIDC_ROLE`, `VAULT_OIDC_MOUNT_PATH`, `VAULT_NAMESPACE`, `VAULT_TIMEOUT_SECONDS`), and the database knobs (`DATABASE_URL`, `DATABASE_POOL_SIZE`, `DATABASE_POOL_TIMEOUT`). `DATABASE_URL` is required; the others have sensible defaults. Tests reset via `get_settings.cache_clear()`. |
+| `Settings` / `get_settings` | `src/meho_backplane/settings.py` | Pydantic v2 model + `lru_cache`-singleton accessor for the Keycloak knobs (`KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_JWKS_CACHE_TTL_SECONDS`, `KEYCLOAK_JWT_LEEWAY_SECONDS`), the Vault knobs (`VAULT_ADDR`, `VAULT_OIDC_ROLE`, `VAULT_OIDC_MOUNT_PATH`, `VAULT_NAMESPACE`, `VAULT_TIMEOUT_SECONDS`), and the database knobs (`DATABASE_URL`, `DATABASE_POOL_SIZE`, `DATABASE_POOL_TIMEOUT`). `DATABASE_URL` is required and validated by a Pydantic `@field_validator` that rejects sync DSNs (`postgresql://`, `sqlite:///`, `postgresql+psycopg2://`) — only `postgresql+asyncpg://` and `sqlite+aiosqlite://` are accepted, matching ADR 0004's async-only mandate. Tests reset via `get_settings.cache_clear()`. |
 | `create_engine_for_url` / `get_engine` / `get_sessionmaker` / `get_session` / `dispose_engine` | `src/meho_backplane/db/engine.py` | SQLAlchemy 2.x async engine + per-request session factory (Task #27). `get_engine` is lazy + cached; `get_session` is the FastAPI `Depends` that yields a transaction-bracketed `AsyncSession`. SQLite URLs (dev / aiosqlite) prune the `pool_size` / `pool_timeout` kwargs because StaticPool rejects them; Postgres URLs (asyncpg) keep them. `dispose_engine` is awaited from the lifespan shutdown so asyncpg's pool releases its connections cleanly. |
 | `db_migration_probe` / `alembic_config` / `find_alembic_ini` | `src/meho_backplane/db/migrations.py` | Async readiness probe + Alembic config helpers (Task #27). The probe compares `MigrationContext.configure(conn).get_current_revision()` against `ScriptDirectory.from_config(cfg).get_current_head()` over an `AsyncEngine.connect()`/`run_sync` pair; every failure mode collapses onto `ProbeResult(ok=False)` with a redacted `detail` (no operator-controllable URL substrings). |
 | `backend/alembic.ini` + `backend/alembic/env.py` + `backend/alembic/script.py.mako` | repo paths | Alembic configuration (Task #27). `env.py` follows the upstream async cookbook: `async_engine_from_config` + `connection.run_sync(do_run_migrations)`. URL is sourced from `DATABASE_URL` so the migration runner and the running backplane share one knob. `versions/` ships empty; first migration lands in T28. |

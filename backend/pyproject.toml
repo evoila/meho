@@ -39,6 +39,19 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/meho_backplane"]
 
+# Ship ``alembic.ini`` + the ``alembic/`` migration tree as package
+# data adjacent to the ``meho_backplane`` package so installed wheels
+# can resolve them via :func:`importlib.resources.files`. The
+# in-repo source layout keeps both at ``backend/`` (matching the
+# Alembic CLI's cwd-relative discovery rule for local dev); the wheel
+# layout collapses them under ``meho_backplane/`` so a ``pip install
+# meho-backplane`` deployment doesn't need an external ``alembic.ini``
+# bind-mount. ``find_alembic_ini`` (db/migrations.py) walks both
+# layouts in order: env var → package data → cwd → source tree.
+[tool.hatch.build.targets.wheel.force-include]
+"alembic.ini" = "meho_backplane/alembic.ini"
+"alembic" = "meho_backplane/alembic"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

@@ -24,10 +24,22 @@ chain immediately rather than days later under load.
 
 import os
 from functools import lru_cache
+from typing import Final
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 __all__ = ["Settings", "get_settings"]
+
+#: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
+#: backplane refuses to construct a sync engine because every database
+#: I/O path off the request hot loop must be ``await``-able (ADR 0004).
+#: ``postgresql+asyncpg://`` is the production driver; ``sqlite+aiosqlite://``
+#: is the v0.1 dev/test driver. Adding a third scheme requires both an
+#: ADR amendment and a confirmed async driver shipping with that prefix.
+_SUPPORTED_DATABASE_URL_SCHEMES: Final[tuple[str, ...]] = (
+    "postgresql+asyncpg://",
+    "sqlite+aiosqlite://",
+)
 
 
 class Settings(BaseModel):
@@ -121,6 +133,29 @@ class Settings(BaseModel):
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
+
+    @field_validator("database_url")
+    @classmethod
+    def _database_url_must_be_async(cls, value: str) -> str:
+        """Reject sync SQLAlchemy DSNs at construction time.
+
+        ADR 0004 mandates that every database I/O path off the request
+        hot loop is ``await``-able. A sync DSN
+        (``postgresql://`` / ``sqlite:///``) would silently work for
+        engine construction but would block the FastAPI event loop on
+        every checkout — the failure mode is a saturated worker that
+        looks healthy on ``/healthz`` but starves at ``/api/...``. Fail
+        fast at startup instead, with an actionable error message that
+        names the supported schemes so the operator can fix the
+        ``DATABASE_URL`` env var directly without grepping the codebase.
+        """
+        if not value.startswith(_SUPPORTED_DATABASE_URL_SCHEMES):
+            supported = ", ".join(_SUPPORTED_DATABASE_URL_SCHEMES)
+            raise ValueError(
+                f"DATABASE_URL must use an async driver scheme; "
+                f"supported: {supported}. Got: {value!r}",
+            )
+        return value
 
 
 @lru_cache(maxsize=1)

@@ -115,6 +115,57 @@ so wall-clock time is bounded by the slower job, not the sum.
 `docs/codebase/backend.md` records the cost detail and the refresh
 policy for `PYTHON_BASE_DIGEST`.
 
+## Verifying image signatures
+
+Every image published to `ghcr.io/evoila/meho` from `.github/workflows/image.yml`
+is signed with [cosign](https://github.com/sigstore/cosign) keyless OIDC. There
+are **no private keys** to distribute — verification works against the public
+Sigstore trust root (Fulcio CA + Rekor transparency log) plus the expected
+**certificate identity** (which workflow file + ref produced the signature).
+
+The signature is bound to the manifest-list digest, so the same signature
+verifies every tag alias (`:sha-<long>`, `:main`, `:v<x.y.z>`) and every
+per-architecture child manifest under that digest.
+
+Verify the `:main` rolling tag:
+
+```bash
+cosign verify ghcr.io/evoila/meho:main \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/image\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  | jq .
+```
+
+Verify a `v*` release tag:
+
+```bash
+cosign verify ghcr.io/evoila/meho:v0.1.0 \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/image\.yml@refs/tags/v.*$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  | jq .
+```
+
+Verify by immutable digest (most defensible — content-addressed, never moves):
+
+```bash
+DIGEST=$(docker buildx imagetools inspect ghcr.io/evoila/meho:main \
+  --format '{{json .Manifest}}' | jq -r '.digest')
+
+cosign verify ghcr.io/evoila/meho@${DIGEST} \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/image\.yml@.*$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  | jq .
+```
+
+A successful verification prints a JSON array of signature payload objects;
+exit status is `0`. Verification failure (wrong identity, unsigned image,
+tampered registry) exits non-zero with a structured error.
+
+These are the same identity-regex + issuer values
+[`claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)'s
+`install.sh` uses as a **gating** check before pulling the image (per Goal #11
+cross-repo coordination).
+
 ## What this skeleton intentionally omits
 
 | Surface          | Lands in       |
@@ -138,3 +189,6 @@ policy for `PYTHON_BASE_DIGEST`.
 - [FastAPI tutorial](https://fastapi.tiangolo.com/tutorial/)
 - [uv project guide](https://docs.astral.sh/uv/concepts/projects/)
 - [uv Docker pattern](https://docs.astral.sh/uv/guides/integration/docker/)
+- [Sigstore cosign keyless signing overview](https://docs.sigstore.dev/cosign/signing/overview/)
+- [Sigstore CI quickstart (GitHub Actions OIDC)](https://docs.sigstore.dev/quickstart/quickstart-ci/)
+- [`sigstore/cosign-installer`](https://github.com/sigstore/cosign-installer) action

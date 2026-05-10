@@ -158,13 +158,23 @@ def _default_database_url(
     db_path = tmp_path / "default.db"
     url = f"sqlite+aiosqlite:///{db_path}"
 
+    # ``DATABASE_URL`` must be set **before** ``command.upgrade`` runs:
+    # ``backend/alembic/env.py`` reads ``os.environ.get("DATABASE_URL")``
+    # and overrides whatever ``cfg.set_main_option("sqlalchemy.url", ...)``
+    # was set to here. Without the reordering, a ``DATABASE_URL`` inherited
+    # from the parent process silently redirects the migration runner at a
+    # different database than the fixture configured — the test DB ends up
+    # un-migrated and the next ``get_engine()`` call fails with
+    # ``no such table: audit_log``. monkeypatch.setenv is rolled back on
+    # teardown so the override is still per-test scoped.
+    monkeypatch.setenv("DATABASE_URL", url)
+
     cfg = alembic_config()
     cfg.set_main_option("sqlalchemy.url", url)
     command.upgrade(cfg, "head")
 
     get_settings.cache_clear()
     reset_engine_for_testing()
-    monkeypatch.setenv("DATABASE_URL", url)
     yield
     # Tests that constructed an engine via this URL leave a cached
     # AsyncEngine pointing at a tmp file that pytest will reap;

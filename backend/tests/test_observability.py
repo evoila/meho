@@ -59,6 +59,7 @@ def _configure_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.dict_tracebacks,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
@@ -133,18 +134,43 @@ def test_metrics_endpoint_returns_prometheus_text_format(
 def test_metrics_endpoint_does_not_increment_for_itself_during_render(
     client: TestClient,
 ) -> None:
-    """A single ``/metrics`` request renders deterministically.
+    """A ``/metrics`` request increments exactly once, after the response.
 
-    Sanity check: the counter is incremented *after* the response is
-    generated, so the body of any given ``/metrics`` response reflects
-    state captured before the request itself completed.
+    The middleware increments :data:`HTTP_REQUESTS_TOTAL` after the
+    handler returns, so a single ``/metrics`` request must move the
+    counter for ``path="/metrics"`` forward by exactly 1.0 — never 2.0
+    (which would mean the renderer itself inflated the count) and
+    never 0.0 (which would mean the increment never landed). The two
+    sequential requests pin both sides: ``mid - before`` proves
+    response_one's request applied exactly one increment, and
+    ``after - mid`` proves response_two did the same independently.
+
+    The naive ``"http_requests_total" in response_two.text`` substring
+    check is too weak — the HELP/TYPE preamble alone satisfies it
+    regardless of which samples are actually present, so it cannot
+    distinguish a working counter from a silently-broken one.
     """
+    label_set = {"method": "GET", "path": "/metrics", "status": "200"}
+
+    before = REGISTRY.get_sample_value("http_requests_total", labels=label_set) or 0.0
+
     response_one = client.get("/metrics")
+    mid = REGISTRY.get_sample_value("http_requests_total", labels=label_set) or 0.0
+
     response_two = client.get("/metrics")
+    after = REGISTRY.get_sample_value("http_requests_total", labels=label_set) or 0.0
 
     assert response_one.status_code == 200
     assert response_two.status_code == 200
-    assert "http_requests_total" in response_two.text
+
+    # Each /metrics request increments its own labelled sample by
+    # exactly 1.0 — no double-counting during render.
+    assert mid - before == pytest.approx(1.0)
+    assert after - mid == pytest.approx(1.0)
+    # Response_two's body must expose the sample the previous request
+    # registered (proves the renderer reflects the post-increment
+    # registry state, not stale memory).
+    assert 'http_requests_total{method="GET",path="/metrics",status="200"}' in response_two.text
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +190,57 @@ def test_logs_are_valid_json_lines(client: TestClient, log_buffer: io.StringIO) 
         assert "timestamp" in entry
         assert "level" in entry
         assert "event" in entry
+
+
+def test_handler_exception_emits_structured_traceback(
+    log_buffer: io.StringIO,
+) -> None:
+    """``log.exception`` in the middleware serialises the traceback.
+
+    Regression guard for the missing ``dict_tracebacks`` processor:
+    without it, the ``request_failed`` log line carries the literal
+    ``"exc_info": true`` and zero traceback content, which strips
+    production triage of the only signal that maps a 5xx back to a
+    line of source. The middleware's ``except Exception: log.exception(...)``
+    block is the load-bearing surface here, so the test drives a
+    handler that raises and asserts the captured log line carries a
+    non-empty structured ``exception`` payload.
+    """
+    from fastapi import FastAPI
+
+    boom = FastAPI()
+    boom.add_middleware(RequestContextMiddleware)
+
+    @boom.get("/boom")
+    async def _boom() -> dict[str, str]:
+        raise RuntimeError("synthetic-handler-failure")
+
+    boom_client = TestClient(boom, raise_server_exceptions=False)
+    response = boom_client.get("/boom")
+    assert response.status_code == 500
+
+    failed = [
+        entry for entry in _read_log_lines(log_buffer) if entry.get("event") == "request_failed"
+    ]
+    assert failed, "expected a request_failed log line for the raising handler"
+
+    entry = failed[-1]
+    # dict_tracebacks emits a list of {exc_type, exc_value, frames, ...}
+    # dicts. The literal "exc_info": true bug shape must never reappear.
+    assert entry.get("exc_info") is not True, (
+        "dict_tracebacks regression: log line carries the unrendered exc_info=true literal "
+        "instead of a structured traceback"
+    )
+    exception_payload = entry.get("exception")
+    assert isinstance(exception_payload, list) and exception_payload, (
+        "expected non-empty structured exception list from dict_tracebacks"
+    )
+    head = exception_payload[0]
+    assert isinstance(head, dict)
+    assert head.get("exc_type") == "RuntimeError"
+    assert head.get("exc_value") == "synthetic-handler-failure"
+    frames = head.get("frames")
+    assert isinstance(frames, list) and frames, "expected at least one traceback frame"
 
 
 def test_request_completed_log_shape(client: TestClient, log_buffer: io.StringIO) -> None:

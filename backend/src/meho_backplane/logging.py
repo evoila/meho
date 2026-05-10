@@ -35,7 +35,13 @@ def configure_logging(level: int = logging.INFO) -> None:
     2. ``add_log_level`` — adds the ``level`` key.
     3. ``TimeStamper(fmt="iso", utc=True)`` — adds the ``timestamp``
        key in ISO 8601 UTC form.
-    4. ``JSONRenderer`` — final processor; serialises the event dict
+    4. ``dict_tracebacks`` — when an event includes ``exc_info`` (set
+       by :meth:`structlog.stdlib.BoundLogger.exception`), serialises
+       the exception chain into a structured ``exception`` list. Must
+       run before ``JSONRenderer``; otherwise the exception surfaces
+       as the unhelpful ``"exc_info": true`` literal and the traceback
+       is lost. Load-bearing for production triage of 5xx responses.
+    5. ``JSONRenderer`` — final processor; serialises the event dict
        to a single JSON line.
 
     The logger factory writes to ``sys.stdout`` directly via
@@ -56,6 +62,7 @@ def configure_logging(level: int = logging.INFO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.dict_tracebacks,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),

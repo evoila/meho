@@ -28,7 +28,7 @@ def test_root_returns_identity_payload() -> None:
     response = client.get("/")
 
     assert response.status_code == 200
-    assert response.json() == {"name": "meho-backplane", "version": "0.1.0-dev"}
+    assert response.json() == {"name": "meho-backplane", "version": __version__}
 
 
 def test_version_constant_matches_pyproject() -> None:

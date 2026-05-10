@@ -22,7 +22,11 @@ ENV UV_PYTHON_DOWNLOADS=0 \
 WORKDIR /app
 
 # Step 1: install dependencies only (cacheable).
-COPY pyproject.toml uv.lock ./
+# README.md is co-copied here because hatchling resolves
+# `[project].readme = "README.md"` at wheel-build time during the second
+# `uv sync` below; staging it in the deps-only layer costs ~1 KB on a
+# cache hit and avoids needing a separate COPY before that step.
+COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 

@@ -374,14 +374,14 @@ def test_happy_path_returns_full_federation_response(
 
     assert response.status_code == 200
     body = response.json()
-    # ``db.migrated`` now reflects the DB-migration-state probe verdict
-    # (T27). Under the autouse default DATABASE_URL (in-memory aiosqlite,
-    # no alembic_version table) the probe reports unhealthy → migrated=False.
-    # T28's first migration flips this back to True end-to-end.
+    # ``db.migrated`` now reflects the DB-migration-state probe verdict.
+    # Post-T28, the autouse default DATABASE_URL has the audit-log
+    # migration applied at fixture setup, so the probe reports healthy
+    # and ``migrated`` is True.
     assert body == {
         "operator": {"sub": "op-100", "name": "Alice", "email": "alice@example.com"},
         "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
-        "db": {"migrated": False},
+        "db": {"migrated": True},
     }
 
     # Vault was hit with the configured role / mount and the operator's
@@ -521,9 +521,10 @@ def test_vault_unreachable_returns_200_with_structured_detail(
     assert body["vault"]["reachable"] is False
     assert body["vault"]["read_ok"] is False
     assert body["vault"]["detail"] == "login_failed: VaultUnreachableError"
-    # ``db.migrated`` now reflects the T27 probe verdict; with no migrations
-    # applied it remains False until T28 lands the first revision.
-    assert body["db"]["migrated"] is False
+    # ``db.migrated`` now reflects the T27 probe verdict; post-T28
+    # the autouse default has the migration applied, so the probe is
+    # healthy and ``migrated`` is True.
+    assert body["db"]["migrated"] is True
 
 
 def test_vault_role_denied_returns_200_with_role_denied_detail(

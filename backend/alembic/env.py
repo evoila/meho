@@ -18,13 +18,12 @@ Two design decisions worth flagging:
   migration runner and the request hot path can never disagree on the
   target database. Operators run ``DATABASE_URL=... alembic upgrade
   head`` and the same env var the backplane already reads is honoured.
-* **Empty target_metadata.** v0.1 ships an empty ``versions/``
-  directory; the first model lands in T28. ``target_metadata = None``
-  means autogeneration is a no-op until then, but ``alembic upgrade
-  head`` still works (and creates the ``alembic_version`` table on
-  first run, which is what the readiness probe in T27 looks for).
-  When T28 adds the audit-log model, this file imports its
-  ``Base.metadata`` and assigns it here.
+* **target_metadata.** Imports :data:`meho_backplane.db.models.Base`
+  so :attr:`Base.metadata` is the source of truth for
+  ``--autogenerate``. T28 lands the first model
+  (:class:`~meho_backplane.db.models.AuditLog`); subsequent models
+  register themselves into the same metadata at import time, so
+  this env file does not need to import them individually.
 
 Offline mode is preserved for completeness — operators rendering
 SQL without a live DB connection (``alembic upgrade head --sql``)
@@ -44,6 +43,8 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+from meho_backplane.db.models import Base
+
 # this is the Alembic Config object, which provides access to values
 # within the .ini file in use.
 config = context.config
@@ -60,10 +61,11 @@ _database_url = os.environ.get("DATABASE_URL")
 if _database_url:
     config.set_main_option("sqlalchemy.url", _database_url)
 
-# v0.1 chassis: no models declared yet. T28's audit-log migration
-# imports ``meho_backplane.db.models.Base.metadata`` and assigns it
-# here. Until then ``--autogenerate`` is a no-op.
-target_metadata: Any = None
+# T28+ models register into ``Base.metadata`` at import time; the
+# alembic CLI invokes this file after :mod:`meho_backplane.db.models`
+# is importable, so the metadata is fully populated by the time
+# ``--autogenerate`` queries it.
+target_metadata: Any = Base.metadata
 
 
 def run_migrations_offline() -> None:

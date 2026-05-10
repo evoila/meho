@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -36,7 +37,7 @@ from meho_backplane.db.engine import (
     dispose_engine,
     reset_engine_for_testing,
 )
-from meho_backplane.db.migrations import db_migration_probe
+from meho_backplane.db.migrations import alembic_config, db_migration_probe
 from meho_backplane.health import (
     ProbeResult,
     clear_probes,
@@ -119,15 +120,30 @@ async def _create_alembic_version_table(eng: AsyncEngine, revision: str | None) 
 
 
 @pytest.mark.asyncio
-async def test_probe_unhealthy_when_no_migrations_and_no_table(
+async def test_probe_unhealthy_when_versions_present_but_db_unstamped(
     sqlite_engine: AsyncEngine,
 ) -> None:
-    """Empty versions/ + fresh DB → not ready, with a stable detail string."""
+    """Migrations on disk + fresh DB (no alembic_version) → diverged-style detail.
+
+    Pre-T28 the chassis shipped with an empty ``versions/`` directory,
+    so head and current were both ``None`` and the probe returned the
+    ``no_migrations`` flavour of unhealthy. Once T28's first migration
+    lands, head is ``0001`` and a fresh DB still has no
+    ``alembic_version`` table; the probe's failure is now expressed
+    as ``current=None head=0001`` (the ``current == head`` branch
+    fails for a different reason than the empty case it once
+    described). The fail-closed contract — ``ok=False`` with a
+    structured detail — is preserved.
+    """
     result = await db_migration_probe()
     assert result.name == "db"
     assert result.ok is False
     assert result.detail is not None
-    assert "no_migrations" in result.detail
+    # Resolve head dynamically from the script directory so the
+    # assertion survives future migrations replacing 0001 as head.
+    current_head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert f"head={current_head}" in result.detail
+    assert "current=None" in result.detail
 
 
 @pytest.mark.asyncio
@@ -232,8 +248,8 @@ def test_ready_reflects_db_probe_state(
 
     Registers only the DB probe (clearing Keycloak/Vault from the
     autouse fixture); asserts the response carries the structured
-    ``check_failed`` detail when the empty versions/ + fresh DB
-    flips the probe red.
+    diverged-revision detail when migrations exist on disk (T28's
+    ``0001``) but the DB is fresh (no ``alembic_version`` table).
     """
     register_probe("db", db_migration_probe)
 
@@ -244,4 +260,8 @@ def test_ready_reflects_db_probe_state(
     body = response.json()
     db_check = next(c for c in body["checks"] if c["name"] == "db")
     assert db_check["ok"] is False
-    assert "no_migrations" in (db_check["detail"] or "")
+    # Dynamic head — see other ``head=`` assertion in this module for
+    # rationale; pinning the literal would tie every future migration
+    # to also fixing this test.
+    current_head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert f"head={current_head}" in (db_check["detail"] or "")

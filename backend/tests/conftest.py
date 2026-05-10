@@ -106,33 +106,94 @@ SECRET_LEAK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 
 
 @pytest.fixture(autouse=True)
-def _default_database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Provide a default ``DATABASE_URL`` so :class:`Settings` constructs.
+def _default_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> Iterator[None]:
+    """Provide a default ``DATABASE_URL`` (file-backed SQLite, schema applied).
 
-    Every existing test file pins ``KEYCLOAK_ISSUER_URL`` / ``VAULT_ADDR``
-    in its own per-file fixture; ``DATABASE_URL`` is the third required
-    field added in T27. Pinning the default here (an aiosqlite URL,
-    intentionally not a real PG host) avoids a 7-file diff chasing every
-    settings-using fixture and keeps the failure shape obvious if a test
-    actually needs a live PG: the test resets ``DATABASE_URL`` itself or
-    constructs an engine directly. Tests that exercise the
-    DB-migration-state probe override this default with a testcontainers
-    PG URL or a ``aiosqlite:///<tmp>`` file path.
+    Every test file pins ``KEYCLOAK_ISSUER_URL`` / ``VAULT_ADDR`` in its
+    own per-file fixture; ``DATABASE_URL`` is the third required field
+    added in T27 and the ``audit_log`` table needs to exist post-T28
+    so the synchronous audit middleware doesn't fail-closed on every
+    authenticated request. Pinning the default to a per-test tmp-path
+    SQLite file (rather than ``:memory:``) lets us run
+    ``alembic upgrade head`` against it once at fixture setup; the
+    file-backed URL is what makes the schema visible to the engine the
+    app constructs in a different connection than the migration runner.
+    ``:memory:`` databases are connection-scoped — schema applied via
+    one connection is invisible to the next, so audit middleware
+    inserts would fail with ``no such table: audit_log``.
+
+    Tests that exercise the DB-migration-state probe still override
+    this default with their own monkeypatched URL (testcontainers PG
+    or a different ``aiosqlite:///<tmp>`` path); the override wins
+    because :func:`pytest.MonkeyPatch.setenv` is last-write.
 
     The ``get_settings.cache_clear()`` brackets matter: ``Settings`` is
     cached at module scope by :func:`functools.lru_cache`, and a stale
     cache entry from an earlier test (constructed before this fixture
     set the env var) would survive into the next test and silently
-    return the previous URL. Clearing the cache before *and* after the
-    yield guarantees every test in this suite sees a fresh
-    ``Settings`` constructed against this fixture's env-var pin.
+    return the previous URL. The same shape applies to the
+    module-level engine cache, which is reset around every test so
+    the file-backed DB this fixture creates is the one the app's
+    audit middleware sees.
+
+    The Alembic upgrade runs in this autouse fixture's *sync* portion
+    so it's well-defined relative to ``@pytest.mark.asyncio`` tests:
+    fixture body executes before pytest-asyncio enters its event
+    loop. :func:`alembic.command.upgrade` invokes
+    :func:`asyncio.run` internally via the env.py async cookbook,
+    which would clash with an outer running loop.
     """
+    # Local import to avoid a top-of-file circular-ish dependency:
+    # this conftest is loaded before any meho_backplane modules,
+    # and importing the engine module here means it gets imported
+    # once at fixture-resolution time per test.
+    from alembic import command
+
+    from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
+    from meho_backplane.db.migrations import alembic_config
+
+    db_path = tmp_path / "default.db"
+    url = f"sqlite+aiosqlite:///{db_path}"
+
+    # ``DATABASE_URL`` must be set **before** ``command.upgrade`` runs:
+    # ``backend/alembic/env.py`` reads ``os.environ.get("DATABASE_URL")``
+    # and overrides whatever ``cfg.set_main_option("sqlalchemy.url", ...)``
+    # was set to here. Without the reordering, a ``DATABASE_URL`` inherited
+    # from the parent process silently redirects the migration runner at a
+    # different database than the fixture configured — the test DB ends up
+    # un-migrated and the next ``get_engine()`` call fails with
+    # ``no such table: audit_log``. monkeypatch.setenv is rolled back on
+    # teardown so the override is still per-test scoped.
+    monkeypatch.setenv("DATABASE_URL", url)
+
+    cfg = alembic_config()
+    cfg.set_main_option("sqlalchemy.url", url)
+    command.upgrade(cfg, "head")
+
     get_settings.cache_clear()
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        "sqlite+aiosqlite:///:memory:",
-    )
+    reset_engine_for_testing()
     yield
+    # Tests that constructed an engine via this URL leave a cached
+    # AsyncEngine pointing at a tmp file that pytest will reap;
+    # disposing here closes the asyncpg/aiosqlite pool cleanly so the
+    # next test gets a fresh engine bound to its own tmp DB.
+    try:
+        # Best-effort dispose; pytest-asyncio's event loop may already
+        # be torn down by the time we get here, in which case the
+        # cache reset alone is sufficient.
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(dispose_engine())
+        finally:
+            loop.close()
+    except Exception:
+        pass
+    reset_engine_for_testing()
     get_settings.cache_clear()
 
 

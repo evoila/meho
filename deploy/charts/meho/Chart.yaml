@@ -1,0 +1,33 @@
+apiVersion: v2
+name: meho
+description: Governance backplane for AI agents acting on infrastructure
+type: application
+
+# version is the *chart* version (calver-bumped by G2.5-T5 CI: 0.1.YYYYMMDD-<sha>).
+# appVersion is the *application* version — overridden by G2.5-T5 CI to the git
+# sha being deployed. Both values are placeholders here; the publish workflow
+# rewrites them at OCI push time.
+version: 0.1.0
+appVersion: "0.1.0"
+
+# Tightest Kubernetes API version range that exercises all manifests:
+# - networking.k8s.io/v1 NetworkPolicy: stable since 1.19
+# - networking.k8s.io/v1 Ingress: stable since 1.19
+# RKE2 (Goal #11's target) ships 1.28+; tighten the floor to match.
+kubeVersion: ">=1.28.0-0"
+
+icon: https://meho.ai/icon.svg
+
+sources:
+  - https://github.com/evoila/meho
+
+maintainers:
+  - name: evoila Group
+    url: https://github.com/evoila
+
+keywords:
+  - mcp
+  - governance
+  - audit
+  - kubernetes
+  - backplane

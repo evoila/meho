@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "meho.fullname" . }}-config
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+data:
+  # Non-secret env vars consumed by the backplane via `envFrom` in the
+  # Deployment. Keys follow `backend/src/meho_backplane/settings.py`'s
+  # `os.environ.get` mapping exactly — the env-var names are the contract.
+  # Secrets (DATABASE_URL, Keycloak client secret, Vault role bindings)
+  # live in Kubernetes Secrets and are wired via `valueFrom.secretKeyRef`
+  # in the Deployment template.
+  KEYCLOAK_ISSUER_URL: {{ .Values.config.keycloakIssuerUrl | quote }}
+  KEYCLOAK_AUDIENCE: {{ .Values.config.keycloakAudience | quote }}
+  KEYCLOAK_JWKS_CACHE_TTL_SECONDS: {{ .Values.config.keycloakJwksCacheTtlSeconds | quote }}
+  KEYCLOAK_JWT_LEEWAY_SECONDS: {{ .Values.config.keycloakJwtLeewaySeconds | quote }}
+  VAULT_ADDR: {{ .Values.config.vaultAddr | quote }}
+  VAULT_OIDC_ROLE: {{ .Values.config.vaultOidcRole | quote }}
+  VAULT_OIDC_MOUNT_PATH: {{ .Values.config.vaultOidcMountPath | quote }}
+  VAULT_TIMEOUT_SECONDS: {{ .Values.config.vaultTimeoutSeconds | quote }}
+  DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | quote }}
+  DATABASE_POOL_TIMEOUT: {{ .Values.config.databasePoolTimeout | quote }}

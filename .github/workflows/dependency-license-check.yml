@@ -48,7 +48,7 @@ permissions:
 jobs:
   python-licenses:
     name: Python License Check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, meho-runners]
     timeout-minutes: 10
     if: hashFiles('pyproject.toml') != ''
     steps:
@@ -91,7 +91,7 @@ jobs:
 
   npm-licenses:
     name: NPM License Check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, meho-runners]
     timeout-minutes: 10
     if: hashFiles('**/package-lock.json') != ''
     steps:

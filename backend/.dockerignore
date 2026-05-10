@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Files intentionally excluded from the Docker build context. Mirrors
+# `.gitignore` plus runtime artefacts that should never enter an image.
+
+# Local virtual environments — image builds its own venv via uv.
+.venv/
+venv/
+
+# Python caches.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tests are not shipped in the runtime image.
+tests/
+
+# Editor / OS noise.
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Coverage / build outputs.
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+build/
+dist/
+
+# Documentation source. README.md is intentionally NOT excluded — hatchling's
+# `project.readme` metadata in pyproject.toml requires it at wheel-build time;
+# excluding it makes `uv sync --locked --no-dev --no-editable` fail inside the
+# Docker builder with `OSError: Readme file does not exist: README.md`.
+
+# Secrets — defence in depth even though they should never be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt

@@ -28,7 +28,7 @@ from meho_backplane import __version__
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.auth.jwt import keycloak_readiness_probe
 from meho_backplane.auth.vault import vault_readiness_probe
-from meho_backplane.db.engine import dispose_engine
+from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
@@ -53,6 +53,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     readiness is a deployment-shape concern, not a request-path
     concern.
 
+    The SQLAlchemy async engine is **eagerly** instantiated here (via
+    :func:`get_engine`) so that the pool is built and the
+    ``DATABASE_URL`` is validated at startup, not on the first
+    request. Without this pre-warm the very first ``/ready`` poll the
+    kubelet sends absorbs the engine-construction cost, which both
+    inflates first-request latency and risks a race where the readiness
+    probe is asked to query a database whose engine hasn't been
+    constructed yet. The engine factory itself stays lazy
+    (process-level cache); the lifespan call is what flips it from
+    "lazy on first request" to "eager at process boot".
+
     On shutdown the SQLAlchemy async engine is disposed so the asyncpg
     connection pool releases its connections cleanly; without the
     explicit ``await engine.dispose()`` the SQLAlchemy 2.x async docs
@@ -63,6 +74,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     register_probe("keycloak", keycloak_readiness_probe)
     register_probe("vault", vault_readiness_probe)
     register_probe("db", db_migration_probe)
+    # Eager engine construction — see lifespan docstring for why.
+    get_engine()
     try:
         yield
     finally:

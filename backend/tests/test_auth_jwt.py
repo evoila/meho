@@ -62,15 +62,20 @@ _JWKS_URL: str = f"{_ISSUER}/protocol/openid-connect/certs"
 
 @pytest.fixture(autouse=True)
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin the four Keycloak env vars and reset the settings cache.
+    """Pin every env var the Settings model reads and reset the cache.
 
     Settings are cached per-process via ``functools.lru_cache``; without
-    a per-test reset, an env-var change wouldn't propagate.
+    a per-test reset, an env-var change wouldn't propagate. The Vault
+    knobs are pinned here even though this file does not exercise the
+    Vault client — :class:`Settings` validates them at construction
+    time, so any path that calls :func:`get_settings` (including
+    :func:`verify_jwt`) needs them populated.
     """
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", _ISSUER)
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", _AUDIENCE)
     monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
     monkeypatch.setenv("KEYCLOAK_JWT_LEEWAY_SECONDS", "30")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

@@ -57,12 +57,45 @@ class Settings(BaseModel):
         validation. Real-world deployments routinely drift a few seconds
         between Keycloak and backplane hosts; default 30s absorbs that
         without giving meaningful runway to a stolen-token replay.
+    vault_addr:
+        Base URL of the Vault server, e.g. ``https://vault.evba.lab``.
+        Required — the backplane refuses to start without it. The OIDC
+        forward-auth chain hangs entirely off this endpoint.
+    vault_oidc_role:
+        Vault role bound to the JWT auth method that the backplane
+        forwards tokens against. Default ``meho-mcp`` matches Goal #11's
+        requirement letter; operators provisioning a different Vault
+        role can override per environment.
+    vault_oidc_mount_path:
+        Mount path of Vault's JWT/OIDC auth method, **without** the
+        ``auth/`` prefix. Vault's recommended convention is to mount
+        the JWT method at ``jwt`` (the default) and the OIDC method at
+        ``oidc``; either name works for this backplane because hvac's
+        ``jwt_login`` calls the same ``POST /auth/{path}/login``
+        endpoint regardless of the underlying handler. Override only
+        when a Vault operator has chosen a non-standard mount path.
+    vault_namespace:
+        Vault Enterprise namespace for the JWT auth method, sent as
+        the ``X-Vault-Namespace`` header. ``None`` (the default) for
+        Vault OSS — the header is omitted, which is the correct shape
+        for non-Enterprise deployments.
+    vault_timeout_seconds:
+        Timeout applied to every HTTP call into Vault (login, secret
+        read, health probe). Kept tight: a hung Vault should
+        fail-closed quickly rather than starve request capacity. The
+        v0.1 dogfood load is per-request login, so the timeout governs
+        worst-case request latency directly.
     """
 
     keycloak_issuer_url: HttpUrl
     keycloak_audience: str = Field(min_length=1)
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
+    vault_addr: HttpUrl
+    vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
+    vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
+    vault_namespace: str | None = None
+    vault_timeout_seconds: float = Field(default=10.0, gt=0)
 
 
 @lru_cache(maxsize=1)
@@ -79,6 +112,7 @@ def get_settings() -> Settings:
     in code review. When the surface grows, switching to
     ``BaseSettings`` is a one-commit refactor.
     """
+    vault_namespace_env = os.environ.get("VAULT_NAMESPACE")
     return Settings(
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
@@ -87,5 +121,19 @@ def get_settings() -> Settings:
         ),
         keycloak_jwt_leeway_seconds=int(
             os.environ.get("KEYCLOAK_JWT_LEEWAY_SECONDS", "30"),
+        ),
+        vault_addr=os.environ["VAULT_ADDR"],  # type: ignore[arg-type]
+        vault_oidc_role=os.environ.get("VAULT_OIDC_ROLE", "meho-mcp"),
+        vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),
+        # ``VAULT_NAMESPACE`` distinguishes "unset" (OSS deployment, no
+        # header) from empty-string (operator misconfiguration); the
+        # latter is preserved so pydantic's ``min_length`` would reject
+        # it — but we deliberately allow None|str without min_length
+        # because OSS expects None. Empty-string is treated as None
+        # here to match Vault's own CLI which silently drops empty
+        # ``-namespace`` values.
+        vault_namespace=vault_namespace_env if vault_namespace_env else None,
+        vault_timeout_seconds=float(
+            os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
         ),
     )

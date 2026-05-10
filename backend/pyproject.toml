@@ -13,6 +13,7 @@ dependencies = [
     "prometheus-client>=0.20",
     "authlib>=1.3",
     "httpx>=0.27",
+    "hvac>=2.4.0",
 ]
 
 [dependency-groups]
@@ -83,6 +84,25 @@ files = ["src"]
 # every other dependency.
 [[tool.mypy.overrides]]
 module = ["authlib.*"]
+ignore_missing_imports = true
+
+# hvac (HashiCorp Vault Python client, ADR 0004) ships no ``py.typed``
+# marker as of 2.4.0 — every public method returns ``Any``. Whitelisting
+# its tree lets strict mode keep biting on the rest of the codebase
+# while the Vault wrapper module localises the untyped surface to one
+# place. If hvac later ships stubs, drop this override.
+[[tool.mypy.overrides]]
+module = ["hvac.*"]
+ignore_missing_imports = true
+
+# ``requests`` is hvac's transport dependency. We only catch its
+# exception types in :mod:`meho_backplane.auth.vault` to map them
+# through to backplane-side errors; we don't depend on its public API
+# directly. ``types-requests`` would pull a separate stub package into
+# the runtime image; whitelisting the module keeps the dev image lean
+# without weakening typing for first-party code.
+[[tool.mypy.overrides]]
+module = ["requests.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

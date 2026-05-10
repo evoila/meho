@@ -26,9 +26,17 @@ this stage it exposes:
   (cached, kid-rotation aware) and yields a frozen `Operator` model
   (Task #22). No protected routes are mounted yet; consumers land in
   G2.2-T3 (`/api/v1/health`).
+* Vault forward-auth — the `vault_client_for_operator` async context
+  manager performs a per-request JWT/OIDC login against Vault
+  (`meho-mcp` role by default) using the operator's validated JWT,
+  yields an authenticated `hvac.Client`, and revokes the issued token
+  on exit (Task #23). The Vault readiness probe registered in lifespan
+  flips `/ready` red when `/sys/health` is unreachable, sealed, or
+  uninitialized. No protected route consuming Vault has landed yet;
+  G2.2-T3 wires this into `/api/v1/health` and reads the federation
+  proof secret.
 
-Vault federation and database persistence land progressively in
-subsequent G2.2 / G2.3 Tasks. The stack (FastAPI, Pydantic v2,
+Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
 for JOSE) is locked by
 [ADR 0004](https://github.com/evoila-bosnia/meho-internal/issues/13).
@@ -56,11 +64,14 @@ PYTHONPATH-leak imports.
 | `SENSITIVE_HEADERS` | `src/meho_backplane/middleware.py` | `frozenset({b"authorization", b"cookie", b"x-api-key"})`. The middleware never logs the values of these headers; redaction is enforced by *not* logging request headers at all in v0.1, with a `tests/test_observability.py` regression test. |
 | `HTTP_REQUESTS_TOTAL` | `src/meho_backplane/metrics.py` | Module-level `prometheus_client.Counter` registered against the default registry. Labels: `method`, `path`, `status`. `path` is the matched FastAPI route template when available, bounding label cardinality. |
 | `render_metrics` | `src/meho_backplane/metrics.py` | Returns `(body, content_type)` for the `/metrics` route. Pins `text/plain; version=0.0.4; charset=utf-8` — the legacy Prometheus format every scraper accepts (`prometheus_client>=0.21` advertises 1.0.0 in `CONTENT_TYPE_LATEST`, but 0.0.4 stays universally compatible). |
-| `Settings` / `get_settings` | `src/meho_backplane/settings.py` | Pydantic v2 model + `lru_cache`-singleton accessor for the Keycloak knobs (`KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_JWKS_CACHE_TTL_SECONDS`, `KEYCLOAK_JWT_LEEWAY_SECONDS`). Tests reset via `get_settings.cache_clear()`. |
+| `Settings` / `get_settings` | `src/meho_backplane/settings.py` | Pydantic v2 model + `lru_cache`-singleton accessor for the Keycloak knobs (`KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_JWKS_CACHE_TTL_SECONDS`, `KEYCLOAK_JWT_LEEWAY_SECONDS`) and the Vault knobs (`VAULT_ADDR`, `VAULT_OIDC_ROLE`, `VAULT_OIDC_MOUNT_PATH`, `VAULT_NAMESPACE`, `VAULT_TIMEOUT_SECONDS`). Tests reset via `get_settings.cache_clear()`. |
 | `Operator` | `src/meho_backplane/auth/operator.py` | Frozen pydantic v2 model carrying validated claims (`sub`, `name`, `email`, `raw_jwt`). Returned by `verify_jwt`; consumed by every authenticated route from G2.2-T3 onward. `raw_jwt` is preserved verbatim for G2.2-T2's Vault forward-auth. |
 | `verify_jwt` | `src/meho_backplane/auth/jwt.py` | FastAPI dependency: parses `Authorization: Bearer ...`, fetches/caches Keycloak's JWKS, validates signature + `iss` + `aud` + `exp` (with leeway), refreshes JWKS on a kid miss, and returns an `Operator`. Every failure mode collapses to a terse 401. |
 | `keycloak_readiness_probe` | `src/meho_backplane/auth/jwt.py` | Synchronous probe registered with the readiness registry at app lifespan startup. Hits `{issuer}/.well-known/openid-configuration` then `jwks_uri`; failure detail surfaces only the exception class name to avoid leaking issuer URLs into 503 payloads. |
 | JWKS cache | `src/meho_backplane/auth/jwt.py` (`_jwks_cache`, `_jwks_fetched_at`, `_jwks_lock`) | Module-level dict + monotonic-fetched timestamp + asyncio lock. TTL-bounded (default 5 min) and kid-rotation refreshed (one forced re-fetch per request on a kid miss). Single-worker design; v0.2 may move to Redis when multi-worker uvicorn is needed. |
+| `vault_client_for_operator` | `src/meho_backplane/auth/vault.py` | Async context manager: builds an `hvac.Client` from settings, performs `client.auth.jwt.jwt_login(role, jwt, path)` against the configured mount path, yields the authenticated client, and revokes the issued token on exit (best-effort). Every blocking hvac call runs through `asyncio.to_thread` because hvac is `requests`-based and FastAPI does not auto-offload sync I/O inside `async def` callables. Per-request login by design (v0.1); v0.2 may add a per-operator cache. |
+| `vault_readiness_probe` | `src/meho_backplane/auth/vault.py` | Synchronous probe registered with the readiness registry at app lifespan startup. Calls `client.sys.read_health_status(method='GET')` (unauthenticated) and classifies the response — `sealed=False`/`http_429`/`http_472`/`http_473` → ok; `sealed`/`uninitialized`/connection-error → not ok. Detail strings never echo the Vault URL or namespace. |
+| `VaultClientError` / `VaultUnreachableError` / `VaultRoleDeniedError` | `src/meho_backplane/auth/vault.py` | Backplane-side exception hierarchy. Callers catch `VaultClientError` for a single error response shape, or one of the subclasses to map to specific HTTP statuses. The hierarchy lets consumers avoid importing `hvac` directly. |
 
 ## Control flow
 
@@ -73,7 +84,8 @@ PYTHONPATH-leak imports.
    and `metrics` route handlers.
 3. uvicorn opens the lifespan context: `configure_logging()` runs,
    pinning structlog's processor chain so every subsequent log line
-   is JSON to stdout.
+   is JSON to stdout, and the Keycloak + Vault readiness probes are
+   registered against the probe registry.
 4. uvicorn binds to `:8000` and starts the ASGI event loop.
 5. Each HTTP request enters `RequestContextMiddleware.__call__`,
    which:
@@ -119,6 +131,7 @@ Pinned-floor declarations; exact versions resolved into `uv.lock`.
 | `pydantic[email]` | ≥ 2.6 | Frozen `Operator` model uses `EmailStr`, which pulls `email-validator` via the `email` extra. |
 | `authlib` | ≥ 1.3 | JWS / JWK / JWT primitives for Keycloak token verification. The `authlib.jose` namespace is deprecated in favour of `joserfc` (same maintainer, clean rewrite); migration to `joserfc` is tracked as a v0.2 candidate. |
 | `httpx` | ≥ 0.27 | Async + sync HTTP client for the OIDC discovery doc and JWKS endpoint. (Also used as the `fastapi.testclient.TestClient` backend.) |
+| `hvac` | ≥ 2.4 | Official HashiCorp Vault Python client (per ADR 0004). Sync-only, transitively pulls `requests` + `urllib3`; the backplane localises the sync surface inside `auth/vault.py` and wraps every call in `asyncio.to_thread` from the async context manager. No type stubs ship with the package, so `[tool.mypy.overrides]` whitelists `hvac.*` and `requests.*`. |
 | (dev) `pytest` ≥ 8 | | Test runner. |
 | (dev) `pytest-asyncio` ≥ 0.23 | | Async test support; `asyncio_mode = "auto"` in pyproject. |
 | (dev) `cryptography` ≥ 42.0 | | RSA keypair generation in test fixtures (authlib pulls it transitively in production). |
@@ -128,13 +141,22 @@ Pinned-floor declarations; exact versions resolved into `uv.lock`.
 
 ## Known issues
 
-`/ready` returns 503 until at least one passing probe is registered.
-After Task #22 the lifespan hook registers the Keycloak probe, so a
-running app with a reachable Keycloak realm reports 200. Without
-Keycloak (or before Vault lands in G2.2-T2 and DB migrations land in
-G2.3) `/ready` stays 503 by design. Helm charts pointing their
-kubernetes readiness probe at `/ready` before those Initiatives land
-will see pods stay `NotReady`; that's the intended contract.
+`/ready` returns 503 until every registered probe passes. After Task
+#23 the lifespan hook registers both the Keycloak and Vault probes,
+so a running app needs Keycloak's JWKS endpoint reachable **and**
+Vault's `/sys/health` reachable + unsealed before `/ready` flips green.
+Until DB migrations land in G2.3, the registry is otherwise complete
+for the federation-chain dependency surface. Helm charts pointing
+their kubernetes readiness probe at `/ready` before either dependency
+is provisioned will see pods stay `NotReady`; that is the intended
+contract.
+
+Vault hvac calls are synchronous (the library is built on `requests`)
+but the backplane is async-first. Every hvac call from
+`auth/vault.py` runs through `asyncio.to_thread` to avoid blocking
+the event loop. v0.2 may move to a native async Vault client when one
+of acceptable maturity emerges, or to per-operator token caching to
+reduce login pressure under higher load.
 
 `authlib.jose` emits an `AuthlibDeprecationWarning` at first import,
 recommending `joserfc` (the same maintainer's clean rewrite). The
@@ -171,6 +193,7 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #19 — public health + version + readiness endpoints
 - Task #20 — observability primitives (`/metrics`, structlog, middleware)
 - Task #22 — Keycloak JWT validation + readiness probe
+- Task #23 — Vault OIDC forward-auth client + readiness probe
 - [FastAPI tutorial](https://fastapi.tiangolo.com/tutorial/)
 - [FastAPI lifespan API](https://fastapi.tiangolo.com/advanced/events/)
 - [FastAPI dependencies (`Depends`)](https://fastapi.tiangolo.com/tutorial/dependencies/)
@@ -178,6 +201,8 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - [structlog contextvars](https://www.structlog.org/en/stable/contextvars.html)
 - [prometheus_client](https://github.com/prometheus/client_python)
 - [authlib JOSE / JWT docs](https://docs.authlib.org/en/latest/jose/jwt.html)
+- [hvac JWT/OIDC auth](https://python-hvac.org/en/stable/usage/auth_methods/jwt-oidc.html)
+- [Vault `/sys/health` HTTP API](https://developer.hashicorp.com/vault/api-docs/system/health)
 - [respx mock router](https://lundberg.github.io/respx/)
 - [OIDC core — token validation](https://openid.net/specs/openid-connect-core-1_0.html#TokenResponseValidation)
 - [uv project structure](https://docs.astral.sh/uv/concepts/projects/)

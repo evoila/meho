@@ -54,6 +54,7 @@ from meho_backplane.auth.vault import (
     VaultClientError,
     vault_client_for_operator,
 )
+from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.middleware import verify_jwt_and_bind
 
 __all__ = ["router"]
@@ -102,10 +103,16 @@ class VaultStatus(BaseModel):
 class DbStatus(BaseModel):
     """Database migration status.
 
-    ``migrated`` is ``None`` in v0.1 — G2.3 wires the real Alembic check.
-    The field is present in the response shape now so the CLI's
-    ``meho status`` rendering doesn't have to special-case its absence
-    when G2.3 lands.
+    ``migrated`` is ``True`` when the DB-migration-state probe reports
+    healthy (current Alembic revision matches head), ``False`` when
+    the probe reports unhealthy for any reason (DB unreachable,
+    revision diverged, ``alembic_version`` table absent). v0.1 ships
+    no opinions on retry / repair — operators see the probe's
+    ``detail`` string on the ``/ready`` payload (and downstream tooling
+    in T29 enforces the migration-runner contract). The field stays
+    ``bool | None`` for forward compatibility with response decoders
+    that were generated against the chassis-stage shape, but the
+    handler now always populates it from the probe.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -232,6 +239,7 @@ async def authenticated_health(
     """
     log = structlog.get_logger()
     vault_status = await _probe_vault_federation(operator, log)
+    db_probe_result = await db_migration_probe()
     return HealthResponse(
         operator=OperatorIdentity(
             sub=operator.sub,
@@ -239,5 +247,5 @@ async def authenticated_health(
             email=operator.email,
         ),
         vault=vault_status,
-        db=DbStatus(migrated=None),
+        db=DbStatus(migrated=db_probe_result.ok),
     )

@@ -28,6 +28,8 @@ from meho_backplane import __version__
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.auth.jwt import keycloak_readiness_probe
 from meho_backplane.auth.vault import vault_readiness_probe
+from meho_backplane.db.engine import dispose_engine, get_engine
+from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -44,21 +46,40 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     Configures structlog at startup so every log line emitted from this
     point onwards (including the very first request) is JSON-formatted,
-    and registers the Keycloak + Vault readiness probes with the
-    registry so ``/ready`` reflects whether each dependency is
-    reachable. The Vault probe is registered even though no protected
-    route consuming Vault has landed yet (G2.2-T3) — readiness is a
-    deployment-shape concern, not a request-path concern.
+    and registers the Keycloak + Vault + DB-migration-state readiness
+    probes with the registry so ``/ready`` reflects whether each
+    dependency is reachable. Probes are registered even though no
+    request-path consumer of the dependency may have landed yet —
+    readiness is a deployment-shape concern, not a request-path
+    concern.
 
-    There is nothing to tear down at shutdown yet; the ``yield`` /
-    ``return`` shape is preserved so future Initiatives (G2.3
-    SQLAlchemy engine ``dispose()``) can plug in without restructuring
-    the function.
+    The SQLAlchemy async engine is **eagerly** instantiated here (via
+    :func:`get_engine`) so that the pool is built and the
+    ``DATABASE_URL`` is validated at startup, not on the first
+    request. Without this pre-warm the very first ``/ready`` poll the
+    kubelet sends absorbs the engine-construction cost, which both
+    inflates first-request latency and risks a race where the readiness
+    probe is asked to query a database whose engine hasn't been
+    constructed yet. The engine factory itself stays lazy
+    (process-level cache); the lifespan call is what flips it from
+    "lazy on first request" to "eager at process boot".
+
+    On shutdown the SQLAlchemy async engine is disposed so the asyncpg
+    connection pool releases its connections cleanly; without the
+    explicit ``await engine.dispose()`` the SQLAlchemy 2.x async docs
+    warn that the underlying connections may stay reachable only from
+    a different event loop, which the GC cannot reliably close.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
     register_probe("vault", vault_readiness_probe)
-    yield
+    register_probe("db", db_migration_probe)
+    # Eager engine construction — see lifespan docstring for why.
+    get_engine()
+    try:
+        yield
+    finally:
+        await dispose_engine()
 
 
 app: FastAPI = FastAPI(

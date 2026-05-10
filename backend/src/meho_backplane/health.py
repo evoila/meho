@@ -32,18 +32,21 @@ Usage::
     register_probe("vault", vault_probe)
 """
 
-from collections.abc import Callable
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 __all__ = [
+    "ProbeFn",
     "ProbeResult",
     "clear_probes",
     "register_probe",
     "router",
     "run_probes",
+    "run_probes_async",
 ]
 
 
@@ -69,23 +72,45 @@ class ProbeResult:
     detail: str | None = None
 
 
-_probes: list[tuple[str, Callable[[], ProbeResult]]] = []
+#: A probe is either a plain callable returning :class:`ProbeResult`
+#: synchronously (Keycloak / Vault probes — both use the ``hvac``
+#: + ``httpx`` sync clients wrapped where needed) or an ``async def``
+#: coroutine returning the same (the DB-migration-state probe — the
+#: SQLAlchemy 2.x async engine forces the I/O onto the event loop).
+#: The registry stores both shapes; the ``/ready`` handler awaits
+#: coroutine-returning probes and calls sync probes inline.
+ProbeFn = Callable[[], ProbeResult] | Callable[[], Awaitable[ProbeResult]]
 
 
-def register_probe(name: str, fn: Callable[[], ProbeResult]) -> None:
+_probes: list[tuple[str, ProbeFn]] = []
+
+
+def register_probe(name: str, fn: ProbeFn) -> None:
     """Register *fn* under *name* in the readiness-probe registry.
 
     Probes are evaluated in registration order on every ``/ready`` hit.
-    The same name may be registered more than once (callers are
-    responsible for uniqueness); duplicates simply run twice. This
-    permissive contract keeps the registry trivially testable — see
-    :func:`clear_probes`.
+    Both synchronous (``def``) and asynchronous (``async def``) probe
+    callables are accepted — the registry keeps them in a single list
+    and the ``/ready`` handler dispatches via
+    :func:`inspect.iscoroutinefunction`. The same name may be
+    registered more than once (callers are responsible for
+    uniqueness); duplicates simply run twice. This permissive contract
+    keeps the registry trivially testable — see :func:`clear_probes`.
     """
     _probes.append((name, fn))
 
 
 def run_probes() -> list[ProbeResult]:
-    """Evaluate every registered probe and return the result list.
+    """Evaluate every registered **synchronous** probe.
+
+    Async probes are skipped — calling them from a synchronous
+    context would either return an un-awaited coroutine (silently
+    discarding the I/O) or require spinning a new event loop (which
+    would deadlock when called from inside a running loop). The
+    ``/ready`` endpoint uses :func:`run_probes_async` instead;
+    this function is preserved for the Task #19 contract that
+    ``run_probes`` is part of the public registry API and for
+    callers that only register sync probes.
 
     Pure pass-through: probe exceptions are *not* caught here. Probes
     are expected to convert their own failures into a ``ProbeResult``
@@ -93,7 +118,46 @@ def run_probes() -> list[ProbeResult]:
     bug and surfacing it as a 500 from ``/ready`` is the correct
     behaviour.
     """
-    return [fn() for _, fn in _probes]
+    results: list[ProbeResult] = []
+    for _name, fn in _probes:
+        if inspect.iscoroutinefunction(fn):
+            continue
+        result = fn()
+        # An ``async def`` without the ``__wrapped__`` marker still
+        # returns a coroutine when called; defensively skip those.
+        if inspect.iscoroutine(result):  # pragma: no cover — defensive
+            continue
+        # Mypy can't see that ``iscoroutinefunction`` already excluded
+        # the awaitable branch of the ``ProbeFn`` union at this point,
+        # so we narrow explicitly via :func:`isinstance`.
+        if isinstance(result, ProbeResult):
+            results.append(result)
+    return results
+
+
+async def run_probes_async() -> list[ProbeResult]:
+    """Evaluate every registered probe — sync and async alike.
+
+    Async probes are awaited; sync probes are called inline. Probes
+    run sequentially in registration order (parallelising readiness
+    checks across dependencies is a v0.2 optimisation; v0.1 favours
+    deterministic ordering for readable ``/ready`` payloads and
+    audit logs).
+    """
+    results: list[ProbeResult] = []
+    for _name, fn in _probes:
+        if inspect.iscoroutinefunction(fn):
+            results.append(await fn())
+        else:
+            value = fn()
+            # Defensive: a sync-typed callable that returned an
+            # awaitable (mis-annotated probe) gets awaited rather
+            # than silently dropped on the floor.
+            if inspect.isawaitable(value):  # pragma: no cover — defensive
+                results.append(await value)
+            else:
+                results.append(value)
+    return results
 
 
 def clear_probes() -> None:
@@ -122,7 +186,7 @@ async def ready() -> JSONResponse:
     ``all([])`` is vacuously ``True`` in Python, which would otherwise
     flip the chassis to "ready" with zero evidence.
     """
-    results = run_probes()
+    results = await run_probes_async()
     ready_ok = bool(results) and all(r.ok for r in results)
     payload = {
         "status": "ready" if ready_ok else "not_ready",

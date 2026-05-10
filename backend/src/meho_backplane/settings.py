@@ -24,10 +24,22 @@ chain immediately rather than days later under load.
 
 import os
 from functools import lru_cache
+from typing import Final
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 __all__ = ["Settings", "get_settings"]
+
+#: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
+#: backplane refuses to construct a sync engine because every database
+#: I/O path off the request hot loop must be ``await``-able (ADR 0004).
+#: ``postgresql+asyncpg://`` is the production driver; ``sqlite+aiosqlite://``
+#: is the v0.1 dev/test driver. Adding a third scheme requires both an
+#: ADR amendment and a confirmed async driver shipping with that prefix.
+_SUPPORTED_DATABASE_URL_SCHEMES: Final[tuple[str, ...]] = (
+    "postgresql+asyncpg://",
+    "sqlite+aiosqlite://",
+)
 
 
 class Settings(BaseModel):
@@ -85,6 +97,28 @@ class Settings(BaseModel):
         fail-closed quickly rather than starve request capacity. The
         v0.1 dogfood load is per-request login, so the timeout governs
         worst-case request latency directly.
+    database_url:
+        SQLAlchemy URL for the PostgreSQL database, e.g.
+        ``postgresql+asyncpg://meho:<password>@<host>:5432/meho``.
+        Required — the backplane refuses to start without it. The
+        ``+asyncpg`` driver is mandatory (per ADR 0004); a sync URL
+        would silently work for the engine factory but the per-request
+        session dependency would block the FastAPI event loop on every
+        I/O call. Required also for Alembic — ``env.py`` reads this
+        value rather than the static ``[alembic]`` ini setting so the
+        migration runner's URL stays in lock-step with the running
+        backplane.
+    database_pool_size:
+        Maximum number of connections SQLAlchemy keeps idle in the
+        pool. Default 10 follows SQLAlchemy 2.x's published guidance
+        for a single-replica web service; raise it when sustained
+        request concurrency exceeds the default.
+    database_pool_timeout:
+        Seconds to wait for an available pool connection before
+        raising :class:`sqlalchemy.exc.TimeoutError`. Default 30s
+        gives a real PG outage time to recover before requests start
+        failing fast; tune downward for traffic shapes where
+        backpressure is preferred to long latency.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -96,6 +130,32 @@ class Settings(BaseModel):
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
+    database_url: str = Field(min_length=1)
+    database_pool_size: int = Field(default=10, gt=0)
+    database_pool_timeout: float = Field(default=30.0, gt=0)
+
+    @field_validator("database_url")
+    @classmethod
+    def _database_url_must_be_async(cls, value: str) -> str:
+        """Reject sync SQLAlchemy DSNs at construction time.
+
+        ADR 0004 mandates that every database I/O path off the request
+        hot loop is ``await``-able. A sync DSN
+        (``postgresql://`` / ``sqlite:///``) would silently work for
+        engine construction but would block the FastAPI event loop on
+        every checkout — the failure mode is a saturated worker that
+        looks healthy on ``/healthz`` but starves at ``/api/...``. Fail
+        fast at startup instead, with an actionable error message that
+        names the supported schemes so the operator can fix the
+        ``DATABASE_URL`` env var directly without grepping the codebase.
+        """
+        if not value.startswith(_SUPPORTED_DATABASE_URL_SCHEMES):
+            supported = ", ".join(_SUPPORTED_DATABASE_URL_SCHEMES)
+            raise ValueError(
+                f"DATABASE_URL must use an async driver scheme; "
+                f"supported: {supported}. Got: {value!r}",
+            )
+        return value
 
 
 @lru_cache(maxsize=1)
@@ -135,5 +195,10 @@ def get_settings() -> Settings:
         vault_namespace=vault_namespace_env if vault_namespace_env else None,
         vault_timeout_seconds=float(
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
+        ),
+        database_url=os.environ["DATABASE_URL"],
+        database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
+        database_pool_timeout=float(
+            os.environ.get("DATABASE_POOL_TIMEOUT", "30.0"),
         ),
     )

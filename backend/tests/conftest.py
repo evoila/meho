@@ -44,6 +44,8 @@ import httpx
 import pytest
 import respx
 
+from meho_backplane.settings import get_settings
+
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     from authlib.jose import JsonWebKey, JsonWebToken
@@ -116,12 +118,22 @@ def _default_database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     constructs an engine directly. Tests that exercise the
     DB-migration-state probe override this default with a testcontainers
     PG URL or a ``aiosqlite:///<tmp>`` file path.
+
+    The ``get_settings.cache_clear()`` brackets matter: ``Settings`` is
+    cached at module scope by :func:`functools.lru_cache`, and a stale
+    cache entry from an earlier test (constructed before this fixture
+    set the env var) would survive into the next test and silently
+    return the previous URL. Clearing the cache before *and* after the
+    yield guarantees every test in this suite sees a fresh
+    ``Settings`` constructed against this fixture's env-var pin.
     """
+    get_settings.cache_clear()
     monkeypatch.setenv(
         "DATABASE_URL",
         "sqlite+aiosqlite:///:memory:",
     )
     yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

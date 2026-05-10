@@ -430,6 +430,82 @@ The runtime stage stamps the published image with OCI annotations
 `revision` and `created` flow into `GET /version` via the same build
 args, so the registry view and the running app agree on identity.
 
+### Cosign keyless signing (Task #34, ADR 0006)
+
+Every image push from `.github/workflows/image.yml` is signed with
+[cosign](https://github.com/sigstore/cosign) keyless OIDC against the
+public Sigstore trust root (Fulcio CA + Rekor transparency log). There
+are no private signing keys to custody, rotate, or distribute — the
+trust anchor is the **certificate identity** baked into the Fulcio
+certificate at signing time:
+
+| Field | Value |
+| --- | --- |
+| OIDC issuer | `https://token.actions.githubusercontent.com` |
+| Identity (main pushes) | `https://github.com/evoila/meho/.github/workflows/image.yml@refs/heads/main` |
+| Identity (v* tag pushes) | `https://github.com/evoila/meho/.github/workflows/image.yml@refs/tags/v<x.y.z>` |
+| Transparency log | public Rekor (`rekor.sigstore.dev`) |
+| Cosign version | v3.0.6 (pinned via `sigstore/cosign-installer@v4.1.2`) |
+
+The flow on every non-PR build:
+
+1. The job's `id-token: write` permission (granted at the workflow level
+   in PR #164's forward-compat scaffold) lets the runner mint a short-
+   lived GitHub Actions OIDC token whose subject encodes the repo +
+   workflow file path + ref.
+2. `cosign sign --yes ghcr.io/evoila/meho@<digest>` hands the OIDC
+   token to Fulcio; Fulcio mints a ~10-minute x509 certificate binding
+   an ephemeral ECDSA-P256 keypair to the OIDC identity.
+3. cosign signs the manifest-list digest with the ephemeral key and
+   uploads `{signature, certificate}` to public Rekor. The Rekor
+   inclusion proof is what verifies the (now-expired) Fulcio
+   certificate was valid at signing time — disabling tlog upload would
+   make the signature unverifiable post-expiry and is forbidden by
+   ADR 0006.
+
+**Signing by digest, not by tag.** `docker/build-push-action@v7`'s
+`outputs.digest` is the manifest-list digest, not a per-arch child.
+Signing the manifest list covers every tag alias pointing at it
+(`:sha-<long>`, `:main`, `:v<x.y.z>`) and every per-arch child
+(linux/amd64 + linux/arm64) without separate invocations. Tags are
+mutable; digests are content-addressed — the signature binds to *what*
+was signed, not the human-readable name.
+
+**The `--yes` flag** is the non-interactive confirmation prompt cosign
+otherwise emits before contacting Fulcio. CI has no TTY. It is *not*
+related to the deprecated `COSIGN_EXPERIMENTAL=1` of the cosign-1.x
+era; cosign 2.x+ makes keyless the default for `cosign sign` and the
+experimental gate is gone.
+
+**Why a single workflow signs many tag aliases.** ADR 0006 anticipates
+a future `release.yml` that bundles image + Helm chart + CLI tarball
+signing under one identity. For now, the image workflow signs only
+the image; the chart and CLI workflows (G2.5, G2.6) will each carry
+their own cosign step under their own `<workflow>.yml@<ref>` identity.
+Operator verification policies pattern-match across them
+(`--certificate-identity-regexp '.../\.github/workflows/.*\.yml@.*'`)
+where appropriate.
+
+**Verification commands** live in `backend/README.md` under "Verifying
+image signatures" — same regex, same issuer, copy-pasteable into an
+operator runbook. The downstream
+[`claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+`install.sh` runs that exact `cosign verify` as a **gating** check
+before `docker pull`; a failed verification aborts the install with
+the expected-identity error message.
+
+**Action pin discipline.** `sigstore/cosign-installer` is pinned to a
+commit SHA (`6f9f17788090df1f26f669e9d70d6ae9567deba6`, tag `v4.1.2`)
+matching the rest of the workflow's third-party-action pinning policy.
+The action installs cosign `v3.0.6` (its default) — bumping the action
+major version (v3 → v4) is a deliberate Renovate / Dependabot review
+because v4 dropped cosign-1.x support.
+
+**Out of scope, lands later.** SBOM (syft) attestation and trivy
+vulnerability scanning are Task #35; they extend the same workflow
+with `cosign attest` (SPDX JSON predicate) and a report-only trivy
+SARIF upload after the sign step.
+
 ## Known issues
 
 `/ready` returns 503 until every registered probe passes. After Task
@@ -493,7 +569,12 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #28 — Audit table schema + synchronous audit-write middleware
 - Task #29 — Migration runner entrypoint + CI guard rejecting destructive migration patterns
 - Task #32 — Multi-stage Dockerfile finalized + multi-arch buildx (linux/amd64 + linux/arm64); base image digest-pinned
+- Task #33 — GHCR image push workflow (`.github/workflows/image.yml`)
+- Task #34 — Cosign keyless signing of pushed images via GitHub Actions OIDC (per ADR 0006)
 - [OCI image-spec annotations](https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+- [Sigstore cosign keyless signing overview](https://docs.sigstore.dev/cosign/signing/overview/)
+- [Sigstore CI quickstart (GitHub Actions OIDC)](https://docs.sigstore.dev/quickstart/quickstart-ci/)
+- [`sigstore/cosign-installer`](https://github.com/sigstore/cosign-installer) action
 - [Docker buildx multi-platform builds](https://docs.docker.com/build/building/multi-platform/)
 - [SQLAlchemy 2.x async overview](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
 - [SQLAlchemy 2.x pool / pre-ping disconnect handling](https://docs.sqlalchemy.org/en/20/core/pooling.html#disconnect-handling-pessimistic)

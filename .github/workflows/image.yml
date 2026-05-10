@@ -44,10 +44,20 @@
 #     backend/README.md (operator copy-paste) and docs/codebase/backend.md
 #     (rationale).
 #
-# Forward-compatibility note (G2.4-T4):
+# Supply-chain attestations (Task #35):
 #   - provenance + sbom on build-push-action emit small inline OCI annotations
-#     into the manifest; the richer syft SBOM attestation + trivy scan land in
-#     Task #35 as additional steps on this same job, after the sign step below.
+#     into the manifest; the richer syft SBOM attestation + trivy scan run as
+#     additional steps on this same job, after the sign step below.
+#   - anchore/sbom-action invokes syft against the pushed manifest-list digest
+#     and writes SPDX JSON; cosign then packages the SBOM as a Sigstore
+#     attestation signed under the same keyless identity as the image. The
+#     attestation is content-addressed (bound to the digest, not a tag) so
+#     verification works for every tag alias.
+#   - aquasecurity/trivy-action scans the same digest for CVEs and emits SARIF.
+#     v0.1 is report-only (`exit-code: 0`) — the workflow never fails on
+#     findings. SARIF results land both on the GitHub Security tab (Code
+#     scanning alerts) and as a 30-day workflow artefact. v0.2 will flip on a
+#     severity-based gate once the baseline noise level is known.
 
 name: image
 
@@ -68,8 +78,9 @@ on:
 
 permissions:
   contents: read
-  packages: write    # push to ghcr.io/evoila/meho
-  id-token: write    # forward-compat: cosign keyless OIDC (Task #34)
+  packages: write          # push to ghcr.io/evoila/meho
+  id-token: write          # cosign keyless OIDC (Task #34, #35)
+  security-events: write   # upload trivy SARIF to the Security tab (Task #35)
 
 concurrency:
   # On main/tag pushes: keep one in-flight build per ref so a fast follow-up
@@ -194,3 +205,97 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           cosign sign --yes "ghcr.io/evoila/meho@${DIGEST}"
+
+      - name: Generate SBOM (syft via anchore/sbom-action)
+        # anchore/sbom-action wraps syft. It pulls the image by digest (the
+        # `image:` input accepts `repo@sha256:...`) and emits the SBOM in the
+        # requested format. SPDX JSON is the format the downstream consumer's
+        # `cosign verify-attestation --type spdxjson` expects (Goal #11 cross-
+        # repo install.sh contract); cosign's predicate type vocabulary maps
+        # `spdxjson` -> SPDX 2.x JSON, which is what syft produces here.
+        #
+        # The action also auto-attaches the SBOM as a workflow run artefact
+        # (named `sbom.spdx.json` by default) so it's downloadable for 90 days
+        # even before the attest step runs. We *also* pass `output-file:` so
+        # the file lives at a predictable path for the cosign attest step.
+        if: github.event_name != 'pull_request'
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          image: ghcr.io/evoila/meho@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          # Skip the per-job auto-upload to GitHub release pages; this workflow
+          # also runs on plain main pushes (no release), and the SBOM is
+          # already surfaced via cosign attest + the workflow artefact.
+          upload-release-assets: false
+
+      - name: Attach SBOM as cosign attestation
+        # cosign attest wraps the SBOM file as an in-toto attestation
+        # (predicate = SBOM, predicate type = spdxjson), signs it under the
+        # same keyless OIDC identity as the cosign sign step above, and
+        # uploads {attestation, certificate} to Rekor. Verification:
+        #
+        #   cosign verify-attestation --type spdxjson \
+        #     --certificate-identity-regexp '...' \
+        #     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+        #     ghcr.io/evoila/meho@<digest>
+        #
+        # Attest by digest (immutable) — the attestation binds to the manifest
+        # list, so every tag alias and per-arch child is covered by one call.
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "ghcr.io/evoila/meho@${DIGEST}"
+
+      - name: Vulnerability scan (trivy, report-only)
+        # trivy scans the pushed image (OS packages + language deps,
+        # including the uv-installed Python wheels in /app/.venv). Emits
+        # SARIF for upload to the GitHub Security tab.
+        #
+        # v0.1 is *report-only*:
+        #   - `severity: CRITICAL,HIGH` filters the SARIF to the levels that
+        #     actually matter (LOW/MEDIUM are noise at this stage).
+        #   - `exit-code: '0'` keeps the workflow green regardless of
+        #     findings. v0.2 will flip this to fail on a defined policy once
+        #     the baseline noise is known (deliberate split per Goal #11).
+        #   - `ignore-unfixed: true` drops CVEs with no upstream fix
+        #     available, which would otherwise dominate the SARIF without
+        #     any operator action to take.
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ghcr.io/evoila/meho@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload trivy SARIF to GitHub Security tab
+        # SARIF upload surfaces findings under repo -> Security -> Code
+        # scanning alerts. Requires `security-events: write` at the job or
+        # workflow level — granted in the top-level permissions block.
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e  # v4.35.4
+        with:
+          sarif_file: trivy-results.sarif
+          # Category disambiguates this run when other SARIF sources (e.g.
+          # CodeQL itself) upload to the same repo; without it the upload
+          # would overwrite siblings.
+          category: trivy-image-scan
+
+      - name: Upload trivy SARIF as workflow artefact
+        # Mirrors the SARIF upload as a downloadable artefact (30-day
+        # retention) so operators can pull it via `gh run download` without
+        # needing Security-tab access.
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          retention-days: 30
+          if-no-files-found: error

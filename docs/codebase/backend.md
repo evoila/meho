@@ -501,10 +501,71 @@ The action installs cosign `v3.0.6` (its default) — bumping the action
 major version (v3 → v4) is a deliberate Renovate / Dependabot review
 because v4 dropped cosign-1.x support.
 
-**Out of scope, lands later.** SBOM (syft) attestation and trivy
-vulnerability scanning are Task #35; they extend the same workflow
-with `cosign attest` (SPDX JSON predicate) and a report-only trivy
-SARIF upload after the sign step.
+### SBOM-as-attestation + vulnerability scan (Task #35)
+
+Every pushed image carries a syft-generated SPDX 2.x SBOM that cosign
+attaches to the manifest-list digest as an [in-toto attestation](https://docs.sigstore.dev/cosign/verifying/attestation/)
+signed under the same keyless identity as the image. Operators verify
+the attestation with `cosign verify-attestation --type spdxjson …` and
+get back the full bill of materials plus a Rekor-anchored signature
+chain — same identity claim, single trust root. Verification commands
+live in `backend/README.md` under "Verifying the SBOM attestation".
+
+The flow on every non-PR build:
+
+1. `anchore/sbom-action` (which wraps syft) pulls the image by digest
+   and emits `sbom.spdx.json` next to the workflow workspace. The
+   action also auto-attaches the SBOM as a workflow artefact so it
+   stays downloadable independently of the attestation.
+2. `cosign attest --predicate sbom.spdx.json --type spdxjson
+   ghcr.io/evoila/meho@<digest>` wraps the predicate as an in-toto
+   statement, signs it under the same keyless OIDC flow as the image
+   signature, and uploads the attestation envelope + Fulcio
+   certificate to Rekor. Attestation is bound to the manifest-list
+   digest so every tag alias and per-arch child is covered by one
+   call.
+3. The predicate-type identifier (`spdxjson`) tells cosign to wrap
+   the SBOM under the SPDX-JSON in-toto predicate type
+   (`https://spdx.dev/Document`). The downstream consumer's
+   `cosign verify-attestation --type spdxjson` reads the same
+   identifier, decodes the base64 payload, and exposes the SPDX
+   document as the attestation's `.predicate`.
+
+The supply-chain rationale: signing the image proves *who* built it;
+the SBOM attestation proves *what's in it*. Both anchor to the same
+Fulcio identity (`image.yml@<ref>`), so downstream `install.sh` (the
+dogfooding consumer) verifies the entire chain — image, build
+provenance, bill of materials — with one trust anchor.
+
+**Trivy report-only scan.** `aquasecurity/trivy-action` runs after the
+attestation step against the same digest. The scan emits SARIF
+covering OS packages + the locked Python deps inside `/app/.venv`,
+filtered to `CRITICAL,HIGH` with `ignore-unfixed: true` so the
+results list only actionable findings. SARIF is uploaded **twice**:
+
+- `github/codeql-action/upload-sarif` posts the report to the GitHub
+  Security tab (Code scanning alerts, category `trivy-image-scan`).
+  Requires `security-events: write` at the workflow level (granted
+  in the permissions block alongside `id-token: write`).
+- `actions/upload-artifact` attaches the same SARIF as a 30-day
+  workflow artefact (`trivy-results`) so operators without
+  Security-tab access can still download the file via
+  `gh run download`.
+
+**v0.1 is report-only by deliberate split.** `exit-code: '0'` keeps
+the workflow green regardless of findings. Goal #11 splits "scan
+runs" from "scan gates the build" so the team can establish a
+baseline noise level before committing to a remediation policy. v0.2
+will flip `exit-code` to fail on a defined severity threshold once
+the baseline is known and triage cadence is sustainable.
+
+**Action pin discipline (same rule as cosign).** Every third-party
+action in the new steps is SHA-pinned with the human-readable tag in
+a trailing comment: `anchore/sbom-action@…` (v0.24.0),
+`aquasecurity/trivy-action@…` (v0.36.0),
+`github/codeql-action/upload-sarif@…` (v4.35.4),
+`actions/upload-artifact@…` (v7.0.1). Renovate / Dependabot bumps
+these on the same review cadence as `sigstore/cosign-installer`.
 
 ## Known issues
 

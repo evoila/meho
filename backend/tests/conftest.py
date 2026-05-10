@@ -107,6 +107,7 @@ SECRET_LEAK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 def _no_secret_leak_sweep(
     caplog: pytest.LogCaptureFixture,
     capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
     """Fail any test that emits a credential-shaped substring.
 
@@ -128,16 +129,41 @@ def _no_secret_leak_sweep(
     live in the dedicated leak tests in
     ``tests/test_secret_leak_checks.py``; this fixture is the safety
     net for everything else.
+
+    **Mid-test drain protection.** ``capfd.readouterr`` is destructive:
+    each call returns *and clears* whatever has been captured since the
+    previous call. A test that drains the buffer mid-run (to assert on
+    its own output) would consume those bytes before this sweep sees
+    them, silently bypassing the check. To stay sound regardless of
+    test internals, the fixture installs a record-and-forward proxy
+    over ``capfd.readouterr`` that copies every read into an internal
+    list; at teardown the sweep concatenates every recorded chunk plus
+    a final post-yield read into the haystack. The current 125 tests
+    do not pre-drain, but this guards against future tests doing so.
     """
+    captured_chunks: list[tuple[str, str]] = []
+    real_readouterr = capfd.readouterr
+
+    def _recording_readouterr() -> Any:
+        result = real_readouterr()
+        captured_chunks.append((result.out, result.err))
+        return result
+
+    monkeypatch.setattr(capfd, "readouterr", _recording_readouterr)
+
     yield
 
-    # ``readouterr`` is reentrant — re-reading the same stream after a
-    # test's own ``capsys.readouterr`` is safe; it returns whatever was
-    # emitted *since* the last read. The sweep is therefore most
-    # effective when a test does not pre-drain the capture itself.
-    captured_fd = capfd.readouterr()
+    # Final post-yield drain plus everything any in-test caller already
+    # consumed. Concatenating both sides means a mid-test call to
+    # ``capfd.readouterr()`` (or a fixture/teardown call after the
+    # ``yield`` boundary in another autouse fixture) cannot consume
+    # secret-shaped output before the sweep runs.
+    final = real_readouterr()
+    captured_chunks.append((final.out, final.err))
+    out_parts = [out for out, _err in captured_chunks if out]
+    err_parts = [err for _out, err in captured_chunks if err]
     log_records = "\n".join(record.getMessage() for record in caplog.records)
-    haystack = "\n".join((captured_fd.out, captured_fd.err, log_records))
+    haystack = "\n".join(("\n".join(out_parts), "\n".join(err_parts), log_records))
 
     if not haystack.strip():
         return

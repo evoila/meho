@@ -27,17 +27,26 @@ configuration bug and surfaces as a 401 rather than silently propagating
 garbage downstream.
 """
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 __all__ = ["Operator"]
 
 
 class Operator(BaseModel):
-    """Validated operator identity extracted from a verified JWT."""
+    """Validated operator identity extracted from a verified JWT.
+
+    ``raw_jwt`` is excluded from :meth:`__repr__` (``Field(repr=False)``)
+    so that an :class:`Operator` accidentally bound into a structured
+    log record — e.g. via ``logger.bind(operator=op)`` under structlog,
+    whose JSON renderer calls ``repr()`` on non-primitive values — never
+    leaks the bearer token to stdout or any downstream log shipper.
+    The model field is still populated and accessible by name; only the
+    default string representation is sanitised.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     sub: str
     name: str | None = None
     email: EmailStr | None = None
-    raw_jwt: str
+    raw_jwt: str = Field(repr=False)

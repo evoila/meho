@@ -54,6 +54,7 @@ import warnings
 from typing import Any
 
 import httpx
+import pydantic
 
 # ``authlib.jose`` emits an ``AuthlibDeprecationWarning`` at first
 # import, recommending ``joserfc`` (authlib's own successor). The
@@ -274,10 +275,17 @@ async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
     """Decode *token* against the cached JWKS, refreshing once on a kid miss.
 
     The first ``_fetch_jwks`` call serves the cached keyset (or fetches
-    one if the cache is empty). On a ``ValueError("Key not found")`` —
-    the canonical kid-rotation signal from authlib — the function
-    force-refreshes the JWKS and retries exactly once. Any other
-    decoding error, or a second kid miss after refresh, is fatal.
+    one if the cache is empty). authlib raises ``ValueError`` (currently
+    with the message ``"Key not found"``) when the JWT's ``kid`` is
+    absent from the keyset — but the message is an internal detail and
+    has changed across authlib releases. We deliberately do **not**
+    string-match on it: any ``ValueError`` from ``_decode_with_jwks``
+    triggers a single, bounded refresh-and-retry. Other decoding errors
+    (signature, claims, structure) fail fast as 401 ``invalid_token``.
+
+    The retry budget is exactly one — a second ``ValueError`` after the
+    forced JWKS refresh is treated as a hard 401, preventing an
+    infinite-refresh loop on a token whose ``kid`` truly does not exist.
     """
     try:
         jwks = await _fetch_jwks()
@@ -289,9 +297,11 @@ async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
 
     try:
         return _decode_with_jwks(token, jwks, settings)
-    except ValueError as exc:
-        if "Key not found" not in str(exc):
-            raise _http_401("invalid_token") from exc
+    except ValueError:
+        # Treat *any* ValueError as a kid-miss signal — the message
+        # ("Key not found") is authlib-internal and not part of any
+        # stable contract. Fall through to refresh-and-retry.
+        pass
     except _AUTHLIB_DECODE_ERRORS as exc:
         raise _http_401("invalid_token") from exc
 
@@ -308,7 +318,16 @@ async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
 
 
 def _operator_from_claims(claims: Any, raw_jwt: str) -> Operator:
-    """Project the validated claims into the public :class:`Operator` shape."""
+    """Project the validated claims into the public :class:`Operator` shape.
+
+    A signature-valid JWT can still carry malformed claim values — most
+    notably an ``email`` that fails the ``EmailStr`` validator on
+    :class:`Operator`. Pydantic raises ``ValidationError`` in that case;
+    the security contract is that *every* failure to materialise a
+    trusted operator from a token surfaces as 401 ``invalid_token``,
+    never an unhandled 500. The try/except converts the validation
+    failure into the same 401 the rest of the dependency emits.
+    """
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
         # ``sub`` is mandated by OIDC core §2; a token without it is
@@ -316,12 +335,15 @@ def _operator_from_claims(claims: Any, raw_jwt: str) -> Operator:
         raise _http_401("invalid_token")
     name = claims.get("name")
     email = claims.get("email")
-    return Operator(
-        sub=sub,
-        name=name if isinstance(name, str) else None,
-        email=email if isinstance(email, str) else None,
-        raw_jwt=raw_jwt,
-    )
+    try:
+        return Operator(
+            sub=sub,
+            name=name if isinstance(name, str) else None,
+            email=email if isinstance(email, str) else None,
+            raw_jwt=raw_jwt,
+        )
+    except pydantic.ValidationError as exc:
+        raise _http_401("invalid_token") from exc
 
 
 async def verify_jwt(authorization: str | None = Header(default=None)) -> Operator:

@@ -486,3 +486,110 @@ def test_readiness_probe_fails_when_jwks_malformed() -> None:
 
     assert result.ok is False
     assert result.detail == "jwks_malformed"
+
+
+# ---------------------------------------------------------------------------
+# Regression: malformed claims, secret-leak, contract-coupling
+# (B1 / B2 / M1 from PR #151 review iter-1)
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_email_claim_returns_401() -> None:
+    """B1 regression: a signature-valid JWT carrying a malformed ``email``
+    claim must reject as 401 ``invalid_token`` — never as a 500.
+
+    The Operator model uses pydantic's ``EmailStr`` validator; if the
+    Keycloak realm is misconfigured and emits ``"not-an-email"``,
+    pydantic raises ``ValidationError`` during ``Operator(...)``
+    construction. The dependency must catch that and return 401, not
+    propagate the exception as an unhandled 500.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-evil", email="not-an-email")
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "invalid_token"}
+
+
+def test_operator_repr_does_not_leak_raw_jwt() -> None:
+    """B2 regression: ``repr(Operator(...))`` must not contain the bearer
+    token string, and must not even mention ``raw_jwt`` as a field name.
+
+    structlog (wired in Task #24) calls ``repr()`` on bound non-primitive
+    values when emitting JSON; an unrestricted default repr would dump
+    every operator's full bearer token to stdout / log shippers. The
+    field is excluded via ``Field(repr=False)``.
+    """
+    fake_token = "header.payload.signature-very-secret"
+    op = Operator(
+        sub="op-1",
+        name="Alice",
+        email="alice@example.com",
+        raw_jwt=fake_token,
+    )
+
+    text = repr(op)
+    assert fake_token not in text, f"raw_jwt value leaked into repr: {text!r}"
+    assert "raw_jwt" not in text, f"raw_jwt field name leaked into repr: {text!r}"
+    # The field is still populated and accessible by name — we only
+    # sanitised the default representation.
+    assert op.raw_jwt == fake_token
+
+
+def test_value_error_key_not_found_triggers_jwks_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M1 regression: any ``ValueError`` from the JWKS-decode helper
+    triggers a single refresh-and-retry — independent of the message
+    string.
+
+    The kid-rotation contract used to depend on string-matching
+    authlib's ``"Key not found"`` ValueError; an authlib version bump
+    could silently change that message and break rotation. The fix
+    drops the string match. To prove the new contract, we monkey-patch
+    ``_decode_with_jwks`` to raise a ``ValueError`` with an *unrelated*
+    message on the first call and to delegate to the real implementation
+    on the second — and assert (a) the JWKS endpoint was hit twice
+    (initial + forced refresh) and (b) the verify ultimately succeeds.
+    """
+    from meho_backplane.auth import jwt as jwt_module
+
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(key)
+
+    real_decode = jwt_module._decode_with_jwks
+    call_count = {"n": 0}
+
+    def fake_decode(tok: str, ks: dict[str, Any], settings: Any) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Message intentionally unrelated to "Key not found" — the
+            # fix must refresh on *any* ValueError.
+            raise ValueError("some opaque authlib internal message")
+        return real_decode(tok, ks, settings)
+
+    monkeypatch.setattr(jwt_module, "_decode_with_jwks", fake_decode)
+
+    with respx.mock as mock_router:
+        discovery_route, jwks_route = _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    # Initial decode raised ValueError -> forced refresh -> retry succeeds.
+    assert call_count["n"] == 2
+    # The forced refresh re-hits both discovery and JWKS.
+    assert discovery_route.call_count == 2
+    assert jwks_route.call_count == 2

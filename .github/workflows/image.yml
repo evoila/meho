@@ -64,6 +64,16 @@ concurrency:
 jobs:
   build:
     name: Build (and conditionally push) backplane image
+    # Fork-PR guard: never execute arbitrary Dockerfile code from a fork on the
+    # self-hosted runner pool. `docker/build-push-action` runs the Dockerfile,
+    # which on a self-hosted runner is the canonical fork-PR compromise vector
+    # (GitHub Actions hardening guide, "Hardening for self-hosted runners").
+    #   - push events (main, v*) -> github.event_name != 'pull_request' -> run.
+    #   - same-repo PRs (internal branches) -> head.repo.full_name == github.repository -> run.
+    #   - fork PRs -> head.repo.full_name != github.repository -> skip entirely.
+    # The OR short-circuits on push events, so the missing pull_request context
+    # on push is irrelevant. Job-level (not step-level) so no step ever starts.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, meho-runners]
     timeout-minutes: 45  # arm64 emulation under QEMU is 3-5x slower than native
     steps:

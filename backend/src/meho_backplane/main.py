@@ -13,6 +13,9 @@ Gunicorn / k8s probes. v0.1 ships:
 * Observability primitives — structured JSON logs to stdout, the
   request-context middleware, and the Prometheus ``/metrics``
   endpoint (Task #20).
+* The authenticated federation-proof endpoint at ``/api/v1/health``
+  (Task #24), which exercises the entire JWT → Vault chain on every
+  call and is what the CLI's ``meho status`` (G2.6-T3) hits.
 """
 
 from collections.abc import AsyncIterator
@@ -22,6 +25,7 @@ from typing import Final
 from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
+from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.auth.jwt import keycloak_readiness_probe
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.health import register_probe
@@ -77,6 +81,7 @@ app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health_router)
 app.include_router(version_router)
+app.include_router(api_v1_health_router)
 
 
 @app.get("/")

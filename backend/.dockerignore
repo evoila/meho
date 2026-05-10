@@ -19,6 +19,28 @@ __pycache__/
 # Tests are not shipped in the runtime image.
 tests/
 
+# Repo-root entries when the build is invoked from above `backend/`. The
+# default context is `backend/` (so these are no-ops), but listing them
+# is defence in depth for the rare CI invocation that uses the repo root
+# as context. Leaking `.git/` into a build context exposes commit history
+# (and any historical secrets) to the image layers and to anyone who can
+# pull the published image.
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Documentation. README.md is required by hatchling at wheel-build time
+# (see note further down), so it is whitelisted back in below.
+*.md
+!README.md
+
+# Docker-related files (not needed inside the image).
+Dockerfile*
+.dockerignore
+docker-compose*.yml
+docker-compose*.yaml
+
 # Editor / OS noise.
 .idea/
 .vscode/

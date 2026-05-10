@@ -58,8 +58,62 @@ docker rm -f meho-backplane
 The image runs as **uid 1001** in the root group (gid 0) so the
 runtime filesystem can stay read-only when the orchestrator sets
 `readOnlyRootFilesystem: true` (configured in the Helm chart in
-G2.5). The base image is `python:3.12-slim`; the runtime stage
-contains only the locked virtualenv, no build tools.
+G2.5). The base image is `python:3.12-slim` pinned by manifest-list
+digest (see `Dockerfile` — `ARG PYTHON_BASE_DIGEST`); the runtime
+stage contains only the locked virtualenv, no build tools.
+
+## Multi-arch build (linux/amd64 + linux/arm64)
+
+The image is published for both `linux/amd64` (Hetzner deploy target)
+and `linux/arm64` (Apple Silicon developer machines). Building the
+manifest list locally requires `docker buildx` with QEMU registered
+for the non-native architecture.
+
+```bash
+cd backend/
+
+# One-time: register QEMU for cross-arch emulation on an amd64 host
+# (and create a dedicated builder so the default builder stays
+# untouched).
+docker run --privileged --rm tonistiigi/binfmt --install all
+docker buildx create --use --name meho-builder
+
+# Build both architectures into a manifest list. `--load` only works
+# with a single platform — to inspect both archs locally, push to a
+# local registry or omit `--load` and use `buildx imagetools` after
+# pushing to a registry.
+docker buildx build \
+  --platform=linux/amd64,linux/arm64 \
+  --build-arg GIT_SHA=$(git rev-parse HEAD) \
+  --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t meho-backplane:multiarch-test \
+  --output=type=image,push=false \
+  .
+
+# Inspect the manifest list (after pushing to a registry — buildx
+# does not write multi-arch manifests to the local docker daemon).
+docker buildx imagetools inspect meho-backplane:multiarch-test
+
+# Per-arch single-platform builds (loadable into the local daemon):
+docker buildx build --platform=linux/amd64 --load -t meho-backplane:amd64 .
+docker buildx build --platform=linux/arm64 --load -t meho-backplane:arm64 .
+
+# Smoke-test the resulting image — `platform.machine()` is the arch
+# Python sees, which matches the build platform.
+docker run --rm --platform=linux/amd64 meho-backplane:amd64 \
+  python -c "import platform; print(platform.machine())"     # → x86_64
+docker run --rm --platform=linux/arm64 meho-backplane:arm64 \
+  python -c "import platform; print(platform.machine())"     # → aarch64
+```
+
+**Expect arm64 builds on an amd64 host to take 3–5× longer than the
+native amd64 build** — QEMU user-mode emulation translates every
+guest instruction, and `uv`'s wheel-install step is heavy on
+compiled extensions (`asyncpg`, `cryptography`, `pydantic-core`).
+The CI pipeline (G2.4-T2) runs both architectures in parallel jobs
+so wall-clock time is bounded by the slower job, not the sum.
+`docs/codebase/backend.md` records the cost detail and the refresh
+policy for `PYTHON_BASE_DIGEST`.
 
 ## What this skeleton intentionally omits
 

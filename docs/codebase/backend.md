@@ -334,6 +334,102 @@ Pinned-floor declarations; exact versions resolved into `uv.lock`.
 | (dev) `ruff` ≥ 0.5 | | Lint + format. |
 | (dev) `mypy` ≥ 1.10 | | Strict type checking. |
 
+## Container image (multi-arch build)
+
+The backplane ships as a multi-stage Docker image at `backend/Dockerfile`,
+built for `linux/amd64` (Hetzner deploy target) and `linux/arm64`
+(Apple Silicon developer machines, GitHub Actions arm64 runners).
+
+### Base image digest pin (Task #32)
+
+`ARG PYTHON_BASE_DIGEST` near the top of the Dockerfile pins the base
+image to a specific OCI manifest-list digest, not the floating
+`python:3.12-slim` tag. The digest references the manifest list, not a
+per-arch image — buildx resolves it to the correct `linux/amd64` or
+`linux/arm64` child at build time, so one pin covers both architectures.
+
+| Field | Value |
+| --- | --- |
+| Base | `docker.io/library/python:3.12-slim` |
+| Pinned digest | `sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe` |
+| Pinned on | 2026-05-10 |
+| Verify | `docker manifest inspect python:3.12-slim` or the [Docker Hub `tags` API](https://hub.docker.com/v2/repositories/library/python/tags/3.12-slim) |
+
+The uv installer image (`ghcr.io/astral-sh/uv`) is also digest-pinned
+at `0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7`
+in the same file. The two pins move together when the toolchain
+upgrades.
+
+**Refresh policy.** Every digest bump lands in a dedicated PR titled
+`chore(backend): bump python:3.12-slim base digest to <new>`. Open a
+new PR rather than batching the digest bump into an unrelated change
+— the supply-chain audit trail (G2.4-T3 cosign + G2.4-T4 SBOM) reads
+this PR as the provenance event for the upgrade. The same rule
+applies to the uv digest.
+
+### arm64 cross-compile cost (Task #32)
+
+The Dockerfile does *not* split the builder stage onto
+`--platform=$BUILDPLATFORM` (the cross-compile pattern from the Docker
+multi-platform guide). Buildx runs the full Dockerfile once per target
+platform; for the non-native architecture this means QEMU user-mode
+emulation translates every guest instruction.
+
+**Expect arm64 builds on an amd64 host to take 3–5× longer than the
+native amd64 build.** The dominant cost is `uv sync --no-editable`
+invoking the wheel installer for compiled extensions:
+
+- `asyncpg` — C extension, native build under QEMU
+- `cryptography` — Rust + C extensions, slowest single dep
+- `pydantic-core` — Rust extension
+- `greenlet` — C extension
+
+Cross-compile via `--platform=$BUILDPLATFORM` was considered and
+rejected: it works cleanly for pure-Python projects but breaks here
+because the builder would be installing wheels for the wrong arch
+(or recompiling Rust crates without a cross toolchain configured).
+The CI pipeline (G2.4-T2) runs amd64 and arm64 in parallel jobs so
+wall-clock time is bounded by the slower job, not the sum; the
+self-hosted `meho-runners` pool (introduced in PR #160) can provision
+arm64 nodes natively when the team is ready to skip QEMU entirely
+for the arm64 leg.
+
+### .dockerignore discipline
+
+`backend/.dockerignore` excludes:
+
+- `tests/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`,
+  `.ruff_cache/` — never shipped in the runtime image
+- `.git/`, `.github/` — defence in depth against build contexts
+  rooted above `backend/`
+- `*.md` (whitelist-exempt: `README.md` for hatchling
+  `[project].readme`)
+- `Dockerfile*`, `.dockerignore`, `docker-compose*.yml` — never
+  needed inside the image
+- `.env*`, `*.pem`, `*.key`, `*.crt` — secret-shaped paths,
+  whitelist-exempt: `.env.example`
+
+`README.md` is intentionally **not** excluded — hatchling errors at
+wheel-build time with `OSError: Readme file does not exist:
+README.md` when `[project].readme` is set and the file is absent.
+
+### OCI image labels
+
+The runtime stage stamps the published image with OCI annotations
+(see [image-spec annotations](https://github.com/opencontainers/image-spec/blob/main/annotations.md)):
+
+- `org.opencontainers.image.source=https://github.com/evoila/meho`
+- `org.opencontainers.image.licenses=Apache-2.0`
+- `org.opencontainers.image.title=meho-backplane`
+- `org.opencontainers.image.description=…`
+- `org.opencontainers.image.revision=${GIT_SHA}` (filled by CI via
+  `--build-arg GIT_SHA=$(git rev-parse HEAD)`)
+- `org.opencontainers.image.created=${BUILD_DATE}` (RFC 3339 UTC)
+- `org.opencontainers.image.vendor=evoila`
+
+`revision` and `created` flow into `GET /version` via the same build
+args, so the registry view and the running app agree on identity.
+
 ## Known issues
 
 `/ready` returns 503 until every registered probe passes. After Task
@@ -396,6 +492,9 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #27 — PG connection pool + Alembic wiring + DB-migration-state readiness probe
 - Task #28 — Audit table schema + synchronous audit-write middleware
 - Task #29 — Migration runner entrypoint + CI guard rejecting destructive migration patterns
+- Task #32 — Multi-stage Dockerfile finalized + multi-arch buildx (linux/amd64 + linux/arm64); base image digest-pinned
+- [OCI image-spec annotations](https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+- [Docker buildx multi-platform builds](https://docs.docker.com/build/building/multi-platform/)
 - [SQLAlchemy 2.x async overview](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
 - [SQLAlchemy 2.x pool / pre-ping disconnect handling](https://docs.sqlalchemy.org/en/20/core/pooling.html#disconnect-handling-pessimistic)
 - [Alembic async migrations cookbook](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic)

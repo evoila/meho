@@ -8,18 +8,21 @@ license = "Apache-2.0"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.30",
-    "pydantic>=2.6",
+    "pydantic[email]>=2.6",
     "structlog>=24.1",
     "prometheus-client>=0.20",
+    "authlib>=1.3",
+    "httpx>=0.27",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "httpx>=0.27",
     "ruff>=0.5",
     "mypy>=1.10",
+    "cryptography>=42.0",
+    "respx>=0.21",
 ]
 
 [build-system]
@@ -52,11 +55,44 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]  # asserts allowed in tests
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's standard dependency-injection pattern relies on calling
+# Depends() / Header() / Query() / Path() / Body() / File() / Form() /
+# Security() in argument defaults. B008 would flag every one of those;
+# whitelisting them here keeps the rule strict for genuine
+# accidental-call defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Header",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
+]
+
 [tool.mypy]
 strict = true
 python_version = "3.12"
 files = ["src"]
 
+# authlib publishes no type stubs (the maintainer migrated typing
+# attention to ``joserfc``). Whitelist its module tree rather than
+# disabling missing-imports globally — strict mode stays in effect for
+# every other dependency.
+[[tool.mypy.overrides]]
+module = ["authlib.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Note: ``authlib.deprecate`` calls ``warnings.simplefilter("always",
+# AuthlibDeprecationWarning)`` at import time, so the
+# ``AuthlibDeprecationWarning("authlib.jose module is deprecated...")``
+# raised on first import shows in the pytest summary even when the
+# import is wrapped in ``warnings.catch_warnings()``. The single
+# warning is intentional — it's the only signal the test run carries
+# of the v0.2 ``joserfc`` migration backlog item, and silencing it
+# would risk obscuring future authlib deprecations.

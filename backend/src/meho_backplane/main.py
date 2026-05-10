@@ -22,6 +22,8 @@ from typing import Final
 from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
+from meho_backplane.auth.jwt import keycloak_readiness_probe
+from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
 from meho_backplane.metrics import render_metrics
@@ -36,13 +38,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
 
     Configures structlog at startup so every log line emitted from this
-    point onwards (including the very first request) is JSON-formatted.
+    point onwards (including the very first request) is JSON-formatted,
+    and registers the Keycloak readiness probe with the registry so
+    ``/ready`` reflects whether the JWKS endpoint is reachable.
+
     There is nothing to tear down at shutdown yet; the ``yield`` /
     ``return`` shape is preserved so future Initiatives (G2.2 Vault
     client teardown, G2.3 SQLAlchemy engine ``dispose()``) can plug in
     without restructuring the function.
     """
     configure_logging()
+    register_probe("keycloak", keycloak_readiness_probe)
     yield
 
 

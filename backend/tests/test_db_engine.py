@@ -190,16 +190,15 @@ def test_alembic_upgrade_head_against_sqlite_creates_version_table(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``alembic upgrade head`` against a fresh SQLite DB creates the version table.
+    """``alembic upgrade head`` against a fresh SQLite DB stamps T28's revision.
 
-    Asserts AC #2 of Task #27: a ``DATABASE_URL`` plus the on-disk
-    Alembic config is enough to drive the async ``env.py`` end-to-end
-    and Alembic creates its bookkeeping table on the first contact.
-    The chassis ships with an empty ``versions/`` directory so the
-    head is ``None`` and no revision is stamped, but the
-    ``alembic_version`` table is still materialised (with no rows).
-    T28's first migration adds a row; T29's migration runner asserts
-    the row matches head before letting the backplane process traffic.
+    Asserts AC #2 of Task #27 (the env.py async path is end-to-end
+    drivable from a ``DATABASE_URL`` plus the on-disk Alembic config)
+    extended for Task #28 (the first migration is now the audit-log
+    table, revision ``0001``). The migration runs cleanly on SQLite
+    because ``0001_create_audit_log.py`` branches on
+    ``op.get_bind().dialect.name`` and skips the PG-specific
+    ``gen_random_uuid()`` / ``now()`` server defaults.
 
     The test is **synchronous** because ``alembic.command.upgrade``
     drives :func:`asyncio.run` itself (via the env.py
@@ -218,16 +217,21 @@ def test_alembic_upgrade_head_against_sqlite_creates_version_table(
     command.upgrade(cfg, "head")
 
     head = ScriptDirectory.from_config(cfg).get_current_head()
-    assert head is None  # empty versions/ dir at the chassis stage.
+    assert head == "0001"  # T28's audit-log migration is now head.
 
-    # ``alembic_version`` is materialised on the first ``upgrade head``
-    # contact even when no revision is stamped. T28's first migration
-    # adds a row; this assertion documents the chassis-stage shape.
+    # The migration created both the ``alembic_version`` bookkeeping
+    # table and the ``audit_log`` table itself. Both indexes ship
+    # with the migration.
     sync_eng = sa_create_engine(sync_url)
     try:
         with sync_eng.connect() as conn:
-            tables = sa_inspect(conn).get_table_names()
+            inspector = sa_inspect(conn)
+            tables = inspector.get_table_names()
             assert "alembic_version" in tables
+            assert "audit_log" in tables
+            index_names = {idx["name"] for idx in inspector.get_indexes("audit_log")}
+            assert "audit_log_occurred_at_idx" in index_names
+            assert "audit_log_operator_sub_idx" in index_names
     finally:
         sync_eng.dispose()
 

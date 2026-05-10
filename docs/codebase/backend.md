@@ -93,11 +93,12 @@ this stage it exposes:
   inner `do_run_migrations` invoked through `run_sync`. The URL is
   not pinned in `alembic.ini`; `env.py` resolves it from the same
   `DATABASE_URL` env var the running backplane reads, so the
-  migration runner and the request hot path can never drift. The
-  `versions/` directory ships empty in T27 — T28 lands the first
-  migration (the audit log table). `alembic.ini` and the `alembic/`
-  tree are also shipped as package data under `meho_backplane/` (via
-  the `[tool.hatch.build.targets.wheel.force-include]` table in
+  migration runner and the request hot path can never drift. T28
+  populates `target_metadata` with `meho_backplane.db.models.Base`
+  so `alembic revision --autogenerate` diffs the model graph
+  against the live schema. `alembic.ini` and the `alembic/` tree are
+  also shipped as package data under `meho_backplane/` (via the
+  `[tool.hatch.build.targets.wheel.force-include]` table in
   `backend/pyproject.toml`) so installed-wheel deployments resolve
   them via `importlib.resources.files('meho_backplane')` rather than
   needing the source tree on disk. The `find_alembic_ini` resolver
@@ -106,6 +107,49 @@ this stage it exposes:
   layout), the current working directory (matches the `alembic` CLI's
   rule), and the source-tree layout (`__file__.parents[3]` for the
   editable-install dev case).
+* Audit-log persistence (Task #28) — `backend/alembic/versions/0001_create_audit_log.py`
+  is the first revision on the schema, creating the `audit_log` table
+  plus two b-tree indexes (`audit_log_occurred_at_idx`,
+  `audit_log_operator_sub_idx`). The migration is dialect-aware: PG
+  gets `gen_random_uuid()` / `now()` / `'{}'::jsonb` server defaults;
+  SQLite (the dev/test driver via aiosqlite) skips them and lets the
+  ORM Python-side defaults fire. Column types use SQLAlchemy's
+  portable `Uuid` and `JSON().with_variant(JSONB(), "postgresql")`
+  so the same migration runs cleanly on both dialects without
+  branching the column shape itself. The
+  `meho_backplane.db.models.AuditLog` ORM model carries the same
+  field set with `Mapped[...]` typed-mapped annotations.
+* Audit middleware (Task #28) — `backend/src/meho_backplane/audit.py`
+  defines the **pure-ASGI** `AuditMiddleware` that writes one row to
+  `audit_log` per authenticated request **before** the response yields
+  back to the ASGI send chain. Pure-ASGI is required (not
+  `starlette.middleware.base.BaseHTTPMiddleware`): `BaseHTTPMiddleware`
+  runs the wrapped app inside an `anyio.create_task_group` /
+  `task_group.start_soon` pair, which means contextvars set inside
+  the handler — including the `operator_sub` bound by
+  `verify_jwt_and_bind` — disappear from the dispatch task after
+  `await call_next(...)`. Empirically verified against starlette
+  1.0.0; the pure-ASGI shape preserves the binding intact. The
+  middleware buffers the inner app's `http.response.start` /
+  `http.response.body` send messages until the audit insert
+  completes; on success it forwards them verbatim, on failure it
+  discards them and emits a fresh 500
+  `{"detail": "audit_write_failed"}` (fail-closed contract — an
+  unaudited action is an unallowed action). Skip rules: requests
+  without `operator_sub` in contextvars (public surfaces, 401 paths,
+  any unauthenticated request) bypass the audit write entirely.
+* Middleware stack ordering (Task #28) — registration order in
+  `main.py` is now load-bearing for both context propagation **and**
+  audit semantics. ASGI: `client → RequestContextMiddleware →
+  AuditMiddleware → router → handler`. Achieved with two
+  `app.add_middleware` calls: `AuditMiddleware` first (becomes
+  innermost), `RequestContextMiddleware` second (becomes outermost,
+  per `add_middleware`'s last-added-is-outermost rule). The order
+  ensures `request_id` is bound before audit reads it on entry, and
+  `operator_sub` is bound by the handler before audit reads it on
+  exit — and that the fail-closed 500 still carries
+  `RequestContextMiddleware`'s `X-Request-Id` response header so the
+  operator has a correlation crumb on the failure path.
 
 Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
@@ -140,6 +184,9 @@ PYTHONPATH-leak imports.
 | `Settings` / `get_settings` | `src/meho_backplane/settings.py` | Pydantic v2 model + `lru_cache`-singleton accessor for the Keycloak knobs (`KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_JWKS_CACHE_TTL_SECONDS`, `KEYCLOAK_JWT_LEEWAY_SECONDS`), the Vault knobs (`VAULT_ADDR`, `VAULT_OIDC_ROLE`, `VAULT_OIDC_MOUNT_PATH`, `VAULT_NAMESPACE`, `VAULT_TIMEOUT_SECONDS`), and the database knobs (`DATABASE_URL`, `DATABASE_POOL_SIZE`, `DATABASE_POOL_TIMEOUT`). `DATABASE_URL` is required and validated by a Pydantic `@field_validator` that rejects sync DSNs (`postgresql://`, `sqlite:///`, `postgresql+psycopg2://`) — only `postgresql+asyncpg://` and `sqlite+aiosqlite://` are accepted, matching ADR 0004's async-only mandate. Tests reset via `get_settings.cache_clear()`. |
 | `create_engine_for_url` / `get_engine` / `get_sessionmaker` / `get_session` / `dispose_engine` | `src/meho_backplane/db/engine.py` | SQLAlchemy 2.x async engine + per-request session factory (Task #27). `get_engine` is lazy + cached; `get_session` is the FastAPI `Depends` that yields a transaction-bracketed `AsyncSession`. SQLite URLs (dev / aiosqlite) prune the `pool_size` / `pool_timeout` kwargs because StaticPool rejects them; Postgres URLs (asyncpg) keep them. `dispose_engine` is awaited from the lifespan shutdown so asyncpg's pool releases its connections cleanly. |
 | `db_migration_probe` / `alembic_config` / `find_alembic_ini` | `src/meho_backplane/db/migrations.py` | Async readiness probe + Alembic config helpers (Task #27). The probe compares `MigrationContext.configure(conn).get_current_revision()` against `ScriptDirectory.from_config(cfg).get_current_head()` over an `AsyncEngine.connect()`/`run_sync` pair; every failure mode collapses onto `ProbeResult(ok=False)` with a redacted `detail` (no operator-controllable URL substrings). |
+| `Base` / `AuditLog` | `src/meho_backplane/db/models.py` | SQLAlchemy 2.x `DeclarativeBase` plus the v0.1 `AuditLog` model (Task #28). Columns use portable `Uuid` and `JSON().with_variant(JSONB(), "postgresql")` types so the model and migration run cleanly on both PG (production) and SQLite (dev/test). Indexes on `occurred_at` and `operator_sub` are declared in `__table_args__`. |
+| `AuditMiddleware` | `src/meho_backplane/audit.py` | Pure-ASGI middleware (Task #28). For every authenticated request (`operator_sub` present in contextvars) writes one `audit_log` row synchronously before yielding the response back to the send chain. Buffers `http.response.start`/`http.response.body` messages so the fail-closed path can replace them with a 500 `{"detail": "audit_write_failed"}` when the audit insert raises. Skips public surfaces and 401 paths by keying on the contextvar's presence rather than path-matching. |
+| `0001_create_audit_log` | `backend/alembic/versions/0001_create_audit_log.py` | First migration on the schema (Task #28). Creates the `audit_log` table plus `audit_log_occurred_at_idx` and `audit_log_operator_sub_idx`. PG gets `gen_random_uuid()` / `now()` / `'{}'::jsonb` server defaults; SQLite branches skip them and rely on the ORM Python-side defaults. Downgrade drops the table — the only revertible operation here because no production data exists yet; subsequent migrations land under the additive-only discipline enforced by Task #29's CI guard. |
 | `backend/alembic.ini` + `backend/alembic/env.py` + `backend/alembic/script.py.mako` | repo paths | Alembic configuration (Task #27). `env.py` follows the upstream async cookbook: `async_engine_from_config` + `connection.run_sync(do_run_migrations)`. URL is sourced from `DATABASE_URL` so the migration runner and the running backplane share one knob. `versions/` ships empty; first migration lands in T28. |
 | `Operator` | `src/meho_backplane/auth/operator.py` | Frozen pydantic v2 model carrying validated claims (`sub`, `name`, `email`, `raw_jwt`). Returned by `verify_jwt`; consumed by every authenticated route from G2.2-T3 onward. `raw_jwt` is preserved verbatim for G2.2-T2's Vault forward-auth. |
 | `verify_jwt` | `src/meho_backplane/auth/jwt.py` | FastAPI dependency: parses `Authorization: Bearer ...`, fetches/caches Keycloak's JWKS, validates signature + `iss` + `aud` + `exp` (with leeway), refreshes JWKS on a kid miss, and returns an `Operator`. Every failure mode collapses to a terse 401. |
@@ -240,11 +287,12 @@ Pinned-floor declarations; exact versions resolved into `uv.lock`.
 DB-migration-state probe. A running app needs Keycloak's JWKS endpoint
 reachable, Vault's `/sys/health` reachable + unsealed, **and** the
 PostgreSQL database reachable with an `alembic_version` row matching
-the on-disk Alembic head. The empty `versions/` directory in T27 means
-the probe reports `ok=False` with `no_migrations: …` until T28's first
-migration lands; that is the intended fail-closed default. Helm charts
-pointing their kubernetes readiness probe at `/ready` before all three
-dependencies are provisioned will see pods stay `NotReady` — by design.
+the on-disk Alembic head. T28 lands the first migration (`0001`); a
+deployment that has not yet run `alembic upgrade head` will see the
+probe report `ok=False` with `current=None head=0001` until the
+migration runner (T29) catches up. Helm charts pointing their
+kubernetes readiness probe at `/ready` before all three dependencies
+are provisioned will see pods stay `NotReady` — by design.
 
 Vault hvac calls are synchronous (the library is built on `requests`)
 but the backplane is async-first. Every hvac call from
@@ -292,6 +340,7 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #24 — Federation-proof `/api/v1/health` + operator-identity propagation
 - Task #25 — Federation-chain failure-mode test suite + always-on secret-leak sweep
 - Task #27 — PG connection pool + Alembic wiring + DB-migration-state readiness probe
+- Task #28 — Audit table schema + synchronous audit-write middleware
 - [SQLAlchemy 2.x async overview](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html)
 - [SQLAlchemy 2.x pool / pre-ping disconnect handling](https://docs.sqlalchemy.org/en/20/core/pooling.html#disconnect-handling-pessimistic)
 - [Alembic async migrations cookbook](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic)

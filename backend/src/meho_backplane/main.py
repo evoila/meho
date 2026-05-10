@@ -16,6 +16,10 @@ Gunicorn / k8s probes. v0.1 ships:
 * The authenticated federation-proof endpoint at ``/api/v1/health``
   (Task #24), which exercises the entire JWT → Vault chain on every
   call and is what the CLI's ``meho status`` (G2.6-T3) hits.
+* The synchronous audit-write middleware (Task #28), which writes
+  one row to ``audit_log`` per authenticated request *before* the
+  response yields back to the ASGI send chain. Fail-closed on
+  insert error: an unaudited request is converted to HTTP 500.
 """
 
 from collections.abc import AsyncIterator
@@ -26,6 +30,7 @@ from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
 from meho_backplane.api.v1.health import router as api_v1_health_router
+from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.db.engine import dispose_engine, get_engine
@@ -91,13 +96,28 @@ app: FastAPI = FastAPI(
 
 # Middleware registration order matters for ASGI: ``add_middleware``
 # wraps the existing app, so the *last* middleware added becomes the
-# outermost layer. RequestContextMiddleware is the only middleware in
-# v0.1, so the order is trivial; subsequent Initiatives (G2.2 JWT
-# validation, G2.3 audit) must register *after* the request-context
-# middleware so their log calls inherit ``request_id``. Middleware is
+# outermost layer (its ``__call__`` runs first on the request side and
+# last on the response side). The required runtime order for v0.1 is:
+#
+#   client → RequestContextMiddleware → AuditMiddleware → router → handler
+#
+# - ``RequestContextMiddleware`` outermost so ``request_id`` is bound
+#   before any inner middleware reads it; the
+#   :func:`~meho_backplane.middleware.verify_jwt_and_bind` dependency
+#   binds ``operator_sub`` deeper still, inside the handler invocation.
+# - ``AuditMiddleware`` directly inside it so the audit row sees both
+#   contextvars on the response side, and so its fail-closed 500
+#   replacement still passes through ``RequestContextMiddleware``'s
+#   header injection (the operator gets ``X-Request-Id`` even on the
+#   audit-failure path).
+#
+# To achieve that with ``add_middleware``'s last-added-is-outermost
+# rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
+# then ``RequestContextMiddleware`` (becomes outermost). Middleware is
 # registered before routers so every endpoint (including the Task #19
 # health/version/ready surfaces and the Task #20 ``/metrics`` route)
 # inherits the request-id binding and the http_requests_total counter.
+app.add_middleware(AuditMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health_router)

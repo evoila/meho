@@ -326,9 +326,9 @@ def test_valid_jwt_vault_unreachable_returns_200_with_structured_detail(
     assert body["vault"]["read_ok"] is False
     assert body["vault"]["detail"] == "login_failed: VaultUnreachableError"
     # ``db.migrated`` reflects the T27 DB-migration-state probe verdict;
-    # the autouse default DATABASE_URL has no migrations applied so the
-    # probe returns False until T28 lands the first revision.
-    assert body["db"]["migrated"] is False
+    # post-T28, the autouse default DATABASE_URL has the audit-log
+    # migration applied at fixture setup, so the probe reports healthy.
+    assert body["db"]["migrated"] is True
 
 
 def test_valid_jwt_vault_role_denied_returns_200_with_role_denied_detail(

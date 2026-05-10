@@ -30,6 +30,47 @@ the release.)
 For the backplane (Python / FastAPI) skeleton — `uv` and Docker
 recipes for running it locally — see [`backend/README.md`](./backend/README.md).
 
+## Container image
+
+The backplane is published to GitHub Container Registry as a multi-arch
+manifest (`linux/amd64` + `linux/arm64`):
+
+```bash
+# Pin to an immutable commit-sha tag (recommended for deploys):
+docker pull ghcr.io/evoila/meho:sha-<40-char-git-sha>
+
+# Latest tip of main (moving target — use for development only):
+docker pull ghcr.io/evoila/meho:main
+
+# Tagged release:
+docker pull ghcr.io/evoila/meho:v0.1.0
+```
+
+**No `:latest` tag is ever published** — operators must pin to an
+immutable `:sha-<...>` or `:v<x.y.z>` reference (Goal #11 deploy
+discipline).
+
+### Maintainer one-time setup
+
+The first time `image.yml` pushes to `ghcr.io/evoila/meho`, GHCR creates
+the package as **private**. A maintainer must flip visibility to
+**public** once so anonymous `docker pull` works:
+
+```bash
+gh api --method PATCH /orgs/evoila/packages/container/meho \
+  -f visibility=public
+```
+
+Or via the UI: GitHub org `evoila` → Packages → `meho` → Package settings →
+Change visibility → **Public**.
+
+Verify:
+
+```bash
+gh api /orgs/evoila/packages/container/meho --jq '.visibility'   # -> "public"
+docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
+```
+
 ## Documentation
 
 (Placeholder — `docs.meho.ai` will land before v0.1.)

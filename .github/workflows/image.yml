@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Backplane container image build + publish pipeline.
+#
+# Locked tag scheme (Goal #11 — artefact-distribution principle):
+#   PR (branch -> main)   : build only, do NOT push (verifies Dockerfile + deps).
+#   push to main          : push :<git-sha> (immutable) + :main (moving target).
+#   push tag v*           : push :v<x.y.z> (alongside :<sha> + :main from main push).
+#
+# Goal #11 explicitly forbids :latest as a deploy target — operators MUST pin
+# to :<git-sha> (immutable) or :v<x.y.z> (semver, immutable). metadata-action
+# is configured to never emit a "latest" tag for that reason.
+#
+# Multi-arch (linux/amd64 + linux/arm64) is mandatory per Initiative #31 DoD;
+# the Dockerfile is digest-pinned and multi-arch ready (PR #163 / Task #32).
+# QEMU + buildx make cross-arch builds work on a single amd64 runner; arm64
+# layers are emulated (3-5x slower than native, accepted per Dockerfile
+# header comment).
+#
+# Auth uses GITHUB_TOKEN with packages:write — no PATs. The first time the
+# workflow pushes to ghcr.io/evoila/meho, the GHCR package is created
+# PRIVATE by default; a maintainer must flip visibility to public ONCE via
+#   gh api --method PATCH /orgs/evoila/packages/container/meho \
+#     -f visibility=public
+# (or via the GHCR UI). The workflow can't do this safely from CI — visibility
+# is org-scoped and changing it from a workflow would require a PAT with
+# org admin scope. README.md documents the one-time step.
+#
+# Forward-compatibility note (G2.4-T3 + G2.4-T4):
+#   - id-token: write is granted now so the cosign keyless signing step
+#     (Task #34, ADR 0006) can be appended without re-touching permissions.
+#   - provenance + sbom on build-push-action emit small inline OCI annotations
+#     into the manifest; the richer syft SBOM attestation lands in Task #35.
+
+name: image
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/image.yml'
+  push:
+    # No `paths:` filter here. Path filtering applies to BOTH branch and tag
+    # pushes when set, which would cause a v* tag annotating a docs-only
+    # commit on main to skip the image push. Releases must always publish;
+    # the cost of an occasional cache-hit-mostly build on a non-backend
+    # main commit is negligible.
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write    # push to ghcr.io/evoila/meho
+  id-token: write    # forward-compat: cosign keyless OIDC (Task #34)
+
+concurrency:
+  # On main/tag pushes: keep one in-flight build per ref so a fast follow-up
+  # commit cancels its predecessor. On PRs: scoped by PR ref the same way.
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (and conditionally push) backplane image
+    # Fork-PR guard: never execute arbitrary Dockerfile code from a fork on the
+    # self-hosted runner pool. `docker/build-push-action` runs the Dockerfile,
+    # which on a self-hosted runner is the canonical fork-PR compromise vector
+    # (GitHub Actions hardening guide, "Hardening for self-hosted runners").
+    #   - push events (main, v*) -> github.event_name != 'pull_request' -> run.
+    #   - same-repo PRs (internal branches) -> head.repo.full_name == github.repository -> run.
+    #   - fork PRs -> head.repo.full_name != github.repository -> skip entirely.
+    # The OR short-circuits on push events, so the missing pull_request context
+    # on push is irrelevant. Job-level (not step-level) so no step ever starts.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, meho-runners]
+    timeout-minutes: 45  # arm64 emulation under QEMU is 3-5x slower than native
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up QEMU (arm64 emulation for cross-build)
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a  # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+
+      - name: Log in to GHCR
+        # PRs build only; no login needed and no GHCR credential available
+        # to the workflow on PRs from forks anyway.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags + labels
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf  # v6.0.0
+        with:
+          images: ghcr.io/evoila/meho
+          # Tag matrix:
+          #   type=sha,format=long          -> :sha-<40char> (always emitted)
+          #   type=raw,value=main           -> :main         (main push only)
+          #   type=semver,pattern={{raw}}   -> :v<x.y.z>     (v* tag push only)
+          # NO type=raw,value=latest — Goal #11 forbids :latest as deploy target.
+          tags: |
+            type=sha,format=long
+            type=raw,value=main,enable={{is_default_branch}}
+            type=semver,pattern={{raw}}
+          # docker/metadata-action emits OCI annotation labels (source, revision,
+          # created, etc.) by default; build-push-action applies them as image
+          # labels so `docker inspect` shows provenance.
+          flavor: |
+            latest=false
+
+      - name: Build (and conditionally push) image
+        id: build
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
+        with:
+          context: backend
+          # Multi-arch invariant (Initiative #31 DoD): publish manifest list
+          # covering amd64 + arm64. Dockerfile is digest-pinned so the base
+          # image resolves per-arch automatically.
+          platforms: linux/amd64,linux/arm64
+          # PRs build only (verifies Dockerfile + dep resolution).
+          # Main pushes and v* tag pushes go live.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA-backed remote cache. The first build cold-fills it; subsequent
+          # builds reuse layers across branches.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Inline OCI provenance + SBOM annotations on the manifest. These
+          # are buildkit-native, cheap, and complement (do not replace) the
+          # cosign attestations landing in Task #35.
+          provenance: true
+          sbom: true
+
+      - name: Echo pushed digest
+        # Surfaces the immutable manifest-list digest in workflow logs.
+        # Task #34 (cosign keyless) signs by exactly this digest.
+        if: github.event_name != 'pull_request'
+        run: echo "Pushed digest=${{ steps.build.outputs.digest }}"

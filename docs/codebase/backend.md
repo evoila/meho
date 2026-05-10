@@ -32,9 +32,19 @@ this stage it exposes:
   yields an authenticated `hvac.Client`, and revokes the issued token
   on exit (Task #23). The Vault readiness probe registered in lifespan
   flips `/ready` red when `/sys/health` is unreachable, sealed, or
-  uninitialized. No protected route consuming Vault has landed yet;
-  G2.2-T3 wires this into `/api/v1/health` and reads the federation
-  proof secret.
+  uninitialized.
+* Federation-proof endpoint — `GET /api/v1/health` (auth-required) is
+  the load-bearing integration point where the entire JWT → Vault
+  chain runs on every call (Task #24). The route uses the
+  `verify_jwt_and_bind` dependency wrapper, which delegates to
+  `verify_jwt` and — on success — binds `operator_sub` into structlog
+  contextvars. The handler then forwards the validated JWT to Vault
+  via `vault_client_for_operator`, reads the test secret at
+  `secret/meho/test/federation` (KV v2), and returns a structured
+  JSON document with operator identity, Vault status, and a DB
+  migration placeholder (`db.migrated = null` until G2.3). All Vault
+  failure modes surface as structured fields on a 200 response — the
+  smoke test never sees a 5xx from this endpoint.
 
 Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
@@ -60,7 +70,8 @@ PYTHONPATH-leak imports.
 | `health.router` (`/healthz`, `/ready`) | `src/meho_backplane/health.py` | Liveness and readiness endpoints. `/healthz` is unconditional 200; `/ready` aggregates the probe registry and **fails closed on the empty default** (vacuous-truth trap explicitly guarded). |
 | `version.router` (`/version`) | `src/meho_backplane/version.py` | Build identity. Reads `GIT_SHA` and `BUILD_DATE` env vars (injected via `docker build --build-arg`); falls back to `"unknown"` when unset or empty. `chart_version` is `None` until G2.5. |
 | `configure_logging` | `src/meho_backplane/logging.py` | Configures structlog: `merge_contextvars` → `add_log_level` → `TimeStamper(iso, utc)` → `JSONRenderer`, writing to stdout. Idempotent. |
-| `RequestContextMiddleware` | `src/meho_backplane/middleware.py` | Pure-ASGI middleware. Per request: extracts/mints a `request_id`, binds into structlog contextvars, mirrors it onto the `X-Request-Id` response header, increments `http_requests_total{method,path,status}`, emits one `request_completed` JSON log line with method / path / status / duration_ms. |
+| `RequestContextMiddleware` | `src/meho_backplane/middleware.py` | Pure-ASGI middleware. Per request: extracts/mints a `request_id`, clears any leftover contextvars and binds the new `request_id`, mirrors it onto the `X-Request-Id` response header, increments `http_requests_total{method,path,status}`, emits one `request_completed` JSON log line with method / path / status / duration_ms (which inherits any contextvars bound during the request, including `operator_sub` from `verify_jwt_and_bind`). |
+| `verify_jwt_and_bind` | `src/meho_backplane/middleware.py` | FastAPI dependency wrapper around `verify_jwt`. On successful validation, binds `operator_sub` (the JWT's `sub` claim) into structlog contextvars so every subsequent log line in the request scope carries operator identity automatically. Authenticated routes use `Depends(verify_jwt_and_bind)` instead of `Depends(verify_jwt)` directly. Lives alongside the middleware because `RequestContextMiddleware`'s request-entry `clear_contextvars` call is what guarantees the bound key does not leak across requests reusing the same asyncio task. |
 | `SENSITIVE_HEADERS` | `src/meho_backplane/middleware.py` | `frozenset({b"authorization", b"cookie", b"x-api-key"})`. The middleware never logs the values of these headers; redaction is enforced by *not* logging request headers at all in v0.1, with a `tests/test_observability.py` regression test. |
 | `HTTP_REQUESTS_TOTAL` | `src/meho_backplane/metrics.py` | Module-level `prometheus_client.Counter` registered against the default registry. Labels: `method`, `path`, `status`. `path` is the matched FastAPI route template when available, bounding label cardinality. |
 | `render_metrics` | `src/meho_backplane/metrics.py` | Returns `(body, content_type)` for the `/metrics` route. Pins `text/plain; version=0.0.4; charset=utf-8` — the legacy Prometheus format every scraper accepts (`prometheus_client>=0.21` advertises 1.0.0 in `CONTENT_TYPE_LATEST`, but 0.0.4 stays universally compatible). |
@@ -72,6 +83,8 @@ PYTHONPATH-leak imports.
 | `vault_client_for_operator` | `src/meho_backplane/auth/vault.py` | Async context manager: builds an `hvac.Client` from settings, performs `client.auth.jwt.jwt_login(role, jwt, path)` against the configured mount path, yields the authenticated client, and revokes the issued token on exit (best-effort). Every blocking hvac call runs through `asyncio.to_thread` because hvac is `requests`-based and FastAPI does not auto-offload sync I/O inside `async def` callables. Per-request login by design (v0.1); v0.2 may add a per-operator cache. |
 | `vault_readiness_probe` | `src/meho_backplane/auth/vault.py` | Synchronous probe registered with the readiness registry at app lifespan startup. Calls `client.sys.read_health_status(method='GET')` (unauthenticated) and classifies the response — `sealed=False`/`http_429`/`http_472`/`http_473` → ok; `sealed`/`uninitialized`/connection-error → not ok. Detail strings never echo the Vault URL or namespace. |
 | `VaultClientError` / `VaultUnreachableError` / `VaultRoleDeniedError` | `src/meho_backplane/auth/vault.py` | Backplane-side exception hierarchy. Callers catch `VaultClientError` for a single error response shape, or one of the subclasses to map to specific HTTP statuses. The hierarchy lets consumers avoid importing `hvac` directly. |
+| `api/v1/health.router` (`/api/v1/health`) | `src/meho_backplane/api/v1/health.py` | Authenticated federation-proof endpoint (Task #24). `GET` handler runs through `Depends(verify_jwt_and_bind)`, calls `vault_client_for_operator(operator)`, reads `secret/meho/test/federation` (KV v2), and returns `HealthResponse` (operator identity + vault status + db status). Vault unreachable / role denied / read failure surface as structured fields on a 200 response — never 5xx. |
+| `HealthResponse` / `OperatorIdentity` / `VaultStatus` / `DbStatus` | `src/meho_backplane/api/v1/health.py` | Frozen pydantic v2 response models. `OperatorIdentity` deliberately excludes `raw_jwt` so the bearer token never appears in the response body. `DbStatus.migrated` is `None` until G2.3 wires Alembic. `VaultStatus.detail` carries only structured tokens (`version=N`, `read_failed: <ExcClass>`, `login_failed: <ExcClass>`) — no operator-controllable URL substrings. |
 
 ## Control flow
 
@@ -108,6 +121,14 @@ PYTHONPATH-leak imports.
    - `GET /metrics` → returns the default registry's exposition text
      directly. The middleware still wraps it, so `/metrics` requests
      show up in the counter (under `path="/metrics"`).
+   - `GET /api/v1/health` → resolves `Depends(verify_jwt_and_bind)`
+     (which runs `verify_jwt` and binds `operator_sub` into
+     contextvars on success), calls `vault_client_for_operator(op)`
+     to forward the JWT to Vault and obtain a per-operator client,
+     reads `secret/meho/test/federation`, and returns the
+     `HealthResponse` document. The middleware's eventual
+     `request_completed` log line inherits `operator_sub` because
+     the binding lives in the same request-scoped contextvar context.
 
 The FastAPI
 [lifespan](https://fastapi.tiangolo.com/advanced/events/) hook is the
@@ -194,6 +215,7 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #20 — observability primitives (`/metrics`, structlog, middleware)
 - Task #22 — Keycloak JWT validation + readiness probe
 - Task #23 — Vault OIDC forward-auth client + readiness probe
+- Task #24 — Federation-proof `/api/v1/health` + operator-identity propagation
 - [FastAPI tutorial](https://fastapi.tiangolo.com/tutorial/)
 - [FastAPI lifespan API](https://fastapi.tiangolo.com/advanced/events/)
 - [FastAPI dependencies (`Depends`)](https://fastapi.tiangolo.com/tutorial/dependencies/)

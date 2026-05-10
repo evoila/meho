@@ -1,7 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Request-context middleware (pure ASGI).
+"""Request-context middleware (pure ASGI) and operator-identity binding.
+
+Two concerns share this module: the request-scoped contextvar lifecycle
+that every authenticated route inherits, and the small dependency
+wrapper that binds operator identity into that same context after JWT
+validation succeeds. Co-locating them keeps the contextvar contract
+auditable in one file — the middleware sets up and tears down the
+``request_id`` / ``operator_sub`` slots; the wrapper populates the
+``operator_sub`` slot at the integration boundary where verify_jwt
+returns a trusted :class:`Operator`.
+
+Request-context middleware (:class:`RequestContextMiddleware`)
+==============================================================
 
 For every HTTP request the middleware:
 
@@ -38,6 +50,30 @@ per the Starlette 1.0+ docs (BaseHTTPMiddleware spawns an anyio task
 wrapper that interferes with streaming responses and complicates
 contextvar lifetimes). The pattern below is the canonical "wrap
 ``send`` to mutate the response start" recipe.
+
+Operator-identity binding (:func:`verify_jwt_and_bind`)
+=======================================================
+
+Authenticated routes declare ``Depends(verify_jwt_and_bind)`` instead
+of ``Depends(verify_jwt)`` directly. The wrapper delegates to
+:func:`~meho_backplane.auth.jwt.verify_jwt` for the actual security
+work (signature, claims, JWKS rotation) and — only on success — binds
+``operator_sub`` into structlog's contextvars. Every log line emitted
+*after* this point under the same request context (handler logs, the
+middleware's own ``request_completed`` line, future audit-middleware
+rows) automatically carries the operator's stable subject id.
+
+The binding lives in a dependency wrapper rather than the middleware
+itself because the middleware is pure ASGI and runs *before* FastAPI
+has resolved the request to a route — so it does not yet know whether
+the route requires auth or which dependency would extract the
+``Operator``. ``verify_jwt`` stays free of side effects so its unit
+tests do not need to mock contextvars; the binding side effect is
+introduced at the integration boundary, where it belongs.
+
+The middleware's :func:`structlog.contextvars.clear_contextvars` call
+at request entry is what guarantees ``operator_sub`` does not leak
+across requests served on the same asyncio task.
 """
 
 from __future__ import annotations
@@ -47,9 +83,18 @@ from typing import Final
 from uuid import uuid4
 
 import structlog
+from fastapi import Depends
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from meho_backplane.auth.jwt import verify_jwt
+from meho_backplane.auth.operator import Operator
 from meho_backplane.metrics import HTTP_REQUESTS_TOTAL
+
+__all__ = [
+    "SENSITIVE_HEADERS",
+    "RequestContextMiddleware",
+    "verify_jwt_and_bind",
+]
 
 #: Lower-cased header names whose values must never appear in logs or
 #: metrics. The set is intentionally tiny — every entry is paid for in
@@ -161,3 +206,42 @@ class RequestContextMiddleware:
             status=status_code,
             duration_ms=duration_ms,
         )
+
+
+async def verify_jwt_and_bind(
+    operator: Operator = Depends(verify_jwt),
+) -> Operator:
+    """Validate the Bearer token and bind ``operator_sub`` for the request.
+
+    Authenticated routes use this wrapper as their security dependency
+    in place of :func:`~meho_backplane.auth.jwt.verify_jwt`::
+
+        @router.get("/protected")
+        async def protected(
+            operator: Operator = Depends(verify_jwt_and_bind),
+        ) -> ...:
+            ...
+
+    The wrapper relies on FastAPI's dependency-graph contract: ``verify_jwt``
+    runs first; only if it returns successfully does this function execute,
+    so a failed JWT validation never bleeds an ``operator_sub`` into a
+    later request. The bound value is the OIDC ``sub`` claim — the stable
+    operator identifier — and nothing else; ``name`` and ``email`` are
+    deliberately *not* bound, because they are soft identity claims that
+    can vary across token refreshes and would noise the logs without
+    adding traceability beyond what ``sub`` already provides.
+
+    The middleware's request-entry :func:`structlog.contextvars.clear_contextvars`
+    call is what guarantees the bound key does not leak into the next
+    request reusing the same asyncio task. We deliberately do **not**
+    unbind here — the contextvar lives only as long as the current
+    request's ASGI scope, and clearing once per request entry is both
+    cheaper and more robust than asymmetric unbind logic that would have
+    to run in a finally clause inside the wrapper.
+
+    Returns:
+        The same :class:`Operator` that ``verify_jwt`` produced — the
+        wrapper is transparent to the route handler.
+    """
+    structlog.contextvars.bind_contextvars(operator_sub=operator.sub)
+    return operator

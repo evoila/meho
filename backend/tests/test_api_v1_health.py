@@ -577,3 +577,40 @@ def test_vault_secret_read_failure_returns_200_with_read_failed_detail(
     assert body["vault"]["reachable"] is True
     assert body["vault"]["read_ok"] is False
     assert body["vault"]["detail"] == "read_failed: RuntimeError"
+
+
+def test_vault_malformed_payload_returns_200_with_read_failed_detail(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed hvac payload (missing version key) is a 200, not a 500.
+
+    Regression for the bug where ``_extract_version`` raised ``KeyError``
+    on payloads like ``{"data": {}}`` and the exception escaped the route
+    as an HTTP 500 — violating AC #3 (the endpoint must never 5xx; a
+    Vault read failure is always a 200 with ``vault.read_ok=false``).
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key)
+    fake = _install_fake_vault(monkeypatch)
+    # Override the fake's read to return a structurally-broken payload —
+    # ``data`` exists but ``metadata`` (and ``version``) do not. The
+    # _extract_version unwrap raises KeyError on this shape.
+    monkeypatch.setattr(
+        fake.secrets.kv.v2,
+        "read_secret_version",
+        lambda path, **_kwargs: {"data": {}},
+    )
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["vault"]["reachable"] is True
+    assert body["vault"]["read_ok"] is False
+    assert body["vault"]["detail"] == "read_failed: KeyError"

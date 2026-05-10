@@ -42,6 +42,7 @@ controllable URL substrings into a successful 200 response.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
@@ -162,14 +163,34 @@ async def _probe_vault_federation(
     try:
         async with vault_client_for_operator(operator) as client:
             try:
-                # hvac's secrets.kv.v2 lives on the synchronous client.
-                # The read is a single GET; we don't bother offloading
-                # to a thread because the surrounding context manager's
-                # login call already did the expensive blocking work,
-                # and uvicorn's default worker count is 1 in v0.1.
-                secret_payload = client.secrets.kv.v2.read_secret_version(
+                # hvac's secrets.kv.v2 lives on the synchronous client; the
+                # read is a blocking GET against Vault. Offload it to a
+                # worker thread so the event loop stays free, mirroring
+                # auth/vault.py's _to_thread_jwt_login pattern.
+                secret_payload = await asyncio.to_thread(
+                    client.secrets.kv.v2.read_secret_version,
                     path=_FEDERATION_PROOF_PATH,
                     raise_on_deleted_version=False,
+                )
+                # Unwrap inside the same try so a malformed hvac payload
+                # (missing data/metadata/version keys) surfaces as a
+                # structured read failure rather than escaping as an
+                # HTTP 500 — AC #3 forbids 5xx on this endpoint. The
+                # tight (KeyError, TypeError) catch is sufficient for the
+                # dict-indexing failure modes _extract_version can raise;
+                # the broader ``except Exception`` below covers hvac's own
+                # error surface (Forbidden, InvalidPath, RequestException).
+                detail = _extract_version(secret_payload)
+            except (KeyError, TypeError) as exc:
+                log.warning(
+                    "federation_health_read_failed",
+                    vault_read_path=_FEDERATION_PROOF_PATH,
+                    exc_type=type(exc).__name__,
+                )
+                return VaultStatus(
+                    reachable=True,
+                    read_ok=False,
+                    detail=f"read_failed: {type(exc).__name__}",
                 )
             except Exception as exc:
                 log.warning(
@@ -186,7 +207,7 @@ async def _probe_vault_federation(
             return VaultStatus(
                 reachable=True,
                 read_ok=True,
-                detail=_extract_version(secret_payload),
+                detail=detail,
             )
     except VaultClientError as exc:
         log.warning("federation_health_login_failed", exc_type=type(exc).__name__)

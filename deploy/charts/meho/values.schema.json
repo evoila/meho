@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "meho values",
+  "description": "Placeholder schema. G2.5-T2 (issue #38) populates this with the typed values contract that fails `helm install` on misconfiguration.",
+  "type": "object"
+}

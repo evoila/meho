@@ -1,0 +1,153 @@
+# Default values for the meho chart.
+#
+# This file is a **scaffold** in G2.5-T1 — every key shipped here exists so
+# `helm template` renders the core six resources for shape verification.
+# G2.5-T2 will replace these placeholders with safe-by-default values and
+# add `values.schema.json` typing. Until then, callers MUST override the
+# placeholder strings via `--set` or a values overlay; nothing here is
+# production-safe.
+
+# -- Number of replicas. v0.1 is single-replica; HA lands in v0.2.
+replicaCount: 1
+
+image:
+  # -- Image repository. The G2.4 pipeline publishes to `ghcr.io/evoila/meho`.
+  repository: ghcr.io/evoila/meho
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Image tag. When empty, the Deployment falls back to `.Chart.AppVersion`
+  # (per the standard Helm convention from `helm create`). Pinning the tag
+  # in CI / install command (`--set image.tag=<sha>`) is the supported flow.
+  tag: ""
+
+# -- Image pull secrets when consumers mirror through a private registry.
+# Public GHCR pulls (Goal #11's locked artefact-distribution principle) need
+# no secret; the list is empty by default.
+imagePullSecrets: []
+
+# -- Override `<chart-name>` portion of resource names.
+nameOverride: ""
+# -- Override the full resource name (`<release-name>-<chart-name>`).
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Whether to create the ServiceAccount. Disable to reuse an existing SA.
+  create: true
+  # -- Annotations to attach to the ServiceAccount (e.g. IAM/IRSA bindings).
+  annotations: {}
+  # -- Name of the ServiceAccount. Empty = generated from the fullname template.
+  name: ""
+
+# -- Pod-level annotations (e.g. for sidecar injectors).
+podAnnotations: {}
+# -- Pod-level labels.
+podLabels: {}
+
+# -- Pod-level security context.
+# `runAsNonRoot: true` + a numeric `runAsUser` matches the backplane Dockerfile's
+# `USER 1001:0` directive — running with the wrong UID will fail-closed at
+# admission time on a cluster with the restricted PodSecurity profile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context.
+# `readOnlyRootFilesystem: true` + `drop: [ALL]` are the cert-manager / ArgoCD /
+# Flux baseline. The backplane writes nothing to the root filesystem at runtime;
+# `/tmp` is mounted as an `emptyDir` for the few libraries that insist on a
+# writable tempdir.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8000
+  # -- Name of the service port (consumed by the Ingress backend reference).
+  portName: http
+
+ingress:
+  enabled: true
+  # -- IngressClass name. Empty = let the cluster's default IngressClass apply.
+  className: ""
+  # -- Annotations applied to the Ingress. The cert-manager line below assumes
+  # a ClusterIssuer is provisioned in the cluster; override `cluster-issuer`
+  # to match the consumer's environment.
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- Hostname the Ingress publishes. Placeholder; override via values overlay.
+  host: meho.local
+  # -- Path rules. Default routes every path to the backplane Service.
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: true
+    # -- Name of the Kubernetes Secret holding the TLS certificate. When
+    # `cert-manager.io/cluster-issuer` is set above, cert-manager creates this
+    # Secret on first reconciliation; for manual TLS, pre-create the Secret.
+    secretName: meho-tls
+
+# -- Probe configuration. Stubbed in G2.5-T1; G2.5-T2 wires the real endpoints
+# (`/healthz` / `/ready` / `/version`) per the backplane's chassis. Keeping
+# `enabled: false` here means the rendered Deployment omits the probe blocks
+# entirely until T2 lands, avoiding a half-configured probe that would mark
+# the pod NotReady on first start.
+probes:
+  liveness:
+    enabled: false
+  readiness:
+    enabled: false
+  startup:
+    enabled: false
+
+resources: {}
+  # The defaults are intentionally empty; G2.5-T2 picks safe baselines after
+  # measuring chassis idle. Documented comparable: cert-manager ships with
+  # `requests: {cpu: 10m, memory: 32Mi}` + `limits: {memory: 64Mi}` by default.
+
+# -- ConfigMap-sourced environment variables (non-secret).
+# These map 1:1 to `backend/src/meho_backplane/settings.py` env-var contract.
+# Required fields are placeholders; the chart fails-closed when they're left
+# empty (the backplane raises at startup, which surfaces as a CrashLoopBackOff).
+config:
+  keycloakIssuerUrl: ""
+  keycloakAudience: ""
+  keycloakJwksCacheTtlSeconds: "300"
+  keycloakJwtLeewaySeconds: "30"
+  vaultAddr: ""
+  vaultOidcRole: "meho-mcp"
+  vaultOidcMountPath: "jwt"
+  vaultTimeoutSeconds: "10.0"
+  databasePoolSize: "10"
+  databasePoolTimeout: "30.0"
+
+postgres:
+  # -- Name of the Kubernetes Secret holding the DATABASE_URL value at key `url`.
+  # Synced from Vault by ESO (External Secrets Operator) in production; the
+  # consumer pre-provisions it before `helm install`.
+  credentialsSecret: meho-postgres
+
+networkPolicy:
+  enabled: true
+  # -- Namespace label value selecting the ingress controller. RKE2 ships with
+  # `ingress-nginx`; override per-cluster.
+  ingressControllerNamespace: ingress-nginx
+  # -- Egress CIDRs. Placeholders; the consumer overrides each from their
+  # environment's actual subnet allocations. The chart refuses to render an
+  # over-broad `0.0.0.0/0` egress — defense-in-depth against accidental
+  # exfiltration paths from a compromised backplane Pod.
+  postgresCIDR: 10.0.0.0/32
+  vaultCIDR: 10.0.0.0/32
+  keycloakCIDR: 10.0.0.0/32
+
+# -- Node selector applied to the Pod template.
+nodeSelector: {}
+# -- Tolerations applied to the Pod template.
+tolerations: []
+# -- Affinity rules applied to the Pod template.
+affinity: {}

@@ -1,0 +1,72 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "meho.fullname" . }}
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "meho.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the ingress controller's namespace may reach the backplane.
+    # The selector matches RKE2's `ingress-nginx` namespace by default;
+    # override `networkPolicy.ingressControllerNamespace` per environment.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # PostgreSQL — locked to the operator-supplied CIDR. Defaults to a /32
+    # placeholder so the chart fails-closed on a misconfigured value rather
+    # than silently allowing a wide subnet.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.postgresCIDR }}
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Vault — operator-supplied CIDR; default-deny otherwise.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.vaultCIDR }}
+      ports:
+        - port: 8200
+          protocol: TCP
+    # Keycloak — typically reached over HTTPS through the cluster ingress
+    # or an external load balancer; CIDR is operator-supplied.
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.keycloakCIDR }}
+      ports:
+        - port: 443
+          protocol: TCP
+    # Redis — in-cluster subchart (G2.5-T3) selected by the conventional
+    # Helm labels Bitnami's redis subchart sets.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 6379
+          protocol: TCP
+    # DNS — UDP/53 to kube-dns / CoreDNS. Without this rule every other
+    # egress rule above fails on name resolution. The selector matches the
+    # standard `k8s-app: kube-dns` label CoreDNS ships with by default.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+{{- end }}

@@ -1,0 +1,25 @@
+{{ include "meho.fullname" . }} {{ .Chart.AppVersion }} installed into namespace {{ .Release.Namespace }}.
+
+Resources deployed:
+  - Deployment / {{ include "meho.fullname" . }}
+  - Service    / {{ include "meho.fullname" . }} ({{ .Values.service.type }}:{{ .Values.service.port }})
+{{- if .Values.ingress.enabled }}
+  - Ingress    / {{ include "meho.fullname" . }} (host={{ .Values.ingress.host }})
+{{- end }}
+  - ConfigMap  / {{ include "meho.fullname" . }}-config
+{{- if .Values.serviceAccount.create }}
+  - ServiceAccount / {{ include "meho.serviceAccountName" . }}
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+  - NetworkPolicy / {{ include "meho.fullname" . }} (default-deny + explicit egress)
+{{- end }}
+
+Next steps:
+  1. Watch the rollout:
+       kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "meho.fullname" . }}
+{{- if .Values.ingress.enabled }}
+  2. Verify the Ingress comes up with TLS:
+       kubectl -n {{ .Release.Namespace }} get ingress {{ include "meho.fullname" . }}
+{{- end }}
+  3. Tail backplane logs:
+       kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "meho.name" . }} -f

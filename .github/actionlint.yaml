@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# actionlint configuration.
+# Declares custom self-hosted runner labels used by this repo so actionlint
+# stops emitting unknown-label warnings on `runs-on: [self-hosted, meho-runners]`
+# (and the bare `runs-on: meho-runners` in runner-smoke.yml).
+#
+# Reference: https://github.com/rhysd/actionlint/blob/main/docs/config.md
+self-hosted-runner:
+  labels:
+    - meho-runners

@@ -489,6 +489,28 @@ def test_secret_value_does_not_appear_in_response_or_logs_on_read_failure(
     # not echo it.
     assert "permission denied" not in (detail or "")
 
+    # The autouse ``_no_secret_leak_sweep`` fixture only reads
+    # ``capfd`` / ``caplog`` — it does NOT see structlog output that
+    # the production app routes through ``PrintLoggerFactory(file=buf)``.
+    # This test is therefore the sole guard for the read-failure
+    # secret-leak path; assert directly on the structlog buffer that
+    # neither the exception's message ("permission denied") nor the
+    # Vault path ("secret/meho/test/federation") leak, while the
+    # exception class name ("Forbidden") DOES surface (proving the
+    # error-shaping logic emitted *something* — the test isn't
+    # vacuously passing on an empty buffer).
+    captured = log_buffer.getvalue()
+    assert "permission denied" not in captured, (
+        "Vault exception message leaked into structlog output"
+    )
+    assert "secret/meho/test/federation" not in captured, (
+        "Vault secret path leaked into structlog output"
+    )
+    assert "Forbidden" in captured, (
+        "expected exception class name to surface in logs — "
+        "empty/missing log output would mean this test asserts on nothing"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Operator-repr leak (regression coverage on the live route path)

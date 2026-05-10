@@ -60,6 +60,7 @@ from meho_backplane.settings import get_settings
 from tests.conftest import (
     DEFAULT_AUDIENCE,
     DEFAULT_ISSUER,
+    SECRET_LEAK_PATTERNS,
     make_rsa_keypair,
     mint_token,
     mock_discovery_and_jwks,
@@ -559,14 +560,11 @@ def test_operator_logged_via_request_does_not_leak_raw_jwt(
 # ---------------------------------------------------------------------------
 
 
-_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"Bearer\s+[A-Za-z0-9_\-\.=]{20,}"),
-    re.compile(r"\bpassword\s*[=:]", re.IGNORECASE),
-    re.compile(r"\bsecret\s*[=:]", re.IGNORECASE),
-    re.compile(r"\btoken\s*[=:]", re.IGNORECASE),
-    re.compile(r"\bapi[_-]?key\s*[=:]", re.IGNORECASE),
-    re.compile(r"Authorization\s*:\s*Bearer\s+\S+", re.IGNORECASE),
-)
+# Re-use the conftest denylist verbatim — keeping the autouse sweep and
+# this explicit structlog-buffer pass locked to one source of truth so
+# they can never drift. Adding a pattern in conftest automatically
+# covers this sweep too.
+_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = SECRET_LEAK_PATTERNS
 
 
 def test_regex_sweep_on_authenticated_request_log_buffer(

@@ -38,7 +38,7 @@ concurrency:
 jobs:
   check:
     name: Backward-compat migration guard
-    runs-on: ubuntu-latest
+    runs-on: meho-runners
     timeout-minutes: 5
     steps:
       - name: Checkout

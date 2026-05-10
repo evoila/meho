@@ -37,7 +37,7 @@ permissions:
 jobs:
   sonarcloud:
     name: SonarCloud Analysis
-    runs-on: [self-hosted, meho-runners]
+    runs-on: meho-runners
     timeout-minutes: 20
     continue-on-error: true
     if: github.event.workflow_run.conclusion == 'success'

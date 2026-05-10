@@ -45,6 +45,24 @@ this stage it exposes:
   migration placeholder (`db.migrated = null` until G2.3). All Vault
   failure modes surface as structured fields on a 200 response — the
   smoke test never sees a 5xx from this endpoint.
+* Federation-chain failure-mode test suite (Task #25) — comprehensive
+  pytest coverage that proves the chain *fails safely*: every JWT
+  failure shape (expired / wrong-aud / wrong-iss / tampered signature /
+  tampered payload / unknown-key / wrong-algorithm including HS256 +
+  `none` / missing kid / kid not in JWKS / missing sub) returns 401
+  with a centrally-defined detail string; every Vault failure shape
+  (unreachable / DNS / timeout / role-denied / 4xx / 5xx / sealed /
+  uninitialized / standby / DR / perf-standby) maps cleanly onto the
+  documented `VaultClientError` hierarchy or the readiness-probe
+  status; the cross-axis matrix on `/api/v1/health` (auth-broken-only
+  vs Vault-broken-only vs both) preserves the documented contracts;
+  and the bearer token, the issued Vault token, and the Vault secret
+  value never appear in any captured log line. The suite extends the
+  `tests/conftest.py` autouse `_no_secret_leak_sweep` fixture across
+  every test in `tests/` — a `Bearer\s+<long>` / `password\s*[=:]` /
+  `secret\s*[=:]` / `token\s*[=:]` / `api_key\s*[=:]` /
+  `Authorization:\s*Bearer\s+\S+` regex pass over `capfd` + `caplog`
+  on every test exit, fail-closed when any pattern matches.
 
 Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
@@ -85,6 +103,7 @@ PYTHONPATH-leak imports.
 | `VaultClientError` / `VaultUnreachableError` / `VaultRoleDeniedError` | `src/meho_backplane/auth/vault.py` | Backplane-side exception hierarchy. Callers catch `VaultClientError` for a single error response shape, or one of the subclasses to map to specific HTTP statuses. The hierarchy lets consumers avoid importing `hvac` directly. |
 | `api/v1/health.router` (`/api/v1/health`) | `src/meho_backplane/api/v1/health.py` | Authenticated federation-proof endpoint (Task #24). `GET` handler runs through `Depends(verify_jwt_and_bind)`, calls `vault_client_for_operator(operator)`, reads `secret/meho/test/federation` (KV v2), and returns `HealthResponse` (operator identity + vault status + db status). Vault unreachable / role denied / read failure surface as structured fields on a 200 response — never 5xx. |
 | `HealthResponse` / `OperatorIdentity` / `VaultStatus` / `DbStatus` | `src/meho_backplane/api/v1/health.py` | Frozen pydantic v2 response models. `OperatorIdentity` deliberately excludes `raw_jwt` so the bearer token never appears in the response body. `DbStatus.migrated` is `None` until G2.3 wires Alembic. `VaultStatus.detail` carries only structured tokens (`version=N`, `read_failed: <ExcClass>`, `login_failed: <ExcClass>`) — no operator-controllable URL substrings. |
+| `_no_secret_leak_sweep` | `tests/conftest.py` (autouse) | Pytest fixture that runs after every test in `tests/`, scanning `capfd`-captured stdout/stderr and `caplog` records for credential-shaped substrings (`Bearer <long>`, `password=`, `secret=`, `token=`, `api_key=`, `Authorization: Bearer …`). First match → `pytest.fail` with a redacted preview. The patterns live in `SECRET_LEAK_PATTERNS` for contributor extension; the targeted leak tests in `tests/test_secret_leak_checks.py` complement the always-on sweep with explicit assertions on the structlog `StringIO` buffers used by route-level tests. |
 
 ## Control flow
 
@@ -157,6 +176,7 @@ Pinned-floor declarations; exact versions resolved into `uv.lock`.
 | (dev) `pytest-asyncio` ≥ 0.23 | | Async test support; `asyncio_mode = "auto"` in pyproject. |
 | (dev) `cryptography` ≥ 42.0 | | RSA keypair generation in test fixtures (authlib pulls it transitively in production). |
 | (dev) `respx` ≥ 0.21 | | httpx-native mock router used to stub Keycloak's discovery + JWKS endpoints in `tests/test_auth_jwt.py`. |
+| (dev) `pytest-cov` ≥ 5.0 | | Line-coverage reporting; Task #25 acceptance criterion pins `auth/jwt.py` and `auth/vault.py` at >90% line coverage. |
 | (dev) `ruff` ≥ 0.5 | | Lint + format. |
 | (dev) `mypy` ≥ 1.10 | | Strict type checking. |
 
@@ -216,6 +236,7 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #22 — Keycloak JWT validation + readiness probe
 - Task #23 — Vault OIDC forward-auth client + readiness probe
 - Task #24 — Federation-proof `/api/v1/health` + operator-identity propagation
+- Task #25 — Federation-chain failure-mode test suite + always-on secret-leak sweep
 - [FastAPI tutorial](https://fastapi.tiangolo.com/tutorial/)
 - [FastAPI lifespan API](https://fastapi.tiangolo.com/advanced/events/)
 - [FastAPI dependencies (`Depends`)](https://fastapi.tiangolo.com/tutorial/dependencies/)

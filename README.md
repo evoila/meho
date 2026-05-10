@@ -24,7 +24,11 @@ nothing to install yet. Watch the repo for the v0.1 announcement.
 
 ## Quickstart
 
-(Placeholder — will land with the v0.1 release.)
+(Placeholder — full v0.1 install / smoke / upgrade path lands with
+the release.)
+
+For the backplane (Python / FastAPI) skeleton — `uv` and Docker
+recipes for running it locally — see [`backend/README.md`](./backend/README.md).
 
 ## Documentation
 

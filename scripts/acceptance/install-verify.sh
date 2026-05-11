@@ -49,8 +49,14 @@
 #                              check still prints WARN and the verifier
 #                              still records the timing for the
 #                              closing-comment artefact, but doesn't
-#                              fail-loud. Goal #11 closing-criteria
-#                              runs MUST pass --enforce-budget.
+#                              fail-loud. Under --enforce-budget the
+#                              verifier ALSO hard-fails when
+#                              INSTALL_START_TS is unset or non-numeric
+#                              (a closing-criteria run with no timing
+#                              input would otherwise pass silently and
+#                              never prove the <5-min bar was met).
+#                              Goal #11 closing-criteria runs MUST pass
+#                              --enforce-budget.
 #   --skip-cluster-checks      Skip the kubectl-side checks (#1, #2).
 #                              Useful when running from a workstation
 #                              without kubectl context but with TLS
@@ -375,26 +381,50 @@ else
 fi
 
 # --- Check #7: 5-minute wall-clock budget ------------------------------
-if [[ -n "${INSTALL_START_TS:-}" ]]; then
-    NOW_TS="$(date -u +%s)"
-    if [[ "$INSTALL_START_TS" =~ ^[0-9]+$ ]]; then
-        ELAPSED=$((NOW_TS - INSTALL_START_TS))
-        if [[ "$ELAPSED" -le "$BUDGET_SECONDS" ]]; then
-            check_ok "wall-clock ${ELAPSED}s ≤ budget ${BUDGET_SECONDS}s"
-        else
-            msg="wall-clock ${ELAPSED}s > budget ${BUDGET_SECONDS}s"
-            if [[ "$ENFORCE_BUDGET" -eq 1 ]]; then
-                check_fail "$msg" "Goal #11 closing-criteria run; see docs/acceptance/install.md 'What \"<5 min\" means'"
-            else
-                check_warn "$msg" "non-closing run; rerun with --enforce-budget for hard-fail behaviour"
-            fi
-        fi
+# Behaviour matrix:
+#
+#   ENFORCE_BUDGET  INSTALL_START_TS   outcome
+#   0 (warn-only)   unset              [note] skipped — debugging mode
+#   0               non-numeric        [WARN] invalid value — debugging mode
+#   0               numeric            [ok]/[WARN] depending on elapsed
+#   1 (hard-fail)   unset              [FAIL] — Goal #11 runs require timing proof
+#   1               non-numeric        [FAIL] — same as above
+#   1               numeric            [ok]/[FAIL] depending on elapsed
+#
+# The hard-fail-on-missing/invalid behaviour under --enforce-budget is
+# load-bearing for Goal #11 DoD bullet 1: a closing-criteria run with no
+# timing input would otherwise pass silently and the operator's
+# transcript could never prove the <5-min bar was met. The flag's whole
+# point is "treat the budget as a hard contract" — which has to include
+# "the budget input itself must be present and valid".
+if [[ -z "${INSTALL_START_TS:-}" ]]; then
+    if [[ "$ENFORCE_BUDGET" -eq 1 ]]; then
+        check_fail "INSTALL_START_TS is unset under --enforce-budget" \
+            "Goal #11 closing-criteria runs require a numeric start timestamp; install.sh sets START_TS=\$(date -u +%s) as its first action"
+    else
+        check_note "wall-clock budget check skipped — INSTALL_START_TS unset"
+    fi
+elif ! [[ "$INSTALL_START_TS" =~ ^[0-9]+$ ]]; then
+    if [[ "$ENFORCE_BUDGET" -eq 1 ]]; then
+        check_fail "INSTALL_START_TS is not a unix timestamp under --enforce-budget" \
+            "got '$INSTALL_START_TS'; install.sh should set START_TS=\$(date -u +%s)"
     else
         check_warn "INSTALL_START_TS is not a unix timestamp" \
             "got '$INSTALL_START_TS'; install.sh should set START_TS=\$(date -u +%s)"
     fi
 else
-    check_note "wall-clock budget check skipped — INSTALL_START_TS unset"
+    NOW_TS="$(date -u +%s)"
+    ELAPSED=$((NOW_TS - INSTALL_START_TS))
+    if [[ "$ELAPSED" -le "$BUDGET_SECONDS" ]]; then
+        check_ok "wall-clock ${ELAPSED}s ≤ budget ${BUDGET_SECONDS}s"
+    else
+        msg="wall-clock ${ELAPSED}s > budget ${BUDGET_SECONDS}s"
+        if [[ "$ENFORCE_BUDGET" -eq 1 ]]; then
+            check_fail "$msg" "Goal #11 closing-criteria run; see docs/acceptance/install.md 'What \"<5 min\" means'"
+        else
+            check_warn "$msg" "non-closing run; rerun with --enforce-budget for hard-fail behaviour"
+        fi
+    fi
 fi
 
 # --- Optional checks #8 / #9: authenticated probes ---------------------

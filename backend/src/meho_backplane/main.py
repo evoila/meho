@@ -29,6 +29,7 @@ from typing import Final
 from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
+from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
@@ -122,6 +123,7 @@ app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health_router)
 app.include_router(version_router)
+app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
 
 

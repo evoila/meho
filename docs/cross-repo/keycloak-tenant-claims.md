@@ -167,54 +167,20 @@ In the Admin Console:
 ### Step 4 — Configure the `tenant_role` protocol mapper
 
 The realm-role-to-claim mapping is more nuanced than the group
-attribute mapper because Keycloak's built-in **User Realm Role**
-mapper emits *all* of a user's realm roles as a JSON array, not a
-single role string. Two viable shapes:
+attribute mapper because **Keycloak has no built-in mapper that
+emits a fixed scalar claim value gated by a single realm role.**
+The built-in **User Realm Role** mapper writes the user's filtered
+realm-role *names* (a string or JSON array) into the claim — not a
+per-mapper-configured constant. The backplane's `tenant_role` enum
+needs the constant value (`tenant_admin` / `operator` /
+`read_only`), not the role name. Two viable shapes meet the
+contract:
 
-#### Shape A (recommended) — one mapper per role, single-value String
+#### Shape A (recommended) — one Script Mapper
 
-Three mappers, one per role, each writing the same claim name with a
-fixed value when the user has that role. Order is significant — list
-the most-privileged mapper first so the highest role wins when
-multiple are present.
-
-For each of the three roles (`meho-tenant-admin` first,
-`meho-operator` second, `meho-read-only` third), add a **User Realm
-Role** mapper:
-
-1. **Client scopes** → `meho-mcp` → **Mappers** → **Add mapper** →
-   **By configuration** → **User Realm Role**.
-2. Configure (example for the admin mapper):
-   - **Name:** `tenant_role-admin`
-   - **Realm Role prefix:** (leave empty)
-   - **Multivalued:** **off** (single-value String, not an array)
-   - **Token Claim Name:** `tenant_role`
-   - **Claim JSON Type:** `String`
-   - **Add to ID token:** off
-   - **Add to access token:** **on**
-   - **Add to userinfo:** on
-3. Save.
-4. Repeat for `meho-operator` (claim value `operator`) and
-   `meho-read-only` (claim value `read_only`).
-
-The mapper writes `tenant_role` only when the user has the matching
-role; the three mappers do not collide because Keycloak processes
-them in **Priority order** (lower priority number = higher
-precedence). Set:
-
-- `tenant_role-admin` priority **10**
-- `tenant_role-operator` priority **20**
-- `tenant_role-read-only` priority **30**
-
-Result: an operator with both `meho-operator` and `meho-read-only`
-gets `tenant_role: operator` (the higher-priority mapper wins).
-
-#### Shape B (simpler, requires Script Mapper feature) — one Script Mapper
-
-If the realm has the **Script Mapper** feature enabled (off by
-default since Keycloak 18; some operators run it on a hardened build
-with a curated script library), a single mapper picks the
-most-privileged role:
+If the realm has the **Script Mapper** feature enabled, a single
+mapper picks the most-privileged role and emits the
+backplane-shaped enum value:
 
 ```javascript
 // Script Mapper body — token-mapper-script.js
@@ -235,14 +201,84 @@ for (var i = 0; i < ranked.length; i++) {
 ```
 
 Configure with **Token Claim Name:** `tenant_role`, **Claim JSON
-Type:** `String`, **Add to access token:** on. Script Mapper is a
-single mapper instead of three; it depends on the realm having the
-script-mappers feature flag enabled (`--features=token-exchange,
-scripts` on the `kc.sh start` command line) and a suitable JS engine
-(GraalJS bundled with current Keycloak distributions).
+Type:** `String`, **Add to access token:** on, **Add to userinfo:**
+on, **Add to ID token:** off.
 
-Most operators land on Shape A — fewer feature flags, no JavaScript
-in the realm config, easier to audit.
+Script Mapper requires the script-mappers feature flag enabled
+(`--features=scripts` on the `kc.sh start` command line — disabled
+by default since Keycloak 18) and a JS engine on the classpath
+(GraalJS bundled with current Keycloak distributions). Realms that
+allow scripts land here: one mapper, declarative, easy to audit.
+
+#### Shape B (no scripts) — Hardcoded Claim mappers in per-role client scopes
+
+For realms that cannot enable the scripts feature (most hardened
+production deployments), use one **Hardcoded claim** mapper per
+role, each living inside its own dedicated client scope, and assign
+the per-role scope to each user as a default scope alongside the
+realm role:
+
+1. Create three client scopes (one per role), named to mirror the
+   roles:
+   - `meho-tenant-admin-scope`
+   - `meho-operator-scope`
+   - `meho-read-only-scope`
+
+   For each: **Client scopes** → **Create client scope** → Protocol:
+   `openid-connect`, Type: `None` (assigned per-user, not as a realm
+   default — see step 4).
+
+2. On each client scope, add one **Hardcoded claim** mapper:
+   **Mappers** → **Add mapper** → **By configuration** → **Hardcoded
+   claim**.
+
+   Configure (example for the admin scope):
+   - **Name:** `tenant_role`
+   - **Token Claim Name:** `tenant_role`
+   - **Claim value:** `tenant_admin` (the constant — the **literal**
+     enum value the backplane reads, **not** the realm-role name)
+   - **Claim JSON Type:** `String`
+   - **Add to ID token:** off
+   - **Add to access token:** **on**
+   - **Add to userinfo:** on
+   - **Add to token introspection:** on (recommended)
+
+   Repeat for the operator scope (claim value `operator`) and the
+   read-only scope (claim value `read_only`).
+
+3. Add all three scopes to the `meho-mcp` client as **optional**
+   client scopes: **Clients** → `meho-mcp` → **Client scopes** tab
+   → **Add client scope** → select all three → **Add as optional**.
+
+4. **Per-user assignment is what gates the claim value.** Step 5
+   below assigns each user **exactly one** of the three scopes as a
+   default scope (alongside their single realm role); only that
+   scope's Hardcoded claim mapper fires, so the user's tokens carry
+   exactly one `tenant_role` value.
+
+   The pairing — one realm role plus one matching client scope per
+   user — is the contract: the realm role drives RBAC bookkeeping
+   on the realm side; the client scope drives the constant claim
+   value on the token side. They do not auto-bind to each other in
+   Keycloak ≤ 26.x.
+
+The Script Mapper shape (Shape A) does the gating automatically
+from the user's role mappings; Shape B trades the script-engine
+dependency for an explicit per-user wiring step. Both produce the
+same on-the-wire claim shape.
+
+> **Why not the built-in User Realm Role mapper?** Its `setClaim()`
+> reads `RoleResolveUtil.getResolvedRealmRoles(...)` and emits the
+> user's actual filtered role *names* (e.g.
+> `["meho-operator","meho-read-only"]` or
+> `"meho-operator"`) — there is no per-mapper "fixed value" field
+> on its config schema (verified against
+> [`UserRealmRoleMappingMapper.java`](https://github.com/keycloak/keycloak/blob/main/services/src/main/java/org/keycloak/protocol/oidc/mappers/UserRealmRoleMappingMapper.java)
+> on `main`, cross-checked against Keycloak 22.x and 26.x
+> javadocs; behaviour is unchanged on the relevant code path).
+> Tokens minted by that mapper carry e.g.
+> `tenant_role: "meho-operator"`, which the backplane rejects as
+> `401 unknown_tenant_role` (wrong prefix, not in the enum).
 
 ### Step 5 — Assign users
 
@@ -256,16 +292,31 @@ For each operator who should authenticate against MEHO:
 2. **Users** → select the user → **Role mapping** tab → **Assign
    role** → filter by **Realm roles** → pick exactly one of
    `meho-tenant-admin` / `meho-operator` / `meho-read-only`.
-3. Save.
+3. **(Shape B only — skip if you used the Script Mapper from
+   Shape A.)** **Clients** → `meho-mcp` → **Client scopes** tab →
+   click into the **Default client scopes** (per-user) view for
+   this operator (or use the **Sessions** → user-level scope
+   override flow appropriate for your Keycloak version) and add
+   exactly one of the three per-role scopes
+   (`meho-tenant-admin-scope` / `meho-operator-scope` /
+   `meho-read-only-scope`) matching the realm role assigned in
+   step 2. Two scopes assigned to the same user produces two
+   competing `tenant_role` Hardcoded claim mappers, which Keycloak
+   resolves non-deterministically — pick exactly one.
+4. Save.
 
 Operators that are members of zero tenant groups, or that hold none
-of the three `meho-*` roles, will be rejected by the backplane with
-`401 missing_tenant_claim` on every authenticated request.
+of the three `meho-*` roles (Shape A and Shape B), or hold a role
+without the matching per-role client scope assigned (Shape B only),
+will be rejected by the backplane with `401 missing_tenant_claim`
+on every authenticated request.
 
 ## Verification
 
-Two checks. Run them after applying the recipe and before considering
-the realm "v0.2-ready".
+Three checks. Run them after applying the recipe and before
+considering the realm "v0.2-ready". Checks 1 and 2 prove the realm
+half (claims appear on userinfo and on the access token); Check 3
+proves the realm + backplane contract end-to-end.
 
 ### Check 1 — Claims appear on the userinfo endpoint
 
@@ -309,8 +360,16 @@ reads from the access token directly. Spot-check by decoding:
 
 ```bash
 # Decode the JWT body (no signature verification — we only want to
-# confirm the claim shape).
-echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq
+# confirm the claim shape). JWT payloads are base64url-encoded with
+# padding stripped; plain `base64 -d` mishandles both the alphabet
+# and the missing padding. Use Python's urlsafe_b64decode and pad
+# back to a multiple of 4:
+echo "$TOKEN" | cut -d. -f2 | python3 -c '
+import base64, json, sys
+p = sys.stdin.read().strip()
+p += "=" * (-len(p) % 4)
+print(json.dumps(json.loads(base64.urlsafe_b64decode(p)), indent=2))
+'
 ```
 
 Expected: a JSON object with `tenant_id` (UUID string) and
@@ -343,11 +402,14 @@ Failure modes:
   **Claim JSON Type** (must be `String`, not `int` or array) and the
   attribute / role values.
 - **`401 unknown_tenant_role`** — `tenant_role` is a string but not
-  one of `tenant_admin` / `operator` / `read_only`. The user holds a
-  realm role outside the three the mappers gate on, **and** the
-  mappers are configured to forward that role's name verbatim. Either
-  remove the stray role from the user, or harden the mappers to emit
-  only the three enum values.
+  one of `tenant_admin` / `operator` / `read_only`. Most common
+  cause: a built-in **User Realm Role** mapper is forwarding the
+  user's realm-role names verbatim (e.g. `meho-operator`) instead
+  of the backplane's enum values. Replace it with the recipe in
+  [Step 4](#step-4--configure-the-tenant_role-protocol-mapper) —
+  Shape A (Script Mapper) or Shape B (Hardcoded claim mappers in
+  per-role client scopes) — both emit the constant enum values the
+  backplane expects.
 
 ## Troubleshooting
 
@@ -357,7 +419,7 @@ Failure modes:
 | `401 missing_tenant_claim` for one user only | User is not in a tenant group, or holds none of the three realm roles | Assign the user (Step 5) |
 | `401 malformed_tenant_claim` | `tenant_id` mapper has **Aggregate attribute values** on (emits a JSON array instead of a single string) | Toggle **Aggregate attribute values** off and re-issue the token |
 | `401 malformed_tenant_claim` (continued) | `tenant_id` mapper has **Claim JSON Type:** `int` or `JSON` instead of `String` | Set **Claim JSON Type** to `String`; UUIDs are strings, not ints |
-| `401 unknown_tenant_role` | User holds a non-`meho-*` realm role and the mapper forwards it | Use Shape A (one mapper per role) instead of forwarding all roles via a single multivalued mapper |
+| `401 unknown_tenant_role` | The token's `tenant_role` is a string but not one of the three enum values — usually because the operator left a built-in **User Realm Role** mapper in place (it forwards realm-role names like `meho-operator`, not the constant enum values) | Remove the User Realm Role mapper; use Shape A (Script Mapper) or Shape B (one Hardcoded claim mapper per per-role client scope) so the claim value is the constant enum (`tenant_admin` / `operator` / `read_only`) |
 | Two operators in the same tenant get different `tenant_id` values | One of them is in two tenant groups; the mapper picks one non-deterministically | Each user belongs to exactly one tenant group |
 | `403 Forbidden` on a route that worked before | User has been assigned a lower role than the route requires (e.g. demoted to `meho-read-only`) | Re-assign the appropriate role on the **Role mapping** tab |
 | Claims appear on userinfo but not on the access token | Mapper has **Add to userinfo: on** but **Add to access token: off** | Toggle both on |

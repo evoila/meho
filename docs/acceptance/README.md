@@ -22,12 +22,15 @@ Copyright (c) 2026 evoila Group
 | [`install.md`](./install.md) | bullet 1 — `install.sh` cold-deploy → working MEHO at meho.evba.lab in <5 min | [#55](https://github.com/evoila-bosnia/meho-internal/issues/55) |
 | [`smoke.md`](./smoke.md) | bullet 2 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state) | [#56](https://github.com/evoila-bosnia/meho-internal/issues/56) |
 | [`rollback.md`](./rollback.md) | bullet 3 — `helm rollback meho` verified end-to-end with a non-trivial schema diff | [#57](https://github.com/evoila-bosnia/meho-internal/issues/57) |
+| [`green-counter.md`](./green-counter.md) | bullets 4 + 5 — 5-consecutive-merged-PR green-smoke counter + `targets.yaml` `rdc-meho` entry | [#58](https://github.com/evoila-bosnia/meho-internal/issues/58) |
 
-Siblings to be added by their respective G2.8 tasks as they land:
-
-- [Task #58](https://github.com/evoila-bosnia/meho-internal/issues/58) —
-  5-consecutive-merged-PR green-smoke counter + `targets.yaml` entry
-  (DoD bullets 4 + 5)
+The `green-counter.md` contract is the producer-side spec; the
+counter implementation and the `targets.yaml` entry land on the
+consumer side per the cross-repo split (see
+[`docs/cross-repo/targets-yaml.md`](../cross-repo/targets-yaml.md)
+for the `targets.yaml` schema and
+[`docs/cross-repo/issue-58-consumer-ticket-body.md`](../cross-repo/issue-58-consumer-ticket-body.md)
+for the draft consumer-side issue body).
 
 ## Why these live in `evoila/meho`
 

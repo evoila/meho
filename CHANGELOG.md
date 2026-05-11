@@ -149,6 +149,27 @@ shipped and why it matters — not a dump of commit subjects.
   unit-level forward-compat regression test at
   [`backend/tests/test_migration_rollback.py`](./backend/tests/test_migration_rollback.py)
   (Task #30) — two layers of forward-compat assurance. (#57)
+- **Green-smoke counter + `targets.yaml` rdc-meho schema:**
+  producer-side specification of Goal #11 DoD bullets 4 and 5.
+  [`docs/acceptance/green-counter.md`](./docs/acceptance/green-counter.md)
+  codifies the 5-consecutive-merged-PR green-smoke counter — scope,
+  exclusions, data source (`pr-smoke.yml` workflow-run history),
+  reference algorithm, and three read surfaces (Shields badge,
+  one-shot CLI, chassis probe).
+  [`docs/cross-repo/targets-yaml.md`](./docs/cross-repo/targets-yaml.md)
+  ships the cross-repo schema for the consumer's `targets.yaml`
+  `rdc-meho` entry — required + recommended fields, a worked
+  example, anti-patterns, and the chassis health-probe contract
+  (authenticated `/api/v1/health` + anonymous `/healthz`
+  fallback). The
+  [README badge](./README.md)
+  carries a placeholder the maintainer swaps for a live Shields
+  endpoint URL once the consumer-side counter is up.
+  Counter implementation and the `targets.yaml` entry land on
+  `claude-rdc-hetzner-dc` per the producer/consumer split (draft
+  consumer issue body at
+  [`docs/cross-repo/issue-58-consumer-ticket-body.md`](./docs/cross-repo/issue-58-consumer-ticket-body.md)).
+  (#58)
 
 ### Changed
 

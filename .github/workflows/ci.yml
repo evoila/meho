@@ -19,9 +19,13 @@
 # Out of scope (deliberately delegated to existing workflows; do not
 # duplicate here):
 #   * Backplane image build / push  -> .github/workflows/image.yml
-#     (already builds on PRs without pushing — the Dockerfile + dep
-#     resolution gate). Repeating it here would double the build cost
-#     for every PR with no extra signal.
+#     (builds without pushing on PRs that touch `backend/**` or
+#     `.github/workflows/image.yml` — path-filtered, see image.yml's
+#     `on.pull_request.paths`). PRs that don't touch backend skip the
+#     image build by design — the Dockerfile + dep-resolution gate only
+#     needs to run when its inputs change. Repeating the build here
+#     would double the cost for backend PRs and add zero signal for
+#     non-backend PRs.
 #   * Alembic backward-compat guard -> .github/workflows/migration-compat.yml
 #     (path-scoped to backend/alembic/versions/**, runs only when
 #     migrations change).

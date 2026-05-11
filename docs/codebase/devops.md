@@ -615,18 +615,23 @@ reason.
 ### Why no image build job
 
 `ci.yml` deliberately does **not** build the backplane container image.
-[`image.yml`](../../.github/workflows/image.yml) already runs on every
-PR with `push: false` (the Dockerfile + dep-resolution gate); repeating
-the build in `ci.yml` would double the build cost for every PR with no
-additional signal. The same reasoning applies to the chart publish
-(`chart.yml` runs `validate` on PRs as a path-scoped gate) — `ci.yml`
-exercises a parallel `helm lint`/`helm template`/`kubeconform` pass
-unconditionally so a chart-touching regression also fails the central
-CI check, but it does not duplicate the publish path. Migration
-backward-compat (`migration-compat.yml`), dependency license scan
-(`dependency-license-check.yml`), secret scan (`secret-scan.yml`), and
-the SAST stack (`security-scan.yml`) all stay in their dedicated
-workflows.
+[`image.yml`](../../.github/workflows/image.yml) runs on PRs that touch
+`backend/**` or `.github/workflows/image.yml` (path-filtered, see
+`image.yml`'s `on.pull_request.paths`) with `push: false` — the
+Dockerfile + dep-resolution gate. PRs that don't touch the backend
+(chart-only, CLI-only, docs-only) skip the image build by design,
+because the gate's inputs haven't changed and rebuilding would add zero
+signal. Repeating the build in `ci.yml` would double the cost for
+backend PRs and pointlessly run the gate for the non-backend PRs that
+`image.yml` already filters out. The same reasoning applies to the
+chart publish (`chart.yml` runs `validate` on PRs as a path-scoped
+gate) — `ci.yml` exercises a parallel `helm lint`/`helm template`/
+`kubeconform` pass unconditionally so a chart-touching regression also
+fails the central CI check, but it does not duplicate the publish
+path. Migration backward-compat (`migration-compat.yml`), dependency
+license scan (`dependency-license-check.yml`), secret scan
+(`secret-scan.yml`), and the SAST stack (`security-scan.yml`) all stay
+in their dedicated workflows.
 
 ### Coverage handoff to SonarCloud
 

@@ -13,9 +13,8 @@ This directory holds the Go module; the Python backplane lives at
 
 ## Status
 
-**G2.6-T3 — `meho status` + oapi-codegen client + discovery scaffold
-+ output discipline.** Multi-platform releases (G2.6-T4) and cosign
-signing (G2.6-T5) land in subsequent Tasks.
+**G2.6-T4 — multi-platform release pipeline via GoReleaser.**
+Cosign signing of release artefacts (G2.6-T5) lands in the next Task.
 
 ## Layout
 
@@ -209,6 +208,70 @@ deliberately narrow — see comments in
 [`.golangci.yml`](./.golangci.yml) for rationale. PR-level CI (lint +
 test on every push) lands with Initiative G2.7 / Task #48; until then,
 contributors run `make lint && make test` locally.
+
+## Release
+
+Release builds are driven by [GoReleaser](https://goreleaser.com/)
+configured at [`.goreleaser.yaml`](./.goreleaser.yaml). On every
+`v*` tag push, `.github/workflows/cli-release.yml` builds four
+static binaries — `linux/amd64`, `linux/arm64`, `darwin/amd64`,
+`darwin/arm64` — packages each as a `meho_<version>_<os>_<arch>.tar.gz`
+tarball containing the binary plus the top-level
+[`LICENSE`](../LICENSE) and this README, computes a combined
+`SHA256SUMS` file, and publishes them as assets on a new draft
+GitHub Release at
+<https://github.com/evoila/meho/releases>.
+
+The release is created in **draft** mode — a maintainer flips it
+to public via the GitHub Releases UI after verifying the four
+tarballs are present and `meho version` reports the expected tag.
+Cosign signing of release artefacts (Issue #47) lands in the next
+Task.
+
+### Local dry-run
+
+```bash
+cd cli/
+make release-check     # validate .goreleaser.yaml (no build)
+make release-dry-run   # produce dist/ tarballs + SHA256SUMS (no push)
+```
+
+Both targets install GoReleaser into `bin/` on first run (pinned to
+the same v2.x line the workflow uses) and never push to GitHub.
+Inspect the output under `dist/`:
+
+```text
+dist/
+├── meho_0.0.1-snapshot_darwin_amd64.tar.gz
+├── meho_0.0.1-snapshot_darwin_arm64.tar.gz
+├── meho_0.0.1-snapshot_linux_amd64.tar.gz
+├── meho_0.0.1-snapshot_linux_arm64.tar.gz
+└── SHA256SUMS
+```
+
+Snapshot mode names tarballs with a synthetic `0.0.1-snapshot`
+version. On a real tag push the version slot gets the tag minus
+the leading `v` (`meho_0.1.0_linux_amd64.tar.gz`) while the binary's
+`meho version` output preserves the full tag form (`v0.1.0`).
+
+### Anonymous download
+
+GitHub Releases on public repos are anonymously downloadable. After
+a maintainer publishes the draft:
+
+```bash
+TAG=v0.1.0
+TARBALL=meho_${TAG#v}_linux_amd64.tar.gz
+curl -LO https://github.com/evoila/meho/releases/download/${TAG}/${TARBALL}
+curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS
+sha256sum -c SHA256SUMS                   # verify integrity
+tar xzf ${TARBALL} && ./meho version       # meho v0.1.0 (commit ..., built ...)
+```
+
+For the durable map of the release flow — what GoReleaser does, why
+each archive includes LICENSE + README, how identity is injected,
+how reproducible builds work — see
+[`../docs/codebase/cli.md`](../docs/codebase/cli.md).
 
 ## Design notes
 

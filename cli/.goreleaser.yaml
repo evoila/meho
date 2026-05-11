@@ -1,0 +1,195 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# GoReleaser config for the meho CLI binary.
+#
+# Locked artefact contract (Goal #11 — CLI release-distribution principle):
+#   linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 single-static
+#   tar.gz tarballs published to https://github.com/evoila/meho/releases
+#   on every `v*` tag push, alongside a single combined SHA256SUMS file.
+#
+# Tarball naming (GoReleaser default with `_` separator):
+#   meho_<version>_<os>_<arch>.tar.gz
+#
+# Each tarball ships the `meho` binary + LICENSE + CLI README so anonymous
+# download → extract → verify identity → run is a single workflow with no
+# external dependencies.
+#
+# Reproducible builds — `-trimpath` strips the build-machine path prefix
+# (already used by `cli/Makefile`), `-s -w` strips the symbol table and
+# DWARF debug info (matches gh/argocd/flux), and `mod_timestamp:
+# {{ .CommitTimestamp }}` pins every artefact's mtime to the commit's
+# author date so two builds of the same tag at different wall-clock
+# times produce byte-identical tarballs.
+#
+# Cosign signing (G2.6-T5 / Issue #47) extends this config with a
+# `signs:` block; this Task ships build + publish only — the workflow
+# `permissions: id-token: write` is already declared to keep the signing
+# follow-up a single-line extension.
+
+version: 2
+
+project_name: meho
+
+before:
+  hooks:
+    # `go mod tidy` keeps go.sum honest before each release build.
+    # Idempotent on a clean tag; surfaces drift if the contributor
+    # forgot to run it locally.
+    - go mod tidy
+    # Copy the top-level LICENSE into the build context so the
+    # archive `files:` section can reference it by basename.
+    # GoReleaser's archive glob rejects `..` path traversal by
+    # design (defence against pulling arbitrary host files into
+    # release tarballs), so the canonical workaround is to hoist
+    # external files into the build context via a before-hook.
+    # `cli/LICENSE` is added to `cli/.gitignore` so the copy is
+    # transient — the source of truth stays at the repo root.
+    - sh -c 'cp ../LICENSE LICENSE'
+
+builds:
+  - id: meho
+    main: ./cmd/meho
+    binary: meho
+    env:
+      # Single static binary — pure-Go, no glibc dependency. Matches
+      # the v0.1 distribution promise (operators download one tarball,
+      # no runtime install). The `keyring` and `oauth2` deps are
+      # pure-Go; verified at G2.6-T2 via `CGO_ENABLED=0 go build`.
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Reproducible builds: pin the binary's embedded mtime to the
+    # commit timestamp so the same tag rebuilt at a different wall
+    # clock produces a byte-identical artefact. Required for
+    # cryptographic-attestation flows (G2.6-T5 cosign) where the
+    # signed digest must match between independent builds.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      # `-trimpath` removes the build-machine path prefix from the
+      # binary, matching `cli/Makefile`'s GOFLAGS. Required for
+      # reproducible builds and avoids leaking the build directory
+      # into panic stack traces.
+      - -trimpath
+    ldflags:
+      # `-s -w` strips the symbol table and DWARF debug info — the
+      # same flags `cli/Makefile`'s release path uses. Go's runtime
+      # still emits useful panics (PC-only stack walks).
+      #
+      # The three `-X` injections feed `internal/version/version.go`:
+      #   Version → git tag with the leading `v` preserved
+      #             (`v0.1.0`, `v0.1.0-rc.1`). GoReleaser's
+      #             `{{.Version}}` strips the leading `v` per semver
+      #             body convention; the Goal #11 acceptance
+      #             criterion requires the tag form, so we use
+      #             `{{.Tag}}`. Matches what `cli/Makefile`'s
+      #             `VERSION` override produces.
+      #   Commit  → full commit SHA (GoReleaser default; the Makefile
+      #             uses --short — operators see the full SHA on a
+      #             release binary, the short form on a `make build`
+      #             dev binary)
+      #   Date    → commit author date in RFC3339 UTC. We bind to
+      #             `{{.CommitDate}}` rather than `{{.Date}}` (build
+      #             wall clock) so a rebuild of the same tag produces
+      #             a byte-identical binary. Together with `mod_timestamp`
+      #             this makes the four tarballs bit-for-bit
+      #             reproducible — necessary for cryptographic
+      #             attestation flows (G2.6-T5 cosign).
+      - -s -w
+      - -X github.com/evoila/meho/cli/internal/version.Version={{.Tag}}
+      - -X github.com/evoila/meho/cli/internal/version.Commit={{.Commit}}
+      - -X github.com/evoila/meho/cli/internal/version.Date={{.CommitDate}}
+
+archives:
+  - id: meho
+    # `name_template` controls the tarball basename. GoReleaser's
+    # convention is `_`-separated: `<project>_<version>_<os>_<arch>`.
+    # GitHub Release URLs render fine with either underscores or
+    # dashes, so we stick with the upstream convention to keep the
+    # config minimal and predictable for tooling that consumes
+    # GoReleaser output (homebrew-releaser, scoop-bucket, etc.,
+    # which G2.6 explicitly defers but should be cheap to add later).
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # `formats` is the v2 idiom (v1 used the singular `format`).
+    # tar.gz is universal across linux + macOS — operators on either
+    # OS can `tar xzf` without extra tooling. Zip is the convention
+    # for Windows, which v0.1 doesn't ship.
+    formats:
+      - tar.gz
+    files:
+      # Both files resolve from the dist build context (`cli/`).
+      # `LICENSE` is copied into `cli/` by the `before:` hook above
+      # (kept out of git via `cli/.gitignore`); `README.md` is the
+      # CLI's user-facing README that already lives here.
+      - LICENSE
+      - README.md
+
+checksum:
+  # Single combined checksums file rather than per-artefact .sha256
+  # files — matches the conventions `gh`, `argocd`, `flux` all use.
+  # Operators verify with `sha256sum -c SHA256SUMS` after downloading
+  # the tarball + the checksum file.
+  name_template: "SHA256SUMS"
+  algorithm: sha256
+
+snapshot:
+  # `goreleaser release --snapshot` (used by `make release-dry-run`)
+  # needs a synthetic version string when no git tag is present.
+  # `{{ incpatch .Version }}-snapshot` bumps the patch level on the
+  # nearest tag (so a snapshot off `v0.1.0` produces `0.1.1-snapshot`)
+  # — distinguishable from a real release at a glance.
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  # Release notes derived directly from git commit messages between
+  # the previous tag and the current one. For v0.1.0 (no previous
+  # tag), GoReleaser walks the full history; subsequent releases
+  # narrow to the inter-tag delta.
+  use: git
+  sort: asc
+  groups:
+    # Conventional Commits → release-note section mapping. The
+    # regexp set matches the conventional-pre-commit allowed prefixes
+    # (`feat|fix|chore|docs|refactor|test|ci|build|perf|revert`,
+    # see `.pre-commit-config.yaml`). Anything outside that set
+    # lands in "Other" via the order: 999 sink.
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      # Suppress dependency-bot churn and merge commits — operators
+      # reading the release notes care about behaviour changes, not
+      # `chore(deps): Bump github/codeql-action from 3.x to 4.y`.
+      - '^chore\(deps\):'
+      - '^Merge pull request'
+      - '^Merge branch'
+
+release:
+  github:
+    owner: evoila
+    name: meho
+  # Draft releases require a maintainer to flip them to public via
+  # the GitHub UI. This is the safe default for the first release
+  # of a public Goal #11 v0.1 artefact: it lets a maintainer
+  # eyeball the generated changelog + verify the four tarballs +
+  # SHA256SUMS look right before operators see the GitHub Release.
+  # G2.6-T5 lands cosign signing into this same flow; flipping to
+  # `draft: false` is a one-liner once the full pipeline is proven
+  # end to end.
+  draft: true
+  # `prerelease: auto` flips the GitHub "pre-release" flag based on
+  # whether the tag contains a hyphen (semver pre-release identifier
+  # per https://semver.org). `v0.1.0-rc.1` → pre-release; `v0.1.0`
+  # → stable. Matches the test-tag flow the issue body's verification
+  # block describes.
+  prerelease: auto

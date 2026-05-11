@@ -149,10 +149,15 @@ jobs:
           # `## [Unreleased]` as fallback) and the next `## ` line.
           # `-v` passes the version into awk's namespace; the regex
           # anchors on `[`-bracketed semver to avoid matching prose
-          # headings that happen to start with `## `.
+          # headings that happen to start with `## `. Dots in the
+          # version literal are escaped before interpolation so a
+          # version like `0.1.0` doesn't accidentally match
+          # `[0x1y0]` — semver vocab today is `[0-9A-Za-z.-]` so the
+          # practical risk is nil, but hygiene wins.
           extract_section() {
             local heading_pattern="$1"
-            awk -v pat="${heading_pattern}" '
+            local escaped="${heading_pattern//./\\.}"
+            awk -v pat="${escaped}" '
               BEGIN { in_section = 0 }
               # Section start: line matches `## [<pattern>]` exactly
               # (optionally followed by ` - <date>` per Keep a

@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Local-kind values overlay for MEHO.
+#
+# This file targets a single-node kind cluster on a developer workstation.
+# Its job is to let you exercise the chart's install plumbing — pre-install
+# migration Job → Deployment → Service → liveness/readiness probes — without
+# wiring up real Vault + Keycloak + Postgres. Operator identity is *faked*:
+# the chart points at in-cluster mock endpoints, the backplane comes up,
+# the federation probes register, and `meho status` returns a sensible
+# response. It is **not** a functional federation deploy — for that, see
+# `values-rdc-example.yaml`.
+#
+# Prerequisites (one-time per cluster):
+#
+# ```bash
+# # Mock Postgres, Vault, and Keycloak as cluster-internal Services. The
+# # backplane's startup probes are satisfied by these mocks reaching a TCP
+# # port — actual policy / audit semantics are deferred to a real deploy.
+# kubectl apply -n meho -f - <<'EOF'
+# apiVersion: v1
+# kind: Namespace
+# metadata:
+#   name: meho
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: meho-postgres-mock
+#   namespace: meho
+# type: Opaque
+# stringData:
+#   url: postgresql+asyncpg://meho:meho@mock-postgres.meho.svc:5432/meho
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: mock-postgres
+#   namespace: meho
+# spec:
+#   replicas: 1
+#   selector: { matchLabels: { app: mock-postgres } }
+#   template:
+#     metadata: { labels: { app: mock-postgres } }
+#     spec:
+#       containers:
+#         - name: pg
+#           image: postgres:16-alpine
+#           env:
+#             - { name: POSTGRES_DB,       value: meho }
+#             - { name: POSTGRES_USER,     value: meho }
+#             - { name: POSTGRES_PASSWORD, value: meho }
+#           ports: [{ containerPort: 5432 }]
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata: { name: mock-postgres, namespace: meho }
+# spec:
+#   selector: { app: mock-postgres }
+#   ports: [{ port: 5432, targetPort: 5432 }]
+# EOF
+# ```
+#
+# Mock Vault + Keycloak don't need real deployments for the chassis-stage
+# backplane to start; the chart only requires the *configuration* to be
+# present (Vault address resolves DNS, Keycloak issuer resolves) — the
+# federation probes don't gate process start, they gate readiness.
+# Substitute real endpoints when you need a working `meho login` flow.
+
+# Use a stable production-image tag — kind respects the same registry the
+# chart references. Pin to a real sha-<...> from a green CI run; the
+# project's deploy discipline (Goal #11) forbids `:latest` and `:main`
+# even for local development.
+image:
+  # MUST be overridden — pass `--set image.tag=sha-<git-sha>` at install
+  # time, or set it here before applying. The schema rejects an empty tag.
+  tag: ""
+
+# Ingress is disabled on kind by default — kind ships no IngressClass and
+# the chart's port-forward flow (`kubectl port-forward`) is sufficient
+# for a 5-minute smoke test. Setting `enabled: false` skips the Ingress
+# resource entirely and waives the `host` / `tls.secretName` schema
+# requirements.
+ingress:
+  enabled: false
+
+# NetworkPolicy is disabled on kind. kind's default CNI (kindnet) does
+# not enforce NetworkPolicy — keeping the resource enabled would render
+# a no-op policy and force the operator to invent CIDR placeholders.
+# When you graduate to a CNI that enforces policy (Cilium, Calico),
+# flip this back on and supply real CIDRs.
+networkPolicy:
+  enabled: false
+
+# Mock the operator-required Vault + Keycloak fields with in-cluster
+# placeholders. These satisfy the schema's `format: uri` + `minLength: 1`
+# constraints; the backplane resolves them at startup and the readiness
+# probes will report the federation probes as unhealthy (expected — there
+# is no real Vault or Keycloak behind these endpoints) until a real
+# federation stack is wired up.
+vault:
+  address: http://mock-vault.meho.svc:8200
+
+keycloak:
+  issuer: http://mock-keycloak.meho.svc:8080/realms/meho
+  audience: meho-backplane
+
+postgres:
+  # The mock Postgres Secret created in the prerequisite snippet above.
+  # The chart consumes `DATABASE_URL` from this Secret's `url` key — the
+  # pre-install migration Job runs against it and the Deployment uses it
+  # for runtime queries.
+  credentialsSecret: meho-postgres-mock
+
+config:
+  keycloakIssuerUrl: http://mock-keycloak.meho.svc:8080/realms/meho
+  keycloakAudience: meho-backplane
+  vaultAddr: http://mock-vault.meho.svc:8200
+
+# The bundled broadcast subchart (Valkey 9.x per ADR 0005) is left
+# `enabled: true` — kind has plenty of headroom for a single-replica
+# in-tree Valkey, and exercising the broadcast plumbing locally is part
+# of what makes this overlay useful. Disable if your laptop is
+# resource-constrained.
+broadcast:
+  enabled: true
+
+# Conservative resource overrides for a developer laptop. The defaults
+# in `values.yaml` are production baselines; kind on a dev machine
+# typically has tighter memory headroom and benefits from smaller
+# requests/limits.
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi

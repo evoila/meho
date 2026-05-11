@@ -27,7 +27,25 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # When language manifests land, add per-ecosystem blocks below.
+  # Backend Python deps live at backend/pyproject.toml + backend/uv.lock.
+  # Without this block, Dependabot security updates default to `/` and
+  # fail with `dependency_file_not_found: { "file-path": "/" }` (Dependabot
+  # job 1360360077). The `uv` ecosystem covers the uv.lock format the
+  # project uses (Dependabot supports it natively since 2025).
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # When other language manifests land, add per-ecosystem blocks below.
   # Reference (MEHO.X conventions):
   #
   # - package-ecosystem: "pip"

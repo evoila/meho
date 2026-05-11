@@ -277,16 +277,19 @@ jobs:
           echo "Chart version: ${VERSION}"
 
       - name: Ensure PyYAML — chart-stamp dep on ARC runners
-        # The actions-runner-controller scale-set image is minimal and
-        # doesn't ship PyYAML; github-hosted ubuntu-latest does. The next
-        # step's `python3 - <<PY ... import yaml ... PY` exit-1s with
-        # ModuleNotFoundError otherwise. --user keeps the install in
-        # ~/.local with no sudo dependency; the no-op shortcut is
-        # forward-compat for when the runner image grows PyYAML.
+        # The actions-runner-controller scale-set image is minimal: it
+        # ships python3 but not pip (so `pip install pyyaml` exits with
+        # "No module named pip") and not PyYAML itself. Use the apt
+        # package `python3-yaml` — same shape as the envsubst install
+        # in image.yml / chart.yml / cli-release.yml.
         shell: bash
         run: |
           python3 -c "import yaml" 2>/dev/null && exit 0
-          python3 -m pip install --user --quiet pyyaml
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends python3-yaml
+          else
+            apt-get update -q && apt-get install -y --no-install-recommends python3-yaml
+          fi
 
       - name: Stamp Chart.yaml with version + appVersion
         # `helm package` reads `name`, `version`, and `appVersion` from

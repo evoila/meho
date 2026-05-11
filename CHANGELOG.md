@@ -91,9 +91,14 @@ shipped and why it matters — not a dump of commit subjects.
   [`deploy/values-examples/values-kind.yaml`](./deploy/values-examples/values-kind.yaml)
   for a 5-minute laptop deploy that exercises the chart's install
   plumbing (pre-install migration Job, Deployment, broadcast
-  subchart) without real Vault + Keycloak + Postgres. Operator
-  identity is faked; for real federation use the existing-k8s flow.
-  (#60)
+  subchart). Only Postgres ships a real in-cluster mock manifest
+  (Namespace + Secret + Deployment + Service for `postgres:16-alpine`,
+  documented at the top of the overlay); Vault and Keycloak are
+  *placeholder URIs* so the chart's URI-validated fields resolve at
+  install time — no in-cluster Vault or Keycloak is deployed and no
+  real auth flow runs. Operator identity is faked; federation probes
+  register but `meho login` will not complete end-to-end. For real
+  federation use the existing-k8s flow. (#60)
 - **Multi-platform CLI release pipeline:** `linux/amd64`,
   `linux/arm64`, `darwin/amd64`, `darwin/arm64` tarballs published
   to GitHub Releases on every `v*` tag push, with a combined

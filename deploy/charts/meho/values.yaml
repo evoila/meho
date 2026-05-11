@@ -217,12 +217,80 @@ audit:
   # mirror is explicitly v0.2 per Goal #11 spec.
   postgresOnly: true
 
+# Activity-broadcast subchart values (Valkey 9.x, per ADR 0005).
+#
+# The umbrella chart vendors a custom in-tree subchart at `charts/broadcast/`
+# running Valkey OSS as a single-replica Deployment with ephemeral streams.
+# Subchart slug is `broadcast` rather than `redis` because the protocol
+# contract matters more than the brand. The backplane connects via the
+# `REDIS_URL` env var (operator-facing) rendered against the Service name
+# `<release>-broadcast`.
+#
+# Operators on clusters running an external Valkey/Redis can flip
+# `broadcast.enabled: false` and (in v0.2+) point the backplane at the
+# external endpoint via `broadcast.externalEndpoint`. v0.1 ships the
+# `enabled: true` path only — the `externalEndpoint` opt-out is reserved
+# for the v0.2 broadcast feature work.
 broadcast:
-  redis:
-    # -- v0.1: the chart deploys its own Redis subchart (G2.5-T3 #39 adds
-    # the dependency + values plumbing). `bundled: false` would let a
-    # consumer point at an external Redis; not used in v0.1.
-    bundled: true
+  enabled: true
+  image:
+    repository: valkey/valkey
+    tag: "9.0-alpine"
+    pullPolicy: IfNotPresent
+  # -- Replica count. Hard-capped at 1 in v0.1 (no Sentinel, ephemeral
+  # streams); the schema rejects any higher value.
+  replicas: 1
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  service:
+    type: ClusterIP
+    port: 6379
+
+# Pre-install / pre-upgrade migration Job (Helm hook).
+#
+# Runs `python -m meho_backplane.db.migrate` (the entrypoint shipped by
+# G2.3-T3 #29) before the Deployment is created or rolled forward. The
+# migration runner exits non-zero on any Alembic failure, which fails the
+# Helm release and prevents an unmigrated Pod from accepting traffic.
+# Failed Jobs are NOT garbage-collected by the hook delete policy so the
+# operator can inspect logs; the k8s-side `ttlSecondsAfterFinished` is
+# the backstop.
+migrationJob:
+  # -- Number of times Kubernetes retries the migration Job on non-zero
+  # exit. Alembic migrations are idempotent; the retries catch transient
+  # network blips, not real schema mismatches.
+  backoffLimit: 3
+  # -- Seconds after Job completion (success or failure) before
+  # Kubernetes garbage-collects the Job + its Pods. 10 minutes leaves
+  # enough time for an operator to `kubectl logs` a failed Job and is
+  # cleaned up promptly after successful installs.
+  ttlSecondsAfterFinished: 600
+  # -- Container resources for the migration runner. Migrations are
+  # short-lived; the limits are conservative.
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 50m
+      memory: 256Mi
 
 connectors:
   # -- v0.1 ships the chassis with no connectors enabled. The connector

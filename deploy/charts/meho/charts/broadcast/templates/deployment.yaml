@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "broadcast.fullname" . }}
+  labels:
+    {{- include "broadcast.labels" . | nindent 4 }}
+spec:
+  # Hard-capped at 1 for v0.1: streams are ephemeral, no Sentinel sidecar
+  # ships in this chart, and the parent values.schema.json rejects any
+  # value > 1. HA via Sentinel/Cluster lands at v0.2+ (ADR 0005).
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "broadcast.selectorLabels" . | nindent 6 }}
+  strategy:
+    # Single-replica + ephemeral data → Recreate is safer than RollingUpdate.
+    # A RollingUpdate would briefly run two pods, both binding port 6379;
+    # the second would fail readiness and the first would still be torn down
+    # by the rollout controller. Recreate avoids the dance.
+    type: Recreate
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "broadcast.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: broadcast
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Valkey loads the operator-supplied config from /etc/valkey/valkey.conf
+          # mounted from the ConfigMap. The image's entrypoint takes the path as
+          # the first positional argument; no `redis-server` shim is needed.
+          args:
+            - /etc/valkey/valkey.conf
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          # TCP liveness keeps the probe surface minimal — a successful TCP
+          # accept on 6379 is sufficient evidence that the server loop is up.
+          # `redis-cli PING` would be more thorough but couples the probe to
+          # the existence of `redis-cli` in the image, which Valkey OSS does
+          # ship but not under that exact binary name in every variant.
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/valkey
+              readOnly: true
+            # Valkey writes to its data directory even with persistence
+            # disabled (PID file, ephemeral working state). With
+            # readOnlyRootFilesystem: true we mount an emptyDir at the
+            # configured `dir` path so the server can start.
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "broadcast.fullname" . }}-config
+        - name: data
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

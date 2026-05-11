@@ -4,7 +4,7 @@
   "description": "Typed contract for the MEHO Helm chart. Helm validates `.Values` against this schema on `helm install` / `helm upgrade` / `helm template` / `helm lint` (Helm uses JSON Schema draft-07). `additionalProperties: false` is set at every object level so typos and stale keys fail loudly with a clear path. Required-but-blank fields use `minLength: 1` to reject the safe-by-default empty placeholders shipped in `values.yaml` — operators MUST override them via `--set` or a values overlay.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["image", "ingress", "postgres", "vault", "keycloak", "networkPolicy"],
+  "required": ["image", "ingress", "postgres", "vault", "keycloak", "networkPolicy", "broadcast", "migrationJob"],
   "properties": {
     "replicaCount": {
       "type": "integer",
@@ -273,15 +273,114 @@
     },
     "broadcast": {
       "type": "object",
+      "description": "Activity-broadcast subchart values (Valkey 9.x per ADR 0005). When `broadcast.enabled` is false the subchart resources are skipped entirely; the rest of this block may be left at defaults in that mode. When enabled, the subchart's own values.schema.json (charts/broadcast/values.yaml shape) is also enforced — this block declares the top-level surface visible to the parent chart.",
       "additionalProperties": false,
-      "required": ["redis"],
+      "required": ["enabled"],
       "properties": {
-        "redis": {
+        "enabled": { "type": "boolean" },
+        "image": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["bundled"],
+          "required": ["repository", "tag"],
           "properties": {
-            "bundled": { "type": "boolean" }
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$"
+            },
+            "tag": { "type": "string", "minLength": 1 },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1,
+          "description": "v0.1 caps the broadcast subchart at one replica — no Sentinel sidecar ships in this chart and streams are ephemeral by design. HA via Sentinel/Cluster lands at v0.2+ (ADR 0005). Raising this above 1 in v0.1 would not produce a working HA topology and is rejected by the schema."
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "securityContext": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limits": { "$ref": "#/definitions/resourceQuantities" },
+            "requests": { "$ref": "#/definitions/resourceQuantities" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "port"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"]
+            },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "nameOverride": { "type": "string" },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "affinity": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "global": {
+          "type": "object",
+          "description": "Helm injects the parent chart's `.Values.global` into every subchart's values namespace. The key must be permitted by the schema; the contents are arbitrary (operators use it to pass shared values across subcharts).",
+          "additionalProperties": true
+        }
+      }
+    },
+    "migrationJob": {
+      "type": "object",
+      "description": "Pre-install / pre-upgrade migration Job (Helm hook) running `python -m meho_backplane.db.migrate` before the Deployment rolls forward.",
+      "additionalProperties": false,
+      "required": ["backoffLimit", "ttlSecondsAfterFinished"],
+      "properties": {
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Number of Kubernetes-side retries on non-zero exit. Bounded at 10 to keep the hook latency predictable; raise via override only when a known-transient upstream dependency demands it."
+        },
+        "ttlSecondsAfterFinished": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "description": "Seconds after Job completion before Kubernetes garbage-collects the Job. Capped at 24h — longer retention is the operator's responsibility via `kubectl get jobs -o yaml > backup` before TTL fires."
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limits": { "$ref": "#/definitions/resourceQuantities" },
+            "requests": { "$ref": "#/definitions/resourceQuantities" }
           }
         }
       }

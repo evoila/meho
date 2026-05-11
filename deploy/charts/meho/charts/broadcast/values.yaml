@@ -1,0 +1,82 @@
+# Default values for the broadcast subchart (Valkey 9.x).
+#
+# The subchart ships as part of the umbrella `meho` chart; operators override
+# values via the parent chart's `broadcast:` block. ADR 0005 locks the
+# upstream image (Valkey, BSD-3-Clause) and the workload shape (single-
+# replica Deployment, no PVC — broadcast streams are ephemeral in v0.1).
+
+# -- Master switch for the subchart. The parent Chart.yaml's `dependencies`
+# entry references this via `condition: broadcast.enabled`, so flipping to
+# `false` skips all subchart resources at render time. Operators on
+# clusters with an external Redis/Valkey can disable and (in v0.2+) point
+# the backplane at the external endpoint.
+enabled: true
+
+image:
+  # -- Image repository. Defaults to upstream Valkey OSS on Docker Hub.
+  repository: valkey/valkey
+  # -- Image tag. Pinned to a stable Valkey 9.x alpine variant; bump on
+  # security advisories. ADR 0005 locked Valkey 9.x; the patch level is
+  # operator-tunable.
+  tag: "9.0-alpine"
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Number of broadcast replicas. v0.1 is capped at 1 — Valkey is run as a
+# single-replica Deployment without persistence, and the activity-broadcast
+# pillar's streams are ephemeral by design. HA via Sentinel/Cluster lands at
+# v0.2+ per Goal #11 scope; raising this value in v0.1 will not produce a
+# working HA topology (no Sentinel sidecar is shipped) and is therefore
+# rejected by the schema.
+replicas: 1
+
+# -- Pod-level security context. Matches the umbrella chart's `runAsNonRoot`
+# discipline; UID 999 is the upstream Valkey image's default user.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. `readOnlyRootFilesystem: true` is
+# safe because Valkey only writes to its configurable data directory; we
+# mount that as an `emptyDir` so the read-only root invariant holds.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Container resources. Sized for v0.1 streams workload (small messages,
+# low rate). Tune limits up if the broadcast traffic grows.
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+service:
+  # -- Service type. ClusterIP is the only sensible choice for v0.1 — the
+  # broadcast store is consumed by the in-cluster backplane only.
+  type: ClusterIP
+  # -- Service port (Redis-protocol default 6379).
+  port: 6379
+
+# -- Pod-level annotations.
+podAnnotations: {}
+
+# -- Pod-level labels.
+podLabels: {}
+
+# -- Node selector.
+nodeSelector: {}
+
+# -- Tolerations.
+tolerations: []
+
+# -- Affinity rules.
+affinity: {}

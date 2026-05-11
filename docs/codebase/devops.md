@@ -659,20 +659,26 @@ short-circuits on `push` events so main-branch CI is unaffected.
 Every gate the workflow runs can be reproduced locally with the same
 commands. From the repo root:
 
+Each toolchain command runs in its own subshell so `cd` never leaks
+between sections — copy-paste the whole block and every command lands
+in the correct subdir on its own.
+
 ```bash
 # Python
-cd backend && uv sync --locked --all-groups
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
-uv run mypy src/
-uv run pytest -x --cov=meho_backplane --cov-report=term tests/
+(cd backend && uv sync --locked --all-groups)
+(cd backend && uv run ruff check src/ tests/)
+(cd backend && uv run ruff format --check src/ tests/)
+(cd backend && uv run mypy src/)
+(cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
 
 # Go
-cd cli && golangci-lint run
-go build ./...
-go test -race -cover ./...
+# CGO_ENABLED=1 is required for `go test -race` — same reason ci.yml
+# sets it on the race step. The build/lint steps don't need cgo.
+(cd cli && golangci-lint run)
+(cd cli && go build ./...)
+(cd cli && CGO_ENABLED=1 go test -race -cover ./...)
 
-# Helm + kubeconform
+# Helm + kubeconform (run from repo root)
 helm lint deploy/charts/meho/ <same --set overrides as ci.yml>
 helm template test deploy/charts/meho/ <same --set overrides> > /tmp/rendered.yaml
 kubeconform -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary /tmp/rendered.yaml

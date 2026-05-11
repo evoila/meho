@@ -40,10 +40,15 @@ It is deliberately independent of the async cache — readiness must report
 "is the dependency reachable right now?", not "did we last reach it
 during a JWT verify?".
 
-This module never logs token contents or claim values — the
-``request_id`` correlation in :mod:`meho_backplane.middleware` is the
-only crumb left on a 401, by design (no leaks of bearer secrets, no
-identity leaks before authentication completes).
+Token contents and bearer secrets are *never* logged. The tenant-claim
+extraction failure paths log only the configured claim name (an
+operator-controlled config string) and, for malformed values, the bad
+value verbatim — that value has already been signed by the trusted
+issuer and is therefore part of the issuer's claim namespace, never a
+caller-controlled secret. The ``request_id`` correlation bound by
+:mod:`meho_backplane.middleware` ties each log line back to the
+originating request without exposing identity before authentication
+completes.
 """
 
 from __future__ import annotations
@@ -52,9 +57,11 @@ import asyncio
 import time
 import warnings
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pydantic
+import structlog
 
 # ``authlib.jose`` emits an ``AuthlibDeprecationWarning`` at first
 # import, recommending ``joserfc`` (authlib's own successor). The
@@ -77,9 +84,17 @@ from authlib.jose.errors import (
 )
 from fastapi import Header, HTTPException, status
 
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
+
+#: Module-level structlog logger. Used for the tenant-claim-extraction
+#: failure paths so operators staring at a 401 in production can grep
+#: for a specific event name (``missing_tenant_claim`` /
+#: ``malformed_tenant_claim`` / ``missing_tenant_role_claim`` /
+#: ``unknown_tenant_role``) and tell at a glance whether they're chasing
+#: a Keycloak protocol-mapper config bug or a token-tampering attempt.
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "clear_jwks_cache",
@@ -317,16 +332,83 @@ async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
         raise _http_401("invalid_token") from retry_exc
 
 
-def _operator_from_claims(claims: Any, raw_jwt: str) -> Operator:
+def _extract_tenant_id(claims: Any, settings: Settings) -> UUID:
+    """Pull ``tenant_id`` out of *claims* and parse it as a :class:`UUID`.
+
+    Two distinct failure modes, each surfaced with its own structlog
+    event so an operator chasing a 401 can tell whether the issuer's
+    protocol-mapper is missing the claim entirely (``missing_tenant_claim``,
+    fix the Keycloak realm) or is emitting a value that isn't a UUID
+    (``malformed_tenant_claim``, fix the mapper's value expression).
+
+    The bare claim value is included in the malformed log line — it is
+    a value the trusted issuer signed, so it belongs to the issuer's
+    claim namespace, not to the caller. The configured claim *name* is
+    always logged so operators with non-default ``JWT_TENANT_CLAIM_NAME``
+    can grep their settings without re-deriving the contract.
+    """
+    claim_name = settings.jwt_tenant_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        _log.warning("missing_tenant_claim", claim_name=claim_name)
+        raise _http_401("missing_tenant_claim")
+    try:
+        return UUID(raw) if isinstance(raw, str) else UUID(str(raw))
+    except (ValueError, TypeError, AttributeError) as exc:
+        _log.warning(
+            "malformed_tenant_claim",
+            claim_name=claim_name,
+            value=raw,
+        )
+        raise _http_401("malformed_tenant_claim") from exc
+
+
+def _extract_tenant_role(claims: Any, settings: Settings) -> TenantRole:
+    """Pull ``tenant_role`` out of *claims* and resolve it to a :class:`TenantRole`.
+
+    Like :func:`_extract_tenant_id`, distinguishes the two failure
+    modes via separate structlog events
+    (``missing_tenant_role_claim`` vs ``unknown_tenant_role``) so the
+    on-call telemetry maps cleanly to remediation: the first means the
+    Keycloak role-mapper isn't installed; the second means the realm
+    is emitting a role string outside the closed v0.2 enum (likely a
+    typo or a future role that needs the enum widened first).
+    """
+    claim_name = settings.jwt_tenant_role_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        _log.warning("missing_tenant_role_claim", claim_name=claim_name)
+        raise _http_401("missing_tenant_role_claim")
+    try:
+        return TenantRole(raw)
+    except ValueError as exc:
+        _log.warning(
+            "unknown_tenant_role",
+            claim_name=claim_name,
+            value=raw,
+        )
+        raise _http_401("unknown_tenant_role") from exc
+
+
+def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
     A signature-valid JWT can still carry malformed claim values — most
     notably an ``email`` that fails the ``EmailStr`` validator on
-    :class:`Operator`. Pydantic raises ``ValidationError`` in that case;
-    the security contract is that *every* failure to materialise a
-    trusted operator from a token surfaces as 401 ``invalid_token``,
-    never an unhandled 500. The try/except converts the validation
-    failure into the same 401 the rest of the dependency emits.
+    :class:`Operator`, or a tenant claim shape that the issuer hasn't
+    been configured to populate. The security contract is that *every*
+    failure to materialise a trusted operator from a token surfaces as
+    401 — never an unhandled 500 — but the failure *reason* must be
+    distinguishable in logs so on-call doesn't have to guess between a
+    misconfigured issuer, a tampered token, and a legitimate
+    ``tenant_role`` the v0.2 enum doesn't yet model.
+
+    Tenant-claim extraction runs *before* the :class:`Operator`
+    constructor: each failure mode has its own structlog event and 401
+    detail token (``missing_tenant_claim`` / ``malformed_tenant_claim``
+    / ``missing_tenant_role_claim`` / ``unknown_tenant_role``) so the
+    bare ``invalid_token`` fallback is reserved for unexpected
+    pydantic validation failures (the malformed-email regression case).
     """
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
@@ -335,12 +417,16 @@ def _operator_from_claims(claims: Any, raw_jwt: str) -> Operator:
         raise _http_401("invalid_token")
     name = claims.get("name")
     email = claims.get("email")
+    tenant_id = _extract_tenant_id(claims, settings)
+    tenant_role = _extract_tenant_role(claims, settings)
     try:
         return Operator(
             sub=sub,
             name=name if isinstance(name, str) else None,
             email=email if isinstance(email, str) else None,
             raw_jwt=raw_jwt,
+            tenant_id=tenant_id,
+            tenant_role=tenant_role,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc
@@ -364,7 +450,7 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     token = _extract_bearer_token(authorization)
     settings = get_settings()
     claims = await _decode_with_kid_rotation(token, settings)
-    return _operator_from_claims(claims, token)
+    return _operator_from_claims(claims, token, settings)
 
 
 async def keycloak_readiness_probe() -> ProbeResult:

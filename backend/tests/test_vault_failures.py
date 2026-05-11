@@ -228,6 +228,8 @@ def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
         name="Alice",
         email="alice@example.com",
         raw_jwt=jwt,
+        tenant_id="00000000-0000-0000-0000-00000000a0a0",
+        tenant_role="operator",
     )
 
 

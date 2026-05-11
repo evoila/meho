@@ -620,6 +620,8 @@ def test_operator_repr_excludes_raw_jwt() -> None:
         name="Alice",
         email="alice@example.com",
         raw_jwt=sentinel,
+        tenant_id="00000000-0000-0000-0000-00000000a0a0",
+        tenant_role="operator",
     )
 
     text = repr(op)

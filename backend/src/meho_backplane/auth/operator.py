@@ -9,7 +9,7 @@ via ``Depends(verify_jwt)``. The model is **frozen** (pydantic v2
 on request state, log it, and forward it to downstream services without
 fear of mutation creating a confused-deputy bug.
 
-Field choices reflect what G2.2 / G2.3 consumers actually need:
+Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
 
 * ``sub`` — the OIDC subject identifier; the stable operator id.
   Required.
@@ -20,6 +20,15 @@ Field choices reflect what G2.2 / G2.3 consumers actually need:
   G2.2-T2's Vault forward-auth passes the original JWT (not a re-issued
   one) to Vault's OIDC auth method; the chain of custody must be
   preserved bit-for-bit.
+* ``tenant_id`` — the UUID of the tenant the operator acts on behalf
+  of, lifted from the configurable JWT claim (default ``tenant_id``).
+  Required: G0.1's tenancy model treats every authenticated request as
+  scoped to exactly one tenant; downstream Tasks (T3 contextvar
+  binding, T4 RBAC, the future per-tenant query filters) all assume
+  this field is present and well-typed.
+* ``tenant_role`` — the operator's role within the tenant. Modelled as
+  a closed :class:`TenantRole` enum so the RBAC primitive in T4 can be
+  exhaustive (``tenant_admin`` / ``operator`` / ``read_only``).
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -27,9 +36,36 @@ configuration bug and surfaces as a 401 rather than silently propagating
 garbage downstream.
 """
 
+from enum import StrEnum
+from uuid import UUID
+
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-__all__ = ["Operator"]
+__all__ = ["Operator", "TenantRole"]
+
+
+class TenantRole(StrEnum):
+    """Per-tenant role granted to the operator by the JWT issuer.
+
+    The set is intentionally small in v0.2: a closed three-value enum
+    lets the RBAC primitive (Task #234, ``require_role``) make
+    exhaustive comparisons without leaking arbitrary string handling
+    into route code. A richer policy engine — topology-aware
+    permissions, ABAC, approval workflows — is a separate v0.2.next
+    Goal; widening this enum is the only ratcheting mechanism in the
+    interim.
+
+    Values are the literal strings the Keycloak protocol-mapper recipe
+    (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+    cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+    3.11+) gives the members ``str`` semantics for free, so
+    ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+    ``"role=TenantRole.TENANT_ADMIN"``.
+    """
+
+    TENANT_ADMIN = "tenant_admin"
+    OPERATOR = "operator"
+    READ_ONLY = "read_only"
 
 
 class Operator(BaseModel):
@@ -50,3 +86,5 @@ class Operator(BaseModel):
     name: str | None = None
     email: EmailStr | None = None
     raw_jwt: str = Field(repr=False)
+    tenant_id: UUID
+    tenant_role: TenantRole

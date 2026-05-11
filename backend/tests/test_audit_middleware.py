@@ -203,6 +203,8 @@ def _mint_token(
     sub: str = "op-42",
     name: str | None = "Damir",
     email: str | None = "damir@example.com",
+    tenant_id: str = "00000000-0000-0000-0000-00000000a0a0",
+    tenant_role: str = "operator",
 ) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -215,6 +217,8 @@ def _mint_token(
             "iat": now,
             "exp": now + 3600,
             "nbf": now,
+            "tenant_id": tenant_id,
+            "tenant_role": tenant_role,
         }
         if name is not None:
             payload["name"] = name

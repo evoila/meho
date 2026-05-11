@@ -119,12 +119,28 @@ class Settings(BaseModel):
         gives a real PG outage time to recover before requests start
         failing fast; tune downward for traffic shapes where
         backpressure is preferred to long latency.
+    jwt_tenant_claim_name:
+        Name of the JWT claim that carries the operator's tenant UUID.
+        Default ``tenant_id`` matches the Keycloak protocol-mapper
+        recipe documented for G0.1 (Task #235); operators whose realm
+        is configured to surface tenancy under a different claim name
+        (``tid``, ``org_id``, etc.) override via env var. Read once
+        per request by ``verify_jwt`` — the string itself never leaves
+        :class:`Settings`.
+    jwt_tenant_role_claim_name:
+        Name of the JWT claim that carries the operator's
+        :class:`~meho_backplane.auth.operator.TenantRole`. Default
+        ``tenant_role`` matches the same protocol-mapper recipe.
+        Override only when the realm exposes the role under a
+        different attribute.
     """
 
     keycloak_issuer_url: HttpUrl
     keycloak_audience: str = Field(min_length=1)
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
+    jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
+    jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     vault_addr: HttpUrl
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
@@ -181,6 +197,11 @@ def get_settings() -> Settings:
         ),
         keycloak_jwt_leeway_seconds=int(
             os.environ.get("KEYCLOAK_JWT_LEEWAY_SECONDS", "30"),
+        ),
+        jwt_tenant_claim_name=os.environ.get("JWT_TENANT_CLAIM_NAME", "tenant_id"),
+        jwt_tenant_role_claim_name=os.environ.get(
+            "JWT_TENANT_ROLE_CLAIM_NAME",
+            "tenant_role",
         ),
         vault_addr=os.environ["VAULT_ADDR"],  # type: ignore[arg-type]
         vault_oidc_role=os.environ.get("VAULT_OIDC_ROLE", "meho-mcp"),

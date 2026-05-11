@@ -4,6 +4,32 @@ metadata:
   name: {{ include "meho.fullname" . }}-config
   labels:
     {{- include "meho.labels" . | nindent 4 }}
+  # Pre-install / pre-upgrade hook so the ConfigMap exists before the
+  # migration Job's Pod is created. The migration Job (weight -10)
+  # mounts this ConfigMap via `envFrom`, so without the hook
+  # annotation the Pod hits `Error: configmap "<release>-config" not
+  # found` and the entire `helm install --atomic` rolls back before
+  # the Deployment ever renders (issue #205).
+  #
+  # Weight -20 (lower than the migration Job's -10) sequences the
+  # ConfigMap first within the pre-install phase.
+  # `before-hook-creation` means each upgrade replaces the previous
+  # ConfigMap cleanly; the Pod's envFrom is read at Pod start so the
+  # brief delete-recreate window doesn't affect a running backplane.
+  #
+  # Lifecycle implication: hook resources are not tracked by the
+  # release manifest. `helm get manifest` won't list this ConfigMap,
+  # and `helm uninstall` won't garbage-collect it. The trade-off is
+  # acceptable for v0.1 (the Deployment in the release manifest
+  # references the ConfigMap by name, which exists because the hook
+  # ran; uninstall is rare and `kubectl delete cm <release>-config`
+  # cleans up). v0.2 may split this into two ConfigMaps (a
+  # migration-only hook + a release-tracked one for the Deployment)
+  # if leak-on-uninstall becomes load-bearing.
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
 data:
   # Non-secret env vars consumed by the backplane via `envFrom` in the
   # Deployment. Keys follow `backend/src/meho_backplane/settings.py`'s

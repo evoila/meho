@@ -288,6 +288,64 @@ def test_find_alembic_ini_env_override_missing_raises(
     assert str(missing) in str(exc_info.value)
 
 
+def test_alembic_config_overrides_script_location_to_absolute_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``alembic_config`` overrides ``script_location`` to an absolute path.
+
+    Regression for issue #205: the on-disk ``alembic.ini`` ships
+    ``script_location = alembic`` (relative) for source-tree dev
+    ergonomics. Alembic's ``coerce_resource_to_filename`` only does
+    package-resource resolution for values containing a colon, so the
+    plain ``alembic`` ends up cwd-relative — which breaks the installed
+    -wheel path (the migration Job's WORKDIR is ``/app`` but the wheel
+    ships scripts at ``site-packages/meho_backplane/alembic/``).
+
+    The fix is to override ``script_location`` programmatically to the
+    absolute path of the ``alembic/`` directory adjacent to the
+    resolved ``alembic.ini``. Asserting against a tmp_path fixture is
+    sufficient: every resolution path in :func:`find_alembic_ini`
+    follows the same "scripts live next to ini" convention.
+    """
+    custom_ini = tmp_path / "alembic.ini"
+    custom_ini.write_text("[alembic]\nscript_location = alembic\n")
+    scripts_dir = tmp_path / "alembic"
+    scripts_dir.mkdir()
+    monkeypatch.setenv("ALEMBIC_CONFIG", str(custom_ini))
+
+    cfg = alembic_config()
+
+    resolved_script_location = cfg.get_main_option("script_location")
+    assert resolved_script_location is not None
+    assert Path(resolved_script_location).is_absolute()
+    assert Path(resolved_script_location) == scripts_dir
+
+
+def test_alembic_config_preserves_ini_script_location_when_adjacent_dir_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``alembic_config`` falls through to the ini value when no adjacent dir.
+
+    Defensive: if an operator points ``$ALEMBIC_CONFIG`` at an ini file
+    that *doesn't* sit next to an ``alembic/`` directory (exotic
+    layouts — mounted ConfigMap, partial overlay), don't lock the
+    script_location to a path that doesn't exist. Fall through to
+    whatever the ini said; the caller can still override
+    programmatically. This guard keeps the fix surgical — we add an
+    override only when the conventional adjacent layout is satisfied.
+    """
+    custom_ini = tmp_path / "alembic.ini"
+    custom_ini.write_text("[alembic]\nscript_location = /opt/scripts\n")
+    # Deliberately do NOT create tmp_path / "alembic"/.
+    monkeypatch.setenv("ALEMBIC_CONFIG", str(custom_ini))
+
+    cfg = alembic_config()
+
+    assert cfg.get_main_option("script_location") == "/opt/scripts"
+
+
 # ---------------------------------------------------------------------------
 # Optional testcontainers-PG suite
 # ---------------------------------------------------------------------------

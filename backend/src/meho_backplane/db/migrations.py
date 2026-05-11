@@ -128,9 +128,35 @@ def alembic_config(ini_path: Path | None = None) -> Config:
     Config is **not** cached — it is cheap to construct and the
     caller may want to override ``script_location`` for offline /
     test scenarios.
+
+    The on-disk ``alembic.ini`` ships ``script_location = alembic``
+    (relative) for source-tree dev ergonomics — running
+    ``alembic upgrade head`` from ``backend/`` Just Works.  Alembic's
+    ``coerce_resource_to_filename`` only does package-resource
+    resolution for values containing a colon (e.g. ``pkg:path``);
+    plain ``alembic`` is treated as a cwd-relative filename. That
+    breaks the installed-wheel path: the migration Job's container
+    has ``WORKDIR /app`` but the wheel's ``alembic/`` lives under
+    ``site-packages/meho_backplane/alembic/`` — Alembic fails with
+    ``Path doesn't exist: alembic`` (issue #205).
+
+    The convention in every resolution path of :func:`find_alembic_ini`
+    is that ``alembic/`` lives **adjacent to** ``alembic.ini`` (the
+    wheel's ``force-include`` ships them as siblings, the source
+    tree has them as siblings under ``backend/``, the cwd-fallback
+    and env-override patterns are the same). Override
+    ``script_location`` to that absolute path so Alembic finds the
+    scripts regardless of cwd. Guard with ``is_dir()`` so an exotic
+    layout where someone points ``$ALEMBIC_CONFIG`` at an ini-only
+    file falls through to whatever the ini said (caller can still
+    set ``script_location`` themselves; we don't lock it).
     """
     resolved = ini_path or find_alembic_ini()
-    return Config(str(resolved))
+    cfg = Config(str(resolved))
+    script_dir = resolved.parent / "alembic"
+    if script_dir.is_dir():
+        cfg.set_main_option("script_location", str(script_dir))
+    return cfg
 
 
 def _read_current_revision(connection: Connection) -> str | None:

@@ -734,7 +734,7 @@ merge, not against mocks.
 | Event | `pull_request_target` against `main` (`opened`, `synchronize`, `reopened`) |
 | Runner | `meho-runners` (self-hosted) |
 | Concurrency group | `pr-smoke-${{ github.event.pull_request.number }}` with `cancel-in-progress: true` |
-| Permissions | `contents: read`, `id-token: write`, `pull-requests: write` |
+| Permissions | `contents: read`, `packages: write`, `id-token: write`, `pull-requests: write` |
 | Job timeout | 12 min (8 min smoke budget + cold-cache headroom — Task #50 AC #5) |
 
 `pull_request_target` (not `pull_request`) is the load-bearing choice:

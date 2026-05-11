@@ -32,7 +32,16 @@ image:
 imagePullSecrets: []
 
 serviceAccount:
-  create: true
+  # The RDC lab pre-provisions a ServiceAccount named `meho-backplane`
+  # via consumer-side ticket #266 (claude-rdc-hetzner-dc). When the lab
+  # admin owns the SA's name + RBAC, set `create: false` and `name:
+  # <existing-sa>` to wire the chart's Deployment to the existing SA.
+  #
+  # Greenfield labs that want the chart to create its own SA can flip
+  # `create: true` and remove `name` — the chart names the SA after the
+  # release (`<release>` — `meho` for the default release name).
+  create: false
+  name: meho-backplane
   # The RDC lab uses ESO + Vault for secret sync, not workload-identity
   # bindings, so the SA carries no IAM/IRSA annotations.
   annotations: {}

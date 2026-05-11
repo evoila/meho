@@ -200,7 +200,17 @@ jobs:
         # async-token-refresh code (internal/auth) is exercised from
         # parallel tests. -cover keeps the per-package summary in the
         # workflow log; we don't enforce a threshold v0.1.
+        #
+        # CGO_ENABLED=1 is required: `go test -race` is implemented in
+        # the cgo-based race runtime and refuses to run otherwise
+        # (`go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`).
+        # The `meho-runners` self-hosted pool defaults to CGO_ENABLED=0,
+        # so the flag must be set explicitly here. Scoped to this step
+        # only — the build/lint steps work fine with cgo off and don't
+        # need the C toolchain dependency.
         working-directory: cli
+        env:
+          CGO_ENABLED: '1'
         run: go test -race -cover ./...
 
   helm-lint-template:

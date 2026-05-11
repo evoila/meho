@@ -70,15 +70,16 @@ sleep 3
 # `-o /dev/null -w '%{http_code}'` strips the body and emits just the
 # HTTP status as the command's stdout, ready to compare to a literal.
 http_code() {
+  local url="$1"
   curl -sS \
     --retry 5 --retry-delay 1 --retry-connrefused \
     -o /dev/null -w '%{http_code}' \
-    "$1"
+    "$url"
 }
 
 echo ">> assert /healthz returns 200"
 code="$(http_code 'http://127.0.0.1:8000/healthz')"
-if [ "$code" != "200" ]; then
+if [[ "$code" != "200" ]]; then
   echo "::error title=/healthz failed::expected 200, got $code" >&2
   exit 1
 fi
@@ -104,7 +105,7 @@ echo ">> assert /api/v1/health unauthenticated returns 401"
 # requests — both are PR-blocking regressions Goal #11 considers
 # non-negotiable.
 code="$(http_code 'http://127.0.0.1:8000/api/v1/health')"
-if [ "$code" != "401" ]; then
+if [[ "$code" != "401" ]]; then
   echo "::error title=/api/v1/health auth gate regressed::expected 401, got $code" >&2
   exit 1
 fi

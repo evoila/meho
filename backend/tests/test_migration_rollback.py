@@ -415,7 +415,8 @@ class TestForwardCompatRollback:
         token = _mint_token(key, sub=operator_sub)
         _install_fake_vault(monkeypatch)
 
-        with PostgresContainer("postgres:16-alpine") as pg:
+        # mirror.gcr.io: see comment on the matching line in test_db_engine.py.
+        with PostgresContainer("mirror.gcr.io/library/postgres:16-alpine") as pg:
             sync_url = pg.get_connection_url()
             async_url = _async_url_from(sync_url)
 

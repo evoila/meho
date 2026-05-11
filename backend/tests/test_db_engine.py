@@ -344,7 +344,12 @@ class TestPostgresIntegration:
         """
         from testcontainers.postgres import PostgresContainer
 
-        with PostgresContainer("postgres:16-alpine") as pg:
+        # Google's public Docker Hub mirror — same image bits, no Docker Hub
+        # anonymous pull rate limit (100/6h per egress IP). The self-hosted
+        # runner pool shares one egress IP across all org CI, which exhausts
+        # the limit quickly. mirror.gcr.io/library/<name> mirrors the Docker
+        # Hub `library/*` namespace 1:1 and requires no auth.
+        with PostgresContainer("mirror.gcr.io/library/postgres:16-alpine") as pg:
             sync_url = pg.get_connection_url()  # postgresql+psycopg2://...
             async_url = sync_url.replace(
                 "postgresql+psycopg2://",

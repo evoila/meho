@@ -379,7 +379,7 @@ async def test_vault_login_failure_skips_body_and_skips_revoke(
 # ---------------------------------------------------------------------------
 
 
-def test_readiness_probe_reports_unreachable_on_dns_failure(
+async def test_readiness_probe_reports_unreachable_on_dns_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``/sys/health`` raising ``ConnectionError`` surfaces as
@@ -389,7 +389,7 @@ def test_readiness_probe_reports_unreachable_on_dns_failure(
         monkeypatch,
         health_exc=requests.exceptions.ConnectionError("nx domain"),
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.name == "vault"
     assert result.ok is False
@@ -399,7 +399,7 @@ def test_readiness_probe_reports_unreachable_on_dns_failure(
     assert "nx domain" not in result.detail
 
 
-def test_readiness_probe_reports_unreachable_on_timeout(
+async def test_readiness_probe_reports_unreachable_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A read timeout against ``/sys/health`` reports ``unreachable: Timeout``.
@@ -411,14 +411,14 @@ def test_readiness_probe_reports_unreachable_on_timeout(
         monkeypatch,
         health_exc=requests.exceptions.Timeout("upstream timeout"),
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail is not None
     assert result.detail.startswith("unreachable: Timeout")
 
 
-def test_readiness_probe_reports_sealed_on_503_response(
+async def test_readiness_probe_reports_sealed_on_503_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``/sys/health`` returning a 503 response object → ``detail="sealed"``.
@@ -431,13 +431,13 @@ def test_readiness_probe_reports_sealed_on_503_response(
         status_code = 503
 
     _install_fake_client(monkeypatch, health_payload=_FakeResponse())
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail == "sealed"
 
 
-def test_readiness_probe_reports_uninitialized_on_501_response(
+async def test_readiness_probe_reports_uninitialized_on_501_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``/sys/health`` returning 501 → ``detail="uninitialized"``."""
@@ -446,13 +446,13 @@ def test_readiness_probe_reports_uninitialized_on_501_response(
         status_code = 501
 
     _install_fake_client(monkeypatch, health_payload=_FakeResponse())
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail == "uninitialized"
 
 
-def test_readiness_probe_passes_on_dr_secondary_472(
+async def test_readiness_probe_passes_on_dr_secondary_472(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``/sys/health`` returning 472 (DR secondary) → ``ok=true`` with
@@ -463,13 +463,13 @@ def test_readiness_probe_passes_on_dr_secondary_472(
         status_code = 472
 
     _install_fake_client(monkeypatch, health_payload=_FakeResponse())
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is True
     assert result.detail == "http_472"
 
 
-def test_readiness_probe_passes_on_perf_standby_473(
+async def test_readiness_probe_passes_on_perf_standby_473(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``/sys/health`` returning 473 (performance standby) → ``ok=true``."""
@@ -478,13 +478,13 @@ def test_readiness_probe_passes_on_perf_standby_473(
         status_code = 473
 
     _install_fake_client(monkeypatch, health_payload=_FakeResponse())
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is True
     assert result.detail == "http_473"
 
 
-def test_readiness_probe_reports_unexpected_status_for_unknown_code(
+async def test_readiness_probe_reports_unexpected_status_for_unknown_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An undocumented status code surfaces verbatim as
@@ -494,14 +494,14 @@ def test_readiness_probe_reports_unexpected_status_for_unknown_code(
         status_code = 599
 
     _install_fake_client(monkeypatch, health_payload=_FakeResponse())
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail is not None
     assert "599" in result.detail
 
 
-def test_readiness_probe_reports_sealed_when_dict_payload_says_sealed(
+async def test_readiness_probe_reports_sealed_when_dict_payload_says_sealed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dict payload with ``sealed: true`` (HTTP 200 path) →
@@ -514,13 +514,13 @@ def test_readiness_probe_reports_sealed_when_dict_payload_says_sealed(
         monkeypatch,
         health_payload={"initialized": True, "sealed": True},
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail == "sealed"
 
 
-def test_readiness_probe_reports_uninitialized_when_dict_payload_says_so(
+async def test_readiness_probe_reports_uninitialized_when_dict_payload_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dict payload with ``initialized: false`` → ``uninitialized``."""
@@ -528,13 +528,13 @@ def test_readiness_probe_reports_uninitialized_when_dict_payload_says_so(
         monkeypatch,
         health_payload={"initialized": False, "sealed": False},
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail == "uninitialized"
 
 
-def test_readiness_probe_reports_vault_error_for_unclassifiable_response(
+async def test_readiness_probe_reports_vault_error_for_unclassifiable_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A :class:`hvac.exceptions.VaultError` from ``read_health_status``
@@ -547,7 +547,7 @@ def test_readiness_probe_reports_vault_error_for_unclassifiable_response(
         monkeypatch,
         health_exc=hvac.exceptions.VaultError("malformed response"),
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail is not None
@@ -556,7 +556,7 @@ def test_readiness_probe_reports_vault_error_for_unclassifiable_response(
     assert "malformed response" not in result.detail
 
 
-def test_readiness_probe_handles_settings_failure(
+async def test_readiness_probe_handles_settings_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Missing required env vars on probe call → ``settings_unavailable: <Cls>``.
@@ -566,7 +566,7 @@ def test_readiness_probe_handles_settings_failure(
     monkeypatch.delenv("VAULT_ADDR", raising=False)
     get_settings.cache_clear()
 
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail is not None

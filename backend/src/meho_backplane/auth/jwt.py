@@ -367,24 +367,7 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     return _operator_from_claims(claims, token)
 
 
-def _http_get_json_sync(url: str) -> dict[str, Any]:
-    """Synchronous twin of :func:`_http_get_json` for the readiness probe.
-
-    The probe registry from Task #19 expects a synchronous callable, so
-    a sync HTTP client lives here. We don't share the async cache —
-    readiness is "Keycloak reachable *now*", not "we last reached it
-    inside some request".
-    """
-    with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS) as client:
-        response = client.get(url)
-        response.raise_for_status()
-        data: Any = response.json()
-        if not isinstance(data, dict):
-            raise httpx.HTTPError(f"expected JSON object from {url}, got {type(data).__name__}")
-        return data
-
-
-def keycloak_readiness_probe() -> ProbeResult:
+async def keycloak_readiness_probe() -> ProbeResult:
     """Readiness probe: confirm Keycloak's JWKS endpoint is fetchable.
 
     Registered with :mod:`meho_backplane.health` at app startup.
@@ -395,6 +378,15 @@ def keycloak_readiness_probe() -> ProbeResult:
     contract (Task #19), and Keycloak's JWKS endpoint is a single
     HTTP GET against a CDN-able JSON document — a few hundred
     milliseconds in the worst case.
+
+    Async because the JWKS fetch goes through :func:`_http_get_json`'s
+    :class:`httpx.AsyncClient`. The previous sync twin
+    (``_http_get_json_sync``) blocked the FastAPI event loop on every
+    ``/ready`` poll — on a busy worker that's enough to starve request
+    handling while the discovery + JWKS round-trips complete. Sharing
+    the async client path with the request hot path also keeps a
+    single transport configured the same way (timeouts, retries when
+    they land in v0.2).
 
     Failure detail surfaces the exception class name (not its
     message) so the probe payload never leaks issuer URLs or other
@@ -413,7 +405,7 @@ def keycloak_readiness_probe() -> ProbeResult:
     discovery_url = f"{issuer}/.well-known/openid-configuration"
 
     try:
-        discovery = _http_get_json_sync(discovery_url)
+        discovery = await _http_get_json(discovery_url)
         jwks_uri = discovery.get("jwks_uri")
         if not isinstance(jwks_uri, str) or not jwks_uri:
             return ProbeResult(
@@ -421,7 +413,7 @@ def keycloak_readiness_probe() -> ProbeResult:
                 ok=False,
                 detail="jwks_uri_missing",
             )
-        jwks = _http_get_json_sync(jwks_uri)
+        jwks = await _http_get_json(jwks_uri)
         if not isinstance(jwks.get("keys"), list):
             return ProbeResult(
                 name="keycloak",

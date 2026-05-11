@@ -454,21 +454,21 @@ def test_jwks_unreachable_returns_401() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_readiness_probe_passes_when_jwks_fetchable() -> None:
+async def test_readiness_probe_passes_when_jwks_fetchable() -> None:
     key = _make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
-        result = keycloak_readiness_probe()
+        result = await keycloak_readiness_probe()
 
     assert result.name == "keycloak"
     assert result.ok is True
     assert result.detail == "jwks_fetched"
 
 
-def test_readiness_probe_fails_when_discovery_unreachable() -> None:
+async def test_readiness_probe_fails_when_discovery_unreachable() -> None:
     with respx.mock as mock_router:
         mock_router.get(_DISCOVERY_URL).mock(return_value=httpx.Response(503))
-        result = keycloak_readiness_probe()
+        result = await keycloak_readiness_probe()
 
     assert result.name == "keycloak"
     assert result.ok is False
@@ -476,7 +476,7 @@ def test_readiness_probe_fails_when_discovery_unreachable() -> None:
     assert result.detail.startswith("jwks_fetch_failed:")
 
 
-def test_readiness_probe_fails_when_jwks_malformed() -> None:
+async def test_readiness_probe_fails_when_jwks_malformed() -> None:
     with respx.mock as mock_router:
         mock_router.get(_DISCOVERY_URL).mock(
             return_value=httpx.Response(
@@ -487,7 +487,7 @@ def test_readiness_probe_fails_when_jwks_malformed() -> None:
         mock_router.get(_JWKS_URL).mock(
             return_value=httpx.Response(200, json={"unexpected": "shape"}),
         )
-        result = keycloak_readiness_probe()
+        result = await keycloak_readiness_probe()
 
     assert result.ok is False
     assert result.detail == "jwks_malformed"

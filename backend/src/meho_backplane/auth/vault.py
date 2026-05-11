@@ -172,6 +172,29 @@ async def _to_thread_revoke_self(client: hvac.Client) -> None:
     await asyncio.to_thread(_do_revoke_self, client)
 
 
+def _do_read_health(client: hvac.Client) -> Any:
+    """Synchronously call ``client.sys.read_health_status(method="GET")``.
+
+    Factored out of :func:`vault_readiness_probe` so the blocking call
+    can be offloaded to a worker thread via :func:`_to_thread_read_health`
+    without inlining ``asyncio.to_thread(...)`` boilerplate at the probe
+    call site. The seam is also what tests substitute when validating
+    the probe's exception-mapping branches.
+
+    ``method="GET"`` returns the JSON body when status is 200 and a
+    :class:`requests.Response` (with a readable status code) when Vault
+    is sealed / uninitialised / standby. The HEAD default returns no
+    body — fine for a load balancer but loses the ``sealed`` flag we
+    surface in :attr:`ProbeResult.detail`.
+    """
+    return client.sys.read_health_status(method="GET")
+
+
+async def _to_thread_read_health(client: hvac.Client) -> Any:
+    """Run :func:`_do_read_health` off the event loop."""
+    return await asyncio.to_thread(_do_read_health, client)
+
+
 @asynccontextmanager
 async def vault_client_for_operator(operator: Operator) -> AsyncIterator[hvac.Client]:
     """Yield an authenticated :class:`hvac.Client` bound to *operator*.
@@ -272,12 +295,18 @@ def _classify_health_response(payload: Any) -> tuple[bool, str]:
     return False, f"unexpected_status: {status_code}"
 
 
-def vault_readiness_probe() -> ProbeResult:
+async def vault_readiness_probe() -> ProbeResult:
     """Readiness probe — confirm Vault's ``/sys/health`` is reachable.
 
     Registered with :mod:`meho_backplane.health` at app startup. Hits
     Vault on every call (no caching); ``/sys/health`` is unauthenticated
     and explicitly designed to be cheap by HashiCorp's own contract.
+
+    Async because hvac (the only seam to Vault we have) is synchronous
+    and would block the FastAPI event loop on every ``/ready`` poll if
+    called inline. The actual HTTP call is offloaded to a worker thread
+    via :func:`_to_thread_read_health`, mirroring the same pattern the
+    per-request login uses (:func:`_to_thread_jwt_login`).
 
     The probe distinguishes three failure shapes in ``detail``:
 
@@ -303,12 +332,7 @@ def vault_readiness_probe() -> ProbeResult:
 
     client = _build_client(settings)
     try:
-        # ``method='GET'`` so we get the JSON body when status is 200,
-        # and a ``requests.Response`` (with a status code we can read)
-        # when Vault is sealed / uninitialized / standby. The HEAD
-        # default returns no body, which is fine for a load balancer
-        # but loses the ``sealed`` flag we want to surface in detail.
-        payload = client.sys.read_health_status(method="GET")
+        payload = await _to_thread_read_health(client)
     except (
         requests.exceptions.ConnectionError,
         requests.exceptions.Timeout,

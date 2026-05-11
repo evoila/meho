@@ -427,7 +427,7 @@ async def test_vault_other_error_wraps_to_client_error(
 # ---------------------------------------------------------------------------
 
 
-def test_readiness_probe_passes_on_unsealed_active_vault(
+async def test_readiness_probe_passes_on_unsealed_active_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _install_fake_client(
@@ -439,7 +439,7 @@ def test_readiness_probe_passes_on_unsealed_active_vault(
             "version": "1.18.0",
         },
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.name == "vault"
     assert result.ok is True
@@ -447,7 +447,7 @@ def test_readiness_probe_passes_on_unsealed_active_vault(
     assert fake.sys.read_calls == [{"method": "GET"}]
 
 
-def test_readiness_probe_fails_on_sealed_vault(
+async def test_readiness_probe_fails_on_sealed_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sealed Vault answers ``/sys/health`` but cannot honour OIDC logins."""
@@ -455,26 +455,26 @@ def test_readiness_probe_fails_on_sealed_vault(
         monkeypatch,
         health_payload={"initialized": True, "sealed": True},
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail == "sealed"
 
 
-def test_readiness_probe_fails_on_uninitialized_vault(
+async def test_readiness_probe_fails_on_uninitialized_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_client(
         monkeypatch,
         health_payload={"initialized": False, "sealed": False},
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail == "uninitialized"
 
 
-def test_readiness_probe_passes_on_standby_node(
+async def test_readiness_probe_passes_on_standby_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Standby Vault returns 429; hvac returns the raw Response.
@@ -487,13 +487,13 @@ def test_readiness_probe_passes_on_standby_node(
         status_code = 429
 
     _install_fake_client(monkeypatch, health_payload=_FakeResponse())
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is True
     assert result.detail == "http_429"
 
 
-def test_readiness_probe_reports_unexpected_status(
+async def test_readiness_probe_reports_unexpected_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A status code outside the documented matrix surfaces verbatim."""
@@ -502,28 +502,28 @@ def test_readiness_probe_reports_unexpected_status(
         status_code = 418
 
     _install_fake_client(monkeypatch, health_payload=_FakeResponse())
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail is not None
     assert "418" in result.detail
 
 
-def test_readiness_probe_fails_when_vault_unreachable(
+async def test_readiness_probe_fails_when_vault_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_client(
         monkeypatch,
         health_exc=requests.exceptions.ConnectionError("dns failure"),
     )
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail is not None
     assert result.detail.startswith("unreachable: ConnectionError")
 
 
-def test_readiness_probe_handles_settings_failure(
+async def test_readiness_probe_handles_settings_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A missing required env var on probe call yields ``settings_unavailable``.
@@ -539,7 +539,7 @@ def test_readiness_probe_handles_settings_failure(
     monkeypatch.delenv("VAULT_ADDR", raising=False)
     get_settings.cache_clear()
 
-    result = vault_readiness_probe()
+    result = await vault_readiness_probe()
 
     assert result.ok is False
     assert result.detail is not None

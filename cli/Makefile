@@ -5,7 +5,8 @@
 # Python backplane build — invoke via `make cli` from the repo root
 # (which delegates here) or run targets directly from this directory.
 
-.PHONY: help build test lint tidy install clean generate snapshot-openapi tools
+.PHONY: help build test lint tidy install clean generate snapshot-openapi tools \
+        release-check release-dry-run goreleaser
 
 # Version metadata gets baked into the binary via -ldflags -X.
 # Override on the command line for release builds:
@@ -39,6 +40,13 @@ BINARY     := $(BIN_DIR)/meho
 OAPI_CODEGEN_VERSION := v2.5.0
 OAPI_CODEGEN         := $(BIN_DIR)/oapi-codegen
 
+# GoReleaser pinned to v2.15.4 — the active v2.x line as of May 2026.
+# `make release-dry-run` shells out to a local install under bin/ so
+# contributors don't need a system-wide install (the GHA workflow uses
+# goreleaser/goreleaser-action which manages its own binary).
+GORELEASER_VERSION := v2.15.4
+GORELEASER         := $(BIN_DIR)/goreleaser
+
 # Backplane source directory (relative to cli/). Used by
 # snapshot-openapi to drive the FastAPI app and re-emit
 # api/openapi.json.
@@ -64,7 +72,11 @@ install: ## Install meho into $$(go env GOBIN) (or $$GOPATH/bin).
 	go install $(GOFLAGS) -ldflags "$(GO_LDFLAGS)" ./cmd/meho
 
 clean: ## Remove build artefacts (keeps oapi-codegen under bin/).
-	rm -rf dist/ $(BINARY)
+	# Also drop the transient `LICENSE` copy the .goreleaser.yaml
+	# before-hook stages into `cli/`. It's gitignored, so leaving it
+	# behind wouldn't pollute the repo, but contributors find stray
+	# files confusing.
+	rm -rf dist/ $(BINARY) LICENSE
 
 tools: $(OAPI_CODEGEN) ## Install local code-gen tooling under bin/.
 
@@ -78,3 +90,20 @@ generate: tools ## Regenerate the typed API client from api/openapi.json.
 snapshot-openapi: ## Re-snapshot api/openapi.json from the running backplane source.
 	@command -v uv >/dev/null 2>&1 || { echo "snapshot-openapi requires uv (see backend/README.md)"; exit 2; }
 	cd $(BACKEND_DIR) && uv run python3 $(CURDIR)/api/snapshot-openapi.py --out $(CURDIR)/api/openapi.json
+
+goreleaser: $(GORELEASER) ## Install GoReleaser into bin/ (matches cli-release.yml's pinned version).
+
+$(GORELEASER):
+	@mkdir -p $(BIN_DIR)
+	GOBIN=$(CURDIR)/$(BIN_DIR) go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
+
+release-check: goreleaser ## Validate .goreleaser.yaml (config-only, no build).
+	$(GORELEASER) check
+
+release-dry-run: goreleaser ## Local snapshot release (produces dist/ tarballs + SHA256SUMS; no push).
+	# `--snapshot` synthesises a fake tag so the run works on any
+	# branch without needing a real `v*` tag in git history.
+	# `--clean` wipes dist/ before building. `--skip=publish` keeps
+	# the GitHub Release / Homebrew tap publishers off — operators
+	# should never accidentally push to upstream from their laptop.
+	$(GORELEASER) release --snapshot --clean --skip=publish

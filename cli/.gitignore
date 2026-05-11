@@ -1,8 +1,15 @@
 # Build artefacts produced by `make build` / `make install`.
 bin/
 
-# GoReleaser output (lands in G2.6-T4).
+# GoReleaser output.
 dist/
+
+# Transient copy of the top-level LICENSE staged here by the
+# .goreleaser.yaml `before:` hook so archive globs (which reject
+# `..` traversal) can include it by basename. Source of truth
+# stays at the repo root; this copy is recreated on every release
+# build and never committed.
+LICENSE
 
 # Coverage profiles produced by `go test -cover -coverprofile=...`.
 *.out

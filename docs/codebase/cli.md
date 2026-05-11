@@ -12,23 +12,25 @@ the backplane to perform the three Goal #11 v0.1 operations: `login`,
 backplane (`backend/`); the two communicate exclusively over the
 backplane's HTTP/JSON API, with the OpenAPI spec at the seam.
 
-As of G2.6-T3 the v0.1 trio is wired: `version`, `login`, `status`.
+As of G2.6-T4 the v0.1 trio is wired (`version`, `login`, `status`)
+and the multi-platform release pipeline ships every `v*` tag as
+four tarballs + `SHA256SUMS` to GitHub Releases via GoReleaser.
 Server-driven subcommand discovery runs at every startup (empty
 manifest in v0.1; populated by post-Goal-2 backplanes without a
-CLI binary release). Subsequent tasks layer in:
+CLI binary release). The next Task layers in:
 
-* Multi-platform GoReleaser builds + tarballs to GitHub Releases
-  (G2.6-T4 / #46).
-* Cosign keyless signing per ADR 0006 (G2.6-T5 / #47).
+* Cosign keyless signing of release artefacts per ADR 0006
+  (G2.6-T5 / #47).
 
 ## Module layout
 
 ```text
 cli/
 ├── go.mod                  # github.com/evoila/meho/cli; Go 1.22.
-├── Makefile                # build / test / lint / install / generate / snapshot.
+├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
-├── .gitignore              # bin/, dist/, coverage artefacts.
+├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
+├── .gitignore              # bin/, dist/, LICENSE-copy, coverage artefacts.
 ├── README.md               # user-facing quickstart.
 ├── api/
 │   ├── openapi.json        # OpenAPI 3.0 snapshot — input to oapi-codegen.
@@ -98,6 +100,9 @@ The Makefile is the single source of truth for build invocations:
 | `make tools` | Installs `bin/oapi-codegen` at the pinned v2.5.0. |
 | `make generate` | Regenerates `internal/api/client.gen.go` from `api/openapi.json`. |
 | `make snapshot-openapi` | Re-snapshots `api/openapi.json` from the backplane's FastAPI app. |
+| `make goreleaser` | Installs `bin/goreleaser` at the pinned v2.15.4. |
+| `make release-check` | Runs `goreleaser check` against `.goreleaser.yaml` (config-only validation). |
+| `make release-dry-run` | Runs `goreleaser release --snapshot --clean --skip=publish` for a local rehearsal (no push). |
 
 Build-time identity injection follows the canonical Go pattern (the
 one `kubectl`, `gh`, `argocd`, `flux` all use):
@@ -113,8 +118,9 @@ The Makefile shells out to `git rev-parse --short HEAD` and `date -u`
 for the `COMMIT` / `DATE` defaults, so a contributor running plain
 `make build` still gets a binary that identifies itself with the
 real commit it was produced from. Release builds (G2.6-T4) override
-`VERSION` with the semver tag and re-emit the same Makefile via
-GoReleaser.
+`VERSION` with the git tag form via GoReleaser's `{{.Tag}}` template;
+see the **Release pipeline** section below for the full ldflags
+binding rationale.
 
 `-trimpath` strips the build-machine path prefix from the binary,
 which is required for reproducible builds and avoids leaking the
@@ -533,6 +539,166 @@ Choices deliberately omitted:
 The exclude-rules block relaxes `errcheck` and `revive` on
 `_test.go` files only — test code routinely uses blank identifiers
 and dot imports in ways production code shouldn't.
+
+## Release pipeline (G2.6-T4)
+
+Release builds are driven by [GoReleaser](https://goreleaser.com/)
+v2 configured at `cli/.goreleaser.yaml`, executed by
+`.github/workflows/cli-release.yml`. The pipeline trades the
+hand-rolled GitHub Actions matrix that `gh release create` would
+require for GoReleaser's single-config model — the same shape `gh`,
+`argocd`, and `flux` all use.
+
+### Trigger surface
+
+The workflow runs only on `v*` tag push. Goal #11's release
+contract is explicit that the tag is the authoritative version
+stamp — a push to main without a tag has no semver to bake into
+the binary or the tarball file name, so we don't run. The
+`concurrency` group is keyed on `github.ref` so a fast-follow
+re-tag (force-pushed `v0.1.0-rc.1` during validation, for
+instance) cancels its predecessor cleanly.
+
+Permissions follow the per-job least-privilege posture the rest of
+the workflows use (chart.yml, image.yml):
+
+* Workflow-default `contents: read` — just enough to checkout.
+* `release` job elevates to `contents: write` (GitHub Release
+  creation) + `id-token: write` (forward-compat for the cosign
+  keyless signing G2.6-T5 wires in).
+
+`id-token: write` is declared *now*, even though this Task does no
+signing, so the G2.6-T5 follow-up is a single-file delta on the
+workflow rather than a separate maintainer approval to change
+workflow permissions.
+
+### Build matrix
+
+GoReleaser's `builds` block expands the 2×2 target matrix on a
+single x86_64 runner — Go's cross-compilation is built-in, so the
+darwin/* and arm64 targets are first-class without QEMU or a
+multi-arch runner pool. Every target uses:
+
+* `CGO_ENABLED=0` — pure-Go static binary; no glibc dep, single
+  tarball ships unmodified to any operator's machine.
+* `-trimpath` + `-s -w` — same flags `cli/Makefile`'s release path
+  uses (strips build-machine path prefix + symbol table + DWARF
+  debug info).
+* `mod_timestamp: {{ .CommitTimestamp }}` — pins file modification
+  times inside the tarball to the commit author date, so a rebuild
+  of the same tag produces a byte-identical binary. Required for
+  cosign attestation (G2.6-T5) where the signed digest must match
+  between independent builds.
+* `ldflags -X github.com/evoila/meho/cli/internal/version.{Version,Commit,Date}` —
+  feeds `internal/version/version.go`. Bindings:
+  - `Version → {{.Tag}}` (preserves the leading `v` per Goal #11
+    acceptance criterion; GoReleaser's default `{{.Version}}` strips
+    it for the file-name slot).
+  - `Commit → {{.Commit}}` (full SHA on a release binary; the
+    Makefile's `make build` path uses the short form for dev).
+  - `Date → {{.CommitDate}}` (commit author date, not build wall
+    clock — required for reproducibility).
+
+### Archive layout
+
+Each `<os>/<arch>` target produces one tarball:
+
+```text
+meho_<version-no-leading-v>_<os>_<arch>.tar.gz
+├── meho           # the static binary
+├── LICENSE        # top-level Apache 2.0 (copied into cli/ by the
+│                  # before-hook; cli/.gitignore excludes the copy
+│                  # from git — source of truth stays at repo root)
+└── README.md      # the cli/ user-facing README
+```
+
+GoReleaser's archive globs forbid `..` path traversal by design (a
+defence against pulling arbitrary host files into release tarballs),
+which is why the top-level `LICENSE` is hoisted into `cli/` via a
+`before:` hook (`sh -c 'cp ../LICENSE LICENSE'`) before the archive
+step runs. The copy is gitignored; the source of truth remains the
+repo-root `LICENSE`.
+
+The combined `SHA256SUMS` file is produced by
+`checksum: name_template: 'SHA256SUMS'`. Operators verify with:
+
+```bash
+sha256sum -c SHA256SUMS
+```
+
+### Tag → version slot
+
+GoReleaser strips the leading `v` from the git tag for the
+file-name version slot (per the `{{ .Version }}` template
+default — semver body convention), so `v0.1.0` produces
+`meho_0.1.0_linux_amd64.tar.gz`. The binary's `meho version`
+output preserves the full tag form (`v0.1.0`) via the
+`{{ .Tag }}` binding documented above. Both forms exist for a
+reason: file names benefit from the strict-semver shape that some
+package managers expect (homebrew-releaser is the v0.2 driver here);
+runtime identity benefits from human readability (`v` prefix).
+
+### Release notes
+
+`changelog: use: git` walks the commit history between the previous
+tag and the current one to build release notes. For v0.1.0 (no
+previous tag), GoReleaser walks the full history; subsequent
+releases narrow to the inter-tag delta. The `groups` block maps
+Conventional Commits prefixes to release-note sections
+(`feat:` → Features, `fix:` → Fixes, everything else → Other) —
+matches the allowed-prefix set in `.pre-commit-config.yaml`.
+Dependabot churn (`chore(deps): Bump …`) and merge commits are
+filtered out so the operator-facing release notes stay readable.
+
+The top-level `CHANGELOG.md` (Keep a Changelog format) is the
+human-curated narrative — what shipped and why — and is the
+authoritative companion to the auto-generated GitHub Release notes.
+
+### Draft mode
+
+`release: draft: true` creates the GitHub Release as a draft. A
+maintainer flips it to public via the GitHub UI after verifying
+the four tarballs are present and `meho version` reports the
+expected tag. The conservative posture is intentional for a first
+public release — once cosign signing (G2.6-T5) is wired and the
+full pipeline is proven end to end, the draft flag becomes a
+one-line edit.
+
+`release: prerelease: auto` flips the GitHub "pre-release" flag
+based on whether the tag contains a semver pre-release identifier
+(per https://semver.org). `v0.1.0-rc.1` → pre-release;
+`v0.1.0` → stable.
+
+### Local dry-run
+
+`make release-dry-run` runs `goreleaser release --snapshot --clean
+--skip=publish` against the local checkout. Snapshot mode
+synthesises a `0.0.1-snapshot` version so the run works on any
+branch without needing a real `v*` tag in git, and `--skip=publish`
+keeps the GitHub Release / Homebrew tap publishers off so an
+operator can't accidentally push to upstream from their laptop.
+The output lands at `cli/dist/`, gitignored.
+
+`make release-check` runs `goreleaser check` for config-only
+validation — useful as a fast feedback loop when editing
+`.goreleaser.yaml` without producing artefacts.
+
+Both targets install GoReleaser into `cli/bin/` on first run
+(pinned to v2.15.4 for developer reproducibility). The GHA workflow
+uses `goreleaser/goreleaser-action@<sha>` with `version: '~> v2'`
+so security and bug-fix releases land automatically — the v2 major
+schema is what matters for stability, not the patch version.
+
+### Reproducible-build limits
+
+Within-tarball reproducibility is exact: the same tag produces
+byte-identical binaries across rebuilds (`mod_timestamp` +
+`CommitDate` ldflag + `-trimpath`). The gzip wrapper around each
+tarball has its own embedded mtime that varies between runs — the
+binary's content is identical, the gzip stream is not. This is the
+level of reproducibility cosign attestation flows (G2.6-T5)
+require: signing happens on the artefact digest after upload, and
+the artefact digest IS the binary digest, not the gzip stream.
 
 ## Dependencies
 

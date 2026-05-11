@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# meho CLI multi-platform release pipeline.
+#
+# Locked artefact contract (Goal #11 — CLI release-distribution principle):
+#   On every `v*` tag push, build four single-static tarballs
+#   (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64), produce a
+#   combined SHA256SUMS file, and publish them as assets on a new
+#   draft GitHub Release at https://github.com/evoila/meho/releases.
+#
+# Tag-driven only — main branch pushes never publish a release. The
+# release tag is the authoritative version stamp: GoReleaser strips
+# the leading `v` for the file-name convention (per
+# https://goreleaser.com/customization/builds/) but the `meho version`
+# output preserves the tag form (`v0.1.0`) via the `{{.Tag}}` template
+# binding in cli/.goreleaser.yaml.
+#
+# Cosign signing (G2.6-T5 / Issue #47) extends this workflow with a
+# post-publish sign step; the `id-token: write` permission below is
+# already declared so the signing follow-up is a single-file change.
+#
+# Permissions design follows the same per-job least-privilege posture
+# as chart.yml + image.yml:
+#   * workflow-default = `contents: read` (just enough to checkout).
+#   * `release` job elevates to `contents: write` (GitHub Release
+#     creation) + `id-token: write` (forward-compat for cosign keyless
+#     in #47). No `packages: write`, no `security-events: write` —
+#     CLI tarballs land on GitHub Releases, not GHCR, and there is no
+#     SARIF scan in this Task's scope.
+
+name: cli-release
+
+on:
+  push:
+    # Tag-driven only. Goal #11's release contract is explicit:
+    # operators download from a versioned GitHub Release URL, which
+    # only makes sense when the tarball name matches a tag. A push
+    # to main without a tag would have no semantic version to bake
+    # into the binary or the tarball file name, so we don't run.
+    tags: ['v*']
+
+# Workflow-default permissions are read-only. The `release` job
+# below elevates to the minimum it actually needs. CodeRabbit's
+# githubactions:S8233/S8264 and Sonar's `least-privilege per job`
+# both want this shape.
+permissions:
+  contents: read
+
+concurrency:
+  # On a tag push, keep one in-flight release per tag ref so a
+  # fast-follow re-tag (e.g. force-pushed `v0.1.0-rc.1` during
+  # validation) cancels its predecessor cleanly. Tag pushes are
+  # idempotent — `cancel-in-progress` is safe.
+  group: cli-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Build + publish CLI release artefacts
+    # Fork-PR guard mirrors chart.yml + image.yml. Even though this
+    # workflow triggers only on `v*` tag push (not pull_request) and
+    # so the guard is a defence-in-depth no-op today, we keep the
+    # standard shape so a future addition of a PR trigger doesn't
+    # silently open a fork-exec foothold on the self-hosted runner.
+    # The OR short-circuits on push events; the `pull_request.head.repo`
+    # property is irrelevant when github.event_name != 'pull_request'.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners
+    timeout-minutes: 30
+    permissions:
+      # `contents: write` is required for GoReleaser to create the
+      # GitHub Release and upload the four tarballs + SHA256SUMS as
+      # release assets. Scoped to this job only.
+      contents: write
+      # `id-token: write` mints a GitHub Actions OIDC token. Cosign
+      # keyless signing (G2.6-T5 / #47) exchanges that token at
+      # Fulcio for a ~10-minute x509 cert and signs every release
+      # artefact under the workflow identity. Declared now so the
+      # signing follow-up is a single-file delta on top of this
+      # workflow rather than a workflow-permission change that
+      # would require a separate maintainer review.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # GoReleaser's `changelog: use: git` walks the full history
+          # between the previous tag and the current one to build
+          # release notes. Without `fetch-depth: 0` only the HEAD
+          # commit is available and the changelog renders empty.
+          # For v0.1.0 (no previous tag) the full history is walked
+          # anyway.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          # Matches `cli/go.mod`'s `go 1.22` directive. GoReleaser
+          # builds with this toolchain; bumping requires an aligned
+          # `cli/go.mod` edit so we hardcode the version explicitly
+          # rather than reading it from go.mod via `go-version-file:`
+          # (which would silently follow a future bump without a CI
+          # rebuild signal).
+          go-version: '1.22'
+          # Cache go modules across runs; speeds up the cold checkout
+          # by 10-20s on the self-hosted runner pool's pre-warmed
+          # filesystem. Keyed by cli/go.sum (the only Go module in
+          # the tree right now).
+          cache-dependency-path: cli/go.sum
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8  # v7.2.1
+        with:
+          # `~> v2` resolves to the latest GoReleaser v2.x at run
+          # time. We intentionally don't pin to a specific patch
+          # (e.g. `v2.15.4`) so security and bug fixes land
+          # automatically; the v2 major is locked, which is what
+          # matters for config-schema stability. (The local
+          # `make release-dry-run` target pins to v2.15.4 for a
+          # reproducible developer experience.)
+          version: '~> v2'
+          # `release --clean` wipes dist/ before building and then
+          # creates/uploads the GitHub Release. No `--snapshot` —
+          # we're on a real tag push so GoReleaser uses
+          # ${GITHUB_REF#refs/tags/} as the version.
+          args: release --clean
+          # GoReleaser reads .goreleaser.yaml relative to its
+          # working directory. The CLI lives at `cli/`, so we point
+          # it there; the top-level LICENSE is copied into `cli/`
+          # by the `before:` hook in cli/.goreleaser.yaml so the
+          # archive `files:` section can reference it by basename
+          # without using `..` path traversal (which GoReleaser's
+          # archive globs forbid by design).
+          workdir: cli
+        env:
+          # GoReleaser uses GITHUB_TOKEN to create the Release and
+          # upload assets. The default GITHUB_TOKEN minted by the
+          # runner already has the per-job `contents: write` scope
+          # declared above; no PAT, no secret-file mount.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Emit release summary
+        # Surface the published artefact list in the workflow run
+        # summary so a maintainer flipping the draft Release to
+        # public can spot a missing target at a glance.
+        if: success()
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "## CLI release published (draft)"
+            echo ""
+            echo "Tag: \`${TAG}\`"
+            echo ""
+            echo "### Artefacts"
+            echo ""
+            echo '```'
+            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS 2>/dev/null || true
+            echo '```'
+            echo ""
+            echo "### Anonymous download"
+            echo ""
+            echo '```bash'
+            echo "TARBALL=meho_${TAG#v}_linux_amd64.tar.gz"
+            echo "curl -LO https://github.com/evoila/meho/releases/download/${TAG}/\${TARBALL}"
+            echo "tar xzf \${TARBALL} && ./meho version"
+            echo '```'
+            echo ""
+            echo "### Verify checksums"
+            echo ""
+            echo '```bash'
+            echo "curl -LO https://github.com/evoila/meho/releases/download/${TAG}/SHA256SUMS"
+            echo "sha256sum -c SHA256SUMS"
+            echo '```'
+            echo ""
+            echo "The release is created in **draft** mode — a maintainer"
+            echo "must flip it to public via the GitHub Releases UI after"
+            echo "verifying the four tarballs are present and \`meho version\`"
+            echo "reports the expected tag."
+          } >> "${GITHUB_STEP_SUMMARY}"

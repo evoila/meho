@@ -296,6 +296,23 @@ See [`docs/codebase/devops.md`](./docs/codebase/devops.md) for the full
 chart contract, probe semantics, NetworkPolicy posture, install/upgrade
 flow, and verification commands.
 
+## v0.2 upgrade prerequisites
+
+The v0.2 backplane (Initiative
+[#222](https://github.com/evoila/meho/issues/222)) reads two new
+claims (`tenant_id` + `tenant_role`) from every authenticated access
+token. v0.1 chassis-era tokens do not carry those claims; operators
+upgrading from v0.1 to v0.2 must apply the realm-side configuration
+that mints them, or every authenticated request returns
+`401 missing_tenant_claim`.
+
+The realm-side recipe (group attribute + realm role protocol mappers,
+verification + troubleshooting) lives at
+[`docs/cross-repo/keycloak-tenant-claims.md`](./docs/cross-repo/keycloak-tenant-claims.md).
+Apply it against the realm whose issuer is configured as
+`KEYCLOAK_ISSUER_URL` in the chart values **before** rolling the
+backplane image to a v0.2 tag.
+
 ## Documentation
 
 Codebase walkthroughs:

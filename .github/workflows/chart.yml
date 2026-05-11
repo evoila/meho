@@ -99,6 +99,16 @@ jobs:
         # to match devops_best_practices.md's no-`curl|sh`-unpinned rule.
         # The shasum line is the upstream-published checksum for the
         # linux-amd64 tarball of v0.6.7.
+        #
+        # Install target is `$HOME/.local/bin` — a runner-owned directory —
+        # rather than `/usr/local/bin`, because the self-hosted `meho-runners`
+        # pool runs as a non-root user that cannot write to system paths
+        # (writing /usr/local/bin returned `Permission denied` in CI run
+        # 25644668781). Appending the directory to `$GITHUB_PATH` is the
+        # documented GitHub Actions mechanism for surfacing the binary to
+        # *subsequent* steps' PATH; within this step we invoke kubeconform
+        # by its full path for the smoke check so the verification doesn't
+        # depend on PATH propagation that hasn't happened yet.
         run: |
           set -euo pipefail
           KC_VER=v0.6.7
@@ -107,7 +117,25 @@ jobs:
             "https://github.com/yannh/kubeconform/releases/download/${KC_VER}/kubeconform-linux-amd64.tar.gz"
           echo "${KC_SHA}  /tmp/kubeconform.tar.gz" | sha256sum -c -
           tar -xzf /tmp/kubeconform.tar.gz -C /tmp/ kubeconform
-          install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 /tmp/kubeconform "${HOME}/.local/bin/kubeconform"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          # Smoke test the freshly installed binary. PATH for *this* step
+          # was frozen before $GITHUB_PATH was appended above, so call by
+          # the absolute path; subsequent steps pick it up via PATH.
+          "${HOME}/.local/bin/kubeconform" -v
+
+      - name: Verify kubeconform on PATH for subsequent steps
+        # Independent of the install step's own shell. By the time this
+        # step starts, the runner has merged `$GITHUB_PATH` into PATH, so
+        # `kubeconform` must resolve via plain command lookup. Failure here
+        # means the install step "succeeded" but downstream steps would
+        # still hit `kubeconform: command not found` — the exact regression
+        # B1 is meant to prevent. This is the authoritative end-to-end
+        # check that the self-hosted runner fix works.
+        run: |
+          set -euo pipefail
+          which kubeconform
           kubeconform -v
 
       - name: Helm lint

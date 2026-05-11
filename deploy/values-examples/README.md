@@ -173,6 +173,87 @@ Two resources combine to materialise a Secret the chart can consume:
 The `secret/meho` base is configurable via `vault.paths.kv` — adjust the
 KV paths above accordingly if you remount Vault elsewhere.
 
+## Internal-CA trust bundle (`extraVolumes` / `extraEnv`)
+
+The backplane connects to **Vault**, **Keycloak**, and **PostgreSQL**
+over TLS. Any lab whose Vault / Keycloak / PG ingress is signed by an
+**internal CA** (the realistic posture for every regulated lab) needs
+to inject that CA into the backplane Pod, otherwise the readiness probes
+fail with `SSLError` / `ConnectError` and `/ready` returns 503 even
+though `/healthz` is green. The `--atomic --wait` install path rolls
+back the release. This is Issue [#209](https://github.com/evoila/meho/issues/209).
+
+The chart exposes three top-level knobs — `extraVolumes`,
+`extraVolumeMounts`, `extraEnv` — that flow into both the backplane
+Deployment AND the migration Job (Postgres' internal-CA-signed TLS is
+the typical reason the migration Job needs the bundle too).
+
+### Recommended pattern: trust-manager + `SSL_CERT_FILE`
+
+In v0.1 the recommended path is [trust-manager](https://cert-manager.io/docs/trust/trust-manager/)
+(jetstack/trust-manager). The lab admin creates one `Bundle` resource
+cluster-wide; trust-manager distributes a `ConfigMap` containing
+`ca.crt` into every namespace flagged via
+`trust.cert-manager.io/include` (or a NamespaceSelector). The chart
+mounts that ConfigMap and points Python's ssl module at it via
+`SSL_CERT_FILE`:
+
+```yaml
+extraVolumes:
+  - name: trust-bundle
+    configMap:
+      name: internal-ca-bundle       # the ConfigMap trust-manager renders
+      optional: false                # fail-loud if it's missing
+
+extraVolumeMounts:
+  - name: trust-bundle
+    mountPath: /etc/ssl/extra-certs
+    readOnly: true
+
+extraEnv:
+  - name: SSL_CERT_FILE
+    value: /etc/ssl/extra-certs/ca.crt
+```
+
+`SSL_CERT_FILE` is CPython's standard env var
+([`ssl.get_default_verify_paths`](https://docs.python.org/3/library/ssl.html#ssl.get_default_verify_paths))
+— httpx, hvac, asyncpg, and SQLAlchemy all honour it without code
+changes. Mounting read-only keeps the discipline (the bundle is owned
+by trust-manager, not by anything inside the Pod).
+
+### Alternatives if trust-manager isn't deployed
+
+- **Direct ConfigMap.** Skip trust-manager; create the ConfigMap by hand
+  in the `meho` namespace. `extraVolumes[0].configMap.name` points at
+  it. Rotation is now the operator's job.
+- **Secret instead of ConfigMap.** Same `extraVolumes` shape with
+  `secret:` instead of `configMap:`. Useful if the bundle itself is
+  sensitive (uncommon — CA certificates are public-by-design).
+- **Pre-baked image.** Add the CA to the runtime image's
+  `/etc/ssl/certs/`. Rejected for v0.1 because it puts environment-
+  specific state into a public OSS artefact; the chart-side approach
+  keeps the image generic.
+
+### Verification
+
+After `helm install`:
+
+```bash
+# The mount is present
+kubectl exec -n meho deployment/meho -- ls -l /etc/ssl/extra-certs/ca.crt
+# SSL_CERT_FILE resolves to it
+kubectl exec -n meho deployment/meho -- printenv SSL_CERT_FILE
+# Python sees it
+kubectl exec -n meho deployment/meho -- python -c "import ssl; print(ssl.get_default_verify_paths().cafile)"
+# /ready turns green for vault + keycloak
+kubectl exec -n meho deployment/meho -- wget -qO- http://localhost:8000/ready | jq '.checks'
+```
+
+If `/ready` still reports `ssl_error` after the mount lands, check the
+**migration Job's** Pod logs — that Job uses the same bundle. A
+common drift cause: a typo'd ConfigMap name (the mount succeeds but
+the file is empty / wrong).
+
 ## End-to-end install flow
 
 The order matters because the chart's migration Job runs as a

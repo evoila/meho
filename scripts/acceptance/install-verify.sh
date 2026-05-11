@@ -317,19 +317,39 @@ fi
 if version_json="$(curl_body "https://${HOST}/version" 2>/dev/null)"; then
     if echo "$version_json" | jq -e '.git_sha' >/dev/null 2>&1; then
         live_sha="$(echo "$version_json" | jq -r '.git_sha')"
-        # Accept either an exact match OR a prefix match in either
-        # direction. The image-tag convention is `sha-<40-char-git-sha>`
-        # but the /version endpoint reports the bare SHA (per the
-        # chassis stamping in image.yml). Both shapes are valid.
-        expected_bare="${EXPECTED_GIT_SHA#sha-}"
-        if [[ "$live_sha" == "$expected_bare" ]] \
-            || [[ "$live_sha" == "$EXPECTED_GIT_SHA" ]] \
-            || [[ "$expected_bare" == "$live_sha"* ]] \
-            || [[ "$live_sha" == "$expected_bare"* ]]; then
-            check_ok "/version reports git_sha='$live_sha' matching expected '$EXPECTED_GIT_SHA'"
+        # Guard against the empty-or-junk live_sha false-pass: the
+        # previous bidirectional prefix-match treated an empty string
+        # as a prefix of every expected SHA, so `/version` returning
+        # `{"git_sha": ""}` (or null serialized as "" by jq -r) would
+        # silently pass. Require live_sha to be non-empty AND
+        # SHA-shaped (hex / hyphen / dot / underscore — enough to
+        # cover both bare SHAs and `sha-<40hex>` tag form) before
+        # running any comparison.
+        if [[ -z "$live_sha" || "$live_sha" == "null" ]]; then
+            check_fail "/version reports empty git_sha" \
+                "expected '$EXPECTED_GIT_SHA'; got '$live_sha' (raw response: $version_json)"
+        elif ! [[ "$live_sha" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            check_fail "/version git_sha contains unexpected characters" \
+                "expected '$EXPECTED_GIT_SHA' (bare); got '$live_sha'"
         else
-            check_fail "/version git_sha mismatch" \
-                "expected '$EXPECTED_GIT_SHA' (bare '$expected_bare'); got '$live_sha'"
+            # The image-tag convention is `sha-<40-char-git-sha>` but
+            # /version reports the bare SHA (per the chassis stamping
+            # in image.yml). Accept either form by stripping the
+            # `sha-` prefix from --expected-git-sha, then require a
+            # forward prefix-match: the live SHA must start with the
+            # expected SHA (or vice-versa for short-form expected).
+            # Drop the previous bidirectional substring check — it
+            # admitted any non-empty live_sha that happened to be a
+            # substring of the expected value.
+            expected_bare="${EXPECTED_GIT_SHA#sha-}"
+            if [[ "$live_sha" == "$expected_bare" ]] \
+                || [[ "$live_sha" == "$expected_bare"* ]] \
+                || [[ "$expected_bare" == "$live_sha"* ]]; then
+                check_ok "/version reports git_sha='$live_sha' matching expected '$EXPECTED_GIT_SHA'"
+            else
+                check_fail "/version git_sha mismatch" \
+                    "expected '$EXPECTED_GIT_SHA' (bare '$expected_bare'); got '$live_sha'"
+            fi
         fi
     else
         check_fail "/version response missing .git_sha field" "$version_json"

@@ -118,6 +118,28 @@ See [`docs/codebase/devops.md`](./docs/codebase/devops.md) for the full
 chart contract, probe semantics, NetworkPolicy posture, install/upgrade
 flow, and verification commands.
 
+## Deploy
+
+A sanitized example values file for a Vault + Keycloak + Postgres +
+ingress-nginx-shaped cluster (the same shape as the RDC Hetzner
+dogfooding lab) lives at
+[`deploy/values-examples/values-rdc-example.yaml`](./deploy/values-examples/values-rdc-example.yaml);
+the substitution recipe and the **External Secrets Operator (ESO) sync
+patterns** the chart expects are documented in
+[`deploy/values-examples/README.md`](./deploy/values-examples/README.md).
+
+Once v0.1 is released the chart will also be published as an OCI artifact
+at `oci://ghcr.io/evoila/meho-chart` (Task #41); until then, install
+directly from the repository tree:
+
+```bash
+helm upgrade --install meho ./deploy/charts/meho/ \
+  --namespace meho --create-namespace \
+  -f deploy/values-examples/values-rdc-example.yaml \
+  --set image.tag=sha-<git-sha>
+  # ...plus the substitutions documented in deploy/values-examples/README.md
+```
+
 ## Documentation
 
 (Placeholder — `docs.meho.ai` will land before v0.1.)

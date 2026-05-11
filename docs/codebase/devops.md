@@ -340,11 +340,85 @@ Three properties make this the right contract:
 
 `helm lint` against the unmodified `values.yaml` **deliberately fails**
 with the safe-by-default empty fields. The chart's CI / lint workflow
-(G2.5-T5) and `deploy/values-examples/values-rdc-example.yaml` (G2.5-T4)
+(G2.5-T5) and
+[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml)
 both supply the required overrides; ad-hoc lint invocations pass them via
 `--set` or `-f`.
 
+### Example values + ESO patterns
+
+A sanitized example values file lives at
+[`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml).
+It targets the RDC Hetzner dogfooding lab shape (cluster-internal
+Postgres + Vault + Keycloak on `*.evba.lab`, rke2-infra ingress-nginx) and
+is structured so that other Vault-+-Keycloak-+-Postgres-shaped labs can
+copy it, substitute the `<REPLACE: ...>` placeholders, and apply it.
+
+The placeholders are deliberate: every site-specific field
+(`image.tag`, the Keycloak realm in `config.keycloakIssuerUrl` /
+`keycloak.issuer`, the three NetworkPolicy CIDRs) is left as a
+`<REPLACE: ...>` literal that fails the schema's `format: uri` /
+`format: hostname` / IPv4-CIDR pattern at `helm install` time. A
+forgotten substitution surfaces as `at '/networkPolicy/postgresCIDR':
+'<REPLACE: ...>' does not match pattern …` instead of silently rendering
+a NetworkPolicy that allows everything (or nothing).
+
+The actual `values-rdc.yaml` for the dogfooding consumer is environment-
+private and lives in
+[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)'s
+`manifests/meho/values-rdc.yaml` per Goal #11 cross-repo deps; the
+example here is the public template.
+
+**External Secrets Operator (ESO) sync patterns.** The chart references
+operator-provisioned Kubernetes Secrets *by name*
+(`postgres.credentialsSecret` and, in v0.2, a Keycloak client-secret
+Secret). It does not ship a `Secret` template or accept secret values
+via `--set`. The recommended sync mechanism is
+[ESO](https://external-secrets.io/) with the upstream store of the
+operator's choice (the RDC lab uses
+[HashiCorp Vault](https://external-secrets.io/latest/provider/hashicorp-vault/)).
+Two resources combine to materialise a chart-consumable Secret:
+
+1. **`ClusterSecretStore`** (cluster-scoped pointer at Vault, carrying
+   the auth credentials). Created once per cluster by the platform team.
+   **Owned by the consumer's GitOps repo**, not this chart — it outlives
+   any release and embeds cluster-level Vault credentials.
+2. **`ExternalSecret`** (namespaced resource that pulls keys out of the
+   upstream store into a target k8s Secret). Two ownership options:
+    - **Default (consumer-managed):** the consumer's GitOps repo applies
+      the ExternalSecret alongside or before the chart. The chart
+      references the resulting Secret by name. This is the RDC convention.
+    - **Opt-in (chart-managed):** flip `eso.enabled: true` in values and
+      the chart renders the ExternalSecret(s) itself via
+      `templates/externalsecrets.yaml`. The schema requires
+      `eso.secretStore.{name,kind}` when `eso.enabled: true`, so a
+      misconfigured opt-in fails at install. With the default
+      `eso.enabled: false`, `helm template ... | grep -c ExternalSecret`
+      returns `0`.
+
+The full ExternalSecret + ClusterSecretStore manifests, the Vault KV
+path mapping (`secret/meho/postgres` → `DATABASE_URL`, etc.), and the
+end-to-end install ordering (ESO → ClusterSecretStore → ExternalSecret →
+wait-for-Secret → `helm install`) are in
+[`deploy/values-examples/README.md`](../../deploy/values-examples/README.md).
+
 ## Install / upgrade
+
+The recommended flow uses the example values file rather than long
+`--set` strings:
+
+```bash
+# Copy + substitute the example into your private deploy repo first
+# (see deploy/values-examples/README.md).
+helm upgrade --install meho ./deploy/charts/meho/ \
+  --namespace meho \
+  --create-namespace \
+  --set image.tag=sha-<git-sha> \
+  -f values-rdc.yaml
+```
+
+The bare-`--set` equivalent (no values file) — useful for CI smoke
+tests:
 
 ```bash
 helm install meho ./deploy/charts/meho/ \
@@ -362,8 +436,6 @@ helm install meho ./deploy/charts/meho/ \
   --set networkPolicy.postgresCIDR=10.0.1.0/24 \
   --set networkPolicy.vaultCIDR=10.0.2.0/24 \
   --set networkPolicy.keycloakCIDR=10.0.3.0/24
-
-helm upgrade --install meho ./deploy/charts/meho/ -f values-rdc.yaml
 ```
 
 Missing any required override fails the schema validation at install
@@ -426,12 +498,13 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "addition
   `helm dependency update` needed).
 - External Secrets Operator (ESO) — owns the Kubernetes Secrets the chart
   references (`postgres.credentialsSecret`, future Keycloak client secret,
-  future Vault role bindings). ESO is consumer-owned; the chart references
-  the synced Secrets by name only.
+  future Vault role bindings). ESO is consumer-owned by default; the chart
+  references the synced Secrets by name only. The chart can optionally
+  render `ExternalSecret` resources itself when `eso.enabled: true` — see
+  the ESO patterns section above.
 
 ## Known gaps (filled by sibling tasks)
 
-- `deploy/values-examples/values-rdc-example.yaml` — G2.5-T4 (#40).
 - OCI publish to `ghcr.io/evoila/meho-chart` + cosign signing — G2.5-T5
   (#41).
 - HPA / PDB / topologySpreadConstraints / ServiceMonitor / PrometheusRule
@@ -449,3 +522,6 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "addition
 - Helm chart structure: https://helm.sh/docs/topics/charts/
 - Kubernetes NetworkPolicy: https://kubernetes.io/docs/concepts/services-networking/network-policies/
 - cert-manager Ingress annotations: https://cert-manager.io/docs/usage/ingress/
+- External Secrets Operator: https://external-secrets.io/
+- ESO Vault provider: https://external-secrets.io/latest/provider/hashicorp-vault/
+- ESO ExternalSecret API: https://external-secrets.io/latest/api/externalsecret/

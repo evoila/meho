@@ -297,6 +297,50 @@ connectors:
   # surface lands post-Goal-2 with the first product ticket.
   enabled: []
 
+# Optional chart-side External Secrets Operator (ESO) resource rendering.
+#
+# Default `enabled: false` — the chart references operator-provisioned
+# Kubernetes Secrets *by name* (e.g. `postgres.credentialsSecret`) and
+# leaves the sync mechanism to the consumer's GitOps repo. This matches
+# Goal #11's cross-repo convention where
+# `evoila-bosnia/claude-rdc-hetzner-dc` owns the ExternalSecret manifests.
+#
+# Flipping `enabled: true` makes the chart render ExternalSecret CRs for
+# `postgres.credentialsSecret` and (when `eso.keycloak.enabled: true`) the
+# Keycloak client secret. The chart does NOT render the SecretStore /
+# ClusterSecretStore itself — install ESO and create the store first.
+#
+# When `enabled: true` the schema also requires `eso.secretStore.name` and
+# `eso.secretStore.kind`. See `deploy/values-examples/README.md` for the
+# expected ClusterSecretStore + ExternalSecret pattern.
+eso:
+  enabled: false
+  secretStore:
+    # -- Name of the existing SecretStore / ClusterSecretStore.
+    name: ""
+    # -- Kind: `ClusterSecretStore` is the typical RKE2 choice (the store
+    # lives once cluster-wide); `SecretStore` is namespace-scoped.
+    kind: ClusterSecretStore
+  # -- ESO refresh interval. ESO re-pulls from the upstream store at this
+  # cadence; `1h` is the project default and balances rotation latency
+  # against API load on Vault.
+  refreshInterval: 1h
+  postgres:
+    # -- Vault KV path holding the DATABASE_URL value. Empty = derive from
+    # `<vault.paths.kv>/postgres` at render time.
+    remoteKey: ""
+    # -- Property within the remote KV entry that holds the DATABASE_URL.
+    # Must be `url` to match the Deployment env's `secretKeyRef.key: url`.
+    remoteProperty: url
+  keycloak:
+    # -- Render an ExternalSecret for the Keycloak client secret. The
+    # resulting Secret is named `<release>-keycloak-client`, keyed
+    # `client_secret`. v0.1 does not yet consume this Secret in the
+    # Deployment env — set this `true` to verify the sync end-to-end
+    # before the v0.2 federation wiring lands.
+    enabled: false
+    remoteProperty: client_secret
+
 networkPolicy:
   # -- Whether to ship the default-deny NetworkPolicy. Disable only on
   # clusters running an equivalent mesh-level policy (Istio AuthorizationPolicy

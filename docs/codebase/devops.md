@@ -581,6 +581,129 @@ equivalent commands so an operator learns one verification pattern for
 both artefacts. The workflow itself also emits the verification block
 into `GITHUB_STEP_SUMMARY` on every successful publish.
 
+## PR-level CI (`.github/workflows/ci.yml`)
+
+`ci.yml` is the central per-PR test harness. Every PR targeting `main`
+runs three jobs in parallel, one per in-tree toolchain, and every push
+to `main` re-runs the same matrix as a regression catch. Branch
+protection consumes the workflow's overall status as a required check.
+
+### Matrix
+
+| Job | Surface | Steps |
+| --- | --- | --- |
+| `python-lint-test` | `backend/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -x --cov` -> upload `python-coverage` artefact |
+| `go-lint-test` | `cli/` | `golangci-lint` (v6 action, v1.64.8 binary) -> `go build ./...` -> `go test -race -cover ./...` |
+| `helm-lint-template` | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
+
+Each job runs on its own `meho-runners` runner with a 10-minute
+`timeout-minutes`. Wall-clock for a green PR comes in well under the
+Goal #11 10-minute budget because the three jobs never block each other
+— the slowest job is the workflow's elapsed time.
+
+### Fail-loud posture
+
+No step in `ci.yml` carries `continue-on-error: true` except the Python
+coverage artefact upload. Linters, formatters, type checkers, tests,
+and the kubeconform schema validation are all allowed to fail the job.
+The artefact upload is the only soft-fail: losing it degrades the
+SonarCloud signal (no coverage for the run) but never invalidates the
+test outcome, and `quality-gate.yml` already guards its own
+`actions/download-artifact` with `continue-on-error` for the same
+reason.
+
+### Why no image build job
+
+`ci.yml` deliberately does **not** build the backplane container image.
+[`image.yml`](../../.github/workflows/image.yml) already runs on every
+PR with `push: false` (the Dockerfile + dep-resolution gate); repeating
+the build in `ci.yml` would double the build cost for every PR with no
+additional signal. The same reasoning applies to the chart publish
+(`chart.yml` runs `validate` on PRs as a path-scoped gate) — `ci.yml`
+exercises a parallel `helm lint`/`helm template`/`kubeconform` pass
+unconditionally so a chart-touching regression also fails the central
+CI check, but it does not duplicate the publish path. Migration
+backward-compat (`migration-compat.yml`), dependency license scan
+(`dependency-license-check.yml`), secret scan (`secret-scan.yml`), and
+the SAST stack (`security-scan.yml`) all stay in their dedicated
+workflows.
+
+### Coverage handoff to SonarCloud
+
+The Python job runs `pytest --cov-report=xml` and uploads
+`backend/coverage.xml` as the `python-coverage` artefact.
+[`quality-gate.yml`](../../.github/workflows/quality-gate.yml) listens
+on `workflow_run: workflows: ["CI"]`, downloads that exact artefact
+name via `actions/download-artifact@v4`, and feeds the XML into the
+SonarCloud scan. The workflow name (`CI`) and the artefact name
+(`python-coverage`) are the load-bearing contract between the two
+workflows — changing either side without the other would silently lose
+coverage reporting in SonarCloud.
+
+### Fork-PR guard
+
+Every job carries the same `if:` guard the publish workflows use:
+
+```yaml
+if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+```
+
+This is defence in depth on top of branch protection — the
+`meho-runners` self-hosted runner pool is internal infrastructure, so
+arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
+with custom values) is never allowed to execute on it. The OR
+short-circuits on `push` events so main-branch CI is unaffected.
+
+### Local reproduction
+
+Every gate the workflow runs can be reproduced locally with the same
+commands. From the repo root:
+
+```bash
+# Python
+cd backend && uv sync --locked --all-groups
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
+uv run mypy src/
+uv run pytest -x --cov=meho_backplane --cov-report=term tests/
+
+# Go
+cd cli && golangci-lint run
+go build ./...
+go test -race -cover ./...
+
+# Helm + kubeconform
+helm lint deploy/charts/meho/ <same --set overrides as ci.yml>
+helm template test deploy/charts/meho/ <same --set overrides> > /tmp/rendered.yaml
+kubeconform -strict -kubernetes-version 1.28.0 -ignore-missing-schemas -summary /tmp/rendered.yaml
+```
+
+The `--set` override block is the same one this doc's `## Verification`
+section above documents — `ci.yml`, `chart.yml`, and the operator
+copy-paste in [`backend/README.md`](../../backend/README.md) all keep
+it in sync intentionally. Any drift means one of the three is wrong.
+
+### Action pinning audit
+
+All third-party actions in `ci.yml` are pinned to immutable SHAs with
+the human-readable tag in a trailing comment. The SHAs match the ones
+the publish workflows use where the action overlaps
+(`actions/checkout`, `actions/setup-go`, `azure/setup-helm`,
+`actions/upload-artifact`), so a single supply-chain audit covers all
+of CI. Two actions are unique to `ci.yml`:
+
+- `astral-sh/setup-uv@v8.1.0` — the uv installer, with
+  `enable-cache: true` keyed by `uv.lock`.
+- `golangci/golangci-lint-action@v6.5.2` — pinned to the **v6** major,
+  not v7+/v8+, because the in-tree
+  [`cli/.golangci.yml`](../../cli/.golangci.yml) is written in the
+  golangci-lint v1 config schema (`disable-all` + explicit `enable:`
+  list, v1 linter names like `gosimple` / `errcheck`).
+  golangci-lint-action v7.x+ defaults to the v2 binary which rejects
+  v1 configs; pinning the binary to `v1.64.8` keeps the existing
+  config valid. A future migration to the v2 schema flips both the
+  action major and the binary version together.
+
 ## Dependencies
 
 - Image — `ghcr.io/evoila/meho:<tag>` from G2.4 (#31). Multi-arch

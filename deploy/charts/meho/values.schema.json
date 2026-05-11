@@ -540,6 +540,21 @@
       "type": "object",
       "description": "Kubernetes Affinity surface — wide and version-dependent; schema permits arbitrary shape.",
       "additionalProperties": true
+    },
+    "extraVolumes": {
+      "type": "array",
+      "description": "Extra Kubernetes Volume objects to attach to the backplane Pod AND the migration Job Pod. Each item is a full Volume shape; the chart renders the list verbatim. Loose `items: object` rather than enumerating every Volume source type because Kubernetes adds new ones over time and the API server validates downstream. Most common use: trust-manager CA bundle ConfigMaps (Issue #209).",
+      "items": { "type": "object" }
+    },
+    "extraVolumeMounts": {
+      "type": "array",
+      "description": "Extra Kubernetes VolumeMount objects for the backplane container AND the migration Job container. Pair each entry with an `extraVolumes` item of matching name — a mount with no matching Volume fails Pod admission.",
+      "items": { "type": "object" }
+    },
+    "extraEnv": {
+      "type": "array",
+      "description": "Extra Kubernetes EnvVar objects (value or valueFrom) appended to the backplane container env AND the migration Job container env. Most common use: pointing `SSL_CERT_FILE` at a mounted trust-bundle path so Python's default ssl context trusts internal-CA-signed Vault / Keycloak / Postgres endpoints (Issue #209). Don't collide with the chart's own keys (DATABASE_URL, REDIS_URL).",
+      "items": { "type": "object" }
     }
   },
   "definitions": {

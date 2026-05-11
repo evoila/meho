@@ -65,6 +65,14 @@ spec:
             # Other operator-supplied secrets (Keycloak client secret, Vault
             # role bindings) come via ESO-synced Kubernetes Secrets; G2.6
             # wires the references when each surface lands.
+            {{- with .Values.extraEnv }}
+            # Operator-supplied extra env vars (full EnvVar shape — accepts
+            # `value` or `valueFrom`). Most common use: pointing
+            # `SSL_CERT_FILE` at a trust-manager-distributed bundle path so
+            # the Python ssl context trusts internal-CA-signed Vault /
+            # Keycloak endpoints (Issue #209).
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           # Probes target the backplane's chassis health endpoints (Task #19,
           # `backend/src/meho_backplane/health.py`): `/healthz` for liveness
           # (returns 200 unconditionally; failure → pod restart) and `/ready`
@@ -85,9 +93,23 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            # Operator-supplied extra VolumeMounts. Paired with
+            # `extraVolumes` below — see Issue #209 for the trust-bundle
+            # use case (mount a trust-manager ConfigMap into the Pod so
+            # `SSL_CERT_FILE` resolves to a real path).
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- with .Values.extraVolumes }}
+        # Operator-supplied extra Volumes (full Volume shape). Most common
+        # use: mounting a trust-manager-distributed CA bundle ConfigMap
+        # so the backplane can connect to internal-CA-signed Vault and
+        # Keycloak (Issue #209). Paired with `extraVolumeMounts` above.
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

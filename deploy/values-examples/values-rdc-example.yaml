@@ -193,3 +193,44 @@ networkPolicy:
 # itself; see deploy/values-examples/README.md for the contract.
 eso:
   enabled: false
+
+# Trust bundle for internal-CA-signed Vault + Keycloak + Postgres.
+# The RDC lab uses trust-manager (jetstack/trust-manager) to distribute
+# an internal-CA-bundle ConfigMap (key `ca.crt`) into every namespace
+# that has the `trust.cert-manager.io/include` annotation. The chart
+# below mounts that ConfigMap into the backplane Pod AND the migration
+# Job Pod, then sets `SSL_CERT_FILE` so Python's default ssl context
+# honours it. Without this, the readiness probes' httpx calls to
+# Keycloak and the hvac calls to Vault both fail with `SSLError` and
+# `/ready` returns 503 even though `/healthz` is green — see Issue #209.
+#
+# The ConfigMap name (`internal-ca-bundle` here) is whatever the
+# trust-manager `Bundle` resource targets in this cluster; check
+# `kubectl get cm -n meho` to see the name your lab admin chose.
+extraVolumes:
+  - name: trust-bundle
+    configMap:
+      name: internal-ca-bundle
+      # `optional: false` (the default) fails Pod admission if the
+      # ConfigMap is missing — fails-loud, matching the chart-wide
+      # "no silent misconfig" discipline. trust-manager creates it
+      # before any Pod can mount it, so this is rare in practice.
+      optional: false
+
+extraVolumeMounts:
+  - name: trust-bundle
+    # `/etc/ssl/extra-certs/` is a convention; nothing else mounts
+    # here. `SSL_CERT_FILE` below points at the specific key. The
+    # mount is read-only — the bundle is owned by trust-manager, not
+    # by anything inside the Pod.
+    mountPath: /etc/ssl/extra-certs
+    readOnly: true
+
+extraEnv:
+  - name: SSL_CERT_FILE
+    # Python's `ssl` module honours `SSL_CERT_FILE` as a CA bundle
+    # path (see CPython `ssl.get_default_verify_paths()`). This routes
+    # httpx (Keycloak readiness probe, JWKS fetch) and hvac (Vault
+    # OIDC login, `/sys/health` poll) through the internal CA without
+    # the chart having to mutate the OS trust store.
+    value: /etc/ssl/extra-certs/ca.crt

@@ -94,6 +94,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.credentialsSecret }}
                   key: url
+            {{- with .Values.extraEnv }}
+            # Operator-supplied extra env vars (full EnvVar shape).
+            # Shared with the backplane Deployment so e.g. `SSL_CERT_FILE`
+            # points at the same trust-bundle path. Postgres with internal
+            # CA-signed TLS is the typical reason the migration Job needs
+            # this too (Issue #209).
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.migrationJob.resources | nindent 12 }}
           securityContext:
@@ -104,9 +112,23 @@ spec:
             # emptyDir keeps readOnlyRootFilesystem: true valid.
             - name: tmp
               mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            # Operator-supplied extra VolumeMounts. Shared with the
+            # backplane Deployment so the migration Pod sees the same
+            # trust bundle / sidecar config / additional secret mounts
+            # (Issue #209).
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- with .Values.extraVolumes }}
+        # Operator-supplied extra Volumes. Shared with the backplane
+        # Deployment; see Issue #209 for the trust-bundle use case
+        # (internal-CA-signed Postgres often demands the same mount the
+        # backplane needs for Vault / Keycloak).
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -1,7 +1,7 @@
 # MEHO
 
-> An MCP-native governance layer that lets any AI agent operate safely
-> against shared infrastructure. Policy-gated. Audit-grade. Multi-tenant.
+> Governance backplane for AI agents acting on infrastructure —
+> policy-gated, audit-grade, MCP-native. Apache 2.0.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![OSS](https://img.shields.io/badge/OSS-public%20from%20day%201-success.svg)](./CONTRIBUTING.md#public-from-day-1-deliberately)
@@ -34,16 +34,23 @@ Keycloak / Postgres.
 # 1. Spin up a single-node kind cluster.
 kind create cluster --name meho-dev
 
-# 2. Apply the mock Postgres / Vault / Keycloak prerequisites documented
-#    at the top of values-kind.yaml. (Mock Vault + Keycloak come up
-#    cluster-internal so the chart's URI-validated fields resolve; real
-#    federation requires the existing-k8s flow below.)
-#    See deploy/values-examples/values-kind.yaml for the manifests.
+# 2. Apply the prerequisites documented at the top of values-kind.yaml.
+#    Only Postgres ships a real mock manifest (Namespace + Secret +
+#    Deployment + Service for `postgres:16-alpine` — copy-paste it). Vault
+#    and Keycloak are *placeholder URIs* in the overlay so the chart's
+#    URI-validated fields resolve at install time; no in-cluster Vault or
+#    Keycloak is deployed and no real auth flow runs. Federation probes
+#    register but `meho login` will not work end-to-end.
+#    For real federation (working Vault token-exchange + Keycloak OIDC
+#    flow), use the existing-k8s path below instead — you provision Vault
+#    and Keycloak yourself.
+#    See deploy/values-examples/values-kind.yaml for the Postgres manifest.
 
 # 3. Install the chart from its OCI artefact (published by Task #41).
 #    Pin to an immutable image tag — sha-<git-sha> from a green CI run
 #    on main, or a v<x.y.z> release tag. Goal #11 deploy discipline
-#    forbids :latest and :main.
+#    rejects :latest entirely and treats :main as a dev-only moving alias
+#    (not a deploy target).
 helm install meho-dev oci://ghcr.io/evoila/meho-chart \
   --version <chart-version> \
   -n meho --create-namespace \
@@ -58,9 +65,12 @@ curl localhost:8000/healthz
 ```
 
 `values-kind.yaml` disables ingress + NetworkPolicy (kind ships neither
-out of the box) and points at in-cluster mock Vault + Keycloak. Operator
-identity is **faked** — for real federation, use the existing-k8s path
-below.
+out of the box), points Postgres at the in-cluster mock provisioned in
+step 2, and supplies *placeholder* Vault + Keycloak URIs (no in-cluster
+mock for those — the chart's URI-validated fields just need to resolve
+at install time). Operator identity is **faked**; the federation probes
+register but `meho login` will not complete. For real federation, use
+the existing-k8s path below.
 
 ### Existing k8s (~5 min, requires Vault + Keycloak + Postgres)
 
@@ -163,10 +173,12 @@ docker pull ghcr.io/evoila/meho:main
 docker pull ghcr.io/evoila/meho:v0.1.0
 ```
 
-**No `:latest` tag is ever published** — operators must pin to an
-immutable `:sha-<...>` or `:v<x.y.z>` reference (Goal #11 deploy
-discipline). Every image is cosign-signed (Task #34) using the same
-keyless flow described above.
+**No `:latest` tag is ever published.** `:main` is a moving alias for
+the latest main-branch build and is intended for **dev only** (the
+`docker pull` recipe above). Operators deploying MEHO must pin to an
+immutable `:sha-<...>` or `:v<x.y.z>` reference — `:main` is not a
+deploy target (Goal #11 deploy discipline). Every image is
+cosign-signed (Task #34) using the same keyless flow described above.
 
 ### Maintainer one-time setup
 
@@ -313,10 +325,12 @@ auto-generating from git log.
 
 ## License
 
-[Apache License 2.0](./LICENSE). Per ADR 0001 (license selection) and
-the project's inbound = outbound discipline: every contribution flows
-in under the same Apache 2.0 terms via the DCO sign-off — there is no
-separate CLA.
+[Apache License 2.0](./LICENSE). Inbound = outbound: every contribution
+flows in under the same Apache 2.0 terms the project ships under, via
+the Developer Certificate of Origin (DCO) sign-off on every commit
+(`git commit -s`) — there is no separate CLA. See
+[`CONTRIBUTING.md`](./CONTRIBUTING.md#developer-certificate-of-origin)
+for the sign-off discipline.
 
 ## History
 

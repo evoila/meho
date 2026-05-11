@@ -35,9 +35,11 @@ shipped and why it matters — not a dump of commit subjects.
 - Bullets land in `## [Unreleased]` until a tag cuts the release;
   the release-cutting PR moves them under the new `## [x.y.z] -
   YYYY-MM-DD` heading.
-- **Each bullet links to the issue + PR:** `- Add Vault probe (#30 / #47)`.
-  The issue number is the planning anchor (`evoila-bosnia/meho-internal`);
-  the PR number is the implementation (`evoila/meho`).
+- **Each bullet links to the planning issue (and the PR once merged):**
+  `- Add Vault probe (#30 / #47)` when both are known, or
+  `- Add Vault probe (#30)` if the PR has not merged yet. The issue
+  number is the planning anchor (`evoila-bosnia/meho-internal`); the
+  PR number is the implementation (`evoila/meho`).
 - **Conventional-Commits prefixes are optional in the bullet** —
   the category heading is doing the typing already. Keep the prose
   imperative and operator-readable.
@@ -123,7 +125,7 @@ shipped and why it matters — not a dump of commit subjects.
   git-log. The workflow extracts the section matching the current
   tag (or `[Unreleased]` as fallback). (#47)
 
-## [0.1.0-beta] - planned 2026-MM-DD
+## [0.1.0-beta] - planned TBD
 
 Initial v0.1-beta release: backplane chassis, federation probes,
 audit, container image, Helm chart, operator CLI, CI/CD with per-PR

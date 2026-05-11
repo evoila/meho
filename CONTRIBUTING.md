@@ -115,13 +115,11 @@ Each language has a fixed toolchain. CI runs the same tools — no
   format-and-lint pair. `mypy --ignore-missing-imports` for
   type-checking. Pinned versions live in
   [`backend/pyproject.toml`](./backend/pyproject.toml) under the
-  `dev` group; the pre-commit hook (when it lands) will use the
-  same pinned versions.
+  `dev` group; the pre-commit hook uses the same pinned versions.
 - **Go (operator CLI):** `gofmt -s` + `golangci-lint run` from
-  [`cli/.golangci.yml`](./cli/.golangci.yml) (when the file lands;
-  Task #43 scaffolded the module). `go vet` is part of the same
-  pipeline. Generated code (oapi-codegen output) is checked in and
-  excluded from lint.
+  [`cli/.golangci.yml`](./cli/.golangci.yml). `go vet` is part of the
+  same pipeline. Generated code (oapi-codegen output) is checked in
+  and excluded from lint.
 - **YAML, Markdown, JSON:** trailing-whitespace, end-of-file-fixer,
   and `check-yaml` / `check-json` from the pre-commit hooks repo
   catch the common formatting traps. CI also runs `gitleaks` for
@@ -165,9 +163,10 @@ flows are noisy; the easier discipline is to make `-s` the default.
 
 There is no CLA. Apache 2.0 §5 ("inbound = outbound": contributions
 flow in under the same Apache 2.0 terms the project ships under) plus
-the DCO trailer is the full contributor agreement. The license ADR
-documenting this choice lives at ADR 0001 (license selection) and
-ADR 0002 (CLA-vs-DCO).
+the DCO trailer is the full contributor agreement. The DCO trailer
+asserts that you have the right to submit the contribution under the
+project's license; the DCO bot enforces presence on every commit
+landing on `main`.
 
 ## Code of conduct
 

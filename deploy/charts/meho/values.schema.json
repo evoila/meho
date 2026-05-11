@@ -1,6 +1,426 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "title": "meho values",
-  "description": "Placeholder schema. G2.5-T2 (issue #38) populates this with the typed values contract that fails `helm install` on misconfiguration.",
-  "type": "object"
+  "title": "MEHO Helm chart values",
+  "description": "Typed contract for the MEHO Helm chart. Helm validates `.Values` against this schema on `helm install` / `helm upgrade` / `helm template` / `helm lint` (Helm uses JSON Schema draft-07). `additionalProperties: false` is set at every object level so typos and stale keys fail loudly with a clear path. Required-but-blank fields use `minLength: 1` to reject the safe-by-default empty placeholders shipped in `values.yaml` — operators MUST override them via `--set` or a values overlay.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "ingress", "postgres", "vault", "keycloak", "networkPolicy"],
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of backplane replicas. v0.1 is single-replica; HA lands in v0.2."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$",
+          "description": "OCI image repository (host + path). Pattern matches the lowercase / hyphen / underscore / dot / slash grammar OCI image references use, with an optional `:<port>` segment after the host for private registries (e.g. `registry.example.com:5000/team/meho`)."
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Image tag. Empty fails the schema — Goal #11 deploy discipline requires every install to pin an immutable tag."
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "name": { "type": "string" }
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "podLabels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "description": "Pod-level securityContext. Schema deliberately allows any shape because the Kubernetes PodSecurityContext surface is wide and partially version-dependent; the chart's defaults are pinned but operators may add fields the cluster admits.",
+      "additionalProperties": true
+    },
+    "securityContext": {
+      "type": "object",
+      "description": "Container-level securityContext. Same rationale as podSecurityContext.",
+      "additionalProperties": true
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port", "portName"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"]
+        },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "portName": { "type": "string", "minLength": 1, "maxLength": 15 }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": {
+          "type": "string",
+          "description": "Hostname the Ingress publishes. Required and shape-validated (non-empty + RFC 1123 hostname) when ingress.enabled is true — enforced by the allOf below. When ingress.enabled is false the template skips the Ingress resource entirely and host may be left blank."
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "pathType": {
+          "type": "string",
+          "enum": ["Exact", "Prefix", "ImplementationSpecific"]
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": {
+              "type": "string",
+              "description": "Kubernetes Secret name holding the TLS certificate. Required (non-empty) when both ingress.enabled and ingress.tls.enabled are true — enforced by the allOf below."
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["host"],
+            "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "format": "hostname"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "enabled": { "const": true },
+              "tls": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["enabled", "tls"]
+          },
+          "then": {
+            "properties": {
+              "tls": {
+                "properties": {
+                  "secretName": { "type": "string", "minLength": 1 }
+                },
+                "required": ["secretName"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["liveness", "readiness"],
+      "properties": {
+        "liveness": { "$ref": "#/definitions/httpProbe" },
+        "readiness": { "$ref": "#/definitions/httpProbe" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limits": { "$ref": "#/definitions/resourceQuantities" },
+        "requests": { "$ref": "#/definitions/resourceQuantities" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "keycloakIssuerUrl",
+        "keycloakAudience",
+        "keycloakJwksCacheTtlSeconds",
+        "keycloakJwtLeewaySeconds",
+        "vaultAddr",
+        "vaultOidcRole",
+        "vaultOidcMountPath",
+        "vaultTimeoutSeconds",
+        "databasePoolSize",
+        "databasePoolTimeout"
+      ],
+      "properties": {
+        "keycloakIssuerUrl": { "type": "string", "minLength": 1 },
+        "keycloakAudience": { "type": "string", "minLength": 1 },
+        "keycloakJwksCacheTtlSeconds": { "type": "string", "pattern": "^[0-9]+$" },
+        "keycloakJwtLeewaySeconds": { "type": "string", "pattern": "^[0-9]+$" },
+        "vaultAddr": { "type": "string", "format": "uri", "minLength": 1 },
+        "vaultOidcRole": { "type": "string", "minLength": 1 },
+        "vaultOidcMountPath": { "type": "string", "minLength": 1 },
+        "vaultTimeoutSeconds": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" },
+        "databasePoolSize": { "type": "string", "pattern": "^[0-9]+$" },
+        "databasePoolTimeout": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" }
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["credentialsSecret"],
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "database": { "type": "string", "minLength": 1 },
+        "credentialsSecret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Kubernetes Secret name holding the DATABASE_URL value at key `url` — required."
+        }
+      }
+    },
+    "vault": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address"],
+      "properties": {
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "format": "uri",
+          "description": "Vault address — required."
+        },
+        "authMethod": {
+          "type": "string",
+          "enum": ["oidc", "jwt", "kubernetes", "approle", "token"]
+        },
+        "role": { "type": "string", "minLength": 1 },
+        "paths": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kv"],
+          "properties": {
+            "kv": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "keycloak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer"],
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "format": "uri",
+          "description": "Keycloak issuer URL — required."
+        },
+        "audience": { "type": "string", "minLength": 1 },
+        "clientSecretSyncFromVault": { "type": "string", "minLength": 1 }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["postgresOnly"],
+      "properties": {
+        "postgresOnly": { "type": "boolean" }
+      }
+    },
+    "broadcast": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["redis"],
+      "properties": {
+        "redis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bundled"],
+          "properties": {
+            "bundled": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "connectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ingressControllerNamespace": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "description": "Namespace label value selecting the ingress controller. Must match RFC 1123 label syntax."
+        },
+        "postgresCIDR": {
+          "type": "string",
+          "description": "PostgreSQL egress CIDR (IPv4). Required and shape-validated (non-empty IPv4 CIDR) when networkPolicy.enabled is true — the rendered NetworkPolicy refuses to ship a wide subnet by accident. When networkPolicy.enabled is false the template skips the NetworkPolicy resource entirely and this field may be left blank."
+        },
+        "vaultCIDR": {
+          "type": "string",
+          "description": "Vault egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
+        },
+        "keycloakCIDR": {
+          "type": "string",
+          "description": "Keycloak egress CIDR (IPv4). Same conditional shape rules as postgresCIDR."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["postgresCIDR", "vaultCIDR", "keycloakCIDR"],
+            "properties": {
+              "postgresCIDR": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+              },
+              "vaultCIDR": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+              },
+              "keycloakCIDR": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "tolerations": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "affinity": {
+      "type": "object",
+      "description": "Kubernetes Affinity surface — wide and version-dependent; schema permits arbitrary shape.",
+      "additionalProperties": true
+    }
+  },
+  "definitions": {
+    "httpProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["httpGet"],
+      "properties": {
+        "httpGet": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "port"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1, "pattern": "^/" },
+            "port": {
+              "oneOf": [
+                { "type": "integer", "minimum": 1, "maximum": 65535 },
+                { "type": "string", "minLength": 1, "maxLength": 15 }
+              ]
+            },
+            "scheme": { "type": "string", "enum": ["HTTP", "HTTPS"] },
+            "host": { "type": "string" },
+            "httpHeaders": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "value"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "value": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 },
+        "successThreshold": { "type": "integer", "minimum": 1 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resourceQuantities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?m?$" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "memory": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$"
+        }
+      }
+    }
+  }
 }

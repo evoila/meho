@@ -71,6 +71,53 @@ gh api /orgs/evoila/packages/container/meho --jq '.visibility'   # -> "public"
 docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
 ```
 
+## Helm chart values reference
+
+The deploy contract lives at [`deploy/charts/meho/`](./deploy/charts/meho/).
+`values.yaml` ships safe-by-default — every field the backplane cannot
+start without is **blank** and the bundled
+[`values.schema.json`](./deploy/charts/meho/values.schema.json) (JSON
+Schema draft-07) rejects empty required values at `helm install` /
+`helm upgrade` / `helm template` time with a clear path. Unknown keys at
+any level fail with `additional properties '<name>' not allowed`.
+
+Operator-required (MUST be set; the schema rejects empty defaults):
+
+| Path | Type | Notes |
+| --- | --- | --- |
+| `image.tag` | string | Immutable tag (`sha-<git-sha>` or `v<x.y.z>`); never `:latest`. |
+| `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
+| `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
+| `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
+| `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. |
+| `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
+| `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
+| `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
+| `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. |
+| `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
+| `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
+| `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |
+
+Common operator overrides (safe defaults provided; tune as needed):
+
+| Path | Default | Notes |
+| --- | --- | --- |
+| `replicaCount` | `1` | v0.1 ships single-replica; HA lands in v0.2. |
+| `image.repository` | `ghcr.io/evoila/meho` | OCI repo from the G2.4 image pipeline. |
+| `image.pullPolicy` | `IfNotPresent` | `Always` \| `IfNotPresent` \| `Never`. |
+| `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |
+| `ingress.className` | `""` | Cluster default IngressClass when empty. |
+| `probes.liveness.*` / `probes.readiness.*` | `/healthz` / `/ready` httpGet + tuned timings | Operator-tunable; never disabled. |
+| `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative v0.1 chassis baselines. |
+| `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
+| `audit.postgresOnly` | `true` | v0.1; S3 mirror is v0.2. |
+| `broadcast.redis.bundled` | `true` | v0.1 deploys its own Redis subchart (G2.5-T3). |
+| `connectors.enabled` | `[]` | v0.1 chassis ships no connectors. |
+
+See [`docs/codebase/devops.md`](./docs/codebase/devops.md) for the full
+chart contract, probe semantics, NetworkPolicy posture, install/upgrade
+flow, and verification commands.
+
 ## Documentation
 
 (Placeholder — `docs.meho.ai` will land before v0.1.)

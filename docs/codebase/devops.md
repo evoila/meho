@@ -25,11 +25,11 @@ resources that make up a running backplane:
 deploy/charts/meho/
 ├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28
 ├── .helmignore             # standard exclusions
-├── values.yaml             # scaffold defaults; G2.5-T2 hardens them
-├── values.schema.json      # placeholder; G2.5-T2 fills the typed contract
+├── values.yaml             # safe-by-default; required fields are blank
+├── values.schema.json      # draft-07 typed contract; rejects typos and empty required fields
 └── templates/
     ├── _helpers.tpl        # name / fullname / labels / SA helpers
-    ├── deployment.yaml     # backplane Pod
+    ├── deployment.yaml     # backplane Pod + probes (/healthz, /ready)
     ├── service.yaml        # ClusterIP :8000
     ├── ingress.yaml        # TLS + cert-manager
     ├── configmap.yaml      # non-secret env
@@ -56,30 +56,57 @@ deploy/charts/meho/
 
 ### Image reference
 
-The Deployment renders `{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}`.
-That gives consumers three idiomatic ways to pin the image:
+The Deployment renders `{{ .Values.image.repository }}:{{ .Values.image.tag }}`
+with **no `.Chart.AppVersion` fallback**. `values.schema.json` rejects an
+empty `image.tag` (`minLength: 1`), so every install pins the tag
+operator-supplied at `helm install` / `helm upgrade` time. Goal #11's
+deploy discipline forbids moving references (including a chart-`appVersion`
+shadow), and the chart enforces that contract at the schema layer rather
+than relying on consumers to remember to `--set image.tag`.
 
-1. **Pin via `--set image.tag=<sha>`** — typical CI flow; `image.tag` wins.
-2. **Pin via `appVersion` rewrite** — the publish workflow rewrites
-   `Chart.yaml.appVersion` to the git sha at OCI push time; consumers
-   who omit `image.tag` get that pin automatically.
-3. **Override `image.repository`** — consumers mirroring through a private
-   registry point the chart at their mirror.
+`image.repository` accepts the lowercase OCI grammar including an optional
+`:<port>` segment after the host, so private registries like
+`registry.example.com:5000/team/meho` are valid. The pattern enforces the
+shape; the operator picks the value.
 
 `imagePullSecrets` is a values-configurable list, empty by default. The
 backplane image is pushed to **public GHCR** (Goal #11's locked artefact-
 distribution principle), so no pull secret is required in the default
-deployment path.
+deployment path. Consumers mirroring through a private registry override
+`image.repository` to point at their mirror and (if needed) populate
+`imagePullSecrets`.
 
-### Probes (scaffolded, off by default in T1)
+### Probes
 
-The Deployment template emits `livenessProbe` / `readinessProbe` /
-`startupProbe` blocks gated on `probes.<kind>.enabled`. All three default
-to `enabled: false` in this T1 scaffold; G2.5-T2 (issue #38) wires the
-real probe targets (`/healthz` / `/ready` / `/version`) against the
-chassis from G2.1. Keeping probes off until T2 lands avoids a half-
-configured probe marking the Pod NotReady before its health endpoints
-are reachable.
+The Deployment always renders `livenessProbe` and `readinessProbe` against
+the backplane chassis endpoints from G2.1-T2
+(`backend/src/meho_backplane/health.py`):
+
+| Probe | Endpoint | Failure semantics | Default timings (operator-tunable) |
+| --- | --- | --- | --- |
+| `livenessProbe` | `/healthz` (always 200 if the process is up) | Pod **restarts** on failure | `initialDelaySeconds: 30`, `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 3` |
+| `readinessProbe` | `/ready` (200 only when every registered probe in the readiness registry passes; 503 with an empty registry at the chassis stage) | Pod **removed from Service endpoints**, no restart | `initialDelaySeconds: 5`, `periodSeconds: 5`, `timeoutSeconds: 2`, `failureThreshold: 3` |
+
+The 30-second liveness `initialDelaySeconds` gives the FastAPI app time to
+import, build the JWKS cache, and bind structlog context before the first
+check — under-provisioning it would restart-loop the Pod during slow image
+pulls or cold-start library imports. The shorter readiness window (15s
+total detection) makes the Pod fall out of rotation promptly when a
+downstream dependency goes flaky, without triggering an unnecessary
+restart of the backplane process itself.
+
+Probes are **always on** — there is no `enabled: false` escape valve.
+Disabling probes would mask startup deadlocks and let an unready Pod
+accept traffic; that tradeoff is never the right call for a governance
+backplane. Every field under `probes.liveness.*` and `probes.readiness.*`
+in `values.yaml` is operator-tunable for environments that need different
+timings.
+
+The `/ready` endpoint **returns 503 by design** until G2.2 (Vault /
+Keycloak probes) and G2.3 (Alembic migration probe) register concrete
+probes — that's the fail-closed chassis state, not a bug. During chassis-
+stage dev installs the readinessProbe will hold the Pod out of rotation
+until those probes land; that's the intended signal.
 
 ### Security context
 
@@ -108,9 +135,82 @@ Ingress is permitted only from the namespace whose
 `networkPolicy.ingressControllerNamespace` (default `ingress-nginx`,
 RKE2's bundled controller).
 
-The CIDR defaults are intentional **/32 placeholders** — they make the
-chart fail-closed if a consumer forgets to override them rather than
-silently allow a /8 subnet.
+The three egress CIDR fields ship **empty** in `values.yaml` and are
+required-with-shape-validation in the schema **when
+`networkPolicy.enabled: true`**. The chart will not render with the
+default `enabled: true` without explicit per-environment CIDR overrides
+— defense-in-depth against accidentally allowing a wide subnet because
+a typo silently fell through.
+
+Operators on clusters running an equivalent mesh-level policy (Istio
+`AuthorizationPolicy`, Cilium `CiliumNetworkPolicy`, etc.) can set
+`networkPolicy.enabled: false` to skip the chart's NetworkPolicy
+entirely; the schema's conditional `if/then` relaxes the CIDR
+requirements in that mode so the values overlay does not need to
+populate them. Disabling without a replacement policy in place removes
+the chart's least-privilege egress story — only do it when an
+equivalent control is enforced upstream.
+
+### Safe-by-default values
+
+`values.yaml` deliberately ships **blank** for every field the backplane
+cannot start without. Operators MUST override these via `--set` or a
+values overlay:
+
+| Field | Why blank |
+| --- | --- |
+| `image.tag` | Goal #11 deploy discipline: every install pins an immutable tag, never a moving reference |
+| `ingress.host` | Per-environment; no generic placeholder is correct. Required only when `ingress.enabled: true` (the default) — relaxed when ingress is disabled |
+| `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true |
+| `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production) |
+| `vault.address` | Per-environment Vault endpoint |
+| `keycloak.issuer` | Per-environment Keycloak issuer URL |
+| `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract) |
+| `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled |
+
+A blank field falls into the typed-schema contract immediately — `helm
+install` fails before a single Kubernetes resource is created. The
+operator sees the exact missing path (e.g. `at '/vault/address':
+minLength: got 0, want 1`) and a single targeted override fixes it.
+
+Conservative resource defaults (`requests: {cpu: 100m, memory: 256Mi}`,
+`limits: {cpu: 1000m, memory: 1Gi}`) reflect observed steady-state usage
+of the v0.1 chassis (authn/authz traffic + synchronous audit-write fanout);
+tune limits up for higher-throughput deployments.
+
+### `values.schema.json` typed contract
+
+The chart ships a **JSON Schema draft-07** contract for `values.yaml`
+(Helm's supported dialect). Helm validates the merged `.Values` object
+against this schema on:
+
+- `helm lint`
+- `helm template`
+- `helm install` / `helm install --dry-run`
+- `helm upgrade`
+
+Three properties make this the right contract:
+
+1. **`additionalProperties: false` at every object level.** A typo
+   (`postgress` for `postgres`) fails at `helm install` time with the
+   exact path, not silently at first request when the backplane fails to
+   resolve a Vault secret. Helm reports e.g. `at '': additional properties
+   'postgress' not allowed`.
+2. **`minLength: 1` on every required-but-blank field plus
+   `format: uri` / `format: hostname` / `pattern: …` shape validation
+   on URLs / hostnames / CIDRs.** The safe-by-default empty placeholders
+   in `values.yaml` are intentionally rejected, surfacing the exact field
+   the operator must override.
+3. **Subchart compatibility.** When G2.5-T3 (#39) adds the Redis subchart
+   dependency, the top-level `properties` map gains a `redis` key and the
+   subchart's own `values.schema.json` (if present) is also enforced —
+   the parent chart cannot circumvent subchart restrictions.
+
+`helm lint` against the unmodified `values.yaml` **deliberately fails**
+with the safe-by-default empty fields. The chart's CI / lint workflow
+(G2.5-T5) and `deploy/values-examples/values-rdc-example.yaml` (G2.5-T4)
+both supply the required overrides; ad-hoc lint invocations pass them via
+`--set` or `-f`.
 
 ## Install / upgrade
 
@@ -118,8 +218,12 @@ silently allow a /8 subnet.
 helm install meho ./deploy/charts/meho/ \
   --namespace meho \
   --create-namespace \
-  --set image.tag=<sha> \
+  --set image.tag=sha-<git-sha> \
   --set ingress.host=meho.example.org \
+  --set ingress.tls.secretName=meho-tls \
+  --set postgres.credentialsSecret=meho-postgres \
+  --set vault.address=https://vault.example.org \
+  --set keycloak.issuer=https://keycloak.example.org/realms/meho \
   --set config.keycloakIssuerUrl=https://keycloak.example.org/realms/meho \
   --set config.keycloakAudience=meho-backplane \
   --set config.vaultAddr=https://vault.example.org \
@@ -130,26 +234,51 @@ helm install meho ./deploy/charts/meho/ \
 helm upgrade --install meho ./deploy/charts/meho/ -f values-rdc.yaml
 ```
 
-Until G2.5-T2 lands the typed `values.schema.json`, the chart accepts any
-shape — the safety net comes from the backplane itself, which fails-closed
-at startup on missing `KEYCLOAK_*` / `VAULT_*` / `DATABASE_URL` env vars.
+Missing any required override fails the schema validation at install
+time with the exact field path — e.g. omitting `--set vault.address=...`
+produces `at '/vault/address': '' is not valid uri: relative url`. The
+backplane never starts against a misconfigured set of values.
 
 ## Verification
 
 ```bash
-helm lint deploy/charts/meho/
+# helm lint passes only with a values overlay or `--set` overrides for every
+# required-but-blank field; the bare chart deliberately fails-loud:
+helm lint deploy/charts/meho/ \
+  --set image.tag=test \
+  --set ingress.host=meho.test \
+  --set ingress.tls.secretName=meho-tls \
+  --set postgres.credentialsSecret=meho-postgres \
+  --set vault.address=https://vault.test \
+  --set keycloak.issuer=https://keycloak.test/realms/meho \
+  --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+  --set config.keycloakAudience=meho-backplane \
+  --set config.vaultAddr=https://vault.test \
+  --set networkPolicy.postgresCIDR=10.0.0.0/24 \
+  --set networkPolicy.vaultCIDR=10.0.0.0/24 \
+  --set networkPolicy.keycloakCIDR=10.0.0.0/24
 
+# Same flags reproduce the render:
 helm template test-release deploy/charts/meho/ \
   --set image.tag=test \
   --set ingress.host=meho.test \
-  --set postgres.credentialsSecret=test \
-  --set networkPolicy.postgresCIDR=10.0.0.0/24 \
-  --set networkPolicy.vaultCIDR=10.0.0.0/24 \
-  --set networkPolicy.keycloakCIDR=10.0.0.0/24 \
-  --set networkPolicy.ingressControllerNamespace=ingress-nginx \
+  --set ingress.tls.secretName=meho-tls \
+  --set postgres.credentialsSecret=meho-postgres \
+  --set vault.address=https://vault.test \
+  --set keycloak.issuer=https://keycloak.test/realms/meho \
+  --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+  --set config.keycloakAudience=meho-backplane \
+  --set config.vaultAddr=https://vault.test \
+  --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+  --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+  --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
   > /tmp/rendered.yaml
 
 grep -c '^kind:' /tmp/rendered.yaml  # expect >= 6
+
+# Negative tests — the chart fails-loud on the misuse cases the schema covers:
+helm template test deploy/charts/meho/ 2>&1 | grep -E "minLength|valid"
+helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "additional properties"
 ```
 
 ## Dependencies
@@ -166,13 +295,14 @@ grep -c '^kind:' /tmp/rendered.yaml  # expect >= 6
 
 ## Known gaps (filled by sibling tasks)
 
-- `values.schema.json` is a placeholder — G2.5-T2 (#38) fills it.
-- Probes are scaffolded but disabled — G2.5-T2 (#38) wires real targets.
-- Pre-install migration Job + Redis subchart — G2.5-T3 (#39).
+- Pre-install migration Job + Redis subchart — G2.5-T3 (#39). The subchart
+  will extend `values.yaml` with a top-level `redis:` key and the matching
+  schema branch.
 - `deploy/values-examples/values-rdc-example.yaml` — G2.5-T4 (#40).
 - OCI publish to `ghcr.io/evoila/meho-chart` + cosign signing — G2.5-T5
   (#41).
-- HPA / PDB / ServiceMonitor / PrometheusRule — deferred to v0.2.
+- HPA / PDB / topologySpreadConstraints / ServiceMonitor / PrometheusRule
+  — deferred to v0.2. v0.1 is single-replica per Goal #11 scope.
 
 ## References
 

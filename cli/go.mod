@@ -1,11 +1,11 @@
 module github.com/evoila/meho/cli
 
-go 1.22
+go 1.23.0
 
 require (
 	github.com/spf13/cobra v1.10.2
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/oauth2 v0.26.0
+	golang.org/x/oauth2 v0.27.0
 )
 
 require (

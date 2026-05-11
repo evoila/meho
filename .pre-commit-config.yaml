@@ -20,6 +20,15 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # Helm chart templates are Go-template-pre-YAML, not pure YAML;
+        # they only become valid YAML after `helm template` renders
+        # them. Validate them via `helm template` / `helm lint` (the
+        # chart.yml CI workflow), not the generic check-yaml hook. Same
+        # rationale as the OSS Helm-chart repos (e.g.
+        # dragonflyoss/helm-charts) and the pre-commit-hooks#420
+        # discussion. Without this exclude, any edit to a chart template
+        # tries (and fails) to parse Go-template directives as YAML.
+        exclude: ^deploy/charts/.+/templates/.+\.ya?ml$
       - id: check-json
       - id: check-added-large-files
         args: [--maxkb=500]

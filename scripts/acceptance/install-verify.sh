@@ -216,19 +216,43 @@ echo
 
 # --- Check #1: Deployment Available ------------------------------------
 if [[ "$SKIP_CLUSTER_CHECKS" -ne 1 ]]; then
-    # `kubectl rollout status` blocks until Available=True OR the
-    # timeout fires. 60s is generous given the install just completed
-    # with `helm --wait`; if it isn't ready by now something's wrong.
-    if kubectl rollout status -n "$NAMESPACE" "deployment/${RELEASE}" --timeout=60s >/dev/null 2>&1; then
-        check_ok "deployment/${RELEASE} Available in namespace ${NAMESPACE}"
+    # Resolve the backplane Deployment by label selector rather than the
+    # raw release name. The chart's `meho.fullname` helper produces
+    # different object names depending on whether the release name
+    # contains the chart name (`meho` → `meho`, `prod` → `prod-meho`),
+    # so a literal `deployment/${RELEASE}` lookup is release-name-
+    # specific and would false-fail on any non-`meho` release. The
+    # selector `app.kubernetes.io/name=meho,app.kubernetes.io/instance=$RELEASE`
+    # is what install.md row 1 already documents and is invariant
+    # across rename. The `name=meho` discriminator also keeps us from
+    # matching the broadcast subchart's Deployment (which carries
+    # `app.kubernetes.io/name=broadcast`).
+    deployment_name="$(kubectl get deployment -n "$NAMESPACE" \
+        -l "app.kubernetes.io/name=meho,app.kubernetes.io/instance=${RELEASE}" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -z "$deployment_name" ]]; then
+        check_fail "no Deployment matching app.kubernetes.io/name=meho,app.kubernetes.io/instance=${RELEASE} in ${NAMESPACE}" \
+            "kubectl get deployment -n $NAMESPACE -l app.kubernetes.io/instance=${RELEASE} to inspect what's present"
     else
-        check_fail "deployment/${RELEASE} not Available" \
-            "kubectl describe deployment -n $NAMESPACE $RELEASE for details"
+        # `kubectl rollout status` blocks until Available=True OR the
+        # timeout fires. 60s is generous given the install just
+        # completed with `helm --wait`; if it isn't ready by now
+        # something's wrong.
+        if kubectl rollout status -n "$NAMESPACE" "deployment/${deployment_name}" --timeout=60s >/dev/null 2>&1; then
+            check_ok "deployment/${deployment_name} Available in namespace ${NAMESPACE}"
+        else
+            check_fail "deployment/${deployment_name} not Available" \
+                "kubectl describe deployment -n $NAMESPACE $deployment_name for details"
+        fi
     fi
 
     # --- Check #2: Migration Job succeeded ------------------------------
-    # The Job name is templated by the chart as `<release>-meho-migrate`
-    # (see deploy/charts/meho/templates/migration-job.yaml). Helm's
+    # The Job name is templated by the chart as
+    # `<meho.fullname>-migrate`, which is release-name-dependent (see
+    # deploy/charts/meho/templates/migration-job.yaml + _helpers.tpl).
+    # Use the release-name-agnostic label selector
+    # `app.kubernetes.io/component=migrate,app.kubernetes.io/instance=$RELEASE`
+    # — install.md row 2 already documents this shape. Helm's
     # `pre-install,pre-upgrade` hook GCs the Job on success via
     # `hook-succeeded`, so a successful migration may leave NO Job in
     # the namespace by the time the verifier runs. Distinguish "Job
@@ -236,15 +260,18 @@ if [[ "$SKIP_CLUSTER_CHECKS" -ne 1 ]]; then
     # the helm history's last revision state — Helm only marks the
     # release `deployed` if every hook including the migration
     # succeeded.
+    job_name="$(kubectl get job -n "$NAMESPACE" \
+        -l "app.kubernetes.io/component=migrate,app.kubernetes.io/instance=${RELEASE}" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
     job_status=""
-    if kubectl get job -n "$NAMESPACE" "${RELEASE}-meho-migrate" >/dev/null 2>&1; then
-        job_status="$(kubectl get job -n "$NAMESPACE" "${RELEASE}-meho-migrate" \
+    if [[ -n "$job_name" ]]; then
+        job_status="$(kubectl get job -n "$NAMESPACE" "$job_name" \
             -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
         if [[ "$job_status" == "1" ]]; then
-            check_ok "migration Job ${RELEASE}-meho-migrate succeeded"
+            check_ok "migration Job ${job_name} succeeded"
         else
-            check_fail "migration Job ${RELEASE}-meho-migrate exists but did not succeed" \
-                "status.succeeded='$job_status'; kubectl logs -n $NAMESPACE job/${RELEASE}-meho-migrate"
+            check_fail "migration Job ${job_name} exists but did not succeed" \
+                "status.succeeded='$job_status'; kubectl logs -n $NAMESPACE job/${job_name}"
         fi
     else
         # Job was GC'd (hook-succeeded deletion). Assert helm release

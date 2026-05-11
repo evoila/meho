@@ -609,6 +609,22 @@ into `GITHUB_STEP_SUMMARY` on every successful publish.
   Redis/Valkey already running — deferred to v0.2 (the
   `broadcast.enabled: false` knob lands in v0.1 as the disable path).
 
+## Cross-repo handshake
+
+The v0.1 deploy contract crosses one repo boundary: `evoila/meho`
+produces the chart + image; the dogfooding consumer
+[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+operates the rke2-infra cluster the per-PR ephemeral smoke and
+post-merge deploy run against. The handshake spec — cluster auth
+options (OIDC trust preferred over a long-lived kubeconfig secret),
+namespace-scoped RBAC for `meho-ci-*`, the `meho-image-pushed`
+`repository_dispatch` event shape, and the verification commands
+either side can run to prove the contract holds — lives in
+[`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md).
+The companion script
+[`scripts/cross-repo/verify-rke2-access.sh`](../../scripts/cross-repo/verify-rke2-access.sh)
+automates the kubectl portion of the check.
+
 ## References
 
 - Parent Goal: #11 — Deployable v0.1
@@ -619,3 +635,4 @@ into `GITHUB_STEP_SUMMARY` on every successful publish.
 - External Secrets Operator: https://external-secrets.io/
 - ESO Vault provider: https://external-secrets.io/latest/provider/hashicorp-vault/
 - ESO ExternalSecret API: https://external-secrets.io/latest/api/externalsecret/
+- Cross-repo handshake spec: [`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md)

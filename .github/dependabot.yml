@@ -26,6 +26,17 @@ updates:
       - "github-actions"
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # golangci-lint-action v7+ refuses to install golangci-lint v1.x
+      # binaries; the in-tree cli/.golangci.yml is still on the v1
+      # config schema. Until the schema migration ships as a separate
+      # follow-up, major bumps of this action would break CI (and
+      # already did once via PR #198). Minor / patch bumps within v6
+      # still come through. See the long comment in .github/workflows/
+      # ci.yml's golangci-lint step for context.
+      - dependency-name: "golangci/golangci-lint-action"
+        update-types:
+          - "version-update:semver-major"
 
   # Backend Python deps live at backend/pyproject.toml + backend/uv.lock.
   # Without this block, Dependabot security updates default to `/` and

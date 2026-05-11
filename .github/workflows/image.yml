@@ -173,6 +173,19 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo "Pushed digest=${{ steps.build.outputs.digest }}"
 
+      - name: Ensure envsubst (gettext-base) — cosign-installer dep
+        # See chart.yml for context. Same PR-skip gate as the cosign step
+        # so PR-only builds don't burn apt time on a package they won't use.
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          if command -v envsubst >/dev/null 2>&1; then exit 0; fi
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends gettext-base
+          else
+            apt-get update -q && apt-get install -y --no-install-recommends gettext-base
+          fi
+
       - name: Install cosign
         # Pinned to cosign-installer v4.1.2 (ships cosign v3.0.6 by default;
         # see action.yml). v4.x dropped pre-2.0 cosign support; v3.x of cosign

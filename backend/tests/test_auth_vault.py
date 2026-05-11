@@ -419,7 +419,7 @@ async def test_vault_other_error_wraps_to_client_error(
         async with vault_client_for_operator(_make_operator()):
             pytest.fail("body should not run when login raises")
     # Must NOT be a subclass — it's the generic catchall.
-    assert not isinstance(exc_info.value, (VaultUnreachableError, VaultRoleDeniedError))
+    assert not isinstance(exc_info.value, VaultUnreachableError | VaultRoleDeniedError)
 
 
 # ---------------------------------------------------------------------------

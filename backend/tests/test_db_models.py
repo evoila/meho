@@ -73,6 +73,7 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     get_settings.cache_clear()
 
+
 # Note on engine wiring
 # ---------------------
 # Every async test in this file relies on the autouse

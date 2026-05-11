@@ -28,6 +28,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --namespace-prefix)
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "verify-rke2-access.sh: --namespace-prefix requires a value" >&2
+                exit 2
+            fi
             NAMESPACE_PREFIX="$2"
             shift 2
             ;;
@@ -54,7 +58,18 @@ fi
 # Deterministic per-run namespace name. Random suffix instead of $$ keeps
 # the script safe to run from CI matrices where multiple shells share PID
 # numbers across runners.
-SUFFIX="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 8)"
+#
+# Generated without a pipeline reading from /dev/urandom: under
+# `set -o pipefail`, `head -c 8` closing the pipe before `tr` finishes
+# reading raises SIGPIPE (rc=141) and aborts the whole script before any
+# check runs. A bash-builtin RNG ($RANDOM) keeps us free of pipefail
+# entanglement and free of the openssl / coreutils variance between
+# runner images.
+SUFFIX=""
+charset="abcdefghijklmnopqrstuvwxyz0123456789"
+for _ in 1 2 3 4 5 6 7 8; do
+    SUFFIX+="${charset:$((RANDOM % ${#charset})):1}"
+done
 VERIFY_NS="${NAMESPACE_PREFIX}-verify-${SUFFIX}"
 
 FAIL_COUNT=0
@@ -116,7 +131,11 @@ assert_can() {
             check_fail "$label" "expected yes; got verdict='$verdict' rc=$rc"
         fi
     else
-        if [[ "$rc" -ne 0 && "$verdict" != "yes" ]]; then
+        # Per the function's header comment and the kubectl reference,
+        # only rc=1 with verdict="no" is a genuine denial. rc>=2 means
+        # transport / parse / CLI error and must surface as a real
+        # failure, not be silently accepted as "yep, denied".
+        if [[ "$rc" -eq 1 && "$verdict" == "no" ]]; then
             check_ok "$label"
         else
             check_fail "$label" "expected no; got verdict='$verdict' rc=$rc"

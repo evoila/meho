@@ -399,10 +399,23 @@ jobs:
           VERSION: ${{ needs.publish.outputs.chart_version }}
         run: |
           set -euo pipefail
-          # Belt-and-braces: scrub any latent helm registry config that
-          # might leak from a prior run on the same self-hosted runner.
-          rm -f "${HOME}/.config/helm/registry/config.json"
-          rm -rf "${HOME}/.cache/helm/registry"
+          # Isolate Helm from any persisted runner-local auth/config.
+          # The self-hosted `meho-runners` pool does not guarantee a clean
+          # HOME between jobs (https://docs.github.com/en/actions/hosting-your-own-runners);
+          # Helm 3.8+ falls back to ~/.docker/config.json for OCI creds when
+          # HELM_REGISTRY_CONFIG isn't set (helm/helm#7776), so deleting only
+          # Helm's own config can false-pass this DoD check if a prior job
+          # left a docker login behind. A throwaway HOME forces Helm to see
+          # an empty config tree regardless of what persists on the runner.
+          HOME="$(mktemp -d)"
+          export HOME
+          export XDG_CONFIG_HOME="${HOME}/.config"
+          export XDG_CACHE_HOME="${HOME}/.cache"
+          mkdir -p "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}"
+          # Visibility: log the sandbox so CI output proves it is truly empty.
+          echo "HOME=${HOME}"
+          ls -la "${HOME}"
+          helm registry list 2>/dev/null || true
           mkdir -p /tmp/anon-pull
           cd /tmp/anon-pull
           helm pull "oci://ghcr.io/evoila/meho-chart" --version "${VERSION}"

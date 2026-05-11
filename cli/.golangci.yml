@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# golangci-lint config for the meho CLI module.
+#
+# Scope is intentionally narrow at G2.6-T1: the six default linters
+# golangci-lint enables out of the box plus the two formatters that
+# Go consensus treats as table stakes (gofmt, goimports) and revive
+# for stylistic checks that go vet doesn't cover. We stay away from
+# the kitchen-sink presets (gochecknoglobals, exhaustruct, wrapcheck,
+# err113) because the scaffold genuinely needs package-level vars for
+# ldflags injection and unwrapped sentinel errors are idiomatic for
+# CLI exit-status handling.
+
+run:
+  timeout: 5m
+  # The CLI module is self-contained; the linter doesn't need to
+  # see the Python backplane.
+  go: "1.22"
+
+linters:
+  disable-all: true
+  enable:
+    # Default set (golangci-lint runs these unless told otherwise).
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Formatters — fail-closed so CI catches what `gofmt -d` would.
+    - gofmt
+    - goimports
+    # Style/best-practices supplement to go vet.
+    - revive
+
+linters-settings:
+  goimports:
+    # Group local imports separately from third-party — matches the
+    # convention the backplane (Python isort) and the cobra codebase
+    # both use, and makes diff review easier when imports churn.
+    local-prefixes: github.com/evoila/meho/cli
+  revive:
+    # Default rules are noisy by themselves; pin an explicit ruleset
+    # so future revive releases don't surprise CI with new findings.
+    # Keep this list pragmatic — every rule here has paid for itself
+    # in production Go CLIs (gh, argocd, flux all enable equivalents).
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+issues:
+  # Don't hide legitimate findings behind golangci-lint's default
+  # max-issues-per-linter / max-same-issues caps — once CI is wired
+  # (G2.7) we want every finding visible.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Test files routinely use blank identifiers, dot imports, and
+    # global state in ways production code shouldn't; relax the
+    # strictest rules there without disabling them wholesale.
+    - path: _test\.go
+      linters:
+        - errcheck
+        - revive

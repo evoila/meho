@@ -1,0 +1,9 @@
+# Build artefacts produced by `make build` / `make install`.
+bin/
+
+# GoReleaser output (lands in G2.6-T4).
+dist/
+
+# Coverage profiles produced by `go test -cover -coverprofile=...`.
+*.out
+coverage.txt

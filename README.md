@@ -30,6 +30,12 @@ the release.)
 For the backplane (Python / FastAPI) skeleton — `uv` and Docker
 recipes for running it locally — see [`backend/README.md`](./backend/README.md).
 
+For the `meho` operator CLI (Go / cobra) — build, install, and
+`meho version` recipes — see [`cli/README.md`](./cli/README.md). The
+CLI ships as a single static binary; v0.1 wires `version` only, with
+`login` and `status` landing in subsequent tasks under Initiative
+G2.6 (#42).
+
 ## Container image
 
 The backplane is published to GitHub Container Registry as a multi-arch

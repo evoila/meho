@@ -103,6 +103,19 @@ func newLoginCmd() *cobra.Command {
 				return fmt.Errorf("token obtained but storage failed: %w", err)
 			}
 
+			// Persist the backplane URL to the unauthenticated config
+			// file so future subcommands (meho status, future ops)
+			// can recover it without asking the operator to retype
+			// it. The config file carries no secrets — only the URL
+			// — so a write failure is surfaced as a warning, not a
+			// hard error: the token is already safely stored, and
+			// the operator can supply --backplane explicitly on the
+			// next invocation.
+			if err := auth.SaveConfig(auth.Config{BackplaneURL: backplaneURL}); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"warning: failed to persist backplane URL to config file: %v\n", err)
+			}
+
 			fmt.Fprintf(out, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
 			return nil
 		},

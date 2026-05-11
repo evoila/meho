@@ -119,15 +119,20 @@ and dot imports in ways production code shouldn't.
 
 ## Dependencies
 
-Direct: `github.com/spf13/cobra` (CLI framework, per ADR 0001).
-Indirect transitive deps tracked via `go mod tidy` in `go.sum`. The
-project intentionally keeps the dep graph small — every transitive
-import is one more thing supply-chain scanning has to vouch for, and
-operators have to trust to run `meho login` against their secrets.
+Direct: `github.com/spf13/cobra` (CLI framework, per ADR 0004 —
+the stack-choice ADR; ADR 0001 covers license choice and is
+unrelated). Indirect transitive deps tracked via `go mod tidy` in
+`go.sum`. The project intentionally keeps the dep graph small —
+every transitive import is one more thing supply-chain scanning has
+to vouch for, and operators have to trust to run `meho login`
+against their secrets.
 
-Future tasks add `github.com/99designs/keyring` (G2.6-T2),
-`github.com/oapi-codegen/runtime` (G2.6-T3 — the generated client),
-and the OAuth 2.0 device-code helper from
+Future tasks add `github.com/zalando/go-keyring` (G2.6-T2 — chosen
+over `99designs/keyring`, which ADR 0004 rejected on
+maintenance-cadence grounds; the same ADR specifies a file-backed
+fallback at `~/.config/meho/credentials` mode `0600` for hosts with
+no OS keyring service), `github.com/oapi-codegen/runtime` (G2.6-T3 —
+the generated client), and the OAuth 2.0 device-code helper from
 `golang.org/x/oauth2` (G2.6-T2).
 
 ## Known issues / forward-compat scaffolding

@@ -732,7 +732,7 @@ keyless-by-default semantics — no `COSIGN_EXPERIMENTAL=1` needed.
 The cert Fulcio issues binds to the workflow file path + ref of the
 run that minted the OIDC token. Operators verify against:
 
-```
+```text
 ^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$
 ```
 

@@ -429,10 +429,7 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
 else
     check_note "audit_log schema check deferred — \$DATABASE_URL unset"
     check_note "  operator: run the following on the verifier host (or any host with DB access):"
-    check_note "    psql \"\$DATABASE_URL\" -c \\"
-    check_note "      \"SELECT column_name FROM information_schema.columns\""
-    check_note "      \" WHERE table_name='audit_log' AND column_name\""
-    check_note "      \" IN ('${EXPECTED_SCHEMA_COLUMNS//,/\',\'}');\""
+    check_note "    psql \"\$DATABASE_URL\" -c \"SELECT column_name FROM information_schema.columns WHERE table_name='audit_log' AND column_name IN ('${EXPECTED_SCHEMA_COLUMNS//,/\',\'}') ORDER BY column_name;\""
     check_note "    expected output: every column listed above (N+1 schema stays ahead)"
     check_note "  paste the output into the closing comment on issue #57"
 fi

@@ -830,7 +830,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "hvac", specifier = ">=2.4.0" },
     { name = "prometheus-client", specifier = ">=0.20" },
-    { name = "pydantic", extras = ["email"], specifier = ">=2.6" },
+    { name = "pydantic", extras = ["email"], specifier = ">=2.13.4" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },

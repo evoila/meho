@@ -4,7 +4,8 @@
 // Package cmd assembles the cobra command tree for the meho CLI.
 // The root command exposes global flags consumed by every subcommand
 // (--config, -v/--verbose); subcommand-specific behaviour lives in
-// sibling files (version.go and, in later tasks, login.go / status.go).
+// sibling files (version.go, login.go, and — in a later task —
+// status.go).
 package cmd
 
 import "github.com/spf13/cobra"
@@ -29,10 +30,9 @@ func newRootCmd() *cobra.Command {
 		Use:   "meho",
 		Short: "Operator CLI for the MEHO governance backplane",
 		Long: "meho is the operator-facing CLI for the MEHO governance " +
-			"backplane. This scaffold (G2.6-T1) ships the version " +
-			"subcommand only; login and status arrive in subsequent " +
-			"G2.6 Tasks, after which further operations are discovered " +
-			"from the backplane at runtime (see Goal #11).",
+			"backplane. v0.1 ships login (G2.6-T2) and version (G2.6-T1); " +
+			"status (G2.6-T3) lands next, after which further operations " +
+			"are discovered from the backplane at runtime (see Goal #11).",
 		// SilenceUsage stops cobra from dumping the full usage block
 		// when a RunE returns an error — operator-facing tooling
 		// should surface a one-line failure, not a wall of help text.
@@ -59,5 +59,6 @@ func newRootCmd() *cobra.Command {
 	)
 
 	root.AddCommand(newVersionCmd())
+	root.AddCommand(newLoginCmd())
 	return root
 }

@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# oapi-codegen v2 config — generates the typed Go client for the
+# meho backplane API into cli/internal/api/client.gen.go.
+#
+# Invocation (driven by the Makefile `generate` target):
+#
+#   oapi-codegen --config api/oapi.config.yaml api/openapi.json
+#
+# Pinned to v2.5.0 (last v2.x release supporting Go 1.22 as the
+# minimum); ADR 0004 locks oapi-codegen v2 as the seam generator.
+# The generated file is committed so consumers / CI don't have to
+# re-run oapi-codegen on every build; `make generate` is the
+# regeneration entry point when the openapi.json snapshot moves.
+
+package: api
+output: internal/api/client.gen.go
+generate:
+  # Generate models for every schema referenced in the spec.
+  models: true
+  # Generate the lower-level Client (per-operation methods that
+  # return *http.Response) plus the higher-level ClientWithResponses
+  # wrapper (per-operation methods that unmarshal the typed body and
+  # surface response.JSON200 / .JSON401 fields). The wrapper is what
+  # status.go consumes; the lower-level client is what the wrapper
+  # delegates to and stays exported so future ops can drop down a
+  # layer when they need streaming responses or custom decoding.
+  client: true
+output-options:
+  # Skip pruning the unused schemas — the spec is small (six paths
+  # in v0.1) and pruning forces a regeneration churn each time a
+  # new schema becomes referenced.
+  skip-prune: true

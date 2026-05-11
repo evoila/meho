@@ -1,0 +1,310 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "meho-backplane",
+    "description": "MEHO governance-layer backplane (chassis-only in v0.1).",
+    "version": "0.1.0-dev"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Healthz",
+        "description": "Liveness probe. Always returns 200; never inspects the registry.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Healthz Healthz Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Ready",
+        "description": "Readiness probe.\n\nReturns 200 with ``{\"status\": \"ready\", \"checks\": [...]}`` when at\nleast one probe is registered and every probe reports ``ok``.\nReturns 503 with ``{\"status\": \"not_ready\", \"checks\": [...]}``\notherwise \u2014 including the fail-closed empty-registry case at the\nchassis stage. The empty case is handled explicitly because\n``all([])`` is vacuously ``True`` in Python, which would otherwise\nflip the chassis to \"ready\" with zero evidence.",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "tags": [
+          "version"
+        ],
+        "summary": "Version",
+        "description": "Return the build-identity payload.\n\nEach field falls back to ``\"unknown\"`` when its env var is unset or\nempty, which keeps local development frictionless without ever\npretending an unknown build is a known one.",
+        "operationId": "version_version_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "type": "object",
+                  "title": "Response Version Version Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Authenticated Health",
+        "description": "Federation-proof authenticated health check.\n\nSee module docstring for the four-step chain this exercises. The\n``Depends(verify_jwt_and_bind)`` annotation is what guarantees the\nJWT is validated *and* ``operator_sub`` is bound into structlog\ncontextvars before this body runs \u2014 every log line emitted from\nhere downstream carries operator identity automatically.",
+        "operationId": "authenticated_health_api_v1_health_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "summary": "Root",
+        "description": "Identity route.\n\nReturns the running app's name and version. Kept alongside\n``/healthz`` because some legacy probes hit ``/`` instead of\n``/healthz`` and we want both paths to behave.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Root  Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Metrics",
+        "description": "Prometheus exposition endpoint.\n\nReturns the default registry contents (process / GC collectors +\nthe ``http_requests_total`` counter the middleware increments) in\nthe legacy ``text/plain; version=0.0.4`` format that every\nPrometheus scraper understands.",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DbStatus": {
+        "properties": {
+          "migrated": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Migrated"
+          }
+        },
+        "type": "object",
+        "required": [
+          "migrated"
+        ],
+        "title": "DbStatus",
+        "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "operator": {
+            "$ref": "#/components/schemas/OperatorIdentity"
+          },
+          "vault": {
+            "$ref": "#/components/schemas/VaultStatus"
+          },
+          "db": {
+            "$ref": "#/components/schemas/DbStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "operator",
+          "vault",
+          "db"
+        ],
+        "title": "HealthResponse",
+        "description": "``GET /api/v1/health`` response body."
+      },
+      "OperatorIdentity": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Name"
+          },
+          "email": {
+            "type": "string",
+            "nullable": true,
+            "title": "Email"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "name",
+          "email"
+        ],
+        "title": "OperatorIdentity",
+        "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "VaultStatus": {
+        "properties": {
+          "reachable": {
+            "type": "boolean",
+            "title": "Reachable"
+          },
+          "read_ok": {
+            "type": "boolean",
+            "title": "Read Ok"
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true,
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reachable",
+          "read_ok"
+        ],
+        "title": "VaultStatus",
+        "description": "Vault federation-chain status.\n\n``reachable`` is true when ``vault_client_for_operator`` returns a\nlogged-in client (TCP + TLS + JWT/OIDC login all worked). ``read_ok``\nis true when the test secret read succeeded against that client.\n``detail`` carries a short structured string for the CLI to render\non failure paths \u2014 never an unbounded exception message."
+      }
+    }
+  }
+}

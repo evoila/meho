@@ -992,6 +992,29 @@ The companion script
 [`scripts/cross-repo/verify-rke2-access.sh`](../../scripts/cross-repo/verify-rke2-access.sh)
 automates the kubectl portion of the check.
 
+## Acceptance contracts (Goal #11 DoD)
+
+Goal #11's Definition of Done is a deploy contract — it is satisfied
+when a `claude-rdc-hetzner-dc` operator can install, smoke, roll back,
+and observe a MEHO instance against the real lab in bounded wall-clock
+time. The producer-side acceptance contracts that codify what
+"passing" looks like for each DoD bullet live in
+[`docs/acceptance/`](../acceptance/README.md), each pointing at the
+companion verifier shell under
+[`scripts/acceptance/`](../../scripts/acceptance/).
+
+| DoD bullet | Contract | Verifier |
+| --- | --- | --- |
+| 1 — `install.sh` cold-deploy → working MEHO in <5 min | [`docs/acceptance/install.md`](../acceptance/install.md) | [`scripts/acceptance/install-verify.sh`](../../scripts/acceptance/install-verify.sh) |
+
+The split between producer-owned contracts + verifiers and
+consumer-owned wrappers (`install.sh`, `smoke.sh`, …) is the same
+shape as the cross-repo handshake above: the chart producer owns
+"what passing means"; the consumer owns "how to drive the install
+on this environment". The verifier is invoked as the last step of
+the consumer's wrapper, and the verifier's exit code becomes the
+wrapper's exit code.
+
 ## References
 
 - Parent Goal: #11 — Deployable v0.1
@@ -999,6 +1022,7 @@ automates the kubectl portion of the check.
 - Parent Initiative: #48 — G2.7 CI/CD + per-PR ephemeral smoke
 - Task #50 (G2.7-T2) — Per-PR ephemeral cluster deploy + smoke + teardown
 - Task #53 (G2.7-T5) — Cross-repo coordination tracker (consumer-side kubeconfig + RBAC)
+- Task #55 (G2.8-T1) — `install.sh` cold-deploy acceptance contract + verifier (`docs/acceptance/install.md`, `scripts/acceptance/install-verify.sh`)
 - GitHub Actions OIDC: https://docs.github.com/en/actions/concepts/security/openid-connect
 - `pull_request_target` hardening guide: https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
 - Helm chart structure: https://helm.sh/docs/topics/charts/

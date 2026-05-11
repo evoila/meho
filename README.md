@@ -310,8 +310,10 @@ The realm-side recipe (group attribute + realm role protocol mappers,
 verification + troubleshooting) lives at
 [`docs/cross-repo/keycloak-tenant-claims.md`](./docs/cross-repo/keycloak-tenant-claims.md).
 Apply it against the realm whose issuer is configured as
-`KEYCLOAK_ISSUER_URL` in the chart values **before** rolling the
-backplane image to a v0.2 tag.
+`config.keycloakIssuerUrl` in the chart values (rendered into the
+`KEYCLOAK_ISSUER_URL` env var on the backplane Deployment by
+[`templates/configmap.yaml`](./deploy/charts/meho/templates/configmap.yaml))
+**before** rolling the backplane image to a v0.2 tag.
 
 ## Documentation
 

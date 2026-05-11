@@ -183,15 +183,22 @@ jobs:
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
-        # v6 (NOT v7+ / v8+) because the in-tree cli/.golangci.yml is
-        # written in the golangci-lint v1 config schema (disable-all +
+        # v6 (NOT v7+ / v8+ / v9+) because the in-tree cli/.golangci.yml
+        # is written in the golangci-lint v1 config schema (disable-all +
         # explicit enable list, v1 linter names like `gosimple` /
-        # `errcheck`). golangci-lint-action v7.x+ defaults to the v2
-        # binary which rejects v1 configs. Pinning the binary to
-        # v1.64.8 keeps the existing config valid; a future migration
-        # to the v2 schema can flip both the action major and the
-        # binary version together.
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
+        # `errcheck`). golangci-lint-action v7.x+ refuses to install any
+        # v1.x binary at all — fails with `invalid version string
+        # 'v1.64.8', golangci-lint v1 is not supported`. PR #198
+        # (Dependabot) attempted the major bump from v6.5.2 -> v9.2.0
+        # without the corresponding v2 config migration and broke every
+        # Go CI run on main between #198's merge and this revert. To
+        # prevent the same problem recurring, the action's major-version
+        # bumps are now in Dependabot's ignore list (see
+        # `.github/dependabot.yml`); minor / patch bumps within v6 still
+        # come through normally. Migrating cli/.golangci.yml to the v2
+        # schema is tracked as a separate follow-up — when that lands,
+        # the action major and the binary version flip together.
+        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84  # v6.5.2
         with:
           version: v1.64.8
           working-directory: cli

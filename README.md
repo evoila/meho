@@ -32,9 +32,10 @@ recipes for running it locally — see [`backend/README.md`](./backend/README.md
 
 For the `meho` operator CLI (Go / cobra) — build, install, and
 `meho version` recipes — see [`cli/README.md`](./cli/README.md). The
-CLI ships as a single static binary; v0.1 wires `version` only, with
-`login` and `status` landing in subsequent tasks under Initiative
-G2.6 (#42).
+CLI ships as a single static binary; v0.1 wires `version`, `login`,
+and `status`, plus a cosign-signed multi-platform release pipeline
+(linux/macOS × amd64/arm64). Operator-side signature-verification
+recipe is below in [Verifying CLI release artefacts](#verifying-cli-release-artefacts).
 
 ## Container image
 
@@ -76,6 +77,47 @@ Verify:
 gh api /orgs/evoila/packages/container/meho --jq '.visibility'   # -> "public"
 docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
 ```
+
+## Verifying CLI release artefacts
+
+Every CLI tarball published at <https://github.com/evoila/meho/releases>
+is signed via cosign keyless (ADR 0006). The signature, the
+Fulcio-issued certificate, and the Rekor transparency-log inclusion
+proof are bundled into a single `.cosign.bundle` JSON file attached
+to the release alongside each `.tar.gz` and the combined `SHA256SUMS`
+file.
+
+```bash
+TAG=v0.1.0
+TARBALL=meho_${TAG#v}_linux_amd64.tar.gz
+BASE=https://github.com/evoila/meho/releases/download/${TAG}
+
+curl -LO ${BASE}/${TARBALL}
+curl -LO ${BASE}/${TARBALL}.cosign.bundle
+
+cosign verify-blob \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --bundle ${TARBALL}.cosign.bundle \
+  ${TARBALL}
+# Verified OK
+
+tar xzf ${TARBALL}
+sudo install meho /usr/local/bin/
+meho version
+```
+
+The identity-claim regex is anchored on `cli-release.yml` and
+`refs/tags/v` — same shape as `chart.yml` (chart signing) and
+`image.yml` (container image signing) per ADR 0006. A maliciously
+re-tagged workflow on a fork cannot produce a bundle that satisfies
+it.
+
+`SHA256SUMS` is signed the same way; verify it once, then
+`sha256sum -c SHA256SUMS` against any subset of tarballs the
+operator actually downloaded (two-step trust chain). The full
+recipe and ADR-0006 rationale live in
+[`cli/README.md#verify-signatures`](./cli/README.md#verify-signatures).
 
 ## Helm chart values reference
 

@@ -16,18 +16,21 @@
 # output preserves the tag form (`v0.1.0`) via the `{{.Tag}}` template
 # binding in cli/.goreleaser.yaml.
 #
-# Cosign signing (G2.6-T5 / Issue #47) extends this workflow with a
-# post-publish sign step; the `id-token: write` permission below is
-# already declared so the signing follow-up is a single-file change.
+# Cosign keyless signing (Issue #47, ADR 0006) attaches a sigstore
+# bundle to every release artefact via GoReleaser's `signs:` block in
+# cli/.goreleaser.yaml. The `Install cosign` step below pins the
+# installer SHA (matches chart.yml + image.yml). Release notes are
+# extracted from the top-level CHANGELOG.md so the human-curated
+# narrative — not git-log noise — lands in the GitHub Release body.
 #
 # Permissions design follows the same per-job least-privilege posture
 # as chart.yml + image.yml:
 #   * workflow-default = `contents: read` (just enough to checkout).
 #   * `release` job elevates to `contents: write` (GitHub Release
-#     creation) + `id-token: write` (forward-compat for cosign keyless
-#     in #47). No `packages: write`, no `security-events: write` —
-#     CLI tarballs land on GitHub Releases, not GHCR, and there is no
-#     SARIF scan in this Task's scope.
+#     creation) + `id-token: write` (cosign keyless OIDC). No
+#     `packages: write`, no `security-events: write` — CLI tarballs
+#     land on GitHub Releases, not GHCR, and there is no SARIF scan
+#     in this Task's scope.
 
 name: cli-release
 
@@ -74,12 +77,11 @@ jobs:
       # release assets. Scoped to this job only.
       contents: write
       # `id-token: write` mints a GitHub Actions OIDC token. Cosign
-      # keyless signing (G2.6-T5 / #47) exchanges that token at
+      # keyless signing (Issue #47, ADR 0006) exchanges that token at
       # Fulcio for a ~10-minute x509 cert and signs every release
-      # artefact under the workflow identity. Declared now so the
-      # signing follow-up is a single-file delta on top of this
-      # workflow rather than a workflow-permission change that
-      # would require a separate maintainer review.
+      # artefact under the workflow identity. Mirrors chart.yml and
+      # image.yml's per-job posture for the same reason — only the
+      # signing job needs the token.
       id-token: write
     steps:
       - name: Checkout
@@ -109,6 +111,85 @@ jobs:
           # the tree right now).
           cache-dependency-path: cli/go.sum
 
+      - name: Install cosign
+        # Pinned to cosign-installer v4.1.2 (ships cosign v3.x by
+        # default). Same SHA as chart.yml's signing step so a single
+        # supply-chain audit covers all three artefact pipelines
+        # (image, chart, CLI release). v4.x dropped pre-2.0 cosign
+        # support; v3.x of cosign has keyless-by-default semantics —
+        # no COSIGN_EXPERIMENTAL=1 needed.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Extract release notes from CHANGELOG.md
+        # CHANGELOG.md is the human-curated narrative (Keep a Changelog
+        # format). GoReleaser's `changelog:` block remains in
+        # cli/.goreleaser.yaml as a fallback for snapshot builds, but
+        # for real `v*` tag pushes we override the release body with
+        # the matching CHANGELOG section via `--release-notes` so
+        # operators see the maintainer-written prose rather than the
+        # raw git log.
+        #
+        # The script extracts the `## [<version>]` section matching
+        # the current tag. The leading `v` is stripped to match the
+        # Keep-a-Changelog convention (`## [0.1.0]`). The section ends
+        # at the next `## ` heading or end-of-file. A missing section
+        # falls back to the `[Unreleased]` block — useful for
+        # pre-release tags like `v0.1.0-rc.1` that the CHANGELOG may
+        # not have a dedicated section for yet. If both are absent,
+        # the file is left empty and GoReleaser falls back to its
+        # built-in `changelog:` git-log generation.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+
+          # awk extracts the block between `## [<version>]` (or
+          # `## [Unreleased]` as fallback) and the next `## ` line.
+          # `-v` passes the version into awk's namespace; the regex
+          # anchors on `[`-bracketed semver to avoid matching prose
+          # headings that happen to start with `## `. Dots in the
+          # version literal are escaped before interpolation so a
+          # version like `0.1.0` doesn't accidentally match
+          # `[0x1y0]` — semver vocab today is `[0-9A-Za-z.-]` so the
+          # practical risk is nil, but hygiene wins.
+          extract_section() {
+            local heading_pattern="$1"
+            local escaped="${heading_pattern//./\\.}"
+            awk -v pat="${escaped}" '
+              BEGIN { in_section = 0 }
+              # Section start: line matches `## [<pattern>]` exactly
+              # (optionally followed by ` - <date>` per Keep a
+              # Changelog).
+              $0 ~ "^## \\[" pat "\\]" { in_section = 1; next }
+              # Section end: next `## ` heading.
+              in_section && /^## / { exit }
+              in_section { print }
+            ' CHANGELOG.md
+          }
+
+          # Try the exact version first, then [Unreleased].
+          extract_section "${VERSION}" > "${NOTES_FILE}"
+          if [[ ! -s "${NOTES_FILE}" ]]; then
+            extract_section "Unreleased" > "${NOTES_FILE}"
+          fi
+
+          if [[ -s "${NOTES_FILE}" ]]; then
+            echo "Release notes extracted (${VERSION} or Unreleased):"
+            echo "--- BEGIN ---"
+            cat "${NOTES_FILE}"
+            echo "--- END ---"
+          else
+            echo "::warning::No matching CHANGELOG section for ${VERSION} or [Unreleased]; GoReleaser will fall back to git-log generation."
+          fi
+
+          # Export the path for the next step. Use a stable variable
+          # name (not a step output) so the GoReleaser step's `args:`
+          # template can reference it via `${{ env.RELEASE_NOTES_FILE
+          # }}`.
+          echo "RELEASE_NOTES_FILE=${NOTES_FILE}" >> "${GITHUB_ENV}"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8  # v7.2.1
         with:
@@ -124,7 +205,19 @@ jobs:
           # creates/uploads the GitHub Release. No `--snapshot` —
           # we're on a real tag push so GoReleaser uses
           # ${GITHUB_REF#refs/tags/} as the version.
-          args: release --clean
+          #
+          # `--release-notes ${RELEASE_NOTES_FILE}` overrides
+          # GoReleaser's built-in `changelog:` generation with the
+          # CHANGELOG-extracted section (see "Extract release notes"
+          # step above). When the file is empty (no matching section)
+          # GoReleaser logs a warning and uses the empty body; the
+          # warning step above surfaces this loudly in the workflow
+          # log so a maintainer can spot the missing CHANGELOG
+          # update before flipping the draft Release to public. The
+          # fallback `changelog:` block in cli/.goreleaser.yaml still
+          # serves snapshot builds (`make release-dry-run`) where no
+          # CHANGELOG section exists.
+          args: release --clean --release-notes ${{ env.RELEASE_NOTES_FILE }}
           # GoReleaser reads .goreleaser.yaml relative to its
           # working directory. The CLI lives at `cli/`, so we point
           # it there; the top-level LICENSE is copied into `cli/`
@@ -139,6 +232,13 @@ jobs:
           # runner already has the per-job `contents: write` scope
           # declared above; no PAT, no secret-file mount.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # COSIGN_YES disables cosign's interactive prompt across
+          # every signs:-block invocation. The `--yes` flag in
+          # cli/.goreleaser.yaml's signs block argv covers each
+          # invocation explicitly; this env var is belt-and-braces in
+          # case a future signs entry omits the flag. Matches the
+          # standard sigstore.dev CI guidance.
+          COSIGN_YES: "true"
 
       - name: Emit release summary
         # Surface the published artefact list in the workflow run
@@ -156,8 +256,12 @@ jobs:
             echo "### Artefacts"
             echo ""
             echo '```'
-            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS 2>/dev/null || true
+            ls -1 cli/dist/*.tar.gz cli/dist/SHA256SUMS cli/dist/*.cosign.bundle 2>/dev/null || true
             echo '```'
+            echo ""
+            echo "Each \`.tar.gz\` and the \`SHA256SUMS\` file has a matching"
+            echo "\`.cosign.bundle\` (sigstore bundle: signature + Fulcio cert +"
+            echo "Rekor proof, single JSON file)."
             echo ""
             echo "### Anonymous download"
             echo ""
@@ -174,8 +278,27 @@ jobs:
             echo "sha256sum -c SHA256SUMS"
             echo '```'
             echo ""
+            echo "### Verify signatures (cosign keyless, ADR 0006)"
+            echo ""
+            echo '```bash'
+            echo "TARBALL=meho_${TAG#v}_linux_amd64.tar.gz"
+            echo "BASE=https://github.com/evoila/meho/releases/download/${TAG}"
+            echo "curl -LO \${BASE}/\${TARBALL}"
+            echo "curl -LO \${BASE}/\${TARBALL}.cosign.bundle"
+            echo "cosign verify-blob \\\\"
+            echo "  --certificate-identity-regexp '^https://github\\.com/evoila/meho/\\.github/workflows/cli-release\\.yml@refs/tags/v.+\$' \\\\"
+            echo "  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\\\"
+            echo "  --bundle \${TARBALL}.cosign.bundle \\\\"
+            echo "  \${TARBALL}"
+            echo '```'
+            echo ""
+            echo "The same recipe works for \`SHA256SUMS.cosign.bundle\` —"
+            echo "verify the checksums file's bundle first, then run"
+            echo "\`sha256sum -c SHA256SUMS\` against the tarballs you"
+            echo "actually downloaded (two-step trust chain)."
+            echo ""
             echo "The release is created in **draft** mode — a maintainer"
             echo "must flip it to public via the GitHub Releases UI after"
-            echo "verifying the four tarballs are present and \`meho version\`"
-            echo "reports the expected tag."
+            echo "verifying the four tarballs + bundles are present and"
+            echo "\`meho version\` reports the expected tag."
           } >> "${GITHUB_STEP_SUMMARY}"

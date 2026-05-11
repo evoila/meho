@@ -12,15 +12,14 @@ the backplane to perform the three Goal #11 v0.1 operations: `login`,
 backplane (`backend/`); the two communicate exclusively over the
 backplane's HTTP/JSON API, with the OpenAPI spec at the seam.
 
-As of G2.6-T4 the v0.1 trio is wired (`version`, `login`, `status`)
+As of G2.6-T5 the v0.1 trio is wired (`version`, `login`, `status`)
 and the multi-platform release pipeline ships every `v*` tag as
-four tarballs + `SHA256SUMS` to GitHub Releases via GoReleaser.
-Server-driven subcommand discovery runs at every startup (empty
-manifest in v0.1; populated by post-Goal-2 backplanes without a
-CLI binary release). The next Task layers in:
-
-* Cosign keyless signing of release artefacts per ADR 0006
-  (G2.6-T5 / #47).
+four tarballs + `SHA256SUMS` to GitHub Releases via GoReleaser. Each
+tarball and `SHA256SUMS` ships with a matching `.cosign.bundle`
+sigstore bundle (signature + Fulcio cert + Rekor proof) under the
+ADR 0006 identity-claim format. Server-driven subcommand discovery
+runs at every startup (empty manifest in v0.1; populated by
+post-Goal-2 backplanes without a CLI binary release).
 
 ## Module layout
 
@@ -540,14 +539,18 @@ The exclude-rules block relaxes `errcheck` and `revive` on
 `_test.go` files only — test code routinely uses blank identifiers
 and dot imports in ways production code shouldn't.
 
-## Release pipeline (G2.6-T4)
+## Release pipeline
 
 Release builds are driven by [GoReleaser](https://goreleaser.com/)
 v2 configured at `cli/.goreleaser.yaml`, executed by
 `.github/workflows/cli-release.yml`. The pipeline trades the
 hand-rolled GitHub Actions matrix that `gh release create` would
 require for GoReleaser's single-config model — the same shape `gh`,
-`argocd`, and `flux` all use.
+`argocd`, and `flux` all use. Cosign keyless signing (ADR 0006)
+attaches a sigstore bundle to every release artefact in the same
+GoReleaser invocation; the `signs:` block runs after `archives:`
+and `checksum:`, so the same single workflow produces both the
+artefacts and the signatures atomically.
 
 ### Trigger surface
 
@@ -564,13 +567,12 @@ the workflows use (chart.yml, image.yml):
 
 * Workflow-default `contents: read` — just enough to checkout.
 * `release` job elevates to `contents: write` (GitHub Release
-  creation) + `id-token: write` (forward-compat for the cosign
-  keyless signing G2.6-T5 wires in).
+  creation) + `id-token: write` (cosign keyless OIDC; cosign
+  exchanges this token at Fulcio for a ~10-minute x509 cert bound
+  to the workflow identity).
 
-`id-token: write` is declared *now*, even though this Task does no
-signing, so the G2.6-T5 follow-up is a single-file delta on the
-workflow rather than a separate maintainer approval to change
-workflow permissions.
+Only the release job carries the elevated scopes — the
+workflow-default `contents: read` stays as the floor.
 
 ### Build matrix
 
@@ -587,8 +589,10 @@ multi-arch runner pool. Every target uses:
 * `mod_timestamp: {{ .CommitTimestamp }}` — pins file modification
   times inside the tarball to the commit author date, so a rebuild
   of the same tag produces a byte-identical binary. Required for
-  cosign attestation (G2.6-T5) where the signed digest must match
-  between independent builds.
+  cosign attestation where the signed digest must match between
+  independent builds; the `signs:` block (see below) hashes the
+  artefact content, so a non-reproducible build would break
+  signature verification on the second run.
 * `ldflags -X github.com/evoila/meho/cli/internal/version.{Version,Commit,Date}` —
   feeds `internal/version/version.go`. Bindings:
   - `Version → {{.Tag}}` (preserves the leading `v` per Goal #11
@@ -640,29 +644,148 @@ runtime identity benefits from human readability (`v` prefix).
 
 ### Release notes
 
-`changelog: use: git` walks the commit history between the previous
-tag and the current one to build release notes. For v0.1.0 (no
-previous tag), GoReleaser walks the full history; subsequent
-releases narrow to the inter-tag delta. The `groups` block maps
-Conventional Commits prefixes to release-note sections
-(`feat:` → Features, `fix:` → Fixes, everything else → Other) —
-matches the allowed-prefix set in `.pre-commit-config.yaml`.
-Dependabot churn (`chore(deps): Bump …`) and merge commits are
-filtered out so the operator-facing release notes stay readable.
-
 The top-level `CHANGELOG.md` (Keep a Changelog format) is the
-human-curated narrative — what shipped and why — and is the
-authoritative companion to the auto-generated GitHub Release notes.
+authoritative source of release-note text. The workflow's
+`Extract release notes from CHANGELOG.md` step pulls the section
+matching the current tag's version (`## [0.1.0]`) — with
+`## [Unreleased]` as a fallback for pre-release tags — into
+`$RUNNER_TEMP/release-notes.md`, then passes the path via
+`--release-notes` to GoReleaser. GoReleaser uses the file content
+verbatim as the GitHub Release body, overriding its built-in
+`changelog:` git-log generation.
+
+`cli/.goreleaser.yaml` keeps the `changelog: use: git` block as a
+fallback for snapshot builds (`make release-dry-run` doesn't pass
+`--release-notes`). The `groups` block there maps Conventional
+Commits prefixes to release-note sections (`feat:` → Features,
+`fix:` → Fixes, everything else → Other) — matches the allowed
+prefix set in `.pre-commit-config.yaml`. Dependabot churn
+(`chore(deps): Bump …`) and merge commits are filtered out so the
+fallback release notes stay readable too.
+
+The CHANGELOG.md discipline (one bullet per merged PR, ticket+PR
+links, Keep-a-Changelog categories — see the "How entries are
+added" section in CHANGELOG.md itself) means the release body is
+deterministic and reviewable in a PR before a tag is cut, rather
+than reconstructed at tag time from commit messages.
+
+### Cosign signing (ADR 0006)
+
+GoReleaser's `signs:` block runs after `archives:` and `checksum:`,
+so the `artifacts: all` glob covers every file destined for the
+GitHub Release — the four tarballs **and** the combined `SHA256SUMS`
+file. Per artefact, cosign produces a single `.cosign.bundle` JSON
+file containing the signature, the Fulcio-issued certificate, and
+the Rekor transparency-log inclusion proof; the bundle file is
+uploaded to the Release alongside its artefact:
+
+```yaml
+signs:
+  - id: cosign
+    artifacts: all
+    cmd: cosign
+    signature: "${artifact}.cosign.bundle"
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+    output: true
+```
+
+The `--bundle` flag writes the modern sigstore-bundle format (single
+JSON file); `cosign verify-blob --bundle <file>` is mutually exclusive
+with the legacy `--signature` + `--certificate` flag pair per the
+sigstore.dev docs. flux and recent argocd releases attach bundles by
+the same shape.
+
+> **ADR 0006 deviation — bundle vs. legacy two-file form.** ADR
+> 0006's original G2.6 Implications block prescribed the legacy
+> `--output-signature` + `--output-certificate` two-file form.
+> The CLI release pipeline adopts the modern `--bundle` form
+> instead — it's current sigstore best practice, what flux and
+> recent argocd ship, and `cosign verify-blob --bundle` is
+> mutually exclusive with the legacy flag pair so a single recipe
+> covers all operators. The same evolution happened at
+> `chart.yml` (PR #173) and `image.yml` (PR #165); a follow-up
+> ADR amendment will record this across all three pipelines.
+
+> **ADR 0006 deviation — per-workflow split vs. single release.yml.**
+> ADR 0006 originally sketched a single `release.yml` covering
+> image + chart + CLI. The implemented architecture splits these
+> into three independent workflows (`image.yml`, `chart.yml`,
+> `cli-release.yml`) because each artefact has a distinct trigger
+> surface, permission set, and runner profile — putting them
+> behind one workflow would make `permissions:` either
+> over-broad or littered with per-step elevation. The per-workflow
+> split is now the canonical pattern; the identity-claim regex
+> shape stays uniform so operators learn one verification recipe.
+
+The cosign-installer GitHub Action (`sigstore/cosign-installer@<sha>`,
+pinned in `cli-release.yml` to the same v4.1.2 SHA `chart.yml` uses)
+puts a cosign binary on PATH before the GoReleaser step. v4.x of the
+installer dropped pre-2.0 cosign support; v3.x of cosign has
+keyless-by-default semantics — no `COSIGN_EXPERIMENTAL=1` needed.
+
+#### Identity claim (locked by ADR 0006)
+
+The cert Fulcio issues binds to the workflow file path + ref of the
+run that minted the OIDC token. Operators verify against:
+
+```text
+^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$
+```
+
+The anchor on `cli-release.yml` and the `refs/tags/v` prefix rejects
+bundles produced by a fork's workflow or by a non-tag push. The same
+regex shape (only the workflow basename changes) is used at
+`chart.yml` (chart signing) and `image.yml` (image signing) per
+ADR 0006 — operators have one identity-claim format to learn, three
+artefact types to apply it to.
+
+#### Two-step trust chain
+
+`SHA256SUMS` is itself signed, which lets operators verify once and
+trust a whole release worth of tarballs without re-running cosign
+per file:
+
+1. `cosign verify-blob --bundle SHA256SUMS.cosign.bundle SHA256SUMS`
+2. `sha256sum -c SHA256SUMS` against whichever tarballs they
+   actually downloaded.
+
+The order matters — verifying the signature on `SHA256SUMS` first
+proves the checksums come from the workflow identity; verifying
+checksums after that proves the tarballs match what was signed.
+Reversing the order would let an attacker swap tarballs without
+breaking the (still-valid) signature on the original `SHA256SUMS`.
+
+The full operator-side recipe lives at
+[`cli/README.md`](../../cli/README.md#verify-signatures) and at the
+top-level [`README.md`](../../README.md#verifying-cli-release-artefacts).
+
+#### Snapshot builds skip signing
+
+`make release-dry-run` shells `goreleaser release --snapshot --clean
+--skip=publish,sign`. Per `goreleaser release --help`, `--snapshot`
+alone implies only `--skip=announce,publish,validate` — it does NOT
+skip the `signs:` block. We pass `--skip=sign` explicitly so the
+dry-run completes on a dev machine without cosign on PATH (and
+without the `id-token: write` permission that's only available in a
+real CI run). Snapshot builds therefore produce only tarballs +
+`SHA256SUMS` under `cli/dist/`; the `.cosign.bundle` files are a
+tag-push-only artefact, produced by the CI workflow which omits
+`--skip=sign`.
 
 ### Draft mode
 
 `release: draft: true` creates the GitHub Release as a draft. A
 maintainer flips it to public via the GitHub UI after verifying
-the four tarballs are present and `meho version` reports the
-expected tag. The conservative posture is intentional for a first
-public release — once cosign signing (G2.6-T5) is wired and the
-full pipeline is proven end to end, the draft flag becomes a
-one-line edit.
+the four tarballs + matching `.cosign.bundle` files are present
+and `meho version` reports the expected tag. The conservative
+posture stays for the first few public releases — once the full
+pipeline (signing + verification + anonymous-pull) is proven end
+to end and dogfooding catches any regressions, the draft flag
+becomes a one-line edit.
 
 `release: prerelease: auto` flips the GitHub "pre-release" flag
 based on whether the tag contains a semver pre-release identifier
@@ -672,12 +795,14 @@ based on whether the tag contains a semver pre-release identifier
 ### Local dry-run
 
 `make release-dry-run` runs `goreleaser release --snapshot --clean
---skip=publish` against the local checkout. Snapshot mode
+--skip=publish,sign` against the local checkout. Snapshot mode
 synthesises a `0.0.1-snapshot` version so the run works on any
-branch without needing a real `v*` tag in git, and `--skip=publish`
+branch without needing a real `v*` tag in git; `--skip=publish`
 keeps the GitHub Release / Homebrew tap publishers off so an
-operator can't accidentally push to upstream from their laptop.
-The output lands at `cli/dist/`, gitignored.
+operator can't accidentally push to upstream from their laptop; and
+`--skip=sign` keeps the cosign `signs:` block from firing locally
+(it requires cosign on PATH and `id-token: write` — neither
+available outside CI). The output lands at `cli/dist/`, gitignored.
 
 `make release-check` runs `goreleaser check` for config-only
 validation — useful as a fast feedback loop when editing
@@ -695,10 +820,19 @@ Within-tarball reproducibility is exact: the same tag produces
 byte-identical binaries across rebuilds (`mod_timestamp` +
 `CommitDate` ldflag + `-trimpath`). The gzip wrapper around each
 tarball has its own embedded mtime that varies between runs — the
-binary's content is identical, the gzip stream is not. This is the
-level of reproducibility cosign attestation flows (G2.6-T5)
-require: signing happens on the artefact digest after upload, and
-the artefact digest IS the binary digest, not the gzip stream.
+binary's content is identical, the gzip stream is not.
+
+Cosign signs the gzip stream the workflow actually uploads (the
+`signs:` block runs against the file on disk under `cli/dist/`),
+not the inner binary. A second tag-push of the exact same tag
+would therefore produce a different `.tar.gz` digest and a
+non-matching signature — but signatures aren't compared between
+runs; each is verified independently against the cert's Fulcio
+identity claim and the Rekor inclusion proof. The reproducibility
+that matters for the trust chain is the **binary**'s content (so
+operators can re-build from source and verify nothing was tampered
+with via `make build`); GoReleaser's gzip-stream non-determinism
+doesn't undermine that.
 
 ## Dependencies
 
@@ -771,11 +905,17 @@ have to trust to run `meho login` against their secrets.
 * Parent Goal: [#11](https://github.com/evoila-bosnia/meho-internal/issues/11)
 * Parent Initiative: [G2.6 #42](https://github.com/evoila-bosnia/meho-internal/issues/42)
 * Stack ADR (locked): [#13](https://github.com/evoila-bosnia/meho-internal/issues/13)
+* Cosign keyless ADR (locked): [#15](https://github.com/evoila-bosnia/meho-internal/issues/15) — same identity-claim format used by image (`image.yml`) and chart (`chart.yml`) signing.
 * cobra docs: https://github.com/spf13/cobra
 * zalando/go-keyring: https://github.com/zalando/go-keyring
 * golang.org/x/oauth2 device flow: https://pkg.go.dev/golang.org/x/oauth2#Config.DeviceAuth
 * RFC 8628 — Device Authorization Grant: https://datatracker.ietf.org/doc/html/rfc8628
 * golangci-lint config reference: https://golangci-lint.run/
-* Empirical comparables for the scaffold pattern: `gh` (GitHub CLI),
-  `argocd`, `flux`. All use cobra + ldflags-injected version, all
-  ship single static binaries.
+* GoReleaser `signs:` block: https://goreleaser.com/customization/sign/
+* cosign sign-blob: https://docs.sigstore.dev/cosign/signing/signing_with_blobs/
+* cosign verify (incl. verify-blob): https://docs.sigstore.dev/cosign/verifying/verify/
+* Empirical comparables for the scaffold + signed-release pattern:
+  `gh` (GitHub CLI), `argocd`, `flux`. All use cobra +
+  ldflags-injected version, all ship single static binaries, and
+  flux + recent argocd releases attach sigstore bundles by the same
+  shape this Task wires.

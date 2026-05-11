@@ -13,8 +13,10 @@ This directory holds the Go module; the Python backplane lives at
 
 ## Status
 
-**G2.6-T4 — multi-platform release pipeline via GoReleaser.**
-Cosign signing of release artefacts (G2.6-T5) lands in the next Task.
+**G2.6-T5 — multi-platform, cosign-signed release pipeline via GoReleaser.**
+Every release artefact (four tarballs + `SHA256SUMS`) ships with a
+matching `.cosign.bundle` sigstore bundle on the GitHub Release. The
+verification recipe lives in the [Release](#release) section below.
 
 ## Layout
 
@@ -224,9 +226,9 @@ GitHub Release at
 
 The release is created in **draft** mode — a maintainer flips it
 to public via the GitHub Releases UI after verifying the four
-tarballs are present and `meho version` reports the expected tag.
-Cosign signing of release artefacts (Issue #47) lands in the next
-Task.
+tarballs + matching `.cosign.bundle` files are present and
+`meho version` reports the expected tag. See the [Verify signatures](#verify-signatures)
+section below for the operator-side check.
 
 ### Local dry-run
 
@@ -268,10 +270,60 @@ sha256sum -c SHA256SUMS                   # verify integrity
 tar xzf ${TARBALL} && ./meho version       # meho v0.1.0 (commit ..., built ...)
 ```
 
+### Verify signatures
+
+Every release artefact is signed via cosign keyless (ADR 0006) — the
+GitHub Actions OIDC token is exchanged at Fulcio for a short-lived
+x509 cert bound to the workflow identity, cosign signs the artefact
+digest, and the {signature, certificate, Rekor proof} triple is
+attached to the GitHub Release as a single `.cosign.bundle` JSON
+file. No public key to distribute, no key custody to rotate.
+
+```bash
+TAG=v0.1.0
+TARBALL=meho_${TAG#v}_linux_amd64.tar.gz
+BASE=https://github.com/evoila/meho/releases/download/${TAG}
+
+curl -LO ${BASE}/${TARBALL}
+curl -LO ${BASE}/${TARBALL}.cosign.bundle
+
+cosign verify-blob \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --bundle ${TARBALL}.cosign.bundle \
+  ${TARBALL}
+# Verified OK
+```
+
+The identity-claim regex is anchored on `cli-release.yml` and the
+`refs/tags/v` prefix so a malicious workflow on a fork (or a non-tag
+push on this repo) cannot produce a bundle that satisfies it. Same
+regex format as image (`image.yml`) and chart (`chart.yml`) signing
+per ADR 0006.
+
+The `SHA256SUMS` file is signed the same way:
+
+```bash
+curl -LO ${BASE}/SHA256SUMS
+curl -LO ${BASE}/SHA256SUMS.cosign.bundle
+
+cosign verify-blob \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --bundle SHA256SUMS.cosign.bundle \
+  SHA256SUMS
+sha256sum -c SHA256SUMS                   # then verify the tarballs
+```
+
+The two-step chain — verify the checksums file's signature first,
+then `sha256sum -c` against the tarballs — lets operators verify
+once and trust a whole release worth of tarballs without re-running
+cosign for each one.
+
 For the durable map of the release flow — what GoReleaser does, why
 each archive includes LICENSE + README, how identity is injected,
-how reproducible builds work — see
-[`../docs/codebase/cli.md`](../docs/codebase/cli.md).
+how reproducible builds work, how the cosign signing block plugs in
+— see [`../docs/codebase/cli.md`](../docs/codebase/cli.md).
 
 ## Design notes
 

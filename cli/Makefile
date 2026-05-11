@@ -100,10 +100,16 @@ $(GORELEASER):
 release-check: goreleaser ## Validate .goreleaser.yaml (config-only, no build).
 	$(GORELEASER) check
 
-release-dry-run: goreleaser ## Local snapshot release (produces dist/ tarballs + SHA256SUMS; no push).
+release-dry-run: goreleaser ## Local snapshot release (produces dist/ tarballs + SHA256SUMS; no push, no signing).
 	# `--snapshot` synthesises a fake tag so the run works on any
-	# branch without needing a real `v*` tag in git history.
-	# `--clean` wipes dist/ before building. `--skip=publish` keeps
-	# the GitHub Release / Homebrew tap publishers off — operators
-	# should never accidentally push to upstream from their laptop.
-	$(GORELEASER) release --snapshot --clean --skip=publish
+	# branch without needing a real `v*` tag in git history. Per
+	# `goreleaser release --help`, `--snapshot` implies
+	# `--skip=announce,publish,validate` — it does NOT skip signing,
+	# so we pass `--skip=sign` explicitly. Without it the `signs:`
+	# block fires and fails with `cosign: executable file not found`
+	# on any dev machine that doesn't have cosign installed (and
+	# would in any case require `id-token: write`, only available in
+	# CI). `--clean` wipes dist/ before building. `--skip=publish`
+	# keeps the GitHub Release / Homebrew tap publishers off so
+	# operators don't accidentally push from their laptop.
+	$(GORELEASER) release --snapshot --clean --skip=publish,sign

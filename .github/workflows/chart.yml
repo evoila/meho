@@ -65,8 +65,11 @@ on:
 
 permissions:
   contents: read
-  packages: write       # push to ghcr.io/evoila/meho-chart
-  id-token: write       # cosign keyless OIDC (ADR 0006)
+  # `packages: write` (GHCR push) and `id-token: write` (cosign OIDC) are
+  # granted per-job on `publish` only. validate and verify-anonymous-pull
+  # inherit the workflow-default `contents: read` with no elevation, which
+  # satisfies SonarCloud githubactions:S8233/S8264 (least-privilege per job)
+  # and CodeRabbit's same finding. See the `publish` job below.
 
 concurrency:
   # On main/tag pushes: keep one in-flight publish per ref so a fast follow-up
@@ -201,6 +204,13 @@ jobs:
     needs: validate
     runs-on: meho-runners
     timeout-minutes: 15
+    permissions:
+      # Per-job scope: only `publish` needs to push to GHCR and mint an OIDC
+      # token for cosign keyless signing. validate (lint+kubeconform) and
+      # verify-anonymous-pull (anonymous helm pull) get neither.
+      contents: read
+      packages: write       # push to ghcr.io/evoila/meho-chart
+      id-token: write       # cosign keyless OIDC (ADR 0006)
     outputs:
       chart_version: ${{ steps.ver.outputs.version }}
     steps:

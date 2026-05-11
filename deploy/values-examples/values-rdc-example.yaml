@@ -15,6 +15,15 @@
 # See `deploy/values-examples/README.md` for the substitution recipe
 # and the External Secrets Operator (ESO) sync patterns the chart
 # expects the consumer to provision before install.
+#
+# Top-level fields not shown in this example (e.g. `broadcast`,
+# `migrationJob`, `securityContext`, `affinity`, `tolerations`) are
+# satisfied by chart defaults in `deploy/charts/meho/values.yaml` —
+# override here only when the site requires non-default sizing,
+# retention, Redis/Valkey config, scheduling, or pod-security
+# context. The schema marks `broadcast` and `migrationJob` as
+# required at the top level; Helm's values-merge supplies the chart
+# defaults so the example doesn't need to redeclare them.
 
 replicaCount: 1
 

@@ -1,0 +1,47 @@
+# Declarative source of truth for `evoila/meho` GitHub repo metadata.
+#
+# The actual repo description and topics live in the GitHub UI / API.
+# This file documents the desired state so drift is detectable and the
+# settings can be re-applied idempotently via:
+#
+#   scripts/setup/repo-metadata.sh
+#
+# Schema is loosely modelled on the Probot Settings App
+# (https://github.com/repository-settings/app) so it can be promoted to
+# an enforced sync if/when that app (or an equivalent action) is
+# installed on the org. Today it is documentation only.
+#
+# Owner: maintainers. Bump alongside any positioning change so README,
+# repo description, and topics stay in lockstep.
+repository:
+  # Match the README tagline (line 3-4) verbatim.
+  description: >-
+    Governance backplane for AI agents acting on infrastructure —
+    policy-gated, audit-grade, MCP-native. Apache 2.0.
+
+  # GitHub topic rules: lowercase, alphanumeric + hyphens, ≤ 50 chars,
+  # max 20 per repo. Order is not semantic but kept alphabetical for
+  # diff stability.
+  topics:
+    - ai-agents
+    - apache-2-0
+    - audit
+    - devops
+    - governance
+    - helm-chart
+    - infrastructure
+    - kubernetes
+    - mcp
+    - multi-tenant
+    - oidc
+    - oss
+    - policy
+    - sigstore
+
+  # Topics intentionally NOT set:
+  #
+  # - `vmware`  — v0.1 has no VMware connector; this was a leftover from
+  #               the MEHO.X "multi-vendor IaC" framing. Re-add when a
+  #               real vCenter / VCF connector lands (v0.2+).
+  # - `cncf`    — aspirational only; do not claim until the project is
+  #               actually filed with the CNCF Sandbox process.

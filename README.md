@@ -1,7 +1,7 @@
 # MEHO
 
-> An MCP-native governance layer that lets any AI agent operate safely
-> against shared infrastructure. Policy-gated. Audit-grade. Multi-tenant.
+> Governance backplane for AI agents acting on infrastructure —
+> policy-gated, audit-grade, MCP-native. Apache 2.0.
 
 **Status:** v0.1 in development. No released artifact yet.
 

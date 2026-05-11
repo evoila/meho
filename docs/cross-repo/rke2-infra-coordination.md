@@ -70,7 +70,7 @@ on `evoila/meho`.
 
 Sub-claim shape (the Kubernetes user identity rke2-infra will see):
 
-```
+```text
 repo:evoila/meho:ref:refs/heads/main
 repo:evoila/meho:pull_request
 repo:evoila/meho:environment:rke2-ci
@@ -78,9 +78,60 @@ repo:evoila/meho:environment:rke2-ci
 
 The exact shape depends on the workflow's `permissions:` block and
 which trigger fired. The `evoila/meho` CI workflows that will use this
-trust path set `permissions: id-token: write` and consume the token
-via `actions/create-github-app-token` or by calling the OIDC token
-endpoint directly. For Kubernetes-side mapping, the recommended sub
+trust path set `permissions: id-token: write` at the workflow (or job)
+level and request the OIDC ID token from GitHub Actions' own OIDC
+provider — **not** from `actions/create-github-app-token`, which mints
+GitHub App installation tokens via private-key auth and is unrelated
+to the K8s OIDC trust path. Two equivalent retrieval mechanisms:
+
+1. The Actions toolkit method `core.getIDToken(audience)` invoked from
+   `actions/github-script` (or any custom JavaScript action).
+2. A direct `curl` against the runner-local OIDC endpoint, using the
+   two environment variables the runner injects when
+   `id-token: write` is granted:
+   `$ACTIONS_ID_TOKEN_REQUEST_URL` (the endpoint) and
+   `$ACTIONS_ID_TOKEN_REQUEST_TOKEN` (the bearer token authorising
+   the request).
+
+Minimal worked example (the smoke workflow's authentication step):
+
+```yaml
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: rke2-ci
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Mint GitHub Actions OIDC ID token
+        id: oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('rke2-infra.evba.lab');
+            core.setSecret(token);
+            core.setOutput('token', token);
+      # Equivalent curl form when not using actions/github-script:
+      #   TOKEN=$(curl -sSf \
+      #     -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+      #     "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rke2-infra.evba.lab" \
+      #     | jq -r .value)
+      - name: Configure kubectl to use the OIDC ID token
+        run: |
+          kubectl config set-credentials gha \
+            --token="${{ steps.oidc.outputs.token }}"
+          kubectl config set-cluster rke2-infra \
+            --server=https://rke2-infra.evba.lab:6443 \
+            --certificate-authority=/etc/ca/rke2-infra.crt
+          kubectl config set-context gha \
+            --cluster=rke2-infra --user=gha --namespace=meho-ci-${{ github.event.pull_request.number }}
+          kubectl config use-context gha
+```
+
+The audience string (`rke2-infra.evba.lab` above) must match the
+`audiences` entry in the kube-apiserver's OIDC configuration (see the
+next subsection). For Kubernetes-side mapping, the recommended sub
 template is `repo:evoila/meho:environment:rke2-ci` — gating workflow
 access through a GitHub Environment named `rke2-ci` lets the consumer
 side require manual approval, environment-scoped secrets, and the
@@ -88,7 +139,7 @@ audit trail the bare `pull_request` claim doesn't give.
 
 **kube-apiserver configuration (pre-Kubernetes 1.29):**
 
-```
+```text
 --oidc-issuer-url=https://token.actions.githubusercontent.com
 --oidc-client-id=rke2-infra.evba.lab
 --oidc-username-claim=sub

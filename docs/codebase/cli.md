@@ -744,12 +744,15 @@ top-level [`README.md`](../../README.md#verifying-cli-release-artefacts).
 #### Snapshot builds skip signing
 
 `make release-dry-run` shells `goreleaser release --snapshot --clean
---skip=publish` — the `--skip=publish` short-circuits before the
-`signs:` block would run because GoReleaser orders signing after
-upload by design (you can't sign an artefact-by-OIDC-identity unless
-you're in CI with `id-token: write`). Snapshot builds therefore
-produce only tarballs + `SHA256SUMS` under `cli/dist/`; the bundles
-are a tag-push-only artefact.
+--skip=publish,sign`. Per `goreleaser release --help`, `--snapshot`
+alone implies only `--skip=announce,publish,validate` — it does NOT
+skip the `signs:` block. We pass `--skip=sign` explicitly so the
+dry-run completes on a dev machine without cosign on PATH (and
+without the `id-token: write` permission that's only available in a
+real CI run). Snapshot builds therefore produce only tarballs +
+`SHA256SUMS` under `cli/dist/`; the `.cosign.bundle` files are a
+tag-push-only artefact, produced by the CI workflow which omits
+`--skip=sign`.
 
 ### Draft mode
 
@@ -770,12 +773,14 @@ based on whether the tag contains a semver pre-release identifier
 ### Local dry-run
 
 `make release-dry-run` runs `goreleaser release --snapshot --clean
---skip=publish` against the local checkout. Snapshot mode
+--skip=publish,sign` against the local checkout. Snapshot mode
 synthesises a `0.0.1-snapshot` version so the run works on any
-branch without needing a real `v*` tag in git, and `--skip=publish`
+branch without needing a real `v*` tag in git; `--skip=publish`
 keeps the GitHub Release / Homebrew tap publishers off so an
-operator can't accidentally push to upstream from their laptop.
-The output lands at `cli/dist/`, gitignored.
+operator can't accidentally push to upstream from their laptop; and
+`--skip=sign` keeps the cosign `signs:` block from firing locally
+(it requires cosign on PATH and `id-token: write` — neither
+available outside CI). The output lands at `cli/dist/`, gitignored.
 
 `make release-check` runs `goreleaser check` for config-only
 validation — useful as a fast feedback loop when editing

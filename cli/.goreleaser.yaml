@@ -161,12 +161,16 @@ checksum:
 # `https://token.actions.githubusercontent.com`; see cli/README.md and
 # the top-level README.md for the full verification recipe.
 #
-# Snapshot builds (`make release-dry-run`) skip signing — the
-# goreleaser-action invocation passes `--skip=sign` only on `release
-# --snapshot`, and on a real tag push (where OIDC and Fulcio are
-# reachable) signing is unconditional. We do NOT add `skip:` flags to
-# this block; the `--skip=sign` CLI flag is the documented mechanism
-# for snapshot-only suppression so the config stays declarative.
+# Snapshot builds (`make release-dry-run`) must pass `--skip=sign`
+# explicitly — `--snapshot` alone implies only `--skip=announce,
+# publish,validate` per `goreleaser release --help`, NOT `sign`. The
+# Makefile's release-dry-run target therefore uses
+# `--skip=publish,sign` so devs without cosign on PATH can still
+# produce snapshot tarballs locally. On a real tag push (where OIDC
+# and Fulcio are reachable) the CI workflow omits `--skip=sign` and
+# signing is unconditional. We do NOT add `skip:` flags to this
+# block; the `--skip=sign` CLI flag is the documented mechanism for
+# snapshot-only suppression so the config stays declarative.
 signs:
   - id: cosign
     # `artifacts: all` is the broadest setting (vs. `archive` or

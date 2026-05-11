@@ -1006,14 +1006,25 @@ companion verifier shell under
 | DoD bullet | Contract | Verifier |
 | --- | --- | --- |
 | 1 — `install.sh` cold-deploy → working MEHO in <5 min | [`docs/acceptance/install.md`](../acceptance/install.md) | [`scripts/acceptance/install-verify.sh`](../../scripts/acceptance/install-verify.sh) |
+| 3 — `helm rollback meho` end-to-end with a non-trivial schema diff (cluster-level forward-compat proof) | [`docs/acceptance/rollback.md`](../acceptance/rollback.md) | [`scripts/acceptance/rollback-verify.sh`](../../scripts/acceptance/rollback-verify.sh) (sample N+1 migration at [`scripts/acceptance/synthetic-n-plus-1.sql`](../../scripts/acceptance/synthetic-n-plus-1.sql)) |
 
 The split between producer-owned contracts + verifiers and
-consumer-owned wrappers (`install.sh`, `smoke.sh`, …) is the same
-shape as the cross-repo handshake above: the chart producer owns
-"what passing means"; the consumer owns "how to drive the install
-on this environment". The verifier is invoked as the last step of
-the consumer's wrapper, and the verifier's exit code becomes the
-wrapper's exit code.
+consumer-owned wrappers (`install.sh`, `smoke.sh`,
+`rollback-drill.sh`, …) is the same shape as the cross-repo
+handshake above: the chart producer owns "what passing means"; the
+consumer owns "how to drive the install on this environment". The
+verifier is invoked as the last step of the consumer's wrapper, and
+the verifier's exit code becomes the wrapper's exit code.
+
+The rollback contract is the **cluster-level** half of the
+forward-compat assurance Goal #11 DoD bullet 3 promises; the
+**unit-level** half lives at
+[`backend/tests/test_migration_rollback.py`](../../backend/tests/test_migration_rollback.py)
+(Task #30, Initiative #26) and runs on every PR via
+[`.github/workflows/migration-compat.yml`](../../.github/workflows/migration-compat.yml).
+Together they assert "the N image runs cleanly against the N+1
+schema" at two layers: testcontainers in CI (fast, every PR) and
+real `helm rollback` against the lab (slow, Goal-closing milestone).
 
 ## References
 
@@ -1023,6 +1034,10 @@ wrapper's exit code.
 - Task #50 (G2.7-T2) — Per-PR ephemeral cluster deploy + smoke + teardown
 - Task #53 (G2.7-T5) — Cross-repo coordination tracker (consumer-side kubeconfig + RBAC)
 - Task #55 (G2.8-T1) — `install.sh` cold-deploy acceptance contract + verifier (`docs/acceptance/install.md`, `scripts/acceptance/install-verify.sh`)
+- Task #57 (G2.8-T3) — `helm rollback` end-to-end acceptance contract + verifier (`docs/acceptance/rollback.md`, `scripts/acceptance/rollback-verify.sh`, `scripts/acceptance/synthetic-n-plus-1.sql`)
+- Task #30 (G2.3-T4) — unit-level forward-compat regression test (`backend/tests/test_migration_rollback.py`)
+- Helm `helm rollback` reference: https://helm.sh/docs/helm/helm_rollback/
+- Helm chart hooks reference: https://helm.sh/docs/topics/charts_hooks/
 - GitHub Actions OIDC: https://docs.github.com/en/actions/concepts/security/openid-connect
 - `pull_request_target` hardening guide: https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
 - Helm chart structure: https://helm.sh/docs/topics/charts/

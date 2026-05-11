@@ -20,13 +20,12 @@ Copyright (c) 2026 evoila Group
 | File | Goal #11 DoD bullet | Initiative G2.8 task |
 | --- | --- | --- |
 | [`install.md`](./install.md) | bullet 1 — `install.sh` cold-deploy → working MEHO at meho.evba.lab in <5 min | [#55](https://github.com/evoila-bosnia/meho-internal/issues/55) |
+| [`rollback.md`](./rollback.md) | bullet 3 — `helm rollback meho` verified end-to-end with a non-trivial schema diff | [#57](https://github.com/evoila-bosnia/meho-internal/issues/57) |
 
 Siblings to be added by their respective G2.8 tasks as they land:
 
 - [Task #56](https://github.com/evoila-bosnia/meho-internal/issues/56) —
   `smoke.sh` federation-chain proof (DoD bullet 2)
-- [Task #57](https://github.com/evoila-bosnia/meho-internal/issues/57) —
-  `helm rollback` end-to-end (DoD bullet 3)
 - [Task #58](https://github.com/evoila-bosnia/meho-internal/issues/58) —
   5-consecutive-merged-PR green-smoke counter + `targets.yaml` entry
   (DoD bullets 4 + 5)

@@ -58,6 +58,19 @@
 #     findings. SARIF results land both on the GitHub Security tab (Code
 #     scanning alerts) and as a 30-day workflow artefact. v0.2 will flip on a
 #     severity-based gate once the baseline noise level is known.
+#
+# Cross-repo deploy trigger (Task #51):
+#   - After image push on main, the workflow POSTs a `repository_dispatch`
+#     event of type `meho-image-pushed` to evoila-bosnia/claude-rdc-hetzner-dc
+#     so the dogfooding consumer can roll forward its deploy without polling.
+#     The event shape (image, digest, tag, commit, ref) is the canonical
+#     handshake documented at `docs/cross-repo/rke2-infra-coordination.md`.
+#   - Cross-repo dispatch requires a PAT — the default GITHUB_TOKEN is scoped
+#     to this repo only. The PAT is stored as the `RDC_DISPATCH_TOKEN` secret
+#     (fine-grained, single-repo, `metadata: read` + `actions: write` on
+#     claude-rdc-hetzner-dc). The dispatch step is skipped (not failed) when
+#     the secret is missing, so a rotated/revoked PAT degrades gracefully —
+#     the image is still built, pushed, signed, and attested.
 
 name: image
 
@@ -103,6 +116,13 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners
     timeout-minutes: 45  # arm64 emulation under QEMU is 3-5x slower than native
+    env:
+      # Surfaced at the job level so the `Notify claude-rdc-hetzner-dc` step
+      # below can skip when the secret is unset. Secrets can't be referenced
+      # in `if:` directly (GitHub Actions docs, "Using secrets") — the
+      # documented pattern is to expose them via env and test `env.X != ''`.
+      # Missing/rotated PAT degrades to skip-not-fail (Task #51 AC #5).
+      RDC_DISPATCH_TOKEN: ${{ secrets.RDC_DISPATCH_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -312,3 +332,59 @@ jobs:
           path: trivy-results.sarif
           retention-days: 30
           if-no-files-found: error
+
+      - name: Notify claude-rdc-hetzner-dc (repository_dispatch)
+        # Cross-repo deploy trigger (Task #51). On every main-push that lands
+        # a new image, send a `meho-image-pushed` repository_dispatch event
+        # to the dogfooding consumer carrying the immutable digest. The
+        # consumer's `.github/workflows/meho-deploy.yml` (consumer-owned)
+        # listens for the event and rolls the rke2-infra lab forward.
+        #
+        # Gate (three conjuncts):
+        #   1. github.event_name == 'push'  — never PRs (no token, no need).
+        #   2. github.ref == 'refs/heads/main' — main only. Tag pushes
+        #      (v* releases) are out of scope for v0.1: the dogfooding
+        #      consumer tracks main, not tagged releases. The cross-repo
+        #      handshake at docs/cross-repo/rke2-infra-coordination.md
+        #      locks `client_payload.ref` to refs/heads/main.
+        #   3. env.RDC_DISPATCH_TOKEN != ''  — skip when the PAT is missing.
+        #      AC #5 requires graceful degradation: a rotated or revoked
+        #      token must not fail the workflow; downstream operators
+        #      monitor the consumer-side deploy independently. Secrets
+        #      cannot be referenced in `if:` directly, hence the
+        #      job-level env block above.
+        #
+        # Auth: cross-repo dispatches need a PAT (fine-grained, single-repo
+        # on claude-rdc-hetzner-dc, scoped to `metadata: read` +
+        # `actions: write`). The default GITHUB_TOKEN is scoped to this
+        # repo only and the API returns 404 if used cross-repo.
+        #
+        # Failure mode: fail-loud on PAT-present but dispatch fails. A 401
+        # (revoked/wrong token) or 422 (bad payload shape) means the
+        # consumer never learns about the new image; silent swallow would
+        # leave the lab on a stale revision indefinitely. No
+        # `continue-on-error`.
+        #
+        # Payload shape is the canonical handshake from
+        # docs/cross-repo/rke2-infra-coordination.md (Section 3, "Event
+        # contract"). Top-level key cardinality (5) sits well under the
+        # GitHub API ceiling (10 keys, 64KB total). All values are strings;
+        # `-f` (raw-field) keeps gh from re-typing integers as JSON
+        # numbers — image digests, tags, and refs are all opaque strings.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.RDC_DISPATCH_TOKEN != ''
+        env:
+          # gh CLI reads GH_TOKEN for auth; the job-level RDC_DISPATCH_TOKEN
+          # is the PAT minted on claude-rdc-hetzner-dc.
+          GH_TOKEN: ${{ env.RDC_DISPATCH_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          gh api repos/evoila-bosnia/claude-rdc-hetzner-dc/dispatches \
+            --method POST \
+            --silent \
+            -f event_type=meho-image-pushed \
+            -f client_payload[image]=ghcr.io/evoila/meho \
+            -f client_payload[digest]="${DIGEST}" \
+            -f client_payload[tag]="${TAGS}" \
+            -f client_payload[commit]="${GITHUB_SHA}" \
+            -f client_payload[ref]="${GITHUB_REF}"

@@ -204,6 +204,86 @@ The downstream `install.sh` from
 can run this exact command to confirm the SBOM is intact and the bill of
 materials matches the image being pulled.
 
+## Verifying chart signatures
+
+The Helm chart at [`deploy/charts/meho/`](../deploy/charts/meho/) is published
+as a public OCI artefact at `oci://ghcr.io/evoila/meho-chart` and signed with
+the same cosign keyless OIDC flow as the image, from
+`.github/workflows/chart.yml`. The chart's GHCR package is intentionally a
+separate package from the image package (`ghcr.io/evoila/meho`) so visibility,
+retention, and signing identities can be managed independently.
+
+Like the image signature, the chart signature is bound to the OCI manifest
+digest, so the same signature verifies every tag alias of that digest.
+
+Verify a calver release (main push):
+
+```bash
+cosign verify ghcr.io/evoila/meho-chart:0.1.20260510-abc1234 \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/chart\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  | jq .
+```
+
+Verify a `v*` release tag:
+
+```bash
+cosign verify ghcr.io/evoila/meho-chart:0.1.0 \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/chart\.yml@refs/tags/v.*$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  | jq .
+```
+
+Accept any ref (calver or tag) by widening the identity regex:
+
+```bash
+cosign verify ghcr.io/evoila/meho-chart:<version> \
+  --certificate-identity-regexp '^https://github\.com/evoila/meho/\.github/workflows/chart\.yml@.*$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  | jq .
+```
+
+A successful verification prints a JSON array of signature payload objects;
+exit status is `0`. Verification failure (wrong identity, unsigned chart,
+tampered registry) exits non-zero with a structured error.
+
+## Pulling the chart anonymously
+
+The chart's GHCR package is **public** — no GitHub login is required to
+pull it. The CI pipeline asserts this on every main / `v*` tag push by
+running a dedicated `verify-anonymous-pull` job in a clean environment
+that never calls `helm registry login` (Goal #11 DoD).
+
+```bash
+docker logout ghcr.io 2>/dev/null
+helm registry logout ghcr.io 2>/dev/null
+helm pull oci://ghcr.io/evoila/meho-chart --version <version>
+ls meho-chart-*.tgz
+```
+
+This works from any network with outbound internet — no GitHub login
+required. If the pull fails with `unauthorized` and you have not logged
+in to GHCR, the chart package is private and a maintainer needs to flip
+visibility to public (one-time, per package — same pattern as the image
+package on its first push):
+
+```bash
+gh api --method PATCH /orgs/evoila/packages/container/meho-chart \
+  -f visibility=public
+```
+
+After the chart is pulled, inspect it with `helm show chart`:
+
+```bash
+helm show chart oci://ghcr.io/evoila/meho-chart --version <version>
+```
+
+The published chart's `name` field is `meho-chart` (the OCI artefact
+basename) while `app.kubernetes.io/name` labels on rendered resources
+remain `meho` — the chart's `values.yaml` defaults `nameOverride: meho`
+to preserve the label invariant. Operators selecting against the rendered
+resources continue to use `app.kubernetes.io/name=meho`.
+
 ## Vulnerability scan
 
 Every pushed image is scanned by [trivy](https://github.com/aquasecurity/trivy)

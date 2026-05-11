@@ -65,9 +65,10 @@ Mirrors the discipline ``0001_create_audit_log.py`` established:
 * Indexes — both new indexes use b-tree explicitly on PG via
   ``postgresql_using="btree"``; on SQLite the kwarg is a no-op
   (SQLite only has b-tree indexes). The unique constraint on
-  ``slug`` is declared inline on the column (rather than as a
-  separate ``UniqueConstraint``) so it survives both dialects
-  cleanly.
+  ``slug`` is enforced exclusively by the named
+  ``tenant_slug_idx`` (declared ``unique=True``); the column
+  itself omits ``unique=True`` to avoid PG also auto-creating a
+  second, redundantly-named unique index for the same column.
 
 Reversibility contract
 ----------------------
@@ -115,7 +116,14 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("gen_random_uuid()") if is_postgres else None,
         ),
-        sa.Column("slug", sa.Text(), nullable=False, unique=True),
+        # ``slug`` uniqueness is enforced by the named ``tenant_slug_idx``
+        # below (declared ``unique=True``). We deliberately do **not** set
+        # ``unique=True`` on the column itself — PostgreSQL would otherwise
+        # auto-generate a *second* unique b-tree index alongside our named
+        # one, doubling per-write index maintenance for zero benefit. One
+        # named unique b-tree is enough; ``Index(..., unique=True)`` on the
+        # model side keeps autogenerate diffs clean.
+        sa.Column("slug", sa.Text(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column(
             "created_at",
@@ -124,18 +132,23 @@ def upgrade() -> None:
             server_default=sa.text("now()") if is_postgres else None,
         ),
     )
-    # Explicit b-tree index on ``slug``. The ``unique=True`` on the
-    # column already creates an implicit unique index on PG, but its
-    # name is auto-generated (``ix_tenant_slug`` or similar depending
-    # on dialect) and therefore brittle across upgrades. Declaring a
-    # named index here gives us a stable identifier that operators and
-    # later migrations can reference. The index spec mirrors the
-    # ``Index("tenant_slug_idx", "slug", postgresql_using="btree")``
-    # declared on the SQLAlchemy model so autogenerate stays a no-op.
+    # Named **unique** b-tree index on ``slug`` — single source of
+    # uniqueness enforcement for this column. We intentionally do not
+    # set ``unique=True`` on the ``slug`` column above: PG would
+    # auto-generate an additional unique index there with an
+    # opaque dialect-specific name, leaving us with two structurally
+    # identical indexes maintained on every insert/update of
+    # ``tenant``. The named ``tenant_slug_idx`` here is the stable
+    # identifier later migrations and operators reference; the
+    # ``unique=True`` kwarg makes it the constraint enforcer too. The
+    # index spec mirrors ``Index("tenant_slug_idx", "slug",
+    # unique=True, postgresql_using="btree")`` declared on the
+    # SQLAlchemy model so autogenerate stays a no-op.
     op.create_index(
         "tenant_slug_idx",
         "tenant",
         ["slug"],
+        unique=True,
         postgresql_using="btree",
     )
 

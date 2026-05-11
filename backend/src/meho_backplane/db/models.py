@@ -25,10 +25,12 @@ Schema decisions for :class:`Tenant`:
   out-of-band inserts.
 * ``slug`` — Text NOT NULL UNIQUE. The operator-facing identifier
   (``rdc-internal``, ``customer-a``); used in URLs, log lines,
-  audit displays. The unique constraint is enforced both at the
-  column level (so SQLAlchemy generates the right DDL) and via
-  the explicitly-named ``tenant_slug_idx`` b-tree index (stable
-  identifier for later migrations to reference).
+  audit displays. Uniqueness is enforced **exclusively** by the
+  named ``tenant_slug_idx`` b-tree index (declared
+  ``unique=True``); the column itself omits ``unique=True`` so
+  PostgreSQL does not auto-create a duplicate unique index next
+  to the named one. The named index gives later migrations a
+  stable identifier to reference.
 * ``name`` — Text NOT NULL. Free-form display label
   (e.g. "RDC Internal Tenancy"); not constrained or indexed.
 * ``created_at`` — ``timestamptz``. PG-side ``now()`` server
@@ -230,10 +232,16 @@ class Tenant(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
+    # Uniqueness is enforced exclusively by the named ``tenant_slug_idx``
+    # below (declared ``unique=True``). Setting ``unique=True`` on the
+    # column too would prompt PostgreSQL to auto-create a second unique
+    # index alongside the named one — two structurally identical b-tree
+    # indexes maintained on every insert/update of ``tenant`` for zero
+    # benefit. One named unique b-tree is enough; later migrations and
+    # operators reference it by stable name.
     slug: Mapped[str] = mapped_column(
         Text,
         nullable=False,
-        unique=True,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -246,6 +254,7 @@ class Tenant(Base):
         Index(
             "tenant_slug_idx",
             "slug",
+            unique=True,
             postgresql_using="btree",
         ),
     )

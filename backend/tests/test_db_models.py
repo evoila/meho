@@ -146,8 +146,8 @@ async def test_tenant_round_trip_persists_every_field() -> None:
 async def test_tenant_slug_uniqueness_enforced() -> None:
     """Two :class:`Tenant` rows with the same slug → IntegrityError.
 
-    The migration declares ``slug`` UNIQUE both via the column-level
-    constraint and via the named ``tenant_slug_idx``; this test
+    The migration enforces uniqueness on ``slug`` via the named
+    ``tenant_slug_idx`` (declared ``unique=True``); this test
     proves the constraint is enforced at the DB layer (not just by
     a UI-side validator). Without this assertion, a future migration
     that accidentally dropped the unique flag would silently allow

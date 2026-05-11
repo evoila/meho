@@ -567,6 +567,83 @@ a trailing comment: `anchore/sbom-action@…` (v0.24.0),
 `actions/upload-artifact@…` (v7.0.1). Renovate / Dependabot bumps
 these on the same review cadence as `sigstore/cosign-installer`.
 
+### Cross-repo deploy trigger (Task #51)
+
+After image push, sign, attest, and scan, `image.yml`'s final step
+fires a `repository_dispatch` event of type `meho-image-pushed` at
+[`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
+— the dogfooding consumer that operates MEHO against the rke2-infra
+lab cluster. The dispatch is the upstream half of the cross-repo
+handshake; the consumer-side listener (`.github/workflows/meho-deploy.yml`
+on the consumer) is consumer-owned per Goal #11's cross-repo deps.
+
+The full event-shape spec lives in
+[`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md);
+that doc is the canonical source of truth for the payload — keep it
+and `image.yml` in lock-step.
+
+| Aspect | Value | Rationale |
+| --- | --- | --- |
+| `event_type` | `meho-image-pushed` | Single event type; consumer matches on `types: [meho-image-pushed]` in its workflow's `on:` block |
+| `client_payload.image` | `ghcr.io/evoila/meho` | Static; the consumer reads `image@digest` to pull |
+| `client_payload.digest` | `sha256:<64-hex>` from `docker/build-push-action` output | Immutable handle; the consumer deploys by digest, never by tag |
+| `client_payload.tag` | `${{ steps.meta.outputs.tags }}` (newline-joined list from metadata-action) | Human-readable cross-reference; not used for pulls |
+| `client_payload.commit` | `${{ github.sha }}` (full 40-char SHA) | Surfaces in the consumer's run logs so operators can trace which evoila/meho commit produced the deploy |
+| `client_payload.ref` | `${{ github.ref }}` (always `refs/heads/main` here) | Confirms the trigger origin; the consumer can branch on tag vs branch pushes if needed |
+
+**Trigger gating.** Three conjuncts on the step's `if:`:
+
+1. `github.event_name == 'push'` — never on PRs. PRs build the
+   image but don't push it, so there's no new artefact to advertise.
+2. `github.ref == 'refs/heads/main'` — main only. Tag pushes (v*
+   releases) are out of scope for v0.1; the dogfooding consumer
+   tracks main, not tagged releases. The cross-repo doc locks
+   `ref` to `refs/heads/main`.
+3. `env.RDC_DISPATCH_TOKEN != ''` — skip when the secret is missing.
+   Secrets cannot be referenced inside `if:` directly per GitHub
+   Actions docs; the workflow exposes the PAT via a job-level
+   `env:` block (`RDC_DISPATCH_TOKEN`) so the step can test
+   `env.RDC_DISPATCH_TOKEN != ''`. A rotated or revoked PAT
+   degrades the workflow to "image still gets built, signed,
+   attested, and pushed, just no downstream advertisement" rather
+   than failing the whole run.
+
+**Cross-repo auth: PAT, not GITHUB_TOKEN.** The default
+`GITHUB_TOKEN` is scoped to the originating repo only and returns
+404 against `/repos/evoila-bosnia/claude-rdc-hetzner-dc/dispatches`.
+A maintainer-provisioned fine-grained PAT lives in `evoila/meho`
+secrets as `RDC_DISPATCH_TOKEN`, scoped to:
+
+- Target repository: `evoila-bosnia/claude-rdc-hetzner-dc` (single repo)
+- Permissions: `metadata: read` + `actions: write` (the minimum
+  surface for `POST /repos/{owner}/{repo}/dispatches`)
+
+**One-time maintainer setup.** The PAT is not workflow-creatable; a
+maintainer with org-admin access on `evoila-bosnia/claude-rdc-hetzner-dc`
+mints it, then stores it as the `RDC_DISPATCH_TOKEN` secret on
+`evoila/meho` (Settings → Secrets and variables → Actions). When
+the PAT is missing the step skips silently; when the PAT is present
+but invalid (revoked, wrong scope) the step fails-loud — a 401/403
+surfaces in the workflow log so the operator knows to rotate.
+
+**v0.2 improvement on the horizon.** The PAT is the v0.1 expedient.
+A GitHub App + installation token would carry shorter-lived
+credentials (1-hour installation tokens vs PATs that live until
+manually rotated), and CodeRabbit consistently flags long-lived PATs
+as such. The GitHub App migration is tracked separately; v0.1 ships
+with the PAT because the rotation discipline is captured on the
+coordination tracker
+([`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md))
+and the consumer-side acceptance bullet covers it.
+
+**Failure semantics.** No `continue-on-error` on the dispatch
+step. A silent dispatch failure means the consumer never learns
+about the new image — the lab would deploy stale revisions
+indefinitely. The fail-loud posture turns rotation issues into
+visible alerts (red workflow run) instead of silent drift. Per
+issue #51 AC #5 the *missing-secret* path skips; the
+*invalid-secret* path fails — the two are intentionally distinct.
+
 ## Known issues
 
 `/ready` returns 503 until every registered probe passes. After Task
@@ -632,6 +709,7 @@ ecosystem catches up to the 1.0.0 format, the constant in
 - Task #32 — Multi-stage Dockerfile finalized + multi-arch buildx (linux/amd64 + linux/arm64); base image digest-pinned
 - Task #33 — GHCR image push workflow (`.github/workflows/image.yml`)
 - Task #34 — Cosign keyless signing of pushed images via GitHub Actions OIDC (per ADR 0006)
+- Task #51 — `repository_dispatch` to claude-rdc-hetzner-dc on main image push (`meho-image-pushed` event)
 - [OCI image-spec annotations](https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 - [Sigstore cosign keyless signing overview](https://docs.sigstore.dev/cosign/signing/overview/)
 - [Sigstore CI quickstart (GitHub Actions OIDC)](https://docs.sigstore.dev/quickstart/quickstart-ci/)

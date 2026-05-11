@@ -243,15 +243,21 @@ returns `yes`. The Verification section below scripts both checks.
 
 `evoila/meho`'s `main` push image workflow (G2.7-T3, #51) sends a
 `repository_dispatch` event to
-`evoila-bosnia/claude-rdc-hetzner-dc` with:
+`evoila-bosnia/claude-rdc-hetzner-dc` with the shape below. The
+producer-side step lives at the tail of
+[`.github/workflows/image.yml`](../../.github/workflows/image.yml)
+(`Notify claude-rdc-hetzner-dc (repository_dispatch)`); its
+implementation rationale is documented in
+[`docs/codebase/backend.md`](../codebase/backend.md) under
+"Cross-repo deploy trigger (Task #51)".
 
 | Field | Value |
 | --- | --- |
 | `event_type` | `meho-image-pushed` (≤100 chars per GitHub API limit) |
 | `client_payload.image` | `ghcr.io/evoila/meho` |
-| `client_payload.digest` | `sha256:<64-hex>` of the pushed manifest |
-| `client_payload.tag` | The calver-stamped tag (`0.1.YYYYMMDD-<short-sha>`) |
-| `client_payload.commit` | The full 40-char git SHA of `main` |
+| `client_payload.digest` | `sha256:<64-hex>` of the pushed manifest list (immutable; what the consumer pulls) |
+| `client_payload.tag` | The full tag list emitted by `docker/metadata-action`, newline-joined — on a main push this is `ghcr.io/evoila/meho:sha-<long>` and `ghcr.io/evoila/meho:main`. Human-readable cross-reference; the consumer pulls by digest, not by tag |
+| `client_payload.commit` | The full 40-char git SHA of `main` (`${{ github.sha }}`) |
 | `client_payload.ref` | The git ref that was pushed (always `refs/heads/main` for this trigger) |
 
 `client_payload` has a 10-top-level-key + 65535-character total ceiling

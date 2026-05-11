@@ -699,6 +699,28 @@ with the legacy `--signature` + `--certificate` flag pair per the
 sigstore.dev docs. flux and recent argocd releases attach bundles by
 the same shape.
 
+> **ADR 0006 deviation — bundle vs. legacy two-file form.** ADR
+> 0006's original G2.6 Implications block prescribed the legacy
+> `--output-signature` + `--output-certificate` two-file form.
+> The CLI release pipeline adopts the modern `--bundle` form
+> instead — it's current sigstore best practice, what flux and
+> recent argocd ship, and `cosign verify-blob --bundle` is
+> mutually exclusive with the legacy flag pair so a single recipe
+> covers all operators. The same evolution happened at
+> `chart.yml` (PR #173) and `image.yml` (PR #165); a follow-up
+> ADR amendment will record this across all three pipelines.
+
+> **ADR 0006 deviation — per-workflow split vs. single release.yml.**
+> ADR 0006 originally sketched a single `release.yml` covering
+> image + chart + CLI. The implemented architecture splits these
+> into three independent workflows (`image.yml`, `chart.yml`,
+> `cli-release.yml`) because each artefact has a distinct trigger
+> surface, permission set, and runner profile — putting them
+> behind one workflow would make `permissions:` either
+> over-broad or littered with per-step elevation. The per-workflow
+> split is now the canonical pattern; the identity-claim regex
+> shape stays uniform so operators learn one verification recipe.
+
 The cosign-installer GitHub Action (`sigstore/cosign-installer@<sha>`,
 pinned in `cli-release.yml` to the same v4.1.2 SHA `chart.yml` uses)
 puts a cosign binary on PATH before the GoReleaser step. v4.x of the

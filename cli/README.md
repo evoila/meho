@@ -2,10 +2,8 @@
 
 The operator-facing command-line client for the
 [MEHO governance backplane](../README.md). Single static Go binary,
-multi-platform. This scaffold (G2.6-T1) ships only the `version`
-subcommand; `login` and `status` arrive in subsequent G2.6 Tasks,
-and post-Goal-2 operations are discovered from the backplane at
-runtime.
+multi-platform. Ships `version` and `login` today; `status` and the
+post-Goal-2 operations land in subsequent G2.6 Tasks.
 
 This directory holds the Go module; the Python backplane lives at
 [`../backend/`](../backend/) and the Helm chart at
@@ -13,9 +11,9 @@ This directory holds the Go module; the Python backplane lives at
 
 ## Status
 
-**G2.6-T1 — scaffold + `meho version` only.** Login (G2.6-T2),
-status + dynamic discovery (G2.6-T3), multi-platform releases
-(G2.6-T4), and cosign signing (G2.6-T5) land in subsequent Tasks.
+**G2.6-T2 — `meho version` + `meho login`.** Status + dynamic
+discovery (G2.6-T3), multi-platform releases (G2.6-T4), and cosign
+signing (G2.6-T5) land in subsequent Tasks.
 
 ## Layout
 
@@ -28,10 +26,13 @@ cli/
 │   └── meho/
 │       └── main.go                 # entry point; calls internal/cmd.Execute()
 └── internal/
+    ├── auth/                       # device-code flow + token storage
+    │   ├── devicecode.go           # OIDC discovery + x/oauth2 device flow
+    │   └── store.go                # TokenStore interface, keyring & file backends
     ├── cmd/
     │   ├── root.go                 # cobra root + persistent flags
     │   ├── version.go              # `meho version` subcommand
-    │   └── version_test.go         # output-contract test
+    │   └── login.go                # `meho login <backplane-url>` subcommand
     └── version/
         └── version.go              # build-time identity (ldflags-injected)
 ```
@@ -58,6 +59,35 @@ make build VERSION=v0.1.0 COMMIT=$(git rev-parse --short HEAD)
 
 The Makefile also exposes the convenience target from the repo root
 (`make cli` delegates here).
+
+## Login
+
+```bash
+./bin/meho login https://meho.example.com
+# ...prints a verification URL + user_code; open the URL on any
+# device with a browser, sign in, approve, and the CLI completes.
+```
+
+Tokens persist to the OS keyring by default (Keychain on macOS,
+Secret Service on Linux, Wincred on Windows). On headless hosts
+without a keyring service the CLI falls back to
+`$XDG_CONFIG_HOME/meho/credentials.json` (default
+`~/.config/meho/credentials.json`) created mode `0600`. Set
+`MEHO_KEYRING_DISABLE=1` to force the file backend explicitly.
+
+If the backplane hasn't yet shipped its `/api/v1/auth-config`
+endpoint (G2.2 coordination), pass the realm issuer and OAuth
+`client_id` explicitly:
+
+```bash
+./bin/meho login https://meho.example.com \
+  --issuer https://keycloak.example.com/realms/meho \
+  --client-id meho-cli
+```
+
+For the durable narrative of the login flow — discovery precedence,
+polling semantics, storage backend selection, and persisted JSON
+schema — see [`../docs/codebase/cli.md`](../docs/codebase/cli.md).
 
 ## Install
 

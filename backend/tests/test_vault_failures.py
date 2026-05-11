@@ -328,7 +328,7 @@ async def test_vault_invalid_request_during_login_raises_client_error(
     with pytest.raises(VaultClientError) as exc_info:
         async with vault_client_for_operator(_make_operator()):
             pytest.fail("body must not run when login raises")
-    assert not isinstance(exc_info.value, (VaultUnreachableError, VaultRoleDeniedError))
+    assert not isinstance(exc_info.value, VaultUnreachableError | VaultRoleDeniedError)
 
 
 async def test_vault_internal_server_error_during_login_raises_client_error(

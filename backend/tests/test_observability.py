@@ -257,7 +257,7 @@ def test_request_completed_log_shape(client: TestClient, log_buffer: io.StringIO
     assert entry["method"] == "GET"
     assert entry["path"] == "/"
     assert entry["status"] == 200
-    assert isinstance(entry["duration_ms"], (int, float))
+    assert isinstance(entry["duration_ms"], int | float)
     assert entry["duration_ms"] >= 0
 
 

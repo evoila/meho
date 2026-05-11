@@ -111,6 +111,17 @@ jobs:
           # the tree right now).
           cache-dependency-path: cli/go.sum
 
+      - name: Ensure envsubst (gettext-base) — cosign-installer dep
+        # See chart.yml for context.
+        shell: bash
+        run: |
+          if command -v envsubst >/dev/null 2>&1; then exit 0; fi
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update -q && sudo apt-get install -y --no-install-recommends gettext-base
+          else
+            apt-get update -q && apt-get install -y --no-install-recommends gettext-base
+          fi
+
       - name: Install cosign
         # Pinned to cosign-installer v4.1.2 (ships cosign v3.x by
         # default). Same SHA as chart.yml's signing step so a single
@@ -186,8 +197,12 @@ jobs:
 
           # Export the path for the next step. Use a stable variable
           # name (not a step output) so the GoReleaser step's `args:`
-          # template can reference it via `${{ env.RELEASE_NOTES_FILE
-          # }}`.
+          # template can reference it as an env-context expression
+          # (env.RELEASE_NOTES_FILE in the `args:` line below).
+          # Note: the literal expression syntax is intentionally not
+          # written out here — GitHub Actions parses ${ followed by
+          # double-braces from anywhere in the workflow file regardless
+          # of YAML comments, so embedding it would break this file.
           echo "RELEASE_NOTES_FILE=${NOTES_FILE}" >> "${GITHUB_ENV}"
 
       - name: Run GoReleaser

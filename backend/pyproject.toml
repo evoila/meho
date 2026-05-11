@@ -74,6 +74,14 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]  # asserts allowed in tests
+# A005 flags any module name that matches a stdlib module by short name,
+# regardless of package path. These two are namespaced under
+# `meho_backplane.*` and are never imported as bare `operator` / `logging`,
+# so the shadowing risk A005 is designed to catch does not apply.
+# Revisit if a future caller does `from meho_backplane.auth import operator`
+# and then `operator.attrgetter(...)` — that pattern WOULD be confusing.
+"src/meho_backplane/auth/operator.py" = ["A005"]
+"src/meho_backplane/logging.py" = ["A005"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's standard dependency-injection pattern relies on calling

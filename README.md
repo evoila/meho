@@ -5,6 +5,12 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![OSS](https://img.shields.io/badge/OSS-public%20from%20day%201-success.svg)](./CONTRIBUTING.md#public-from-day-1-deliberately)
+<!-- placeholder: green-smoke-counter badge — populated by consumer-side
+     rdc-deploy-stability action. Contract: docs/acceptance/green-counter.md.
+     Replace this comment with a Shields.io endpoint badge linking to the
+     consumer-side counter JSON once the endpoint is live; the maintainer
+     files the consumer-side issue using
+     docs/cross-repo/issue-58-consumer-ticket-body.md verbatim. -->
 
 **Status:** v0.1 in development. The backplane image, the Helm chart, and
 the operator CLI are all building toward the first tagged release; nothing

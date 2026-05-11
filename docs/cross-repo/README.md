@@ -21,6 +21,17 @@ prove the handshake works end-to-end.
 | Doc | Consumer repo | Surface |
 | --- | --- | --- |
 | [`rke2-infra-coordination.md`](./rke2-infra-coordination.md) | [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) | Per-PR ephemeral-cluster smoke + `repository_dispatch` deploy trigger; cluster auth (OIDC > kubeconfig); namespace-scoped RBAC for `meho-ci-*` |
+| [`targets-yaml.md`](./targets-yaml.md) | [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) | `targets.yaml` `rdc-meho` entry — schema, worked example, and health-probe contract for the consumer's connector chassis to manage MEHO as a target (Goal #11 DoD bullet 5) |
+
+The consumer-side ticket body the maintainer files when shipping
+the consumer-side half of Task #58 is drafted at
+[`issue-58-consumer-ticket-body.md`](./issue-58-consumer-ticket-body.md).
+That file is **not** a handshake spec — it is a ready-to-file
+issue body the maintainer copies into `gh issue create` on the
+consumer repo. The handshake spec it tracks lives in
+[`targets-yaml.md`](./targets-yaml.md), and the green-counter
+contract it depends on lives at
+[`docs/acceptance/green-counter.md`](../acceptance/green-counter.md).
 
 ## When to add a doc here
 

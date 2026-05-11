@@ -1008,6 +1008,7 @@ companion verifier shell under
 | 1 — `install.sh` cold-deploy → working MEHO in <5 min | [`docs/acceptance/install.md`](../acceptance/install.md) | [`scripts/acceptance/install-verify.sh`](../../scripts/acceptance/install-verify.sh) |
 | 2 — `smoke.sh` passes (login + status + audit-row + Vault + DB-migration state) — federation chain end-to-end | [`docs/acceptance/smoke.md`](../acceptance/smoke.md) | [`scripts/acceptance/smoke.sh`](../../scripts/acceptance/smoke.sh) |
 | 3 — `helm rollback meho` end-to-end with a non-trivial schema diff (cluster-level forward-compat proof) | [`docs/acceptance/rollback.md`](../acceptance/rollback.md) | [`scripts/acceptance/rollback-verify.sh`](../../scripts/acceptance/rollback-verify.sh) (sample N+1 migration at [`scripts/acceptance/synthetic-n-plus-1.sql`](../../scripts/acceptance/synthetic-n-plus-1.sql)) |
+| 4 + 5 — 5-consecutive-merged-PR green-smoke counter + `targets.yaml` `rdc-meho` entry (deploy-stability proof + chassis registration) | [`docs/acceptance/green-counter.md`](../acceptance/green-counter.md) | producer-side contract only — counter implementation and the `targets.yaml` entry land on the consumer side per the cross-repo split. Schema for the `targets.yaml` entry lives at [`docs/cross-repo/targets-yaml.md`](../cross-repo/targets-yaml.md); the draft consumer-side issue body the maintainer files is at [`docs/cross-repo/issue-58-consumer-ticket-body.md`](../cross-repo/issue-58-consumer-ticket-body.md); the README ships a badge placeholder the maintainer swaps for the live Shields endpoint URL once the consumer-side counter is up |
 
 The split between producer-owned contracts + verifiers and
 consumer-owned wrappers (`install.sh`, `smoke.sh`,
@@ -1037,6 +1038,7 @@ real `helm rollback` against the lab (slow, Goal-closing milestone).
 - Task #55 (G2.8-T1) — `install.sh` cold-deploy acceptance contract + verifier (`docs/acceptance/install.md`, `scripts/acceptance/install-verify.sh`)
 - Task #56 (G2.8-T2) — `smoke.sh` federation-chain acceptance contract + verifier (`docs/acceptance/smoke.md`, `scripts/acceptance/smoke.sh`)
 - Task #57 (G2.8-T3) — `helm rollback` end-to-end acceptance contract + verifier (`docs/acceptance/rollback.md`, `scripts/acceptance/rollback-verify.sh`, `scripts/acceptance/synthetic-n-plus-1.sql`)
+- Task #58 (G2.8-T4) — 5-consecutive-merged-PR green-smoke counter contract + `targets.yaml` `rdc-meho` schema (`docs/acceptance/green-counter.md`, `docs/cross-repo/targets-yaml.md`, `docs/cross-repo/issue-58-consumer-ticket-body.md`, README badge placeholder); consumer-side counter implementation + `targets.yaml` entry tracked on `claude-rdc-hetzner-dc`
 - Task #30 (G2.3-T4) — unit-level forward-compat regression test (`backend/tests/test_migration_rollback.py`)
 - Helm `helm rollback` reference: https://helm.sh/docs/helm/helm_rollback/
 - Helm chart hooks reference: https://helm.sh/docs/topics/charts_hooks/

@@ -373,18 +373,43 @@ jobs:
         # numbers — image digests, tags, and refs are all opaque strings.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.RDC_DISPATCH_TOKEN != ''
         env:
-          # gh CLI reads GH_TOKEN for auth; the job-level RDC_DISPATCH_TOKEN
-          # is the PAT minted on claude-rdc-hetzner-dc.
-          GH_TOKEN: ${{ env.RDC_DISPATCH_TOKEN }}
+          # `curl` reads the PAT via this var; the job-level
+          # RDC_DISPATCH_TOKEN is the PAT minted on
+          # claude-rdc-hetzner-dc.
+          RDC_TOKEN: ${{ env.RDC_DISPATCH_TOKEN }}
           DIGEST: ${{ steps.build.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
+        # Implementation note: the original step used `gh api`, but the
+        # gha-runner-scale-set image doesn't ship the `gh` CLI (exit 127:
+        # command not found, CI run 25684872120). curl IS preinstalled
+        # (it's used by the kubeconform install in chart.yml too).
+        # python3's json.dumps does the heavy lifting on payload escaping
+        # so multi-line TAGS (newline-separated tag list from
+        # docker/metadata-action) are encoded as valid JSON strings,
+        # preserving the exact semantics gh provided.
         run: |
-          gh api repos/evoila-bosnia/claude-rdc-hetzner-dc/dispatches \
-            --method POST \
-            --silent \
-            -f event_type=meho-image-pushed \
-            -f client_payload[image]=ghcr.io/evoila/meho \
-            -f client_payload[digest]="${DIGEST}" \
-            -f client_payload[tag]="${TAGS}" \
-            -f client_payload[commit]="${GITHUB_SHA}" \
-            -f client_payload[ref]="${GITHUB_REF}"
+          set -euo pipefail
+          PAYLOAD="$(python3 -c '
+          import json, os
+          print(json.dumps({
+              "event_type": "meho-image-pushed",
+              "client_payload": {
+                  "image": "ghcr.io/evoila/meho",
+                  "digest": os.environ["DIGEST"],
+                  "tag": os.environ["TAGS"],
+                  "commit": os.environ["GITHUB_SHA"],
+                  "ref": os.environ["GITHUB_REF"],
+              },
+          }))
+          ')"
+          # --fail-with-body: non-2xx → non-zero exit AND print response
+          # body so the workflow log shows whatever Fulcio/Rekor/GitHub
+          # said. Mirrors gh's behavior. -sS silences progress but keeps
+          # error output.
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${RDC_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            https://api.github.com/repos/evoila-bosnia/claude-rdc-hetzner-dc/dispatches

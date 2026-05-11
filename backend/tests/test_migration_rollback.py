@@ -145,7 +145,13 @@ def _public_jwks(*keys: Any) -> dict[str, list[dict[str, Any]]]:
     return {"keys": [k.as_dict(is_private=False) for k in keys]}
 
 
-def _mint_token(private_key: Any, *, sub: str = "op-rollback") -> str:
+def _mint_token(
+    private_key: Any,
+    *,
+    sub: str = "op-rollback",
+    tenant_id: str = "00000000-0000-0000-0000-00000000a0a0",
+    tenant_role: str = "operator",
+) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         jwt = JsonWebToken(["RS256"])
@@ -159,6 +165,8 @@ def _mint_token(private_key: Any, *, sub: str = "op-rollback") -> str:
             "nbf": now,
             "name": "Forward Compat",
             "email": "fc@example.com",
+            "tenant_id": tenant_id,
+            "tenant_role": tenant_role,
         }
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, private_key)

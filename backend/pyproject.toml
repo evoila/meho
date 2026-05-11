@@ -7,8 +7,8 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
     "fastapi>=0.110",
-    "uvicorn[standard]>=0.30",
-    "pydantic[email]>=2.13.4",
+    "uvicorn[standard]>=0.46.0",
+    "pydantic[email]>=2.6",
     "structlog>=24.1",
     "prometheus-client>=0.20",
     "authlib>=1.3",

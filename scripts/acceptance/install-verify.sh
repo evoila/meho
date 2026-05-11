@@ -181,18 +181,27 @@ check_warn() {
 }
 check_note() { printf '[note] %s\n' "$1"; }
 
-# Curl wrapper that returns only the body on success. `--retry` covers
-# the cert-manager + ingress-controller warm-up gap; `--retry-all-errors`
-# (curl >=7.71) treats TLS handshake errors as retryable too. The
-# `|| true` fallback to `--retry-connrefused` keeps older curl builds
-# working (Ubuntu 22.04 ships 7.81 which has --retry-all-errors).
+# Curl retry args. `--retry`/`--retry-delay`/`--retry-connrefused` are
+# universally available on the curl versions we target (Ubuntu 22.04's
+# 7.81+). `--retry-all-errors` (curl >=7.71) treats TLS handshake
+# errors as retryable too — useful during the cert-manager +
+# ingress-controller warm-up gap — but the previous unconditional use
+# misrepresented it as "always-on with a fallback": there was no
+# fallback; older curls would just reject the flag and fail-loud. Detect
+# support once at boot and include the flag only when the installed
+# curl actually accepts it.
+CURL_RETRY_ARGS=(--retry 5 --retry-delay 2 --retry-connrefused)
+if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+    CURL_RETRY_ARGS+=(--retry-all-errors)
+fi
+
 curl_body() {
     local url="$1"
     shift
     local cacert_args=()
     [[ -n "$CACERT" ]] && cacert_args=("--cacert" "$CACERT")
     curl -sSf "${cacert_args[@]}" \
-        --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+        "${CURL_RETRY_ARGS[@]}" \
         --max-time 10 \
         "$@" "$url"
 }
@@ -203,7 +212,7 @@ curl_code() {
     local cacert_args=()
     [[ -n "$CACERT" ]] && cacert_args=("--cacert" "$CACERT")
     curl -sS "${cacert_args[@]}" \
-        --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+        "${CURL_RETRY_ARGS[@]}" \
         --max-time 10 \
         -o /dev/null -w '%{http_code}' \
         "$@" "$url"
@@ -390,7 +399,7 @@ fi
 # the table above documents it as such.
 if request_id_header="$(curl -sS \
     ${CACERT:+--cacert "$CACERT"} \
-    --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \
+    "${CURL_RETRY_ARGS[@]}" \
     --max-time 10 \
     -o /dev/null -D - \
     "https://${HOST}/api/v1/health" 2>/dev/null \

@@ -274,9 +274,13 @@ jobs:
         run: |
           set -euo pipefail
           # Use python3+pyyaml on the self-hosted runner so we don't pull in
-          # an extra `yq` dependency for two field edits. PyYAML preserves
-          # block style for typical Chart.yaml shapes; we re-read after write
-          # to assert the edits applied.
+          # an extra `yq` dependency for two field edits. yaml.safe_dump
+          # strips comments and may reorder keys vs the source file (we pass
+          # sort_keys=False to suppress reordering); for our purposes that
+          # is fine because the stamped Chart.yaml is workflow-local — it is
+          # consumed by `helm package` in the next step and never committed
+          # back to the repo. The in-tree Chart.yaml retains its hand-tuned
+          # form (comments and all).
           python3 - <<'PY'
           import os
           import yaml

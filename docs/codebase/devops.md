@@ -8,7 +8,7 @@
 Everything a consumer needs to install MEHO onto a Kubernetes cluster lives
 under `deploy/`. The Helm chart at `deploy/charts/meho/` is the **single
 contract** between MEHO and the deployment environment — `helm install` /
-`helm upgrade --install` consumes it and produces all six core Kubernetes
+`helm upgrade --install` consumes it and produces the core Kubernetes
 resources that make up a running backplane:
 
 - Deployment — the backplane Pod (FastAPI app, `uvicorn` on port 8000).
@@ -17,25 +17,39 @@ resources that make up a running backplane:
 - ConfigMap — non-secret env (Keycloak URLs, Vault address, pool sizes).
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
-  Postgres, Vault, Keycloak, in-cluster Redis, and CoreDNS only.
+  Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.
+- Migration Job — `pre-install,pre-upgrade` Helm hook running
+  `python -m meho_backplane.db.migrate` before the Deployment rolls forward.
+- Broadcast subchart — in-tree Valkey 9.x Deployment + Service + ConfigMap
+  per ADR 0005.
 
 ## Chart layout
 
 ```
 deploy/charts/meho/
-├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28
+├── Chart.yaml              # apiVersion v2, kubeVersion >=1.28, dependencies: broadcast
 ├── .helmignore             # standard exclusions
 ├── values.yaml             # safe-by-default; required fields are blank
 ├── values.schema.json      # draft-07 typed contract; rejects typos and empty required fields
-└── templates/
-    ├── _helpers.tpl        # name / fullname / labels / SA helpers
-    ├── deployment.yaml     # backplane Pod + probes (/healthz, /ready)
-    ├── service.yaml        # ClusterIP :8000
-    ├── ingress.yaml        # TLS + cert-manager
-    ├── configmap.yaml      # non-secret env
-    ├── serviceaccount.yaml # Pod identity
-    ├── networkpolicy.yaml  # default-deny + explicit egress
-    └── NOTES.txt           # post-install hints
+├── templates/
+│   ├── _helpers.tpl        # name / fullname / labels / SA helpers
+│   ├── deployment.yaml     # backplane Pod + probes (/healthz, /ready)
+│   ├── service.yaml        # ClusterIP :8000
+│   ├── ingress.yaml        # TLS + cert-manager
+│   ├── configmap.yaml      # non-secret env
+│   ├── serviceaccount.yaml # Pod identity
+│   ├── networkpolicy.yaml  # default-deny + explicit egress (broadcast egress conditional)
+│   ├── migration-job.yaml  # pre-install/pre-upgrade Helm hook (alembic upgrade head)
+│   └── NOTES.txt           # post-install hints
+└── charts/
+    └── broadcast/          # in-tree Valkey 9.x subchart (ADR 0005)
+        ├── Chart.yaml
+        ├── values.yaml
+        └── templates/
+            ├── _helpers.tpl
+            ├── deployment.yaml   # single-replica Recreate; readonly rootfs + emptyDir /data
+            ├── service.yaml      # ClusterIP :6379 (port name "redis")
+            └── configmap.yaml    # minimal valkey.conf (no auth, no persistence)
 ```
 
 ## Chart contract
@@ -126,8 +140,11 @@ egress rules to:
 - Postgres — `tcp/5432` to `networkPolicy.postgresCIDR`
 - Vault — `tcp/8200` to `networkPolicy.vaultCIDR`
 - Keycloak — `tcp/443` to `networkPolicy.keycloakCIDR`
-- Redis — `tcp/6379` to a `podSelector` matching the in-cluster Redis
-  subchart (G2.5-T3)
+- Broadcast subchart — `tcp/<broadcast.service.port>` (default 6379) to a
+  `podSelector` matching the in-cluster broadcast subchart's selector
+  labels (`app.kubernetes.io/name: broadcast`); the rule is conditional
+  on `broadcast.enabled: true` and is omitted when the broadcast subchart
+  is disabled
 - DNS — `udp/53` to the `k8s-app: kube-dns` selector (matches CoreDNS)
 
 Ingress is permitted only from the namespace whose
@@ -150,6 +167,117 @@ requirements in that mode so the values overlay does not need to
 populate them. Disabling without a replacement policy in place removes
 the chart's least-privilege egress story — only do it when an
 equivalent control is enforced upstream.
+
+### Migration Job (`templates/migration-job.yaml`)
+
+A Kubernetes `Job` runs as a Helm hook before the Deployment is created
+(install) or rolled forward (upgrade). The container executes
+`python -m meho_backplane.db.migrate` — the entrypoint shipped by Task
+#29 — which invokes `alembic upgrade head` against the same
+`DATABASE_URL` Secret the backplane Deployment consumes. The Job uses
+the same image as the backplane (`{{ .Values.image.repository }}:{{ .Values.image.tag }}`)
+so the migrations applied match exactly the revision the rolling-out
+Deployment expects — a separate migration image would drift.
+
+Hook semantics:
+
+| Annotation | Value | Meaning |
+| --- | --- | --- |
+| `helm.sh/hook` | `pre-install,pre-upgrade` | Runs the Job both on a fresh `helm install` and every `helm upgrade` |
+| `helm.sh/hook-weight` | `"-10"` | Runs ahead of any other hook resources (only documentary at the chassis stage — no other hooks ship yet) |
+| `helm.sh/hook-delete-policy` | `before-hook-creation,hook-succeeded` | Overwrites the previous Job on retry; GCs the Job once it exits 0. `hook-failed` is **intentionally absent** — failed Jobs stay in the namespace for `kubectl logs` forensics |
+
+Pod spec:
+
+- `restartPolicy: OnFailure` — retry in-place on transient asyncpg
+  errors without re-scheduling the whole Pod.
+- `backoffLimit: 3` (operator-tunable via `.Values.migrationJob.backoffLimit`) —
+  catches transient network blips between the Job pod and PostgreSQL.
+  Alembic migrations are idempotent so re-running a partially-applied
+  step is safe.
+- `ttlSecondsAfterFinished: 600` (operator-tunable via
+  `.Values.migrationJob.ttlSecondsAfterFinished`) — Kubernetes-side
+  garbage-collection backstop: even if `helm uninstall` is delayed, the
+  Job + Pod logs are reaped after the configured window (10 minutes by
+  default).
+- Same `serviceAccountName`, `imagePullSecrets`, and pod/container
+  `securityContext` as the backplane Deployment (`runAsNonRoot`,
+  `readOnlyRootFilesystem`, `drop: [ALL]`), with `/tmp` mounted as an
+  `emptyDir` to keep the read-only root invariant.
+- `envFrom` reuses the backplane's ConfigMap so any Alembic-relevant env
+  vars (pool sizes, timeouts) stay in lock-step; `DATABASE_URL` is
+  pulled from `Values.postgres.credentialsSecret` at the `url` key
+  exactly like the Deployment does.
+
+**Failure semantics.** When the Job exhausts `backoffLimit`, Helm fails
+the release at the pre-install/pre-upgrade hook step. The Deployment is
+never created against an unmigrated schema. The failed Job is left in
+the namespace; `kubectl logs -n <ns> job/<release>-meho-migrate` shows
+the Alembic error (rendered to stderr by the runner as
+`migration_failed: <ExcClass>: <msg>`).
+
+### Broadcast subchart (`charts/broadcast/`)
+
+A custom in-tree Helm subchart deploys Valkey 9.x as the
+Redis-protocol-compatible activity-broadcast store. ADR 0005 locks the
+upstream choice and the workload shape; the subchart is the
+implementation of that decision.
+
+| Aspect | Value | Rationale |
+| --- | --- | --- |
+| Upstream image | `valkey/valkey:9.0-alpine` (Docker Hub) | BSD-3-Clause; Linux Foundation governance; carries Redis 7.2.4's last permissive license forward |
+| Slug | `broadcast` (not `redis`) | The protocol contract matters more than the brand |
+| Workload | `Deployment` (not `StatefulSet`), single replica | Streams are ephemeral in v0.1; HA via Sentinel/Cluster is v0.2+ |
+| Persistence | None (no PVC, `save ""`, `appendonly no`) | Restart-loss of stream history is acceptable in v0.1 |
+| Auth | None (no `requirepass`) | v0.1 single-tenant; gated at the network layer by the umbrella chart's NetworkPolicy |
+| Update strategy | `Recreate` | Single-replica + port-bind constraint makes RollingUpdate worse |
+| Probes | TCP `connect` on 6379 | Minimal — avoids coupling to `redis-cli` / `valkey-cli` binary naming variance |
+| Service | ClusterIP `<release>-broadcast:6379` (port name `redis`) | In-cluster only; backplane consumes via the operator-facing `REDIS_URL` env |
+
+The subchart lives unpacked at `deploy/charts/meho/charts/broadcast/`.
+The parent `Chart.yaml` declares it as a dependency with
+`repository: ""` (the documented Helm shape for an unpacked local
+subchart — `helm dependency update` is not required and would fail
+trying to fetch from a remote registry). `condition: broadcast.enabled`
+lets operators flip the entire subchart off with a single boolean — for
+example, on clusters where an external managed Valkey/Redis (Azure
+Cache, AWS ElastiCache, GCP Memorystore) is already available. The
+v0.2+ `broadcast.externalEndpoint` opt-out lands when the broadcast
+feature actually carries cross-deployment streams.
+
+**Schema interaction with the parent.** The umbrella chart's
+`values.schema.json` declares a `broadcast` property with
+`additionalProperties: false` plus an explicit list of permitted keys,
+**plus a permissive `global` property** because Helm injects
+`.Values.global` into every subchart's values namespace. Without the
+`global` allowance, `helm lint` reports
+`at '/broadcast': additional properties 'global' not allowed`. The
+subchart's own values.yaml shape is also enforced by Helm independently —
+this parent block is the surface visible to the umbrella's `--set` flags.
+
+**Backplane wiring.** When `broadcast.enabled: true` (the default), the
+backplane Deployment renders a `REDIS_URL` env var pointing at
+`redis://{{ .Release.Name }}-broadcast:{{ .Values.broadcast.service.port }}/0`.
+The full broadcast feature is v0.2 work; the env var is forward-prepared
+in v0.1 so the chassis discovers the endpoint as soon as the broadcast
+code uses it. ADR 0005 locked `redis-py` as the driver — it parses
+`redis://` schemes against a Valkey endpoint unchanged (wire-protocol
+compatibility carries from Redis 7.2.4).
+
+**Operator-supplied secrets.** The Job + the backplane both consume
+`DATABASE_URL` from a Kubernetes Secret named by
+`postgres.credentialsSecret` at key `url`. The chart references this
+Secret by name only — provisioning it is the operator's job. Production
+deployments use **External Secrets Operator (ESO)** to sync the value
+from HashiCorp Vault (G2.5-T4 ships the example overlay; G2.6 wires the
+ESO ExternalSecret resources). Dev installs may pre-provision the Secret
+manually:
+
+```bash
+kubectl create secret generic meho-postgres \
+  --from-literal=url='postgresql+asyncpg://meho:<password>@<host>:5432/meho' \
+  --namespace meho
+```
 
 ### Safe-by-default values
 
@@ -201,10 +329,14 @@ Three properties make this the right contract:
    on URLs / hostnames / CIDRs.** The safe-by-default empty placeholders
    in `values.yaml` are intentionally rejected, surfacing the exact field
    the operator must override.
-3. **Subchart compatibility.** When G2.5-T3 (#39) adds the Redis subchart
-   dependency, the top-level `properties` map gains a `redis` key and the
-   subchart's own `values.schema.json` (if present) is also enforced —
-   the parent chart cannot circumvent subchart restrictions.
+3. **Subchart compatibility.** The umbrella's `properties` map declares
+   a `broadcast` key for the in-tree subchart at `charts/broadcast/`, and
+   the subchart's own `values.schema.json` (if shipped) is also enforced
+   by Helm independently — the parent chart cannot circumvent subchart
+   restrictions. A permissive `broadcast.global` allowance is required
+   because Helm injects `.Values.global` into every subchart's
+   values namespace; omitting it causes
+   `at '/broadcast': additional properties 'global' not allowed`.
 
 `helm lint` against the unmodified `values.yaml` **deliberately fails**
 with the safe-by-default empty fields. The chart's CI / lint workflow
@@ -285,9 +417,13 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "addition
 
 - Image — `ghcr.io/evoila/meho:<tag>` from G2.4 (#31). Multi-arch
   (amd64 + arm64), cosign-signed, SBOM-attested.
-- Migration runner — invoked by a pre-install/pre-upgrade Job hook landed
-  in G2.5-T3 (#39); shells out to the entrypoint added in G2.3-T3 (#29).
-- Redis subchart — added by G2.5-T3 (#39) per ADR 0005.
+- Migration runner — invoked by the `pre-install,pre-upgrade` Job hook
+  defined in `templates/migration-job.yaml`; shells out to the
+  entrypoint added in G2.3-T3 (#29) — `python -m meho_backplane.db.migrate`.
+- Broadcast subchart — in-tree at `charts/broadcast/`, Valkey 9.x per
+  ADR 0005. Declared in `Chart.yaml`'s `dependencies:` block with
+  `repository: ""` (local unpacked subchart; no
+  `helm dependency update` needed).
 - External Secrets Operator (ESO) — owns the Kubernetes Secrets the chart
   references (`postgres.credentialsSecret`, future Keycloak client secret,
   future Vault role bindings). ESO is consumer-owned; the chart references
@@ -295,14 +431,16 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "addition
 
 ## Known gaps (filled by sibling tasks)
 
-- Pre-install migration Job + Redis subchart — G2.5-T3 (#39). The subchart
-  will extend `values.yaml` with a top-level `redis:` key and the matching
-  schema branch.
 - `deploy/values-examples/values-rdc-example.yaml` — G2.5-T4 (#40).
 - OCI publish to `ghcr.io/evoila/meho-chart` + cosign signing — G2.5-T5
   (#41).
 - HPA / PDB / topologySpreadConstraints / ServiceMonitor / PrometheusRule
   — deferred to v0.2. v0.1 is single-replica per Goal #11 scope.
+- Broadcast subchart HA (Sentinel/Cluster), persistence, auth —
+  deferred to v0.2 per ADR 0005.
+- `broadcast.externalEndpoint` opt-out for operators with a managed
+  Redis/Valkey already running — deferred to v0.2 (the
+  `broadcast.enabled: false` knob lands in v0.1 as the disable path).
 
 ## References
 

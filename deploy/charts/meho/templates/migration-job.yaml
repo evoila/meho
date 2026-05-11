@@ -1,0 +1,114 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "meho.fullname" . }}-migrate
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+    # The chassis-stage migration runner exits 0 on success / 1 on any
+    # Alembic failure (`backend/src/meho_backplane/db/migrate.py`). When the
+    # Job exhausts `backoffLimit` retries, Helm fails the release at the
+    # pre-install/pre-upgrade hook step — the Deployment is never created
+    # against an unmigrated schema. This is the contract Goal #11 spec
+    # section 6 locks: migration failure blocks rollout.
+  annotations:
+    # `pre-install,pre-upgrade` runs the Job before the Deployment is
+    # created (install) or rolled forward (upgrade). `hook-weight: "-10"`
+    # is well below the default 0 weight used by Deployment + Service +
+    # NetworkPolicy hooks (when those run as hooks; the chart's own
+    # resources are not hooks but Helm still creates them after weighted
+    # hook resources resolve). The negative weight is documentary — even
+    # at weight 0 the migration Job would precede the Deployment because
+    # only hooks weighted in this Job render at the pre-install phase.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    # `before-hook-creation` lets a fresh `helm upgrade` retry overwrite
+    # the previous Job. `hook-succeeded` GCs the Job once it exits 0 so a
+    # successful migration doesn't accumulate in the namespace.
+    # `hook-failed` is intentionally **not** in the list: when the Job
+    # fails the operator needs the Pod logs for forensic, and Helm leaves
+    # the Job in place. `helm uninstall` cleans it up at release-removal
+    # time.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  # `ttlSecondsAfterFinished` is a hard backstop on the Kubernetes side:
+  # even if the operator's `helm uninstall` is delayed (or the release is
+  # abandoned), the Job + its Pod log are garbage-collected after the
+  # configured window. Tune via `.Values.migrationJob.ttlSecondsAfterFinished`.
+  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
+  # `backoffLimit` retries on non-zero exit. Alembic migrations are
+  # idempotent (a partially-applied migration leaves the database in the
+  # same logical state it started in — Alembic's transactional wrapping
+  # rolls back the half-applied step). Default 3 catches transient
+  # network blips between the Job pod and PostgreSQL without masking a
+  # real schema mismatch.
+  backoffLimit: {{ .Values.migrationJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "meho.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      # `OnFailure` lets the Pod restart in-place on container failure
+      # (subject to `backoffLimit`), which is cheaper than re-scheduling
+      # the whole Pod for transient asyncpg connection errors.
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "meho.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          # Same image as the backplane Deployment — the migration runner
+          # (`python -m meho_backplane.db.migrate`) lives in the backplane
+          # wheel and shares the chassis's Alembic config / SQLAlchemy
+          # version. A separate migration image would drift; using the
+          # same image guarantees the migrations applied are exactly the
+          # ones the rolling-out Deployment expects.
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The runner takes no CLI flags by design — its contract is
+          # `alembic upgrade head` against the env-supplied DATABASE_URL.
+          # Partial upgrades are deliberately not exposed (the operator
+          # cannot accidentally pin to an intermediate revision).
+          command: ["python", "-m", "meho_backplane.db.migrate"]
+          envFrom:
+            # Reuse the backplane's ConfigMap so any Alembic-relevant
+            # env vars (pool sizes, timeouts) stay in lock-step. The
+            # runner ignores the FastAPI-only keys.
+            - configMapRef:
+                name: {{ include "meho.fullname" . }}-config
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.credentialsSecret }}
+                  key: url
+          resources:
+            {{- toYaml .Values.migrationJob.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            # Migrations don't write to the root FS, but the same libraries
+            # the backplane uses may touch /tmp on import; mounting it as
+            # emptyDir keeps readOnlyRootFilesystem: true valid.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

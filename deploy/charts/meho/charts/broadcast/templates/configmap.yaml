@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "broadcast.fullname" . }}-config
+  labels:
+    {{- include "broadcast.labels" . | nindent 4 }}
+data:
+  # Minimal Valkey config for the v0.1 ephemeral-streams workload.
+  #
+  # * `bind 0.0.0.0` — listen on the Pod IP only; access is gated by the
+  #   parent chart's NetworkPolicy (the broadcast podSelector + port-6379
+  #   egress rule). Cluster network is the only path into the pod.
+  # * `protected-mode no` — Valkey's protected-mode is a defense for
+  #   exposed-without-auth listeners running on a loopback. NetworkPolicy
+  #   gates ingress here, so disabling protected-mode is what allows the
+  #   bound port to accept connections from the backplane pod.
+  # * No `requirepass` — v0.1 single-tenant; auth is reserved for v0.2+ when
+  #   the broadcast feature actually carries cross-tenant streams.
+  # * No `save` lines / `appendonly no` — streams are ephemeral by design;
+  #   persistence is explicitly out of scope for v0.1.
+  # * `maxmemory-policy allkeys-lru` — caps memory growth without dropping
+  #   the entire stream history; tune via override when streams grow.
+  # * `dir /data` — points Valkey at the emptyDir-backed writable mount so
+  #   readOnlyRootFilesystem: true holds.
+  valkey.conf: |
+    bind 0.0.0.0
+    protected-mode no
+    port 6379
+    dir /data
+    save ""
+    appendonly no
+    maxmemory-policy allkeys-lru

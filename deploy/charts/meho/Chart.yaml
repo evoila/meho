@@ -31,3 +31,15 @@ keywords:
   - audit
   - kubernetes
   - backplane
+
+# The broadcast subchart lives in-tree at `charts/broadcast/` (ADR 0005:
+# custom Valkey 9.x chart, not Bitnami). `repository: ""` is the documented
+# Helm shape for an unpacked local subchart — no `helm dependency update`
+# is required, and no Chart.lock is produced. The `condition:` flag flips
+# the entire subchart off when an operator points the backplane at an
+# external Valkey/Redis endpoint instead (v0.2+ wiring).
+dependencies:
+  - name: broadcast
+    version: 0.1.0
+    repository: ""
+    condition: broadcast.enabled

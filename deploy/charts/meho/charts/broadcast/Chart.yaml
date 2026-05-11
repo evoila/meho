@@ -1,0 +1,31 @@
+apiVersion: v2
+name: broadcast
+description: |
+  Redis-protocol-compatible activity-broadcast store for the MEHO backplane.
+  Runs Valkey 9.x OSS — the BSD-3-Clause Linux Foundation fork of Redis 7.2.4
+  — as a single-replica Deployment with ephemeral streams. Subchart slug is
+  `broadcast` rather than `redis` because the protocol contract matters more
+  than the brand (ADR 0005). The Service name (`<release>-broadcast`) is the
+  endpoint the backplane connects to via `REDIS_URL`.
+
+# Subchart version is independent of the parent chart's calver. Bump on
+# breaking subchart-values changes; rev the patch level on image-tag bumps.
+type: application
+version: 0.1.0
+appVersion: "9.0"
+
+kubeVersion: ">=1.28.0-0"
+
+sources:
+  - https://github.com/evoila/meho
+  - https://github.com/valkey-io/valkey
+
+maintainers:
+  - name: evoila Group
+    url: https://github.com/evoila
+
+keywords:
+  - valkey
+  - redis
+  - broadcast
+  - streams

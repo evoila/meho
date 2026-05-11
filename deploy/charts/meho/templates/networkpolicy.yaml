@@ -48,16 +48,23 @@ spec:
       ports:
         - port: 443
           protocol: TCP
-    # Redis — in-cluster subchart (G2.5-T3) selected by the conventional
-    # Helm labels Bitnami's redis subchart sets.
+    {{- if .Values.broadcast.enabled }}
+    # Activity-broadcast subchart (`charts/broadcast/` — Valkey per ADR
+    # 0005). Selectors match the broadcast subchart's `_helpers.tpl`
+    # `broadcast.selectorLabels` exactly so this rule lines up with the
+    # Pods the subchart renders. Egress is conditional on
+    # `broadcast.enabled` — when the operator points at an external
+    # endpoint the rule disappears and no in-cluster port-6379 traffic
+    # is permitted.
     - to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: redis
+              app.kubernetes.io/name: broadcast
               app.kubernetes.io/instance: {{ .Release.Name }}
       ports:
-        - port: 6379
+        - port: {{ .Values.broadcast.service.port }}
           protocol: TCP
+    {{- end }}
     # DNS — UDP/53 to kube-dns / CoreDNS. Without this rule every other
     # egress rule above fails on name resolution. The selector matches the
     # standard `k8s-app: kube-dns` label CoreDNS ships with by default.

@@ -50,6 +50,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.credentialsSecret }}
                   key: url
+            {{- if .Values.broadcast.enabled }}
+            # REDIS_URL points the backplane at the in-cluster broadcast
+            # store. The activity-broadcast pillar's full implementation
+            # lands in v0.2 (Goal #11 scope: chassis-only in v0.1) but the
+            # env var is forward-prepared here so the backplane chassis
+            # discovers the endpoint as soon as the broadcast code uses
+            # it. ADR 0005 locks the wire-protocol-compatible store as
+            # Valkey 9.x; `redis-py` (locked driver) parses the
+            # `redis://` scheme unchanged.
+            - name: REDIS_URL
+              value: "redis://{{ .Release.Name }}-broadcast:{{ .Values.broadcast.service.port }}/0"
+            {{- end }}
             # Other operator-supplied secrets (Keycloak client secret, Vault
             # role bindings) come via ESO-synced Kubernetes Secrets; G2.6
             # wires the references when each surface lands.

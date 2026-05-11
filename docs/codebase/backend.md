@@ -35,8 +35,9 @@ this stage it exposes:
   `malformed_tenant_claim` / `unknown_tenant_role`) and surfaces as a
   401 with a matching `detail` token, so an operator chasing a
   Keycloak protocol-mapper bug can grep the JSON log line directly.
-  No protected routes are mounted yet; consumers land in G2.2-T3
-  (`/api/v1/health`).
+  No new protected routes are added in this task; consumers land in
+  G2.2-T3 (`/api/v1/health`) and existing authentication behavior
+  remains unchanged.
 * Vault forward-auth — the `vault_client_for_operator` async context
   manager performs a per-request JWT/OIDC login against Vault
   (`meho-mcp` role by default) using the operator's validated JWT,

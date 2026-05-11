@@ -256,6 +256,20 @@ jobs:
           echo "${GHCR_PASS}" | helm registry login ghcr.io \
             --username "${GHCR_USER}" --password-stdin
 
+      - name: Log in to GHCR (Docker config — for cosign sign)
+        # `helm registry login` above writes to ~/.config/helm/registry/config.json,
+        # which `cosign sign` does NOT read. cosign reads ~/.docker/config.json.
+        # Without this step the "Sign chart with cosign" step below fails with
+        #   UNAUTHORIZED: unauthenticated: User cannot be authenticated with the token provided
+        # even though the helm push above succeeds (helm uses its own auth file).
+        # Mirrors the working pattern in image.yml; same SHA so a single
+        # supply-chain audit covers both pipelines.
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Compute chart version (calver or tag)
         id: ver
         env:

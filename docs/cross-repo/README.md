@@ -22,6 +22,7 @@ prove the handshake works end-to-end.
 | --- | --- | --- |
 | [`rke2-infra-coordination.md`](./rke2-infra-coordination.md) | [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) | Per-PR ephemeral-cluster smoke + `repository_dispatch` deploy trigger; cluster auth (OIDC > kubeconfig); namespace-scoped RBAC for `meho-ci-*` |
 | [`targets-yaml.md`](./targets-yaml.md) | [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) | `targets.yaml` `rdc-meho` entry — schema, worked example, and health-probe contract for the consumer's connector chassis to manage MEHO as a target (Goal #11 DoD bullet 5) |
+| [`vault-provisioning.md`](./vault-provisioning.md) | [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) | Vault auth method + role + policy + KV mount + **federation-proof test KV path** (`secret/meho/test/federation`) the backplane reads on every authenticated `/api/v1/health` call. The fifth surface is the one most easily missed during provisioning — its absence breaks smoke leg #4 with a misleading "chain broken" diagnostic |
 
 The consumer-side ticket body the maintainer files when shipping
 the consumer-side half of Task #58 is drafted at

@@ -99,6 +99,61 @@
 
 set -Eeuo pipefail
 
+# --- Help text ---------------------------------------------------------
+# Self-contained --help output. Previously slurped from the script
+# header via `sed -n '2,75p'` — brittle to header edits (any new
+# comment row above line 75 would silently shift the slice and either
+# truncate help mid-flag or include unrelated boilerplate). The
+# heredoc form decouples the operator-facing surface from the script's
+# physical line numbering.
+usage() {
+    cat <<'HELP'
+install-verify.sh — producer-side cold-deploy acceptance verifier
+(Task #55, Goal #11 DoD bullet 1).
+
+Runs the assertions documented in docs/acceptance/install.md against
+a freshly-installed MEHO instance. Designed to be invoked as the LAST
+step of the consumer's install.sh. The verifier's exit code IS the
+cold-deploy's exit code:
+
+  0  every required check passed
+  1  at least one required check failed
+  2  CLI usage error (missing args, kubectl/curl/jq not found)
+
+Usage:
+  bash scripts/acceptance/install-verify.sh \
+    --host meho.evba.lab \
+    --expected-git-sha "$TAG" \
+    --namespace meho
+
+Flags:
+  --host <hostname>          Ingress hostname (default: meho.evba.lab).
+  --expected-git-sha <sha>   The git SHA the operator passed to
+                             install.sh --tag. Required.
+  --namespace <ns>           Kubernetes namespace (default: meho).
+  --release <name>           Helm release name (default: meho).
+  --cacert <path>            CA bundle for ingress TLS verify
+                             (default: system trust store).
+  --enforce-budget           Treat the 5-minute budget check as a hard
+                             failure. Also hard-fails when
+                             INSTALL_START_TS is unset or non-numeric.
+                             Goal #11 closing-criteria runs MUST pass
+                             this flag.
+  --skip-cluster-checks      Skip kubectl-side checks (#1, #2). HTTP
+                             probes still run.
+  -h | --help                Print this help and exit 0.
+
+Environment:
+  KUBECONFIG            Honoured by every kubectl invocation.
+  MEHO_ACCESS_TOKEN     Enables authenticated probes (#8, #9) when set.
+  INSTALL_START_TS      Unix epoch seconds (UTC), captured by
+                        install.sh as its first action. Required under
+                        --enforce-budget.
+
+See docs/acceptance/install.md for the full contract.
+HELP
+}
+
 # --- Defaults ----------------------------------------------------------
 HOST="meho.evba.lab"
 EXPECTED_GIT_SHA=""
@@ -134,12 +189,7 @@ while [[ $# -gt 0 ]]; do
             CACERT="$2"; shift 2 ;;
         --enforce-budget) ENFORCE_BUDGET=1; shift ;;
         --skip-cluster-checks) SKIP_CLUSTER_CHECKS=1; shift ;;
-        -h|--help)
-            # Re-print the script header (everything between the first
-            # `#!` line and the first blank-comment line). Stable
-            # operator-facing help text without duplicating the docs.
-            sed -n '2,75p' "$0" | sed 's/^# \{0,1\}//'
-            exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "install-verify.sh: unknown argument: $1" >&2; exit 2 ;;
     esac
 done

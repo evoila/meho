@@ -22,10 +22,11 @@
 # author date so two builds of the same tag at different wall-clock
 # times produce byte-identical tarballs.
 #
-# Cosign signing (G2.6-T5 / Issue #47) extends this config with a
-# `signs:` block; this Task ships build + publish only — the workflow
-# `permissions: id-token: write` is already declared to keep the signing
-# follow-up a single-line extension.
+# Cosign keyless signing (Issue #47, ADR 0006) attaches a sigstore
+# bundle to every release artefact via the `signs:` block below. The
+# workflow's `permissions: id-token: write` (declared in
+# .github/workflows/cli-release.yml) mints the GitHub Actions OIDC
+# token cosign exchanges at Fulcio for a ~10-minute x509 cert.
 
 version: 2
 
@@ -132,9 +133,77 @@ checksum:
   # Single combined checksums file rather than per-artefact .sha256
   # files — matches the conventions `gh`, `argocd`, `flux` all use.
   # Operators verify with `sha256sum -c SHA256SUMS` after downloading
-  # the tarball + the checksum file.
+  # the tarball + the checksum file. GoReleaser produces this BEFORE
+  # the `signs:` block runs, so SHA256SUMS lands inside the
+  # `artifacts: all` set the signer iterates — operators can
+  # verify-blob the checksums file then sha256sum -c against the
+  # tarballs (two-step trust chain).
   name_template: "SHA256SUMS"
   algorithm: sha256
+
+# Cosign keyless blob-signing (Issue #47, ADR 0006).
+#
+# GoReleaser runs this block AFTER `archives:` and `checksum:`, so the
+# `artifacts: all` glob includes the four tarballs + SHA256SUMS — every
+# operator-downloadable file gets a sigstore bundle. The bundle is a
+# single JSON document containing the signature, the Fulcio-issued
+# x509 cert, and the Rekor transparency-log inclusion proof, so the
+# operator verification command is a one-liner with no separate `.sig`
+# / `.cert` files to track.
+#
+# Identity claim format (locked by ADR 0006, mirrored at chart.yml /
+# image.yml):
+#
+#   ^https://github\.com/evoila/meho/\.github/workflows/cli-release\.yml@refs/tags/v.+$
+#
+# Operators paste this regex into `cosign verify-blob
+# --certificate-identity-regexp` along with the OIDC issuer
+# `https://token.actions.githubusercontent.com`; see cli/README.md and
+# the top-level README.md for the full verification recipe.
+#
+# Snapshot builds (`make release-dry-run`) skip signing — the
+# goreleaser-action invocation passes `--skip=sign` only on `release
+# --snapshot`, and on a real tag push (where OIDC and Fulcio are
+# reachable) signing is unconditional. We do NOT add `skip:` flags to
+# this block; the `--skip=sign` CLI flag is the documented mechanism
+# for snapshot-only suppression so the config stays declarative.
+signs:
+  - id: cosign
+    # `artifacts: all` is the broadest setting (vs. `archive` or
+    # `checksum`). It iterates every artefact GoReleaser produces in
+    # the v0.1 pipeline — the four tarballs + SHA256SUMS — so an
+    # operator can verify the checksum file's signature first, then
+    # `sha256sum -c SHA256SUMS` against any subset of tarballs they
+    # actually downloaded. The two-step trust chain is what
+    # supply-chain attestation tooling (chainloop, scribe, etc.)
+    # expects of a "fully signed release".
+    artifacts: all
+    cmd: cosign
+    # Sigstore bundle (single JSON file) instead of two separate
+    # `.sig` + `.cert` files. The bundle contains signature +
+    # certificate + Rekor transparency-log proof; `cosign verify-blob
+    # --bundle <file>` is mutually exclusive with the legacy
+    # `--signature` + `--certificate` flag pair (sigstore.dev cosign
+    # docs). flux and recent argocd releases attach bundles.
+    signature: "${artifact}.cosign.bundle"
+    args:
+      - sign-blob
+      # `--yes` bypasses the interactive prompt (CI runners have no
+      # TTY); equivalent of `COSIGN_YES=true` but keeps the
+      # confirmation visible at the argv level for auditability.
+      - --yes
+      # `--bundle <file>` writes the modern sigstore-bundle format.
+      # The `${signature}` template variable expands to the
+      # `signature:` value above (`<artifact>.cosign.bundle`).
+      - --bundle=${signature}
+      - ${artifact}
+    # `output: true` echoes cosign's stdout/stderr to the workflow log
+    # so an operator (or `gh run view`) can inspect the Fulcio cert's
+    # SAN identity and the Rekor log entry index after the fact. The
+    # noise budget is small — one cosign invocation per artefact, five
+    # total in v0.1. Pinned at v2.13+ of GoReleaser (cli/Makefile pins
+    # v2.15.4).
+    output: true
 
 snapshot:
   # `goreleaser release --snapshot` (used by `make release-dry-run`)

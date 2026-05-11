@@ -199,31 +199,50 @@ jobs:
         working-directory: cli
         run: go build ./...
 
-      - name: Ensure gcc is available (for cgo race runtime)
+      - name: Ensure C toolchain is available (for cgo race runtime)
         # `go test -race` links the cgo-based race runtime, which needs
-        # a working C compiler on PATH. The `meho-runners` self-hosted
-        # pool ships a minimal image without `gcc`, so the next step
-        # would fail with `cgo: C compiler "gcc" not found`. Install
-        # `gcc` only if it's not already present — the check keeps the
-        # step a no-op on runners that already have the toolchain (and
-        # avoids a needless apt round-trip on every CI run).
+        # a working C toolchain — both `gcc` (or any cc) AND libc
+        # development headers (`<stdlib.h>` etc.). The `meho-runners`
+        # self-hosted pool ships a minimal image without either, so
+        # the race test would fail with one of:
+        #   - `cgo: C compiler "gcc" not found` (no gcc), or
+        #   - `_cgo_export.c:3:10: fatal error: stdlib.h: No such file
+        #     or directory` (gcc installed, no libc6-dev — caught
+        #     after the first iteration of this PR's CI).
+        #
+        # Install both as a unit. We check `<stdlib.h>` (not just
+        # `gcc`) because a half-provisioned runner (gcc, no headers)
+        # is exactly the state the previous fix iteration produced.
+        # The probe compiles a one-liner via `cpp` so a future runner
+        # with a non-gcc cc (e.g. clang) still passes the check.
         #
         # `sudo -n` keeps the step fail-fast on a runner that doesn't
-        # grant passwordless sudo; that's a runner-pool config gap
+        # grant passwordless sudo — that's a runner-pool config gap
         # better surfaced loudly here than buried in a confusing
-        # `cgo: ...` error from `go test` itself. `DEBIAN_FRONTEND` and
-        # `--no-install-recommends` keep the install fast and minimal —
-        # only the bare `gcc` package, no editors/manpages/etc.
+        # later `cgo:` error. `--no-install-recommends` keeps the
+        # install fast and minimal: gcc + libc6-dev only, no
+        # editors/manpages/etc. The proper long-term fix is to bake
+        # the C toolchain into the meho-runners base image; until
+        # then this step keeps PR CI green without expanding the
+        # workflow's blast radius.
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          if ! command -v gcc >/dev/null 2>&1; then
-            echo "gcc not found on PATH; installing via apt..."
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
-            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc
-          else
-            echo "gcc already installed: $(gcc --version | head -1)"
+          have_cc=0
+          if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then
+            have_cc=1
           fi
+          have_headers=0
+          if echo '#include <stdlib.h>' | cpp -E - >/dev/null 2>&1; then
+            have_headers=1
+          fi
+          if [ "${have_cc}" = "1" ] && [ "${have_headers}" = "1" ]; then
+            echo "C toolchain ready: $(gcc --version 2>/dev/null | head -1 || cc --version | head -1)"
+            exit 0
+          fi
+          echo "C toolchain incomplete (cc=${have_cc} headers=${have_headers}); installing gcc + libc6-dev via apt..."
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc libc6-dev
 
       - name: Go test (race + coverage)
         # -race catches data races the CLI may hit when the

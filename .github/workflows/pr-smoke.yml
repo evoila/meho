@@ -92,6 +92,9 @@ on:
 
 permissions:
   contents: read         # checkout
+  packages: write        # push ghcr.io/evoila/meho:pr-<n>-<sha> via GITHUB_TOKEN
+                         # (same scope image.yml grants; without it, the
+                         # docker/build-push-action push step 403s every run)
   id-token: write        # OIDC token mint for Option A (rke2-infra trust)
   pull-requests: write   # post smoke-result comment
 
@@ -106,27 +109,29 @@ concurrency:
 jobs:
   smoke:
     name: Build, deploy to rke2-infra, smoke, teardown
-    # Two gates conjoined at the job level (secrets cannot be referenced in
-    # step-level `if:` reliably; promoting auth-presence to env at the job
-    # level is the documented GitHub Actions pattern). Order matters:
+    # Two gates conjoined at the job level. Order matters:
     #
     #   1. Fork-PR guard. `pull_request_target`'s `pull_request` payload
     #      carries `head.repo.full_name`; for fork PRs this !=
-    #      github.repository, so the OR short-circuits to false. Same as
+    #      github.repository, so the AND short-circuits to false. Same as
     #      ci.yml / image.yml / chart.yml — `meho-runners` is internal
     #      infrastructure and fork-PR code never executes on it.
     #
-    #   2. Consumer-side auth gate. The job runs only when at least one of
-    #      the consumer-provisioned secrets is set (surfaced via
-    #      env.HAS_OIDC_TRUST / env.HAS_KUBECONFIG below). While Task #53's
-    #      tracker is still all-pending neither secret is set and the
-    #      whole job is skipped — the workflow appears as `skipped` in
-    #      the PR's checks tab, not `failure`. Once the consumer rolls
-    #      out OIDC trust or the kubeconfig secret the gate flips on with
-    #      zero workflow edits.
+    #   2. Consumer-side enable knob. GitHub Actions does NOT expose the
+    #      `secrets` context to job-level `if:` (only `github`, `needs`,
+    #      `vars`, `inputs` are available — see
+    #      https://docs.github.com/en/actions/reference/contexts-reference).
+    #      So we cannot test `secrets.RDC_KUBECONFIG != ''` here; the
+    #      single repository-scoped variable `vars.RKE2_SMOKE_ENABLED` is
+    #      the documented gate. Maintainers flip the variable to `true`
+    #      after the consumer-side auth (Task #53) lands; until then the
+    #      job is `skipped`, not `failure`. The "Build kubeconfig" step
+    #      below still inspects `env.RKE2_CA_CERT` / `env.RDC_KUBECONFIG`
+    #      to pick the auth mode at step level (where `secrets.*` IS
+    #      legal, via the job-level `env:` indirection).
     if: |
       (github.event.pull_request.head.repo.full_name == github.repository) &&
-      (vars.RKE2_SMOKE_ENABLED == 'true' || secrets.RDC_KUBECONFIG != '' || secrets.RKE2_CA_CERT != '')
+      (vars.RKE2_SMOKE_ENABLED == 'true')
     runs-on: meho-runners
     environment: rke2-ci  # consumer-side env-scoped approval + secret store
     timeout-minutes: 12   # 8min smoke budget (Task #50 AC #5) + headroom for cold buildx cache
@@ -278,16 +283,26 @@ jobs:
             printf '%s' "$RDC_KUBECONFIG" | base64 -d > "$HOME/.kube/config"
             # Pin the default namespace on the existing context so
             # subsequent kubectl/helm commands target the ephemeral.
-            CTX="$(kubectl config current-context)"
-            kubectl config set-context "$CTX" --namespace="$NS"
+            # `--kubeconfig` is threaded explicitly (instead of relying
+            # on kubectl's $HOME/.kube/config default search) so the
+            # path is unambiguous in logs and survives any future
+            # KUBECONFIG-env-var change.
+            CTX="$(kubectl config current-context --kubeconfig="$HOME/.kube/config")"
+            kubectl config set-context "$CTX" \
+              --namespace="$NS" \
+              --kubeconfig="$HOME/.kube/config"
           else
             echo "::error title=Auth misconfigured::Neither OIDC (RKE2_CA_CERT + RKE2_API_SERVER) nor kubeconfig (RDC_KUBECONFIG) is provisioned. Job-level gate should have skipped this run — file a bug." >&2
             exit 1
           fi
+          # Restrict the bearer-token kubeconfig BEFORE any kubectl probe.
+          # `chmod` after the whoami call would leave the file at default
+          # umask during the probe — brief but real leak window on a
+          # shared self-hosted runner.
+          chmod 0600 "$HOME/.kube/config"
           # Sanity check: surface the identity rke2-infra sees in the
           # workflow log so an RBAC denial later is debuggable.
           kubectl auth whoami || kubectl get --raw='/api' >/dev/null
-          chmod 0600 "$HOME/.kube/config"
 
       - name: Create ephemeral namespace
         # Idempotent: `apply -f -` is the documented Helm-prereq pattern

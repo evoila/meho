@@ -777,10 +777,20 @@ The gate is:
 ```yaml
 if: |
   (github.event.pull_request.head.repo.full_name == github.repository) &&
-  (vars.RKE2_SMOKE_ENABLED == 'true'
-   || secrets.RDC_KUBECONFIG != ''
-   || secrets.RKE2_CA_CERT != '')
+  (vars.RKE2_SMOKE_ENABLED == 'true')
 ```
+
+GitHub Actions does **not** expose the `secrets` context to job-level
+`if:` expressions (only `github`, `needs`, `vars`, and `inputs` are
+available — see the
+[GitHub Actions contexts reference](https://docs.github.com/en/actions/reference/contexts-reference)).
+A clause like `secrets.RDC_KUBECONFIG != ''` therefore collapses to
+undefined at evaluation time and the gate silently breaks. The single
+repository-scoped `vars.RKE2_SMOKE_ENABLED` is the documented gate;
+maintainers flip it to `'true'` after the consumer-side auth (Task
+\#53) lands. The "Build kubeconfig" step still inspects
+`env.RKE2_CA_CERT` / `env.RDC_KUBECONFIG` to pick Option A vs Option B
+at step level (where the env indirection makes `secrets.*` legal).
 
 Two auth modes are supported, matching the cross-repo doc's Sections 1A
 and 1B:
@@ -792,16 +802,19 @@ and 1B:
 
 When both are set, Option A wins (the cross-repo doc's preference
 order: short-lived OIDC tokens vs. a long-lived stored kubeconfig).
-When neither is set, the job is skipped with no failure signal — the
-workflow's "skipped" status appears in the PR's checks tab so
-maintainers know the per-PR-smoke discipline is in degraded mode, but
-no PR is blocked on the unrolled-out consumer side.
+When neither is set, the "Build kubeconfig" step errors out — but
+the job-level `vars.RKE2_SMOKE_ENABLED` gate is the upstream guard
+that prevents that path from ever running while the consumer side
+is still unrolled-out.
 
-The repository-scoped `vars.RKE2_SMOKE_ENABLED == 'true'` clause is an
-**explicit enable knob** for maintainers: once the consumer side
-rolls out, set the variable to `true` and the gate flips on for every
-subsequent PR. Useful for the `5 consecutive green smokes` Goal #11
-window — flip the var, queue 5 PRs, count.
+The repository-scoped `vars.RKE2_SMOKE_ENABLED == 'true'` clause is the
+**single enable knob** for maintainers: once the consumer side rolls
+out and the secrets are provisioned, set the variable to `true` and
+the gate flips on for every subsequent PR. Useful for the `5
+consecutive green smokes` Goal #11 window — flip the var, queue 5 PRs,
+count. While the variable is unset (or `'false'`), the workflow is
+`skipped` at job level (not `failure`), so PRs are never blocked on
+the unrolled-out consumer side.
 
 ### Job structure
 

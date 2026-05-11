@@ -1,14 +1,62 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-# Placeholder CI workflow.
+# PR-level CI workflow — the central per-PR test harness for all three
+# in-tree toolchains.
 #
-# Until application code lands (Goals 3+), this workflow is a shell
-# that lints whatever exists and runs whatever tests exist, exiting
-# cleanly when the repo has no Python or no test invocation yet.
-# The shape is intentional: when code lands, the gates are already
-# wired (pinned action SHAs, minimum permissions, concurrency
-# cancellation, per-job timeouts).
+# Locked matrix (Goal #11 DoD bullet 4 — every PR runs lint + tests on
+# every toolchain that has source code in the repo):
+#
+#   python-lint-test  : ruff check + ruff format --check + mypy + pytest on backend/
+#   go-lint-test      : golangci-lint + go build + go test on cli/
+#   helm-lint-template: helm lint + helm template + kubeconform on deploy/charts/meho/
+#
+# Each job runs on its own meho-runners runner in parallel; total wall
+# clock for a green PR is well below the 10-minute Goal #11 budget
+# because the three jobs never block each other. Per-job
+# `timeout-minutes` caps a runaway gate at twice its observed cost.
+#
+# Out of scope (deliberately delegated to existing workflows; do not
+# duplicate here):
+#   * Backplane image build / push  -> .github/workflows/image.yml
+#     (builds without pushing on PRs that touch `backend/**` or
+#     `.github/workflows/image.yml` — path-filtered, see image.yml's
+#     `on.pull_request.paths`). PRs that don't touch backend skip the
+#     image build by design — the Dockerfile + dep-resolution gate only
+#     needs to run when its inputs change. Repeating the build here
+#     would double the cost for backend PRs and add zero signal for
+#     non-backend PRs.
+#   * Alembic backward-compat guard -> .github/workflows/migration-compat.yml
+#     (path-scoped to backend/alembic/versions/**, runs only when
+#     migrations change).
+#   * Chart publish / sign          -> .github/workflows/chart.yml
+#     (publish runs only on main + tag pushes; chart.yml's `validate`
+#     job runs on PRs too as a path-scoped gate. This workflow's
+#     helm job exercises the same lint+template+kubeconform pass
+#     unconditionally so a chart-touching regression also fails the
+#     central CI check operators see in branch protection.)
+#   * Dependency license scan       -> .github/workflows/dependency-license-check.yml
+#     (path-scoped to manifest changes).
+#   * Secret + supply-chain scans   -> secret-scan.yml + security-scan.yml.
+#
+# The workflow name is `CI` so it satisfies the `workflow_run:
+# workflows: ["CI"]` dependency in quality-gate.yml (SonarCloud's
+# Clean-as-You-Code gate). The Python job uploads `coverage.xml` as a
+# `python-coverage` artifact so the downstream SonarCloud scan can
+# ingest it — quality-gate.yml's `actions/download-artifact` step
+# references that exact name.
+#
+# Fail-loud posture (per Goal #11 + devops_best_practices "no
+# continue-on-error on linters or tests"): every step that asserts a
+# contract is allowed to fail the job. The only continue-on-error in
+# this file is on the coverage artifact upload — losing the artifact
+# does not invalidate the test result, and SonarCloud already guards
+# its own download with continue-on-error.
+#
+# All third-party actions pinned to immutable SHAs with the
+# human-readable tag in a trailing comment (devops_best_practices:
+# SHA-pin every action). Same SHAs as the publish workflows where the
+# action overlaps, so a single supply-chain audit covers all of CI.
 
 name: CI
 
@@ -22,39 +70,289 @@ permissions:
   contents: read
 
 concurrency:
+  # On push to main: one in-flight CI run per ref so a fast follow-up
+  # commit cancels its predecessor. On PRs: scoped per PR ref so an
+  # author force-push cancels its own prior CI run cleanly. Mirrors
+  # the pattern used by image.yml, chart.yml, and cli-release.yml.
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint-python:
-    name: Python lint (ruff)
+  python-lint-test:
+    name: Python (ruff + mypy + pytest)
+    # Fork-PR guard: never execute project code from a fork on the
+    # self-hosted runner pool. Mirrors image.yml + chart.yml's stance —
+    # `runs-on: meho-runners` is internal infra, so fork PRs skip
+    # entirely. Push events (main) short-circuit the OR via
+    # github.event_name != 'pull_request'. Job-level (not step-level)
+    # so no step ever starts on a fork PR.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners
-    timeout-minutes: 5
+    timeout-minutes: 10
+    defaults:
+      run:
+        # backend/ is the only Python project today; pyproject.toml
+        # and uv.lock both live here.
+        working-directory: backend
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
-        with:
-          python-version: "3.13"
-      - name: Install ruff
-        run: pip install ruff==0.9.6
-      - name: Ruff check
-        run: |
-          if find . -name '*.py' -not -path './.git/*' | grep -q .; then
-            ruff check .
-            ruff format --check .
-          else
-            echo "No Python files yet; skipping ruff."
-          fi
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-  placeholder-tests:
-    name: Tests
+      - name: Install uv
+        # uv is the project's canonical Python toolchain (pyproject.toml
+        # locks a uv.lock, not a requirements.txt). enable-cache: true
+        # opts into the action's built-in cache for the uv download
+        # cache directory, keyed by uv.lock — repeat installs on the
+        # same lockfile are near-instant. version unset -> latest, which
+        # is fine because uv ships a strict resolver and the lockfile
+        # pins every transitive dep.
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        # --locked refuses to update uv.lock; if pyproject.toml drifted
+        # from the lock, CI fails here rather than silently bumping
+        # deps. --all-groups pulls dev tools (ruff, mypy, pytest, etc.)
+        # declared in [dependency-groups.dev].
+        run: uv sync --locked --all-groups
+
+      - name: Ruff check (lint)
+        # ruff config lives in backend/pyproject.toml [tool.ruff.lint].
+        # Targets the src/ + tests/ trees the project ships.
+        run: uv run ruff check src/ tests/
+
+      - name: Ruff format --check
+        # Format gate — non-zero exit if any file would be reformatted.
+        # Authors run `uv run ruff format` locally before pushing.
+        run: uv run ruff format --check src/ tests/
+
+      - name: Mypy (strict)
+        # [tool.mypy] in pyproject.toml is `strict = true` against
+        # files = ["src"]. Per-dep ignores (authlib, hvac, requests)
+        # are already declared there.
+        run: uv run mypy src/
+
+      - name: Pytest (unit + coverage)
+        # -x exits on first failure (fast feedback on PR runs).
+        # --cov=meho_backplane emits a coverage report; --cov-report=xml
+        # produces coverage.xml in the working dir, which the next step
+        # uploads as the `python-coverage` artifact consumed by
+        # SonarCloud (quality-gate.yml). --cov-report=term echoes the
+        # summary into the workflow log.
+        run: uv run pytest -x --cov=meho_backplane --cov-report=xml --cov-report=term tests/
+
+      - name: Upload Python coverage artifact
+        # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).
+        # Lossy artifact: a missing upload (network, runner eviction)
+        # degrades the SonarCloud signal to "no coverage for this run"
+        # but never invalidates the test outcome. continue-on-error is
+        # appropriate ONLY for this step — every preceding linter /
+        # type check / test is fail-loud.
+        if: always() && hashFiles('backend/coverage.xml') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-coverage
+          path: backend/coverage.xml
+          retention-days: 7
+          if-no-files-found: warn
+
+  go-lint-test:
+    name: Go (golangci-lint + go test)
+    # Fork-PR guard mirrors the Python job — same rationale.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Placeholder
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Go
+        # Same version + cache shape as cli-release.yml so a single
+        # supply-chain audit covers both. cache-dependency-path keys
+        # the Go module cache off cli/go.sum, the only Go module in
+        # the tree today.
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version: '1.22'
+          cache-dependency-path: cli/go.sum
+
+      - name: golangci-lint
+        # v6 (NOT v7+ / v8+) because the in-tree cli/.golangci.yml is
+        # written in the golangci-lint v1 config schema (disable-all +
+        # explicit enable list, v1 linter names like `gosimple` /
+        # `errcheck`). golangci-lint-action v7.x+ defaults to the v2
+        # binary which rejects v1 configs. Pinning the binary to
+        # v1.64.8 keeps the existing config valid; a future migration
+        # to the v2 schema can flip both the action major and the
+        # binary version together.
+        uses: golangci/golangci-lint-action@8564da7cb3c6866ed1da648ca8f00a258ef0c802  # v6.5.2
+        with:
+          version: v1.64.8
+          working-directory: cli
+
+      - name: Go build
+        # Smoke build of every package — fails fast on a broken import
+        # graph or a typo before the test gate touches anything. cwd is
+        # cli/ so `./...` resolves to the CLI module's packages only.
+        working-directory: cli
+        run: go build ./...
+
+      - name: Ensure C toolchain is available (for cgo race runtime)
+        # `go test -race` links the cgo-based race runtime, which needs
+        # a working C toolchain — both `gcc` (or any cc) AND libc
+        # development headers (`<stdlib.h>` etc.). The `meho-runners`
+        # self-hosted pool ships a minimal image without either, so
+        # the race test would fail with one of:
+        #   - `cgo: C compiler "gcc" not found` (no gcc), or
+        #   - `_cgo_export.c:3:10: fatal error: stdlib.h: No such file
+        #     or directory` (gcc installed, no libc6-dev — caught
+        #     after the first iteration of this PR's CI).
+        #
+        # Install both as a unit. We check `<stdlib.h>` (not just
+        # `gcc`) because a half-provisioned runner (gcc, no headers)
+        # is exactly the state the previous fix iteration produced.
+        # The probe compiles a one-liner via `cpp` so a future runner
+        # with a non-gcc cc (e.g. clang) still passes the check.
+        #
+        # `sudo -n` keeps the step fail-fast on a runner that doesn't
+        # grant passwordless sudo — that's a runner-pool config gap
+        # better surfaced loudly here than buried in a confusing
+        # later `cgo:` error. `--no-install-recommends` keeps the
+        # install fast and minimal: gcc + libc6-dev only, no
+        # editors/manpages/etc. The proper long-term fix is to bake
+        # the C toolchain into the meho-runners base image; until
+        # then this step keeps PR CI green without expanding the
+        # workflow's blast radius.
+        if: runner.os == 'Linux'
         run: |
-          if [ -f pyproject.toml ] || [ -f package.json ]; then
-            echo "TODO: wire actual test invocation when code lands."
+          set -euo pipefail
+          have_cc=0
+          if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1; then
+            have_cc=1
           fi
-          echo "Placeholder: CI alive."
+          have_headers=0
+          if echo '#include <stdlib.h>' | cpp -E - >/dev/null 2>&1; then
+            have_headers=1
+          fi
+          if [ "${have_cc}" = "1" ] && [ "${have_headers}" = "1" ]; then
+            echo "C toolchain ready: $(gcc --version 2>/dev/null | head -1 || cc --version | head -1)"
+            exit 0
+          fi
+          echo "C toolchain incomplete (cc=${have_cc} headers=${have_headers}); installing gcc + libc6-dev via apt..."
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc libc6-dev
+
+      - name: Go test (race + coverage)
+        # -race catches data races the CLI may hit when the
+        # async-token-refresh code (internal/auth) is exercised from
+        # parallel tests. -cover keeps the per-package summary in the
+        # workflow log; we don't enforce a threshold v0.1.
+        #
+        # CGO_ENABLED=1 is required: `go test -race` is implemented in
+        # the cgo-based race runtime and refuses to run otherwise
+        # (`go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`).
+        # The `meho-runners` self-hosted pool defaults to CGO_ENABLED=0,
+        # so the flag must be set explicitly here. The preceding step
+        # ensures `gcc` is on PATH so the race runtime can actually
+        # link. Scoped to this step only — the build/lint steps work
+        # fine with cgo off and don't need the C toolchain dependency.
+        working-directory: cli
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -cover ./...
+
+  helm-lint-template:
+    name: Helm (lint + template + kubeconform)
+    # Fork-PR guard mirrors the other jobs.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Helm
+        # Same version pin as chart.yml's validate + publish jobs so
+        # the central CI check exercises the same Helm binary the
+        # publish pipeline uses. >=3.8 ships OCI helm push (irrelevant
+        # here — this job never pushes — but kept aligned).
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Install kubeconform
+        # kubeconform validates rendered manifests against Kubernetes
+        # JSON Schemas offline. Pin to v0.6.7 by SHA256 — same shape
+        # chart.yml uses (devops_best_practices: no `curl|sh` of
+        # unpinned binaries). Install to $HOME/.local/bin because the
+        # self-hosted meho-runners pool runs as a non-root user that
+        # cannot write to /usr/local/bin (regression caught in PR #173
+        # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
+        # the binary to subsequent steps without relying on the install
+        # step's frozen PATH.
+        run: |
+          set -euo pipefail
+          KC_VER=v0.6.7
+          KC_SHA=95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+          curl -fsSL -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KC_VER}/kubeconform-linux-amd64.tar.gz"
+          echo "${KC_SHA}  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp/ kubeconform
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 /tmp/kubeconform "${HOME}/.local/bin/kubeconform"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          "${HOME}/.local/bin/kubeconform" -v
+
+      - name: Helm lint
+        # The chart ships safe-by-default empty fields that
+        # values.schema.json rejects at lint time on purpose; the same
+        # override set chart.yml uses keeps the lint exercising the
+        # typed schema end-to-end. Any drift between the CI override
+        # set and chart.yml means one of the two is wrong — kept in
+        # sync intentionally.
+        run: |
+          helm lint deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24
+
+      - name: Helm template + kubeconform
+        # Render then validate. -strict rejects unknown fields;
+        # -kubernetes-version 1.28.0 matches the chart's kubeVersion
+        # floor (also matches chart.yml). CRDs (ExternalSecret etc.)
+        # are not validated upstream so -ignore-missing-schemas keeps
+        # the gate from failing on missing CRD schemas while still
+        # catching every core API drift.
+        run: |
+          helm template test deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+            > /tmp/rendered.yaml
+
+          kubeconform \
+            -strict \
+            -kubernetes-version 1.28.0 \
+            -ignore-missing-schemas \
+            -summary \
+            /tmp/rendered.yaml

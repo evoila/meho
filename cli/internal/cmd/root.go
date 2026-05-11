@@ -13,8 +13,9 @@ import "github.com/spf13/cobra"
 // produced by the executed subcommand. The caller is responsible for
 // translating that error into a process exit code; cobra has already
 // rendered the human-facing error message to stderr because the root
-// command is configured with SilenceUsage = false and the default
-// error-printing behaviour.
+// command is configured with SilenceUsage = true (suppress the usage
+// wall on RunE errors) and SilenceErrors = false (let cobra still
+// print the one-line error to stderr through its default printer).
 func Execute() error {
 	return newRootCmd().Execute()
 }
@@ -28,9 +29,10 @@ func newRootCmd() *cobra.Command {
 		Use:   "meho",
 		Short: "Operator CLI for the MEHO governance backplane",
 		Long: "meho is the operator-facing CLI for the MEHO governance " +
-			"backplane. v0.1 ships login, status, and version; further " +
-			"operations are discovered from the backplane at runtime " +
-			"(see Goal #11).",
+			"backplane. This scaffold (G2.6-T1) ships the version " +
+			"subcommand only; login and status arrive in subsequent " +
+			"G2.6 Tasks, after which further operations are discovered " +
+			"from the backplane at runtime (see Goal #11).",
 		// SilenceUsage stops cobra from dumping the full usage block
 		// when a RunE returns an error — operator-facing tooling
 		// should surface a one-line failure, not a wall of help text.

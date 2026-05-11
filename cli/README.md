@@ -2,9 +2,10 @@
 
 The operator-facing command-line client for the
 [MEHO governance backplane](../README.md). Single static Go binary,
-multi-platform; v0.1 ships three subcommands — `login`, `status`,
-`version` — with server-driven dynamic-discovery scaffolding for
-operations added post-Goal-2.
+multi-platform. This scaffold (G2.6-T1) ships only the `version`
+subcommand; `login` and `status` arrive in subsequent G2.6 Tasks,
+and post-Goal-2 operations are discovered from the backplane at
+runtime.
 
 This directory holds the Go module; the Python backplane lives at
 [`../backend/`](../backend/) and the Helm chart at

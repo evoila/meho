@@ -199,6 +199,32 @@ jobs:
         working-directory: cli
         run: go build ./...
 
+      - name: Ensure gcc is available (for cgo race runtime)
+        # `go test -race` links the cgo-based race runtime, which needs
+        # a working C compiler on PATH. The `meho-runners` self-hosted
+        # pool ships a minimal image without `gcc`, so the next step
+        # would fail with `cgo: C compiler "gcc" not found`. Install
+        # `gcc` only if it's not already present — the check keeps the
+        # step a no-op on runners that already have the toolchain (and
+        # avoids a needless apt round-trip on every CI run).
+        #
+        # `sudo -n` keeps the step fail-fast on a runner that doesn't
+        # grant passwordless sudo; that's a runner-pool config gap
+        # better surfaced loudly here than buried in a confusing
+        # `cgo: ...` error from `go test` itself. `DEBIAN_FRONTEND` and
+        # `--no-install-recommends` keep the install fast and minimal —
+        # only the bare `gcc` package, no editors/manpages/etc.
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if ! command -v gcc >/dev/null 2>&1; then
+            echo "gcc not found on PATH; installing via apt..."
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc
+          else
+            echo "gcc already installed: $(gcc --version | head -1)"
+          fi
+
       - name: Go test (race + coverage)
         # -race catches data races the CLI may hit when the
         # async-token-refresh code (internal/auth) is exercised from
@@ -209,9 +235,10 @@ jobs:
         # the cgo-based race runtime and refuses to run otherwise
         # (`go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`).
         # The `meho-runners` self-hosted pool defaults to CGO_ENABLED=0,
-        # so the flag must be set explicitly here. Scoped to this step
-        # only — the build/lint steps work fine with cgo off and don't
-        # need the C toolchain dependency.
+        # so the flag must be set explicitly here. The preceding step
+        # ensures `gcc` is on PATH so the race runtime can actually
+        # link. Scoped to this step only — the build/lint steps work
+        # fine with cgo off and don't need the C toolchain dependency.
         working-directory: cli
         env:
           CGO_ENABLED: '1'

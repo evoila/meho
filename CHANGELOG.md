@@ -131,6 +131,24 @@ shipped and why it matters — not a dump of commit subjects.
   is reachable, and wall-clock budget ≤ 300s (warn by default,
   hard-fail with `--enforce-budget`). Optional authenticated
   probes when `MEHO_ACCESS_TOKEN` is set. (#55)
+- **Helm-rollback acceptance contract:** producer-side specification
+  of Goal #11 DoD bullet 3 (`helm rollback meho` verified
+  end-to-end with a non-trivial schema diff) lives at
+  [`docs/acceptance/rollback.md`](./docs/acceptance/rollback.md).
+  Companion verifier
+  [`scripts/acceptance/rollback-verify.sh`](./scripts/acceptance/rollback-verify.sh)
+  asserts the cluster-level forward-compat property: after a
+  `helm upgrade` to N+1 with a non-trivial additive migration and
+  a `helm rollback` back to N, the running Pod is the N image, the
+  schema retains the N+1 columns (no down-migration ran), and the
+  public surface (`/healthz`, `/version`, `/api/v1/health`) serves
+  traffic correctly. Sample synthetic migration at
+  [`scripts/acceptance/synthetic-n-plus-1.sql`](./scripts/acceptance/synthetic-n-plus-1.sql)
+  lets the exercise reuse a documented N→N+1 change without
+  authoring a one-shot alembic migration. Complements the
+  unit-level forward-compat regression test at
+  [`backend/tests/test_migration_rollback.py`](./backend/tests/test_migration_rollback.py)
+  (Task #30) — two layers of forward-compat assurance. (#57)
 
 ### Changed
 

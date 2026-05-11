@@ -25,7 +25,8 @@
         "tag": {
           "type": "string",
           "minLength": 1,
-          "description": "Image tag. Empty fails the schema — Goal #11 deploy discipline requires every install to pin an immutable tag."
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+          "description": "Image tag. Empty fails the schema — Goal #11 deploy discipline requires every install to pin an immutable tag. The pattern matches the OCI tag grammar (`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`) so a forgotten `<REPLACE: ...>` placeholder from an example values file fails at install instead of producing an image reference Kubernetes rejects at Pod create."
         },
         "pullPolicy": {
           "type": "string",
@@ -395,6 +396,84 @@
           "items": { "type": "string", "minLength": 1 }
         }
       }
+    },
+    "eso": {
+      "type": "object",
+      "description": "Optional chart-side External Secrets Operator (ESO) resource rendering. The default `enabled: false` keeps the chart decoupled from the secret-sync mechanism — Goal #11's cross-repo convention is that the consumer's GitOps repo owns the ExternalSecret manifests. Flipping `enabled: true` renders ExternalSecret CRs for `postgres.credentialsSecret` and (when `eso.keycloak.enabled: true`) the Keycloak client secret, both referencing the named SecretStore. The chart never renders the SecretStore / ClusterSecretStore itself — the consumer installs ESO and creates the store before applying this chart. `eso.secretStore.name` and `eso.postgres.remoteKey` are allowed empty in the default-disabled mode; the conditional `allOf` below enforces non-empty values + the ESO API shape only when `eso.enabled: true`, so a misconfigured opt-in still fails at install time.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "secretStore": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Name of the existing SecretStore / ClusterSecretStore the rendered ExternalSecret references. Required (non-empty) when `eso.enabled: true`."
+            },
+            "kind": {
+              "type": "string",
+              "enum": ["SecretStore", "ClusterSecretStore"],
+              "description": "Kind of the referenced store. ClusterSecretStore is the typical choice on RKE2 clusters because the store lives once cluster-wide; SecretStore is namespace-scoped."
+            }
+          }
+        },
+        "refreshInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$",
+          "description": "ESO refresh interval (e.g. `1h`, `15m`). Defaults to `1h`."
+        },
+        "postgres": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "remoteKey": {
+              "type": "string",
+              "description": "Vault KV path that holds the DATABASE_URL value. Empty → the template derives it as `<vault.paths.kv>/postgres` at render time."
+            },
+            "remoteProperty": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Property within the remote KV entry that holds the DATABASE_URL string. Defaults to `url` to match the chart's Deployment env, which reads the synced Secret's `url` key."
+            }
+          }
+        },
+        "keycloak": {
+          "type": "object",
+          "description": "Optional ExternalSecret for the Keycloak client secret. v0.1 does not yet consume this Secret in the Deployment env — it is rendered so the consumer's CI can verify the sync end-to-end before the v0.2 Keycloak federation wiring lands. Target Secret name is `<release>-keycloak-client`, keyed `client_secret`.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "remoteProperty": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["secretStore"],
+            "properties": {
+              "secretStore": {
+                "required": ["name", "kind"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "networkPolicy": {
       "type": "object",

@@ -1,0 +1,177 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Example chart values for the RDC Hetzner dogfooding lab.
+#
+# The *actual* values-rdc.yaml is environment-private and lives in
+# `evoila-bosnia/claude-rdc-hetzner-dc/manifests/meho/values-rdc.yaml`
+# (per Goal #11 cross-repo deps). This file is a SANITIZED EXAMPLE
+# that other operators copy as a template: no real secrets, no real
+# CIDRs, and every site-specific field uses a `<REPLACE: ...>`
+# placeholder so a forgotten substitution fails values.schema.json
+# validation at `helm install` time instead of CrashLoopBackOff'ing
+# silently against the wrong system.
+#
+# See `deploy/values-examples/README.md` for the substitution recipe
+# and the External Secrets Operator (ESO) sync patterns the chart
+# expects the consumer to provision before install.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/evoila/meho
+  # MUST be set. Pin to an immutable tag: `sha-<40-char-git-sha>` from CI
+  # (preferred for production deploys) or `v<x.y.z>` for a tagged release.
+  # `:latest` and `:main` are forbidden by Goal #11 deploy discipline.
+  # install.sh injects this via `--set image.tag=...` so the example file
+  # leaves it as the schema's reject-empty trigger.
+  tag: "<REPLACE: sha-<40-char-git-sha> or v0.1.0>"
+  pullPolicy: IfNotPresent
+
+# RDC GHCR pulls are anonymous (public package). No pullSecret needed.
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  # The RDC lab uses ESO + Vault for secret sync, not workload-identity
+  # bindings, so the SA carries no IAM/IRSA annotations.
+  annotations: {}
+
+# Pod-level security context inherits from chart defaults (runAsNonRoot,
+# runAsUser: 1001, seccompProfile: RuntimeDefault). Overriding here is
+# rarely needed and would conflict with the chart's Dockerfile USER.
+
+service:
+  type: ClusterIP
+  port: 8000
+  portName: http
+
+ingress:
+  enabled: true
+  # rke2-infra ships ingress-nginx as the default IngressClass.
+  className: nginx
+  # RDC lab hostname. cert-manager (Cluster Issuer `letsencrypt-prod`)
+  # publishes the certificate; the Secret name below matches the one the
+  # Certificate resource projects.
+  host: meho.evba.lab
+  path: /
+  pathType: Prefix
+  # cert-manager-on-Ingress annotation: cert-manager watches Ingress
+  # objects and provisions the Certificate + Secret on first reconcile.
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: true
+    secretName: meho-tls
+
+probes:
+  liveness:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /ready
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# ConfigMap-sourced env vars. These mirror the vault/keycloak block below
+# (the backplane reads its config from the ConfigMap, not from Helm values
+# directly) so the two must stay in lockstep. The RDC lab realm name is a
+# placeholder — substitute before install.
+config:
+  keycloakIssuerUrl: "https://keycloak.evba.lab/realms/<REPLACE: realm-name>"
+  keycloakAudience: meho-backplane
+  keycloakJwksCacheTtlSeconds: "300"
+  keycloakJwtLeewaySeconds: "30"
+  vaultAddr: https://vault.evba.lab
+  vaultOidcRole: meho-mcp
+  vaultOidcMountPath: jwt
+  vaultTimeoutSeconds: "10.0"
+  databasePoolSize: "10"
+  databasePoolTimeout: "30.0"
+
+postgres:
+  # Cluster-internal Postgres on rke2-infra (per Goal #11 cross-repo deps).
+  host: postgres.evba.lab
+  port: 5432
+  database: meho
+  # K8s Secret holding DATABASE_URL at key `url`. The consumer's ESO
+  # ExternalSecret materialises this Secret from Vault path
+  # `secret/meho/postgres` — see deploy/values-examples/README.md for the
+  # ExternalSecret manifest.
+  credentialsSecret: meho-postgres
+
+vault:
+  address: https://vault.evba.lab
+  authMethod: oidc
+  # Provisioned by the consumer per Goal #11 cross-repo deps (Vault role
+  # bound to the Keycloak issuer configured above).
+  role: meho-mcp
+  paths:
+    kv: secret/meho
+
+keycloak:
+  # MUST be substituted: the realm segment is environment-specific.
+  issuer: "https://keycloak.evba.lab/realms/<REPLACE: realm-name>"
+  audience: meho-backplane
+  clientSecretSyncFromVault: secret/meho/keycloak/client_secret
+
+audit:
+  # v0.1: audit rows written to PostgreSQL only. The S3 / object-store
+  # mirror is v0.2 per Goal #11 scope.
+  postgresOnly: true
+
+broadcast:
+  # v0.1: chart-bundled Valkey 9.x subchart, single-replica, ephemeral
+  # streams (ADR 0005). Operators with an external managed Valkey/Redis
+  # flip this to `false` once the externalEndpoint opt-out lands in v0.2.
+  enabled: true
+  image:
+    repository: valkey/valkey
+    tag: "9.0-alpine"
+    pullPolicy: IfNotPresent
+  replicas: 1
+
+connectors:
+  # v0.1 ships the chassis only — no connectors enabled by default.
+  # The connector surface lands post-Goal-2 with the first product ticket.
+  enabled: []
+
+networkPolicy:
+  enabled: true
+  # rke2-infra labels the controller namespace `ingress-nginx`.
+  ingressControllerNamespace: ingress-nginx
+  # MUST be substituted: site-specific CIDRs. The schema's IPv4-CIDR
+  # pattern rejects `<REPLACE: ...>` literals so a forgotten substitution
+  # fails-loud at `helm install` time. Recover the actual CIDRs from
+  # `kubectl get endpoints <svc> -n <ns> -o yaml` against the rke2-infra
+  # PG / vault.evba.lab / keycloak.evba.lab services.
+  postgresCIDR: "<REPLACE: rke2-infra Postgres CIDR, e.g. 10.0.1.0/24>"
+  vaultCIDR: "<REPLACE: vault.evba.lab CIDR, e.g. 10.0.2.0/24>"
+  keycloakCIDR: "<REPLACE: keycloak.evba.lab CIDR, e.g. 10.0.3.0/24>"
+
+# Optional chart-side ExternalSecret rendering. Default `false` — the
+# RDC lab convention (per Goal #11 cross-repo deps) is that the
+# consumer's GitOps repo owns the ExternalSecret manifests so that the
+# chart stays decoupled from the secret-sync mechanism. Flip to `true`
+# only if you want the chart to render ExternalSecret resources for
+# `postgres.credentialsSecret` and `keycloak.clientSecretSyncFromVault`
+# itself; see deploy/values-examples/README.md for the contract.
+eso:
+  enabled: false

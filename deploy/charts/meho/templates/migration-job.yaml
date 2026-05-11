@@ -4,6 +4,13 @@ metadata:
   name: {{ include "meho.fullname" . }}-migrate
   labels:
     {{- include "meho.labels" . | nindent 4 }}
+    # `component: migrate` on the Job's own metadata (in addition to the
+    # Pod template at spec.template.metadata.labels) lets the acceptance
+    # verifier locate the Job via a release-name-agnostic label selector
+    # (`-l app.kubernetes.io/component=migrate,app.kubernetes.io/instance=$RELEASE`).
+    # Without this label here, the selector would only match the Pod, not
+    # the Job — and the verifier asserts the Job's `.status.succeeded`.
+    app.kubernetes.io/component: migrate
     # The chassis-stage migration runner exits 0 on success / 1 on any
     # Alembic failure (`backend/src/meho_backplane/db/migrate.py`). When the
     # Job exhausts `backoffLimit` retries, Helm fails the release at the

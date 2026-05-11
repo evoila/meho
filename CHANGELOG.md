@@ -117,6 +117,20 @@ shipped and why it matters — not a dump of commit subjects.
   coordination flow, and DCO sign-off discipline. This CHANGELOG
   reframed as project-wide (image + chart + CLI under one
   document). (#60)
+- **Cold-deploy acceptance contract:** producer-side specification
+  of Goal #11 DoD bullet 1 (`install.sh` cold-deploy → working
+  MEHO at meho.evba.lab in <5 min) lives at
+  [`docs/acceptance/install.md`](./docs/acceptance/install.md).
+  Companion verifier
+  [`scripts/acceptance/install-verify.sh`](./scripts/acceptance/install-verify.sh)
+  is invoked as the last step of the consumer's `install.sh` on
+  `claude-rdc-hetzner-dc`; its exit code is the cold-deploy's exit
+  code. Asserts deployment Ready, migration Job succeeded,
+  `/healthz` 200, `/version` reports the deployed git SHA,
+  `/api/v1/health` unauthenticated returns 401, audit middleware
+  is reachable, and wall-clock budget ≤ 300s (warn by default,
+  hard-fail with `--enforce-budget`). Optional authenticated
+  probes when `MEHO_ACCESS_TOKEN` is set. (#55)
 
 ### Changed
 

@@ -284,7 +284,20 @@ if [[ "$SKIP_CLUSTER_CHECKS" -ne 1 ]]; then
         # status as the equivalent positive signal. The helm release
         # only flips to `deployed` when every pre-install/pre-upgrade
         # hook including the migration Job exited 0.
-        if command -v helm >/dev/null 2>&1; then
+        #
+        # `helm` is a hard requirement on the verifier's PATH: there
+        # is no alternative signal that distinguishes "Job ran
+        # successfully and was GC'd" from "Job never ran". A WARN here
+        # would let check #2 pass without proof, which is the same
+        # silent-success failure mode B2 closes for the timing check.
+        # If the operator is running the verifier from a workstation
+        # without helm, they must rerun with --skip-cluster-checks
+        # (the HTTP probes still catch a misdeployed backplane), but
+        # check #2 is GONE in that mode by design.
+        if ! command -v helm >/dev/null 2>&1; then
+            check_fail "cannot confirm migration Job succeeded" \
+                "Job not present and 'helm' not on PATH for release-status fallback; install 'helm' on the verifier host"
+        else
             helm_status="$(helm status -n "$NAMESPACE" "$RELEASE" -o json 2>/dev/null \
                 | jq -r '.info.status // "unknown"' 2>/dev/null || echo "unknown")"
             if [[ "$helm_status" == "deployed" ]]; then
@@ -293,9 +306,6 @@ if [[ "$SKIP_CLUSTER_CHECKS" -ne 1 ]]; then
                 check_fail "cannot confirm migration Job succeeded" \
                     "Job not present and helm release status='$helm_status' (expected 'deployed')"
             fi
-        else
-            check_warn "helm not on PATH; migration Job already GC'd" \
-                "install 'helm' to assert release status as the fallback signal"
         fi
     fi
 fi

@@ -34,8 +34,14 @@ image:
 # no secret; the list is empty by default.
 imagePullSecrets: []
 
-# -- Override `<chart-name>` portion of resource names.
-nameOverride: ""
+# -- Override `<chart-name>` portion of resource names. Defaults to `meho` so
+# every rendered resource carries `app.kubernetes.io/name: meho` regardless
+# of the chart's OCI artefact name (`meho-chart` per Chart.yaml). NetworkPolicy
+# pod selectors, ServiceMonitor matchLabels, and any consumer-side label
+# selectors that target this release continue to use
+# `app.kubernetes.io/name=meho`. Override only when running two MEHO releases
+# in the same namespace and they need distinct selector labels.
+nameOverride: "meho"
 # -- Override the full resource name (`<release-name>-<chart-name>`).
 fullnameOverride: ""
 

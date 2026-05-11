@@ -1,12 +1,20 @@
 apiVersion: v2
-name: meho
+# `name` is the OCI artefact basename — `helm push` derives the published
+# package path (`ghcr.io/evoila/meho-chart`) from this field. We keep it as
+# `meho-chart` permanently so the GHCR package stays distinct from the
+# backplane image package at `ghcr.io/evoila/meho` (Task #33). To preserve
+# the existing resource-label invariant (`app.kubernetes.io/name: meho`)
+# the umbrella sets `nameOverride: meho` in values.yaml; the chart name
+# rename is purely a publish-coordinate concern.
+name: meho-chart
 description: Governance backplane for AI agents acting on infrastructure
 type: application
 
-# version is the *chart* version (calver-bumped by G2.5-T5 CI: 0.1.YYYYMMDD-<sha>).
-# appVersion is the *application* version — overridden by G2.5-T5 CI to the git
-# sha being deployed. Both values are placeholders here; the publish workflow
-# rewrites them at OCI push time.
+# version is the *chart* version (calver-bumped by .github/workflows/chart.yml:
+# 0.1.YYYYMMDD-<short-sha> on main pushes, plain semver on v* tag pushes).
+# appVersion is the *application* version — overridden by the same workflow
+# to the git sha being deployed. Both values are placeholders here; the
+# publish workflow rewrites them at OCI push time.
 version: 0.1.0
 appVersion: "0.1.0"
 

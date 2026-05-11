@@ -57,16 +57,27 @@ deploy/charts/meho/
 ### `Chart.yaml`
 
 - `apiVersion: v2` — required for Helm 3 / 4.
-- `version` is the **chart** version (calver-bumped by the publish workflow
-  in G2.5-T5 to `0.1.YYYYMMDD-<sha>`); `appVersion` is the **application**
-  version, overridden by the same workflow to the git sha being deployed.
-  The values shipped in `Chart.yaml` are placeholders — they exist only so
-  `helm lint` / `helm template` succeed on a fresh checkout.
+- `name: meho-chart` is the **OCI artefact basename**. `helm push` derives
+  the published package path (`ghcr.io/evoila/meho-chart`) from this field.
+  The chart is named `meho-chart` rather than `meho` so the GHCR package
+  stays distinct from the backplane image package at `ghcr.io/evoila/meho`
+  — visibility, retention, and signing identities are managed
+  independently on each package. To preserve the existing resource-label
+  invariant (`app.kubernetes.io/name: meho`) the chart sets
+  `nameOverride: meho` in `values.yaml`; the rename is purely a publish-
+  coordinate concern.
+- `version` is the **chart** version (calver-bumped by
+  `.github/workflows/chart.yml` to `0.1.YYYYMMDD-<short-sha>` on main
+  pushes, plain semver on `v*` tag pushes); `appVersion` is the
+  **application** version, overridden by the same workflow to the git sha
+  being deployed. The values shipped in `Chart.yaml` are placeholders —
+  they exist only so `helm lint` / `helm template` succeed on a fresh
+  checkout.
 - `kubeVersion: ">=1.28.0-0"` — matches Goal #11's RKE2 target. The
   manifests use only API versions that have been stable since 1.19; the
   floor is set higher than strictly required to align with the test bed.
 - `sources` + `maintainers` + `keywords` follow Artifact Hub norms for
-  discoverability after the OCI publish workflow lands.
+  discoverability now that the OCI publish workflow has landed.
 
 ### Image reference
 
@@ -339,8 +350,8 @@ Three properties make this the right contract:
    `at '/broadcast': additional properties 'global' not allowed`.
 
 `helm lint` against the unmodified `values.yaml` **deliberately fails**
-with the safe-by-default empty fields. The chart's CI / lint workflow
-(G2.5-T5) and
+with the safe-by-default empty fields. The chart's `validate` job in
+[`.github/workflows/chart.yml`](../../.github/workflows/chart.yml) and
 [`deploy/values-examples/values-rdc-example.yaml`](../../deploy/values-examples/values-rdc-example.yaml)
 both supply the required overrides; ad-hoc lint invocations pass them via
 `--set` or `-f`.
@@ -485,6 +496,91 @@ helm template test deploy/charts/meho/ 2>&1 | grep -E "minLength|valid"
 helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "additional properties"
 ```
 
+## Publish workflow (`.github/workflows/chart.yml`)
+
+The chart is packaged, pushed to OCI, and cosign-signed by
+`.github/workflows/chart.yml`. The workflow targets `meho-runners` (the
+project's self-hosted runner pool, per #160 + #167) and shares the
+hardening conventions of `image.yml` (Task #33): job-level fork-PR guard,
+SHA-pinned actions with `# vX.Y.Z` comments, minimum `permissions:` block
+(`contents: read`, `packages: write`, `id-token: write`), per-job
+`timeout-minutes`, and a `concurrency:` group that cancels stale runs per
+ref.
+
+### Triggers and locked publish behaviour
+
+| Trigger | Jobs run | Side effects |
+| --- | --- | --- |
+| `pull_request` against `main` (same-repo PRs only) | `validate` | Lint + render + kubeconform; no push, no sign |
+| `push` to `main` (chart paths) | `validate` -> `publish` -> `verify-anonymous-pull` | Push at calver `0.1.YYYYMMDD-<short-sha>`, cosign-sign, anonymous-pull check |
+| `push` of a `v*` tag | `validate` -> `publish` -> `verify-anonymous-pull` | Push at plain semver `<x.y.z>` (leading `v` stripped), cosign-sign, anonymous-pull check |
+| Fork PR | (skipped at job level) | None — `head.repo.full_name != github.repository` short-circuits |
+
+The `push:` block intentionally has no `paths:` filter — path filtering
+applies to both branch and tag pushes when set, which would silently skip
+a `v*` tag annotating a non-chart commit. Releases always publish; the
+cost of an occasional chart re-publish on a non-chart main push is
+negligible.
+
+### Version stamping
+
+Inline Python (with the standard-library + PyYAML on the runner) reads
+`Chart.yaml`, rewrites `version` and `appVersion` in place, and re-dumps
+the file before `helm package` runs. The chart's `name` field stays
+`meho-chart` (set permanently in-tree); only `version` and `appVersion`
+are workflow-stamped. The post-stamp `cat` of `Chart.yaml` lands in the
+workflow log so operators can confirm the published metadata.
+
+### OCI push and signing
+
+`helm push <tgz> oci://ghcr.io/evoila` lands the artefact at
+`ghcr.io/evoila/meho-chart:<version>` because Helm derives the basename
+from `Chart.yaml`'s `name` field. The push step parses the `Digest:
+sha256:...` line from Helm's stdout and exposes it as a step output;
+`cosign sign --yes "ghcr.io/evoila/meho-chart@<digest>"` then signs the
+chart by digest under the same keyless OIDC identity as the image — the
+operator-facing verification command shape is identical between the two
+packages (one workflow file path differs from the other, matched by the
+`--certificate-identity-regexp`).
+
+### Anonymous-pull verification (Goal #11 DoD)
+
+A dedicated `verify-anonymous-pull` job runs after `publish` on main / tag
+pushes. It installs Helm in a fresh job context and intentionally does
+**not** call `helm registry login`. The job also scrubs any stale
+`HELM_REGISTRY_CONFIG` left over from a prior run on the same self-hosted
+runner. `helm pull oci://ghcr.io/evoila/meho-chart --version <ver>` from
+that scrubbed environment can only succeed if the GHCR package is public
+— a successful pull is the DoD signal.
+
+### First-time public-package step
+
+GHCR creates a new package PRIVATE by default. The first time
+`chart.yml` pushes to `ghcr.io/evoila/meho-chart`, the
+`verify-anonymous-pull` job will fail with `unauthorized` until a
+maintainer flips visibility to public **once**:
+
+```bash
+gh api --method PATCH /orgs/evoila/packages/container/meho-chart \
+  -f visibility=public
+```
+
+(Or via the GHCR UI: org -> Packages -> meho-chart -> Package settings ->
+Change visibility -> Public.) The workflow itself cannot do this safely
+from CI — visibility is org-scoped and changing it from a workflow would
+require a PAT with org-admin scope, which the `GITHUB_TOKEN` lacks. The
+image package at `ghcr.io/evoila/meho` had the same one-time gate
+documented in `image.yml`'s header comment.
+
+### Verification commands (operator copy-paste)
+
+The published-chart's verification commands live in
+[`backend/README.md`](../../backend/README.md) (sections "Verifying chart
+signatures" and "Pulling the chart anonymously"), alongside the image's
+equivalent commands so an operator learns one verification pattern for
+both artefacts. The workflow itself also emits the verification block
+into `GITHUB_STEP_SUMMARY` on every successful publish.
+
 ## Dependencies
 
 - Image — `ghcr.io/evoila/meho:<tag>` from G2.4 (#31). Multi-arch
@@ -505,8 +601,6 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "addition
 
 ## Known gaps (filled by sibling tasks)
 
-- OCI publish to `ghcr.io/evoila/meho-chart` + cosign signing — G2.5-T5
-  (#41).
 - HPA / PDB / topologySpreadConstraints / ServiceMonitor / PrometheusRule
   — deferred to v0.2. v0.1 is single-replica per Goal #11 scope.
 - Broadcast subchart HA (Sentinel/Cluster), persistence, auth —

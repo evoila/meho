@@ -1,0 +1,423 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Helm chart package + OCI publish + cosign-sign pipeline.
+#
+# Locked artefact location (Goal #11 — chart contract section 2):
+#   oci://ghcr.io/evoila/meho-chart          (public OCI Helm chart)
+#
+# Tag scheme:
+#   pull_request -> main : lint + template + kubeconform; NO push (validation gate).
+#   push to main         : push :0.1.<YYYYMMDD>-<short-sha>   (calver, immutable).
+#   push tag v*          : push :<x.y.z>                       (semver, immutable).
+#
+# The artefact name `meho-chart` (not `meho`) is derived from the chart's
+# `name` field in deploy/charts/meho/Chart.yaml. The umbrella sets
+# `nameOverride: meho` in values.yaml so rendered resources retain
+# `app.kubernetes.io/name: meho` — the rename is purely a publish-coordinate
+# concern. The image package at ghcr.io/evoila/meho (Task #33) and the chart
+# package at ghcr.io/evoila/meho-chart are intentionally distinct GHCR
+# packages so visibility, retention, and signing identities can be managed
+# independently.
+#
+# Cosign keyless signing (ADR 0006, Task #34 precedent):
+#   - id-token: write at workflow level lets the runner mint a GitHub Actions
+#     OIDC token. cosign exchanges it at Fulcio for a ~10-minute x509 cert,
+#     signs the chart's OCI manifest digest, and uploads {signature,
+#     certificate} to the public Rekor transparency log.
+#   - The signature binds to the digest, so every tag alias of the same
+#     digest is covered by one `cosign sign` invocation.
+#   - The certificate identity an operator verifies against is the workflow
+#     file path + ref pattern:
+#       https://github.com/evoila/meho/.github/workflows/chart.yml@<ref>
+#     where <ref> is `refs/heads/main` for main pushes or `refs/tags/v*` for
+#     tag pushes. Operator copy-paste verification lives in backend/README.md.
+#
+# Anonymous-pull verification (Goal #11 DoD):
+#   A separate `verify` job runs after `publish` on main/tag pushes only.
+#   It uses azure/setup-helm in a clean environment and intentionally does
+#   NOT call `helm registry login`, so a successful
+#   `helm pull oci://ghcr.io/evoila/meho-chart --version <ver>` proves the
+#   package is reachable without GHCR credentials. The first time the chart
+#   is pushed the GHCR package is created PRIVATE by default; a maintainer
+#   must flip visibility to public ONCE via
+#     gh api --method PATCH /orgs/evoila/packages/container/meho-chart \
+#       -f visibility=public
+#   (or the GHCR UI). README.md documents the one-time step. Until the flip,
+#   the verify job will fail with `unauthorized` — that is the intended fail-
+#   closed signal, not a workflow bug.
+
+name: chart
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/charts/meho/**'
+      - '.github/workflows/chart.yml'
+  push:
+    # No `paths:` filter here. Path filtering applies to BOTH branch and tag
+    # pushes when set, which would cause a v* tag annotating a non-chart
+    # commit on main to skip the chart publish. Releases must always publish;
+    # mirrors the same decision documented in image.yml.
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  # `packages: write` (GHCR push) and `id-token: write` (cosign OIDC) are
+  # granted per-job on `publish` only. validate and verify-anonymous-pull
+  # inherit the workflow-default `contents: read` with no elevation, which
+  # satisfies SonarCloud githubactions:S8233/S8264 (least-privilege per job)
+  # and CodeRabbit's same finding. See the `publish` job below.
+
+concurrency:
+  # On main/tag pushes: keep one in-flight publish per ref so a fast follow-up
+  # commit cancels its predecessor. On PRs: scoped by PR ref the same way.
+  group: chart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Lint + template + kubeconform (PR build gate)
+    # Fork-PR guard: never execute chart logic from a fork on the self-hosted
+    # runner pool. Mirrors image.yml's stance — `runs-on` is internal infra,
+    # so fork PRs are skipped entirely. push events (main, v*) short-circuit
+    # the OR.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v3.16.4  # pin at execution time; >=3.8 ships OCI helm push
+
+      - name: Install kubeconform
+        # kubeconform validates rendered manifests against Kubernetes JSON
+        # Schemas (offline; no API server needed). Pinned to v0.6.7 by SHA256
+        # to match devops_best_practices.md's no-`curl|sh`-unpinned rule.
+        # The shasum line is the upstream-published checksum for the
+        # linux-amd64 tarball of v0.6.7.
+        #
+        # Install target is `$HOME/.local/bin` — a runner-owned directory —
+        # rather than `/usr/local/bin`, because the self-hosted `meho-runners`
+        # pool runs as a non-root user that cannot write to system paths
+        # (writing /usr/local/bin returned `Permission denied` in CI run
+        # 25644668781). Appending the directory to `$GITHUB_PATH` is the
+        # documented GitHub Actions mechanism for surfacing the binary to
+        # *subsequent* steps' PATH; within this step we invoke kubeconform
+        # by its full path for the smoke check so the verification doesn't
+        # depend on PATH propagation that hasn't happened yet.
+        run: |
+          set -euo pipefail
+          KC_VER=v0.6.7
+          KC_SHA=95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73
+          curl -fsSL -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KC_VER}/kubeconform-linux-amd64.tar.gz"
+          echo "${KC_SHA}  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp/ kubeconform
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 /tmp/kubeconform "${HOME}/.local/bin/kubeconform"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          # Smoke test the freshly installed binary. PATH for *this* step
+          # was frozen before $GITHUB_PATH was appended above, so call by
+          # the absolute path; subsequent steps pick it up via PATH.
+          "${HOME}/.local/bin/kubeconform" -v
+
+      - name: Verify kubeconform on PATH for subsequent steps
+        # Independent of the install step's own shell. By the time this
+        # step starts, the runner has merged `$GITHUB_PATH` into PATH, so
+        # `kubeconform` must resolve via plain command lookup. Failure here
+        # means the install step "succeeded" but downstream steps would
+        # still hit `kubeconform: command not found` — the exact regression
+        # B1 is meant to prevent. This is the authoritative end-to-end
+        # check that the self-hosted runner fix works.
+        run: |
+          set -euo pipefail
+          which kubeconform
+          kubeconform -v
+
+      - name: Helm lint
+        # The chart ships safe-by-default empty fields that values.schema.json
+        # rejects at lint time on purpose; we pass the same overrides
+        # docs/codebase/devops.md uses in its Verification block so the lint
+        # exercises the typed-schema contract end-to-end.
+        run: |
+          helm lint deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24
+
+      - name: Helm template + kubeconform
+        # Render the chart with the same override set, then validate every
+        # manifest against upstream Kubernetes JSON Schemas. The schemas
+        # source is the community-maintained
+        # https://github.com/yannh/kubernetes-json-schema mirror — same
+        # source kubeconform defaults to. `--strict` rejects unknown fields;
+        # `--kubernetes-version 1.28.0` matches Chart.yaml's kubeVersion
+        # floor. CRDs (ExternalSecret) are not validated upstream so we add
+        # `--schema-location` pointing at the ESO repo's published schema
+        # mirror, falling back to `ignore_missing_schemas` for any CRD
+        # without a hosted schema.
+        run: |
+          helm template test deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+            > /tmp/rendered.yaml
+
+          kubeconform \
+            -strict \
+            -kubernetes-version 1.28.0 \
+            -ignore-missing-schemas \
+            -summary \
+            /tmp/rendered.yaml
+
+  publish:
+    name: Package + push + sign chart
+    # Skip on pull_request entirely — PRs don't push. The same fork-PR guard
+    # would never fire here because the trigger above already filters PRs,
+    # but the explicit `if` makes intent visible.
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: meho-runners
+    timeout-minutes: 15
+    permissions:
+      # Per-job scope: only `publish` needs to push to GHCR and mint an OIDC
+      # token for cosign keyless signing. validate (lint+kubeconform) and
+      # verify-anonymous-pull (anonymous helm pull) get neither.
+      contents: read
+      packages: write       # push to ghcr.io/evoila/meho-chart
+      id-token: write       # cosign keyless OIDC (ADR 0006)
+    outputs:
+      chart_version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # short-sha derivation needs at least the HEAD commit; default
+          # fetch-depth: 1 is sufficient because we only ever read HEAD.
+          fetch-depth: 1
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Install cosign
+        # Pinned to cosign-installer v4.1.2 (ships cosign v3.0.6 by default).
+        # v4.x dropped pre-2.0 cosign support; v3.x of cosign has
+        # keyless-by-default semantics — no COSIGN_EXPERIMENTAL=1 needed.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Log in to GHCR (Helm registry)
+        # GITHUB_TOKEN is piped via stdin so the secret never lands in
+        # `ps`/process listings (devops_best_practices: "No secrets in logs").
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_PASS: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${GHCR_PASS}" | helm registry login ghcr.io \
+            --username "${GHCR_USER}" --password-stdin
+
+      - name: Compute chart version (calver or tag)
+        id: ver
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${REF}" == refs/tags/v* ]]; then
+            # v* tag push: strip the leading `v` so the chart version is plain
+            # semver (Helm rejects a leading-v in Chart.yaml's version field).
+            VERSION="${REF#refs/tags/v}"
+          else
+            # main branch push: calver = 0.1.<YYYYMMDD>-<short-sha>. Sortable,
+            # immutable per commit, no ambiguity with semver-tagged releases.
+            DATE="$(date -u +%Y%m%d)"
+            SHA="$(git rev-parse --short HEAD)"
+            VERSION="0.1.${DATE}-${SHA}"
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Chart version: ${VERSION}"
+
+      - name: Stamp Chart.yaml with version + appVersion
+        # `helm package` reads `name`, `version`, and `appVersion` from
+        # Chart.yaml. We rewrite version (chart calver) and appVersion (git
+        # sha — the deployable image tag) in place; the in-tree Chart.yaml
+        # placeholders (`0.1.0` / `"0.1.0"`) exist only so `helm lint` /
+        # `helm template` succeed on a fresh checkout.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Use python3+pyyaml on the self-hosted runner so we don't pull in
+          # an extra `yq` dependency for two field edits. yaml.safe_dump
+          # strips comments and may reorder keys vs the source file (we pass
+          # sort_keys=False to suppress reordering); for our purposes that
+          # is fine because the stamped Chart.yaml is workflow-local — it is
+          # consumed by `helm package` in the next step and never committed
+          # back to the repo. The in-tree Chart.yaml retains its hand-tuned
+          # form (comments and all).
+          python3 - <<'PY'
+          import os
+          import yaml
+
+          path = "deploy/charts/meho/Chart.yaml"
+          with open(path, "r", encoding="utf-8") as f:
+              data = yaml.safe_load(f)
+          data["version"] = os.environ["VERSION"]
+          data["appVersion"] = os.environ["GIT_SHA"]
+          with open(path, "w", encoding="utf-8") as f:
+              yaml.safe_dump(data, f, sort_keys=False)
+          PY
+          echo "--- Chart.yaml after stamp ---"
+          cat deploy/charts/meho/Chart.yaml
+
+      - name: Helm package
+        id: package
+        # The in-tree broadcast subchart at deploy/charts/meho/charts/broadcast/
+        # is already unpacked (Chart.yaml dependency block declares
+        # `repository: ""` per the documented local-subchart shape). No
+        # `helm dependency update` is needed and running it would fail — the
+        # subchart is not on a remote registry.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/charts
+          helm package deploy/charts/meho/ -d /tmp/charts/
+          TARBALL="$(ls /tmp/charts/*.tgz)"
+          echo "tarball=${TARBALL}" >> "${GITHUB_OUTPUT}"
+          echo "Packaged: ${TARBALL}"
+
+      - name: Helm push to OCI
+        id: push
+        # `helm push <tgz> oci://ghcr.io/evoila` lands the artefact at
+        # ghcr.io/evoila/<chart-name>:<chart-version> — Helm derives the
+        # basename from Chart.yaml's `name` field (which we keep as
+        # `meho-chart` permanently in-tree to give the published artefact a
+        # distinct GHCR package from the backplane image at
+        # ghcr.io/evoila/meho).
+        run: |
+          set -euo pipefail
+          OUTPUT="$(helm push "${{ steps.package.outputs.tarball }}" oci://ghcr.io/evoila 2>&1)"
+          echo "${OUTPUT}"
+          # `helm push` prints a `Digest: sha256:...` line on success. Grep
+          # is anchored to the line start so a chart name containing the
+          # word "Digest" can't confuse the parser. `awk` extracts the
+          # digest field directly.
+          DIGEST="$(printf '%s\n' "${OUTPUT}" | awk '/^Digest:/ {print $2; exit}')"
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::Could not parse digest from helm push output" >&2
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "Pushed digest: ${DIGEST}"
+
+      - name: Sign chart with cosign (keyless OIDC)
+        # Keyless signing flow: cosign requests an OIDC token from GitHub
+        # Actions (id-token: write), Fulcio mints a ~10-min x509 cert bound
+        # to the workflow identity, cosign signs the chart's OCI manifest
+        # digest and uploads {signature, certificate} to Rekor. --yes is
+        # the non-interactive confirmation (CI has no TTY).
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign --yes "ghcr.io/evoila/meho-chart@${DIGEST}"
+
+      - name: Emit verification summary
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## Chart published"
+            echo ""
+            echo "- Package: \`oci://ghcr.io/evoila/meho-chart\`"
+            echo "- Version: \`${VERSION}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo ""
+            echo "### Pull"
+            echo ""
+            echo '```bash'
+            echo "helm pull oci://ghcr.io/evoila/meho-chart --version ${VERSION}"
+            echo '```'
+            echo ""
+            echo "### Verify signature"
+            echo ""
+            echo '```bash'
+            echo "cosign verify ghcr.io/evoila/meho-chart:${VERSION} \\"
+            echo "  --certificate-identity-regexp '^https://github\\.com/evoila/meho/\\.github/workflows/chart\\.yml@.*\$' \\"
+            echo "  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' | jq ."
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  verify-anonymous-pull:
+    name: "Verify anonymous pull (Goal #11 DoD)"
+    # Runs only on push events (main / v*) — anonymous-pull verification of a
+    # PR build makes no sense (PRs don't push). We split this into its own
+    # job rather than running inside `publish` so the `helm registry login`
+    # state from the push step cannot accidentally satisfy the pull. A fresh
+    # job ships a clean filesystem with no GHCR credentials anywhere — a
+    # successful `helm pull` here can only mean the GHCR package is public.
+    if: github.event_name != 'pull_request'
+    needs: publish
+    runs-on: meho-runners
+    timeout-minutes: 10
+    steps:
+      - name: Install Helm (no checkout — keeps env scrubbed of repo state)
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Pull chart anonymously
+        # No `helm registry login` step. If the GHCR package is private,
+        # this step fails with `unauthorized` and surfaces the missing
+        # one-time visibility-flip step (documented in backend/README.md).
+        env:
+          VERSION: ${{ needs.publish.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          # Isolate Helm from any persisted runner-local auth/config.
+          # The self-hosted `meho-runners` pool does not guarantee a clean
+          # HOME between jobs (https://docs.github.com/en/actions/hosting-your-own-runners);
+          # Helm 3.8+ falls back to ~/.docker/config.json for OCI creds when
+          # HELM_REGISTRY_CONFIG isn't set (helm/helm#7776), so deleting only
+          # Helm's own config can false-pass this DoD check if a prior job
+          # left a docker login behind. A throwaway HOME forces Helm to see
+          # an empty config tree regardless of what persists on the runner.
+          HOME="$(mktemp -d)"
+          export HOME
+          export XDG_CONFIG_HOME="${HOME}/.config"
+          export XDG_CACHE_HOME="${HOME}/.cache"
+          mkdir -p "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}"
+          # Visibility: log the sandbox so CI output proves it is truly empty.
+          echo "HOME=${HOME}"
+          ls -la "${HOME}"
+          helm registry list 2>/dev/null || true
+          mkdir -p /tmp/anon-pull
+          cd /tmp/anon-pull
+          helm pull "oci://ghcr.io/evoila/meho-chart" --version "${VERSION}"
+          ls -l "meho-chart-${VERSION}.tgz"
+          echo "Anonymous pull OK: meho-chart-${VERSION}.tgz"

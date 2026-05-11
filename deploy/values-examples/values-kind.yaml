@@ -74,8 +74,13 @@
 # even for local development.
 image:
   # MUST be overridden — pass `--set image.tag=sha-<git-sha>` at install
-  # time, or set it here before applying. The schema rejects an empty tag.
-  tag: ""
+  # time, or set it here before applying. The schema's pattern check
+  # rejects this `<REPLACE: ...>` literal AND an empty string equally,
+  # but the placeholder form keeps the failure message human-readable
+  # ("does not match pattern: <REPLACE: ...>") and stays consistent with
+  # `values-rdc-example.yaml`'s placeholder convention. A forgotten
+  # substitution fails-loud at `helm install` time, never silently.
+  tag: "<REPLACE: sha-<40-char-git-sha> or v0.1.0>"
 
 # Ingress is disabled on kind by default — kind ships no IngressClass and
 # the chart's port-forward flow (`kubectl port-forward`) is sufficient

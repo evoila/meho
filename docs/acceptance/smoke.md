@@ -62,6 +62,18 @@ audit-log signal-to-noise ratio high. The cluster-side cross-check
 in leg #5 is the only leg that makes a second probe (a kubectl /
 helm call), and that probe is read-only.
 
+**Note on script-side leg ordering.** The numbered legs above are the
+*contract* order — the narrative order an operator reads. The
+verifier (`scripts/acceptance/smoke.sh`) asserts them in a different
+order for fail-fast reasons: **#2 status → #4 Vault → #3 audit-row →
+#5 db-migration**. Leg #4 is asserted before leg #3 because the
+audit-row check needs the `operator_sub` from leg #2's response AND
+because a broken Vault chain often correlates with broken audit
+writes; failing fast on Vault avoids a flood of misleading audit-row
+`[FAIL]` lines that all point at the same root cause. The pass/fail
+verdict is identical either way — only the order of the lines in the
+verifier's output changes.
+
 ## What "passing" means
 
 The deployed system has **passed** the smoke when every required leg

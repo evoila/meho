@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +50,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import meho_backplane.audit as audit_module
-from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
@@ -72,6 +70,7 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._vault_fakes import install_fake_vault as _install_fake_vault
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS-cache fixtures
@@ -168,106 +167,6 @@ async def isolated_audit_engine(
     finally:
         await dispose_engine()
         reset_engine_for_testing()
-
-
-# ---------------------------------------------------------------------------
-# Vault fake — mirror tests/test_api_v1_health.py
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _FakeJWTAuth:
-    login_calls: list[dict[str, Any]] = field(default_factory=list)
-    issued_token: str = "fake-vault-token"
-    parent: _FakeClient | None = None
-
-    def jwt_login(self, role: str, jwt: str, path: str | None = None) -> dict[str, Any]:
-        self.login_calls.append({"role": role, "jwt": jwt, "path": path})
-        if self.parent is not None:
-            self.parent.token = self.issued_token
-        return {"auth": {"client_token": self.issued_token}}
-
-
-@dataclass
-class _FakeTokenAuth:
-    revoke_calls: int = 0
-
-    def revoke_self(self, mount_point: str = "token") -> None:
-        self.revoke_calls += 1
-
-
-@dataclass
-class _FakeAuth:
-    jwt: _FakeJWTAuth
-    token: _FakeTokenAuth
-
-
-@dataclass
-class _FakeKVv2:
-    secret: dict[str, Any] = field(default_factory=lambda: {"username": "demo"})
-    version: int = 7
-    read_calls: list[dict[str, Any]] = field(default_factory=list)
-
-    def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-        self.read_calls.append({"path": path})
-        return {
-            "data": {
-                "data": self.secret,
-                "metadata": {"version": self.version, "path": path},
-            }
-        }
-
-
-@dataclass
-class _FakeKV:
-    v2: _FakeKVv2
-
-
-@dataclass
-class _FakeSecrets:
-    kv: _FakeKV
-
-
-@dataclass
-class _FakeSysBackend:
-    payload: Any = None
-
-    def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
-        return self.payload
-
-
-@dataclass
-class _FakeClient:
-    url: str
-    timeout: float
-    namespace: str | None
-    token: str | None
-    auth: _FakeAuth
-    sys: _FakeSysBackend
-    secrets: _FakeSecrets
-
-
-def _install_fake_vault(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
-    jwt_auth = _FakeJWTAuth()
-    token_auth = _FakeTokenAuth()
-    kv_v2 = _FakeKVv2(version=11)
-    fake = _FakeClient(
-        url="https://vault.test",
-        timeout=5.0,
-        namespace=None,
-        token=None,
-        auth=_FakeAuth(jwt=jwt_auth, token=token_auth),
-        sys=_FakeSysBackend(),
-        secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2)),
-    )
-    jwt_auth.parent = fake
-
-    def _fake_build_client(_settings: Any, *, token: str | None = None) -> _FakeClient:
-        fake.token = token
-        return fake
-
-    monkeypatch.setattr(vault_module, "_build_client", _fake_build_client)
-    return fake
 
 
 # ---------------------------------------------------------------------------

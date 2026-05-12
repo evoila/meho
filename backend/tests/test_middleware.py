@@ -32,14 +32,12 @@ import io
 import json
 import logging
 from collections.abc import Iterator
-from typing import Any
 
 import pytest
 import respx
 import structlog
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
@@ -50,6 +48,7 @@ from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._vault_fakes import install_fake_vault as _install_fake_vault
 
 
 @pytest.fixture(autouse=True)
@@ -123,95 +122,6 @@ def log_buffer() -> Iterator[io.StringIO]:
 def _read_log_lines(buf: io.StringIO) -> list[dict[str, object]]:
     """Parse each non-empty line in *buf* as JSON."""
     return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
-
-
-def _install_fake_vault(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace the Vault client builder with a no-op fake.
-
-    The middleware test does not care about the Vault round-trip
-    semantics — :func:`~meho_backplane.api.v1.health` happens to
-    invoke Vault, but only the bound contextvars on the
-    ``request_completed`` log line are under assertion here. The
-    fake satisfies the call site without touching the network.
-    """
-    from dataclasses import dataclass, field
-
-    @dataclass
-    class _JWT:
-        parent: Any | None = None
-
-        def jwt_login(
-            self,
-            role: str,
-            jwt: str,
-            path: str | None = None,
-        ) -> dict[str, Any]:
-            if self.parent is not None:
-                self.parent.token = "fake-vault-token"
-            return {"auth": {"client_token": "fake-vault-token"}}
-
-    @dataclass
-    class _TokenAuth:
-        def revoke_self(self, mount_point: str = "token") -> None:
-            return None
-
-    @dataclass
-    class _Auth:
-        jwt: _JWT
-        token: _TokenAuth
-
-    @dataclass
-    class _KVv2:
-        def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-            return {
-                "data": {
-                    "data": {"username": "demo"},
-                    "metadata": {"version": 1, "path": path},
-                }
-            }
-
-    @dataclass
-    class _KV:
-        v2: _KVv2
-
-    @dataclass
-    class _Secrets:
-        kv: _KV
-
-    @dataclass
-    class _Sys:
-        def read_health_status(
-            self,
-            *,
-            method: str = "HEAD",
-            **_kwargs: Any,
-        ) -> Any:
-            return None
-
-    @dataclass
-    class _Client:
-        url: str = "https://vault.test"
-        timeout: float = 5.0
-        namespace: str | None = None
-        token: str | None = None
-        auth: _Auth = field(
-            default_factory=lambda: _Auth(jwt=_JWT(), token=_TokenAuth()),
-        )
-        sys: _Sys = field(default_factory=_Sys)
-        secrets: _Secrets = field(
-            default_factory=lambda: _Secrets(kv=_KV(v2=_KVv2())),
-        )
-
-        def __post_init__(self) -> None:
-            self.auth.jwt.parent = self
-
-    fake = _Client()
-
-    def _fake_build_client(_settings: Any, *, token: str | None = None) -> _Client:
-        fake.token = token
-        return fake
-
-    monkeypatch.setattr(vault_module, "_build_client", _fake_build_client)
 
 
 def test_request_completed_log_carries_tenant_id(

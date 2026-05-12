@@ -173,11 +173,17 @@ async def _initialize(params: dict[str, Any] | None) -> InitializeResponse:
             f"initialize: {exc.error_count()} validation error(s)",
         ) from exc
 
+    # T1 advertises an **empty** capabilities envelope. Advertising
+    # ``tools`` / ``resources`` here ahead of T3 (#248) registering the
+    # corresponding methods would tell a spec-conforming client it can
+    # call ``tools/list`` (and friends) — which would then ``-32601``
+    # and may disconnect the client per the MCP 2025-06-18 §Capability
+    # Negotiation contract ("Only use capabilities that were
+    # successfully negotiated"). T3 flips the ``tools`` / ``resources``
+    # capability envelopes back on once the dispatch table can honor
+    # the negotiated methods.
     return InitializeResponse(
-        capabilities=ServerCapabilities(
-            tools={"listChanged": False},
-            resources={"listChanged": False, "subscribe": False},
-        ),
+        capabilities=ServerCapabilities(),
         serverInfo={"name": _SERVER_NAME, "version": __version__},
     )
 

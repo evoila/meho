@@ -166,15 +166,18 @@ class InitializeRequest(BaseModel):
 class ServerCapabilities(BaseModel):
     """Server-side capability declaration returned on ``initialize``.
 
-    T1 advertises ``tools`` and ``resources`` envelopes (with
-    ``listChanged: false``) so the negotiated capability namespace is
-    already reachable when T3 (#248) wires the registries. ``prompts``
-    / ``roots`` / ``sampling`` / ``completions`` are out of scope for
-    v0.2 and stay absent — clients that probe for them must treat the
-    omission as "not supported" per spec §Capability Negotiation.
-
-    ``logging`` is reserved for a future server-emit-log capability;
-    leaving it ``None`` here makes the upgrade additive.
+    T1 advertises an **empty** capabilities envelope — ``tools`` /
+    ``resources`` / ``logging`` all stay :data:`None`, which the
+    hand-rolled wire serializer drops. Advertising a capability ahead
+    of the dispatch table being able to honor it would tell a
+    spec-conforming client it can call ``tools/list`` / ``resources/list``
+    immediately after the handshake, which would then ``-32601`` and
+    likely cause the client to disconnect per spec §Capability
+    Negotiation ("Only use capabilities that were successfully
+    negotiated"). T3 (#248) is where ``tools`` and ``resources`` flip
+    back on, paired with the dispatch-table additions. ``prompts`` /
+    ``roots`` / ``sampling`` / ``completions`` are out of scope for
+    v0.2 and stay absent.
     """
 
     model_config = ConfigDict(frozen=True)

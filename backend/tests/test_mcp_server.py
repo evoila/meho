@@ -101,14 +101,13 @@ def test_initialize_returns_protocol_version_capabilities_and_serverinfo(
     result = body["result"]
     assert result["protocolVersion"] == PROTOCOL_VERSION
     assert result["serverInfo"] == {"name": "meho-backplane", "version": __version__}
-    # Both registries land later (T3/#248); T1 advertises their envelopes
-    # so the negotiated capability namespace is reachable, with
-    # listChanged: false matching the v0.2 out-of-scope notes.
-    assert result["capabilities"]["tools"] == {"listChanged": False}
-    assert result["capabilities"]["resources"] == {
-        "listChanged": False,
-        "subscribe": False,
-    }
+    # T1 advertises an **empty** capabilities envelope — see
+    # `ServerCapabilities` docstring + `_initialize` for rationale.
+    # Advertising `tools` / `resources` ahead of T3 (#248) registering
+    # the corresponding handlers would tell a spec-conforming client
+    # it can call `tools/list`, which would then `-32601`. T3 flips the
+    # envelopes back on paired with the dispatch-table additions.
+    assert result["capabilities"] == {}
 
 
 def test_initialize_without_protocol_version_returns_invalid_params(

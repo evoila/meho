@@ -92,7 +92,16 @@ def k3s_kubeconfig_and_target() -> Any:
     except ImportError as exc:  # pragma: no cover — testcontainers ships k3s in 4.x
         pytest.skip(f"testcontainers.k3s unavailable: {exc}")
 
-    image = os.environ.get("MEHO_TEST_K3S_IMAGE", "rancher/k3s:latest")
+    # Default tag pinned to a known-good k3s minor aligned with
+    # ``kubernetes_asyncio>=32,<33`` (both target the K8s 1.32 API).
+    # ``rancher/k3s:latest`` would let an upstream release with a
+    # regression in ``/readyz`` / ``/version`` / auth break CI on PRs
+    # that did not touch the connector — same rationale the rest of
+    # the integration suite already follows for ``pgvector/pgvector``
+    # (``MEHO_TEST_PGVECTOR_IMAGE`` defaults to a pinned minor, not
+    # ``:latest``). ``MEHO_TEST_K3S_IMAGE`` override stays for a
+    # registry-mirror swap or a deliberate version bump.
+    image = os.environ.get("MEHO_TEST_K3S_IMAGE", "rancher/k3s:v1.32.5-k3s1")
     try:
         container = K3SContainer(image=image)
         container.start()

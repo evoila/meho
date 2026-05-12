@@ -31,6 +31,8 @@ __all__ = [
     "product_from_git_version",
 ]
 
+_REGISTRY_MODULE = "meho_backplane.connectors.registry"
+
 try:
     # The registry lands with G0.2-T2 (#241, PR #295). Until that PR
     # merges into main, the module does not exist; the ``type: ignore``
@@ -38,13 +40,19 @@ try:
     from meho_backplane.connectors.registry import (  # type: ignore[import-untyped, unused-ignore]
         register_connector,
     )
-except ImportError:  # pragma: no cover — exercised once G0.2-T2 (#241) lands.
+except ModuleNotFoundError as exc:  # pragma: no cover — exercised once G0.2-T2 (#241) lands.
+    # Re-raise on any ModuleNotFoundError whose root cause is *not* the
+    # registry module itself. After #241 lands, this discriminator stops
+    # the broad-except from masking genuine import bugs inside the
+    # registry tree (missing transitive dep, circular import, etc.).
+    if exc.name != _REGISTRY_MODULE:
+        raise
     import structlog
 
     structlog.get_logger(__name__).info(
         "connector_registry_deferred",
         product="kubernetes",
-        reason="meho_backplane.connectors.registry not yet importable (G0.2-T2 / #241 open)",
+        reason=f"{_REGISTRY_MODULE} not yet importable (G0.2-T2 / #241 open)",
     )
 else:
     register_connector("kubernetes", KubernetesConnector)

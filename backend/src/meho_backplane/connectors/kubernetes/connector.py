@@ -120,23 +120,36 @@ class KubernetesConnector(Connector):
         )
 
     async def probe(self, target: KubernetesTargetLike) -> ProbeResult:
-        """Kubeconfig-free reachability + readyz check.
+        """Kubeconfig-free reachability check against ``/readyz`` (or ``/healthz``).
 
-        TLS verification is intentionally disabled: the probe is a
-        reachability signal, not an auth check. A 401 response is
-        treated as success — it means the API server is up and
-        speaking TLS; auth surfaces at :meth:`execute` time. Real
-        certificate validation happens via the kubeconfig's
+        TLS verification is intentionally disabled (NOSONAR S4830): the
+        probe is a reachability signal, not an auth check, and runs
+        before any kubeconfig is loaded, so the CA bundle is not yet
+        known. A 401 response is treated as success — it means the API
+        server is up and speaking TLS; auth surfaces at :meth:`execute`
+        time. Real certificate validation happens via the kubeconfig's
         ``certificate-authority-data`` once the operator's identity is
         in play.
+
+        Endpoint fallback: ``GET /readyz`` first; on HTTP 404 retry
+        ``GET /healthz`` (legacy clusters that predate ``/readyz`` or
+        have it disabled). The first response whose status is in
+        :data:`_PROBE_OK_STATUSES` short-circuits the probe.
         """
         port = target.port if target.port is not None else _DEFAULT_K8S_PORT
-        url = f"https://{target.host}:{port}/readyz"
+        base_url = f"https://{target.host}:{port}"
         start = time.monotonic()
         probed_at = datetime.now(UTC)
+        endpoint = "/readyz"
         try:
-            async with httpx.AsyncClient(verify=False, timeout=_PROBE_TIMEOUT_SECONDS) as http:
-                resp = await http.get(url)
+            async with httpx.AsyncClient(
+                verify=False,  # NOSONAR S4830 — kubeconfig-free reachability probe; see docstring
+                timeout=_PROBE_TIMEOUT_SECONDS,
+            ) as http:
+                resp = await http.get(f"{base_url}{endpoint}")
+                if resp.status_code == 404:
+                    endpoint = "/healthz"
+                    resp = await http.get(f"{base_url}{endpoint}")
         except (httpx.HTTPError, OSError) as exc:
             return ProbeResult(
                 ok=False,
@@ -149,7 +162,7 @@ class KubernetesConnector(Connector):
             return ProbeResult(ok=True, latency_ms=latency_ms, probed_at=probed_at)
         return ProbeResult(
             ok=False,
-            reason=f"HTTP {resp.status_code} on /readyz",
+            reason=f"HTTP {resp.status_code} on {endpoint}",
             latency_ms=latency_ms,
             probed_at=probed_at,
         )
@@ -182,6 +195,24 @@ class KubernetesConnector(Connector):
                 await api_client.close()
             self._api_clients.clear()
 
+    @staticmethod
+    def _cache_key(target: KubernetesTargetLike) -> str:
+        """Globally unique cache key for *target*.
+
+        Keyed on ``secret_ref`` (the Vault path the kubeconfig lives
+        at) rather than ``target.name``. Once G0.3 (#224) lands its
+        ``Target`` model, target names are unique only within a tenant
+        — two tenants legitimately holding a target both named
+        ``"rke2-meho"`` would otherwise share an :class:`ApiClient`
+        built from whichever kubeconfig loaded first, and the second
+        tenant's ops would silently execute against the first
+        tenant's cluster. The Vault path is the operator's chosen
+        opaque identifier for the kubeconfig and is globally unique
+        by the consumer's ``targets.yaml`` convention. Swap to
+        ``target.id`` when G0.3 finalises a row-PK shape.
+        """
+        return target.secret_ref
+
     async def _get_api_client(self, target: KubernetesTargetLike) -> client.ApiClient:
         """Resolve (and cache) the :class:`ApiClient` for *target*.
 
@@ -190,13 +221,14 @@ class KubernetesConnector(Connector):
         slow kubeconfig read happens under the lock so two concurrent
         callers for the same target don't both pay the cost.
         """
+        key = self._cache_key(target)
         async with self._lock:
-            cached = self._api_clients.get(target.name)
+            cached = self._api_clients.get(key)
             if cached is not None:
                 return cached
             kubeconfig_dict = await self._kubeconfig_loader(target)
             api_client = await config.new_client_from_config_dict(kubeconfig_dict)
-            self._api_clients[target.name] = api_client
+            self._api_clients[key] = api_client
             _log.info(
                 "kubernetes_api_client_built",
                 target=target.name,

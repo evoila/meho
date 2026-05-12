@@ -64,11 +64,17 @@ def parse_kubeconfig_yaml(kubeconfig_text: str) -> dict[str, Any]:
     """Parse a kubeconfig YAML string into the dict shape k_a consumes.
 
     Wraps :func:`yaml.safe_load` so callers get a single failure path
-    when a Vault secret's ``kubeconfig`` field is malformed. Returning
-    a non-dict (empty file, scalar YAML) raises :exc:`ValueError` to
-    match the contract every caller expects.
+    when a Vault secret's ``kubeconfig`` field is malformed. Both
+    failure shapes — syntactically invalid YAML (parser/scanner
+    errors) and structurally wrong YAML (scalar, empty, list) — raise
+    :exc:`ValueError`, never the underlying :exc:`yaml.YAMLError`
+    subclass, so callers don't need to import ``yaml`` just to catch
+    parse failures.
     """
-    parsed = yaml.safe_load(kubeconfig_text)
+    try:
+        parsed = yaml.safe_load(kubeconfig_text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"kubeconfig YAML failed to parse: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValueError(f"kubeconfig YAML must parse to a mapping, got {type(parsed).__name__}")
     return parsed

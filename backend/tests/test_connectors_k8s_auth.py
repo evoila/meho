@@ -209,17 +209,22 @@ class _FakeAsyncClient:
 
     The connector uses ``async with httpx.AsyncClient(...) as http:``;
     we replace the constructor with a factory that returns this stub
-    so the test never hits the network.
+    so the test never hits the network. Pass ``status_code`` for a
+    fixed-response stub or ``status_by_url`` for a per-URL mapping
+    that exercises the ``/readyz`` → ``/healthz`` fallback path.
     """
 
     def __init__(
         self,
         *,
         status_code: int | None = None,
+        status_by_url: dict[str, int] | None = None,
         exc: Exception | None = None,
     ) -> None:
         self._status_code = status_code
+        self._status_by_url = status_by_url or {}
         self._exc = exc
+        self.calls: list[str] = []
 
     async def __aenter__(self) -> _FakeAsyncClient:
         return self
@@ -227,10 +232,17 @@ class _FakeAsyncClient:
     async def __aexit__(self, *_: object) -> None:
         return None
 
-    async def get(self, _url: str) -> Any:
+    async def get(self, url: str) -> Any:
+        self.calls.append(url)
         if self._exc is not None:
             raise self._exc
         resp = MagicMock()
+        if self._status_by_url:
+            for suffix, code in self._status_by_url.items():
+                if url.endswith(suffix):
+                    resp.status_code = code
+                    return resp
+            raise AssertionError(f"unstubbed URL: {url}")
         resp.status_code = self._status_code
         return resp
 
@@ -293,6 +305,35 @@ async def test_probe_returns_not_ok_on_transport_error() -> None:
     assert result.ok is False
     assert result.reason is not None and "ConnectError" in result.reason
     assert result.latency_ms is None
+
+
+@pytest.mark.asyncio
+async def test_probe_falls_back_to_healthz_on_readyz_404() -> None:
+    """Legacy clusters without ``/readyz`` succeed via the ``/healthz`` fallback."""
+    connector = _make_connector_with_stub_kubeconfig()
+    stub = _FakeAsyncClient(status_by_url={"/readyz": 404, "/healthz": 200})
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.httpx.AsyncClient",
+        return_value=stub,
+    ):
+        result = await connector.probe(_TARGET_A)
+    assert result.ok is True
+    assert [c.rsplit(":", 1)[1].split("/", 1)[1] for c in stub.calls] == ["readyz", "healthz"]
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_healthz_in_reason_when_both_endpoints_fail() -> None:
+    """Both endpoints non-OK → reason names ``/healthz`` (the last call)."""
+    connector = _make_connector_with_stub_kubeconfig()
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.httpx.AsyncClient",
+        return_value=_FakeAsyncClient(status_by_url={"/readyz": 404, "/healthz": 503}),
+    ):
+        result = await connector.probe(_TARGET_A)
+    assert result.ok is False
+    assert result.reason is not None
+    assert "503" in result.reason
+    assert "/healthz" in result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +399,42 @@ async def test_api_clients_per_target_are_distinct() -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_client_cache_key_is_secret_ref_not_name() -> None:
+    """Two tenants holding same-named targets get distinct ApiClients.
+
+    Locks in the forward-compat fix for G0.3 tenant-scoped target name
+    uniqueness — keying on ``target.name`` alone would silently
+    cross-pollinate ApiClients across tenants. ``secret_ref`` is the
+    operator's chosen globally-unique Vault path.
+    """
+    tenant_a = _StubTarget(
+        name="rke2-meho", host="t-a.test", port=6443, secret_ref="kv/data/tenant-a/k8s"
+    )
+    tenant_b = _StubTarget(
+        name="rke2-meho", host="t-b.test", port=6443, secret_ref="kv/data/tenant-b/k8s"
+    )
+
+    async def _loader(target: KubernetesTargetLike) -> dict[str, Any]:
+        return _stub_kubeconfig_dict()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        side_effect=lambda _d: MagicMock(close=AsyncMock()),
+    ) as factory:
+        c_a = await connector._get_api_client(tenant_a)
+        c_b = await connector._get_api_client(tenant_b)
+
+    assert c_a is not c_b
+    assert factory.call_count == 2
+    assert set(connector._api_clients.keys()) == {
+        tenant_a.secret_ref,
+        tenant_b.secret_ref,
+    }
+
+
+@pytest.mark.asyncio
 async def test_aclose_closes_every_cached_client_and_clears_cache() -> None:
     async def _loader(target: KubernetesTargetLike) -> dict[str, Any]:
         return _stub_kubeconfig_dict()
@@ -415,3 +492,19 @@ users:
 def test_parse_kubeconfig_yaml_rejects_non_mapping(malformed: str) -> None:
     with pytest.raises(ValueError, match="must parse to a mapping"):
         parse_kubeconfig_yaml(malformed)
+
+
+@pytest.mark.parametrize(
+    "broken_yaml",
+    [
+        "invalid: [unclosed",
+        "key: 'unterminated",
+        "{bad: [mismatched}",
+    ],
+)
+def test_parse_kubeconfig_yaml_normalises_parser_errors_to_value_error(
+    broken_yaml: str,
+) -> None:
+    """``yaml.YAMLError`` (parser/scanner) is re-raised as ``ValueError``."""
+    with pytest.raises(ValueError, match="failed to parse"):
+        parse_kubeconfig_yaml(broken_yaml)

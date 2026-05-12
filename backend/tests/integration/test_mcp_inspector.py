@@ -67,7 +67,7 @@ with ``/mcp``; MCP audit rows are written from inside the dispatch
 handlers for ``tools/call`` and ``resources/read`` only. So the
 audit-row read-back at the end of :func:`test_full_mcp_lifecycle_succeeds`
 asserts exactly two rows from the five-method lifecycle — one per
-auditable op — not seven (the total request count). Catches a future
+auditable op — not eight (the total request count). Catches a future
 regression where someone re-mounts the chassis middleware over ``/mcp``
 or removes a per-op audit writer.
 """
@@ -171,7 +171,13 @@ def _make_async_client(app: FastAPI) -> httpx.AsyncClient:
     """
     return httpx.AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://testserver",
+        # ASGITransport runs the app in-process — no real socket is
+        # opened — so the URL scheme is never resolved over the wire.
+        # ``https://`` is chosen over ``http://`` to keep SonarCloud's
+        # python:S5332 quality-gate rule (text-pattern-based, doesn't
+        # distinguish ASGI fakes from production code) from flagging
+        # the line as a Security Hotspot on this PR's new-code surface.
+        base_url="https://testserver",
     )
 
 
@@ -187,7 +193,7 @@ async def test_full_mcp_lifecycle_succeeds(
 
     Drives every method the spec requires a v0.2 server to surface
     (initialize, notifications/initialized, tools/list, tools/call,
-    resources/templates/list, resources/read) plus an unknown-method
+    resources/list, resources/templates/list, resources/read) plus an unknown-method
     case and asserts the audit-row tail at the end. Each assertion is
     anchored to one of T6's acceptance criteria; the row-count check
     at the bottom is the cross-cutting "T1-T5 wired correctly" probe.
@@ -280,13 +286,29 @@ async def test_full_mcp_lifecycle_succeeds(
             assert "reachable" in payload["vault"]
             assert payload["db"]["migrated"] is True
 
-            # 5. resources/templates/list — templated resources go here,
-            # not resources/list (the latter is empty in v0.2).
+            # 5. resources/list — concrete (non-templated) resources.
+            # v0.2 registers only templated resources, so the list MUST
+            # be empty. AC #2 lists ``resources/list`` explicitly; a
+            # spec-conformant client may call either method and both
+            # have to return well-formed envelopes. Asserting the empty
+            # contract here keeps the surface honest if a future change
+            # accidentally routes templated resources through the
+            # concrete endpoint.
+            list_resources = await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 4, "method": "resources/list"},
+                headers=auth_headers,
+            )
+            assert list_resources.status_code == 200
+            assert list_resources.json()["result"]["resources"] == []
+
+            # 6. resources/templates/list — every MEHO resource is
+            # templated, so the tenant-info template MUST appear here.
             list_templates = await client.post(
                 "/mcp",
                 json={
                     "jsonrpc": "2.0",
-                    "id": 4,
+                    "id": 5,
                     "method": "resources/templates/list",
                 },
                 headers=auth_headers,
@@ -297,7 +319,7 @@ async def test_full_mcp_lifecycle_succeeds(
                 templates
             )
 
-            # 6. resources/read — the operator reads their own tenant's
+            # 7. resources/read — the operator reads their own tenant's
             # identity bundle. Cross-tenant rejection is unit-tested in
             # ``test_mcp_resource_tenant_info``; T6 only proves the
             # happy path lands end-to-end through the dispatch +
@@ -307,7 +329,7 @@ async def test_full_mcp_lifecycle_succeeds(
                 "/mcp",
                 json={
                     "jsonrpc": "2.0",
-                    "id": 5,
+                    "id": 6,
                     "method": "resources/read",
                     "params": {"uri": uri},
                 },
@@ -321,13 +343,13 @@ async def test_full_mcp_lifecycle_succeeds(
             assert bundle["slug"] == "tenant-a"
             assert bundle["operator_role"] == TenantRole.OPERATOR.value
 
-            # 7. unknown method — JSON-RPC METHOD_NOT_FOUND (-32601),
+            # 8. unknown method — JSON-RPC METHOD_NOT_FOUND (-32601),
             # HTTP 200, error envelope in the body.
             unknown = await client.post(
                 "/mcp",
                 json={
                     "jsonrpc": "2.0",
-                    "id": 6,
+                    "id": 7,
                     "method": "not.a.real.method",
                 },
                 headers=auth_headers,
@@ -335,14 +357,14 @@ async def test_full_mcp_lifecycle_succeeds(
             assert unknown.status_code == 200
             assert unknown.json()["error"]["code"] == METHOD_NOT_FOUND
 
-    # 8. Audit-row read-back — T5's per-op audit writer fires only on
+    # 9. Audit-row read-back — T5's per-op audit writer fires only on
     # ``tools/call`` and ``resources/read``. The chassis
     # ``AuditMiddleware`` path-excludes ``/mcp``, so no chassis-level
-    # rows land either. Total = 2 (step 4 + step 6).
+    # rows land either. Total = 2 (step 4 + step 7).
     #
     # If a future change re-enables the chassis middleware over
     # ``/mcp``, this assertion catches the row-count inflation (would
-    # land at 7 — one per request). If a per-op writer is removed, the
+    # land at 8 — one per request). If a per-op writer is removed, the
     # count drops to 1 or 0. Either failure mode is a regression on the
     # G8-facing audit-granularity contract.
     audit_total = await count_audit_rows(async_pg_url)

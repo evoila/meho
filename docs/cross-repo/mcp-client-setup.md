@@ -82,7 +82,7 @@ MEHO speaks Streamable HTTP at `/mcp`, not stdio. This matters because Claude De
 
 [Claude.ai → Settings → Connectors → Add custom connector](https://modelcontextprotocol.io/docs/develop/connect-remote-servers). Paste the server URL when prompted:
 
-```
+```text
 https://meho.example.com/mcp
 ```
 

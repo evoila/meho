@@ -23,7 +23,8 @@ expensive end-to-end deploy gate.
 What the test exercises
 -----------------------
 
-#. Spin up ``postgres:16-alpine`` via ``testcontainers``.
+#. Spin up ``pgvector/pgvector:pg16`` via ``testcontainers``
+   (image overridable via ``MEHO_TEST_PGVECTOR_IMAGE``).
 #. Run ``alembic upgrade head`` against it. The schema is now at
    revision N (the audit-log table from
    ``0001_create_audit_log.py``).

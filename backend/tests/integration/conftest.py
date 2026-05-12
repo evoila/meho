@@ -18,15 +18,19 @@ pieces:
   the whole testcontainers-driven class when the agent sandbox has no
   Docker; CI runners provision Docker so the tests run there.
 * ``async_pg_url`` — module-scoped fixture that boots a single
-  ``postgres:16-alpine`` container, applies ``alembic upgrade head``
-  against the asyncpg-translated URL, and yields the URL string for
-  every test in the module. Module scope (rather than function scope)
-  amortises the ~3-second container boot across the five tests in
-  :mod:`tests.integration.test_tenant_isolation` so the suite still
-  finishes well inside the issue's "< 10s wall clock" acceptance
-  criterion. Migrations land once, not five times; the per-test
-  ``audit_log`` truncation in ``integration_app`` keeps test isolation
-  honest even though the DB is shared.
+  ``pgvector/pgvector:pg16`` container (image overridable via
+  ``MEHO_TEST_PGVECTOR_IMAGE``; the pgvector-bearing image is required
+  because migration ``0003`` runs ``CREATE EXTENSION vector``), applies
+  ``alembic upgrade head`` against the asyncpg-translated URL, and
+  yields the URL string for every test in the module. Module scope
+  (rather than function scope) amortises the ~3-second container boot
+  across the five tests in :mod:`tests.integration.test_tenant_isolation`
+  so the suite still finishes well inside the issue's "< 10s wall clock"
+  acceptance criterion. Migrations land once, not five times; the
+  per-test ``TRUNCATE TABLE audit_log, documents, tenant`` in
+  ``pg_engine`` keeps test isolation honest even though the DB is shared
+  (non-cascading multi-table TRUNCATE is required because of the
+  ``documents.tenant_id REFERENCES tenant(id)`` FK from migration 0003).
 * ``integration_env`` — autouse fixture that pins every Settings env
   var the chassis needs at construction time, then yields. The
   conftest in ``tests/conftest.py`` already pins ``DATABASE_URL`` to a

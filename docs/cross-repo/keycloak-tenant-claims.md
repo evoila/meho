@@ -88,7 +88,7 @@ In the Admin Console (logged in as a realm admin):
 3. After the group is created, open **Attributes** on that group.
 4. Add an attribute:
    - **Key:** `tenant_id`
-   - **Value:** a generated UUID (run `python -c "import uuid;
+   - **Value:** a generated UUID (run `python3 -c "import uuid;
      print(uuid.uuid4())"` or `uuidgen` to mint one). Record this
      value — it goes into `targets.yaml` on the consumer side as the
      per-tenant UUID for v0.2.next.

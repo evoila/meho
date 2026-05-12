@@ -54,6 +54,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -122,7 +123,14 @@ async def write_mcp_audit_row(
             path=path,
             status_code=status_code,
             request_id=request_id,
-            duration_ms=duration_ms,
+            # Convert ``duration_ms`` via ``Decimal(str(...))`` for shape
+            # consistency with the chassis ``_write_audit_row`` (in
+            # ``meho_backplane.audit``). SQLAlchemy's ``Numeric`` type
+            # accepts both ``float`` and ``Decimal``, but the
+            # ``Decimal(str(value))`` path round-trips through the JSON
+            # string representation and avoids the float→Decimal binary
+            # conversion artifacts ``Decimal(float)`` would introduce.
+            duration_ms=Decimal(str(duration_ms)),
             payload=payload,
         )
         session.add(row)

@@ -78,6 +78,17 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]  # asserts allowed in tests
+# Pytest's fixture-injection-by-parameter-name pattern shadows the
+# fixture's module-level import name, which ruff's F811 (redefinition
+# of unused name) flags on every test function that takes a fixture
+# parameter imported from a shared fixtures module. F811 is otherwise
+# a useful rule, so the suppression is narrowed to the test files that
+# import shared MCP fixtures from ``tests.mcp_test_fixtures`` (rather
+# than disabling F811 globally or repeating ``# noqa: F811`` on every
+# test signature line).
+"tests/test_mcp_audit.py" = ["F811"]
+"tests/test_mcp_tool_meho_status.py" = ["F811"]
+"tests/test_mcp_resource_tenant_info.py" = ["F811"]
 # A005 flags any module name that matches a stdlib module by short name,
 # regardless of package path. These two are namespaced under
 # `meho_backplane.*` and are never imported as bare `operator` / `logging`,

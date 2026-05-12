@@ -24,121 +24,28 @@ Covers every acceptance criterion on issue #250:
 
 from __future__ import annotations
 
-import importlib
 import json
-from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, Tenant
-from meho_backplane.main import app
+from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
-from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
-from meho_backplane.mcp.registry import clear_registries
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
-from meho_backplane.settings import get_settings
-
-_OPERATOR_TENANT_ID = UUID("00000000-0000-0000-0000-00000000a0a0")
-
-
-def _operator(role: TenantRole = TenantRole.READ_ONLY) -> Operator:
-    return Operator(
-        sub="op-test",
-        name="Test",
-        email=None,
-        raw_jwt="fixture-jwt-not-real",
-        tenant_id=_OPERATOR_TENANT_ID,
-        tenant_role=role,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin Keycloak / Vault / backplane env vars every test in this file needs.
-
-    The autouse ``_default_database_url`` fixture in
-    :mod:`tests.conftest` only pins ``DATABASE_URL``; the helper-level
-    ``write_mcp_audit_row`` test (which doesn't use ``client_with_operator``)
-    still calls ``get_sessionmaker()`` → ``get_settings()`` and would
-    explode on a missing Keycloak knob otherwise. Pinning here makes
-    every test in the file independently runnable.
-    """
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolated_registry_with_production_modules() -> Iterator[None]:
-    """Clear registries then re-execute production tool/resource registrations.
-
-    Same pattern documented in :mod:`tests.test_mcp_tool_meho_status`:
-    Python's import cache makes ``eager_import_mcp_modules`` a no-op on
-    the 2nd+ test in the same process, so the production registrations
-    have to be reloaded explicitly to land after the registry clear.
-    """
-    from meho_backplane.mcp.resources import tenant_info
-    from meho_backplane.mcp.tools import meho_status
-
-    clear_registries()
-    importlib.reload(meho_status)
-    importlib.reload(tenant_info)
-    yield
-    clear_registries()
-
-
-@pytest.fixture
-def client_with_operator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[TestClient, Operator]]:
-    """``TestClient`` with the MCP auth dependency overridden to a fixture operator."""
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
-    get_settings.cache_clear()
-
-    op = _operator(TenantRole.READ_ONLY)
-
-    async def _fake_verify() -> Operator:
-        return op
-
-    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
-    try:
-        with TestClient(app) as client:
-            yield client, op
-    finally:
-        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
-        get_settings.cache_clear()
-
-
-@pytest.fixture
-async def seeded_operator_tenant() -> None:
-    """Insert the operator's :class:`Tenant` row so the tenant_info resource resolves."""
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session, session.begin():
-        session.add(
-            Tenant(
-                id=_OPERATOR_TENANT_ID,
-                slug="op-test-tenant",
-                name="Operator Test Tenant",
-            ),
-        )
-
-
-def _post_mcp(client: TestClient, body: Any) -> Any:
-    return client.post("/mcp", json=body)
+from tests.mcp_test_fixtures import (
+    build_operator,
+    client_with_operator,  # noqa: F401 — pytest-discovered fixture
+    isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
+    post_mcp,
+    required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
+)
 
 
 async def _audit_rows() -> list[AuditLog]:
@@ -195,7 +102,7 @@ async def test_tools_call_meho_status_writes_one_audit_row(
     """AC #1: tools/call meho.status writes one row, method=MCP, status_code=200."""
     client, op = client_with_operator
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
@@ -227,7 +134,7 @@ async def test_tools_call_unknown_tool_writes_audit_row_with_404(
     """AC #3: unknown.tool → row with status_code=404, op_class=unknown."""
     client, _op = client_with_operator
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
@@ -260,7 +167,7 @@ async def test_resources_read_tenant_info_writes_one_audit_row(
     client, op = client_with_operator
     uri = f"meho://tenant/{op.tenant_id}/info"
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
@@ -302,7 +209,7 @@ async def test_mcp_envelope_does_not_produce_chassis_audit_row(
     """
     client, _op = client_with_operator
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
@@ -346,7 +253,7 @@ async def test_audit_write_failure_converts_call_to_internal_error(
         "meho_backplane.mcp.handlers.write_mcp_audit_row",
         side_effect=_explode,
     ):
-        response = _post_mcp(
+        response = post_mcp(
             client,
             {
                 "jsonrpc": "2.0",
@@ -368,7 +275,7 @@ async def test_audit_write_failure_converts_call_to_internal_error(
 @pytest.mark.asyncio
 async def test_write_mcp_audit_row_persists_every_field() -> None:
     """The helper round-trips every field including the JSON ``payload``."""
-    op = _operator()
+    op = build_operator()
     request_id = uuid4()
     payload = {"op_id": "test.tool", "params_hash": "abc123", "op_class": "read"}
 

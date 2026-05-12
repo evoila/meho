@@ -1,0 +1,40 @@
+{{- /*
+  fastembed model-cache PVC (G0.4-T2 #259, Initiative #225).
+
+  Gated on `.Values.retrieval.modelCache.enabled` so operators on
+  short-lived dev clusters who don't care about the ~120 MB
+  re-download per pod restart can flip the whole feature off in one
+  knob. The Deployment template gates the matching `volumeMounts:` +
+  `volumes:` entries on the same boolean so the PVC and its consumer
+  always render in lock-step.
+
+  AccessMode is `ReadWriteOnce` (single-attach). v0.2 ships
+  single-replica anyway; multi-replica deploys that need a shared
+  cache can either (a) disable this PVC and pay the per-pod download,
+  (b) provide an RWX PVC of their own via `extraVolumes` +
+  `extraVolumeMounts` pointing at `retrievalModelCacheDir`, or (c)
+  upgrade to the per-replica-cache pattern in v0.2.next.
+
+  The volume is never explicitly written to by the chart at install
+  time — fastembed populates it on first model load. A fresh install
+  shows the PVC bound but empty until the first `index_document` /
+  `retrieve` call (or until the lifespan's eager preload runs against
+  the live PG, which happens at pod start).
+*/}}
+{{- if .Values.retrieval.modelCache.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "meho.fullname" . }}-fastembed-cache
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.retrieval.modelCache.size | quote }}
+  {{- with .Values.retrieval.modelCache.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

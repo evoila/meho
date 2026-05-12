@@ -19,6 +19,7 @@ dependencies = [
     "alembic>=1.13",
     "jsonschema>=4.26.0",
     "pgvector>=0.3,<1.0",
+    "fastembed>=0.7,<1.0",
 ]
 
 [dependency-groups]
@@ -146,9 +147,28 @@ ignore_missing_imports = true
 module = ["pgvector.*"]
 ignore_missing_imports = true
 
+# fastembed (https://github.com/qdrant/fastembed) ships no ``py.typed``
+# marker as of 0.8. The only API surface we touch is
+# ``fastembed.TextEmbedding`` (in :mod:`meho_backplane.retrieval.embedding`),
+# whose constructor + ``.embed()`` method both return iterables of numpy
+# arrays untyped at the Python level. Whitelisting the module tree
+# localises the untyped surface to the EmbeddingService wrapper.
+[[tool.mypy.overrides]]
+module = ["fastembed.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Custom markers — registered so ``pytest --strict-markers`` (when CI
+# flips it on) does not warn. Currently:
+# * ``slow`` — opt-in only via ``MEHO_RUN_SLOW_TESTS=1``. Used by
+#   tests that load the real fastembed ONNX model (~120 MB weight
+#   download on cold cache; ~1–2 s load on warm cache). CI's slow
+#   lane sets the env var; the always-on lane skips.
+markers = [
+    "slow: opt-in network/IO-heavy tests; gate via MEHO_RUN_SLOW_TESTS=1.",
+]
 # Note: ``authlib.deprecate`` calls ``warnings.simplefilter("always",
 # AuthlibDeprecationWarning)`` at import time, so the
 # ``AuthlibDeprecationWarning("authlib.jose module is deprecated...")``

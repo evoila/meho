@@ -93,6 +93,16 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.retrieval.modelCache.enabled }}
+            # G0.4-T2 (#259) — fastembed ONNX-weight cache. Mount
+            # gated on the same `retrieval.modelCache.enabled` knob
+            # as the PVC template; flipping it off skips the mount
+            # AND the PVC so the Pod still admits cleanly (fastembed
+            # downloads weights to an ephemeral path on every restart
+            # in that mode).
+            - name: fastembed-cache
+              mountPath: {{ .Values.retrieval.modelCache.mountPath | quote }}
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             # Operator-supplied extra VolumeMounts. Paired with
             # `extraVolumes` below — see Issue #209 for the trust-bundle
@@ -103,6 +113,14 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.retrieval.modelCache.enabled }}
+        # G0.4-T2 (#259) — bind the fastembed-cache PVC into the Pod.
+        # The PVC itself is rendered by templates/pvc-fastembed-cache.yaml,
+        # gated on the same `retrieval.modelCache.enabled` boolean.
+        - name: fastembed-cache
+          persistentVolumeClaim:
+            claimName: {{ include "meho.fullname" . }}-fastembed-cache
+        {{- end }}
         {{- with .Values.extraVolumes }}
         # Operator-supplied extra Volumes (full Volume shape). Most common
         # use: mounting a trust-manager-distributed CA bundle ConfigMap

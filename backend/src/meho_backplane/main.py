@@ -49,6 +49,7 @@ from fastapi import FastAPI, Response
 from meho_backplane import __version__
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
+from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
@@ -188,6 +189,13 @@ app.include_router(health_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
+# G0.4-T5 (#262) -- hybrid retrieval diagnostic surface
+# (`POST /api/v1/retrieve`). Mounted unconditionally; the route uses
+# `require_role(TenantRole.OPERATOR)` so unauthorised callers get
+# 401 / 403, and the audit middleware records every call with a
+# privacy-preserving query_hash payload (the raw query is never
+# persisted -- per v0.2 sensitivity defaults).
+app.include_router(api_v1_retrieve_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

@@ -53,6 +53,7 @@ from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
+from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import RequestContextMiddleware
@@ -98,6 +99,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     register_probe("db", db_migration_probe)
     # Eager engine construction — see lifespan docstring for why.
     get_engine()
+    # MCP tool / resource auto-discovery (G0.5-T3, #248). Walks every
+    # module under `mcp/tools/` and `mcp/resources/` so the top-level
+    # `register_mcp_tool` / `register_mcp_resource` calls in each module
+    # run before the first `tools/list` request arrives. Both
+    # subpackages are empty in T3 (T4 adds the first tool / resource);
+    # the helper handles the empty-package case silently.
+    eager_import_mcp_modules()
     try:
         yield
     finally:

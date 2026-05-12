@@ -134,13 +134,16 @@ def test_initialize_returns_protocol_version_capabilities_and_serverinfo(
     result = body["result"]
     assert result["protocolVersion"] == PROTOCOL_VERSION
     assert result["serverInfo"] == {"name": "meho-backplane", "version": __version__}
-    # T1 advertises an **empty** capabilities envelope — see
-    # `ServerCapabilities` docstring + `_initialize` for rationale.
-    # Advertising `tools` / `resources` ahead of T3 (#248) registering
-    # the corresponding handlers would tell a spec-conforming client
-    # it can call `tools/list`, which would then `-32601`. T3 flips the
-    # envelopes back on paired with the dispatch-table additions.
-    assert result["capabilities"] == {}
+    # T3 (#248) registers tools/* and resources/* handlers, so the
+    # capabilities envelope advertises both surfaces. ``listChanged:
+    # false`` because v0.2 doesn't emit `notifications/tools/list_changed`
+    # (registry is populated at startup); ``subscribe: false`` because
+    # v0.2 doesn't implement `resources/subscribe`.
+    assert result["capabilities"]["tools"] == {"listChanged": False}
+    assert result["capabilities"]["resources"] == {
+        "listChanged": False,
+        "subscribe": False,
+    }
 
 
 def test_initialize_without_protocol_version_returns_invalid_params(
@@ -216,7 +219,7 @@ def test_unknown_method_returns_method_not_found_for_request(
         {
             "jsonrpc": "2.0",
             "id": 3,
-            "method": "tools/list",  # T3 (#248) registers; not yet present
+            "method": "totally_made_up_method",  # never registered
         },
     )
 
@@ -224,7 +227,7 @@ def test_unknown_method_returns_method_not_found_for_request(
     body = response.json()
     assert body["id"] == 3
     assert body["error"]["code"] == METHOD_NOT_FOUND
-    assert "tools/list" in body["error"]["message"]
+    assert "totally_made_up_method" in body["error"]["message"]
 
 
 def test_unknown_notification_returns_202(client: TestClient) -> None:
@@ -516,7 +519,10 @@ def test_register_method_rejects_duplicate_registration() -> None:
     """
     from meho_backplane.mcp.server import register_method
 
-    async def _dummy(_params: dict[str, Any] | None) -> dict[str, Any]:
+    async def _dummy(
+        _operator: Operator,
+        _params: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         return {}
 
     with pytest.raises(RuntimeError, match="already registered"):
@@ -540,7 +546,10 @@ def test_handler_exception_becomes_internal_error(
     """
     from meho_backplane.mcp import server as server_module
 
-    async def _boom(_params: dict[str, Any] | None) -> dict[str, Any]:
+    async def _boom(
+        _operator: Operator,
+        _params: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         raise ValueError("boom")
 
     monkeypatch.setitem(server_module._DISPATCH, "test_boom", _boom)
@@ -572,7 +581,10 @@ def test_handler_returning_non_dict_scalar_becomes_internal_error(
     """
     from meho_backplane.mcp import server as server_module
 
-    async def _list_returner(_params: dict[str, Any] | None) -> list[int]:
+    async def _list_returner(
+        _operator: Operator,
+        _params: dict[str, Any] | None,
+    ) -> list[int]:
         # Plausible handler bug: forgetting to wrap the items in a
         # ``{"items": [...]}`` dict before returning.
         return [1, 2, 3]

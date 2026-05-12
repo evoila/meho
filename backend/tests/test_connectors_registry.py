@@ -312,6 +312,8 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch("meho_backplane.main.register_probe"),
             patch("meho_backplane.main.get_engine"),
             patch("meho_backplane.main.dispose_engine"),
+            patch("meho_backplane.main.get_broadcast_client"),
+            patch("meho_backplane.main.dispose_broadcast_client"),
             patch(
                 "meho_backplane.main._eager_import_connectors", side_effect=lambda: called.append(1)
             ),

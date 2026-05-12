@@ -49,6 +49,20 @@ _SUPPORTED_DATABASE_URL_SCHEMES: Final[tuple[str, ...]] = (
     "sqlite+aiosqlite://",
 )
 
+#: URL schemes accepted on ``BROADCAST_REDIS_URL``. Mirrors redis-py's
+#: own :func:`redis.asyncio.from_url` accept-list (``redis://`` for TCP,
+#: ``rediss://`` for TLS, ``unix://`` for local-socket dev). ``valkey://``
+#: is **not** included even though the backend is Valkey: redis-py
+#: rejects the scheme at URL-parse time, and Valkey itself is
+#: wire-compatible under ``redis://``. Validating up front turns a
+#: misconfigured env var into a fail-fast startup error rather than a
+#: silent first-``/ready`` failure.
+_SUPPORTED_BROADCAST_URL_SCHEMES: Final[tuple[str, ...]] = (
+    "redis://",
+    "rediss://",
+    "unix://",
+)
+
 #: Truthy spellings accepted by :func:`_parse_bool`. Anything else
 #: (including the empty string and "disabled") is treated as ``False``
 #: so a misconfigured env var never silently enables a guarded surface.
@@ -217,6 +231,24 @@ class Settings(BaseModel):
         ``RETRIEVAL_MODEL_CACHE_DIR`` typically point at
         ``$HOME/.cache/fastembed`` so a developer's existing cache is
         reused across runs.
+    broadcast_redis_url:
+        Connection URL for the Valkey (Redis-protocol-compatible)
+        broadcast substrate the G6 activity-broadcast Initiative
+        (#228) is built on. Default ``redis://localhost:6379`` keeps
+        local development working without env-var wiring; production
+        deploys point this at the in-cluster broadcast service
+        rendered by the Helm chart (``redis://<release>-broadcast:6379``).
+        Only ``redis://``, ``rediss://``, and ``unix://`` schemes are
+        accepted — ``valkey://`` is rejected because redis-py itself
+        rejects it at URL-parse time and Valkey serves the Redis wire
+        protocol under ``redis://``. Validation runs at
+        :class:`Settings` construction so a typo fails startup rather
+        than the first ``/ready`` poll.
+    broadcast_retention_hours:
+        Server-side replay window for broadcast events, in hours.
+        Default 24 matches the locked v0.2 decision-3 contract. T3
+        (#309) will use this to set ``XADD MAXLEN`` / ``MINID`` trim
+        on every publish; T1 only carries the knob.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -244,6 +276,32 @@ class Settings(BaseModel):
         default="/var/cache/fastembed",
         min_length=1,
     )
+    broadcast_redis_url: str = Field(
+        default="redis://localhost:6379",
+        min_length=1,
+    )
+    broadcast_retention_hours: int = Field(default=24, gt=0)
+
+    @field_validator("broadcast_redis_url")
+    @classmethod
+    def _broadcast_url_must_use_supported_scheme(cls, value: str) -> str:
+        """Reject schemes redis-py would refuse at runtime.
+
+        :func:`redis.asyncio.from_url` raises :class:`ValueError` at
+        URL-parse time for anything outside ``redis://`` / ``rediss://`` /
+        ``unix://``. Pulling that validation up to :class:`Settings`
+        construction converts a misconfigured ``BROADCAST_REDIS_URL``
+        into a fail-fast startup error with an actionable message
+        naming the supported schemes, rather than a deferred crash on
+        the first :func:`get_broadcast_client` call.
+        """
+        if not value.startswith(_SUPPORTED_BROADCAST_URL_SCHEMES):
+            supported = ", ".join(_SUPPORTED_BROADCAST_URL_SCHEMES)
+            raise ValueError(
+                f"BROADCAST_REDIS_URL must use a redis-py-supported scheme; "
+                f"supported: {supported}. Got: {value!r}",
+            )
+        return value
 
     @field_validator("database_url")
     @classmethod
@@ -329,5 +387,12 @@ def get_settings() -> Settings:
         retrieval_model_cache_dir=os.environ.get(
             "RETRIEVAL_MODEL_CACHE_DIR",
             "/var/cache/fastembed",
+        ),
+        broadcast_redis_url=os.environ.get(
+            "BROADCAST_REDIS_URL",
+            "redis://localhost:6379",
+        ),
+        broadcast_retention_hours=int(
+            os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),
     )

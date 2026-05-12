@@ -53,6 +53,11 @@ from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
 from meho_backplane.auth.vault import vault_readiness_probe
+from meho_backplane.broadcast import (
+    broadcast_readiness_probe,
+    dispose_broadcast_client,
+    get_broadcast_client,
+)
 from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
@@ -109,13 +114,28 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     misconfiguration (wrong model name, unwritable cache dir) will
     surface on the first ``/api/v1/retrieve`` call with a clear
     fastembed-side error.
+
+    The async Valkey client backing the G6 activity-broadcast
+    Initiative (#228) is also constructed eagerly via
+    :func:`get_broadcast_client`. The construction parses
+    ``BROADCAST_REDIS_URL`` (failing startup on a malformed scheme,
+    per :class:`Settings`'s validator) but the actual TCP connection
+    stays lazy — no socket opens until the first ``PING`` from the
+    readiness probe (T1) or the first ``XADD`` from the publish hook
+    (T3). On shutdown :func:`dispose_broadcast_client` releases the
+    connection pool the same way :func:`dispose_engine` releases the
+    SQLAlchemy pool.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
     register_probe("vault", vault_readiness_probe)
     register_probe("db", db_migration_probe)
+    register_probe("broadcast", broadcast_readiness_probe)
     # Eager engine construction - see lifespan docstring for why.
     get_engine()
+    # Eager broadcast client construction (G6.1-T1 #307) - same rationale
+    # as the engine. URL-parse failures surface here, not on first /ready.
+    get_broadcast_client()
     # Connector auto-discovery (G0.2-T2, #241). Walks every subpackage
     # under `connectors/` so the top-level `register_connector` calls
     # in each product's `__init__.py` run before the first request
@@ -149,6 +169,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await dispose_engine()
+        await dispose_broadcast_client()
 
 
 app: FastAPI = FastAPI(

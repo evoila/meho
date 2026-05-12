@@ -67,10 +67,17 @@ def _eager_import_connectors() -> None:
 
     Called from ``main.py`` lifespan. Each subpackage self-registers by
     calling :func:`register_connector` at module top-level.
+
+    Subpackages are imported in name-sorted order so startup log lines
+    (one ``connector_registered`` event per registration) are stable
+    across restarts and across hosts. Behaviour is order-independent
+    today, but deterministic ordering keeps deploy diffs comparable and
+    avoids surprises if a future connector ever takes a registration-
+    time side-effect on another connector's presence.
     """
     import meho_backplane.connectors as pkg
 
-    for _, name, ispkg in pkgutil.iter_modules(pkg.__path__):
+    for _, name, ispkg in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m[1]):
         if ispkg:
             importlib.import_module(f"{pkg.__name__}.{name}")
 

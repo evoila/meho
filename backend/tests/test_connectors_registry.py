@@ -238,6 +238,46 @@ def test_eager_import_skips_non_packages() -> None:
     assert imported == []
 
 
+def test_eager_import_orders_subpackages_by_name() -> None:
+    """_eager_import_connectors imports subpackages in name-sorted order.
+
+    Pins the determinism contract: regardless of the order
+    ``pkgutil.iter_modules`` yields entries (filesystem order on POSIX
+    is not guaranteed), :func:`_eager_import_connectors` must call
+    ``importlib.import_module`` in name-sorted order so startup log
+    lines are stable across hosts.
+    """
+    # Yield unsorted to prove the sort happens here, not at iter_modules.
+    fake_iter = MagicMock(
+        return_value=iter(
+            [
+                ("", "vsphere", True),
+                ("", "bind9", True),
+                ("", "vault", True),
+            ]
+        )
+    )
+    imported_order: list[str] = []
+
+    def _track_import(name: str) -> types.ModuleType:
+        imported_order.append(name)
+        return types.ModuleType(name)
+
+    _import_target = "meho_backplane.connectors.registry.importlib.import_module"
+
+    with (
+        patch("meho_backplane.connectors.registry.pkgutil.iter_modules", fake_iter),
+        patch(_import_target, side_effect=_track_import),
+    ):
+        _eager_import_connectors()
+
+    assert imported_order == [
+        "meho_backplane.connectors.bind9",
+        "meho_backplane.connectors.vault",
+        "meho_backplane.connectors.vsphere",
+    ]
+
+
 def test_eager_import_no_subpackages_is_noop() -> None:
     """_eager_import_connectors handles empty connector directory gracefully."""
     fake_iter = MagicMock(return_value=iter([]))

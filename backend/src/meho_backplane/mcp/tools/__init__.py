@@ -12,6 +12,7 @@ invoked from the FastAPI ``lifespan`` (see
 ``pkgutil.iter_modules`` so the registrations land before the first
 ``tools/list`` request arrives.
 
-T3 (#248) ships the registry shell; this subpackage stays empty until
-T4 (#249) lands the reference ``meho.status`` tool.
+T4 (#249) lands the first tool: ``meho.status`` at
+:mod:`meho_backplane.mcp.tools.meho_status` — the reference impl
+downstream G3-G9 connector tools copy.
 """

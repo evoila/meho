@@ -495,7 +495,13 @@ def test_get_on_mcp_endpoint_returns_405(client: TestClient) -> None:
 
 
 def test_register_method_rejects_duplicate_registration() -> None:
-    """``register_method`` is a programmer-error gate, not a network one."""
+    """``register_method`` is a programmer-error gate, not a network one.
+
+    Test isolation: ``register_method`` raises *before* mutating
+    ``_DISPATCH`` (the duplicate check runs ahead of the dict
+    assignment), so a passing run leaves no residue in the module-
+    level registry. No fixture-level cleanup is needed.
+    """
     from meho_backplane.mcp.server import register_method
 
     async def _dummy(_params: dict[str, Any] | None) -> dict[str, Any]:
@@ -536,3 +542,38 @@ def test_handler_exception_becomes_internal_error(
     body = response.json()
     assert body["id"] == 11
     assert body["error"]["code"] == INTERNAL_ERROR
+
+
+def test_handler_returning_non_dict_scalar_becomes_internal_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handler that returns a non-dict / non-BaseModel value → -32603.
+
+    This is the load-bearing handler-bug guard at the end of
+    ``mcp_dispatch``: if a handler returns a list, string, int, or any
+    other shape that isn't a JSON-RPC ``result`` body, the dispatcher
+    must convert that to INTERNAL_ERROR rather than emit a wire-broken
+    envelope. ``test_handler_exception_becomes_internal_error`` covers
+    the ``except Exception`` arm; this case is the "handler returned
+    successfully but with the wrong shape" arm.
+    """
+    from meho_backplane.mcp import server as server_module
+
+    async def _list_returner(_params: dict[str, Any] | None) -> list[int]:
+        # Plausible handler bug: forgetting to wrap the items in a
+        # ``{"items": [...]}`` dict before returning.
+        return [1, 2, 3]
+
+    monkeypatch.setitem(server_module._DISPATCH, "test_bad_shape", _list_returner)
+
+    response = _post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 12, "method": "test_bad_shape"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 12
+    assert body["error"]["code"] == INTERNAL_ERROR
+    assert "result" in body["error"]["message"].lower()

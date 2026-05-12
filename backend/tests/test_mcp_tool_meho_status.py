@@ -38,87 +38,18 @@ regardless of the probe outcome.
 
 from __future__ import annotations
 
-import importlib
 import json
-from collections.abc import Iterator
-from typing import Any
-from uuid import UUID
 
-import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.main import app
-from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
-from meho_backplane.mcp.registry import clear_registries
+from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.schemas import INVALID_PARAMS
-from meho_backplane.settings import get_settings
-
-
-def _operator(role: TenantRole = TenantRole.READ_ONLY) -> Operator:
-    return Operator(
-        sub="op-test",
-        name="Test",
-        email=None,
-        raw_jwt="fixture-jwt-not-real",
-        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
-        tenant_role=role,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _isolated_registry_with_production_tool() -> Iterator[None]:
-    """Reset the registry then re-register the production ``meho.status`` tool.
-
-    ``clear_registries()`` between tests is needed for isolation, but
-    Python's import cache means the lifespan's
-    :func:`eager_import_mcp_modules` is a no-op on the 2nd+ call within
-    the same process — the top-level ``register_mcp_tool(...)`` call in
-    :mod:`meho_backplane.mcp.tools.meho_status` only runs at first
-    import. :func:`importlib.reload` forces the module body to re-execute
-    so the production registration lands fresh in every test, regardless
-    of which test file ran first.
-    """
-    from meho_backplane.mcp.tools import meho_status
-
-    clear_registries()
-    importlib.reload(meho_status)
-    yield
-    clear_registries()
-
-
-@pytest.fixture
-def client_with_operator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[TestClient, Operator]]:
-    """Same shape as :mod:`tests.test_mcp_registry`'s fixture, pinned to READ_ONLY.
-
-    The tool requires ``required_role=READ_ONLY`` so all happy-path
-    cases run as ``read_only``; tests that need a different role
-    parametrise indirectly.
-    """
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
-    get_settings.cache_clear()
-
-    op = _operator(TenantRole.READ_ONLY)
-
-    async def _fake_verify() -> Operator:
-        return op
-
-    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
-    try:
-        with TestClient(app) as client:
-            yield client, op
-    finally:
-        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
-        get_settings.cache_clear()
-
-
-def _post_mcp(client: TestClient, body: Any) -> Any:
-    return client.post("/mcp", json=body)
+from tests.mcp_test_fixtures import (
+    client_with_operator,  # noqa: F401 — pytest-discovered fixture
+    isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
+    post_mcp,
+    required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+)
 
 
 def test_tools_list_exposes_meho_status_with_well_formed_input_schema(
@@ -127,7 +58,7 @@ def test_tools_list_exposes_meho_status_with_well_formed_input_schema(
     """AC #1: ``tools/list`` surfaces ``meho.status`` with a 2020-12 schema."""
     client, _op = client_with_operator
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
     )
@@ -158,7 +89,7 @@ def test_tools_call_meho_status_returns_health_response_shape(
     """
     client, op = client_with_operator
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
@@ -197,7 +128,7 @@ def test_tools_call_meho_status_rejects_extra_arguments(
     """AC #3: extra args fail the ``additionalProperties: false`` schema → -32602."""
     client, _op = client_with_operator
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",

@@ -58,11 +58,19 @@ Public surface
   :func:`~meho_backplane.mcp.auth.www_authenticate_header` — URI / header
   builders for the OAuth-RS chain.
 
-**Out of scope for T3** (will be picked up by later tasks): MCP-specific
-audit integration on ``tools/call`` / ``resources/read`` (T5, #250) and
-MCP Inspector acceptance test + cross-repo docs (T6, #251). Origin-header
-validation per the MCP transport DNS-rebinding warning and request-body
-size caps remain deferred to a transport-hardening fast-follow.
+T5 (#250) layers per-operation audit on top of T3's dispatch surface:
+:func:`~meho_backplane.mcp.audit.write_mcp_audit_row` is called from
+inside :func:`~meho_backplane.mcp.handlers.handle_tools_call` and
+:func:`~meho_backplane.mcp.handlers.handle_resources_read` so each
+invocation produces one :class:`~meho_backplane.db.models.AuditLog`
+row regardless of how many calls share a JSON-RPC POST. The chassis
+:class:`~meho_backplane.audit.AuditMiddleware` skips ``/mcp`` paths so
+the granularity is one-row-per-operation, not one-row-per-envelope.
+
+**Out of scope for T5** (will be picked up by later tasks): MCP Inspector
+acceptance test + cross-repo docs (T6, #251). Origin-header validation
+per the MCP transport DNS-rebinding warning and request-body size caps
+remain deferred to a transport-hardening fast-follow.
 """
 
 # Importing `handlers` runs the side-effect registration of the five T3

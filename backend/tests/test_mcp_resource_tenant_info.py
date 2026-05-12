@@ -20,103 +20,21 @@ Covers acceptance criteria 5-8 on issue #249:
 
 from __future__ import annotations
 
-import importlib
 import json
-from collections.abc import Iterator
-from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
-from meho_backplane.main import app
-from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
-from meho_backplane.mcp.registry import clear_registries
 from meho_backplane.mcp.schemas import INVALID_PARAMS
-from meho_backplane.settings import get_settings
-
-_OPERATOR_TENANT_ID = UUID("00000000-0000-0000-0000-00000000a0a0")
-
-
-def _operator(role: TenantRole = TenantRole.READ_ONLY) -> Operator:
-    return Operator(
-        sub="op-test",
-        name="Test",
-        email=None,
-        raw_jwt="fixture-jwt-not-real",
-        tenant_id=_OPERATOR_TENANT_ID,
-        tenant_role=role,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _isolated_registry_with_production_resource() -> Iterator[None]:
-    """Reset the registry then re-register the production ``tenant_info`` resource.
-
-    Same rationale as :mod:`tests.test_mcp_tool_meho_status` — Python's
-    import cache prevents the lifespan's
-    :func:`eager_import_mcp_modules` from re-running top-level
-    registrations after the first test. :func:`importlib.reload` forces
-    the module body to re-execute so each test starts from a known
-    state regardless of cross-file ordering.
-    """
-    from meho_backplane.mcp.resources import tenant_info
-
-    clear_registries()
-    importlib.reload(tenant_info)
-    yield
-    clear_registries()
-
-
-@pytest.fixture
-def client_with_operator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[TestClient, Operator]]:
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
-    get_settings.cache_clear()
-
-    op = _operator(TenantRole.READ_ONLY)
-
-    async def _fake_verify() -> Operator:
-        return op
-
-    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
-    try:
-        with TestClient(app) as client:
-            yield client, op
-    finally:
-        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
-        get_settings.cache_clear()
-
-
-@pytest.fixture
-async def seeded_operator_tenant() -> None:
-    """Insert a :class:`Tenant` row matching the fixture operator's ``tenant_id``.
-
-    The conftest autouse fixture runs ``alembic upgrade head`` to materialise
-    the ``tenant`` table; this fixture populates the operator's row so the
-    handler's ``session.execute(select(Tenant).where(...))`` returns a real
-    record rather than ``None``.
-    """
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as session, session.begin():
-        session.add(
-            Tenant(
-                id=_OPERATOR_TENANT_ID,
-                slug="op-test-tenant",
-                name="Operator Test Tenant",
-            ),
-        )
-
-
-def _post_mcp(client: TestClient, body: Any) -> Any:
-    return client.post("/mcp", json=body)
+from tests.mcp_test_fixtures import (
+    client_with_operator,  # noqa: F401 — pytest-discovered fixture
+    isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
+    post_mcp,
+    required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
+    seeded_operator_tenant,  # noqa: F401 — pytest-discovered fixture
+)
 
 
 def test_resources_templates_list_exposes_tenant_info(
@@ -125,7 +43,7 @@ def test_resources_templates_list_exposes_tenant_info(
     """AC #5: ``resources/templates/list`` returns the registered template."""
     client, _op = client_with_operator
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {"jsonrpc": "2.0", "id": 1, "method": "resources/templates/list"},
     )
@@ -149,7 +67,7 @@ async def test_resources_read_own_tenant_returns_identity_bundle(
     client, op = client_with_operator
     uri = f"meho://tenant/{op.tenant_id}/info"
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
@@ -185,7 +103,7 @@ def test_resources_read_cross_tenant_returns_invalid_params(
     foreign_tenant = uuid4()
     uri = f"meho://tenant/{foreign_tenant}/info"
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",
@@ -211,7 +129,7 @@ def test_resources_read_invalid_uuid_returns_invalid_params(
     # inside the handler.
     uri = "meho://tenant/not-a-uuid/info"
 
-    response = _post_mcp(
+    response = post_mcp(
         client,
         {
             "jsonrpc": "2.0",

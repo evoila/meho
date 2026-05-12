@@ -266,6 +266,28 @@ this stage it exposes:
   `operator_sub`) with a fail-closed MCP-specific audit path on
   `tools/call` + `resources/read`.
 
+* MCP per-operation audit (Task #250, G0.5-T5) — every `tools/call` and
+  `resources/read` invocation writes exactly one `audit_log` row via
+  `backend/src/meho_backplane/mcp/audit.py::write_mcp_audit_row`. The
+  chassis `AuditMiddleware` (`backend/src/meho_backplane/audit.py`) is
+  taught to skip `/mcp` paths via the `_AUDIT_SKIP_PATH_PREFIXES`
+  tuple — otherwise the JSON-RPC envelope would attribute the entire
+  POST to a single row regardless of how many operations live inside,
+  which is the wrong granularity for G8's audit queries. Each MCP
+  handler wraps its body in a `try/finally` that derives a
+  `status_code` (200 / 400 / 403 / 404 / 500) from the JSON-RPC
+  outcome, packs a `payload` (`{op_id, params_hash, op_class}` for
+  tools; `{uri, op_class: "read"}` for resources), and commits the
+  row before propagating the result or exception. `params_hash` is
+  the SHA-256 hex digest of the canonical JSON arguments
+  (`sort_keys=True`, `separators=(",", ":")`) so G8 can answer "find
+  all calls with these arguments" without persisting the arguments
+  themselves — important for tools whose `arguments` reference secret
+  paths (e.g. a future `vault.kv.read`). Fail-closed: an audit-write
+  failure invalidates the operation; the MCP client sees JSON-RPC
+  `-32603` Internal Error and the row's absence is the operator's
+  signal to investigate the audit layer specifically.
+
 * MCP reference tool + resource (Task #249, G0.5-T4) — the two
   reference implementations downstream G3-G9 connector tools and
   resources copy. `backend/src/meho_backplane/mcp/tools/meho_status.py`

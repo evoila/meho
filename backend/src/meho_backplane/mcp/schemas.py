@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 __all__ = [
     "INTERNAL_ERROR",
@@ -90,6 +90,27 @@ class JsonRpcRequest(BaseModel):
     id: JsonRpcId = None
     method: str
     params: dict[str, Any] | None = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _reject_bool_id(cls, value: Any) -> Any:
+        """Reject ``bool`` ids before Pydantic coerces them to int.
+
+        ``bool`` is a subclass of ``int`` in Python, so the ``int | str |
+        None`` annotation accepts ``True`` / ``False`` and silently
+        coerces them to ``1`` / ``0``. JSON-RPC 2.0 §4.1.2 restricts the
+        id to "a String, Number, or NULL value if included" — and the
+        wire contract on the response side requires the response id to
+        equal the request id. Echoing ``1`` when the client sent ``true``
+        breaks that contract. The ``mode="before"`` hook runs ahead of
+        type coercion so the ValidationError surfaces ``True`` /
+        ``False`` rather than ``1`` / ``0`` in the error context.
+        """
+        if isinstance(value, bool):
+            raise ValueError(
+                "JSON-RPC id must be String, Number, or NULL — not bool",
+            )
+        return value
 
 
 class JsonRpcError(BaseModel):

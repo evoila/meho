@@ -280,8 +280,16 @@ def _coerce_request_id(payload: dict[str, Any]) -> JsonRpcId:
     parseable (helps clients correlate failures). When the raw value
     isn't a String / Number / NULL, fall back to ``None`` per spec §5
     ("If there was an error in detecting the id ... it MUST be Null").
+
+    ``bool`` is short-circuited explicitly because it subclasses ``int``
+    in Python — without this check ``True`` / ``False`` would slip
+    through the ``isinstance(raw, (int, str))`` arm and echo as ``1`` /
+    ``0`` in the error response, which the client cannot correlate
+    against its original ``true`` / ``false`` request id.
     """
     raw = payload.get("id")
+    if isinstance(raw, bool):
+        return None
     if isinstance(raw, (int, str)) or raw is None:
         return raw
     return None

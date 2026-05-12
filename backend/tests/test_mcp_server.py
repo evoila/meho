@@ -288,6 +288,32 @@ def test_request_missing_method_returns_invalid_request(client: TestClient) -> N
     assert body["error"]["code"] == INVALID_REQUEST
 
 
+@pytest.mark.parametrize("bad_id", [True, False])
+def test_bool_id_is_rejected_as_invalid_request(
+    client: TestClient,
+    bad_id: bool,
+) -> None:
+    """``bool`` ids violate JSON-RPC §4.1.2 (Number/String/NULL only).
+
+    ``bool`` subclasses ``int`` in Python, so without an explicit reject
+    Pydantic would coerce ``True`` → ``1`` / ``False`` → ``0`` and echo
+    that integer in the response, breaking the client's id correlation.
+    The field validator on :class:`JsonRpcRequest.id` and the bool-
+    short-circuit in :func:`_coerce_request_id` both gate this.
+    """
+    response = _post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": bad_id, "method": "ping"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # The error response carries id=null because the raw id was not a
+    # valid JSON-RPC id; echoing the bool would propagate the bug.
+    assert body["id"] is None
+    assert body["error"]["code"] == INVALID_REQUEST
+
+
 # ---------------------------------------------------------------------------
 # ping utility
 # ---------------------------------------------------------------------------

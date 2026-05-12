@@ -55,10 +55,13 @@ specifies what the realm must produce.
   with a single tenant (`rdc-internal` for the dogfooding lab); the
   UUID is recorded on the consumer side in `targets.yaml` for
   per-target tenancy.
-- Keycloak version **22+**. The mapper type names in this recipe
-  (`Group Attribute`, `User Realm Role`) match the Admin Console as
-  shipped in Keycloak 22 through current (26.x at time of writing);
-  the 19.x and earlier consoles use slightly different labels.
+- Keycloak version **22+**. The mapper type names this recipe
+  uses (`Group Attribute` for `tenant_id` in Step 3; `Script Mapper`
+  for Shape A and `User Attribute` for Shape B in Step 4; and
+  `User Realm Role` referenced only as the discouraged shape in
+  Step 4's two callouts) match the Admin Console as shipped in
+  Keycloak 22 through current (26.x at time of writing); the 19.x
+  and earlier consoles use slightly different labels.
 
 ## Recommended path: groups + realm roles
 

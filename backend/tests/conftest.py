@@ -55,6 +55,8 @@ __all__ = [
     "DEFAULT_DISCOVERY_URL",
     "DEFAULT_ISSUER",
     "DEFAULT_JWKS_URL",
+    "DEFAULT_TENANT_ID",
+    "DEFAULT_TENANT_ROLE",
     "SECRET_LEAK_PATTERNS",
     "make_rsa_keypair",
     "mint_token",
@@ -294,6 +296,23 @@ DEFAULT_DISCOVERY_URL: Final[str] = f"{DEFAULT_ISSUER}/.well-known/openid-config
 #: JWKS endpoint Keycloak's discovery doc points at by default.
 DEFAULT_JWKS_URL: Final[str] = f"{DEFAULT_ISSUER}/protocol/openid-connect/certs"
 
+#: Default ``tenant_id`` claim value the helper mints into every token.
+#:
+#: Pinned to a stable, recognisable UUID so failure messages and audit
+#: rows in the chassis suite are diff-friendly across runs. Tests that
+#: care about cross-tenant isolation pass an explicit per-test value.
+DEFAULT_TENANT_ID: Final[str] = "00000000-0000-0000-0000-00000000a0a0"
+
+#: Default ``tenant_role`` claim value the helper mints into every token.
+#:
+#: Most chassis tests don't care about the role itself — they care only
+#: that the token *has* one so :func:`verify_jwt` returns rather than
+#: 401-ing. ``"operator"`` is the most representative middle-of-the-road
+#: value (neither the most-privileged ``tenant_admin`` nor the
+#: least-privileged ``read_only``); RBAC-shape tests in T4 will pin
+#: per-test values explicitly.
+DEFAULT_TENANT_ROLE: Final[str] = "operator"
+
 
 def make_rsa_keypair(kid: str) -> Any:
     """Generate a fresh RSA-2048 keypair with the requested ``kid``.
@@ -332,10 +351,14 @@ def mint_token(
     algorithm: str = "RS256",
     kid: str | None = None,
     omit_sub: bool = False,
+    tenant_id: str | None = DEFAULT_TENANT_ID,
+    tenant_role: str | None = DEFAULT_TENANT_ROLE,
+    tenant_claim_name: str = "tenant_id",
+    tenant_role_claim_name: str = "tenant_role",
 ) -> str:
     """Mint a JWT signed by *private_key*, returning the compact form.
 
-    Mirrors the helper in ``tests/test_auth_jwt.py`` but adds three
+    Mirrors the helper in ``tests/test_auth_jwt.py`` but adds the
     failure-mode knobs the comprehensive suite needs:
 
     * ``algorithm`` — the JWS ``alg`` header value. Defaults to
@@ -347,6 +370,18 @@ def mint_token(
       drive the kid-miss → JWKS-refresh path.
     * ``omit_sub`` — when ``True``, drops the ``sub`` claim from the
       payload to verify the missing-claim 401 contract.
+    * ``tenant_id`` / ``tenant_role`` — defaults to
+      :data:`DEFAULT_TENANT_ID` / :data:`DEFAULT_TENANT_ROLE` so
+      pre-G0.1 chassis tests keep flowing through ``verify_jwt``
+      without needing per-test boilerplate. Pass ``None`` to omit the
+      claim (drives ``missing_tenant_claim`` / ``missing_tenant_role_claim``);
+      pass a malformed string to drive ``malformed_tenant_claim`` /
+      ``unknown_tenant_role``.
+    * ``tenant_claim_name`` / ``tenant_role_claim_name`` — control the
+      *name* of the claim that carries the tenancy values, so tests
+      can exercise the configurable ``JWT_TENANT_CLAIM_NAME`` /
+      ``JWT_TENANT_ROLE_CLAIM_NAME`` settings without rebuilding
+      this helper.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -365,6 +400,10 @@ def mint_token(
             payload["name"] = name
         if email is not None:
             payload["email"] = email
+        if tenant_id is not None:
+            payload[tenant_claim_name] = tenant_id
+        if tenant_role is not None:
+            payload[tenant_role_claim_name] = tenant_role
         if extra_claims:
             payload.update(extra_claims)
         # ``kid`` resolution: explicit override wins; otherwise pull

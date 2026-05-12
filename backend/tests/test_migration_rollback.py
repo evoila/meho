@@ -62,23 +62,16 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
-import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 import respx
 from alembic import command
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
-
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    from authlib.jose import JsonWebKey, JsonWebToken
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -98,11 +91,12 @@ from tests.fixtures.synthetic_n_plus_1 import (
     apply_synthetic_n_plus_1_migration,
 )
 
-_ISSUER: str = "https://keycloak.test/realms/meho"
-_AUDIENCE: str = "meho-backplane"
-_DISCOVERY_URL: str = f"{_ISSUER}/.well-known/openid-configuration"
-_JWKS_URL: str = f"{_ISSUER}/protocol/openid-connect/certs"
-
+from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
+from ._oidc_jwt_helpers import mint_token as _mint_token
+from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
+from ._oidc_jwt_helpers import public_jwks as _public_jwks
 
 # ---------------------------------------------------------------------------
 # Docker-availability skip — same shape as test_db_engine.TestPostgresIntegration
@@ -123,61 +117,6 @@ _DOCKER_AVAILABLE: bool = _docker_socket_present()
 _SKIP_REASON: str = (
     "Docker socket unavailable in this sandbox; runs in CI where containers are provisioned."
 )
-
-
-# ---------------------------------------------------------------------------
-# JWT / Vault helpers — mirror tests/test_audit_middleware.py
-# ---------------------------------------------------------------------------
-
-
-def _make_rsa_keypair(kid: str) -> Any:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        return JsonWebKey.generate_key(
-            "RSA",
-            2048,
-            options={"kid": kid},
-            is_private=True,
-        )
-
-
-def _public_jwks(*keys: Any) -> dict[str, list[dict[str, Any]]]:
-    return {"keys": [k.as_dict(is_private=False) for k in keys]}
-
-
-def _mint_token(private_key: Any, *, sub: str = "op-rollback") -> str:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        jwt = JsonWebToken(["RS256"])
-        now = int(time.time())
-        payload: dict[str, Any] = {
-            "sub": sub,
-            "iss": _ISSUER,
-            "aud": _AUDIENCE,
-            "iat": now,
-            "exp": now + 3600,
-            "nbf": now,
-            "name": "Forward Compat",
-            "email": "fc@example.com",
-        }
-        header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
-        token: bytes | str = jwt.encode(header, payload, private_key)
-        return token.decode("ascii") if isinstance(token, bytes) else token
-
-
-def _mock_discovery_and_jwks(
-    mock_router: respx.MockRouter,
-    jwks: dict[str, Any],
-) -> None:
-    mock_router.get(_DISCOVERY_URL).mock(
-        return_value=httpx.Response(
-            200,
-            json={"issuer": _ISSUER, "jwks_uri": _JWKS_URL},
-        ),
-    )
-    mock_router.get(_JWKS_URL).mock(
-        return_value=httpx.Response(200, json=jwks),
-    )
 
 
 class _FakeJWTAuth:
@@ -412,7 +351,12 @@ class TestForwardCompatRollback:
 
         operator_sub = "op-rollback"
         key = _make_rsa_keypair("kid-rollback")
-        token = _mint_token(key, sub=operator_sub)
+        token = _mint_token(
+            key,
+            sub=operator_sub,
+            name="Forward Compat",
+            email="fc@example.com",
+        )
         _install_fake_vault(monkeypatch)
 
         # mirror.gcr.io: see comment on the matching line in test_db_engine.py.

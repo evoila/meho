@@ -106,6 +106,10 @@ def _public_jwks(*keys: Any) -> dict[str, list[dict[str, Any]]]:
     return {"keys": [k.as_dict(is_private=False) for k in keys]}
 
 
+_DEFAULT_TENANT_ID: str = "00000000-0000-0000-0000-00000000a0a0"
+_DEFAULT_TENANT_ROLE: str = "operator"
+
+
 def _mint_token(
     private_key: Any,
     *,
@@ -117,8 +121,23 @@ def _mint_token(
     expires_in: int = 3600,
     not_before_offset: int = 0,
     extra_claims: dict[str, Any] | None = None,
+    tenant_id: str | None = _DEFAULT_TENANT_ID,
+    tenant_role: str | None = _DEFAULT_TENANT_ROLE,
+    tenant_claim_name: str = "tenant_id",
+    tenant_role_claim_name: str = "tenant_role",
 ) -> str:
-    """Mint a JWT signed by *private_key*, returning the compact form."""
+    """Mint a JWT signed by *private_key*, returning the compact form.
+
+    ``tenant_id`` / ``tenant_role`` default to fixture values so the
+    pre-G0.1 happy paths keep flowing through ``verify_jwt`` without
+    test-by-test boilerplate. Pass ``None`` to omit the claim entirely
+    (drives the missing-claim 401 branches); pass a malformed string
+    to drive the malformed-value 401 branches. ``tenant_claim_name``
+    / ``tenant_role_claim_name`` let the
+    :data:`Settings.jwt_tenant_claim_name` /
+    :data:`Settings.jwt_tenant_role_claim_name` override path be
+    exercised end-to-end.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         jwt = JsonWebToken(["RS256"])
@@ -135,6 +154,10 @@ def _mint_token(
             payload["name"] = name
         if email is not None:
             payload["email"] = email
+        if tenant_id is not None:
+            payload[tenant_claim_name] = tenant_id
+        if tenant_role is not None:
+            payload[tenant_role_claim_name] = tenant_role
         if extra_claims:
             payload.update(extra_claims)
         header = {
@@ -539,6 +562,8 @@ def test_operator_repr_does_not_leak_raw_jwt() -> None:
         name="Alice",
         email="alice@example.com",
         raw_jwt=fake_token,
+        tenant_id=_DEFAULT_TENANT_ID,
+        tenant_role=_DEFAULT_TENANT_ROLE,
     )
 
     text = repr(op)
@@ -598,3 +623,318 @@ def test_value_error_key_not_found_triggers_jwks_refresh(
     # The forced refresh re-hits both discovery and JWKS.
     assert discovery_route.call_count == 2
     assert jwks_route.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# G0.1-T2 — tenant_id / tenant_role claim extraction
+# ---------------------------------------------------------------------------
+
+
+import io  # noqa: E402  - kept local to the new section for clarity
+import json  # noqa: E402
+import logging  # noqa: E402
+
+import pydantic  # noqa: E402
+import structlog  # noqa: E402
+
+from meho_backplane.auth.operator import TenantRole  # noqa: E402
+
+
+def _configure_log_capture(buf: io.StringIO) -> None:
+    """Redirect structlog JSON output into *buf* for the duration of one test.
+
+    Mirrors the production processor chain in
+    :func:`meho_backplane.logging.configure_logging` so the captured
+    lines are byte-identical to what would land on stdout. The only
+    deviation is ``cache_logger_on_first_use=False`` — production caches
+    the bound logger after first use; tests need a fresh factory binding
+    every time they install a buffer, otherwise an earlier test's
+    handle is reused and the new buffer stays empty.
+
+    ``dict_tracebacks`` is included to keep parity with production so
+    any future test that emits ``exc_info`` (e.g. via
+    :meth:`structlog.stdlib.BoundLogger.exception`) sees the same
+    serialised ``exception`` list shape an operator would see in
+    stdout.
+    """
+    structlog.reset_defaults()
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.dict_tracebacks,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(file=buf),
+        cache_logger_on_first_use=False,
+    )
+
+
+@pytest.fixture
+def log_buffer() -> Iterator[io.StringIO]:
+    """Per-test structlog capture buffer."""
+    buf = io.StringIO()
+    _configure_log_capture(buf)
+    yield buf
+    structlog.reset_defaults()
+
+
+def _captured_events(buf: io.StringIO) -> list[dict[str, Any]]:
+    """Parse one JSON dict per non-empty line in *buf*."""
+    return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
+
+
+def _assert_event_logged(buf: io.StringIO, event: str, **expected: Any) -> None:
+    """Fail the test unless *event* appears in *buf* with the given fields.
+
+    Relies on the structlog ``event`` key (the canonical name slot) for
+    matching, then asserts every requested kwarg matches the captured
+    record's field of the same name. Fails with a diagnostic dump of all
+    captured events so a missing or mistyped event surfaces immediately.
+    """
+    events = _captured_events(buf)
+    matches = [e for e in events if e.get("event") == event]
+    assert matches, f"event {event!r} not found; captured: {events!r}"
+    record = matches[-1]
+    for field, value in expected.items():
+        assert record.get(field) == value, (
+            f"event {event!r} field {field!r}: expected {value!r}, got {record.get(field)!r}"
+        )
+
+
+def test_tenant_claim_extraction_populates_operator() -> None:
+    """Happy path: a JWT with both claims yields an Operator carrying them."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    expected_tenant = "11111111-1111-1111-1111-111111111111"
+    token = _mint_token(
+        key,
+        sub="op-1",
+        tenant_id=expected_tenant,
+        tenant_role="tenant_admin",
+    )
+
+    app = FastAPI()
+
+    @app.get("/whoami")
+    async def whoami(operator: Operator = Depends(verify_jwt)) -> dict[str, Any]:
+        return {
+            "sub": operator.sub,
+            "tenant_id": str(operator.tenant_id),
+            "tenant_role": operator.tenant_role.value,
+        }
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(app)
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sub"] == "op-1"
+    assert body["tenant_id"] == expected_tenant
+    assert body["tenant_role"] == "tenant_admin"
+
+
+def test_missing_tenant_id_claim_returns_401_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """A JWT without ``tenant_id`` is rejected fail-closed with telemetry."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(key, tenant_id=None)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "missing_tenant_claim"}
+    _assert_event_logged(log_buffer, "missing_tenant_claim", claim_name="tenant_id")
+
+
+def test_missing_tenant_role_claim_returns_401_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """A JWT without ``tenant_role`` is rejected fail-closed with telemetry."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(key, tenant_role=None)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "missing_tenant_role_claim"}
+    _assert_event_logged(
+        log_buffer,
+        "missing_tenant_role_claim",
+        claim_name="tenant_role",
+    )
+
+
+def test_malformed_tenant_id_returns_401_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """A non-UUID ``tenant_id`` is rejected as ``malformed_tenant_claim``."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(key, tenant_id="not-a-uuid")
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "malformed_tenant_claim"}
+    _assert_event_logged(
+        log_buffer,
+        "malformed_tenant_claim",
+        claim_name="tenant_id",
+        value="not-a-uuid",
+    )
+
+
+def test_unknown_tenant_role_returns_401_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """A role outside the closed enum is rejected as ``unknown_tenant_role``."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(key, tenant_role="superadmin")
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "unknown_tenant_role"}
+    _assert_event_logged(
+        log_buffer,
+        "unknown_tenant_role",
+        claim_name="tenant_role",
+        value="superadmin",
+    )
+
+
+def test_jwt_tenant_claim_name_env_override_routes_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting ``JWT_TENANT_CLAIM_NAME`` reroutes which JWT claim is read.
+
+    Operators with a Keycloak realm that surfaces tenancy under a
+    non-default claim name (e.g. ``tid``) override the env var; the
+    extractor must read from the configured key instead of the
+    hard-coded default. Mirror test for ``JWT_TENANT_ROLE_CLAIM_NAME``.
+    """
+    monkeypatch.setenv("JWT_TENANT_CLAIM_NAME", "tid")
+    monkeypatch.setenv("JWT_TENANT_ROLE_CLAIM_NAME", "trole")
+    get_settings.cache_clear()
+
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    expected_tenant = "22222222-2222-2222-2222-222222222222"
+    # Mint the token under the *non-default* claim names so a regression
+    # to the old hard-coded keys would surface as a 401 missing-claim.
+    token = _mint_token(
+        key,
+        sub="op-9",
+        tenant_id=expected_tenant,
+        tenant_role="read_only",
+        tenant_claim_name="tid",
+        tenant_role_claim_name="trole",
+    )
+
+    app = FastAPI()
+
+    @app.get("/whoami")
+    async def whoami(operator: Operator = Depends(verify_jwt)) -> dict[str, Any]:
+        return {
+            "tenant_id": str(operator.tenant_id),
+            "tenant_role": operator.tenant_role.value,
+        }
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(app)
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tenant_id"] == expected_tenant
+    assert body["tenant_role"] == "read_only"
+
+
+def test_settings_tenant_claim_name_defaults() -> None:
+    """The ``Settings`` defaults match the issue body's documented values."""
+    monkeypatch_envs = ("JWT_TENANT_CLAIM_NAME", "JWT_TENANT_ROLE_CLAIM_NAME")
+    with pytest.MonkeyPatch.context() as mp:
+        for name in monkeypatch_envs:
+            mp.delenv(name, raising=False)
+        get_settings.cache_clear()
+        settings = get_settings()
+    assert settings.jwt_tenant_claim_name == "tenant_id"
+    assert settings.jwt_tenant_role_claim_name == "tenant_role"
+
+
+def test_operator_requires_both_tenant_fields_at_construction() -> None:
+    """Constructing an :class:`Operator` without tenant fields must fail.
+
+    Pinned as a unit-level guard so a future regression that drops the
+    required-ness of the fields surfaces before any integration test
+    catches it. The test asserts on pydantic's :class:`ValidationError`
+    rather than on the HTTP-layer 401 — those higher-level paths are
+    covered above.
+    """
+    with pytest.raises(pydantic.ValidationError):
+        Operator(
+            sub="op-1",
+            raw_jwt="x.y.z",
+            tenant_id="00000000-0000-0000-0000-00000000a0a0",
+            # tenant_role intentionally omitted
+        )
+    with pytest.raises(pydantic.ValidationError):
+        Operator(
+            sub="op-1",
+            raw_jwt="x.y.z",
+            tenant_role=TenantRole.OPERATOR,
+            # tenant_id intentionally omitted
+        )
+
+
+def test_tenant_role_enum_values_match_v02_contract() -> None:
+    """The closed enum contract: exactly three values, exact spelling.
+
+    A widening of the enum is a v0.2.next decision; this guard surfaces
+    accidental additions or rename in code review by failing the suite.
+    """
+    assert {member.value for member in TenantRole} == {
+        "tenant_admin",
+        "operator",
+        "read_only",
+    }

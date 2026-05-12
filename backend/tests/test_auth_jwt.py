@@ -650,6 +650,12 @@ def _configure_log_capture(buf: io.StringIO) -> None:
     the bound logger after first use; tests need a fresh factory binding
     every time they install a buffer, otherwise an earlier test's
     handle is reused and the new buffer stays empty.
+
+    ``dict_tracebacks`` is included to keep parity with production so
+    any future test that emits ``exc_info`` (e.g. via
+    :meth:`structlog.stdlib.BoundLogger.exception`) sees the same
+    serialised ``exception`` list shape an operator would see in
+    stdout.
     """
     structlog.reset_defaults()
     structlog.configure(
@@ -657,6 +663,7 @@ def _configure_log_capture(buf: io.StringIO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.dict_tracebacks,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

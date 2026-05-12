@@ -160,10 +160,21 @@ def async_pg_url() -> Iterator[str]:
     # fine and skip the consuming tests.
     from testcontainers.postgres import PostgresContainer
 
-    # mirror.gcr.io: same registry pin as test_db_engine /
-    # test_migration_rollback so the supply-chain audit (Goal #11
-    # acceptance criteria) covers a single image source.
-    with PostgresContainer("mirror.gcr.io/library/postgres:16-alpine") as pg:
+    # pgvector/pgvector:pg16 — Postgres 16 with the pgvector extension
+    # pre-installed. After G0.4-T1 (#258) migration 0003 runs
+    # ``CREATE EXTENSION IF NOT EXISTS vector`` as part of
+    # ``alembic upgrade head``, so the testcontainers image must ship
+    # the extension. Stock ``postgres:16-alpine`` (the v0.1-chassis
+    # choice from #268) has no ``vector.control`` and fails fast,
+    # which is why this conftest's image was swapped in lock-step
+    # with the matching swaps in ``test_db_engine.py`` and
+    # ``test_migration_rollback.py``. Image name is overridable via
+    # ``MEHO_TEST_PGVECTOR_IMAGE`` so a registry-mirror swap (GHCR
+    # cache, internal Harbor) does not require a code change — same
+    # env-knob shape ``test_db_engine`` / ``test_migration_rollback``
+    # honour.
+    image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+    with PostgresContainer(image) as pg:
         sync_url = pg.get_connection_url()
         async_url = _async_url_from(sync_url)
 
@@ -252,13 +263,18 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
     engine_module._engine = eng
 
     async with eng.connect() as conn:
-        # ``RESTART IDENTITY CASCADE`` is unnecessary — neither table
-        # has serial columns or FK relationships in v0.2 — but the
-        # explicit ``TRUNCATE`` is what guarantees a stale row from a
-        # prior test cannot leak into the next test's per-tenant
-        # row-count assertions.
-        await conn.execute(text("TRUNCATE TABLE audit_log"))
-        await conn.execute(text("TRUNCATE TABLE tenant"))
+        # Truncate every chassis table in one statement: PG requires
+        # that a TRUNCATE against a table referenced by a FK either
+        # use ``CASCADE`` or include every referencing table in the
+        # same statement. Migration ``0003`` (G0.4-T1) added a real
+        # ``documents.tenant_id REFERENCES tenant(id)`` FK, so
+        # ``TRUNCATE TABLE tenant`` on its own is rejected — listing
+        # ``documents`` explicitly keeps the statement non-cascading
+        # while still leaving the table empty. ``audit_log`` has no
+        # FK to ``tenant`` (the soft column shape from 0002), but
+        # bundling it into the same TRUNCATE keeps the per-test reset
+        # atomic.
+        await conn.execute(text("TRUNCATE TABLE audit_log, documents, tenant"))
         # Re-seed two pinned tenant rows so the integration suite
         # actually exercises the T1 ``tenant`` table (the issue body's
         # explicit "Setup fixture" requirement). The pinned UUIDs

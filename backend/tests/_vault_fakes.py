@@ -83,6 +83,13 @@ class _FakeTokenAuth:
     revoke_calls: int = 0
 
     def revoke_self(self, mount_point: str = "token") -> None:
+        # ``mount_point`` is part of the hvac call shape (production code
+        # passes it by keyword); the fake records the call without
+        # branching on the value. The explicit ``_ = mount_point`` rebind
+        # is the use-the-parameter pattern that defeats SonarCloud's
+        # python:S1172 unused-argument rule without forcing a rename
+        # (which would break the keyword call site).
+        _ = mount_point
         self.revoke_calls += 1
 
 
@@ -123,6 +130,14 @@ class _FakeSysBackend:
     payload: Any = None
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
+        # ``method`` mirrors the hvac signature so production-shaped
+        # callers (``read_health_status(method='HEAD')``) work; the fake
+        # always returns the configured payload regardless of verb. The
+        # explicit ``_ = method`` rebind is the use-the-parameter
+        # pattern that defeats SonarCloud's python:S1172 unused-argument
+        # rule without forcing a rename (which would break the keyword
+        # call site).
+        _ = method
         return self.payload
 
 

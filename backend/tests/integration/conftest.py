@@ -52,7 +52,6 @@ route table reproducible from the test source alone.
 
 from __future__ import annotations
 
-import asyncio
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -260,6 +259,23 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         # row-count assertions.
         await conn.execute(text("TRUNCATE TABLE audit_log"))
         await conn.execute(text("TRUNCATE TABLE tenant"))
+        # Re-seed two pinned tenant rows so the integration suite
+        # actually exercises the T1 ``tenant`` table (the issue body's
+        # explicit "Setup fixture" requirement). The pinned UUIDs
+        # match ``TENANT_A_ID`` / ``TENANT_B_ID`` in
+        # :mod:`tests.integration.test_tenant_isolation`; keeping them
+        # as string literals here avoids importing test-module symbols
+        # into the conftest. Test 2's "unknown tenant_id" probe gains
+        # meaning from this seed — a bogus UUID now contrasts against
+        # two real tenant rows in the same DB rather than against an
+        # empty table.
+        await conn.execute(
+            text(
+                "INSERT INTO tenant (id, slug, name) VALUES "
+                "('11111111-1111-1111-1111-111111111111', 'tenant-a', 'Tenant A'), "
+                "('22222222-2222-2222-2222-222222222222', 'tenant-b', 'Tenant B')"
+            )
+        )
         await conn.commit()
 
     try:
@@ -359,13 +375,13 @@ async def count_audit_rows(async_url: str) -> int:
     return int(count)
 
 
-def run_async(coro: Any) -> Any:
-    """Run *coro* in a fresh event loop, returning its value.
-
-    Wrapper around :func:`asyncio.run` that exists so the test bodies
-    can stay synchronous (the testcontainers PG class form mirrors
-    :class:`tests.test_migration_rollback.TestForwardCompatRollback`,
-    where ``alembic.command.upgrade`` calls :func:`asyncio.run`
-    internally and the outer test cannot itself be ``async``).
-    """
-    return asyncio.run(coro)
+# The previous ``run_async`` helper (a thin wrapper around
+# :func:`asyncio.run`) was deliberately removed. Each call would spawn
+# a *fresh* event loop, but the asyncpg pool created in the
+# :func:`pg_engine` async fixture is bound to the pytest-asyncio
+# managed loop. Crossing loops on a pool checkout tripped
+# SQLAlchemy's ``pool_pre_ping`` with
+# ``RuntimeError: ... attached to a different loop`` in CI on PR #268.
+# The cure is to keep PG-driven tests ``async def`` (the
+# ``asyncio_mode = "auto"`` setting in ``backend/pyproject.toml`` makes
+# that the default) and to ``await`` the helper coroutines directly.

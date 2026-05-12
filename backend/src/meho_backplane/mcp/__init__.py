@@ -24,14 +24,21 @@ T1 (this Task #246) ships the **transport + dispatch skeleton**:
   universal — ``initialize``, ``notifications/initialized``, and
   ``ping``.
 
-**No Bearer-token auth in T1.** Every well-formed JSON-RPC request
-currently succeeds. T2 (#247) adds the OAuth 2.1 resource-server
-chain: ``/.well-known/oauth-protected-resource``, the
-``WWW-Authenticate`` header on 401s, audience validation per RFC 8707,
-and reuse of the existing :func:`~meho_backplane.auth.jwt.verify_jwt`
-chain. Origin-header validation per the MCP transport security warning
-(DNS rebinding defence) is also deferred to T2 — it requires the
-``MCP_ALLOWED_ORIGINS`` setting T2 introduces.
+**No Bearer-token auth in T1.** No ``Authorization`` header is required;
+no ``operator_sub`` is bound. Well-formed JSON-RPC requests reach the
+handler without an identity check. The transport layer still enforces
+two spec MUSTs that can reject before the handler runs: the
+``MCP-Protocol-Version`` header validation (HTTP 400 on an unsupported
+revision per spec §"Protocol Version Header", waived for the
+``initialize`` call itself) and the JSON-RPC envelope parse / validate
+pipeline (HTTP 200 + JSON-RPC error envelope on parse error / invalid
+request). T2 (#247) adds the OAuth 2.1 resource-server chain on top:
+``/.well-known/oauth-protected-resource``, the ``WWW-Authenticate``
+header on 401s, audience validation per RFC 8707, and reuse of the
+existing :func:`~meho_backplane.auth.jwt.verify_jwt` chain. Origin-
+header validation per the MCP transport security warning (DNS rebinding
+defence) is also deferred to T2 — it requires the ``MCP_ALLOWED_ORIGINS``
+setting T2 introduces.
 """
 
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method, router

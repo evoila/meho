@@ -40,8 +40,12 @@ Per the Streamable HTTP §"Sending Messages to the Server":
 
 A JSON-RPC-level error (parse error, invalid request, method not found,
 invalid params, internal error) is encoded as a 200 envelope with the
-``error`` member populated; only transport-level failures (in T1: none)
-flip the HTTP status away from 200 / 202.
+``error`` member populated. **Transport-level failures** flip the HTTP
+status away from 200 / 202; T1 has one such case: an unsupported
+``MCP-Protocol-Version`` header on a non-``initialize`` call returns
+HTTP 400 with a JSON-RPC error envelope in the body (spec §"Protocol
+Version Header" MUST). T2 (#247) adds the OAuth 401 / 403 cases when
+the Bearer chain lands.
 
 The single-shot JSON shape is also what the AC list on #246 codifies:
 no streaming, no chunked responses, no SSE. The transport spec's GET

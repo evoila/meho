@@ -350,6 +350,45 @@ def test_jwks_unreachable_returns_401(
 
 
 # ---------------------------------------------------------------------------
+# Defence in depth: empty audience setting fail-closes locally to the verifier
+# ---------------------------------------------------------------------------
+
+
+def test_empty_audience_setting_returns_401(
+    keypair: Any,
+    jwks: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``BACKPLANE_URL=""`` + ``MCP_RESOURCE_URI=""`` → every request 401s.
+
+    Without this guard the fail-closed property would rely on the
+    issuer never minting a token with an empty ``aud`` claim. The
+    verifier now refuses upfront with ``audience_not_configured`` so
+    the failure mode is local to the verifier rather than depending on
+    an honest-issuer invariant.
+    """
+    monkeypatch.setenv("BACKPLANE_URL", "")
+    monkeypatch.setenv("MCP_RESOURCE_URI", "")
+    get_settings.cache_clear()
+    try:
+        client = TestClient(app)
+        with respx.mock as router:
+            _mock_discovery_and_jwks(router, jwks)
+            # Even a token whose `aud` matches the empty derived audience
+            # (i.e. `aud=""`) is rejected because the verifier refuses
+            # to run at all on an empty expected_audience.
+            token = _mint_mcp_token(keypair, audience="")
+            response = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 100, "method": "ping"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 401
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # Settings resolution: explicit MCP_RESOURCE_URI overrides the BACKPLANE_URL derivation
 # ---------------------------------------------------------------------------
 

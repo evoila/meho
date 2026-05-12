@@ -475,7 +475,19 @@ async def verify_jwt_for_audience(
     Failures-with-audience-mismatch surface as ``invalid_token``
     because that's how authlib's ``InvalidClaimError`` maps in the
     centralised handler.
+
+    Defence in depth: an empty or whitespace-only ``expected_audience``
+    short-circuits to ``audience_not_configured`` 401. The MCP route
+    derives the audience from ``MCP_RESOURCE_URI`` / ``BACKPLANE_URL``
+    and returns an empty string when neither is set; without this
+    guard the fail-closed property would rely on the *issuer* never
+    emitting a token with an empty ``aud`` claim — a true assumption
+    against any real Keycloak deployment but one external invariant
+    away from a bypass. Failing the check locally to the verifier
+    makes the property auditable in one place.
     """
+    if not expected_audience or not expected_audience.strip():
+        raise _http_401("audience_not_configured")
     token = _extract_bearer_token(authorization)
     settings = get_settings()
     claims = await _decode_with_kid_rotation(

@@ -211,6 +211,36 @@ def test_token_for_chassis_audience_is_rejected_at_mcp(
     assert "Bearer" in response.headers.get("www-authenticate", "")
 
 
+def test_token_for_arbitrary_audience_is_rejected_at_mcp(
+    client: TestClient,
+    keypair: Any,
+    jwks: dict[str, Any],
+) -> None:
+    """*Any* non-matching ``aud`` claim 401s — not just the chassis audience.
+
+    Pins the contract that the audience check is value-based: a token
+    minted for an arbitrary third party (e.g. another internal service
+    that happens to share the same Keycloak realm) cannot reach
+    ``/mcp`` no matter what its `aud` is. authlib's check is exact-
+    string match, so this test would catch a regression that loosens
+    audience handling to "any value not in a denylist" or similar.
+    """
+    with respx.mock as router:
+        _mock_discovery_and_jwks(router, jwks)
+        foreign_token = _mint_mcp_token(
+            keypair,
+            audience="https://some-other-service.evba.lab/api",
+        )
+        response = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 11, "method": "ping"},
+            headers={"Authorization": f"Bearer {foreign_token}"},
+        )
+
+    assert response.status_code == 401
+    assert "Bearer" in response.headers.get("www-authenticate", "")
+
+
 def test_token_with_mcp_audience_is_accepted(
     client: TestClient,
     keypair: Any,

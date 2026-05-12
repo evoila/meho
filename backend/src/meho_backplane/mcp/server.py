@@ -406,6 +406,23 @@ async def mcp_dispatch(request: Request) -> Response:
     # as such regardless of the envelope's id field.
     is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
 
+    # The MCP transport spec at §"Sending Messages to the Server"
+    # splits the notification response shape: "If the server accepts
+    # the input, the server MUST return HTTP status code 202" vs. "If
+    # the server cannot accept the input, it MUST return an HTTP error
+    # status code." The phrase "cannot accept" is intentionally narrow
+    # — it refers to *transport-level* rejection (malformed envelope,
+    # bad JSON, batch arrays), not "the handler's logic couldn't
+    # process this notification." Spec language treats application-
+    # level failures of a notification as the server's problem to log,
+    # not the client's to fix (the client cannot retry a notification
+    # without violating §4.1.2). T1 therefore returns 202 for every
+    # post-envelope notification path — unknown method, invalid params,
+    # internal error — and logs the failure for operator triage. The
+    # transport-level rejections (parse error, invalid request, batch
+    # arrays, unsupported protocol version) above already flip to
+    # HTTP 4xx because they happen *before* the notification/request
+    # split.
     handler = _DISPATCH.get(jrpc.method)
     if handler is None:
         if is_notification:

@@ -154,6 +154,16 @@ async def verify_mcp_jwt(
     except HTTPException as exc:
         if exc.status_code != 401:
             raise
+        # Structured-log the MCP-side auth failure with a grep-able event
+        # name. The chassis `verify_jwt` deliberately doesn't log auth
+        # failures (the 401 surface is already on every chassis route);
+        # /mcp is a new surface where operators want to distinguish MCP
+        # 401 spikes from chassis 401 spikes. ``detail`` is the chassis
+        # chain's failure-mode token (`missing_token` / `invalid_token`
+        # / `jwks_unavailable` / `missing_tenant_claim` / etc.) — never
+        # an operator-controllable string, so logging it verbatim is
+        # safe (see auth/jwt.py docstring).
+        _log.warning("mcp_auth_failed", detail=exc.detail)
         headers = dict(exc.headers or {})
         headers["WWW-Authenticate"] = www_authenticate_header(settings)
         raise HTTPException(

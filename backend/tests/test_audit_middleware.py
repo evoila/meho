@@ -38,18 +38,18 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 import respx
+import structlog
 from alembic import command
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from meho_backplane.auth import vault as vault_module
+import meho_backplane.audit as audit_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
@@ -64,11 +64,13 @@ from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
 from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
 from ._oidc_jwt_helpers import public_jwks as _public_jwks
+from ._vault_fakes import install_fake_vault as _install_fake_vault
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS-cache fixtures
@@ -168,106 +170,6 @@ async def isolated_audit_engine(
 
 
 # ---------------------------------------------------------------------------
-# Vault fake — mirror tests/test_api_v1_health.py
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _FakeJWTAuth:
-    login_calls: list[dict[str, Any]] = field(default_factory=list)
-    issued_token: str = "fake-vault-token"
-    parent: _FakeClient | None = None
-
-    def jwt_login(self, role: str, jwt: str, path: str | None = None) -> dict[str, Any]:
-        self.login_calls.append({"role": role, "jwt": jwt, "path": path})
-        if self.parent is not None:
-            self.parent.token = self.issued_token
-        return {"auth": {"client_token": self.issued_token}}
-
-
-@dataclass
-class _FakeTokenAuth:
-    revoke_calls: int = 0
-
-    def revoke_self(self, mount_point: str = "token") -> None:
-        self.revoke_calls += 1
-
-
-@dataclass
-class _FakeAuth:
-    jwt: _FakeJWTAuth
-    token: _FakeTokenAuth
-
-
-@dataclass
-class _FakeKVv2:
-    secret: dict[str, Any] = field(default_factory=lambda: {"username": "demo"})
-    version: int = 7
-    read_calls: list[dict[str, Any]] = field(default_factory=list)
-
-    def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-        self.read_calls.append({"path": path})
-        return {
-            "data": {
-                "data": self.secret,
-                "metadata": {"version": self.version, "path": path},
-            }
-        }
-
-
-@dataclass
-class _FakeKV:
-    v2: _FakeKVv2
-
-
-@dataclass
-class _FakeSecrets:
-    kv: _FakeKV
-
-
-@dataclass
-class _FakeSysBackend:
-    payload: Any = None
-
-    def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
-        return self.payload
-
-
-@dataclass
-class _FakeClient:
-    url: str
-    timeout: float
-    namespace: str | None
-    token: str | None
-    auth: _FakeAuth
-    sys: _FakeSysBackend
-    secrets: _FakeSecrets
-
-
-def _install_fake_vault(monkeypatch: pytest.MonkeyPatch) -> _FakeClient:
-    jwt_auth = _FakeJWTAuth()
-    token_auth = _FakeTokenAuth()
-    kv_v2 = _FakeKVv2(version=11)
-    fake = _FakeClient(
-        url="https://vault.test",
-        timeout=5.0,
-        namespace=None,
-        token=None,
-        auth=_FakeAuth(jwt=jwt_auth, token=token_auth),
-        sys=_FakeSysBackend(),
-        secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2)),
-    )
-    jwt_auth.parent = fake
-
-    def _fake_build_client(_settings: Any, *, token: str | None = None) -> _FakeClient:
-        fake.token = token
-        return fake
-
-    monkeypatch.setattr(vault_module, "_build_client", _fake_build_client)
-    return fake
-
-
-# ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
 
@@ -332,6 +234,12 @@ async def test_authenticated_request_writes_one_audit_row(
     assert row.duration_ms is not None
     assert row.duration_ms >= 0
     assert row.payload == {}
+    # G0.1-T3: tenant_id from the JWT claim lands on the audit row.
+    # The default helper-minted token carries DEFAULT_TENANT_ID, which
+    # ``verify_jwt_and_bind`` binds into contextvars and the audit
+    # middleware reads back, parses, and writes here.
+    assert row.tenant_id is not None
+    assert str(row.tenant_id) == _DEFAULT_TENANT_ID
 
 
 # ---------------------------------------------------------------------------
@@ -564,3 +472,202 @@ async def test_request_id_null_when_caller_sends_opaque_string(
     # The other fields land normally — failing the insert on a request
     # shape mismatch would convert a benign client into a 5xx.
     assert rows[0].operator_sub == "op-400"
+
+
+# ---------------------------------------------------------------------------
+# G0.1-T3 — tenant_id contextvar binding + AuditMiddleware persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_row_tenant_id_matches_jwt_claim(
+    isolated_audit_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a per-test ``tenant_id`` claim flows JWT → contextvar → row.
+
+    Pinning a non-default tenant id (rather than re-asserting on
+    DEFAULT_TENANT_ID like the happy-path test does) proves the value
+    actually rides through the pipeline — a regression that hard-coded
+    the default would still pass the happy-path assertion.
+    """
+    custom_tenant = "11111111-2222-3333-4444-555555555555"
+    key = _make_rsa_keypair("kid-T")
+    token = _mint_token(key, sub="op-tenant", tenant_id=custom_tenant)
+    _install_fake_vault(monkeypatch)
+
+    client = TestClient(app)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert len(rows) == 1
+    assert str(rows[0].tenant_id) == custom_tenant
+
+
+def _patch_get_contextvars(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    transform: Any,
+) -> None:
+    """Patch ``audit_module.structlog.contextvars.get_contextvars`` in place.
+
+    The audit middleware reads tenant_id off contextvars via that
+    indirection; substituting a transformed copy lets a test simulate
+    a programming bug (binding cleared mid-request, or the value bound
+    to garbage) without touching the production code path.
+    """
+    real_get = structlog.contextvars.get_contextvars
+
+    def _wrapped() -> dict[str, Any]:
+        return transform(dict(real_get()))
+
+    monkeypatch.setattr(
+        audit_module.structlog.contextvars,
+        "get_contextvars",
+        _wrapped,
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_tenant_contextvar_logs_error_and_writes_null(
+    isolated_audit_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Hand-crafted bug: tenant_id contextvar cleared mid-request.
+
+    Asserts the design contract spelt out in the issue body: "If the
+    request reached AuditMiddleware past the auth dependency,
+    ``tenant_id`` MUST be bound — its absence is a programming bug, not
+    a runtime condition. Surface it loudly: log
+    ``audit_missing_tenant_id`` at error level, write ``tenant_id=None``
+    to the row, proceed."
+
+    The bug is simulated by intercepting
+    :func:`structlog.contextvars.get_contextvars` inside the audit
+    module so the read returns an ``operator_sub``-bearing dict but no
+    ``tenant_id`` key — exactly the shape a future contributor would
+    produce by routing a protected handler through
+    ``Depends(verify_jwt)`` directly instead of
+    ``Depends(verify_jwt_and_bind)``. The route still resolves cleanly
+    (handler-side identity comes from the typed :class:`Operator`
+    dependency, which is unaffected by contextvar state), so the
+    response is 200 and the audit row is written — only the
+    ``tenant_id`` column is NULL.
+
+    Captured stdlib :mod:`logging` records are inspected via
+    :class:`pytest.LogCaptureFixture` rather than parsing the structlog
+    JSON buffer, because the chassis test config ships structlog
+    forwarding into the stdlib logger; the ``caplog`` route is the
+    smallest seam for asserting on the event name.
+    """
+    key = _make_rsa_keypair("kid-E")
+    token = _mint_token(key, sub="op-clear")
+    _install_fake_vault(monkeypatch)
+
+    def _drop_tenant(ctx: dict[str, Any]) -> dict[str, Any]:
+        ctx.pop("tenant_id", None)
+        return ctx
+
+    _patch_get_contextvars(monkeypatch, transform=_drop_tenant)
+
+    captured: list[dict[str, Any]] = []
+
+    real_resolve = audit_module._resolve_tenant_id
+
+    def _wrapped_resolve(*, log: Any, **kwargs: Any) -> Any:
+        class _Recorder:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(log, name)
+
+            def error(self, event: str, **fields: Any) -> None:
+                captured.append({"event": event, **fields})
+                log.error(event, **fields)
+
+        return real_resolve(log=_Recorder(), **kwargs)
+
+    monkeypatch.setattr(audit_module, "_resolve_tenant_id", _wrapped_resolve)
+
+    client = TestClient(app)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert len(rows) == 1
+    # The row is committed; only the tenant_id column is NULL —
+    # T1's nullable column is the schema-level escape hatch for
+    # exactly this programming-bug surface.
+    assert rows[0].tenant_id is None
+    assert rows[0].operator_sub == "op-clear"
+
+    matched = [e for e in captured if e["event"] == "audit_missing_tenant_id"]
+    assert matched, f"expected audit_missing_tenant_id in {captured!r}"
+    assert matched[0]["operator_sub"] == "op-clear"
+    assert matched[0]["path"] == "/api/v1/health"
+
+
+@pytest.mark.asyncio
+async def test_malformed_tenant_contextvar_logs_error_and_writes_null(
+    isolated_audit_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bound ``tenant_id`` is not a UUID-shaped string → row gets NULL + error log.
+
+    Same fail-soft contract as the missing-binding test, distinguished
+    by a different log event (``audit_malformed_tenant_id``) so on-call
+    can tell at a glance whether a contributor forgot to bind at all
+    or bound something the wrong shape.
+    """
+    key = _make_rsa_keypair("kid-F")
+    token = _mint_token(key, sub="op-malformed")
+    _install_fake_vault(monkeypatch)
+
+    def _garbage_tenant(ctx: dict[str, Any]) -> dict[str, Any]:
+        ctx["tenant_id"] = "not-a-uuid"
+        return ctx
+
+    _patch_get_contextvars(monkeypatch, transform=_garbage_tenant)
+
+    captured: list[dict[str, Any]] = []
+    real_resolve = audit_module._resolve_tenant_id
+
+    def _wrapped_resolve(*, log: Any, **kwargs: Any) -> Any:
+        class _Recorder:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(log, name)
+
+            def error(self, event: str, **fields: Any) -> None:
+                captured.append({"event": event, **fields})
+                log.error(event, **fields)
+
+        return real_resolve(log=_Recorder(), **kwargs)
+
+    monkeypatch.setattr(audit_module, "_resolve_tenant_id", _wrapped_resolve)
+
+    client = TestClient(app)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert len(rows) == 1
+    assert rows[0].tenant_id is None
+
+    matched = [e for e in captured if e["event"] == "audit_malformed_tenant_id"]
+    assert matched, f"expected audit_malformed_tenant_id in {captured!r}"
+    assert matched[0]["value"] == "not-a-uuid"

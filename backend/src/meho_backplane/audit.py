@@ -33,6 +33,9 @@ the JWT has already been validated by ``verify_jwt`` and the result
 encoded into a contextvar by ``verify_jwt_and_bind``. Re-validating
 the JWT here would double the JWKS round-trip and risk drift between
 "who the auth layer authorised" and "who the audit row attributes".
+The same wrapper binds ``tenant_id`` (as the canonical UUID string),
+which the middleware re-parses into a :class:`uuid.UUID` before
+writing the new ``audit_log.tenant_id`` column (see :func:`_resolve_tenant_id`).
 
 Skip rules
 ==========
@@ -45,6 +48,21 @@ Skip rules
   to attribute. The skip rule keys on the contextvar's presence
   rather than path-matching the public surfaces explicitly so the
   rule cannot drift if a new public path is added.
+
+Tenant-id binding contract
+==========================
+
+Every authenticated request that reaches the audit branch MUST have
+``tenant_id`` bound in contextvars (``verify_jwt_and_bind`` binds it
+unconditionally on top of ``operator_sub``). A missing or malformed
+``tenant_id`` in this slot is a programming bug, not a runtime
+condition: the audit row is still committed (with ``tenant_id=None``,
+which T1's nullable column allows) but ``audit_missing_tenant_id`` /
+``audit_malformed_tenant_id`` is logged at error level so on-call sees
+the invariant violation. Failing the request hard would compound a
+programming bug into a 500 with no audit trace; emitting a loud log
+plus the partially-attributed row is the better tradeoff. See
+:func:`_resolve_tenant_id` for the mechanism.
 
 Fail-closed buffering
 =====================
@@ -77,7 +95,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Final
+from typing import Any, Final
 
 import structlog
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -118,6 +136,7 @@ def _coerce_request_id(raw: object) -> uuid.UUID | None:
 async def _write_audit_row(
     *,
     operator_sub: str,
+    tenant_id: uuid.UUID | None,
     method: str,
     path: str,
     status_code: int,
@@ -137,6 +156,7 @@ async def _write_audit_row(
             id=uuid.uuid4(),
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
+            tenant_id=tenant_id,
             method=method,
             path=path,
             status_code=status_code,
@@ -201,6 +221,73 @@ def _resolve_request_metadata(
     if not isinstance(path, str):
         path = ""
     return method, path, request_id
+
+
+def _resolve_tenant_id(
+    *,
+    operator_sub: str,
+    method: str,
+    path: str,
+    log: Any,
+) -> uuid.UUID | None:
+    """Pull ``tenant_id`` out of contextvars and parse it as :class:`uuid.UUID`.
+
+    ``verify_jwt_and_bind`` binds ``tenant_id`` as ``str(operator.tenant_id)``
+    immediately after :func:`~meho_backplane.auth.jwt.verify_jwt` validates
+    the token. Reaching this helper from the audit middleware means the
+    request has already cleared the auth dependency, so a missing or
+    malformed value is a programming bug — not a runtime condition the
+    operator caused. Both branches are surfaced loudly:
+
+    * **Missing** — the auth dependency ran (``operator_sub`` is set) but
+      no one bound ``tenant_id``. Logs ``audit_missing_tenant_id`` at
+      error level. This trips when a future contributor stages a
+      protected route through ``Depends(verify_jwt)`` directly instead
+      of ``Depends(verify_jwt_and_bind)``, or when test code calls
+      :func:`structlog.contextvars.clear_contextvars` mid-request.
+    * **Malformed** — ``tenant_id`` is bound to a value that does not
+      parse as a UUID. Logs ``audit_malformed_tenant_id`` with the bad
+      value verbatim — that value originated from a JWT the trusted
+      issuer signed, so it belongs to the issuer's claim namespace, not
+      to a caller-controlled secret.
+
+    Both failure modes return ``None``, which the migration in T1 leaves
+    nullable on ``audit_log.tenant_id``. The audit row is still
+    written — losing the row would compound a programming bug into a
+    full request failure with no audit trace, exactly the wrong
+    tradeoff. The error log is the operator's signal that the
+    invariant was violated; the missing column value on the row is the
+    durable artifact for postmortem.
+    """
+    raw = structlog.contextvars.get_contextvars().get("tenant_id")
+    if raw is None:
+        log.error(
+            "audit_missing_tenant_id",
+            operator_sub=operator_sub,
+            method=method,
+            path=path,
+        )
+        return None
+    if not isinstance(raw, str):
+        log.error(
+            "audit_malformed_tenant_id",
+            operator_sub=operator_sub,
+            method=method,
+            path=path,
+            value=raw,
+        )
+        return None
+    try:
+        return uuid.UUID(raw)
+    except (ValueError, AttributeError):
+        log.error(
+            "audit_malformed_tenant_id",
+            operator_sub=operator_sub,
+            method=method,
+            path=path,
+            value=raw,
+        )
+        return None
 
 
 async def _send_audit_failure_response(send: Send) -> None:
@@ -281,9 +368,16 @@ class AuditMiddleware:
 
         method, path, request_id = _resolve_request_metadata(scope)
         log = structlog.get_logger()
+        tenant_id = _resolve_tenant_id(
+            operator_sub=operator_sub,
+            method=method,
+            path=path,
+            log=log,
+        )
         try:
             await _write_audit_row(
                 operator_sub=operator_sub,
+                tenant_id=tenant_id,
                 method=method,
                 path=path,
                 status_code=status_code,

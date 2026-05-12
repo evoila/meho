@@ -53,6 +53,7 @@ from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
 from meho_backplane.auth.vault import vault_readiness_probe
+from meho_backplane.connectors.registry import _eager_import_connectors
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.health import register_probe
@@ -115,6 +116,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     register_probe("db", db_migration_probe)
     # Eager engine construction - see lifespan docstring for why.
     get_engine()
+    # Connector auto-discovery (G0.2-T2, #241). Walks every subpackage
+    # under `connectors/` so the top-level `register_connector` calls
+    # in each product's `__init__.py` run before the first request
+    # arrives. Empty until G0.2-T5+ lands the first concrete connector;
+    # the helper handles the empty-package case silently.
+    _eager_import_connectors()
     # MCP tool / resource auto-discovery (G0.5-T3, #248). Walks every
     # module under `mcp/tools/` and `mcp/resources/` so the top-level
     # `register_mcp_tool` / `register_mcp_resource` calls in each module

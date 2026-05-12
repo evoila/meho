@@ -35,9 +35,12 @@ this stage it exposes:
   `malformed_tenant_claim` / `unknown_tenant_role`) and surfaces as a
   401 with a matching `detail` token, so an operator chasing a
   Keycloak protocol-mapper bug can grep the JSON log line directly.
-  No new protected routes are added in this task; consumers land in
-  G2.2-T3 (`/api/v1/health`) and existing authentication behavior
-  remains unchanged.
+  No new protected routes are added in this task; consumers continue
+  to land in G2.2-T3 (`/api/v1/health`). The auth contract itself
+  does change: `verify_jwt` now requires `tenant_id` + `tenant_role`
+  on every accepted JWT, so the issuer (Keycloak realm provisioning,
+  G0.1-T5) must emit them — JWTs without these claims now fail 401
+  with one of the four detail tokens above.
 * Vault forward-auth — the `vault_client_for_operator` async context
   manager performs a per-request JWT/OIDC login against Vault
   (`meho-mcp` role by default) using the operator's validated JWT,

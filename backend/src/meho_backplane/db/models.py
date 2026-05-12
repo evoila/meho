@@ -4,11 +4,11 @@
 """SQLAlchemy 2.x ORM models for the backplane database.
 
 The module exposes the declarative :class:`Base` that every model
-inherits from, plus :class:`AuditLog` (v0.1) and :class:`Tenant`
-(v0.2 / G0.1). The metadata object on :data:`Base.metadata` is what
-:mod:`meho_backplane.alembic.env` imports as ``target_metadata`` so
-``alembic revision --autogenerate`` can diff the model graph against
-the live schema.
+inherits from, plus :class:`AuditLog` (v0.1), :class:`Tenant`
+(v0.2 / G0.1), and :class:`Target` (v0.2 / G0.3). The metadata
+object on :data:`Base.metadata` is what :mod:`meho_backplane.alembic.env`
+imports as ``target_metadata`` so ``alembic revision --autogenerate``
+can diff the model graph against the live schema.
 
 Type-correct ``Mapped[...]`` annotations are non-negotiable per
 SQLAlchemy 2.x: the typed-mapped pattern is what gives mypy real
@@ -82,8 +82,13 @@ Schema decisions for :class:`AuditLog`:
   always writes ``{}``; v0.2 may capture per-route structured data.
   The column is the forward-compat escape hatch for payload
   evolution without DDL changes.
+* ``target_id`` — UUID, nullable. Added by migration ``0003``; the
+  G0.3 CRUD layer writes the value when a request operates on a
+  specific target. Generic requests (health, policy listing) leave
+  it NULL. No FK to ``targets.id`` in v0.2 by the same soft-FK
+  discipline established for ``tenant_id``.
 
-Indexes:
+Indexes on :class:`AuditLog`:
 
 * ``audit_log_occurred_at_idx`` — DESC b-tree on ``occurred_at`` so
   "last N audit rows" queries (the dominant CLI query shape) hit
@@ -95,6 +100,61 @@ Indexes:
   per-tenant audit queries ("show me everything in
   ``rdc-internal``") hit the index. Added by migration ``0002``;
   G0.1 sibling tasks T2/T3 wire the column writes.
+* ``audit_log_target_id_idx`` — b-tree on ``target_id`` so
+  per-target audit queries hit the index. Added by migration ``0003``.
+
+Schema decisions for :class:`Target`:
+
+* ``id`` — UUID primary key. Same portable :class:`Uuid` shape.
+* ``tenant_id`` — UUID NOT NULL. Every target belongs to exactly one
+  tenant. No FK clause in v0.2 (same soft-FK discipline as
+  ``audit_log.tenant_id``); the G0.3 CRUD layer enforces referential
+  integrity at the application layer until a tightening migration
+  adds the FK.
+* ``name`` — Text NOT NULL. Human-readable handle within the tenant.
+  Uniqueness enforced by the named ``targets_tenant_name_idx``
+  (unique b-tree on ``(tenant_id, name)``).
+* ``aliases`` — JSON/TEXT[], nullable. Secondary names for the target
+  (DNS aliases, legacy hostnames). Stored as native ``TEXT[]`` on
+  PostgreSQL (GIN-indexed for containment queries) and as a JSON
+  array on SQLite (no native ARRAY type; GIN index skipped there).
+  Portable via ``JSON().with_variant(PG_ARRAY(Text), "postgresql")``.
+* ``product`` — Text NOT NULL. Product family identifier
+  (e.g. ``kubernetes``, ``ssh``). Indexed with ``tenant_id`` via
+  ``targets_tenant_product_idx`` for "list targets by product"
+  queries.
+* ``host`` — Text NOT NULL. Connection hostname or IP address.
+* ``port`` — Integer, nullable. Defaults to the product's standard
+  port at the connection layer; NULL means "use default".
+* ``fqdn`` — Text, nullable. Fully-qualified domain name when it
+  differs from ``host`` (e.g. service mesh names).
+* ``secret_ref`` — Text, nullable. Vault path for credentials
+  (populated by the G0.3 credential-binding layer, not T1).
+* ``auth_model`` — Text NOT NULL DEFAULT ``'shared_service_account'``.
+  How the agent authenticates to this target. Extensible via string
+  values; the default covers the v0.2 SSA pattern.
+* ``vpn_required`` — Boolean NOT NULL DEFAULT ``false``. Whether the
+  agent must establish a VPN tunnel before connecting.
+* ``extras`` — JSON NOT NULL DEFAULT ``{}``. JSONB on PostgreSQL
+  (binary, GIN-friendly), generic JSON on SQLite. Escape hatch for
+  per-product structured data without DDL changes.
+* ``notes`` — Text, nullable. Free-form operator notes.
+* ``created_at`` / ``updated_at`` — ``timestamptz`` NOT NULL.
+  PG-side ``now()`` server default via the migration; the ORM also
+  declares ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
+  The CRUD layer is responsible for updating ``updated_at`` on every
+  write; no trigger is installed in v0.2 (added by convention in the
+  application layer).
+
+Indexes on :class:`Target`:
+
+* ``targets_tenant_name_idx`` — unique b-tree on ``(tenant_id, name)``
+  — enforces the one-name-per-tenant invariant.
+* ``targets_tenant_product_idx`` — b-tree on ``(tenant_id, product)``
+  — drives the "list targets by product in tenant" query.
+* ``targets_aliases_gin_idx`` — GIN on ``aliases`` (PostgreSQL only).
+  Enables ``@>`` / ``&&`` array-containment queries for alias lookups.
+  Declared on the model; the migration skips it on non-PG dialects.
 
 References
 ----------
@@ -109,20 +169,37 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, Numeric, Text, Uuid
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
-__all__ = ["AuditLog", "Base", "Document", "Tenant"]
+__all__ = ["AuditLog", "Base", "Document", "Target", "Tenant"]
 
 
 #: Portable JSON column type — :class:`JSONB` on PostgreSQL (binary
 #: JSON, indexable by ``@>`` / GIN), generic :class:`JSON` (text)
 #: on every other dialect including the SQLite dev/test path.
 _PORTABLE_JSON: TypeEngine[dict[str, object]] = JSON().with_variant(JSONB(), "postgresql")
+
+#: Portable ARRAY(Text) column type — native ``TEXT[]`` on PostgreSQL
+#: (supports GIN-indexed containment queries); JSON array on every other
+#: dialect including the SQLite dev/test path (no native ARRAY type).
+_PORTABLE_ARRAY: TypeEngine[list[str]] = JSON().with_variant(PG_ARRAY(Text), "postgresql")
 
 
 #: Portable 384-dimensional dense-vector column type —
@@ -253,6 +330,16 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Nullable on purpose — requests that don't operate on a specific
+    # target (health checks, policy listings) leave this NULL. The G0.3
+    # CRUD layer writes the value when a request targets a specific
+    # endpoint. No FK to ``targets.id`` in v0.2; same soft-FK discipline
+    # as ``tenant_id``. Added by migration ``0003``.
+    target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -268,6 +355,11 @@ class AuditLog(Base):
         Index(
             "audit_log_tenant_id_idx",
             "tenant_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_target_id_idx",
+            "target_id",
             postgresql_using="btree",
         ),
     )
@@ -496,5 +588,102 @@ class Document(Base):
             "documents_body_hash_idx",
             "body_hash",
             postgresql_using="btree",
+        ),
+    )
+
+
+class Target(Base):
+    """A registered endpoint that MEHO agents may connect to.
+
+    Per-tenant registry of SSH hosts, Kubernetes API servers, and
+    other endpoints the governance layer mediates access to. The
+    G0.3 CRUD layer (Tasks T2+) provisions these rows; the G0.3
+    policy layer (Tasks T3+) evaluates them against operator
+    permissions before yielding connection coordinates to an agent.
+
+    ``tenant_id`` is NOT NULL — every target belongs to exactly one
+    tenant. No FK to ``tenant.id`` in v0.2 by the same soft-FK
+    discipline as ``audit_log.tenant_id``; the application layer
+    enforces referential integrity at insert time until a tightening
+    migration adds the FK.
+
+    ``name`` is unique within a tenant (enforced by the named
+    ``targets_tenant_name_idx`` unique b-tree). Operators reference
+    targets by name in CLI commands and policy rules; the UUID is
+    the stable cross-system identifier.
+
+    ``aliases`` stores secondary names (DNS aliases, legacy hostnames)
+    as a native ``TEXT[]`` on PostgreSQL (GIN-indexed for containment
+    queries) and as a JSON array on SQLite. NULL means no aliases.
+
+    ``extras`` is the forward-compat escape hatch for per-product
+    structured fields that don't yet have first-class columns. v0.2
+    always writes ``{}``; later tasks can write product-specific dicts.
+    """
+
+    __tablename__ = "targets"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NOT NULL — every target belongs to exactly one tenant.
+    # No FK clause in v0.2; application layer enforces integrity.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable — NULL means no aliases. TEXT[] on PG, JSON array on SQLite.
+    aliases: Mapped[list[str] | None] = mapped_column(
+        _PORTABLE_ARRAY,
+        nullable=True,
+        default=None,
+    )
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    host: Mapped[str] = mapped_column(Text, nullable=False)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fqdn: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auth_model: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="shared_service_account",
+    )
+    vpn_required: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+    )
+    extras: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="targets_tenant_name_idx"),
+        Index(
+            "targets_tenant_product_idx",
+            "tenant_id",
+            "product",
+            postgresql_using="btree",
+        ),
+        Index(
+            "targets_aliases_gin_idx",
+            "aliases",
+            postgresql_using="gin",
         ),
     )

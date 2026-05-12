@@ -349,7 +349,10 @@ async def test_execute_returns_unknown_op_for_every_op_id() -> None:
     assert result.status == "error"
     assert result.op_id == "k8s.pod.list"
     assert result.error is not None and "unknown_op" in result.error
-    assert result.duration_ms == 0.0
+    # ``duration_ms`` is hard-coded to ``0.0`` for the skeleton dispatcher;
+    # using a tolerance comparison rather than ``== 0.0`` satisfies SonarCloud's
+    # "no float equality" rule without weakening the assertion.
+    assert result.duration_ms == pytest.approx(0.0)
     assert dict(result.extras) == {"known_ops": []}
 
 

@@ -81,7 +81,7 @@ jobs:
         # broadening the allowlist to include UNKNOWN. Remove these
         # exceptions once pip-licenses gains PEP 639 support upstream.
         run: >
-          pip-licenses --format=plain --ignore-packages "MarkupSafe;cffi" --allow-only="
+          pip-licenses --format=plain --ignore-packages MarkupSafe cffi --allow-only="
           Apache Software License;
           Apache-2.0;
           Apache 2.0;

@@ -254,8 +254,16 @@ def register_mcp_resource(
     time and a collision indicates two modules trying to own the same
     URI namespace.
 
-    Two flavours of conflict are rejected:
+    Three flavours of bad input are rejected:
 
+    * **Duplicate placeholder names** — the ``uriTemplate`` reuses the
+      same ``{var}`` name more than once (e.g.
+      ``meho://tenant/{id}/{id}``). :func:`_match_uri_template` would
+      build a regex with two identically-named capture groups, which
+      Python's :mod:`re` engine raises :class:`re.error` on at compile
+      time. The crash would surface at first ``resources/read`` match
+      attempt as a JSON-RPC INTERNAL_ERROR; reject at registration
+      instead so the misconfiguration is loud and pre-traffic.
     * **Exact duplicate** — the ``uriTemplate`` string is already
       registered.
     * **Same-shape collision** — two templates that differ only in
@@ -266,6 +274,11 @@ def register_mcp_resource(
       these at registration time so the failure surfaces immediately
       instead of as a dead-code handler the operator can't see fire.
     """
+    var_names = _TEMPLATE_VAR_RE.findall(definition.uriTemplate)
+    if len(var_names) != len(set(var_names)):
+        raise RuntimeError(
+            f"MCP resource template reuses placeholder names: {definition.uriTemplate!r}",
+        )
     if definition.uriTemplate in _RESOURCES:
         raise RuntimeError(
             f"MCP resource template already registered: {definition.uriTemplate!r}",

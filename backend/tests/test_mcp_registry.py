@@ -50,6 +50,7 @@ from meho_backplane.mcp.registry import (
     get_tool,
 )
 from meho_backplane.mcp.schemas import INVALID_PARAMS
+from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -79,6 +80,7 @@ def _isolated_registries() -> Iterator[None]:
 @pytest.fixture
 def client_with_operator(
     request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[TestClient, Operator]]:
     """:class:`TestClient` with ``verify_mcp_jwt_and_bind`` overridden to a fixture.
 
@@ -86,7 +88,30 @@ def client_with_operator(
     ``@pytest.mark.parametrize("role", [TenantRole.OPERATOR, ...])``;
     the fixture builds the corresponding :class:`Operator` and injects
     it for every dispatch this test makes.
+
+    The ``TestClient`` is entered as a context manager so Starlette runs
+    the FastAPI lifespan startup (and shutdown) around the test.
+    Without the ``with``, ``TestClient.__init__`` would set up the
+    transport but skip lifespan entirely — meaning
+    :func:`~meho_backplane.mcp.registry.eager_import_mcp_modules` would
+    never fire in tests, and any future regression in the
+    lifespan-driven discovery path would slip past every fixture-driven
+    test in this file.
+
+    Lifespan-required env vars are pinned here. ``DATABASE_URL`` is
+    already set by the autouse ``_default_database_url`` fixture in
+    ``conftest.py``; the remaining ``KEYCLOAK_*`` / ``VAULT_ADDR`` /
+    ``BACKPLANE_URL`` settings are MCP-specific defaults pinned per
+    :mod:`tests.test_well_known`'s pattern. ``get_settings.cache_clear()``
+    brackets the lifespan so a stale ``Settings`` from a prior test
+    can't poison ours.
     """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
+    get_settings.cache_clear()
+
     role: TenantRole = getattr(request, "param", TenantRole.OPERATOR)
     op = _operator(role)
 
@@ -95,9 +120,11 @@ def client_with_operator(
 
     app.dependency_overrides[verify_mcp_jwt_and_bind] = _fake_verify
     try:
-        yield TestClient(app), op
+        with TestClient(app) as client:
+            yield client, op
     finally:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+        get_settings.cache_clear()
 
 
 def _post_mcp(client: TestClient, body: Any) -> Any:
@@ -428,6 +455,33 @@ def test_register_mcp_resource_rejects_duplicate() -> None:
 
     with pytest.raises(RuntimeError, match="already registered"):
         register_mcp_resource(defn, _stub)
+
+
+def test_register_mcp_resource_rejects_duplicate_placeholder_names() -> None:
+    """A template that reuses the same ``{var}`` name → ``RuntimeError``.
+
+    ``_match_uri_template`` builds a regex with one named capture group
+    per placeholder; two placeholders sharing a name would produce two
+    capture groups with the same name, which Python's :mod:`re` engine
+    rejects at compile time with ``re.error: redefinition of group name``.
+    Today that crash would surface at first ``resources/read`` against a
+    matching URI as a JSON-RPC ``INTERNAL_ERROR``; the registration check
+    moves the failure to boot time where the misconfigured operator sees
+    it loud and fast.
+    """
+
+    async def _stub(_op: Operator, _params: dict[str, str]) -> dict[str, Any]:
+        return {}
+
+    with pytest.raises(RuntimeError, match="reuses placeholder names"):
+        register_mcp_resource(
+            ResourceTemplateDefinition(
+                uriTemplate="meho://tenant/{id}/{id}",
+                name="duplicate-placeholders",
+                description="template with reused {var}",
+            ),
+            _stub,
+        )
 
 
 def test_register_mcp_resource_rejects_same_shape_with_different_var_names() -> None:

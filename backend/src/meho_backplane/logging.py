@@ -19,7 +19,6 @@ slate call it again after rebinding stdout.
 from __future__ import annotations
 
 import logging
-import sys
 
 import structlog
 
@@ -44,14 +43,37 @@ def configure_logging(level: int = logging.INFO) -> None:
     5. ``JSONRenderer`` — final processor; serialises the event dict
        to a single JSON line.
 
-    The logger factory writes to ``sys.stdout`` directly via
-    :class:`structlog.PrintLoggerFactory`. Python's standard
-    ``logging`` module is intentionally not bridged in v0.1 — the
-    chassis has no third-party libraries that emit through stdlib
-    logging at startup. G2.2 (Vault/Keycloak SDKs) will likely add a
-    ``logging.basicConfig`` shim that routes stdlib logs through the
-    same JSON renderer, but until then the simpler configuration
-    keeps the surface honest.
+    The logger factory writes to ``sys.stdout`` **lazily** via
+    :class:`structlog.PrintLoggerFactory` constructed with no ``file``
+    argument. The factory then resolves stdout per-write inside
+    :meth:`structlog.PrintLogger.msg`, which calls :func:`print` with
+    no ``file=`` keyword whenever ``self._file is sys.stdout`` (the
+    structlog-module-level alias captured at structlog import time, i.e.
+    the *original* process stdout). With the no-arg factory shape, every
+    constructed ``PrintLogger`` defaults its ``_file`` attribute to that
+    same alias, so :func:`print` in ``msg`` runs without a pinned
+    ``file`` and Python writes to whatever ``sys.stdout`` currently
+    points at when the log call fires.
+
+    This matters specifically for pytest: pytest's ``capfd`` /
+    ``capsys`` machinery swaps ``sys.stdout`` for a file-descriptor
+    wrapper for the duration of a test, then closes that wrapper at
+    teardown. The previously-eager ``PrintLoggerFactory(file=sys.stdout)``
+    shape captured the wrapper at ``configure_logging()`` time (called
+    from FastAPI lifespan startup), and ``cache_logger_on_first_use=True``
+    kept the resulting factory + cached PrintLogger alive into later
+    tests where the wrapped fd was already closed — yielding
+    ``ValueError: I/O operation on closed file.`` from the next
+    middleware-emitted log line. The lazy shape avoids the capture
+    entirely; production behaviour is unchanged because the real
+    process ``sys.stdout`` does not get rebound at runtime.
+
+    Python's standard ``logging`` module is intentionally not bridged
+    in v0.1 — the chassis has no third-party libraries that emit
+    through stdlib logging at startup. G2.2 (Vault/Keycloak SDKs) will
+    likely add a ``logging.basicConfig`` shim that routes stdlib logs
+    through the same JSON renderer, but until then the simpler
+    configuration keeps the surface honest.
 
     Args:
         level: Minimum log level emitted. Defaults to ``INFO``;
@@ -66,6 +88,6 @@ def configure_logging(level: int = logging.INFO) -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )

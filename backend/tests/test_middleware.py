@@ -147,8 +147,14 @@ def test_request_completed_log_carries_tenant_id(
     token = _mint_token(key, sub="op-log", tenant_id=custom_tenant)
     _install_fake_vault(monkeypatch)
 
-    client = TestClient(app)
-    with respx.mock as mock_router:
+    # ``TestClient`` as a context manager triggers the FastAPI lifespan
+    # startup/shutdown hooks (Starlette's ``LifespanManager``), matching
+    # production request boundaries. The lifespan calls
+    # ``configure_logging`` which re-points structlog at stdout, so we
+    # re-apply the in-memory capture *after* entering the context to
+    # win the last-writer race against the lifespan's configuration.
+    with TestClient(app) as client, respx.mock as mock_router:
+        _configure_capture(log_buffer)
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get(
             "/api/v1/health",
@@ -179,8 +185,15 @@ def test_unauthenticated_request_log_has_no_tenant_id(
     flip side of the binding contract — proves the bound value is
     *only* present when the auth dependency ran.
     """
-    client = TestClient(app)
-    response = client.get("/healthz")
+    # Lifespan-aware client matches production request boundaries; the
+    # public ``/healthz`` path doesn't need lifespan state for this
+    # assertion but the symmetry with the authenticated case keeps test
+    # hygiene uniform across the suite. Re-apply the capture inside the
+    # context: the lifespan's ``configure_logging`` re-points structlog
+    # at stdout, so the test must win the last-writer race.
+    with TestClient(app) as client:
+        _configure_capture(log_buffer)
+        response = client.get("/healthz")
     assert response.status_code == 200
 
     completed = [

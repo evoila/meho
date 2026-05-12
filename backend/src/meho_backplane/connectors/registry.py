@@ -38,8 +38,11 @@ def register_connector(product: str, cls: type[Connector]) -> None:
     """Register a connector class under a product slug.
 
     Called at module import time from ``connectors/<product>/__init__.py``.
+    Raises :exc:`TypeError` when ``cls`` is not a :class:`Connector` subclass.
     Raises :exc:`RuntimeError` on duplicate registration.
     """
+    if not (isinstance(cls, type) and issubclass(cls, Connector)):
+        raise TypeError(f"connector class for product={product!r} must subclass Connector: {cls!r}")
     if product in _REGISTRY:
         raise RuntimeError(
             f"connector already registered for product={product!r}: "

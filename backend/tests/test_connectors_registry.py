@@ -20,6 +20,7 @@ Coverage matrix (per Task #241 acceptance criteria):
 from __future__ import annotations
 
 import types
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -73,7 +74,7 @@ class _AnotherFakeConnector(Connector):
 
 
 @pytest.fixture(autouse=True)
-def _clean_registry() -> Any:
+def _clean_registry() -> Iterator[None]:
     """Isolate each test: clear the registry before and after."""
     clear_registry()
     yield
@@ -138,6 +139,19 @@ def test_duplicate_registration_error_message_names_both_classes() -> None:
     assert "_FakeConnector" in msg
     assert "_AnotherFakeConnector" in msg
     assert "vsphere" in msg
+
+
+def test_non_connector_class_raises_type_error() -> None:
+    class NotAConnector:
+        pass
+
+    with pytest.raises(TypeError, match="must subclass Connector"):
+        register_connector("vsphere", NotAConnector)  # type: ignore[arg-type]
+
+
+def test_non_class_raises_type_error() -> None:
+    with pytest.raises(TypeError, match="must subclass Connector"):
+        register_connector("vsphere", "not-a-class")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

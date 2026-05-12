@@ -140,17 +140,26 @@ def test_well_known_keycloak_issuer_url_has_no_trailing_slash(
     path component; the metadata document strips it so downstream
     clients can use the value verbatim as the issuer identifier when
     constructing AS-metadata URLs per RFC 8414.
+
+    The env var is deliberately set **with** a trailing slash so the
+    test actually exercises the strip — a previous version of this
+    test set the value without a trailing slash, which made the
+    ``not server.endswith("/")`` assertion pass trivially regardless
+    of whether the strip logic ran.
     """
     monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
     monkeypatch.setenv("MCP_RESOURCE_URI", "")
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho/")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
     try:
         client = TestClient(app)
         body = client.get("/.well-known/oauth-protected-resource").json()
-        for server in body["authorization_servers"]:
-            assert not server.endswith("/")
+        # Exact equality, not just "doesn't end with /" — pins the
+        # canonical form against future regressions.
+        assert body["authorization_servers"] == [
+            "https://keycloak.test/realms/meho",
+        ]
     finally:
         get_settings.cache_clear()

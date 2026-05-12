@@ -22,6 +22,7 @@ Gunicorn / k8s probes. v0.1 ships:
   insert error: an unaudited request is converted to HTTP 500.
 """
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Final
@@ -41,6 +42,7 @@ from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.settings import parse_bool_env
 from meho_backplane.version import router as version_router
 
 _APP_NAME: Final[str] = "meho-backplane"
@@ -125,6 +127,28 @@ app.include_router(health_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
+
+# Opt-in stub routes for end-to-end verification of
+# :func:`~meho_backplane.auth.rbac.require_role`. Disabled by default
+# so production deploys never expose them; CI flips
+# ``MEHO_ENABLE_RBAC_TEST_ROUTE=1`` for the RBAC integration job. The
+# import is local to this branch so importing :mod:`meho_backplane.main`
+# never pulls the stub module into a production process.
+#
+# The env var is read directly via :func:`_parse_bool` rather than
+# through ``get_settings()`` because module import here happens before
+# the rest of the chassis settings (``KEYCLOAK_ISSUER_URL``,
+# ``VAULT_ADDR``, ``DATABASE_URL``) may have been pinned. The existing
+# test suite assumes ``from meho_backplane.main import app`` succeeds
+# without any env var set; routing instantiating ``Settings`` from this
+# import path would regress that contract. The same parser keeps the
+# truthy-spelling rule consistent with :class:`Settings`.
+if parse_bool_env(os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE")):
+    from meho_backplane.api.v1.rbac_test import (
+        router as api_v1_rbac_test_router,
+    )
+
+    app.include_router(api_v1_rbac_test_router)
 
 
 @app.get("/")

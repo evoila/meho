@@ -20,6 +20,14 @@ clearing the cache via ``get_settings.cache_clear()``.
 Pydantic v2 is the model engine; the ``BaseModel`` validators run at
 construction time so a missing or malformed env var fails the import
 chain immediately rather than days later under load.
+
+Boolean env vars are parsed by :func:`_parse_bool` which accepts the
+canonical truthy spellings (``1``, ``true``, ``yes``, ``on``,
+case-insensitive) and treats every other value (including the empty
+string) as ``False``. The accept-list is deliberately tight so a
+``MEHO_ENABLE_RBAC_TEST_ROUTE=disabled`` typo doesn't silently mount
+the test routes in production — the documented contract is that
+*anything other than the four truthy spellings* is off.
 """
 
 import os
@@ -28,7 +36,7 @@ from typing import Final
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
-__all__ = ["Settings", "get_settings"]
+__all__ = ["Settings", "get_settings", "parse_bool_env"]
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
 #: backplane refuses to construct a sync engine because every database
@@ -40,6 +48,27 @@ _SUPPORTED_DATABASE_URL_SCHEMES: Final[tuple[str, ...]] = (
     "postgresql+asyncpg://",
     "sqlite+aiosqlite://",
 )
+
+#: Truthy spellings accepted by :func:`_parse_bool`. Anything else
+#: (including the empty string and "disabled") is treated as ``False``
+#: so a misconfigured env var never silently enables a guarded surface.
+_TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
+
+
+def parse_bool_env(value: str | None) -> bool:
+    """Return ``True`` only for the canonical truthy spellings.
+
+    Used for env-var-backed boolean :class:`Settings` fields and by
+    callers (``main.py``) that need the same parsing rule without
+    instantiating :class:`Settings` (which requires every chassis env
+    var to be set). The accept-list is intentionally tight: a typo
+    like ``MEHO_ENABLE_RBAC_TEST_ROUTE=disabled`` evaluates to
+    ``False`` rather than the truthy-by-non-empty default Python's
+    ``bool(str)`` would produce.
+    """
+    if value is None:
+        return False
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
 class Settings(BaseModel):
@@ -133,6 +162,16 @@ class Settings(BaseModel):
         ``tenant_role`` matches the same protocol-mapper recipe.
         Override only when the realm exposes the role under a
         different attribute.
+    enable_rbac_test_route:
+        When ``True``, mounts the ``/api/v1/rbac-test/*`` stub routes
+        from :mod:`meho_backplane.api.v1.rbac_test` for end-to-end
+        verification of :func:`~meho_backplane.auth.rbac.require_role`.
+        Default ``False``: production deploys leave the routes
+        unmounted (404). CI integration jobs flip the env var
+        ``MEHO_ENABLE_RBAC_TEST_ROUTE=1`` for the RBAC pipeline only.
+        The flag is read at FastAPI app construction time; flipping it
+        after import has no effect — every test that needs the routes
+        builds its own :class:`~fastapi.FastAPI` with the flag set.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -141,6 +180,7 @@ class Settings(BaseModel):
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
+    enable_rbac_test_route: bool = False
     vault_addr: HttpUrl
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
@@ -202,6 +242,9 @@ def get_settings() -> Settings:
         jwt_tenant_role_claim_name=os.environ.get(
             "JWT_TENANT_ROLE_CLAIM_NAME",
             "tenant_role",
+        ),
+        enable_rbac_test_route=parse_bool_env(
+            os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE"),
         ),
         vault_addr=os.environ["VAULT_ADDR"],  # type: ignore[arg-type]
         vault_oidc_role=os.environ.get("VAULT_OIDC_ROLE", "meho-mcp"),

@@ -44,36 +44,26 @@ from __future__ import annotations
 import io
 import json
 import logging
-import time
-import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 import pytest
 import respx
 import structlog
 from fastapi.testclient import TestClient
-
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    from authlib.jose import JsonWebKey, JsonWebToken
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_ISSUER: str = "https://keycloak.test/realms/meho"
-_AUDIENCE: str = "meho-backplane"
-_DISCOVERY_URL: str = f"{_ISSUER}/.well-known/openid-configuration"
-_JWKS_URL: str = f"{_ISSUER}/protocol/openid-connect/certs"
-
+from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
+from ._oidc_jwt_helpers import mint_token as _mint_token
+from ._oidc_jwt_helpers import mock_discovery_and_jwks as _mock_discovery_and_jwks
+from ._oidc_jwt_helpers import public_jwks as _public_jwks
 
 # ---------------------------------------------------------------------------
 # Settings + JWKS-cache fixtures (mirror Task #22 / #23 patterns)
@@ -103,73 +93,6 @@ def _isolated_jwks_cache() -> Iterator[None]:
     clear_jwks_cache()
     yield
     clear_jwks_cache()
-
-
-# ---------------------------------------------------------------------------
-# JWT minting helpers (lifted shape from tests/test_auth_jwt.py)
-# ---------------------------------------------------------------------------
-
-
-def _make_rsa_keypair(kid: str) -> Any:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        return JsonWebKey.generate_key(
-            "RSA",
-            2048,
-            options={"kid": kid},
-            is_private=True,
-        )
-
-
-def _public_jwks(*keys: Any) -> dict[str, list[dict[str, Any]]]:
-    return {"keys": [k.as_dict(is_private=False) for k in keys]}
-
-
-def _mint_token(
-    private_key: Any,
-    *,
-    sub: str = "op-42",
-    name: str | None = "Damir",
-    email: str | None = "damir@example.com",
-    tenant_id: str = "00000000-0000-0000-0000-00000000a0a0",
-    tenant_role: str = "operator",
-) -> str:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        jwt = JsonWebToken(["RS256"])
-        now = int(time.time())
-        payload: dict[str, Any] = {
-            "sub": sub,
-            "iss": _ISSUER,
-            "aud": _AUDIENCE,
-            "iat": now,
-            "exp": now + 3600,
-            "nbf": now,
-            "tenant_id": tenant_id,
-            "tenant_role": tenant_role,
-        }
-        if name is not None:
-            payload["name"] = name
-        if email is not None:
-            payload["email"] = email
-        header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
-        token: bytes | str = jwt.encode(header, payload, private_key)
-        return token.decode("ascii") if isinstance(token, bytes) else token
-
-
-def _mock_discovery_and_jwks(
-    mock_router: respx.MockRouter,
-    jwks: dict[str, Any],
-) -> None:
-    mock_router.get(_DISCOVERY_URL).mock(
-        return_value=httpx.Response(
-            200,
-            json={"issuer": _ISSUER, "jwks_uri": _JWKS_URL},
-        ),
-    )
-    mock_router.get(_JWKS_URL).mock(
-        return_value=httpx.Response(200, json=jwks),
-    )
 
 
 # ---------------------------------------------------------------------------

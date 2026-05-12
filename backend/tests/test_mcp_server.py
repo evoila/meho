@@ -385,6 +385,95 @@ def test_error_response_omits_result_member(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# MCP-Protocol-Version header validation
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_version_header_matching_supported_is_accepted(
+    client: TestClient,
+) -> None:
+    """Header present + matching ``PROTOCOL_VERSION`` → request proceeds normally."""
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 100, "method": "ping"},
+        headers={"MCP-Protocol-Version": PROTOCOL_VERSION},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 100
+    assert body["result"] == {}
+
+
+def test_protocol_version_header_unsupported_returns_400(
+    client: TestClient,
+) -> None:
+    """Header present + unsupported value → HTTP 400 per spec MUST.
+
+    MCP 2025-06-18 §Protocol Version Header: "If the server receives a
+    request with an invalid or unsupported `MCP-Protocol-Version`, it
+    MUST respond with `400 Bad Request`."
+    """
+    response = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 101, "method": "ping"},
+        headers={"MCP-Protocol-Version": "1999-01-01"},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["id"] == 101
+    assert body["error"]["code"] == INVALID_REQUEST
+    assert "1999-01-01" in body["error"]["message"]
+
+
+def test_protocol_version_header_absent_is_accepted_transitionally(
+    client: TestClient,
+) -> None:
+    """Header absent on non-initialize → accepted (transitional lenience).
+
+    Spec SHOULD-assume-2025-03-26 doesn't help us — v0.2 doesn't support
+    that revision. T1 accepts header-absent so clients that don't yet
+    emit it aren't broken. T6 (#251) will pin the strict-mode contract.
+    """
+    response = _post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 102, "method": "ping"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == 102
+
+
+def test_initialize_does_not_require_protocol_version_header(
+    client: TestClient,
+) -> None:
+    """``initialize`` is exempt — clients don't know the version yet.
+
+    Per spec, the header is required on "all subsequent requests" after
+    initialize. The initialize call itself happens before negotiation,
+    so any header value (or its absence) is accepted on that call.
+    """
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 103,
+            "method": "initialize",
+            "params": {"protocolVersion": PROTOCOL_VERSION},
+        },
+        # Deliberately wrong header — would normally trigger 400 but
+        # initialize is exempt.
+        headers={"MCP-Protocol-Version": "1999-01-01"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 103
+    assert body["result"]["protocolVersion"] == PROTOCOL_VERSION
+
+
+# ---------------------------------------------------------------------------
 # Method-not-allowed for non-POST verbs (transport contract)
 # ---------------------------------------------------------------------------
 

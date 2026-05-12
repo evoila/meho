@@ -87,6 +87,7 @@ from meho_backplane.mcp.schemas import (
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
+    PROTOCOL_VERSION,
     InitializeRequest,
     InitializeResponse,
     JsonRpcError,
@@ -247,19 +248,32 @@ def _error_response(
     request_id: JsonRpcId,
     code: int,
     message: str,
+    *,
+    status_code: int = 200,
 ) -> JSONResponse:
-    """Build a JSON-RPC error envelope wrapped in HTTP 200.
+    """Build a JSON-RPC error envelope wrapped in the chosen HTTP status.
 
-    JSON-RPC-level errors are always HTTP 200 with the failure encoded
-    in the envelope; the HTTP status only changes for transport-level
-    issues (none in T1). See MCP transport §"Sending Messages to the
-    Server".
+    JSON-RPC-level errors (parse, invalid request, method-not-found,
+    invalid params, internal error) default to HTTP 200 with the failure
+    encoded in the envelope. ``status_code`` overrides this for the
+    narrow set of transport-level failures that MCP Streamable HTTP
+    mandates flip the HTTP status:
+
+    * The ``MCP-Protocol-Version`` validation arm sets ``status_code=400``
+      per spec §"Protocol Version Header" — "If the server receives a
+      request with an invalid or unsupported `MCP-Protocol-Version`, it
+      MUST respond with `400 Bad Request`."
+
+    The body still carries a JSON-RPC envelope because the MCP transport
+    spec at §"Sending Messages to the Server" allows it ("The HTTP
+    response body MAY comprise a JSON-RPC error response that has no
+    id") and it gives the client a structured failure to render.
     """
     body = JsonRpcResponse(
         id=request_id,
         error=JsonRpcError(code=code, message=message),
     )
-    return JSONResponse(content=_serialize_response(body))
+    return JSONResponse(content=_serialize_response(body), status_code=status_code)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +355,36 @@ async def mcp_dispatch(request: Request) -> Response:
             INVALID_REQUEST,
             f"invalid request: {exc.error_count()} validation error(s)",
         )
+
+    # MCP-Protocol-Version header validation per spec §"Protocol Version
+    # Header". Clients MUST send the header on every post-initialize
+    # request; if the value is invalid or unsupported the server MUST
+    # respond with HTTP 400 Bad Request. The header is exempted on the
+    # `initialize` call itself because clients don't know which version
+    # to send until the handshake completes. Absent header on non-
+    # initialize methods is accepted as a transitional lenience: spec
+    # SHOULD-assume-2025-03-26 doesn't help since v0.2 doesn't support
+    # that revision, and tightening this in T1 would break clients that
+    # don't yet emit the header. T6 (#251) acceptance tests will pin
+    # the strict-mode contract.
+    if jrpc.method != "initialize":
+        protocol_header = request.headers.get("mcp-protocol-version")
+        if protocol_header is not None and protocol_header != PROTOCOL_VERSION:
+            _log.warning(
+                "mcp_unsupported_protocol_version",
+                method=jrpc.method,
+                header=protocol_header,
+                supported=PROTOCOL_VERSION,
+            )
+            return _error_response(
+                _coerce_request_id(payload),
+                INVALID_REQUEST,
+                (
+                    f"unsupported MCP-Protocol-Version: {protocol_header!r} "
+                    f"(server supports {PROTOCOL_VERSION!r})"
+                ),
+                status_code=400,
+            )
 
     # Notification detection: JSON-RPC §4.1.2 says a notification is a
     # request without an ``id`` member. Pydantic-side, ``jrpc.id``

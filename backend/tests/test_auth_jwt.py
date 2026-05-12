@@ -599,13 +599,19 @@ def test_value_error_key_not_found_triggers_jwks_refresh(
     real_decode = jwt_module._decode_with_jwks
     call_count = {"n": 0}
 
-    def fake_decode(tok: str, ks: dict[str, Any], settings: Any) -> Any:
+    def fake_decode(
+        tok: str,
+        ks: dict[str, Any],
+        settings: Any,
+        *,
+        expected_audience: str,
+    ) -> Any:
         call_count["n"] += 1
         if call_count["n"] == 1:
             # Message intentionally unrelated to "Key not found" — the
             # fix must refresh on *any* ValueError.
             raise ValueError("some opaque authlib internal message")
-        return real_decode(tok, ks, settings)
+        return real_decode(tok, ks, settings, expected_audience=expected_audience)
 
     monkeypatch.setattr(jwt_module, "_decode_with_jwks", fake_decode)
 

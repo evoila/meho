@@ -34,13 +34,17 @@ body") is met either way; the wire code follows the spec.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane import __version__
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -50,18 +54,47 @@ from meho_backplane.mcp.schemas import (
     PROTOCOL_VERSION,
 )
 
+_DISPATCH_TEST_OPERATOR: Operator = Operator(
+    sub="dispatcher-test-operator",
+    name="Dispatcher Test",
+    email=None,
+    raw_jwt="fixture-jwt-not-real",
+    tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+    tenant_role=TenantRole.OPERATOR,
+)
+
+
+async def _fixture_verify_mcp_jwt_and_bind() -> Operator:
+    """Dependency override used by every dispatcher unit test.
+
+    The real :func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind`
+    validates the Bearer token against Keycloak's JWKS and the MCP
+    canonical URI. End-to-end coverage of that chain lives in
+    :mod:`tests.test_mcp_auth`; here we only care about the JSON-RPC
+    dispatch + transport semantics, so overriding the dependency with
+    a fixture :class:`Operator` keeps these tests independent of the
+    full OAuth-RS round trip.
+    """
+    return _DISPATCH_TEST_OPERATOR
+
 
 @pytest.fixture
-def client() -> TestClient:
-    """Plain :class:`TestClient` for the running app.
+def client() -> Iterator[TestClient]:
+    """:class:`TestClient` with ``verify_mcp_jwt_and_bind`` overridden.
 
     The shared :mod:`conftest` autouse fixture supplies a per-test
     SQLite ``DATABASE_URL`` with the schema migrated, so the app's
     lifespan and middleware chain boot cleanly under
     :class:`fastapi.testclient.TestClient` without any per-test
-    plumbing here.
+    plumbing here. The dependency override skips the full Bearer-token
+    chain (covered in :mod:`tests.test_mcp_auth`) so each test in this
+    file can focus on JSON-RPC dispatch semantics.
     """
-    return TestClient(app)
+    app.dependency_overrides[verify_mcp_jwt_and_bind] = _fixture_verify_mcp_jwt_and_bind
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
 
 
 def _post_mcp(client: TestClient, body: Any) -> Any:
@@ -332,27 +365,6 @@ def test_ping_returns_empty_result(client: TestClient) -> None:
     assert body["id"] == 7
     assert body["result"] == {}
     assert "error" not in body
-
-
-# ---------------------------------------------------------------------------
-# T1 auth contract — no Bearer required
-# ---------------------------------------------------------------------------
-
-
-def test_t1_has_no_auth_unauthenticated_call_succeeds(client: TestClient) -> None:
-    """AC: "T1 has NO auth yet — every request currently succeeds."
-
-    Calling ``/mcp`` with no ``Authorization`` header must still
-    succeed in T1. T2 (#247) is what adds the OAuth-RS chain on top.
-    """
-    response = _post_mcp(
-        client,
-        {"jsonrpc": "2.0", "id": 8, "method": "ping"},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["result"] == {}
 
 
 # ---------------------------------------------------------------------------

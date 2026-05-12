@@ -255,21 +255,45 @@ this stage it exposes:
   no body per spec §"Sending Messages to the Server". JSON-RPC-level
   errors (parse, invalid request, method-not-found, invalid params,
   internal error) are encoded as 200 envelopes with the `error` member
-  populated — only transport-level failures flip the HTTP code. T1 has
-  **no Bearer-token auth** on `/mcp` yet; every well-formed request
-  succeeds. T2 (#247) adds the OAuth 2.1 resource-server chain
-  (`/.well-known/oauth-protected-resource`, `WWW-Authenticate` headers,
-  audience validation per RFC 8707, reuse of `verify_jwt`); Origin-
-  header validation per the MCP transport DNS-rebinding warning is
-  also deferred to T2 because it depends on the `MCP_ALLOWED_ORIGINS`
-  setting T2 introduces. T3 (#248) layers the tool + resource
-  registries (`register_mcp_tool`, `register_mcp_resource`); T4 (#249)
-  populates them with the reference `meho.status` tool and
-  `meho://tenant/<id>/info` resource; T5 (#250) replaces the implicit
-  AuditMiddleware pass-through (which currently fires its
-  "no operator_sub bound" skip rule on every `/mcp` call because T1
-  doesn't bind one) with a fail-closed MCP-specific audit path on
+  populated; transport-level failures flip the HTTP code (an
+  unsupported `MCP-Protocol-Version` header → 400; missing or
+  invalid Bearer → 401 — see Task #247 below). T3 (#248) layers the
+  tool + resource registries (`register_mcp_tool`,
+  `register_mcp_resource`); T4 (#249) populates them with the
+  reference `meho.status` tool and `meho://tenant/<id>/info` resource;
+  T5 (#250) replaces the chassis AuditMiddleware row (which now fires
+  on every authenticated `/mcp` call thanks to T2 binding
+  `operator_sub`) with a fail-closed MCP-specific audit path on
   `tools/call` + `resources/read`.
+
+* MCP OAuth 2.1 resource-server protection (Task #247, G0.5-T2) —
+  layers spec-conforming auth on top of the T1 dispatcher.
+  `backend/src/meho_backplane/mcp/auth.py` houses the
+  `verify_mcp_jwt` / `verify_mcp_jwt_and_bind` FastAPI dependencies,
+  which reuse the chassis JWKS chain through the new
+  `verify_jwt_for_audience` seam in `auth/jwt.py` but validate against
+  the **MCP canonical URI** instead of the chassis `KEYCLOAK_AUDIENCE`
+  — RFC 8707 §2 audience binding, so a token issued for the HTTP API
+  surface cannot be replayed at `/mcp` and vice versa. On every 401
+  the wrapper attaches the RFC 9728 §5.1
+  `WWW-Authenticate: Bearer resource_metadata="<url>"` header so MCP
+  clients can discover the resource-metadata document and walk the
+  OAuth 2.1 + PKCE handshake against Keycloak. The unauthenticated
+  metadata document lives at `/.well-known/oauth-protected-resource`
+  in `backend/src/meho_backplane/api/well_known.py` — required fields
+  per RFC 9728 §3 (`resource`, `authorization_servers`,
+  `scopes_supported`, `bearer_methods_supported`) populated from the
+  new `BACKPLANE_URL` + `MCP_RESOURCE_URI` settings. The dispatcher's
+  `Depends(verify_mcp_jwt_and_bind)` runs before envelope parsing, so
+  the request never reaches the JSON-RPC pipeline when auth fails;
+  the binding side effect (`operator_sub` + `tenant_id` into structlog
+  contextvars) is what makes `AuditMiddleware` write a row per `/mcp`
+  request, replacing T1's implicit pass-through. T5 (#250) will layer
+  MCP-specific audit semantics on `tools/call` / `resources/read`.
+  Origin-header validation per the MCP transport DNS-rebinding warning
+  is deferred to a later transport-hardening task — it needs
+  `MCP_ALLOWED_ORIGINS` infrastructure that doesn't exist yet, and
+  bundling it with T2 would over-scope the OAuth-RS work.
 
 Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib

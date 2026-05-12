@@ -3,11 +3,16 @@
 
 """meho_backplane.connectors — connector contract public API.
 
-Re-exports the ABC and all result models so downstream consumers can import
-from this package root rather than from the submodules.
+Re-exports the ABC, all result models, and the registry functions so
+downstream consumers can import from this package root.
 """
 
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import (
+    all_connectors,
+    get_connector,
+    register_connector,
+)
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -21,4 +26,7 @@ __all__ = [
     "FingerprintResult",
     "OperationResult",
     "ProbeResult",
+    "all_connectors",
+    "get_connector",
+    "register_connector",
 ]

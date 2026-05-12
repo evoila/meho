@@ -63,13 +63,28 @@ is exhaustively covered in :mod:`tests.test_auth_jwt` /
 :mod:`tests.test_auth_failures`. Fake JWTs minted by
 :func:`tests._oidc_jwt_helpers.mint_token` against a stub JWKS keep
 the focus on the seams T6 is meant to prove.
+
+Why every PG-driven test body is ``async def``:
+
+``backend/pyproject.toml`` pins ``asyncio_mode = "auto"`` for
+pytest-asyncio, so plain ``async def`` test bodies (and ``async``
+fixtures) all run on the single pytest-asyncio-managed event loop.
+The :func:`tests.integration.conftest.pg_engine` async fixture binds
+an asyncpg connection pool to that loop; calling ``asyncio.run()``
+from inside a sync test body would spawn a *fresh* loop per call,
+crossing loop boundaries on every pool checkout and tripping
+SQLAlchemy's ``pool_pre_ping`` with
+``RuntimeError: ... attached to a different loop``. Keeping every
+PG-touching test ``async def`` (and using a single
+:class:`httpx.AsyncClient` per test, awaited directly) is what keeps
+the asyncpg pool, the request, and the read-back queries all on the
+same loop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any
 
 import httpx
 import pytest
@@ -90,7 +105,6 @@ from tests.integration.conftest import (
     SKIP_REASON,
     count_audit_rows,
     fetch_audit_rows_for_tenant,
-    run_async,
 )
 
 # ---------------------------------------------------------------------------
@@ -99,6 +113,9 @@ from tests.integration.conftest import (
 
 
 # Stable test-only tenant UUIDs. Pinned so failure diffs stay readable.
+# Must match the seed rows inserted by ``pg_engine`` in the conftest —
+# the seed there uses these exact UUIDs as string literals so this
+# module doesn't have to import test-symbol state into the fixture.
 TENANT_A_ID: str = "11111111-1111-1111-1111-111111111111"
 TENANT_B_ID: str = "22222222-2222-2222-2222-222222222222"
 
@@ -110,38 +127,27 @@ TENANT_B_ID: str = "22222222-2222-2222-2222-222222222222"
 _skip_no_docker = pytest.mark.skipif(not DOCKER_AVAILABLE, reason=SKIP_REASON)
 
 
-def _send_request(
-    app: FastAPI,
-    *,
-    token: str,
-    path: str = "/api/v1/health",
-) -> httpx.Response:
-    """Drive a single request through *app* using :class:`httpx.AsyncClient`.
+def _make_async_client(app: FastAPI) -> httpx.AsyncClient:
+    """Construct an :class:`httpx.AsyncClient` driving *app* via ASGI in-process.
 
-    ASGI transport runs the app inline in the same event loop the test
-    uses — no real socket, no separate thread — which keeps the
-    concurrent-request test deterministic. Hand-rolled rather than
-    using :class:`fastapi.testclient.TestClient` because TestClient is
-    sync; the concurrent-isolation test (case 5) needs the real async
-    path through the middleware stack so that ``asyncio.gather`` can
-    actually interleave the requests across ``await`` boundaries.
+    ASGITransport runs the FastAPI app inline in the same event loop
+    the test awaits on — no real socket, no separate thread — which
+    keeps the concurrent-request test deterministic. Hand-rolled
+    rather than using :class:`fastapi.testclient.TestClient` because
+    TestClient is sync; the concurrent-isolation test (case 5) needs
+    the real async path through the middleware stack so that
+    :func:`asyncio.gather` can actually interleave the requests across
+    ``await`` boundaries.
 
-    The wrapper exposes a synchronous return for tests that drive
-    one request at a time (cases 1-4); the concurrent case (5) calls
-    the underlying coroutine via ``asyncio.gather`` directly.
+    Reused across tests as a small factory so each test owns its own
+    client lifecycle (``async with ...``) on the pytest-asyncio loop —
+    which is the same loop the :func:`pg_engine` fixture's asyncpg
+    pool was created on.
     """
-    return run_async(_async_send_request(app, token=token, path=path))
-
-
-async def _async_send_request(
-    app: FastAPI,
-    *,
-    token: str,
-    path: str = "/api/v1/health",
-) -> httpx.Response:
-    transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.get(path, headers={"Authorization": f"Bearer {token}"})
+    return httpx.AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +156,7 @@ async def _async_send_request(
 
 
 @_skip_no_docker
-def test_audit_rows_correctly_scoped_per_tenant(
+async def test_audit_rows_correctly_scoped_per_tenant(
     integration_app: FastAPI,
     async_pg_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -173,15 +179,22 @@ def test_audit_rows_correctly_scoped_per_tenant(
 
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        for _ in range(5):
-            response = _send_request(integration_app, token=token_a)
-            assert response.status_code == 200, response.text
-        for _ in range(3):
-            response = _send_request(integration_app, token=token_b)
-            assert response.status_code == 200, response.text
+        async with _make_async_client(integration_app) as client:
+            for _ in range(5):
+                response = await client.get(
+                    "/api/v1/health",
+                    headers={"Authorization": f"Bearer {token_a}"},
+                )
+                assert response.status_code == 200, response.text
+            for _ in range(3):
+                response = await client.get(
+                    "/api/v1/health",
+                    headers={"Authorization": f"Bearer {token_b}"},
+                )
+                assert response.status_code == 200, response.text
 
-    rows_a = run_async(fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID))
-    rows_b = run_async(fetch_audit_rows_for_tenant(async_pg_url, TENANT_B_ID))
+    rows_a = await fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID)
+    rows_b = await fetch_audit_rows_for_tenant(async_pg_url, TENANT_B_ID)
 
     assert len(rows_a) == 5, f"tenant A row leak/loss: {rows_a!r}"
     assert len(rows_b) == 3, f"tenant B row leak/loss: {rows_b!r}"
@@ -194,7 +207,7 @@ def test_audit_rows_correctly_scoped_per_tenant(
     # Global row count matches the sum — no rows landed under a third,
     # unexpected tenant_id (e.g. a default UUID from an unbound
     # contextvar).
-    total = run_async(count_audit_rows(async_pg_url))
+    total = await count_audit_rows(async_pg_url)
     assert total == 8, f"unexpected extra audit rows: total={total}"
 
 
@@ -204,7 +217,7 @@ def test_audit_rows_correctly_scoped_per_tenant(
 
 
 @_skip_no_docker
-def test_jwt_with_unknown_tenant_id_succeeds_but_isolates(
+async def test_jwt_with_unknown_tenant_id_succeeds_but_isolates(
     integration_app: FastAPI,
     async_pg_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -217,7 +230,7 @@ def test_jwt_with_unknown_tenant_id_succeeds_but_isolates(
     v0.2 trusts the JWT issuer's ``tenant_id`` claim verbatim — no DB
     lookup against the ``tenant`` table. A token signed with a
     well-formed UUID that doesn't match any real tenant row still
-    authenticates; its audit row carries that UUID. A pre-seeded
+    authenticates; its audit row carries that UUID. The pre-seeded
     tenant A row in the same DB must NOT inherit the request.
 
     When v0.2.next adds the per-request tenant lookup, this test's
@@ -233,17 +246,23 @@ def test_jwt_with_unknown_tenant_id_succeeds_but_isolates(
 
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        response = _send_request(integration_app, token=token)
+        async with _make_async_client(integration_app) as client:
+            response = await client.get(
+                "/api/v1/health",
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
     assert response.status_code == 200, response.text
 
-    bogus_rows = run_async(fetch_audit_rows_for_tenant(async_pg_url, bogus_tenant_id))
+    bogus_rows = await fetch_audit_rows_for_tenant(async_pg_url, bogus_tenant_id)
     assert len(bogus_rows) == 1, f"expected one row under bogus tenant, got {bogus_rows!r}"
     # Critical isolation property: no row leaked to TENANT_A_ID. If a
     # future bug routed unknown tenant_ids to a fallback tenant
     # (operator misconfig, default-tenant feature), this assertion
-    # catches it.
-    a_rows = run_async(fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID))
+    # catches it. The ``tenant`` table holds two real seed rows
+    # (tenant-a, tenant-b) injected by the ``pg_engine`` fixture, so
+    # this assertion has actual contrast to fail against.
+    a_rows = await fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID)
     assert a_rows == []
 
 
@@ -253,7 +272,7 @@ def test_jwt_with_unknown_tenant_id_succeeds_but_isolates(
 
 
 @_skip_no_docker
-def test_per_tenant_audit_query_returns_only_requesting_tenant(
+async def test_per_tenant_audit_query_returns_only_requesting_tenant(
     integration_app: FastAPI,
     async_pg_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -280,16 +299,42 @@ def test_per_tenant_audit_query_returns_only_requesting_tenant(
 
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        # Interleave so a query that ignored tenant_id and returned
-        # "the last N rows" would visibly mix operators.
-        _send_request(integration_app, token=token_a)
-        _send_request(integration_app, token=token_b)
-        _send_request(integration_app, token=token_a)
-        _send_request(integration_app, token=token_b)
+        async with _make_async_client(integration_app) as client:
+            # Interleave so a query that ignored tenant_id and returned
+            # "the last N rows" would visibly mix operators.
+            responses = [
+                await client.get(
+                    "/api/v1/health",
+                    headers={"Authorization": f"Bearer {token_a}"},
+                ),
+                await client.get(
+                    "/api/v1/health",
+                    headers={"Authorization": f"Bearer {token_b}"},
+                ),
+                await client.get(
+                    "/api/v1/health",
+                    headers={"Authorization": f"Bearer {token_a}"},
+                ),
+                await client.get(
+                    "/api/v1/health",
+                    headers={"Authorization": f"Bearer {token_b}"},
+                ),
+            ]
+        # Catch a "request silently 500'd, audit row never landed"
+        # failure mode before it bleeds into the row-count assertion
+        # below — the count check would still flag it, but the status
+        # assertion gives a clearer error message in CI logs.
+        assert all(r.status_code == 200 for r in responses)
 
-    rows_a = run_async(fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID))
-    rows_b = run_async(fetch_audit_rows_for_tenant(async_pg_url, TENANT_B_ID))
+    rows_a = await fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID)
+    rows_b = await fetch_audit_rows_for_tenant(async_pg_url, TENANT_B_ID)
 
+    # Explicit row-count assertions — without these a silent row-drop
+    # (e.g. an INSERT that swallowed an error) would false-pass the
+    # operator-sub set assertions below: ``{"op-q-a"}`` happily
+    # matches a list of length one.
+    assert len(rows_a) == 2, f"tenant A row leak/loss: {rows_a!r}"
+    assert len(rows_b) == 2, f"tenant B row leak/loss: {rows_b!r}"
     assert {row["operator_sub"] for row in rows_a} == {"op-q-a"}
     assert {row["operator_sub"] for row in rows_b} == {"op-q-b"}
     # Each tenant got their own rows, no overlap.
@@ -304,7 +349,7 @@ def test_per_tenant_audit_query_returns_only_requesting_tenant(
 
 
 @_skip_no_docker
-def test_read_only_role_on_operator_route_returns_403(
+async def test_read_only_role_on_operator_route_returns_403(
     integration_app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -329,11 +374,11 @@ def test_read_only_role_on_operator_route_returns_403(
 
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        response = _send_request(
-            integration_app,
-            token=token,
-            path="/api/v1/rbac-test/operator",
-        )
+        async with _make_async_client(integration_app) as client:
+            response = await client.get(
+                "/api/v1/rbac-test/operator",
+                headers={"Authorization": f"Bearer {token}"},
+            )
 
     assert response.status_code == 403
     assert response.json() == {"detail": "insufficient_role"}
@@ -344,31 +389,8 @@ def test_read_only_role_on_operator_route_returns_403(
 # ---------------------------------------------------------------------------
 
 
-async def _drive_concurrent_requests(
-    app: FastAPI,
-    request_plan: list[tuple[str, str]],
-) -> list[httpx.Response]:
-    """Issue every (token, expected_tenant_id) pair concurrently via gather.
-
-    The plan list shape ``(token, expected_tenant_id)`` is what each
-    coroutine carries; the caller cross-references the response order
-    against ``request_plan`` to assert per-response invariants. A
-    single :class:`httpx.AsyncClient` is reused across the gather so
-    the underlying ASGITransport's task-creation pattern matches what
-    a real reverse-proxy fan-out would do — separate clients per
-    request would serialise inside httpx's connection pool.
-    """
-    transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        coros = [
-            client.get("/api/v1/health", headers={"Authorization": f"Bearer {token}"})
-            for token, _expected in request_plan
-        ]
-        return await asyncio.gather(*coros)
-
-
 @_skip_no_docker
-def test_concurrent_requests_do_not_leak_contextvars(
+async def test_concurrent_requests_do_not_leak_contextvars(
     integration_app: FastAPI,
     async_pg_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -383,6 +405,11 @@ def test_concurrent_requests_do_not_leak_contextvars(
     a sibling's. The plan deliberately interleaves
     tenant-A/B/A/B/A/B/A/B (eight requests) so a leak that occurred
     only after the first context switch would still surface.
+
+    A single :class:`httpx.AsyncClient` is reused across the gather so
+    the underlying ASGITransport's task-creation pattern matches what
+    a real reverse-proxy fan-out would do — separate clients per
+    request would serialise inside httpx's connection pool.
 
     The contract that must hold: every request opens its own ASGI
     scope, :class:`RequestContextMiddleware` calls
@@ -417,7 +444,15 @@ def test_concurrent_requests_do_not_leak_contextvars(
 
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        responses = run_async(_drive_concurrent_requests(integration_app, request_plan))
+        async with _make_async_client(integration_app) as client:
+            coros = [
+                client.get(
+                    "/api/v1/health",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                for token, _expected in request_plan
+            ]
+            responses = await asyncio.gather(*coros)
 
     # Every request returned 200 — concurrency itself didn't break
     # the auth or audit paths.
@@ -431,7 +466,7 @@ def test_concurrent_requests_do_not_leak_contextvars(
     # tenant_id — no cross-contamination. Per-operator counts must
     # match the gather plan (each op appears twice; eight requests
     # total).
-    plan_summary: dict[str, dict[str, Any]] = {}
+    plan_summary: dict[str, dict[str, str | int]] = {}
     for token_sub, expected_tenant in (
         ("op-conc-a1", TENANT_A_ID),
         ("op-conc-a2", TENANT_A_ID),
@@ -443,8 +478,8 @@ def test_concurrent_requests_do_not_leak_contextvars(
             "expected_count": 2,
         }
 
-    rows_a = run_async(fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID))
-    rows_b = run_async(fetch_audit_rows_for_tenant(async_pg_url, TENANT_B_ID))
+    rows_a = await fetch_audit_rows_for_tenant(async_pg_url, TENANT_A_ID)
+    rows_b = await fetch_audit_rows_for_tenant(async_pg_url, TENANT_B_ID)
     assert len(rows_a) == 4, f"tenant A got {len(rows_a)} rows, expected 4: {rows_a!r}"
     assert len(rows_b) == 4, f"tenant B got {len(rows_b)} rows, expected 4: {rows_b!r}"
 
@@ -500,7 +535,6 @@ def test_module_imports_cleanly() -> None:
     assert callable(install_fake_vault)
     assert callable(fetch_audit_rows_for_tenant)
     assert callable(count_audit_rows)
-    assert callable(run_async)
     # Pin the test-only tenant UUIDs so a future edit can't silently
     # change them and degrade diff readability across reviewers.
     uuid.UUID(TENANT_A_ID)

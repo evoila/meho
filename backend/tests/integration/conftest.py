@@ -69,6 +69,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.rbac_test import router as api_v1_rbac_test_router
+from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db import engine as engine_module
@@ -78,6 +79,7 @@ from meho_backplane.db.engine import (
     reset_engine_for_testing,
 )
 from meho_backplane.db.migrations import alembic_config
+from meho_backplane.mcp import router as mcp_router
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from tests._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -334,6 +336,14 @@ def build_integration_app() -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     app.include_router(api_v1_health_router)
     app.include_router(api_v1_rbac_test_router)
+    # MCP transport entrypoint + RFC 9728 protected-resource metadata —
+    # mounted unconditionally so the T6 acceptance suite (G0.5-T6, #251)
+    # can drive the full lifecycle (initialize → tools/list → tools/call
+    # → resources/read) through the production auth chain. Routes that
+    # consuming suites don't exercise are inert: the tenancy isolation
+    # suite never POSTs to ``/mcp`` so its assertions are unaffected.
+    app.include_router(mcp_router)
+    app.include_router(well_known_router)
     return app
 
 

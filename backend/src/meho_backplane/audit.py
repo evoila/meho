@@ -317,6 +317,15 @@ async def _send_audit_failure_response(send: Send) -> None:
     )
 
 
+#: Path prefixes the chassis audit middleware skips entirely. The MCP
+#: transport at ``/mcp`` is JSON-RPC over POST and a single request can
+#: carry multiple tool / resource invocations; the per-operation audit
+#: row is written by :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`
+#: from inside each handler (G0.5-T5, #250). A chassis-level row per
+#: ``/mcp`` POST would be the wrong granularity for G8's audit queries.
+_AUDIT_SKIP_PATH_PREFIXES: tuple[str, ...] = ("/mcp",)
+
+
 class AuditMiddleware:
     """Pure-ASGI middleware that writes one audit row per authenticated request.
 
@@ -331,6 +340,18 @@ class AuditMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # G0.5-T5 (#250): MCP requests are audited at per-operation
+        # granularity by the MCP handlers themselves, not at the
+        # JSON-RPC-envelope layer. Skip the chassis audit path entirely
+        # for ``/mcp`` so we don't double-attribute (or, worse,
+        # under-attribute when the chassis row hides a multi-op POST).
+        scope_path = scope.get("path", "")
+        if isinstance(scope_path, str) and scope_path.startswith(
+            _AUDIT_SKIP_PATH_PREFIXES,
+        ):
             await self.app(scope, receive, send)
             return
 

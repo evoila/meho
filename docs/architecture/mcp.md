@@ -111,11 +111,11 @@ Every G3–G9 tool registration MUST pass a description review before merge.
 
 ## Audit integration
 
-MCP handlers write their own audit rows per `tools/call` and `resources/read`, **not** via the chassis `AuditMiddleware`. The middleware path-excludes `/mcp/*` requests because the JSON-RPC envelope carries multiple potential ops — one audit row per HTTP request would be wrong granularity.
+Per [G0.5-T5 (#250, PR #300)](https://github.com/evoila/meho/pull/300): MCP handlers write their own audit rows per `tools/call` and `resources/read`, **not** via the chassis `AuditMiddleware`. The middleware path-excludes `/mcp` requests (see `_AUDIT_SKIP_PATH_PREFIXES` in [`audit.py`](../../backend/src/meho_backplane/audit.py)) because the JSON-RPC envelope carries multiple potential ops — one audit row per HTTP request would be wrong granularity for G8's audit queries.
 
-MCP audit row shape (G0.5-T5 spec):
+The per-operation writer is [`mcp/audit.py::write_mcp_audit_row`](../../backend/src/meho_backplane/mcp/audit.py), called from inside [`mcp/handlers.py`](../../backend/src/meho_backplane/mcp/handlers.py) for both `tools/call` and `resources/read`. MCP audit row shape:
 
-```
+```text
 operator_sub  ← from JWT (validated by /mcp auth chain)
 tenant_id     ← operator.tenant_id
 request_id    ← from RequestContextMiddleware (still runs)

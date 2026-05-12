@@ -91,27 +91,27 @@ class AuthModel(StrEnum):
 
 Stored on every `Target` row (G0.3); read by the connector at `execute()` time.
 
-## Adapter shapes (G0.2-T3 / T4)
+## Adapter shapes (planned: G0.2-T3 / T4)
 
-Two abstract intermediates between `Connector` and the vendor implementations:
+> **Status:** None of the subclasses below exist yet. G0.2-T1 (ABC + result models) has landed; G0.2-T3 (HTTP adapter), G0.2-T4 (SSH adapter), and G0.2-T5 (`VaultConnector` reference refactor) are still open. The tree is the target hierarchy each vendor Initiative under [G3 (#214)](https://github.com/evoila/meho/issues/214) will register against once the adapters land.
 
-```
-Connector (ABC)
-├── HttpConnector       — httpx.AsyncClient pool, tenacity retry, SSL_CERT_FILE
-│   ├── VaultConnector  — refactor of auth/vault.py (G0.2-T5; reference impl)
+```text
+Connector (ABC)                                      ← G0.2-T1 (shipped)
+├── HttpConnector       — httpx.AsyncClient pool, tenacity retry, SSL_CERT_FILE   ← G0.2-T3 (planned)
+│   ├── VaultConnector  — refactor of auth/vault.py (G0.2-T5; reference impl)     ← G0.2-T5 (planned)
 │   ├── VSphereConnector — vSphere REST API (G3.1)
 │   ├── NSXConnector
 │   ├── HarborConnector
 │   └── ... (HTTP-API vendors)
-└── SshConnector         — asyncssh, key+password, per-target connection pool
+└── SshConnector         — asyncssh, key+password, per-target connection pool     ← G0.2-T4 (planned)
     ├── Bind9Connector
     ├── PfsenseConnector
     └── HolodeckConnector
 ```
 
-**HTTP adapter** (T3): shared `httpx.AsyncClient` per target with retry on idempotent verbs only, `SSL_CERT_FILE` honored natively for the trust-bundle wiring from PR #212.
+**HTTP adapter** (T3, planned): shared `httpx.AsyncClient` per target with retry on idempotent verbs only, `SSL_CERT_FILE` honored natively for the trust-bundle wiring from PR #212.
 
-**SSH adapter** (T4): asyncssh (async-native, no thread offload — beats paramiko for the event loop). Per-target connection cached; closed on lifespan teardown.
+**SSH adapter** (T4, planned): asyncssh (async-native, no thread offload — beats paramiko for the event loop). Per-target connection cached; closed on lifespan teardown.
 
 ## Library choices
 
@@ -135,7 +135,9 @@ get_connector("vsphere")  # → VSphereConnector class
 
 Eager-imported at app startup via the FastAPI `lifespan` so module-side `register_connector(...)` calls land before the first request. Duplicate registration raises `RuntimeError` — programmer bug, surfaces at boot, never at request time.
 
-## Op dispatch flow
+## Op dispatch flow (target shape, once G0.2-T2 / G0.3 land)
+
+> **Status:** today's shipped substrate is the ABC + result models. The remaining pieces — connector registry ([G0.2-T2 / PR #295, open](https://github.com/evoila/meho/pull/295)), targets-as-data ([G0.3 / #224, open](https://github.com/evoila/meho/issues/224)), `_op_map` per connector, the `/api/v1/connectors/...` route surface, and the G6 broadcast hook — are not yet wired. The flow below is the **target shape** every Initiative under #214 / #220 / #217 will land against.
 
 For a CLI call like `meho vsphere vm.list --target rdc-vcenter`:
 

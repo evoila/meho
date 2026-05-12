@@ -230,6 +230,35 @@ async def test_connect_error_retries_three_times() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Idempotent-method guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_method_raises_value_error() -> None:
+    """_request_json raises ValueError immediately for non-idempotent verbs."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    with pytest.raises(ValueError, match="idempotent"):
+        await conn._request_json(target, "POST", "/api/vms", raw_jwt="tok")
+
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_non_idempotent_method_lowercase_also_raises() -> None:
+    """Method normalised to uppercase before guard — 'post' is rejected."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target()
+
+    with pytest.raises(ValueError):
+        await conn._request_json(target, "post", "/api/vms", raw_jwt="tok")
+
+    await conn.aclose()
+
+
+# ---------------------------------------------------------------------------
 # Per-target client pooling
 # ---------------------------------------------------------------------------
 

@@ -27,12 +27,9 @@ import asyncio
 from typing import Any
 
 import httpx
-import structlog
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from meho_backplane.connectors.base import Connector
-
-logger = structlog.get_logger()
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
 # once G0.3 lands the Target model.
@@ -102,11 +99,19 @@ class HttpConnector(Connector):
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Retryable JSON request. Caller decides if retry is safe via method.
+        """Retryable JSON request. Only idempotent verbs (GET, HEAD, OPTIONS).
 
-        Use for idempotent verbs (GET, HEAD, OPTIONS).  Non-idempotent callers
-        should call the httpx client directly to avoid unintended side effects.
+        Raises :exc:`ValueError` for non-idempotent verbs so a caller that
+        accidentally passes ``POST``/``PATCH`` never gets silent retry of a
+        side-effecting operation. Non-idempotent callers must use
+        ``_post_json`` or call the httpx client directly.
         """
+        method = method.upper()
+        if method not in _IDEMPOTENT_METHODS:
+            raise ValueError(
+                f"_request_json only accepts idempotent methods "
+                f"{sorted(_IDEMPOTENT_METHODS)}; got {method!r}"
+            )
         client = await self._http_client(target)
         headers = await self.auth_headers(target, raw_jwt)
         resp = await client.request(method, path, params=params, json=json, headers=headers)

@@ -323,110 +323,136 @@ def _coerce_request_id(payload: dict[str, Any]) -> JsonRpcId:
     return None
 
 
-@router.post("")
-async def mcp_dispatch(request: Request) -> Response:
-    """Dispatch a single JSON-RPC 2.0 request or notification.
+def _parse_request_body(raw_body: bytes) -> dict[str, Any] | JSONResponse:
+    """Decode ``raw_body`` to a JSON-RPC envelope dict or an HTTP error response.
 
-    The Streamable HTTP body contract (§"Sending Messages to the Server"):
+    Three rejection arms map onto the spec-prescribed error codes:
 
-    * Input is a JSON object — batch arrays are unsupported in T1.
-    * On a *request* (id present): return 200 + single JSON envelope.
-    * On a *notification* (id absent, or method prefix
-      ``notifications/``): return 202 with no body, regardless of
-      whether the handler errored — JSON-RPC §4.1.2 forbids replying.
+    * Empty body → PARSE_ERROR (clearer message than ``json.loads(b"")``'s
+      "Expecting value").
+    * :class:`json.JSONDecodeError` → PARSE_ERROR with the parser's message.
+    * Non-dict payload (array or scalar) → INVALID_REQUEST. JSON-RPC §6
+      allows batch arrays at the protocol layer but the MCP Streamable
+      HTTP transport mandates a single envelope per POST.
 
-    GET requests on this path automatically return HTTP 405 (FastAPI's
-    default for an unmatched method) which satisfies the spec's
-    fallback when the server does not implement the GET-opens-SSE
-    branch of the Streamable HTTP transport.
+    On success returns the parsed ``dict``; on failure returns the
+    :class:`JSONResponse` that the dispatcher should hand back to the
+    client. The union return is the idiomatic "or-error-response" shape
+    that lets the caller narrow with :func:`isinstance`.
     """
-    raw_body = await request.body()
     if not raw_body:
         return _error_response(None, PARSE_ERROR, "parse error: empty body")
-
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError as exc:
         _log.warning("mcp_parse_error", error=exc.msg)
         return _error_response(None, PARSE_ERROR, f"parse error: {exc.msg}")
-
     if not isinstance(payload, dict):
-        # Batch (array) bodies are spec-allowed at the JSON-RPC layer
-        # (§6) but the MCP Streamable HTTP transport accepts only a
-        # single request / notification / response per POST. Reject
-        # arrays so the contract is unambiguous.
         return _error_response(
             None,
             INVALID_REQUEST,
             "invalid request: expected JSON object, not array or scalar",
         )
+    return payload
 
-    try:
-        jrpc = JsonRpcRequest.model_validate(payload)
-    except ValidationError as exc:
+
+def _validate_protocol_version_header(
+    request: Request,
+    method: str,
+    payload: dict[str, Any],
+) -> JSONResponse | None:
+    """Enforce MCP 2025-06-18 §"Protocol Version Header" on non-initialize calls.
+
+    Per spec, clients MUST send ``MCP-Protocol-Version`` on every post-
+    ``initialize`` request, and the server MUST respond with HTTP 400
+    when the value is invalid or unsupported. ``initialize`` is exempted
+    because clients don't know which version to send until the handshake
+    completes. Absent header on a non-initialize call is accepted as
+    transitional lenience: spec SHOULD-assume-2025-03-26 doesn't help —
+    v0.2 doesn't support that revision — and tightening this in T1
+    would break clients that don't yet emit the header. T6 (#251)
+    acceptance tests will pin the strict-mode contract.
+
+    Returns ``None`` on the OK path; a :class:`JSONResponse` (HTTP 400
+    + JSON-RPC error envelope) on rejection so the caller can early-
+    return it.
+    """
+    if method == "initialize":
+        return None
+    protocol_header = request.headers.get("mcp-protocol-version")
+    if protocol_header is None or protocol_header == PROTOCOL_VERSION:
+        return None
+    _log.warning(
+        "mcp_unsupported_protocol_version",
+        method=method,
+        header=protocol_header,
+        supported=PROTOCOL_VERSION,
+    )
+    return _error_response(
+        _coerce_request_id(payload),
+        INVALID_REQUEST,
+        (
+            f"unsupported MCP-Protocol-Version: {protocol_header!r} "
+            f"(server supports {PROTOCOL_VERSION!r})"
+        ),
+        status_code=400,
+    )
+
+
+def _build_success_response(
+    request_id: JsonRpcId,
+    result: _McpHandlerResult,
+) -> Response:
+    """Wrap a successful handler result in the JSON-RPC response envelope.
+
+    Three handler return shapes are accepted: a :class:`BaseModel` (dumped
+    with ``exclude_none=True`` so optional MCP fields like
+    ``InitializeResponse.instructions`` are omitted), a plain ``dict``
+    (used verbatim), and any other shape — which is treated as a handler
+    bug and converted to INTERNAL_ERROR. The else-arm is load-bearing
+    for the non-notification contract: returning ``None`` from a
+    request-shaped handler would otherwise emit a wire-broken envelope
+    that fails the spec's exactly-one-of(result, error) invariant.
+    """
+    if isinstance(result, BaseModel):
+        result_body: dict[str, Any] = result.model_dump(mode="json", exclude_none=True)
+    elif isinstance(result, dict):
+        result_body = result
+    else:
         return _error_response(
-            _coerce_request_id(payload),
-            INVALID_REQUEST,
-            f"invalid request: {exc.error_count()} validation error(s)",
+            request_id,
+            INTERNAL_ERROR,
+            "handler returned no result for a non-notification request",
         )
+    response = JsonRpcResponse(id=request_id, result=result_body)
+    return JSONResponse(content=_serialize_response(response))
 
-    # MCP-Protocol-Version header validation per spec §"Protocol Version
-    # Header". Clients MUST send the header on every post-initialize
-    # request; if the value is invalid or unsupported the server MUST
-    # respond with HTTP 400 Bad Request. The header is exempted on the
-    # `initialize` call itself because clients don't know which version
-    # to send until the handshake completes. Absent header on non-
-    # initialize methods is accepted as a transitional lenience: spec
-    # SHOULD-assume-2025-03-26 doesn't help since v0.2 doesn't support
-    # that revision, and tightening this in T1 would break clients that
-    # don't yet emit the header. T6 (#251) acceptance tests will pin
-    # the strict-mode contract.
-    if jrpc.method != "initialize":
-        protocol_header = request.headers.get("mcp-protocol-version")
-        if protocol_header is not None and protocol_header != PROTOCOL_VERSION:
-            _log.warning(
-                "mcp_unsupported_protocol_version",
-                method=jrpc.method,
-                header=protocol_header,
-                supported=PROTOCOL_VERSION,
-            )
-            return _error_response(
-                _coerce_request_id(payload),
-                INVALID_REQUEST,
-                (
-                    f"unsupported MCP-Protocol-Version: {protocol_header!r} "
-                    f"(server supports {PROTOCOL_VERSION!r})"
-                ),
-                status_code=400,
-            )
 
-    # Notification detection: JSON-RPC §4.1.2 says a notification is a
-    # request without an ``id`` member. Pydantic-side, ``jrpc.id``
-    # collapses absent and explicit-null to ``None`` (spec discourages
-    # the latter); the raw dict tells us which form arrived. The
-    # method-prefix relaxation handles buggy clients that send a
-    # ``notifications/*`` method with an id — the method semantics
-    # are spec-defined as notification-only, so the server treats it
-    # as such regardless of the envelope's id field.
-    is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
+async def _dispatch_to_handler(
+    jrpc: JsonRpcRequest,
+    is_notification: bool,
+) -> Response:
+    """Look up and run the handler; map handler outcomes to wire responses.
 
-    # The MCP transport spec at §"Sending Messages to the Server"
-    # splits the notification response shape: "If the server accepts
-    # the input, the server MUST return HTTP status code 202" vs. "If
-    # the server cannot accept the input, it MUST return an HTTP error
-    # status code." The phrase "cannot accept" is intentionally narrow
-    # — it refers to *transport-level* rejection (malformed envelope,
-    # bad JSON, batch arrays), not "the handler's logic couldn't
-    # process this notification." Spec language treats application-
-    # level failures of a notification as the server's problem to log,
-    # not the client's to fix (the client cannot retry a notification
-    # without violating §4.1.2). T1 therefore returns 202 for every
-    # post-envelope notification path — unknown method, invalid params,
-    # internal error — and logs the failure for operator triage. The
-    # transport-level rejections (parse error, invalid request, batch
-    # arrays, unsupported protocol version) above already flip to
-    # HTTP 4xx because they happen *before* the notification/request
-    # split.
+    The MCP transport spec at §"Sending Messages to the Server" splits
+    the notification response shape: "If the server accepts the input,
+    the server MUST return HTTP status code 202" vs. "If the server
+    cannot accept the input, it MUST return an HTTP error status code."
+    The phrase "cannot accept" is intentionally narrow — it refers to
+    *transport-level* rejection (malformed envelope, bad JSON, batch
+    arrays, unsupported protocol version), not "the handler's logic
+    couldn't process this notification." Spec language treats
+    application-level failures of a notification as the server's problem
+    to log, not the client's to fix (the client cannot retry a
+    notification without violating §4.1.2). Every post-envelope
+    notification arm here therefore returns HTTP 202 and logs the
+    failure for operator triage — the transport-level rejections in
+    :func:`_parse_request_body`,
+    :class:`JsonRpcRequest.model_validate`, and
+    :func:`_validate_protocol_version_header` already flip the status
+    to HTTP 4xx because they run *before* the notification/request
+    split.
+    """
     handler = _DISPATCH.get(jrpc.method)
     if handler is None:
         if is_notification:
@@ -461,20 +487,65 @@ async def mcp_dispatch(request: Request) -> Response:
 
     if is_notification:
         return Response(status_code=202)
+    return _build_success_response(jrpc.id, result)
 
-    if isinstance(result, BaseModel):
-        result_body: dict[str, Any] = result.model_dump(mode="json", exclude_none=True)
-    elif isinstance(result, dict):
-        result_body = result
-    else:
-        # Handler returned None (or a non-dict scalar) for a request-
-        # shaped invocation. That's a handler bug; surface as
-        # INTERNAL_ERROR rather than emitting a wire-broken envelope.
+
+@router.post("")
+async def mcp_dispatch(request: Request) -> Response:
+    """Dispatch a single JSON-RPC 2.0 request or notification.
+
+    The Streamable HTTP body contract (§"Sending Messages to the Server"):
+
+    * Input is a JSON object — batch arrays are unsupported in T1.
+    * On a *request* (id present): return 200 + single JSON envelope.
+    * On a *notification* (id absent, or method prefix
+      ``notifications/``): return 202 with no body, regardless of
+      whether the handler errored — JSON-RPC §4.1.2 forbids replying.
+
+    The function is the orchestrator only; each phase of the dispatch
+    pipeline lives in its own helper so the per-phase contract is grep-
+    able and the cognitive complexity stays under the project's
+    SonarCloud threshold:
+
+    * :func:`_parse_request_body` — body → ``dict`` or transport error.
+    * :func:`JsonRpcRequest.model_validate` + :func:`_coerce_request_id`
+      — envelope shape validation.
+    * :func:`_validate_protocol_version_header` — spec §"Protocol
+      Version Header" enforcement.
+    * :func:`_dispatch_to_handler` — handler lookup + execution + error
+      mapping.
+
+    GET requests on this path automatically return HTTP 405 (FastAPI's
+    default for an unmatched method) which satisfies the spec's
+    fallback when the server does not implement the GET-opens-SSE
+    branch of the Streamable HTTP transport.
+    """
+    raw_body = await request.body()
+    parsed = _parse_request_body(raw_body)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    payload = parsed
+
+    try:
+        jrpc = JsonRpcRequest.model_validate(payload)
+    except ValidationError as exc:
         return _error_response(
-            jrpc.id,
-            INTERNAL_ERROR,
-            "handler returned no result for a non-notification request",
+            _coerce_request_id(payload),
+            INVALID_REQUEST,
+            f"invalid request: {exc.error_count()} validation error(s)",
         )
 
-    response = JsonRpcResponse(id=jrpc.id, result=result_body)
-    return JSONResponse(content=_serialize_response(response))
+    protocol_error = _validate_protocol_version_header(request, jrpc.method, payload)
+    if protocol_error is not None:
+        return protocol_error
+
+    # Notification detection: JSON-RPC §4.1.2 says a notification is a
+    # request without an ``id`` member. Pydantic-side, ``jrpc.id``
+    # collapses absent and explicit-null to ``None`` (spec discourages
+    # the latter); the raw dict tells us which form arrived. The
+    # method-prefix relaxation handles buggy clients that send a
+    # ``notifications/*`` method with an id — the method semantics
+    # are spec-defined as notification-only, so the server treats it
+    # as such regardless of the envelope's id field.
+    is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
+    return await _dispatch_to_handler(jrpc, is_notification)

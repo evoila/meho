@@ -253,11 +253,32 @@ def register_mcp_resource(
     raise immediately because the registry is populated at module-import
     time and a collision indicates two modules trying to own the same
     URI namespace.
+
+    Two flavours of conflict are rejected:
+
+    * **Exact duplicate** — the ``uriTemplate`` string is already
+      registered.
+    * **Same-shape collision** — two templates that differ only in
+      variable names (e.g. ``meho://kb/{slug}`` vs ``meho://kb/{id}``)
+      would produce identical match regexes in
+      :func:`_match_uri_template` and silently shadow each other in
+      :func:`get_resource_for_uri` based on registration order. Reject
+      these at registration time so the failure surfaces immediately
+      instead of as a dead-code handler the operator can't see fire.
     """
     if definition.uriTemplate in _RESOURCES:
         raise RuntimeError(
             f"MCP resource template already registered: {definition.uriTemplate!r}",
         )
+    incoming_shape = _canonical_template_shape(definition.uriTemplate)
+    for existing_template in _RESOURCES:
+        if _canonical_template_shape(existing_template) == incoming_shape:
+            raise RuntimeError(
+                "MCP resource template shape already registered: "
+                f"{definition.uriTemplate!r} conflicts with "
+                f"{existing_template!r} (variable names differ but the "
+                "match shape is identical)",
+            )
     _RESOURCES[definition.uriTemplate] = (definition, handler)
     _log.info("mcp_resource_registered", uri_template=definition.uriTemplate)
 
@@ -318,6 +339,26 @@ def all_resource_templates_for(
 #: allows servers to accept any subset, and v0.2's resources never need
 #: query/fragment/explosion semantics.
 _TEMPLATE_VAR_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _canonical_template_shape(template: str) -> str:
+    """Strip variable *names* from a URI template so structurally-equal
+    templates collapse to the same key.
+
+    The matcher in :func:`_match_uri_template` builds its regex from the
+    *positions* of the ``{var}`` placeholders; the variable names show
+    up only as named groups inside that template's own compiled regex.
+    Two templates differing only in variable name (``meho://kb/{slug}``
+    vs ``meho://kb/{id}``) therefore produce identical match behaviour
+    and would silently shadow each other in :func:`get_resource_for_uri`
+    based on registration order.
+
+    Collapsing each ``{var}`` to a fixed ``{}`` placeholder yields a
+    canonical shape key that :func:`register_mcp_resource` checks for
+    collisions at registration time so the failure is loud (RuntimeError
+    at boot) rather than silent (the second handler never fires).
+    """
+    return _TEMPLATE_VAR_RE.sub("{}", template)
 
 
 def _match_uri_template(uri: str, template: str) -> dict[str, str] | None:

@@ -430,6 +430,42 @@ def test_register_mcp_resource_rejects_duplicate() -> None:
         register_mcp_resource(defn, _stub)
 
 
+def test_register_mcp_resource_rejects_same_shape_with_different_var_names() -> None:
+    """Two templates that differ only in ``{var}`` *names* → ``RuntimeError``.
+
+    The matcher builds its regex from the *positions* of placeholders;
+    variable names show up only as named groups inside one template's
+    own compiled regex. ``meho://secure/{id}/data`` and
+    ``meho://secure/{slug}/data`` therefore produce identical match
+    behaviour against any concrete URI, and registration-order
+    would silently determine which handler fires. The registry must
+    reject the shape collision at registration time so the failure is
+    loud and pre-traffic.
+    """
+
+    async def _stub(_op: Operator, _params: dict[str, str]) -> dict[str, Any]:
+        return {}
+
+    register_mcp_resource(
+        ResourceTemplateDefinition(
+            uriTemplate="meho://secure/{id}/data",
+            name="secure-by-id",
+            description="first registration",
+        ),
+        _stub,
+    )
+
+    with pytest.raises(RuntimeError, match="shape already registered"):
+        register_mcp_resource(
+            ResourceTemplateDefinition(
+                uriTemplate="meho://secure/{slug}/data",
+                name="secure-by-slug",
+                description="conflicting shape, different var name",
+            ),
+            _stub,
+        )
+
+
 @pytest.mark.parametrize(
     "client_with_operator",
     [TenantRole.OPERATOR],

@@ -122,7 +122,7 @@ Connector (ABC)                                      ← G0.2-T1 (shipped)
 | SSH transport | `asyncssh` (planned T4) | Async-native (no `to_thread` offload). |
 | Vault client | `hvac` (chassis-era) | Sync, wrapped in `asyncio.to_thread` already. |
 | Vendor: vSphere | **vSphere REST API** | NOT pyvmomi (SOAP, sync). NOT govc subprocess. v0.2 returns 501 for REST gaps; v0.2.next adds a govc fallback if needed. |
-| Vendor: Kubernetes | **Not yet decided** | `kubernetes_asyncio` is the lean; will be locked when the Kubernetes connector Initiative is filed under G3. |
+| Vendor: Kubernetes | **`kubernetes_asyncio`** (locked [decision #8](../planning/v0.2-decisions.md)) | Async fork of the official Python client; mature; broad API coverage; loads kubeconfig from a dict — direct fit for the consumer's `kubeconfig`-in-Vault flow. Rejected: `kr8s` (smaller surface) and `kubectl` subprocess (per-op cost, harder to test). Skeleton landed in [G3.2-T1 (#321)](https://github.com/evoila/meho/issues/321) under [`backend/src/meho_backplane/connectors/kubernetes/`](../../backend/src/meho_backplane/connectors/kubernetes/). |
 
 ## The registry
 

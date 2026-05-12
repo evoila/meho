@@ -23,7 +23,8 @@ expensive end-to-end deploy gate.
 What the test exercises
 -----------------------
 
-#. Spin up ``postgres:16-alpine`` via ``testcontainers``.
+#. Spin up ``pgvector/pgvector:pg16`` via ``testcontainers``
+   (image overridable via ``MEHO_TEST_PGVECTOR_IMAGE``).
 #. Run ``alembic upgrade head`` against it. The schema is now at
    revision N (the audit-log table from
    ``0001_create_audit_log.py``).
@@ -359,8 +360,17 @@ class TestForwardCompatRollback:
         )
         _install_fake_vault(monkeypatch)
 
-        # mirror.gcr.io: see comment on the matching line in test_db_engine.py.
-        with PostgresContainer("mirror.gcr.io/library/postgres:16-alpine") as pg:
+        # pgvector/pgvector:pg16: after G0.4-T1 (#258) migration 0003 runs
+        # ``CREATE EXTENSION IF NOT EXISTS vector`` as part of ``upgrade head``,
+        # so the testcontainers image must have pgvector pre-installed.
+        # ``postgres:16-alpine`` (the v0.1-chassis choice) lacks the .control
+        # file and fails fast; the pgvector image is a drop-in replacement.
+        # See the matching swap in tests/test_db_engine.py. Image name is
+        # env-overridable via ``MEHO_TEST_PGVECTOR_IMAGE`` so a registry-
+        # mirror swap (GHCR cache, internal Harbor) does not require a
+        # code change — same knob the integration conftest honours.
+        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()
             async_url = _async_url_from(sync_url)
 

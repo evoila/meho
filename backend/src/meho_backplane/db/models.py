@@ -104,22 +104,86 @@ References
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, DateTime, Index, Integer, Numeric, Text, Uuid
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, Numeric, Text, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.types import TypeEngine
+from sqlalchemy.types import TypeDecorator, TypeEngine
 
-__all__ = ["AuditLog", "Base", "Tenant"]
+__all__ = ["AuditLog", "Base", "Document", "Tenant"]
 
 
 #: Portable JSON column type — :class:`JSONB` on PostgreSQL (binary
 #: JSON, indexable by ``@>`` / GIN), generic :class:`JSON` (text)
 #: on every other dialect including the SQLite dev/test path.
 _PORTABLE_JSON: TypeEngine[dict[str, object]] = JSON().with_variant(JSONB(), "postgresql")
+
+
+#: Portable 384-dimensional dense-vector column type —
+#: :class:`pgvector.sqlalchemy.Vector` (``vector(384)``) on
+#: PostgreSQL where the ``vector`` extension is enabled (see
+#: migration ``0003``), JSON-encoded ``TEXT`` on every other dialect
+#: (SQLite dev/test) via :class:`_PortableVector384`. The 384
+#: dimensionality matches the ``BAAI/bge-small-en-v1.5`` model the
+#: EmbeddingService in G0.4-T2 (#259) will load by default.
+#:
+#: The :class:`TypeDecorator` keeps the Python contract
+#: ``list[float]`` on **both** dialects: on PG the pgvector adapter's
+#: bind/result processors serialize ``list[float]`` ↔ ``vector(384)``
+#: natively; on SQLite the decorator JSON-encodes the list on bind
+#: and decodes it back on result, so the same ORM call site
+#: (``Document(embedding=[0.1, 0.2, ...])``) works against the
+#: dev/test driver without ``# type: ignore`` or stringified
+#: placeholders. The escape hatch satisfies SQLAlchemy 2.x's typed
+#: ``Mapped[list[float]]`` annotation on :attr:`Document.embedding`.
+class _PortableVector384(TypeDecorator[list[float]]):
+    """Dialect-portable ``vector(384)`` column with a ``list[float]`` Python contract.
+
+    On PostgreSQL the column is the native pgvector type (via
+    :meth:`with_variant`); pgvector's own bind/result processors
+    handle the ``list[float]`` ↔ ``vector(384)`` round-trip. On every
+    other dialect the column compiles to :class:`Text` and the
+    :meth:`process_bind_param` / :meth:`process_result_value` hooks
+    JSON-encode the list on the way in and decode it on the way back
+    so callers see ``list[float]`` regardless of dialect.
+
+    The decorator is :attr:`cache_ok` so SQLAlchemy's query-plan
+    cache can hash it — the encoding logic is pure and parameter-
+    free, so cache reuse across statements is safe.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(
+        self,
+        value: list[float] | None,
+        dialect: Dialect,
+    ) -> str | None:
+        if value is None:
+            return None
+        return json.dumps(value)
+
+    def process_result_value(
+        self,
+        value: str | None,
+        dialect: Dialect,
+    ) -> list[float] | None:
+        if value is None:
+            return None
+        decoded = json.loads(value)
+        return [float(x) for x in decoded]
+
+
+_PORTABLE_VECTOR_384: TypeEngine[list[float]] = _PortableVector384().with_variant(
+    Vector(384), "postgresql"
+)
 
 
 class Base(DeclarativeBase):
@@ -255,6 +319,182 @@ class Tenant(Base):
             "tenant_slug_idx",
             "slug",
             unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
+class Document(Base):
+    """A retrievable per-tenant document with a dense embedding.
+
+    Shared between G4 (#215, knowledge layer) and G5 (#216, memory
+    layer): both ingestion paths write rows here via the
+    ``index_document`` helper landed by G0.4-T3 (#260), and the
+    ``retrieve`` helper landed by T4 (#261) reads them back through
+    hybrid BM25 + cosine RRF. The substrate stays one table, one
+    embedding pipeline, one retrieval implementation — splitting it
+    across G4 and G5 would fork the model-choice decision and double
+    the embedding-compute cost.
+
+    Schema decisions for :class:`Document`:
+
+    * ``id`` — UUID primary key. Same portable :class:`Uuid` shape
+      the chassis tables use; PG production gets a
+      ``gen_random_uuid()`` server default via migration ``0003``,
+      the ORM falls back to ``default=uuid.uuid4`` on SQLite.
+    * ``tenant_id`` — UUID NOT NULL with a real ``REFERENCES
+      tenant(id)`` FK constraint. Unlike :attr:`AuditLog.tenant_id`
+      (chassis-era rows with no real tenant to point at; FK deferred
+      to v0.2.next backfill), :class:`Document` is a brand-new table
+      with no pre-existing rows and a clean downgrade that drops the
+      whole table — there is no backfill or cascade decision to defer.
+      Enforcing the FK at the DB layer is the cheapest point to make
+      the ownership invariant unbreakable: ``index_document`` (T3)
+      cannot silently insert orphan rows for a typo'd / deleted /
+      replayed tenant id, and corpus poisoning via a malformed
+      contextvar surfaces as an :class:`IntegrityError` at insert
+      time instead of as an unreachable row at retrieval time. NOT
+      NULL because every document is owned by exactly one tenant and
+      tenant-scoped queries are the only retrieval path.
+    * ``source`` — Text NOT NULL. Origin namespace (``"kb"``,
+      ``"memory"``, ``"docs-sidecar"``, future). One namespace per
+      consuming Goal so cross-source filtering is a single column
+      lookup, indexed via the composite uniqueness constraint
+      together with ``tenant_id`` and ``source_id``.
+    * ``source_id`` — Text NOT NULL. The per-source natural-key
+      identifier (kb slug, memory file path, etc.). Stored as text
+      so different consumers can keep their own identifier
+      conventions without a schema change.
+    * ``kind`` — Text NOT NULL. Per-source classification
+      (``"kb-entry"``, ``"kb-index"``, ``"memory-user"``,
+      ``"memory-tenant"``, future). Enables retrieval filters that
+      narrow within a source — e.g. ``retrieve(source="memory",
+      kind="memory-user")``. Free-form text so consumers add new
+      kinds without DDL.
+    * ``body`` — Text NOT NULL. The document text — what BM25
+      searches, what the embedding is computed from. Stored as-is
+      (no chunking in v0.2; chunked retrieval is a v0.2.next
+      decision per the Initiative body).
+    * ``body_hash`` — Text NOT NULL. SHA-256 hex digest of
+      :attr:`body` for change-detection. The ``index_document``
+      helper (T3) compares the incoming hash against the existing
+      row's and short-circuits the embed step when they match; this
+      is the cost optimisation that makes ``meho kb refresh``
+      against an unchanged corpus essentially free. Indexed by
+      ``documents_body_hash_idx`` so the lookup is a btree probe.
+    * ``tokens`` — Integer, nullable. Rough token count populated
+      during indexing for budget-tracking by future agent flows
+      (G4 + G5 will fill it in via a heuristic, replaceable by
+      ``tiktoken`` once we have a model dependency). NULL means
+      "not yet estimated"; not a load-bearing retrieval signal.
+    * ``embedding`` — :class:`Vector(384)` on PG (via the
+      pgvector adapter), :class:`Text` on SQLite (via
+      ``with_variant``). NOT NULL — every document must have an
+      embedding for cosine retrieval to work; the
+      ``index_document`` helper computes one synchronously before
+      committing.
+    * ``doc_metadata`` (SQL column ``metadata``) — Portable
+      :class:`JSON` → :class:`JSONB`, NOT NULL DEFAULT ``{}``.
+      Forward-compat escape hatch the same shape
+      :attr:`AuditLog.payload` uses. The Python attribute is
+      ``doc_metadata`` because ``metadata`` is reserved on
+      :class:`DeclarativeBase` (it's the table-registry attribute);
+      :func:`mapped_column` carries the SQL column name explicitly
+      so the table-side identifier matches the migration verbatim.
+    * ``created_at`` / ``updated_at`` — ``timestamptz`` with PG
+      server defaults of ``now()`` and ORM-side
+      ``default=lambda: datetime.now(UTC)``. ``updated_at`` also
+      sets ``onupdate=lambda: datetime.now(UTC)`` so ORM UPDATEs
+      bump the timestamp; raw-SQL UPDATEs against PG do not fire
+      this hook, which is acceptable in v0.2 because the
+      substrate's only writer is the ORM-backed
+      :func:`index_document` helper.
+
+    Indexes:
+
+    * ``documents_tenant_source_id_idx`` — unique composite btree on
+      ``(tenant_id, source, source_id)``. The natural-key upsert
+      target for :func:`index_document`. Uniqueness is enforced
+      exclusively by this named index (no per-column ``unique=True``)
+      so PG does not auto-create a redundant duplicate.
+    * ``documents_body_hash_idx`` — btree on ``body_hash``.
+      Cost-optimisation lookup for the unchanged-body short-circuit
+      during refresh.
+    * ``documents_body_fts_idx`` (PG only) — GIN over
+      ``to_tsvector('english', body)``. Powers the BM25 half of
+      hybrid retrieval. Declared in migration ``0003`` via raw SQL
+      because Alembic has no clean API for expression-based GIN
+      indexes; intentionally **not** in :attr:`__table_args__`
+      because declaring it would force SQLite to attempt creation
+      and fail.
+    * ``documents_embedding_idx`` (PG only) — IVFFlat over
+      ``embedding`` with ``vector_cosine_ops`` and ``lists = 100``.
+      Powers the cosine half of hybrid retrieval. Same migration-
+      only handling as the FTS index for the same reason. The
+      ``lists = 100`` parameter targets ~10k-document corpora per
+      pgvector's recommendation; v0.2.next may switch to HNSW once
+      G4 ships corpus-recall numbers.
+
+    The model deliberately ships with no helper methods — read /
+    write paths live in :mod:`meho_backplane.retrieval` (landed by
+    G0.4 sibling Tasks T2-T5). The ORM class is a pure data shape.
+    """
+
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    body_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    embedding: Mapped[list[float]] = mapped_column(_PORTABLE_VECTOR_384, nullable=False)
+    # ``metadata`` is reserved on :class:`DeclarativeBase` (the
+    # table-registry attribute). The Python attribute is
+    # ``doc_metadata``; the SQL column name carried as the first
+    # positional argument to :func:`mapped_column` keeps the
+    # migration's column identifier (``metadata``) authoritative on
+    # the table side.
+    doc_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata",
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "documents_tenant_source_id_idx",
+            "tenant_id",
+            "source",
+            "source_id",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "documents_body_hash_idx",
+            "body_hash",
             postgresql_using="btree",
         ),
     )

@@ -413,3 +413,161 @@ def test_migration_upgrade_then_downgrade_is_reversible(
             assert "tenant_id" in {col["name"] for col in inspector.get_columns("audit_log")}
     finally:
         sync_eng.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Schema-level inspection — 0003 installs documents table + portable indexes
+# ---------------------------------------------------------------------------
+
+
+def test_migration_installs_documents_table_and_portable_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``alembic upgrade head`` puts the ``documents`` table + portable indexes in place.
+
+    G0.4-T1 acceptance criterion: the migration creates ``documents``
+    with all 12 columns and the two portable btree indexes
+    (``documents_tenant_source_id_idx`` unique,
+    ``documents_body_hash_idx``). The two PG-only indexes
+    (``documents_body_fts_idx`` GIN, ``documents_embedding_idx``
+    IVFFlat) are migration-only and must NOT appear on SQLite —
+    declaring them in ``Document.__table_args__`` would force the
+    dev/test path to try (and fail) to create them. This test
+    pins both contracts.
+
+    Synchronous for the same reason the sibling migration tests
+    above are synchronous: :func:`alembic.command.upgrade` calls
+    :func:`asyncio.run` internally via the env.py async cookbook,
+    which cannot be re-entered from a running event loop.
+    """
+    sync_url, _ = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "documents.db")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        with sync_eng.connect() as conn:
+            inspector = sa_inspect(conn)
+            tables = set(inspector.get_table_names())
+            assert "documents" in tables
+
+            # All 12 columns landed verbatim — the SQL column for
+            # ``Document.doc_metadata`` is ``metadata`` (the Python
+            # attribute is renamed to avoid the DeclarativeBase
+            # collision; see Document docstring).
+            documents_columns = {col["name"] for col in inspector.get_columns("documents")}
+            expected_columns = {
+                "id",
+                "tenant_id",
+                "source",
+                "source_id",
+                "kind",
+                "body",
+                "body_hash",
+                "tokens",
+                "embedding",
+                "metadata",
+                "created_at",
+                "updated_at",
+            }
+            assert documents_columns == expected_columns, (
+                f"documents column set drift: missing={expected_columns - documents_columns} "
+                f"unexpected={documents_columns - expected_columns}"
+            )
+
+            # Two portable indexes — these MUST land on every dialect.
+            documents_indexes = {idx["name"] for idx in inspector.get_indexes("documents")}
+            assert "documents_tenant_source_id_idx" in documents_indexes
+            assert "documents_body_hash_idx" in documents_indexes
+
+            # The PG-only indexes MUST NOT land on SQLite. Declaring
+            # them in ``__table_args__`` would force SQLite to try
+            # (and fail) to create them; emitting them via raw SQL
+            # in ``if is_postgres:`` is the migration-only shape.
+            assert "documents_body_fts_idx" not in documents_indexes, (
+                "documents_body_fts_idx (GIN over to_tsvector) must be PG-only; "
+                "appearing on SQLite means it leaked into __table_args__"
+            )
+            assert "documents_embedding_idx" not in documents_indexes, (
+                "documents_embedding_idx (IVFFlat) must be PG-only; "
+                "appearing on SQLite means it leaked into __table_args__"
+            )
+
+            # Uniqueness flag on the composite index — proves the
+            # natural-key upsert target is DB-enforced. SQLite's
+            # inspector exposes ``unique`` as a boolean on each index
+            # entry; check the matching entry explicitly.
+            tenant_source_id_idx = next(
+                idx
+                for idx in inspector.get_indexes("documents")
+                if idx["name"] == "documents_tenant_source_id_idx"
+            )
+            # SQLite's inspector encodes the unique flag as ``1`` / ``0``
+            # (the underlying ``sqlite_master.unique`` integer), not as
+            # Python's ``True`` / ``False``. Use a truthy check rather
+            # than ``is True`` so the assertion is dialect-portable.
+            assert tenant_source_id_idx["unique"], (
+                "documents_tenant_source_id_idx must be unique — the natural-key "
+                "upsert target for index_document (T3 #260)"
+            )
+
+            # v0.1 chassis tables must still be present and intact.
+            assert "audit_log" in tables
+            assert "tenant" in tables
+    finally:
+        sync_eng.dispose()
+
+
+def test_migration_0003_upgrade_then_downgrade_is_reversible(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``alembic upgrade head`` → ``downgrade 0002`` → re-upgrade is a clean cycle.
+
+    The reversibility contract for G0.4-T1: dropping back to v0.1+G0.1
+    (revision ``0002``) removes ``documents`` and its indexes while
+    leaving the chassis tables (``audit_log``, ``tenant``) intact.
+    Re-running ``upgrade head`` returns the schema to its full shape.
+
+    The downgrade target is spelled as ``"0002"`` rather than ``-1``
+    so a future revision inserted between ``0002`` and ``0003``
+    surfaces as a test failure rather than a silent no-op.
+    """
+    from alembic import command
+
+    sync_url, cfg = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "documents-rev.db")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        with sync_eng.connect() as conn:
+            inspector = sa_inspect(conn)
+            assert "documents" in inspector.get_table_names()
+
+        # Step 2 — downgrade by exactly one revision (back to 0002).
+        # Documents table + its indexes must all be gone; chassis +
+        # G0.1 schema must remain intact.
+        command.downgrade(cfg, "0002")
+
+        with sync_eng.connect() as conn:
+            inspector = sa_inspect(conn)
+            tables = set(inspector.get_table_names())
+            assert "documents" not in tables, "downgrade must drop documents table"
+            assert "tenant" in tables, "G0.1 schema must survive 0003 downgrade"
+            assert "audit_log" in tables, "v0.1 chassis schema must survive 0003 downgrade"
+
+            # G0.1 indexes must still be present — downgrade only undoes 0003.
+            tenant_indexes = {idx["name"] for idx in inspector.get_indexes("tenant")}
+            assert "tenant_slug_idx" in tenant_indexes
+            audit_indexes = {idx["name"] for idx in inspector.get_indexes("audit_log")}
+            assert "audit_log_tenant_id_idx" in audit_indexes
+
+        # Step 3 — re-upgrade. The documents table should return
+        # with its portable indexes; the cycle is fully reversible.
+        command.upgrade(cfg, "head")
+        with sync_eng.connect() as conn:
+            inspector = sa_inspect(conn)
+            assert "documents" in inspector.get_table_names()
+            documents_indexes = {idx["name"] for idx in inspector.get_indexes("documents")}
+            assert "documents_tenant_source_id_idx" in documents_indexes
+            assert "documents_body_hash_idx" in documents_indexes
+    finally:
+        sync_eng.dispose()

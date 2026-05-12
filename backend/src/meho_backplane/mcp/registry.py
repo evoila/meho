@@ -43,12 +43,12 @@ methods filter the registry against the calling operator's role; tools
 or resources above the operator's role rank don't appear in the
 response. The role ranking is the order the closed enum was declared
 (``read_only`` < ``operator`` < ``tenant_admin``) — see
-:func:`_role_at_least`.
+:func:`role_at_least`.
 
 Eager import
 ============
 
-The :func:`_eager_import_mcp_modules` helper walks every module under
+The :func:`eager_import_mcp_modules` helper walks every module under
 ``meho_backplane.mcp.tools`` and ``meho_backplane.mcp.resources`` so the
 side-effect-only registration calls at the top of each module file run
 at app boot. Called from the FastAPI ``lifespan`` so the first incoming
@@ -81,6 +81,7 @@ __all__ = [
     "get_tool",
     "register_mcp_resource",
     "register_mcp_tool",
+    "role_at_least",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -121,11 +122,15 @@ _ROLE_RANK: tuple[TenantRole, ...] = (
 )
 
 
-def _role_at_least(actual: TenantRole, required: TenantRole) -> bool:
+def role_at_least(actual: TenantRole, required: TenantRole) -> bool:
     """Return True when *actual* meets or exceeds *required* in :data:`_ROLE_RANK`.
 
     Centralised so the RBAC filter shape stays single-source for both
-    :func:`all_tools_for` and :func:`all_resource_templates_for`.
+    :func:`all_tools_for` / :func:`all_resource_templates_for` (list-time
+    filter) and the call-time re-check in
+    :mod:`~meho_backplane.mcp.handlers`. Public so the handlers module
+    can import it at module level rather than dipping into a private
+    sibling symbol.
     """
     return _ROLE_RANK.index(actual) >= _ROLE_RANK.index(required)
 
@@ -286,7 +291,7 @@ def all_tools_for(operator: Operator) -> list[ToolDefinition]:
     return [
         defn
         for defn, _ in _TOOLS.values()
-        if _role_at_least(operator.tenant_role, defn.required_role)
+        if role_at_least(operator.tenant_role, defn.required_role)
     ]
 
 
@@ -297,7 +302,7 @@ def all_resource_templates_for(
     return [
         defn
         for defn, _ in _RESOURCES.values()
-        if _role_at_least(operator.tenant_role, defn.required_role)
+        if role_at_least(operator.tenant_role, defn.required_role)
     ]
 
 

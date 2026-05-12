@@ -278,8 +278,11 @@ this stage it exposes:
   the bound variables). Both definitions carry `required_role` (one
   of the three `TenantRole` values); the list methods filter against
   the calling operator's role, and `tools/call` / `resources/read`
-  re-check at call time. MEHO-internal fields (`required_role`,
-  `op_class`) are stripped from the wire shape by `to_wire()`.
+  re-check at call time. MEHO-internal fields are stripped from the wire
+  shape by `to_wire()`: `ToolDefinition` strips both `required_role` and
+  `op_class`; `ResourceTemplateDefinition` strips only `required_role`
+  (the resource-template model has no `op_class` field — it's a
+  tool-only audit-classification hint T5 will consume).
   `backend/src/meho_backplane/mcp/handlers.py` wires five JSON-RPC
   methods to the registries: `tools/list`, `tools/call`,
   `resources/list`, `resources/templates/list`, `resources/read`.

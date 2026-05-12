@@ -4,7 +4,7 @@
 """JSON-RPC method handlers for the registry-backed MCP surface (G0.5-T3).
 
 This module wires the registry primitives in
-:mod:`meho_backplane.mcp.registry` to four JSON-RPC methods on the
+:mod:`meho_backplane.mcp.registry` to five JSON-RPC methods on the
 ``/mcp`` route, registering each via
 :func:`~meho_backplane.mcp.server.register_method` at import time:
 
@@ -23,8 +23,11 @@ This module wires the registry primitives in
   is where every v0.2 resource surfaces.
 * ``resources/read`` — :func:`handle_resources_read`. Matches the
   requested URI against the registered templates, dispatches, packs
-  the result into the MCP ``contents`` array. Returns spec error
-  ``-32002`` "Resource not found" when no template matches.
+  the result into the MCP ``contents`` array. An unmatched URI is
+  surfaced today as ``-32602`` "Invalid params" via
+  :class:`McpInvalidParamsError`; the spec-correct ``-32002`` "Resource
+  not found" mapping is recorded as a follow-up and discussed in
+  :func:`handle_resources_read`'s own docstring.
 
 Why ``resources/list`` and ``resources/templates/list`` are separate
 ====================================================================
@@ -66,6 +69,7 @@ that's fine.)
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import jsonschema
@@ -73,10 +77,13 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.registry import (
+    ResourceTemplateDefinition,
+    ToolDefinition,
     all_resource_templates_for,
     all_tools_for,
     get_resource_for_uri,
     get_tool,
+    role_at_least,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method
 
@@ -178,10 +185,22 @@ async def handle_tools_call(
         )
         raise McpInvalidParamsError(f"forbidden: {name!r} requires a higher role")
 
-    # Validate arguments against the tool's inputSchema. jsonschema raises
-    # ValidationError on the first failure; we surface it as INVALID_PARAMS.
+    # Validate arguments against the tool's inputSchema. ``cls`` is
+    # pinned to :class:`jsonschema.Draft202012Validator` to make the
+    # "JSON Schema 2020-12" contract called out in :class:`ToolDefinition`
+    # load-bearing rather than incidental: jsonschema 4.26 happens to
+    # pick the 2020-12 validator as the default when a schema lacks
+    # ``$schema``, but the default is the library's "latest known"
+    # pointer and would slide forward on a future major bump. Pinning
+    # here decouples MEHO's schema dialect from the library's release
+    # cadence. ``jsonschema.validate`` raises ``ValidationError`` on the
+    # first failure; we surface it as INVALID_PARAMS.
     try:
-        jsonschema.validate(instance=arguments, schema=defn.inputSchema)
+        jsonschema.validate(
+            instance=arguments,
+            schema=defn.inputSchema,
+            cls=jsonschema.Draft202012Validator,
+        )
     except jsonschema.ValidationError as exc:
         raise McpInvalidParamsError(
             f"tools/call {name!r}: arguments failed inputSchema: {exc.message}",
@@ -193,8 +212,6 @@ async def handle_tools_call(
     # ``content`` array. v0.2 ships unstructured content only — a single
     # text block with the JSON-serialised result. Structured content
     # (``structuredContent``) lands when a downstream tool needs it.
-    import json
-
     return {
         "content": [{"type": "text", "text": json.dumps(result)}],
         "isError": False,
@@ -203,7 +220,7 @@ async def handle_tools_call(
 
 def _operator_meets_required_role(
     operator: Operator,
-    defn: Any,
+    defn: ToolDefinition | ResourceTemplateDefinition,
 ) -> bool:
     """Re-check the role ranking from :mod:`~meho_backplane.mcp.registry`.
 
@@ -214,9 +231,7 @@ def _operator_meets_required_role(
     the list-time RBAC filter. The shared rule lives in the registry
     module; this helper is a thin re-application at the call site.
     """
-    from meho_backplane.mcp.registry import _role_at_least
-
-    return _role_at_least(operator.tenant_role, defn.required_role)
+    return role_at_least(operator.tenant_role, defn.required_role)
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +327,6 @@ async def handle_resources_read(
     # the tool-result shape — handlers that need binary (`blob`) return
     # value can override by emitting their own contents-array structure
     # in a later task.
-    import json
-
     return {
         "contents": [
             {

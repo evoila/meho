@@ -538,6 +538,54 @@ def test_resources_read_resolves_template_and_invokes_handler(
 
 @pytest.mark.parametrize(
     "client_with_operator",
+    [TenantRole.READ_ONLY],
+    indirect=True,
+)
+def test_resources_read_forbidden_for_under_privileged_operator(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """A read_only operator reading an OPERATOR-required resource → -32602 forbidden.
+
+    Parallels :func:`test_tools_call_forbidden_for_under_privileged_operator`
+    for the resources surface: the URI resolves to a real template, but the
+    call-time RBAC re-check rejects the under-privileged operator. Without
+    this test the ``resources/read`` RBAC gate would have no end-to-end
+    coverage — a regression that silently drops the re-check would pass
+    every other test in this file.
+    """
+    client, _op = client_with_operator
+
+    async def _stub(_op: Operator, _params: dict[str, str]) -> dict[str, Any]:
+        return {"ok": True}
+
+    register_mcp_resource(
+        ResourceTemplateDefinition(
+            uriTemplate="meho://secure/{id}/data",
+            name="secure data",
+            description="operator-only resource",
+            required_role=TenantRole.OPERATOR,
+        ),
+        _stub,
+    )
+
+    response = _post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "resources/read",
+            "params": {"uri": "meho://secure/abc/data"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "forbidden" in body["error"]["message"].lower()
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
     [TenantRole.OPERATOR],
     indirect=True,
 )

@@ -172,6 +172,29 @@ class Settings(BaseModel):
         The flag is read at FastAPI app construction time; flipping it
         after import has no effect — every test that needs the routes
         builds its own :class:`~fastapi.FastAPI` with the flag set.
+    backplane_url:
+        Canonical externally-visible URL of this backplane, e.g.
+        ``https://meho.evba.lab``. Used to construct the MCP server's
+        canonical URI (G0.5-T2) and the absolute URL the RFC 9728
+        ``WWW-Authenticate: resource_metadata=...`` header points at.
+        Default ``""`` is fail-closed for MCP: a request to ``/mcp``
+        with the default value cannot validate (token audience can
+        never equal the empty derived URI), and the
+        ``/.well-known/oauth-protected-resource`` metadata document
+        will surface an empty ``resource`` field that fails RFC 9728
+        validation on the client side. Operators MUST set this before
+        enabling MCP traffic. Leaving it empty in dev / chassis-only
+        deployments keeps the chassis routes operational.
+    mcp_resource_uri:
+        The canonical URI of this backplane's MCP server, sent as the
+        ``resource`` parameter on OAuth 2.1 authorisation / token
+        requests per RFC 8707 and returned in the RFC 9728 ``resource``
+        field. JWTs presented at ``/mcp`` MUST carry this value in
+        their ``aud`` claim. Default ``""`` falls back to
+        ``f"{backplane_url}/mcp"`` at use time; operators with non-
+        standard MCP mounts (e.g. ``/api/mcp``) override per
+        environment. Per the MCP 2025-06-18 spec's canonical-URI
+        guidance, prefer the no-trailing-slash form.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -181,6 +204,8 @@ class Settings(BaseModel):
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     enable_rbac_test_route: bool = False
+    backplane_url: str = ""
+    mcp_resource_uri: str = ""
     vault_addr: HttpUrl
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
@@ -246,6 +271,8 @@ def get_settings() -> Settings:
         enable_rbac_test_route=parse_bool_env(
             os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE"),
         ),
+        backplane_url=os.environ.get("BACKPLANE_URL", ""),
+        mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),
         vault_addr=os.environ["VAULT_ADDR"],  # type: ignore[arg-type]
         vault_oidc_role=os.environ.get("VAULT_OIDC_ROLE", "meho-mcp"),
         vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),

@@ -80,11 +80,13 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 
 from meho_backplane import __version__
+from meho_backplane.auth.operator import Operator
+from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.schemas import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -491,7 +493,10 @@ async def _dispatch_to_handler(
 
 
 @router.post("")
-async def mcp_dispatch(request: Request) -> Response:
+async def mcp_dispatch(
+    request: Request,
+    operator: Operator = Depends(verify_mcp_jwt_and_bind),
+) -> Response:
     """Dispatch a single JSON-RPC 2.0 request or notification.
 
     The Streamable HTTP body contract (§"Sending Messages to the Server"):
@@ -501,6 +506,17 @@ async def mcp_dispatch(request: Request) -> Response:
     * On a *notification* (id absent, or method prefix
       ``notifications/``): return 202 with no body, regardless of
       whether the handler errored — JSON-RPC §4.1.2 forbids replying.
+
+    Authentication (G0.5-T2, #247): every request to this route MUST
+    carry a Bearer token whose ``aud`` claim equals the canonical MCP
+    resource URI per RFC 8707 §2. Validation runs as a FastAPI
+    dependency before the body is parsed, so a missing or invalid
+    token short-circuits to 401 + ``WWW-Authenticate: Bearer
+    resource_metadata=...`` per RFC 9728 §5.1 — the dispatch pipeline
+    never sees an unauthenticated request. The :class:`Operator` is
+    injected into this handler for downstream use even though T2
+    itself doesn't consume the identity beyond the contextvar binding
+    side effect; T3 / T4 / T5 will pull tenant / role data off it.
 
     The function is the orchestrator only; each phase of the dispatch
     pipeline lives in its own helper so the per-phase contract is grep-
@@ -520,6 +536,10 @@ async def mcp_dispatch(request: Request) -> Response:
     fallback when the server does not implement the GET-opens-SSE
     branch of the Streamable HTTP transport.
     """
+    # ``operator`` is unused beyond the dependency-injection side
+    # effects (JWT validation + contextvar binding). Downstream Tasks
+    # (T3 RBAC filter, T4 reference tool, T5 audit) will read it.
+    del operator
     raw_body = await request.body()
     parsed = _parse_request_body(raw_body)
     if isinstance(parsed, JSONResponse):

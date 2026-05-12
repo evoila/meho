@@ -100,6 +100,7 @@ __all__ = [
     "clear_jwks_cache",
     "keycloak_readiness_probe",
     "verify_jwt",
+    "verify_jwt_for_audience",
 ]
 
 #: HTTP timeout for both the OIDC discovery hit and the JWKS hit. Keep
@@ -211,12 +212,23 @@ async def _fetch_jwks(*, force_refresh: bool = False) -> dict[str, Any]:
         return jwks
 
 
-def _decode_with_jwks(token: str, jwks: dict[str, Any], settings: Settings) -> Any:
+def _decode_with_jwks(
+    token: str,
+    jwks: dict[str, Any],
+    settings: Settings,
+    *,
+    expected_audience: str,
+) -> Any:
     """Verify *token* against *jwks* and return the validated claims.
 
     Wrapped behind the ``warnings.catch_warnings`` block to suppress the
     authlib-jose deprecation noise on every request — the deprecation is
     a v0.2 migration item, not a per-request signal.
+
+    ``expected_audience`` is passed by the caller so MCP routes (G0.5-T2)
+    can validate against the MCP canonical URI rather than the chassis
+    ``KEYCLOAK_AUDIENCE``. The chassis ``verify_jwt`` passes
+    ``settings.keycloak_audience`` to preserve existing behaviour.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -232,7 +244,7 @@ def _decode_with_jwks(token: str, jwks: dict[str, Any], settings: Settings) -> A
                 },
                 "aud": {
                     "essential": True,
-                    "value": settings.keycloak_audience,
+                    "value": expected_audience,
                 },
             },
         )
@@ -286,7 +298,12 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return token
 
 
-async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
+async def _decode_with_kid_rotation(
+    token: str,
+    settings: Settings,
+    *,
+    expected_audience: str,
+) -> Any:
     """Decode *token* against the cached JWKS, refreshing once on a kid miss.
 
     The first ``_fetch_jwks`` call serves the cached keyset (or fetches
@@ -301,6 +318,10 @@ async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
     The retry budget is exactly one — a second ``ValueError`` after the
     forced JWKS refresh is treated as a hard 401, preventing an
     infinite-refresh loop on a token whose ``kid`` truly does not exist.
+
+    ``expected_audience`` is forwarded to :func:`_decode_with_jwks` so
+    callers (chassis ``verify_jwt`` vs MCP ``verify_mcp_jwt``) can
+    enforce different audiences against the same JWKS + issuer pair.
     """
     try:
         jwks = await _fetch_jwks()
@@ -311,7 +332,7 @@ async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
         raise _http_401("jwks_unavailable") from None
 
     try:
-        return _decode_with_jwks(token, jwks, settings)
+        return _decode_with_jwks(token, jwks, settings, expected_audience=expected_audience)
     except ValueError:
         # Treat *any* ValueError as a kid-miss signal — the message
         # ("Key not found") is authlib-internal and not part of any
@@ -327,7 +348,7 @@ async def _decode_with_kid_rotation(token: str, settings: Settings) -> Any:
         raise _http_401("jwks_unavailable") from None
 
     try:
-        return _decode_with_jwks(token, jwks, settings)
+        return _decode_with_jwks(token, jwks, settings, expected_audience=expected_audience)
     except _DECODE_ERRORS_WITH_VALUEERROR as retry_exc:
         raise _http_401("invalid_token") from retry_exc
 
@@ -432,6 +453,39 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
         raise _http_401("invalid_token") from exc
 
 
+async def verify_jwt_for_audience(
+    authorization: str | None,
+    *,
+    expected_audience: str,
+) -> Operator:
+    """Validate a Bearer token against an explicit ``aud`` claim value.
+
+    The full JWT-validation chain (Bearer extraction → JWKS fetch +
+    kid-rotation retry → signature/claims/structure validation →
+    Operator projection) parametrised by audience. This is the public
+    seam the chassis :func:`verify_jwt` dependency uses with
+    ``settings.keycloak_audience``; MCP routes (G0.5-T2) use the same
+    seam with the MCP canonical URI per RFC 8707 §2 / RFC 9728 §7.4
+    audience-binding semantics. Keeping both surfaces on a single chain
+    avoids drift between "what the chassis validates" and "what MCP
+    validates" — issuer / kid-rotation / signature handling stays
+    identical; only the audience differs.
+
+    Raises 401 on every failure mode the chassis chain raises.
+    Failures-with-audience-mismatch surface as ``invalid_token``
+    because that's how authlib's ``InvalidClaimError`` maps in the
+    centralised handler.
+    """
+    token = _extract_bearer_token(authorization)
+    settings = get_settings()
+    claims = await _decode_with_kid_rotation(
+        token,
+        settings,
+        expected_audience=expected_audience,
+    )
+    return _operator_from_claims(claims, token, settings)
+
+
 async def verify_jwt(authorization: str | None = Header(default=None)) -> Operator:
     """FastAPI dependency: validate the Bearer token and return an Operator.
 
@@ -447,10 +501,11 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     cache is refreshed exactly once and the verify is retried. A
     second miss is a hard 401 ``invalid_token``.
     """
-    token = _extract_bearer_token(authorization)
     settings = get_settings()
-    claims = await _decode_with_kid_rotation(token, settings)
-    return _operator_from_claims(claims, token, settings)
+    return await verify_jwt_for_audience(
+        authorization,
+        expected_audience=settings.keycloak_audience,
+    )
 
 
 async def keycloak_readiness_probe() -> ProbeResult:

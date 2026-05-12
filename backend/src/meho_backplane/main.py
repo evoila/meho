@@ -25,9 +25,13 @@ v0.2 adds:
 
 * The MCP Streamable HTTP transport entrypoint at ``/mcp`` (G0.5-T1,
   #246) — JSON-RPC 2.0 dispatch with built-in ``initialize`` / ``ping``
-  / ``notifications/initialized`` handlers. Bearer-token auth on this
-  route lands in G0.5-T2 (#247); the tool + resource registries land
-  in G0.5-T3 (#248).
+  / ``notifications/initialized`` handlers.
+* OAuth 2.1 resource-server protection on ``/mcp`` (G0.5-T2, #247) —
+  Bearer-token validation with the MCP canonical URI as the audience
+  per RFC 8707 §2, plus the RFC 9728 ``/.well-known/oauth-protected-resource``
+  metadata document and the ``WWW-Authenticate: Bearer
+  resource_metadata=...`` header on 401. The tool + resource
+  registries (T3) and reference tool (T4) land next.
 """
 
 import os
@@ -40,6 +44,7 @@ from fastapi import FastAPI, Response
 from meho_backplane import __version__
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
+from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
 from meho_backplane.auth.vault import vault_readiness_probe
@@ -136,13 +141,23 @@ app.include_router(health_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
-# MCP Streamable HTTP transport entrypoint (G0.5-T1, #246). The router
-# inherits the same RequestContextMiddleware + AuditMiddleware chain as
-# every HTTP route; T1 has no Bearer-token auth on /mcp yet, so
-# AuditMiddleware's "no operator_sub bound" skip rule passes /mcp
-# requests through unchanged. T2 (#247) layers OAuth-RS auth on top;
-# T5 (#250) replaces the implicit audit pass-through with a fail-closed
-# MCP-specific audit path on tools/call + resources/read.
+# MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
+# RFC 9728 protected-resource metadata document (G0.5-T2, #247).
+#
+# Auth posture per route:
+# * ``/.well-known/oauth-protected-resource`` — unauthenticated by
+#   design. Spec-conforming MCP clients hit this *before* they have a
+#   token, to discover the authorisation server. AuditMiddleware's
+#   skip rule (no ``operator_sub`` bound) means the route also doesn't
+#   write audit rows, which is the intended behaviour for a discovery
+#   endpoint.
+# * ``/mcp`` — requires a Bearer token whose ``aud`` matches the MCP
+#   canonical URI (G0.5-T2). The
+#   :func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind` dependency
+#   binds ``operator_sub`` + ``tenant_id`` so AuditMiddleware writes a
+#   row per request. G0.5-T5 (#250) layers MCP-specific audit
+#   semantics on top.
+app.include_router(well_known_router)
 app.include_router(mcp_router)
 
 # Opt-in stub routes for end-to-end verification of

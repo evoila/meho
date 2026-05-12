@@ -239,6 +239,38 @@ this stage it exposes:
   `RequestContextMiddleware`'s `X-Request-Id` response header so the
   operator has a correlation crumb on the failure path.
 
+* MCP Streamable HTTP transport entrypoint (Task #246, G0.5-T1) —
+  `backend/src/meho_backplane/mcp/` is the new module hosting MEHO's
+  Model Context Protocol server front. `mcp/schemas.py` defines the
+  JSON-RPC 2.0 envelopes (`JsonRpcRequest`, `JsonRpcResponse`,
+  `JsonRpcError`) plus the MCP 2025-06-18 lifecycle payloads
+  (`InitializeRequest`, `InitializeResponse`, `ServerCapabilities`) as
+  frozen Pydantic v2 models; `mcp/server.py` mounts the `APIRouter` at
+  `POST /mcp`, exposes the module-level `register_method(name, handler)`
+  dispatch-table API (mirroring `register_probe`'s shape), and ships
+  three built-in handlers — `initialize`, `notifications/initialized`,
+  and `ping`. The route follows the Streamable HTTP transport's
+  single-response shape (no SSE in v0.2): requests get HTTP 200 with a
+  single JSON-RPC envelope; notifications get HTTP 202 Accepted with
+  no body per spec §"Sending Messages to the Server". JSON-RPC-level
+  errors (parse, invalid request, method-not-found, invalid params,
+  internal error) are encoded as 200 envelopes with the `error` member
+  populated — only transport-level failures flip the HTTP code. T1 has
+  **no Bearer-token auth** on `/mcp` yet; every well-formed request
+  succeeds. T2 (#247) adds the OAuth 2.1 resource-server chain
+  (`/.well-known/oauth-protected-resource`, `WWW-Authenticate` headers,
+  audience validation per RFC 8707, reuse of `verify_jwt`); Origin-
+  header validation per the MCP transport DNS-rebinding warning is
+  also deferred to T2 because it depends on the `MCP_ALLOWED_ORIGINS`
+  setting T2 introduces. T3 (#248) layers the tool + resource
+  registries (`register_mcp_tool`, `register_mcp_resource`); T4 (#249)
+  populates them with the reference `meho.status` tool and
+  `meho://tenant/<id>/info` resource; T5 (#250) replaces the implicit
+  AuditMiddleware pass-through (which currently fires its
+  "no operator_sub bound" skip rule on every `/mcp` call because T1
+  doesn't bind one) with a fail-closed MCP-specific audit path on
+  `tools/call` + `resources/read`.
+
 Database persistence lands progressively in subsequent G2.3 Tasks. The stack (FastAPI, Pydantic v2,
 SQLAlchemy 2.x async, Alembic, structlog, prometheus_client, authlib
 for JOSE) is locked by

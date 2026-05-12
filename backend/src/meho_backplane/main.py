@@ -20,6 +20,14 @@ Gunicorn / k8s probes. v0.1 ships:
   one row to ``audit_log`` per authenticated request *before* the
   response yields back to the ASGI send chain. Fail-closed on
   insert error: an unaudited request is converted to HTTP 500.
+
+v0.2 adds:
+
+* The MCP Streamable HTTP transport entrypoint at ``/mcp`` (G0.5-T1,
+  #246) — JSON-RPC 2.0 dispatch with built-in ``initialize`` / ``ping``
+  / ``notifications/initialized`` handlers. Bearer-token auth on this
+  route lands in G0.5-T2 (#247); the tool + resource registries land
+  in G0.5-T3 (#248).
 """
 
 import os
@@ -40,6 +48,7 @@ from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
+from meho_backplane.mcp import router as mcp_router
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import parse_bool_env
@@ -127,6 +136,14 @@ app.include_router(health_router)
 app.include_router(version_router)
 app.include_router(api_v1_auth_config_router)
 app.include_router(api_v1_health_router)
+# MCP Streamable HTTP transport entrypoint (G0.5-T1, #246). The router
+# inherits the same RequestContextMiddleware + AuditMiddleware chain as
+# every HTTP route; T1 has no Bearer-token auth on /mcp yet, so
+# AuditMiddleware's "no operator_sub bound" skip rule passes /mcp
+# requests through unchanged. T2 (#247) layers OAuth-RS auth on top;
+# T5 (#250) replaces the implicit audit pass-through with a fail-closed
+# MCP-specific audit path on tools/call + resources/read.
+app.include_router(mcp_router)
 
 # Opt-in stub routes for end-to-end verification of
 # :func:`~meho_backplane.auth.rbac.require_role`. Disabled by default

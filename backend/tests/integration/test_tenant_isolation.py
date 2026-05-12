@@ -48,9 +48,10 @@ The issue body calls it out explicitly. v0.2 production runs
 PostgreSQL; SQLite happens to work for the unit suites' per-test
 ``alembic upgrade head`` shape but doesn't replicate JSONB / UUID /
 index behaviour cleanly. The integration suite uses ``testcontainers``
-+ ``postgres:16-alpine`` (same image pin as
++ ``pgvector/pgvector:pg16`` (same image pin as
 :mod:`tests.test_migration_rollback` and
-:mod:`tests.test_db_engine`); see :mod:`tests.integration.conftest`
+:mod:`tests.test_db_engine`; image overridable via
+``MEHO_TEST_PGVECTOR_IMAGE``); see :mod:`tests.integration.conftest`
 for the fixture wiring. CI runners have Docker provisioned and run
 the full class; agent sandboxes without Docker skip.
 

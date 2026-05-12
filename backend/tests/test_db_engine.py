@@ -385,12 +385,17 @@ class TestPostgresIntegration:
         isolated_engine_cache: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Spin up ``postgres:16-alpine`` and run ``alembic upgrade head``.
+        """Spin up ``pgvector/pgvector:pg16`` and run ``alembic upgrade head``.
 
         AC #2 of Task #27: against a fresh PG, ``alembic upgrade head``
-        completes cleanly. With an empty ``versions/`` directory, no
-        ``alembic_version`` row is created (Alembic skips the table
-        when there is nothing to stamp), but the command must not raise.
+        completes cleanly. The image is ``pgvector/pgvector:pg16``
+        (Postgres 16 + pgvector pre-installed) because migration ``0003``
+        (G0.4-T1 #258) runs ``CREATE EXTENSION IF NOT EXISTS vector``
+        and would fail fast against a vanilla ``postgres:16-alpine``
+        without the extension — the fail-fast behaviour is the intended
+        contract for production deploys against pgvector-less clusters,
+        but the testcontainers smoke must use an image that supports
+        the migration end-to-end.
 
         The test is **synchronous** for the same reason the SQLite
         sibling at lines 188-232 is synchronous: ``alembic.command.upgrade``
@@ -402,12 +407,18 @@ class TestPostgresIntegration:
         """
         from testcontainers.postgres import PostgresContainer
 
-        # Google's public Docker Hub mirror — same image bits, no Docker Hub
-        # anonymous pull rate limit (100/6h per egress IP). The self-hosted
-        # runner pool shares one egress IP across all org CI, which exhausts
-        # the limit quickly. mirror.gcr.io/library/<name> mirrors the Docker
-        # Hub `library/*` namespace 1:1 and requires no auth.
-        with PostgresContainer("mirror.gcr.io/library/postgres:16-alpine") as pg:
+        # ``pgvector/pgvector:pg16`` — Postgres 16 + pgvector pre-installed.
+        # Hosted on Docker Hub at ``pgvector/pgvector``; not available on
+        # ``mirror.gcr.io/library/`` because that mirror only covers the
+        # ``library/*`` (official) namespace. Falling back to Docker Hub
+        # here trades a small rate-limit risk for the pgvector capability.
+        # The image is env-overridable via ``MEHO_TEST_PGVECTOR_IMAGE``
+        # so operators can point at a GHCR / internal-mirror cache
+        # without re-rolling the test on the first 429 from Docker Hub
+        # rate limits. Same env knob the integration conftest and
+        # ``test_migration_rollback`` honour.
+        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        with PostgresContainer(image) as pg:
             sync_url = pg.get_connection_url()  # postgresql+psycopg2://...
             async_url = sync_url.replace(
                 "postgresql+psycopg2://",
@@ -420,6 +431,150 @@ class TestPostgresIntegration:
 
             cfg = alembic_config()
             cfg.set_main_option("sqlalchemy.url", async_url)
-            # Should complete without raising; empty versions/ means
-            # this is a no-op but exercises the env.py async pattern.
+            # Should complete without raising; migrations 0001-0003 all
+            # apply, the ``vector`` extension is enabled by 0003.
             command.upgrade(cfg, "head")
+
+    def test_documents_table_uses_vector_column_on_postgres(
+        self,
+        isolated_engine_cache: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After ``alembic upgrade head``, ``documents.embedding`` is ``vector(384)``.
+
+        G0.4-T1 acceptance: against a real PG with pgvector enabled,
+        migration ``0003`` installs the ``vector`` extension and the
+        ``documents`` table's ``embedding`` column compiles to
+        ``vector(384)`` (not the SQLite-side ``TEXT`` fallback). Also
+        verifies the two PG-only indexes (``documents_body_fts_idx``
+        GIN, ``documents_embedding_idx`` IVFFlat) land on PG — the
+        SQLite-side migration-shape test
+        (``test_migration_installs_documents_table_and_portable_indexes``)
+        pins their *absence* on SQLite; this pins their *presence* on PG.
+
+        Drives schema inspection through the async asyncpg engine
+        (the only PG dialect the backplane installs) via
+        :func:`asyncio.run` from a sync test body. Adding ``psycopg2``
+        just to inspect would balloon dev deps for a one-off probe.
+        """
+        import asyncio
+
+        from sqlalchemy import inspect as sa_inspect
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from testcontainers.postgres import PostgresContainer
+
+        image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
+        with PostgresContainer(image) as pg:
+            sync_url = pg.get_connection_url()
+            async_url = sync_url.replace(
+                "postgresql+psycopg2://",
+                "postgresql+asyncpg://",
+            ).replace(
+                "postgresql://",
+                "postgresql+asyncpg://",
+            )
+            monkeypatch.setenv("DATABASE_URL", async_url)
+
+            cfg = alembic_config()
+            cfg.set_main_option("sqlalchemy.url", async_url)
+            command.upgrade(cfg, "head")
+
+            async def _inspect() -> tuple[set[str], str | None, str, set[str], dict[str, str]]:
+                # Build a fresh async engine bound to the testcontainer.
+                # Disposed in the finally so the asyncpg pool releases
+                # before the testcontainer tears down the cluster.
+                engine = create_async_engine(async_url)
+                try:
+                    async with engine.connect() as conn:
+                        tables = await conn.run_sync(
+                            lambda sync_conn: set(sa_inspect(sync_conn).get_table_names())
+                        )
+                        extversion_result = await conn.execute(
+                            text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                        )
+                        extversion = extversion_result.scalar_one_or_none()
+                        # ``format_type`` renders ``vector(384)`` for the
+                        # pgvector typed column; this is the catalog
+                        # answer rather than the SQLAlchemy dialect's
+                        # opaque ``USER-DEFINED`` string.
+                        type_result = await conn.execute(
+                            text(
+                                "SELECT format_type(atttypid, atttypmod) "
+                                "FROM pg_attribute "
+                                "WHERE attrelid = 'documents'::regclass "
+                                "AND attname = 'embedding'"
+                            )
+                        )
+                        embedding_type_str = type_result.scalar_one()
+                        documents_indexes = await conn.run_sync(
+                            lambda sync_conn: {
+                                idx["name"]
+                                for idx in sa_inspect(sync_conn).get_indexes("documents")
+                            }
+                        )
+                        # ``pg_indexes.indexdef`` carries the canonical
+                        # CREATE INDEX SQL the planner sees. Asserting on
+                        # the DDL — not just the index name — catches a
+                        # regression where someone keeps the name but
+                        # swaps GIN for a btree or drops the IVFFlat
+                        # operator class / ``lists`` parameter, which
+                        # would silently change the recall profile.
+                        indexdef_result = await conn.execute(
+                            text(
+                                "SELECT indexname, indexdef FROM pg_indexes "
+                                "WHERE tablename = 'documents'"
+                            )
+                        )
+                        indexdefs = {row[0]: row[1] for row in indexdef_result.all()}
+                finally:
+                    await engine.dispose()
+                return tables, extversion, embedding_type_str, documents_indexes, indexdefs
+
+            tables, extversion, embedding_type_str, documents_indexes, indexdefs = asyncio.run(
+                _inspect()
+            )
+
+            assert "documents" in tables
+            assert extversion is not None, (
+                "vector extension must be enabled after migration 0003; "
+                "image pgvector/pgvector:pg16 should ship it pre-installed"
+            )
+            assert embedding_type_str == "vector(384)", (
+                f"documents.embedding must be vector(384), got {embedding_type_str!r}"
+            )
+            assert "documents_tenant_source_id_idx" in documents_indexes
+            assert "documents_body_hash_idx" in documents_indexes
+            assert "documents_body_fts_idx" in documents_indexes, (
+                "GIN FTS index must land on PG via migration 0003's raw SQL"
+            )
+            assert "documents_embedding_idx" in documents_indexes, (
+                "IVFFlat cosine index must land on PG via migration 0003's raw SQL"
+            )
+
+            # Definition-level assertions for the two PG-only indexes —
+            # the load-bearing contract from migration 0003 is the
+            # *shape* of the DDL, not the index name. ``pg_indexes.indexdef``
+            # rendering is canonicalised by PG: GIN expression-indexes
+            # show ``USING gin (to_tsvector(...))`` and IVFFlat indexes
+            # show ``USING ivfflat (... vector_cosine_ops) WITH (lists='100')``.
+            # Lowercased compare keeps the assertion robust to PG's
+            # capitalisation choices across versions.
+            fts_def = indexdefs.get("documents_body_fts_idx", "").lower()
+            assert "using gin" in fts_def and "to_tsvector('english'" in fts_def, (
+                "GIN FTS index must be over to_tsvector('english', body); "
+                f"got: {indexdefs.get('documents_body_fts_idx')!r}"
+            )
+            ivf_def = indexdefs.get("documents_embedding_idx", "").lower()
+            assert "using ivfflat" in ivf_def, (
+                f"IVFFlat index must use ivfflat method; got: "
+                f"{indexdefs.get('documents_embedding_idx')!r}"
+            )
+            assert "vector_cosine_ops" in ivf_def, (
+                "IVFFlat index must use vector_cosine_ops operator class; "
+                f"got: {indexdefs.get('documents_embedding_idx')!r}"
+            )
+            assert "lists='100'" in ivf_def or "lists=100" in ivf_def, (
+                "IVFFlat index must carry WITH (lists = 100) per migration 0003; "
+                f"got: {indexdefs.get('documents_embedding_idx')!r}"
+            )

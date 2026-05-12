@@ -195,6 +195,28 @@ class Settings(BaseModel):
         standard MCP mounts (e.g. ``/api/mcp``) override per
         environment. Per the MCP 2025-06-18 spec's canonical-URI
         guidance, prefer the no-trailing-slash form.
+    retrieval_embedding_model:
+        fastembed-supported model identifier the
+        :class:`~meho_backplane.retrieval.embedding.EmbeddingService`
+        binds to (G0.4-T2 #259). Default ``BAAI/bge-small-en-v1.5`` —
+        384-dim, Apache-2.0, English-optimised, matches v0.1-spec
+        L391's chosen model. Operators on non-English tenancies can
+        swap via ``RETRIEVAL_EMBEDDING_MODEL`` to another fastembed-
+        supported identifier; **changing the output dimensionality
+        requires a re-embed-everything migration** because the
+        ``documents.embedding`` column is hard-pinned to
+        ``vector(384)`` by migration ``0003``. Swap to a same-
+        dimension model (e.g. a multilingual 384-dim variant) is
+        zero-migration.
+    retrieval_model_cache_dir:
+        Filesystem path fastembed uses to cache downloaded ONNX
+        weights. Default ``/var/cache/fastembed`` matches the Helm
+        chart's PVC mount point (``deploy/charts/meho/values.yaml``
+        ``retrieval.modelCache.mountPath``) so pod restarts skip the
+        ~120 MB re-download. Dev/test overrides via
+        ``RETRIEVAL_MODEL_CACHE_DIR`` typically point at
+        ``$HOME/.cache/fastembed`` so a developer's existing cache is
+        reused across runs.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -214,6 +236,14 @@ class Settings(BaseModel):
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
+    retrieval_embedding_model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        min_length=1,
+    )
+    retrieval_model_cache_dir: str = Field(
+        default="/var/cache/fastembed",
+        min_length=1,
+    )
 
     @field_validator("database_url")
     @classmethod
@@ -291,5 +321,13 @@ def get_settings() -> Settings:
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
             os.environ.get("DATABASE_POOL_TIMEOUT", "30.0"),
+        ),
+        retrieval_embedding_model=os.environ.get(
+            "RETRIEVAL_EMBEDDING_MODEL",
+            "BAAI/bge-small-en-v1.5",
+        ),
+        retrieval_model_cache_dir=os.environ.get(
+            "RETRIEVAL_MODEL_CACHE_DIR",
+            "/var/cache/fastembed",
         ),
     )

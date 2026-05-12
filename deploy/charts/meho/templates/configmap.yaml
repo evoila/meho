@@ -47,3 +47,14 @@ data:
   VAULT_TIMEOUT_SECONDS: {{ .Values.config.vaultTimeoutSeconds | quote }}
   DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | quote }}
   DATABASE_POOL_TIMEOUT: {{ .Values.config.databasePoolTimeout | quote }}
+  # G0.4-T2 (#259) — retrieval substrate fastembed model + on-disk cache
+  # path. The cache path here is the env-var contract the backplane
+  # honours; the matching `retrieval.modelCache.mountPath` value (above)
+  # is what the PVC actually mounts. Operators flipping
+  # `retrieval.modelCache.enabled=false` should still leave this
+  # pointing at the chart's default — the backplane falls back to
+  # writing weights to that path even without a PVC backing it (an
+  # `emptyDir`-equivalent ephemeral write that re-downloads weights on
+  # every restart).
+  RETRIEVAL_EMBEDDING_MODEL: {{ .Values.config.retrievalEmbeddingModel | quote }}
+  RETRIEVAL_MODEL_CACHE_DIR: {{ .Values.config.retrievalModelCacheDir | quote }}

@@ -193,7 +193,9 @@
         "vaultOidcMountPath",
         "vaultTimeoutSeconds",
         "databasePoolSize",
-        "databasePoolTimeout"
+        "databasePoolTimeout",
+        "retrievalEmbeddingModel",
+        "retrievalModelCacheDir"
       ],
       "properties": {
         "keycloakIssuerUrl": { "type": "string", "minLength": 1 },
@@ -205,7 +207,18 @@
         "vaultOidcMountPath": { "type": "string", "minLength": 1 },
         "vaultTimeoutSeconds": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" },
         "databasePoolSize": { "type": "string", "pattern": "^[0-9]+$" },
-        "databasePoolTimeout": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" }
+        "databasePoolTimeout": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$" },
+        "retrievalEmbeddingModel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "fastembed-supported model identifier (G0.4-T2 #259). Default `BAAI/bge-small-en-v1.5` (384-dim, English). Swapping to a model with different output dimensionality requires a re-embed-everything migration because `documents.embedding` is hard-pinned to `vector(384)` by migration 0003."
+        },
+        "retrievalModelCacheDir": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/",
+          "description": "Absolute filesystem path where fastembed reads / writes cached ONNX weights. Must match `retrieval.modelCache.mountPath` when the PVC is enabled — the chart does not cross-validate the two values to keep override flexibility for operators that mount via `extraVolumes`."
+        }
       }
     },
     "postgres": {
@@ -555,6 +568,36 @@
       "type": "array",
       "description": "Extra Kubernetes EnvVar objects (value or valueFrom) appended to the backplane container env AND the migration Job container env. Most common use: pointing `SSL_CERT_FILE` at a mounted trust-bundle path so Python's default ssl context trusts internal-CA-signed Vault / Keycloak / Postgres endpoints (Issue #209). Don't collide with the chart's own keys (DATABASE_URL, REDIS_URL).",
       "items": { "type": "object" }
+    },
+    "retrieval": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Retrieval substrate (G0.4, Initiative #225) chart-side surface. v0.2 ships only the fastembed model cache PVC; future G0.4 work (reranker model cache, embedding-config rollout knobs) extends this block.",
+      "properties": {
+        "modelCache": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "description": "fastembed ONNX-weight cache PVC. When `enabled: true` the chart renders a PVC named `<release>-fastembed-cache` and mounts it on the backplane Pod at `mountPath`. When `false` the chart skips both the PVC and the mount; fastembed downloads weights to an ephemeral location on every pod restart.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(Gi|Mi|Ki)$",
+              "description": "Kubernetes resource quantity. Default `200Mi` fits `BAAI/bge-small-en-v1.5` (~120 MB on disk) with headroom; raise for `bge-base` (~450 MB) or other larger models."
+            },
+            "mountPath": {
+              "type": "string",
+              "pattern": "^/",
+              "description": "Absolute container path. Must match `config.retrievalModelCacheDir` for fastembed to see the cache contents."
+            },
+            "storageClassName": {
+              "type": "string",
+              "description": "Empty = cluster default StorageClass. Set explicitly when the cluster has multiple classes and the default is not appropriate for a small rarely-written cache volume."
+            }
+          }
+        }
+      }
     }
   },
   "definitions": {

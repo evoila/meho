@@ -266,6 +266,55 @@ this stage it exposes:
   `operator_sub`) with a fail-closed MCP-specific audit path on
   `tools/call` + `resources/read`.
 
+* MCP per-operation audit (Task #250, G0.5-T5) — every `tools/call` and
+  `resources/read` invocation writes exactly one `audit_log` row via
+  `backend/src/meho_backplane/mcp/audit.py::write_mcp_audit_row`. The
+  chassis `AuditMiddleware` (`backend/src/meho_backplane/audit.py`) is
+  taught to skip `/mcp` paths via the `_AUDIT_SKIP_PATH_PREFIXES`
+  tuple — otherwise the JSON-RPC envelope would attribute the entire
+  POST to a single row regardless of how many operations live inside,
+  which is the wrong granularity for G8's audit queries. Each MCP
+  handler wraps its body in a `try/finally` that derives a
+  `status_code` (200 / 400 / 403 / 404 / 500) from the JSON-RPC
+  outcome, packs a `payload` (`{op_id, params_hash, op_class}` for
+  tools; `{uri, op_class: "read"}` for resources), and commits the
+  row before propagating the result or exception. `params_hash` is
+  the SHA-256 hex digest of the canonical JSON arguments
+  (`sort_keys=True`, `separators=(",", ":")`) so G8 can answer "find
+  all calls with these arguments" without persisting the arguments
+  themselves — important for tools whose `arguments` reference secret
+  paths (e.g. a future `vault.kv.read`). Fail-closed: an audit-write
+  failure invalidates the operation; the MCP client sees JSON-RPC
+  `-32603` Internal Error and the row's absence is the operator's
+  signal to investigate the audit layer specifically.
+
+* MCP reference tool + resource (Task #249, G0.5-T4) — the two
+  reference implementations downstream G3-G9 connector tools and
+  resources copy. `backend/src/meho_backplane/mcp/tools/meho_status.py`
+  registers `meho.status` — a no-arg tool whose handler calls
+  `meho_backplane.api.v1.health.build_health_response()` (the same
+  helper the chassis `GET /api/v1/health` route uses post-T4) so the
+  MCP transport returns wire-identical operator-identity + Vault +
+  DB-migration data. The tool's `inputSchema` uses
+  `additionalProperties: false` to reject extra arguments, and its
+  `description` field is written to AI-engineering best-practice
+  standards (precise about what / when / no-args). The companion
+  `backend/src/meho_backplane/mcp/resources/tenant_info.py` registers
+  `meho://tenant/{tenant_id}/info` as a `ResourceTemplateDefinition`
+  whose handler binds `tenant_id` from the URI, validates it as a UUID,
+  enforces tenant-boundary by checking the bound value equals
+  `operator.tenant_id`, then queries the `tenant` table via
+  `get_sessionmaker()` and returns `{id, slug, name, operator_role}`.
+  Cross-tenant reads / invalid UUIDs / missing rows all surface as
+  `McpInvalidParamsError` (-32602) — the JSON-RPC transport carries
+  error codes, not HTTP statuses, so every input-validation failure at
+  this layer maps to INVALID_PARAMS. The tenant-boundary check runs
+  *before* the DB query so a probe attempt against an arbitrary UUID
+  cannot learn whether that tenant exists. `build_health_response()`
+  was extracted from `authenticated_health()` in `api/v1/health.py`
+  during T4 so the chassis route and the MCP tool share the same
+  federation-proof probe chain rather than diverging.
+
 * MCP tool + resource registries (Task #248, G0.5-T3) — the substrate
   every G3–G9 verb registers against. `backend/src/meho_backplane/mcp/registry.py`
   exposes `register_mcp_tool(definition, handler)` /
@@ -392,6 +441,9 @@ PYTHONPATH-leak imports.
 | `api/v1/health.router` (`/api/v1/health`) | `src/meho_backplane/api/v1/health.py` | Authenticated federation-proof endpoint (Task #24, extended in Task #27). `GET` handler runs through `Depends(verify_jwt_and_bind)`, calls `vault_client_for_operator(operator)`, reads `secret/meho/test/federation` (KV v2), invokes `db_migration_probe()` to populate `db.migrated`, and returns `HealthResponse` (operator identity + vault status + db status). Vault unreachable / role denied / read failure / DB unreachable / revision diverged all surface as structured fields on a 200 response — never 5xx. |
 | `require_role` | `src/meho_backplane/auth/rbac.py` | RBAC primitive (Task #234, G0.1-T4): function factory returning a FastAPI dependency that runs after `verify_jwt_and_bind` and rejects operators below a minimum `TenantRole` with HTTP 403 `insufficient_role` plus a structured `insufficient_role` log line carrying `operator_sub` / `actual_role` / `required_role`. Role ranking is **explicit** (a private `_ROLE_ORDER` tuple — `read_only` < `operator` < `tenant_admin`), not implicit in the StrEnum, so a future enum reorder cannot silently invert ranking. The minimum-role rank is resolved at factory call time so a typo or an enum widening that misses `_ROLE_ORDER` surfaces as an import-time `ValueError` rather than a per-request 500. Returns the validated `Operator` so handlers that need both the role gate and the operator instance can declare a single `Depends`. |
 | `api/v1/rbac_test.router` (`/api/v1/rbac-test/*`) | `src/meho_backplane/api/v1/rbac_test.py` | End-to-end stub for `require_role` (Task #234): two GET endpoints (`/api/v1/rbac-test/admin` gated by `require_role(TENANT_ADMIN)`, `/api/v1/rbac-test/operator` gated by `require_role(OPERATOR)`). Mounted only when `Settings.enable_rbac_test_route` is `True` (env var `MEHO_ENABLE_RBAC_TEST_ROUTE=1`); production deploys leave the routes genuinely unmounted (404), CI flips the flag for the RBAC integration job. The flag is read at FastAPI app construction time — flipping it post-import has no effect; tests that need the routes build their own `FastAPI`. |
+| `index_document` / `compute_body_hash` / `estimate_tokens` | `src/meho_backplane/retrieval/indexer.py` | Canonical write path for the `documents` table (G0.4-T3, Task #260) -- both G4 (#215, kb ingestion) and G5 (#216, memory writes) call this helper rather than re-deriving the hash + embed + upsert sequence. Algorithm: look up by `(tenant_id, source, source_id)`; if the existing row's `body_hash` matches the new body's SHA-256, **skip the embedding compute** and just touch `updated_at` (and `doc_metadata` if the caller passed a new dict) -- this is the cost optimisation that makes `meho kb refresh` against an unchanged corpus essentially free. On body change or first-index, calls `get_embedding_service().encode_one(body)` and either updates in place or inserts a fresh row. The caller passes `tenant_id` explicitly (no contextvar resolution) so the tenant boundary is auditable at the call site; T5's API route extracts from `Operator.tenant_id`. Optional `session` arg: when provided, helper does NOT commit (caller owns the transaction -- batch ingestion shape); when `None`, helper opens its own session via `get_sessionmaker()`, commits, and closes. `metadata=None` preserves existing metadata on the skip-re-embed path; `metadata={}` explicitly clears. `compute_body_hash` is SHA-256-hex of the UTF-8 body (regression-locked against a known hash so the encoding contract can't drift); `estimate_tokens` is `int(len(body.split()) * 1.3)` (v0.2 heuristic; tiktoken deferred). |
+| `EmbeddingService` / `get_embedding_service` / `EMBEDDING_DIMENSION` | `src/meho_backplane/retrieval/embedding.py` | fastembed-backed in-process embedding pipeline (G0.4-T2, Task #259). `EmbeddingService` wraps `fastembed.TextEmbedding` with lazy model load + `asyncio.to_thread` offload so the event loop stays responsive (ONNX runtime is sync). The fastembed import is local to `_ensure_loaded` so module-import of the retrieval package doesn't pull onnxruntime; `structlog.get_logger()` is also resolved per-call inside the method so a worker-thread call from inside pytest's stdout-captured context doesn't crash with `I/O operation on closed file`. `get_embedding_service()` is the `@lru_cache(maxsize=1)` singleton bound to `Settings.retrieval_embedding_model` + `Settings.retrieval_model_cache_dir`; T3's `index_document` and T4's `retrieve` both route through it. The lifespan in `main.py` calls `encode_one("model preload")` once at startup so the ~1-2 s ONNX load amortises across the pod lifetime; failure is logged warn-level and falls back to lazy-on-first-call. `EMBEDDING_DIMENSION = 384` is the load-bearing contract — must match the `vector(384)` column type in migration `0003`; a future model with different dimensionality requires a re-embed-everything migration. |
+| `retrieval.modelCache` chart values | `deploy/charts/meho/values.yaml` + `deploy/charts/meho/values.schema.json` + `deploy/charts/meho/templates/pvc-fastembed-cache.yaml` + `deploy/charts/meho/templates/deployment.yaml` | G0.4-T2 (#259) chart-side surface. `retrieval.modelCache.enabled` (default `true`) renders a `ReadWriteOnce` PVC named `<release>-fastembed-cache` of size `retrieval.modelCache.size` (default `200Mi` — enough headroom for `BAAI/bge-small-en-v1.5`'s ~120 MB), mounted at `retrieval.modelCache.mountPath` (default `/var/cache/fastembed`) inside the backplane Pod. The ConfigMap binds `RETRIEVAL_EMBEDDING_MODEL` + `RETRIEVAL_MODEL_CACHE_DIR` from the matching `config.retrievalEmbeddingModel` / `config.retrievalModelCacheDir` keys (default `BAAI/bge-small-en-v1.5` + `/var/cache/fastembed`); operators that need a multi-replica RWX cache provide their own PVC via `extraVolumes` + `extraVolumeMounts` and either flip the chart-managed PVC off or accept the unused volume. The migration Job deliberately does **not** mount the cache — migrations don't embed. |
 | `HealthResponse` / `OperatorIdentity` / `VaultStatus` / `DbStatus` | `src/meho_backplane/api/v1/health.py` | Frozen pydantic v2 response models. `OperatorIdentity` deliberately excludes `raw_jwt` so the bearer token never appears in the response body. `DbStatus.migrated` reflects the T27 DB-migration-state probe verdict (true when current matches Alembic head, false otherwise; `bool \| None` is preserved for forward compatibility with chassis-stage decoders). `VaultStatus.detail` carries only structured tokens (`version=N`, `read_failed: <ExcClass>`, `login_failed: <ExcClass>`) — no operator-controllable URL substrings. |
 | `_no_secret_leak_sweep` | `tests/conftest.py` (autouse) | Pytest fixture that runs after every test in `tests/`, scanning `capfd`-captured stdout/stderr and `caplog` records for credential-shaped substrings (`Bearer <long>`, `password=`, `secret=`, `token=`, `api_key=`, `Authorization: Bearer …`). First match → `pytest.fail` with a redacted preview. The patterns live in `SECRET_LEAK_PATTERNS` for contributor extension; the targeted leak tests in `tests/test_secret_leak_checks.py` complement the always-on sweep with explicit assertions on the structlog `StringIO` buffers used by route-level tests. |
 | `tests/integration/test_tenant_isolation.py` | `backend/tests/integration/test_tenant_isolation.py` | G0.1-T6 (Task #236) broad-spectrum end-to-end test for the tenancy chain. Boots `pgvector/pgvector:pg16` via `testcontainers` (module-scoped fixture in `tests/integration/conftest.py`; image name env-overridable via `MEHO_TEST_PGVECTOR_IMAGE`), applies `alembic upgrade head` against the asyncpg URL, builds a fresh `FastAPI` with the production middleware stack plus the `/api/v1/rbac-test` stub routes mounted unconditionally, and exercises five integration cases: (1) two operators in two tenants generate correctly tenant-scoped audit rows (5+3 split, no cross-pollination); (2) a JWT signed with an unknown tenant_id still authenticates and lands its row under the bogus UUID — documents v0.2's "trust the issuer's claim" model; (3) the per-tenant query helper returns only the requesting tenant's rows (forward-compat for G8); (4) a `read_only` JWT on `/api/v1/rbac-test/operator` returns 403 — sanity for T4's RBAC primitive; (5) the highest-value test — eight interleaved requests under `asyncio.gather` from four operators across two tenants must produce audit rows attributed to the right tenant_id, catching structlog contextvar leaks across concurrent asyncio tasks. The `_skip_no_docker` class-level mark mirrors `tests/test_migration_rollback.py`'s pattern: agent sandboxes without Docker skip the PG-driven tests; CI runners with Docker provisioned run them. The cheap import-smoke test `test_module_imports_cleanly` runs unconditionally so a renamed fixture surfaces at collection time. |
@@ -467,6 +519,8 @@ Pinned-floor declarations; exact versions resolved into `uv.lock`.
 | `sqlalchemy[asyncio]` | ≥ 2.0 | Async ORM + Core (per ADR 0004). The `asyncio` extra pulls `greenlet`, which SQLAlchemy 2.x async needs to bridge sync ORM callsites onto the event loop. |
 | `asyncpg` | ≥ 0.29 | Async PostgreSQL driver (per ADR 0004). Faster than `psycopg`'s sync wrapper for the read/write patterns of an audit log + per-operator metadata, and the only async driver SQLAlchemy 2.x officially supports. |
 | `alembic` | ≥ 1.13 | Schema migrations. The async-aware `env.py` follows the upstream cookbook pattern (`async_engine_from_config` + `connection.run_sync(do_run_migrations)`); Alembic itself stays sync, but reaches into asyncpg via the engine. |
+| `pgvector` | ≥ 0.3, < 1.0 | Postgres vector extension Python adapter (G0.4-T1 #258). Provides `pgvector.sqlalchemy.Vector` used by `Document.embedding` on PG; the SQLite test path falls back to a JSON-encoded `Text` via the in-tree `_PortableVector384` TypeDecorator. No `py.typed` marker as of 0.4 — `[tool.mypy.overrides]` whitelists `pgvector.*`. |
+| `fastembed` | ≥ 0.7, < 1.0 | In-process ONNX embedding pipeline (G0.4-T2 #259). Ships its own bundled ONNX runtime + tokenizers; no PyTorch dependency. The backplane uses `fastembed.TextEmbedding` exclusively (one class surface), wrapped by `meho_backplane.retrieval.embedding.EmbeddingService`. Default model `BAAI/bge-small-en-v1.5` (384-dim, Apache-2.0, ~120 MB ONNX weights). No `py.typed` marker as of 0.8 — `[tool.mypy.overrides]` whitelists `fastembed.*`. |
 | (dev) `aiosqlite` | ≥ 0.19 | Async SQLite driver used for local-dev / test DBs that do not need Docker. The probe + engine module both work against `sqlite+aiosqlite://` URLs because the driver-specific surface is encapsulated by SQLAlchemy. |
 | (dev) `testcontainers` | ≥ 4.0 | Spins up `pgvector/pgvector:pg16` for the testcontainer suites (`tests/test_db_engine.py::TestPostgresIntegration`, `tests/test_migration_rollback.py`, `tests/integration/test_tenant_isolation.py`); image name overridable via `MEHO_TEST_PGVECTOR_IMAGE`. Skipped gracefully when the Docker socket is absent — the SQLite-async coverage stays always-on. |
 | (dev) `pytest` ≥ 8 | | Test runner. |

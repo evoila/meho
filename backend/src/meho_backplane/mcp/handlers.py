@@ -70,12 +70,14 @@ that's fine.)
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import jsonschema
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
@@ -158,64 +160,131 @@ async def handle_tools_call(
     a single ``text`` block containing the JSON-serialised dict, per
     spec §Tools/Tool Result. Structured content (``structuredContent``
     field) is a future polish.
+
+    Audit row writing
+    -----------------
+
+    Per G0.5-T5 (#250), every ``tools/call`` invocation produces exactly
+    one :class:`~meho_backplane.db.models.AuditLog` row via
+    :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`. The write
+    runs inside the ``finally`` block so the failure paths (unknown
+    tool, forbidden, schema-invalid arguments, handler exception) all
+    produce an audit row attributing the *attempted* operation —
+    matching the chassis :class:`~meho_backplane.audit.AuditMiddleware`
+    semantics for HTTP routes. ``status_code`` is the audit-side
+    projection of the JSON-RPC outcome (200 / 400 / 403 / 404 / 500)
+    so dashboards that group HTTP and MCP traffic on ``status_code``
+    see one consistent axis.
+
+    Fail-closed: if the audit write itself raises, the in-flight return
+    value (or in-flight exception) is replaced by the audit exception,
+    which the dispatcher maps to JSON-RPC ``-32603`` Internal Error.
+    The MCP client therefore sees the operation as failed; the audit
+    row's absence is the operator's signal to investigate the audit
+    layer specifically.
     """
     raw_params = params or {}
     name = raw_params.get("name")
     arguments = raw_params.get("arguments", {})
-
-    if not isinstance(name, str) or not name:
-        raise McpInvalidParamsError("tools/call: missing or empty 'name'")
-    if not isinstance(arguments, dict):
-        raise McpInvalidParamsError("tools/call: 'arguments' must be an object")
-
-    entry = get_tool(name)
-    if entry is None:
-        raise McpInvalidParamsError(f"unknown tool: {name!r}")
-    defn, handler = entry
-
-    # RBAC: the tool's required_role gates *invocation*, not just listing.
-    # The list filter already hides tools the operator can't call, but
-    # a client that knows the name could try to call anyway.
-    if not _operator_meets_required_role(operator, defn):
-        _log.warning(
-            "mcp_tool_call_forbidden",
-            tool=name,
-            required=defn.required_role,
-            actual=operator.tenant_role,
-        )
-        raise McpInvalidParamsError(f"forbidden: {name!r} requires a higher role")
-
-    # Validate arguments against the tool's inputSchema. ``cls`` is
-    # pinned to :class:`jsonschema.Draft202012Validator` to make the
-    # "JSON Schema 2020-12" contract called out in :class:`ToolDefinition`
-    # load-bearing rather than incidental: jsonschema 4.26 happens to
-    # pick the 2020-12 validator as the default when a schema lacks
-    # ``$schema``, but the default is the library's "latest known"
-    # pointer and would slide forward on a future major bump. Pinning
-    # here decouples MEHO's schema dialect from the library's release
-    # cadence. ``jsonschema.validate`` raises ``ValidationError`` on the
-    # first failure; we surface it as INVALID_PARAMS.
-    try:
-        jsonschema.validate(
-            instance=arguments,
-            schema=defn.inputSchema,
-            cls=jsonschema.Draft202012Validator,
-        )
-    except jsonschema.ValidationError as exc:
-        raise McpInvalidParamsError(
-            f"tools/call {name!r}: arguments failed inputSchema: {exc.message}",
-        ) from exc
-
-    result = await handler(operator, arguments)
-
-    # MCP §Tool Result: every successful tools/call response carries a
-    # ``content`` array. v0.2 ships unstructured content only — a single
-    # text block with the JSON-serialised result. Structured content
-    # (``structuredContent``) lands when a downstream tool needs it.
-    return {
-        "content": [{"type": "text", "text": json.dumps(result)}],
-        "isError": False,
+    start = time.monotonic()
+    audit_payload: dict[str, Any] = {
+        "op_id": name if isinstance(name, str) else "",
+        "params_hash": "",
+        "op_class": "unknown",
     }
+    status_code = 500
+    audit_name = name if isinstance(name, str) and name else "<empty>"
+
+    try:
+        if not isinstance(name, str) or not name:
+            status_code = 400
+            raise McpInvalidParamsError("tools/call: missing or empty 'name'")
+        if not isinstance(arguments, dict):
+            status_code = 400
+            raise McpInvalidParamsError("tools/call: 'arguments' must be an object")
+
+        audit_payload["params_hash"] = compute_params_hash(arguments)
+
+        entry = get_tool(name)
+        if entry is None:
+            status_code = 404
+            raise McpInvalidParamsError(f"unknown tool: {name!r}")
+        defn, handler = entry
+        audit_payload["op_class"] = defn.op_class
+
+        # RBAC: the tool's required_role gates *invocation*, not just listing.
+        # The list filter already hides tools the operator can't call, but
+        # a client that knows the name could try to call anyway.
+        if not _operator_meets_required_role(operator, defn):
+            _log.warning(
+                "mcp_tool_call_forbidden",
+                tool=name,
+                required=defn.required_role,
+                actual=operator.tenant_role,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: {name!r} requires a higher role",
+            )
+
+        # Validate arguments against the tool's inputSchema. ``cls`` is
+        # pinned to :class:`jsonschema.Draft202012Validator` to make the
+        # "JSON Schema 2020-12" contract called out in :class:`ToolDefinition`
+        # load-bearing rather than incidental: jsonschema 4.26 happens to
+        # pick the 2020-12 validator as the default when a schema lacks
+        # ``$schema``, but the default is the library's "latest known"
+        # pointer and would slide forward on a future major bump. Pinning
+        # here decouples MEHO's schema dialect from the library's release
+        # cadence. ``jsonschema.validate`` raises ``ValidationError`` on the
+        # first failure; we surface it as INVALID_PARAMS.
+        try:
+            jsonschema.validate(
+                instance=arguments,
+                schema=defn.inputSchema,
+                cls=jsonschema.Draft202012Validator,
+            )
+        except jsonschema.ValidationError as exc:
+            status_code = 400
+            raise McpInvalidParamsError(
+                f"tools/call {name!r}: arguments failed inputSchema: {exc.message}",
+            ) from exc
+
+        result = await handler(operator, arguments)
+        status_code = 200
+
+        # MCP §Tool Result: every successful tools/call response carries a
+        # ``content`` array. v0.2 ships unstructured content only — a single
+        # text block with the JSON-serialised result. Structured content
+        # (``structuredContent``) lands when a downstream tool needs it.
+        return {
+            "content": [{"type": "text", "text": json.dumps(result)}],
+            "isError": False,
+        }
+    finally:
+        duration_ms = (time.monotonic() - start) * 1000
+        try:
+            await write_mcp_audit_row(
+                operator=operator,
+                method="MCP",
+                path=f"/mcp/tools/call/{audit_name}",
+                status_code=status_code,
+                duration_ms=duration_ms,
+                payload=audit_payload,
+            )
+        except Exception:
+            # Fail-closed: an audit-write failure invalidates the call.
+            # The finally's bare raise replaces any in-flight return or
+            # exception with the audit-write exception; the dispatcher
+            # then maps it to JSON-RPC -32603 Internal Error. Detail
+            # strings stay scrubbed (only the exception class lands in
+            # the structlog payload below).
+            _log.exception(
+                "mcp_audit_write_failed",
+                method="MCP",
+                path=f"/mcp/tools/call/{audit_name}",
+                status_code=status_code,
+            )
+            raise
 
 
 def _operator_meets_required_role(
@@ -295,47 +364,89 @@ async def handle_resources_read(
     The spec-correct ``-32002`` is recorded as an adjacent finding —
     landing it cleanly needs a small dispatcher extension that's
     outside T3's surface.
+
+    Audit row writing
+    -----------------
+
+    Per G0.5-T5 (#250), every ``resources/read`` invocation produces
+    exactly one :class:`~meho_backplane.db.models.AuditLog` row.
+    ``op_class`` is hardcoded ``"read"`` — resources are passive in v0.2
+    (the registry currently exposes no write-shape resources; future
+    write-shape patterns would surface as tools, not resources).
+    Fail-closed semantics match :func:`handle_tools_call`.
     """
     raw_params = params or {}
     uri = raw_params.get("uri")
-    if not isinstance(uri, str) or not uri:
-        raise McpInvalidParamsError("resources/read: missing or empty 'uri'")
-
-    match = get_resource_for_uri(uri)
-    if match is None:
-        # Per spec this should be -32002. See docstring for the deferral.
-        raise McpInvalidParamsError(f"resource not found: {uri!r}")
-    defn, handler, bound_params = match
-
-    # RBAC: same call-time re-check as tools.
-    if not _operator_meets_required_role(operator, defn):
-        _log.warning(
-            "mcp_resource_read_forbidden",
-            uri=uri,
-            required=defn.required_role,
-            actual=operator.tenant_role,
-        )
-        raise McpInvalidParamsError(
-            f"forbidden: resource {uri!r} requires a higher role",
-        )
-
-    body = await handler(operator, bound_params)
-
-    # MCP §Resources/Reading Resources: response.contents is an array;
-    # each entry carries `uri`, `mimeType`, and one of `text` or `blob`.
-    # v0.2 serialises the handler's dict as a JSON text block, mirroring
-    # the tool-result shape — handlers that need binary (`blob`) return
-    # value can override by emitting their own contents-array structure
-    # in a later task.
-    return {
-        "contents": [
-            {
-                "uri": uri,
-                "mimeType": defn.mimeType,
-                "text": json.dumps(body),
-            },
-        ],
+    start = time.monotonic()
+    audit_uri = uri if isinstance(uri, str) and uri else "<empty>"
+    audit_payload: dict[str, Any] = {
+        "uri": audit_uri,
+        "op_class": "read",
     }
+    status_code = 500
+
+    try:
+        if not isinstance(uri, str) or not uri:
+            status_code = 400
+            raise McpInvalidParamsError("resources/read: missing or empty 'uri'")
+
+        match = get_resource_for_uri(uri)
+        if match is None:
+            # Per spec this should be -32002. See docstring for the deferral.
+            status_code = 404
+            raise McpInvalidParamsError(f"resource not found: {uri!r}")
+        defn, handler, bound_params = match
+
+        # RBAC: same call-time re-check as tools.
+        if not _operator_meets_required_role(operator, defn):
+            _log.warning(
+                "mcp_resource_read_forbidden",
+                uri=uri,
+                required=defn.required_role,
+                actual=operator.tenant_role,
+            )
+            status_code = 403
+            raise McpInvalidParamsError(
+                f"forbidden: resource {uri!r} requires a higher role",
+            )
+
+        body = await handler(operator, bound_params)
+        status_code = 200
+
+        # MCP §Resources/Reading Resources: response.contents is an array;
+        # each entry carries `uri`, `mimeType`, and one of `text` or `blob`.
+        # v0.2 serialises the handler's dict as a JSON text block, mirroring
+        # the tool-result shape — handlers that need binary (`blob`) return
+        # value can override by emitting their own contents-array structure
+        # in a later task.
+        return {
+            "contents": [
+                {
+                    "uri": uri,
+                    "mimeType": defn.mimeType,
+                    "text": json.dumps(body),
+                },
+            ],
+        }
+    finally:
+        duration_ms = (time.monotonic() - start) * 1000
+        try:
+            await write_mcp_audit_row(
+                operator=operator,
+                method="MCP",
+                path=f"/mcp/resources/read/{audit_uri}",
+                status_code=status_code,
+                duration_ms=duration_ms,
+                payload=audit_payload,
+            )
+        except Exception:
+            _log.exception(
+                "mcp_audit_write_failed",
+                method="MCP",
+                path=f"/mcp/resources/read/{audit_uri}",
+                status_code=status_code,
+            )
+            raise
 
 
 # ---------------------------------------------------------------------------

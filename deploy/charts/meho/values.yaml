@@ -174,6 +174,11 @@ config:
   vaultTimeoutSeconds: "10.0"
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
+  # Retrieval substrate (G0.4-T2 #259). The chart sets the model cache
+  # dir to match the PVC mount point so a `retrieval.modelCache.enabled`
+  # flip is the operator's single source of truth for the cache path.
+  retrievalEmbeddingModel: "BAAI/bge-small-en-v1.5"
+  retrievalModelCacheDir: "/var/cache/fastembed"
 
 postgres:
   # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
@@ -302,6 +307,38 @@ connectors:
   # -- v0.1 ships the chassis with no connectors enabled. The connector
   # surface lands post-Goal-2 with the first product ticket.
   enabled: []
+
+# Retrieval substrate (G0.4, Initiative #225). The backplane's fastembed
+# pipeline (G0.4-T2 #259) downloads ~120 MB of ONNX weights for the
+# default model `BAAI/bge-small-en-v1.5` to a local cache. The chart
+# mounts a PVC at `retrieval.modelCache.mountPath` so pod restarts don't
+# re-download. The PVC is RWO (single-attach): v0.2 ships single-replica
+# anyway, and a multi-replica deploy can either disable the PVC and pay
+# the per-pod download or provide its own RWX PVC via `extraVolumes` +
+# `extraVolumeMounts`.
+retrieval:
+  modelCache:
+    # -- Mount the model-cache PVC on the backplane Pod. When `false`,
+    # the chart skips the PVC + the volume mount and fastembed downloads
+    # weights to an ephemeral path on every pod restart (acceptable for
+    # short-lived dev clusters; not for production).
+    enabled: true
+    # -- Requested PVC size. `BAAI/bge-small-en-v1.5` is ~120 MB on
+    # disk; 200Mi gives headroom for the tokenizer metadata plus a
+    # future swap to a same-dim multilingual model without resizing.
+    # Tune upward when swapping to a larger model (e.g. `bge-base` at
+    # ~450 MB).
+    size: 200Mi
+    # -- Path inside the backplane container where fastembed reads /
+    # writes ONNX weights. Must match the
+    # `RETRIEVAL_MODEL_CACHE_DIR` env var the chart's ConfigMap binds
+    # (`config.retrievalModelCacheDir`).
+    mountPath: /var/cache/fastembed
+    # -- StorageClass for the PVC. Empty = cluster default. Set
+    # explicitly when the cluster has multiple classes (e.g. `gp3`
+    # vs `standard`) and the default is not appropriate for a small
+    # rarely-written cache volume.
+    storageClassName: ""
 
 # Optional chart-side External Secrets Operator (ESO) resource rendering.
 #

@@ -97,7 +97,7 @@ from meho_backplane.mcp.schemas import (
     ServerCapabilities,
 )
 
-__all__ = ["register_method", "router"]
+__all__ = ["McpInvalidParamsError", "register_method", "router"]
 
 
 #: Stable ``serverInfo.name`` returned on every ``initialize``. Matches
@@ -141,7 +141,7 @@ def register_method(name: str, handler: _McpHandler) -> None:
     _DISPATCH[name] = handler
 
 
-class _McpInvalidParamsError(Exception):
+class McpInvalidParamsError(Exception):
     """Handler-side sentinel mapped to JSON-RPC ``INVALID_PARAMS``.
 
     Raised by a handler when its params fail validation (e.g.
@@ -149,6 +149,10 @@ class _McpInvalidParamsError(Exception):
     raises :class:`pydantic.ValidationError`). The dispatcher catches
     this distinctly from a generic :class:`Exception` so the wire
     response carries code ``-32602`` rather than ``-32603``.
+
+    Re-exported from :mod:`meho_backplane.mcp` so T3 (#248) tool
+    handlers — and any future MCP method handler — can raise it
+    without reaching into a dunder-private symbol.
     """
 
 
@@ -176,7 +180,7 @@ async def _initialize(params: dict[str, Any] | None) -> InitializeResponse:
     try:
         InitializeRequest.model_validate(params or {})
     except ValidationError as exc:
-        raise _McpInvalidParamsError(
+        raise McpInvalidParamsError(
             f"initialize: {exc.error_count()} validation error(s)",
         ) from exc
 
@@ -415,7 +419,7 @@ async def mcp_dispatch(request: Request) -> Response:
 
     try:
         result = await handler(jrpc.params)
-    except _McpInvalidParamsError as exc:
+    except McpInvalidParamsError as exc:
         if is_notification:
             _log.warning(
                 "mcp_notification_invalid_params",

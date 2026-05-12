@@ -34,6 +34,6 @@ chain. Origin-header validation per the MCP transport security warning
 ``MCP_ALLOWED_ORIGINS`` setting T2 introduces.
 """
 
-from meho_backplane.mcp.server import register_method, router
+from meho_backplane.mcp.server import McpInvalidParamsError, register_method, router
 
-__all__ = ["register_method", "router"]
+__all__ = ["McpInvalidParamsError", "register_method", "router"]

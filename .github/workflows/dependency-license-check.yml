@@ -111,6 +111,12 @@ jobs:
           Mozilla Public License 2.0 (MPL 2.0);
           MPL-2.0;
           CC0-1.0;
+          Zlib;
+          Apache-2.0 OR BSD-2-Clause;
+          Apache-2.0 OR BSD-3-Clause;
+          Apache-2.0 AND BSD-2-Clause;
+          Apache-2.0 AND MIT;
+          BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0;
           "
 
   npm-licenses:

@@ -115,6 +115,8 @@ jobs:
           MPL-2.0;
           CC0-1.0;
           Zlib;
+          MIT-CMU;
+          HPND;
           Apache-2.0 OR BSD-2-Clause;
           Apache-2.0 OR BSD-3-Clause;
           Apache-2.0 AND BSD-2-Clause;

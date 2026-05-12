@@ -266,6 +266,33 @@ this stage it exposes:
   `operator_sub`) with a fail-closed MCP-specific audit path on
   `tools/call` + `resources/read`.
 
+* MCP reference tool + resource (Task #249, G0.5-T4) — the two
+  reference implementations downstream G3-G9 connector tools and
+  resources copy. `backend/src/meho_backplane/mcp/tools/meho_status.py`
+  registers `meho.status` — a no-arg tool whose handler calls
+  `meho_backplane.api.v1.health.build_health_response()` (the same
+  helper the chassis `GET /api/v1/health` route uses post-T4) so the
+  MCP transport returns wire-identical operator-identity + Vault +
+  DB-migration data. The tool's `inputSchema` uses
+  `additionalProperties: false` to reject extra arguments, and its
+  `description` field is written to AI-engineering best-practice
+  standards (precise about what / when / no-args). The companion
+  `backend/src/meho_backplane/mcp/resources/tenant_info.py` registers
+  `meho://tenant/{tenant_id}/info` as a `ResourceTemplateDefinition`
+  whose handler binds `tenant_id` from the URI, validates it as a UUID,
+  enforces tenant-boundary by checking the bound value equals
+  `operator.tenant_id`, then queries the `tenant` table via
+  `get_sessionmaker()` and returns `{id, slug, name, operator_role}`.
+  Cross-tenant reads / invalid UUIDs / missing rows all surface as
+  `McpInvalidParamsError` (-32602) — the JSON-RPC transport carries
+  error codes, not HTTP statuses, so every input-validation failure at
+  this layer maps to INVALID_PARAMS. The tenant-boundary check runs
+  *before* the DB query so a probe attempt against an arbitrary UUID
+  cannot learn whether that tenant exists. `build_health_response()`
+  was extracted from `authenticated_health()` in `api/v1/health.py`
+  during T4 so the chassis route and the MCP tool share the same
+  federation-proof probe chain rather than diverging.
+
 * MCP tool + resource registries (Task #248, G0.5-T3) — the substrate
   every G3–G9 verb registers against. `backend/src/meho_backplane/mcp/registry.py`
   exposes `register_mcp_tool(definition, handler)` /

@@ -57,7 +57,7 @@ from meho_backplane.auth.vault import (
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.middleware import verify_jwt_and_bind
 
-__all__ = ["router"]
+__all__ = ["build_health_response", "router"]
 
 #: Hardcoded path inside the Vault KV v2 mount used to prove the
 #: federation chain. The path is provisioned by the consumer (see
@@ -225,17 +225,17 @@ async def _probe_vault_federation(
         )
 
 
-@router.get("/health", response_model=HealthResponse)
-async def authenticated_health(
-    operator: Operator = Depends(verify_jwt_and_bind),
-) -> HealthResponse:
-    """Federation-proof authenticated health check.
+async def build_health_response(operator: Operator) -> HealthResponse:
+    """Assemble the :class:`HealthResponse` for a validated operator.
 
-    See module docstring for the four-step chain this exercises. The
-    ``Depends(verify_jwt_and_bind)`` annotation is what guarantees the
-    JWT is validated *and* ``operator_sub`` is bound into structlog
-    contextvars before this body runs — every log line emitted from
-    here downstream carries operator identity automatically.
+    Lifted out of :func:`authenticated_health` so the MCP reference tool
+    ``meho.status`` (G0.5-T4) can return the same federation-proof status
+    bundle without re-implementing the Vault + DB probe chain. The route
+    handler is now a thin wrapper around this helper plus the
+    :class:`Operator` dependency the FastAPI router supplies; the MCP
+    tool handler at :mod:`meho_backplane.mcp.tools.meho_status` calls
+    this directly with the :class:`Operator` the MCP dispatcher already
+    resolved.
     """
     log = structlog.get_logger()
     vault_status = await _probe_vault_federation(operator, log)
@@ -249,3 +249,18 @@ async def authenticated_health(
         vault=vault_status,
         db=DbStatus(migrated=db_probe_result.ok),
     )
+
+
+@router.get("/health", response_model=HealthResponse)
+async def authenticated_health(
+    operator: Operator = Depends(verify_jwt_and_bind),
+) -> HealthResponse:
+    """Federation-proof authenticated health check.
+
+    See module docstring for the four-step chain this exercises. The
+    ``Depends(verify_jwt_and_bind)`` annotation is what guarantees the
+    JWT is validated *and* ``operator_sub`` is bound into structlog
+    contextvars before this body runs — every log line emitted from
+    here downstream carries operator identity automatically.
+    """
+    return await build_health_response(operator)

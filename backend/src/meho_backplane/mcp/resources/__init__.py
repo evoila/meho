@@ -12,7 +12,9 @@ invoked from the FastAPI ``lifespan`` (see
 ``pkgutil.iter_modules`` so the registrations land before the first
 ``resources/templates/list`` request arrives.
 
-T3 (#248) ships the registry shell; this subpackage stays empty until
-T4 (#249) lands the reference ``meho://tenant/{tenant_id}/info``
-resource.
+T4 (#249) lands the first resource template:
+``meho://tenant/{tenant_id}/info`` at
+:mod:`meho_backplane.mcp.resources.tenant_info` — the reference impl
+that establishes the tenant-boundary enforcement pattern every
+downstream G3-G9 resource copies.
 """

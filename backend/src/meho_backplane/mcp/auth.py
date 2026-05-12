@@ -71,11 +71,22 @@ def mcp_resource_uri(settings: Settings | None = None) -> str:
 
     1. ``Settings.mcp_resource_uri`` when explicitly set — operators
        with non-default MCP mount points (e.g. ``/api/mcp``) override
-       per environment.
+       per environment. The value is normalised (``.strip()`` +
+       ``.rstrip('/')``) so an operator who pastes the URI from a
+       browser bar with a trailing slash, or leaves a stray newline in
+       the env var, doesn't cause an ``aud`` mismatch against tokens
+       whose ``resource`` parameter Keycloak emitted in canonical
+       form. MCP 2025-06-18 §"Canonical Server URI" mandates the no-
+       trailing-slash form for interop, so the normalisation also
+       enforces the spec contract.
     2. ``f"{settings.backplane_url}/mcp"`` derived at use time.
     3. Empty string when neither is set — fail-closed for MCP: no JWT
        can have an empty audience claim, so every ``/mcp`` request 401s
        until an operator wires ``BACKPLANE_URL`` (or ``MCP_RESOURCE_URI``).
+       Defence in depth: :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`
+       short-circuits an empty expected_audience to a 401 explicitly so
+       the fail-closed property is local to the verifier and doesn't
+       depend on any honest-issuer assumption.
 
     Per MCP 2025-06-18 §Resource Parameter Implementation, the canonical
     form is lowercase scheme + host with no trailing slash; the helper
@@ -84,7 +95,7 @@ def mcp_resource_uri(settings: Settings | None = None) -> str:
     """
     settings = settings or get_settings()
     if settings.mcp_resource_uri:
-        return settings.mcp_resource_uri
+        return settings.mcp_resource_uri.strip().rstrip("/")
     if not settings.backplane_url:
         return ""
     return f"{settings.backplane_url.rstrip('/')}/mcp"

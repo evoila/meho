@@ -17,6 +17,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.49",
     "asyncpg>=0.29",
     "alembic>=1.13",
+    "jsonschema>=4.26.0",
 ]
 
 [dependency-groups]
@@ -30,6 +31,7 @@ dev = [
     "pytest-cov>=5.0",
     "aiosqlite>=0.19",
     "testcontainers>=4.0",
+    "types-jsonschema>=4.26.0.20260508",
 ]
 
 [build-system]

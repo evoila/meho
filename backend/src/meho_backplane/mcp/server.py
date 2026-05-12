@@ -112,8 +112,9 @@ __all__ = ["McpInvalidParamsError", "register_method", "router"]
 _SERVER_NAME: str = "meho-backplane"
 
 
-# A handler receives the parsed JSON-RPC ``params`` (``None`` when the
-# request omits the field) and returns one of:
+# A handler receives the validated :class:`Operator` (so it can apply
+# RBAC + tenant filtering — see G0.5-T3) and the parsed JSON-RPC
+# ``params`` (``None`` when the request omits the field). Returns one of:
 # * a :class:`pydantic.BaseModel` instance — serialized via
 #   :meth:`~pydantic.BaseModel.model_dump` into the response's ``result``;
 # * a plain ``dict`` — used verbatim as the ``result`` body;
@@ -122,7 +123,10 @@ _SERVER_NAME: str = "meho-backplane"
 #   methods. For request-shaped methods, a ``None`` return is treated as
 #   :data:`INTERNAL_ERROR` (a handler bug).
 _McpHandlerResult = BaseModel | dict[str, Any] | None
-_McpHandler = Callable[[dict[str, Any] | None], Awaitable[_McpHandlerResult]]
+_McpHandler = Callable[
+    [Operator, dict[str, Any] | None],
+    Awaitable[_McpHandlerResult],
+]
 
 
 _DISPATCH: dict[str, _McpHandler] = {}
@@ -167,7 +171,10 @@ class McpInvalidParamsError(Exception):
 # ---------------------------------------------------------------------------
 
 
-async def _initialize(params: dict[str, Any] | None) -> InitializeResponse:
+async def _initialize(
+    _operator: Operator,
+    params: dict[str, Any] | None,
+) -> InitializeResponse:
     """Handle the ``initialize`` method per MCP 2025-06-18 §Initialization.
 
     Returns a server-info + capabilities envelope. The spec requires the
@@ -190,22 +197,26 @@ async def _initialize(params: dict[str, Any] | None) -> InitializeResponse:
             f"initialize: {exc.error_count()} validation error(s)",
         ) from exc
 
-    # T1 advertises an **empty** capabilities envelope. Advertising
-    # ``tools`` / ``resources`` here ahead of T3 (#248) registering the
-    # corresponding methods would tell a spec-conforming client it can
-    # call ``tools/list`` (and friends) — which would then ``-32601``
-    # and may disconnect the client per the MCP 2025-06-18 §Capability
-    # Negotiation contract ("Only use capabilities that were
-    # successfully negotiated"). T3 flips the ``tools`` / ``resources``
-    # capability envelopes back on once the dispatch table can honor
-    # the negotiated methods.
+    # T3 (#248) registers tools/list, tools/call, resources/list,
+    # resources/templates/list, resources/read — so the capabilities
+    # envelope now safely advertises both surfaces. ``listChanged: false``
+    # because v0.2 doesn't emit notifications/tools/list_changed
+    # (registry is populated at startup and never mutates at runtime).
+    # ``subscribe: false`` on resources because v0.2 doesn't implement
+    # resources/subscribe.
     return InitializeResponse(
-        capabilities=ServerCapabilities(),
+        capabilities=ServerCapabilities(
+            tools={"listChanged": False},
+            resources={"listChanged": False, "subscribe": False},
+        ),
         serverInfo={"name": _SERVER_NAME, "version": __version__},
     )
 
 
-async def _ping(_params: dict[str, Any] | None) -> dict[str, Any]:
+async def _ping(
+    _operator: Operator,
+    _params: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Handle the ``ping`` utility method.
 
     Defined in MCP 2025-06-18 §Utilities/Ping as the canonical liveness
@@ -216,7 +227,10 @@ async def _ping(_params: dict[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
-async def _initialized_notification(_params: dict[str, Any] | None) -> None:
+async def _initialized_notification(
+    _operator: Operator,
+    _params: dict[str, Any] | None,
+) -> None:
     """Acknowledge ``notifications/initialized`` — no response body.
 
     The MCP lifecycle requires the client to send this notification
@@ -433,6 +447,7 @@ def _build_success_response(
 async def _dispatch_to_handler(
     jrpc: JsonRpcRequest,
     is_notification: bool,
+    operator: Operator,
 ) -> Response:
     """Look up and run the handler; map handler outcomes to wire responses.
 
@@ -467,7 +482,7 @@ async def _dispatch_to_handler(
         )
 
     try:
-        result = await handler(jrpc.params)
+        result = await handler(operator, jrpc.params)
     except McpInvalidParamsError as exc:
         if is_notification:
             _log.warning(
@@ -536,10 +551,11 @@ async def mcp_dispatch(
     fallback when the server does not implement the GET-opens-SSE
     branch of the Streamable HTTP transport.
     """
-    # ``operator`` is unused beyond the dependency-injection side
-    # effects (JWT validation + contextvar binding). Downstream Tasks
-    # (T3 RBAC filter, T4 reference tool, T5 audit) will read it.
-    del operator
+    # ``operator`` flows through to handlers — T3 registry handlers
+    # use it for RBAC filtering on tools/list / resources/templates/list
+    # and for the call-time role re-check on tools/call / resources/read.
+    # Built-in lifecycle handlers (initialize, ping, notifications/
+    # initialized) accept the parameter but don't read it.
     raw_body = await request.body()
     parsed = _parse_request_body(raw_body)
     if isinstance(parsed, JSONResponse):
@@ -568,4 +584,4 @@ async def mcp_dispatch(
     # are spec-defined as notification-only, so the server treats it
     # as such regardless of the envelope's id field.
     is_notification = "id" not in payload or jrpc.method.startswith("notifications/")
-    return await _dispatch_to_handler(jrpc, is_notification)
+    return await _dispatch_to_handler(jrpc, is_notification, operator)

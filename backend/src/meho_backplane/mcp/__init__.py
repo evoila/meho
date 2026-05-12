@@ -9,9 +9,27 @@ Hosted servers use the Streamable HTTP transport (POST to a single MCP
 endpoint with JSON-RPC 2.0 envelopes); stdio is for local-subprocess
 servers and is explicitly out of scope for MEHO.
 
-T1 (#246) shipped the **transport + dispatch skeleton**; T2 (this
-Task #247) layers the **OAuth 2.1 resource-server** chain on top.
-Together they expose:
+* T1 (#246) shipped the **transport + dispatch skeleton** — the
+  ``/mcp`` route, JSON-RPC envelope parsing, and the lifecycle
+  primitives (``initialize`` / ``ping`` / ``notifications/initialized``).
+* T2 (#247) layered the **OAuth 2.1 resource-server** chain on top —
+  Bearer-token validation against the MCP canonical URI per RFC 8707
+  §2, RFC 9728 ``WWW-Authenticate`` discovery header on 401s, and the
+  ``/.well-known/oauth-protected-resource`` metadata document (in
+  :mod:`meho_backplane.api.well_known`).
+* T3 (#248, this Task) layers the **tool + resource registries** on
+  top — :func:`register_mcp_tool` / :func:`register_mcp_resource`,
+  the five JSON-RPC methods (``tools/list``, ``tools/call``,
+  ``resources/list``, ``resources/templates/list``, ``resources/read``),
+  RBAC filtering by :class:`~meho_backplane.auth.operator.TenantRole`,
+  ``jsonschema``-based ``inputSchema`` validation, and the
+  :func:`eager_import_mcp_modules` startup hook that auto-discovers
+  every module under ``mcp/tools/`` and ``mcp/resources/``. T4 (#249)
+  populates the registries with the reference ``meho.status`` tool and
+  ``meho://tenant/{tenant_id}/info`` resource.
+
+Public surface
+==============
 
 * :data:`~meho_backplane.mcp.server.router` — FastAPI ``APIRouter``
   mounted at ``/mcp`` by :mod:`meho_backplane.main`. Accepts JSON-RPC
@@ -20,51 +38,66 @@ Together they expose:
   :func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind` before the
   body is parsed.
 * :func:`~meho_backplane.mcp.server.register_method` — module-level
-  dispatch registration mirroring the
-  :func:`~meho_backplane.health.register_probe` pattern. T3 (#248) layers
-  the tool / resource registries on top of this.
-* Built-in handlers for the lifecycle primitives the spec defines as
-  universal — ``initialize``, ``notifications/initialized``, and
-  ``ping``.
+  JSON-RPC method registration; primarily used internally by T1's
+  lifecycle handlers and T3's :mod:`~meho_backplane.mcp.handlers`.
+* :func:`register_mcp_tool` / :func:`register_mcp_resource` — the
+  registries every G3-G9 verb registers against. Tool / resource
+  modules under ``mcp/tools/`` and ``mcp/resources/`` call these at
+  their module top, then :func:`eager_import_mcp_modules` discovers
+  them at FastAPI lifespan startup.
+* :class:`ToolDefinition` / :class:`ResourceTemplateDefinition` —
+  Pydantic v2 frozen models for the registry entries; ``required_role``
+  is the RBAC gate, ``op_class`` is the audit-classification hint T5
+  (#250) will consume.
 * :func:`~meho_backplane.mcp.auth.verify_mcp_jwt` /
   :func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind` — the OAuth-RS
   dependency that validates the Bearer token against the chassis JWKS
-  and the **MCP canonical URI** (RFC 8707 §2 audience binding). On 401
-  it attaches the RFC 9728 §5.1 ``WWW-Authenticate: Bearer
-  resource_metadata=...`` header so spec-conforming clients can
-  discover the metadata document. The chassis HTTP API keeps its own
-  audience (``KEYCLOAK_AUDIENCE``) so a token issued for one surface
-  is never replayable on the other.
+  and the **MCP canonical URI**. On 401 it attaches the RFC 9728 §5.1
+  ``WWW-Authenticate: Bearer resource_metadata=...`` header.
 * :func:`~meho_backplane.mcp.auth.mcp_resource_uri` /
-  :func:`~meho_backplane.mcp.auth.www_authenticate_header` — helpers
-  that resolve the canonical URI from ``MCP_RESOURCE_URI`` /
-  ``BACKPLANE_URL`` and build the discovery-header value. Re-exported
-  so T3 / T6 can reuse them without reaching into the auth module.
+  :func:`~meho_backplane.mcp.auth.www_authenticate_header` — URI / header
+  builders for the OAuth-RS chain.
 
-The unauthenticated metadata document at
-``/.well-known/oauth-protected-resource`` lives in
-:mod:`meho_backplane.api.well_known`. That router is what an MCP client
-fetches *before* it has a token, to discover the authorisation server.
-
-**Out of scope for T2** (deferred to a later transport-hardening
-task): Origin-header validation per the MCP transport DNS-rebinding
-warning, content-type 415 strict enforcement, and request-body size
-caps. These need ``MCP_ALLOWED_ORIGINS`` / size-cap settings that
-haven't been added yet; bundling them with T2 would over-scope the
-OAuth-RS work.
+**Out of scope for T3** (will be picked up by later tasks): MCP-specific
+audit integration on ``tools/call`` / ``resources/read`` (T5, #250) and
+MCP Inspector acceptance test + cross-repo docs (T6, #251). Origin-header
+validation per the MCP transport DNS-rebinding warning and request-body
+size caps remain deferred to a transport-hardening fast-follow.
 """
 
+# Importing `handlers` runs the side-effect registration of the five T3
+# JSON-RPC methods (tools/list, tools/call, resources/list,
+# resources/templates/list, resources/read) against the dispatcher in
+# `mcp/server.py`. Module access through `_handlers` keeps the import
+# explicit for ruff's F401 check.
+from meho_backplane.mcp import handlers as _handlers  # noqa: F401
 from meho_backplane.mcp.auth import (
     mcp_resource_uri,
     verify_mcp_jwt,
     verify_mcp_jwt_and_bind,
     www_authenticate_header,
 )
+from meho_backplane.mcp.registry import (
+    ResourceHandler,
+    ResourceTemplateDefinition,
+    ToolDefinition,
+    ToolHandler,
+    eager_import_mcp_modules,
+    register_mcp_resource,
+    register_mcp_tool,
+)
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method, router
 
 __all__ = [
     "McpInvalidParamsError",
+    "ResourceHandler",
+    "ResourceTemplateDefinition",
+    "ToolDefinition",
+    "ToolHandler",
+    "eager_import_mcp_modules",
     "mcp_resource_uri",
+    "register_mcp_resource",
+    "register_mcp_tool",
     "register_method",
     "router",
     "verify_mcp_jwt",

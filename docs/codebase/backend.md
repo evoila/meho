@@ -266,6 +266,45 @@ this stage it exposes:
   `operator_sub`) with a fail-closed MCP-specific audit path on
   `tools/call` + `resources/read`.
 
+* MCP tool + resource registries (Task #248, G0.5-T3) — the substrate
+  every G3–G9 verb registers against. `backend/src/meho_backplane/mcp/registry.py`
+  exposes `register_mcp_tool(definition, handler)` /
+  `register_mcp_resource(definition, handler)` (mirroring the
+  `register_probe` shape from `health.py`). Two parallel registries:
+  `ToolDefinition` (active — `tools/call` invokes the handler with the
+  operator + validated arguments) and `ResourceTemplateDefinition`
+  (passive — `resources/read` matches a concrete URI against the
+  registered RFC 6570 `{var}` templates and invokes the handler with
+  the bound variables). Both definitions carry `required_role` (one
+  of the three `TenantRole` values); the list methods filter against
+  the calling operator's role, and `tools/call` / `resources/read`
+  re-check at call time. MEHO-internal fields (`required_role`,
+  `op_class`) are stripped from the wire shape by `to_wire()`.
+  `backend/src/meho_backplane/mcp/handlers.py` wires five JSON-RPC
+  methods to the registries: `tools/list`, `tools/call`,
+  `resources/list`, `resources/templates/list`, `resources/read`.
+  Spec correctness note: the MCP 2025-06-18 spec separates concrete
+  resources (`resources/list`) from templated ones
+  (`resources/templates/list`); v0.2 ships only templates so
+  `resources/list` returns an empty list while
+  `resources/templates/list` carries the registry. `tools/call`
+  validates `arguments` against the tool's JSON Schema 2020-12
+  `inputSchema` via `jsonschema` (4.26+); a violation surfaces as
+  `INVALID_PARAMS` through `McpInvalidParamsError`.
+  `eager_import_mcp_modules()` (called from the FastAPI lifespan)
+  walks every module under `mcp/tools/` and `mcp/resources/` via
+  `pkgutil.iter_modules` so the side-effect-only registration calls
+  at the top of each module run before the first request arrives —
+  both subpackages are empty in T3 (T4 adds the first tool /
+  resource). The dispatcher's `_McpHandler` signature widened from
+  `(params)` to `(operator, params)` so registry handlers can apply
+  RBAC; built-in lifecycle handlers (initialize, ping,
+  notifications/initialized) take the operator but ignore it. The
+  initialize response now advertises non-empty `capabilities` again
+  (`tools={"listChanged": false}`, `resources={"listChanged": false,
+  "subscribe": false}`) — T1's empty-envelope stance was paired with
+  "no handlers registered"; T3 flips them back.
+
 * MCP OAuth 2.1 resource-server protection (Task #247, G0.5-T2) —
   layers spec-conforming auth on top of the T1 dispatcher.
   `backend/src/meho_backplane/mcp/auth.py` houses the

@@ -44,6 +44,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from sqlalchemy import create_engine as sa_create_engine
@@ -53,6 +54,9 @@ from sqlalchemy import select
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, Tenant
 from meho_backplane.settings import get_settings
+
+if TYPE_CHECKING:
+    from alembic.config import Config
 
 
 @pytest.fixture(autouse=True)
@@ -258,6 +262,45 @@ async def test_audit_log_round_trip_with_null_tenant_id() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _alembic_upgrade_against_fresh_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_filename: str,
+) -> tuple[str, Config]:
+    """Pin env, reset caches, run ``alembic upgrade head`` on fresh SQLite.
+
+    Shared setup for the two sync migration tests below — pinning
+    the env-var quartet (DATABASE_URL + the Keycloak/Vault knobs
+    that :class:`Settings` requires), clearing the settings + engine
+    caches, and bringing a per-test SQLite file to the current head.
+    Returns ``(sync_url, alembic_cfg)`` so callers can either
+    inspect the resulting schema or drive further migration ops
+    (e.g. a downgrade) from the same Alembic config object the
+    upgrade just ran against.
+
+    Kept inside the test module — single non-trivial helper, not
+    worth a separate ``conftest`` extension.
+    """
+    from alembic import command
+
+    from meho_backplane.db.migrations import alembic_config
+
+    db_path = tmp_path / db_filename
+    async_url = f"sqlite+aiosqlite:///{db_path}"
+    sync_url = f"sqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", async_url)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    reset_engine_for_testing()
+
+    cfg = alembic_config()
+    cfg.set_main_option("sqlalchemy.url", async_url)
+    command.upgrade(cfg, "head")
+    return sync_url, cfg
+
+
 def test_migration_installs_tenant_table_and_indexes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -277,23 +320,7 @@ def test_migration_installs_tenant_table_and_indexes(
     keeps the SQLite ``alembic upgrade head`` smoke in
     ``tests.test_db_engine`` synchronous.
     """
-    from alembic import command
-
-    from meho_backplane.db.migrations import alembic_config
-
-    db_path = tmp_path / "schema.db"
-    async_url = f"sqlite+aiosqlite:///{db_path}"
-    sync_url = f"sqlite:///{db_path}"
-    monkeypatch.setenv("DATABASE_URL", async_url)
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    get_settings.cache_clear()
-    reset_engine_for_testing()
-
-    cfg = alembic_config()
-    cfg.set_main_option("sqlalchemy.url", async_url)
-    command.upgrade(cfg, "head")
+    sync_url, _ = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "schema.db")
 
     sync_eng = sa_create_engine(sync_url)
     try:
@@ -340,23 +367,11 @@ def test_migration_upgrade_then_downgrade_is_reversible(
     """
     from alembic import command
 
-    from meho_backplane.db.migrations import alembic_config
-
-    db_path = tmp_path / "rev.db"
-    async_url = f"sqlite+aiosqlite:///{db_path}"
-    sync_url = f"sqlite:///{db_path}"
-    monkeypatch.setenv("DATABASE_URL", async_url)
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    get_settings.cache_clear()
-    reset_engine_for_testing()
-
-    cfg = alembic_config()
-    cfg.set_main_option("sqlalchemy.url", async_url)
-
     # Step 1 — upgrade to head (0002). Tenant + tenant_id present.
-    command.upgrade(cfg, "head")
+    # The helper handles env pinning, cache reset, and the initial
+    # upgrade; we keep ``command`` in scope for the downgrade /
+    # re-upgrade in steps 2-3 below.
+    sync_url, cfg = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "rev.db")
 
     sync_eng = sa_create_engine(sync_url)
     try:

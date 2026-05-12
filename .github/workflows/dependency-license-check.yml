@@ -77,20 +77,23 @@ jobs:
         # Multiple identifier forms covered because pip-licenses falls back
         # from PEP 639 License-Expression to Classifier to raw License field.
         #
-        # --ignore-packages py_rust_stemmers: the last holdout that
-        # pip-licenses 5.5.5 (with PEP 639 support) still reports
-        # UNKNOWN. py_rust_stemmers is fastembed's tokeniser; the
-        # crate's repo at github.com/Maxlinn/py-rust-stemmers carries
-        # an MIT licence file but ships no Python-package license
-        # metadata. MIT is already in the allowlist below; the
-        # package is widely vetted via fastembed; skipping the
-        # line-item check for it is safer than broadening the
-        # allowlist to include UNKNOWN. Remove this exception when
-        # py_rust_stemmers ships license metadata upstream.
-        # ``--ignore-packages`` accepts ``nargs=*`` (space-separated),
-        # NOT a semicolon-joined string.
+        # --ignore-packages "py_rust_stemmers fastembed": two
+        # holdouts even with pip-licenses 5.5.5's PEP 639 support.
+        # py_rust_stemmers (fastembed's tokeniser) ships no license
+        # metadata at all — the crate is MIT in its repo
+        # (github.com/Maxlinn/py-rust-stemmers). fastembed itself
+        # reports its license as "Other/Proprietary License" in PyPI
+        # metadata even though the upstream source
+        # (github.com/qdrant/fastembed) is Apache-2.0 — a packaging
+        # bug, not a real licensing issue. Both packages are widely
+        # vetted via the rest of the retrieval substrate. MIT and
+        # Apache-2.0 are already in the allowlist below; skipping
+        # these two line-items is safer than broadening to UNKNOWN /
+        # Other/Proprietary. Remove either entry when upstream
+        # license metadata is corrected. ``--ignore-packages`` accepts
+        # ``nargs=*`` (space-separated), NOT a semicolon-joined string.
         run: >
-          pip-licenses --format=plain --ignore-packages py_rust_stemmers --allow-only="
+          pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed --allow-only="
           Apache Software License;
           Apache-2.0;
           Apache 2.0;

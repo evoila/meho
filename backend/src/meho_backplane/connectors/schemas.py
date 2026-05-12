@@ -3,17 +3,20 @@
 
 """Connector result models and the per-target identity-model enum.
 
-All models are frozen (immutable after construction) via
-:class:`pydantic.ConfigDict`. See v0.1-spec §"Versioned connectors + targets"
-L267-292 (fingerprint shape) and §"Per-target identity model" L447-454
-(AuthModel).
+All models use ``ConfigDict(frozen=True)`` — field reassignment is blocked at
+runtime. The ``extras`` field is wrapped in :class:`types.MappingProxyType` on
+construction, so in-place mutation also raises :exc:`TypeError`. See v0.1-spec
+§"Versioned connectors + targets" L267-292 (fingerprint shape) and §"Per-target
+identity model" L447-454 (AuthModel).
 """
 
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 __all__ = [
     "AuthModel",
@@ -44,7 +47,16 @@ class FingerprintResult(BaseModel):
     reachable: bool
     probed_at: datetime
     probe_method: str
-    extras: dict[str, Any] = Field(default_factory=dict)
+    extras: Mapping[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _freeze_extras(self) -> "FingerprintResult":
+        object.__setattr__(self, "extras", MappingProxyType(dict(self.extras)))
+        return self
+
+    @field_serializer("extras")
+    def _serialize_extras(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)
 
 
 class ProbeResult(BaseModel):
@@ -68,4 +80,13 @@ class OperationResult(BaseModel):
     result: dict[str, Any] | list[Any] | None = None
     error: str | None = None
     duration_ms: float
-    extras: dict[str, Any] = Field(default_factory=dict)
+    extras: Mapping[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _freeze_extras(self) -> "OperationResult":
+        object.__setattr__(self, "extras", MappingProxyType(dict(self.extras)))
+        return self
+
+    @field_serializer("extras")
+    def _serialize_extras(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)

@@ -11,8 +11,9 @@ Coverage matrix (per Task #240 acceptance criteria):
 * A concrete subclass that implements all three methods can be instantiated.
 * Schema round-trip: ``model_dump()`` → ``model_validate()`` is lossless for
   each model.
-* All three models are frozen: mutation after construction raises
-  :exc:`pydantic.ValidationError`.
+* All three models are frozen: field reassignment raises
+  :exc:`pydantic.ValidationError`; ``extras`` in-place mutation raises
+  :exc:`TypeError` (deep immutability via :class:`types.MappingProxyType`).
 * :class:`AuthModel` accepts all three canonical string values and rejects
   unknown values with :exc:`ValueError`.
 """
@@ -180,13 +181,19 @@ def test_fingerprint_result_optional_fields_default() -> None:
     assert fr.version is None
     assert fr.build is None
     assert fr.edition is None
-    assert fr.extras == {}
+    assert dict(fr.extras) == {}
 
 
 def test_fingerprint_result_is_frozen() -> None:
     fr = FingerprintResult(**_fingerprint_kwargs())
     with pytest.raises(ValidationError):
         fr.vendor = "mutated"  # type: ignore[misc]
+
+
+def test_fingerprint_result_extras_is_deeply_immutable() -> None:
+    fr = FingerprintResult(**_fingerprint_kwargs())
+    with pytest.raises(TypeError):
+        fr.extras["new_key"] = "value"  # type: ignore[index]
 
 
 # ---------------------------------------------------------------------------
@@ -235,13 +242,19 @@ def test_operation_result_round_trip() -> None:
 def test_operation_result_optional_fields_default() -> None:
     op = OperationResult(status="error", op_id="vault.kv.read", error="denied", duration_ms=3.1)
     assert op.result is None
-    assert op.extras == {}
+    assert dict(op.extras) == {}
 
 
 def test_operation_result_is_frozen() -> None:
     op = OperationResult(status="ok", op_id="bind9.zone.list", duration_ms=9.0)
     with pytest.raises(ValidationError):
         op.status = "mutated"  # type: ignore[misc]
+
+
+def test_operation_result_extras_is_deeply_immutable() -> None:
+    op = OperationResult(status="ok", op_id="vsphere.vm.list", duration_ms=1.0, extras={"k": "v"})
+    with pytest.raises(TypeError):
+        op.extras["new_key"] = "value"  # type: ignore[index]
 
 
 def test_operation_result_result_can_be_list() -> None:

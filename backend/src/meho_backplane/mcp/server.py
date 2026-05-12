@@ -167,6 +167,12 @@ async def _initialize(params: dict[str, Any] | None) -> InitializeResponse:
     Negotiation past v0.2 (e.g. supporting an older revision for
     legacy clients) is a v0.3 concern.
     """
+    # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
+    # aligned: a missing ``params`` field on the JSON-RPC request and an
+    # explicit empty params object are both equivalent to "no required
+    # fields supplied" for our purposes — :class:`InitializeRequest`'s
+    # validator will then surface a clean INVALID_PARAMS for the
+    # required-but-missing ``protocolVersion``.
     try:
         InitializeRequest.model_validate(params or {})
     except ValidationError as exc:

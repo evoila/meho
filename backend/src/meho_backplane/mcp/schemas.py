@@ -59,8 +59,14 @@ PROTOCOL_VERSION: str = "2025-06-18"
 
 #: A JSON-RPC 2.0 id is "a String, Number, or NULL value if included"
 #: (spec §4.1). A request *without* an id is a notification (§4.1.2);
-#: the absent / explicit-null distinction is normatively discouraged on
-#: the request side, so this server treats both as the same shape.
+#: the dispatcher honors the absent / explicit-null distinction by
+#: inspecting the raw payload dict (``"id" not in payload``) — absent
+#: ids fall into the notification path (HTTP 202, no response body),
+#: while ``"id": null`` is treated as a discouraged-but-valid request
+#: with a null id (the response echoes ``id: null`` per spec §5). On
+#: the response side ``bool`` is rejected explicitly because ``bool``
+#: subclasses ``int``; see
+#: :meth:`JsonRpcRequest._reject_bool_id` for the validator.
 JsonRpcId = int | str | None
 
 

@@ -49,6 +49,14 @@ const (
 	// server side" failure mode without falling back to the generic
 	// exit 1.
 	ExitUnexpected = 4
+	// ExitInsufficientRole indicates the backplane refused the
+	// request on RBAC grounds (HTTP 403). The operator authenticated
+	// successfully but their tenant role is below the minimum the
+	// endpoint requires — `meho status --watch` against the SSE
+	// feed needs operator role, read_only is rejected. Distinct
+	// from auth_expired because `meho login` won't fix it; the
+	// remedy is a tenant-admin role grant.
+	ExitInsufficientRole = 5
 )
 
 // Error codes (the "error" field in the JSON error envelope). The
@@ -66,6 +74,11 @@ const (
 	// ErrCodeUnexpected pairs with ExitUnexpected. The backplane
 	// answered but the response shape was outside the contract.
 	ErrCodeUnexpected = "unexpected_response"
+	// ErrCodeInsufficientRole pairs with ExitInsufficientRole. The
+	// operator is authenticated but their tenant role is below the
+	// endpoint's minimum (HTTP 403). Remedy: tenant-admin role
+	// grant, not a re-login.
+	ErrCodeInsufficientRole = "insufficient_role"
 )
 
 // StructuredError is the error shape produced by every meho
@@ -153,6 +166,18 @@ func Unexpected(detail string) *StructuredError {
 		Code:   ErrCodeUnexpected,
 		Detail: detail,
 		Exit:   ExitUnexpected,
+	}
+}
+
+// InsufficientRole builds the canonical insufficient_role
+// StructuredError for HTTP 403 responses. Detail should name the
+// minimum required role so the operator can ask the right person
+// for the grant.
+func InsufficientRole(detail string) *StructuredError {
+	return &StructuredError{
+		Code:   ErrCodeInsufficientRole,
+		Detail: detail,
+		Exit:   ExitInsufficientRole,
 	}
 }
 

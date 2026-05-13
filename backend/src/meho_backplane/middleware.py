@@ -270,5 +270,6 @@ async def verify_jwt_and_bind(
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
+        target_id=None,  # slot; resolve_target mutates on success (G0.3-T4)
     )
     return operator

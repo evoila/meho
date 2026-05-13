@@ -133,6 +133,46 @@ def _coerce_request_id(raw: object) -> uuid.UUID | None:
         return None
 
 
+#: Prefix routes use to namespace contextvar keys that should land in
+#: the ``audit_log.payload`` JSON. A route binds e.g.
+#: ``structlog.contextvars.bind_contextvars(audit_query_hash="…")``
+#: before yielding the response; :func:`_resolve_audit_payload` reads
+#: every ``audit_*`` contextvar at audit-write time, strips the
+#: prefix, and merges the result into the payload dict. Routes that
+#: bind nothing get the empty-payload behaviour today's audit_log
+#: rows carry -- no opt-in cost for the chassis-era surfaces.
+#:
+#: The prefix discipline is what keeps the contextvar namespace from
+#: colliding with the load-bearing ``operator_sub`` / ``tenant_id`` /
+#: ``request_id`` keys that the audit middleware itself reads, and
+#: lets a grep for ``audit_`` surface every route that enriches the
+#: payload.
+_AUDIT_PAYLOAD_PREFIX: Final[str] = "audit_"
+
+
+def _resolve_audit_payload() -> dict[str, Any]:
+    """Build the audit payload from ``audit_*`` contextvars.
+
+    Reads every key in the current structlog contextvar context whose
+    name starts with :data:`_AUDIT_PAYLOAD_PREFIX`, strips the prefix,
+    and returns the result as a fresh dict. ``None`` values are
+    dropped so a route can ``bind_contextvars(audit_kind=None)``
+    without writing a ``"kind": null`` entry. Empty dict when no
+    routes bound anything (the chassis-era default).
+    """
+    contextvars = structlog.contextvars.get_contextvars()
+    payload: dict[str, Any] = {}
+    for key, value in contextvars.items():
+        if not key.startswith(_AUDIT_PAYLOAD_PREFIX):
+            continue
+        if value is None:
+            continue
+        stripped = key[len(_AUDIT_PAYLOAD_PREFIX) :]
+        if stripped:
+            payload[stripped] = value
+    return payload
+
+
 async def _write_audit_row(
     *,
     operator_sub: str,
@@ -149,7 +189,16 @@ async def _write_audit_row(
     site stays focused on response-buffering control flow. Exceptions
     propagate to the caller, which converts them into the fail-closed
     500 path.
+
+    Reads the payload via :func:`_resolve_audit_payload` so routes
+    that bound ``audit_*`` contextvars (G0.4-T5 #262 binds
+    ``audit_query_hash`` / ``audit_source`` / ``audit_kind`` /
+    ``audit_hit_count`` on ``POST /api/v1/retrieve``) get their
+    enrichment without per-route audit code. Routes that bind nothing
+    fall back to the empty-dict behaviour every chassis-era surface
+    relies on.
     """
+    payload = _resolve_audit_payload()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = AuditLog(
@@ -162,7 +211,7 @@ async def _write_audit_row(
             status_code=status_code,
             request_id=request_id,
             duration_ms=Decimal(str(duration_ms)),
-            payload={},
+            payload=payload,
         )
         session.add(row)
         await session.commit()

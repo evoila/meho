@@ -76,10 +76,17 @@ Disconnect handling
 
 Client disconnect propagates as :class:`asyncio.CancelledError` into
 the generator (Starlette cancels the request task on
-``http.disconnect``). The ``except`` arm returns cleanly without
-re-raising so the audit row at session end records the normal exit
-rather than a synthetic 500 — and Valkey's BLOCKing XREAD releases
-the connection from the pool the next event-loop tick.
+``http.disconnect``). The ``except`` arm logs the structured
+``feed_subscriber_disconnected`` event for operator triage, then
+re-raises so the cancellation unwinds the task tree per asyncio's
+contract (Sonar S7497; Python 3.13+ asyncio re-issues cancellation
+if it goes unpropagated). The audit row at session end still records
+a clean 200 close because ``http.response.start`` was sent on the
+first yield — before any cancellation point — so
+:class:`~meho_backplane.audit.AuditMiddleware`'s buffered
+``status_code`` is already locked at 200 by the time the cancellation
+propagates. Valkey's BLOCKing XREAD releases the connection from the
+pool the next event-loop tick.
 
 References
 ----------
@@ -326,14 +333,32 @@ async def _feed_generator(
                 # feed), so ``entries[0][1]`` is the list of
                 # ``(entry_id, fields_dict)`` tuples.
                 _key, items = entries[0]
-                for entry_id, frame in _process_entries(
+                if items:
+                    # Advance the cursor past EVERY consumed entry,
+                    # not only the ones that survive the filter. The
+                    # M2 refactor moved skip-paths (filter mismatch,
+                    # malformed JSON, unknown field shape) inside
+                    # ``_process_entries``; the helper consumes those
+                    # entries without yielding, so a ``cursor =
+                    # entry_id`` placed inside the post-helper
+                    # ``for ... yield`` loop never advances past them.
+                    # Under explicit-cursor replay (``since=<id>`` or
+                    # ``Last-Event-Id``) a tenant where every entry is
+                    # filtered out would otherwise re-read the same
+                    # batch forever: XREAD with cursor=id_N returns
+                    # IDs > id_N, helper drops them, cursor stays at
+                    # id_N, next XREAD returns the same set. Set the
+                    # cursor here, BEFORE the yield loop, so the next
+                    # XREAD reads strictly past this batch regardless
+                    # of whether anything yielded out the other side.
+                    cursor = items[-1][0]
+                for _entry_id, frame in _process_entries(
                     items,
                     op_class=op_class,
                     principal=principal,
                     target=target,
                     stream_key=stream_key,
                 ):
-                    cursor = entry_id
                     yield frame
                     emitted_any = True
             if emitted_any:

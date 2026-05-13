@@ -460,6 +460,87 @@ class TestFeedGenerator:
         assert len(frames) == 1
         assert frames[0] == ": heartbeat\n\n"
 
+    async def test_cursor_advances_past_filtered_entries(
+        self,
+        _feed_env: None,
+    ) -> None:
+        """Filtered entries advance the XREAD cursor so the next BLOCK reads past them.
+
+        The bug class this test pins: ``_process_entries`` consumes
+        filtered-out / malformed / unknown-field-shape entries
+        internally without yielding. A naive ``cursor = entry_id``
+        placed inside the main loop's post-helper ``for ... yield``
+        would never observe those entries, leaving the cursor pinned
+        at the previous value. Under explicit-cursor replay
+        (``since=<id>`` or ``Last-Event-Id``) on a busy-but-filtered
+        tenant, the next XREAD would re-read the same batch
+        indefinitely.
+
+        Post-fix contract: the cursor advances to ``items[-1][0]`` for
+        every consumed batch BEFORE the yield loop. The second XREAD
+        call must therefore start *past* the first batch's last entry,
+        not at the original subscriber cursor.
+        """
+        # First batch: two writes (subscriber filters for reads).
+        # Second batch: one read.
+        write_a = _make_event(op_class="write", op_id="vsphere.vm.create")
+        write_b = _make_event(op_class="write", op_id="vsphere.vm.delete")
+        read_c = _make_event(op_class="read", op_id="vsphere.vm.list")
+        broadcast_client = get_broadcast_client()
+        seen_cursors: list[str] = []
+
+        async def _xread_side_effect(
+            streams: dict[str, str],
+            **_kwargs: object,
+        ) -> object:
+            cursor_value = next(iter(streams.values()))
+            seen_cursors.append(cursor_value)
+            if len(seen_cursors) == 1:
+                return [
+                    (
+                        "meho:feed:<irrelevant>",
+                        [
+                            ("1715600000001-0", {"event": write_a.model_dump_json()}),
+                            ("1715600000002-0", {"event": write_b.model_dump_json()}),
+                        ],
+                    ),
+                ]
+            if len(seen_cursors) == 2:
+                return [
+                    (
+                        "meho:feed:<irrelevant>",
+                        [("1715600000003-0", {"event": read_c.model_dump_json()})],
+                    ),
+                ]
+            await asyncio.sleep(0.01)
+            return None
+
+        mock = AsyncMock(side_effect=_xread_side_effect)
+        with patch.object(broadcast_client, "xread", new=mock):
+            gen = _feed_generator(
+                operator=_make_operator(),
+                cursor="1715600000000-0",
+                op_class="read",
+                principal=None,
+                target=None,
+            )
+            frames = await _collect_n_frames(gen, n=1)
+
+        # The yielded frame is the read event from the SECOND batch —
+        # the writes in batch one filtered out and produced no
+        # outbound frames.
+        assert len(frames) == 1
+        assert "id: 1715600000003-0" in frames[0]
+
+        # Load-bearing assertion: the second XREAD call's cursor is
+        # the LAST entry id of batch one, NOT the original
+        # subscriber cursor. Without the iter-2 B1 fix, the second
+        # call would resend ``1715600000000-0`` and Valkey would
+        # re-return the filtered writes forever.
+        assert len(seen_cursors) >= 2
+        assert seen_cursors[0] == "1715600000000-0"
+        assert seen_cursors[1] == "1715600000002-0"
+
     async def test_cursor_passes_through_to_xread(self, _feed_env: None) -> None:
         """The cursor argument (already resolved by the handler) is what xread sees."""
         broadcast_client = get_broadcast_client()

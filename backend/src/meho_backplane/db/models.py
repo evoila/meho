@@ -82,7 +82,7 @@ Schema decisions for :class:`AuditLog`:
   always writes ``{}``; v0.2 may capture per-route structured data.
   The column is the forward-compat escape hatch for payload
   evolution without DDL changes.
-* ``target_id`` — UUID, nullable. Added by migration ``0003``; the
+* ``target_id`` — UUID, nullable. Added by migration ``0004``; the
   G0.3 CRUD layer writes the value when a request operates on a
   specific target. Generic requests (health, policy listing) leave
   it NULL. No FK to ``targets.id`` in v0.2 by the same soft-FK
@@ -101,7 +101,7 @@ Indexes on :class:`AuditLog`:
   ``rdc-internal``") hit the index. Added by migration ``0002``;
   G0.1 sibling tasks T2/T3 wire the column writes.
 * ``audit_log_target_id_idx`` — b-tree on ``target_id`` so
-  per-target audit queries hit the index. Added by migration ``0003``.
+  per-target audit queries hit the index. Added by migration ``0004``.
 
 Schema decisions for :class:`Target`:
 
@@ -179,7 +179,6 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
-    UniqueConstraint,
     Uuid,
 )
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
@@ -334,7 +333,7 @@ class AuditLog(Base):
     # target (health checks, policy listings) leave this NULL. The G0.3
     # CRUD layer writes the value when a request targets a specific
     # endpoint. No FK to ``targets.id`` in v0.2; same soft-FK discipline
-    # as ``tenant_id``. Added by migration ``0003``.
+    # as ``tenant_id``. Added by migration ``0004``.
     target_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(),
         nullable=True,
@@ -635,11 +634,13 @@ class Target(Base):
         nullable=False,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    # Nullable — NULL means no aliases. TEXT[] on PG, JSON array on SQLite.
-    aliases: Mapped[list[str] | None] = mapped_column(
+    # NOT NULL; empty list means no aliases. TEXT[] on PG, JSON array on SQLite.
+    # Using [] (never NULL) avoids NULL vs empty ambiguity and simplifies
+    # = ANY(aliases) queries on PG.
+    aliases: Mapped[list[str]] = mapped_column(
         _PORTABLE_ARRAY,
-        nullable=True,
-        default=None,
+        nullable=False,
+        default=list,
     )
     product: Mapped[str] = mapped_column(Text, nullable=False)
     host: Mapped[str] = mapped_column(Text, nullable=False)
@@ -674,7 +675,16 @@ class Target(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "name", name="targets_tenant_name_idx"),
+        # Unique index matches migration op.create_index(..., unique=True).
+        # Using Index rather than UniqueConstraint avoids Alembic autogenerate
+        # drift (autogenerate sees constraint vs index as different objects).
+        Index(
+            "targets_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
         Index(
             "targets_tenant_product_idx",
             "tenant_id",
@@ -685,5 +695,9 @@ class Target(Base):
             "targets_aliases_gin_idx",
             "aliases",
             postgresql_using="gin",
+        ),
+        sa.CheckConstraint(
+            "auth_model IN ('impersonation', 'shared_service_account', 'per_user')",
+            name="ck_targets_auth_model",
         ),
     )

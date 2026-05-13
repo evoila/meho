@@ -124,9 +124,14 @@ def upgrade() -> None:
         # era rows), every target row belongs to exactly one tenant.
         sa.Column("tenant_id", sa.Uuid(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
-        # ``aliases`` — nullable; stores as TEXT[] on PG (GIN-indexable)
-        # and as a JSON array on SQLite (dev/test path).
-        sa.Column("aliases", aliases_type, nullable=True),
+        # ``aliases`` — NOT NULL, empty array default. TEXT[] on PG,
+        # JSON array on SQLite. Never NULL: [] means "no aliases".
+        sa.Column(
+            "aliases",
+            aliases_type,
+            nullable=False,
+            server_default=(sa.text("'{}'::text[]") if is_postgres else sa.text("'[]'")),
+        ),
         sa.Column("product", sa.Text(), nullable=False),
         sa.Column("host", sa.Text(), nullable=False),
         sa.Column("port", sa.Integer(), nullable=True),
@@ -162,6 +167,12 @@ def upgrade() -> None:
             sa.DateTime(timezone=True),
             nullable=False,
             server_default=sa.text("now()") if is_postgres else None,
+        ),
+        # CHECK constraint ensuring only known AuthModel values can be stored.
+        # Extend the IN(...) list when AuthModel gains new enum members.
+        sa.CheckConstraint(
+            "auth_model IN ('impersonation', 'shared_service_account', 'per_user')",
+            name="ck_targets_auth_model",
         ),
     )
 

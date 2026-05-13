@@ -49,7 +49,6 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 from sqlalchemy import create_engine as sa_create_engine
@@ -59,9 +58,6 @@ from sqlalchemy import select
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import AuditLog, Target
 from meho_backplane.settings import get_settings
-
-if TYPE_CHECKING:
-    pass
 
 
 @pytest.fixture(autouse=True)
@@ -151,10 +147,11 @@ async def test_target_round_trip_persists_every_field() -> None:
 async def test_target_round_trip_with_nullable_fields_omitted() -> None:
     """Insert a :class:`Target` with only required fields, verify ORM defaults fire.
 
-    Proves that ``aliases=None``, ``port=None``, ``fqdn=None``,
-    ``secret_ref=None``, ``notes=None`` survive the round-trip as
-    NULL and that the ORM column defaults (``auth_model``,
-    ``vpn_required``, ``extras``) fill in without explicit values.
+    Proves that ``port=None``, ``fqdn=None``, ``secret_ref=None``,
+    ``notes=None`` survive the round-trip as NULL; ``aliases`` defaults
+    to ``[]`` (NOT NULL, empty-list default); and the ORM column defaults
+    (``auth_model``, ``vpn_required``, ``extras``) fill in without
+    explicit values.
     """
     sessionmaker = get_sessionmaker()
     target_id = uuid.uuid4()
@@ -177,7 +174,7 @@ async def test_target_round_trip_with_nullable_fields_omitted() -> None:
         row = result.scalar_one()
 
     assert row.id == target_id
-    assert row.aliases is None
+    assert row.aliases == []
     assert row.port is None
     assert row.fqdn is None
     assert row.secret_ref is None
@@ -365,12 +362,11 @@ async def test_audit_log_round_trip_with_null_target_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_target_aliases_null_round_trips() -> None:
-    """``aliases=None`` survives the ORM round-trip as NULL.
+async def test_target_aliases_empty_round_trips() -> None:
+    """``aliases`` defaults to ``[]`` when omitted; empty list survives round-trip.
 
-    Targets that have no secondary names must be insertable without
-    providing an empty list; NULL is the correct representation of
-    "no aliases" rather than ``[]``.
+    The column is NOT NULL with an empty-list default so there is no
+    NULL vs [] ambiguity and = ANY(aliases) queries on PG always work.
     """
     sessionmaker = get_sessionmaker()
     target_id = uuid.uuid4()
@@ -383,7 +379,6 @@ async def test_target_aliases_null_round_trips() -> None:
                 name="no-alias-target",
                 product="ssh",
                 host="10.0.0.3",
-                aliases=None,
             )
         )
         await session.commit()
@@ -392,7 +387,7 @@ async def test_target_aliases_null_round_trips() -> None:
         result = await session.execute(select(Target).where(Target.id == target_id))
         row = result.scalar_one()
 
-    assert row.aliases is None
+    assert row.aliases == []
 
 
 @pytest.mark.asyncio
@@ -551,13 +546,14 @@ def test_migration_upgrade_then_downgrade_is_reversible(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``alembic upgrade head`` → ``alembic downgrade 0002`` is a clean cycle.
+    """``alembic upgrade head`` → ``alembic downgrade 0003`` is a clean cycle.
 
     Proves that migration ``0004`` is fully reversible: after
-    downgrading to ``0002``, the ``targets`` table and the
-    ``audit_log.target_id`` column + index must be gone while the
-    v0.2 schema (``tenant`` table, ``audit_log.tenant_id``) remains
-    intact. Re-upgrading to head must restore everything cleanly.
+    downgrading by exactly one revision (back to 0003, the documents
+    migration), the ``targets`` table and ``audit_log.target_id`` column
+    + index must be gone while the rest of the schema (``tenant`` table,
+    ``audit_log.tenant_id``) remains intact. Re-upgrading to head must
+    restore everything cleanly.
     """
     from alembic import command
 
@@ -570,8 +566,8 @@ def test_migration_upgrade_then_downgrade_is_reversible(
             assert "targets" in inspector.get_table_names()
             assert "target_id" in {col["name"] for col in inspector.get_columns("audit_log")}
 
-        # Downgrade by exactly one revision (back to 0002).
-        command.downgrade(cfg, "0002")
+        # Downgrade by exactly one revision (back to 0003 — documents migration).
+        command.downgrade(cfg, "0003")
 
         with sync_eng.connect() as conn:
             inspector = sa_inspect(conn)
@@ -590,7 +586,7 @@ def test_migration_upgrade_then_downgrade_is_reversible(
             # v0.2 indexes must remain — downgrade only undoes what 0004 added.
             assert "audit_log_tenant_id_idx" in audit_indexes
 
-        # Re-upgrade — must be idempotent from 0002 back to head.
+        # Re-upgrade — must be idempotent from 0003 back to head.
         command.upgrade(cfg, "head")
         with sync_eng.connect() as conn:
             inspector = sa_inspect(conn)

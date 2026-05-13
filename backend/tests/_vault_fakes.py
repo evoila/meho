@@ -68,11 +68,14 @@ FAKE_VAULT_TOKEN: Final[str] = f"vault-fake-{secrets.token_hex(8)}"
 @dataclass
 class _FakeJWTAuth:
     login_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_login: Exception | None = None
     issued_token: str = FAKE_VAULT_TOKEN
-    parent: _FakeClient | None = None
+    parent: Any | None = None
 
     def jwt_login(self, role: str, jwt: str, path: str | None = None) -> dict[str, Any]:
         self.login_calls.append({"role": role, "jwt": jwt, "path": path})
+        if self.raise_on_login is not None:
+            raise self.raise_on_login
         if self.parent is not None:
             self.parent.token = self.issued_token
         return {"auth": {"client_token": self.issued_token}}
@@ -81,16 +84,13 @@ class _FakeJWTAuth:
 @dataclass
 class _FakeTokenAuth:
     revoke_calls: int = 0
+    raise_on_revoke: Exception | None = None
 
     def revoke_self(self, mount_point: str = "token") -> None:
-        # ``mount_point`` is part of the hvac call shape (production code
-        # passes it by keyword); the fake records the call without
-        # branching on the value. The explicit ``_ = mount_point`` rebind
-        # is the use-the-parameter pattern that defeats SonarCloud's
-        # python:S1172 unused-argument rule without forcing a rename
-        # (which would break the keyword call site).
         _ = mount_point
         self.revoke_calls += 1
+        if self.raise_on_revoke is not None:
+            raise self.raise_on_revoke
 
 
 @dataclass
@@ -128,16 +128,13 @@ class _FakeSecrets:
 @dataclass
 class _FakeSysBackend:
     payload: Any = None
+    raise_on_read: Exception | None = None
+    read_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
-        # ``method`` mirrors the hvac signature so production-shaped
-        # callers (``read_health_status(method='HEAD')``) work; the fake
-        # always returns the configured payload regardless of verb. The
-        # explicit ``_ = method`` rebind is the use-the-parameter
-        # pattern that defeats SonarCloud's python:S1172 unused-argument
-        # rule without forcing a rename (which would break the keyword
-        # call site).
-        _ = method
+        self.read_calls.append({"method": method})
+        if self.raise_on_read is not None:
+            raise self.raise_on_read
         return self.payload
 
 

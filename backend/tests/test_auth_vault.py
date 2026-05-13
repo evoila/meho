@@ -52,6 +52,8 @@ from meho_backplane.auth.vault import (
 )
 from meho_backplane.settings import get_settings
 
+from ._vault_fakes import _FakeAuth, _FakeJWTAuth, _FakeSysBackend, _FakeTokenAuth
+
 # ---------------------------------------------------------------------------
 # Test fixtures
 # ---------------------------------------------------------------------------
@@ -74,63 +76,6 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
-
-
-@dataclass
-class _FakeJWTAuth:
-    """Stand-in for ``client.auth.jwt`` exposing the one method we exercise."""
-
-    login_calls: list[dict[str, Any]] = field(default_factory=list)
-    raise_on_login: Exception | None = None
-    issued_token: str = "fake-vault-token"
-    parent: _FakeClient | None = None
-
-    def jwt_login(self, role: str, jwt: str, path: str | None = None) -> dict[str, Any]:
-        self.login_calls.append({"role": role, "jwt": jwt, "path": path})
-        if self.raise_on_login is not None:
-            raise self.raise_on_login
-        # hvac's real implementation also assigns the token onto the client
-        # when ``use_token=True`` (the default). The wrapper relies on
-        # that side effect for subsequent secret reads.
-        if self.parent is not None:
-            self.parent.token = self.issued_token
-        return {"auth": {"client_token": self.issued_token}}
-
-
-@dataclass
-class _FakeTokenAuth:
-    """Stand-in for ``client.auth.token`` covering ``revoke_self``."""
-
-    revoke_calls: int = 0
-    raise_on_revoke: Exception | None = None
-
-    def revoke_self(self, mount_point: str = "token") -> None:
-        self.revoke_calls += 1
-        if self.raise_on_revoke is not None:
-            raise self.raise_on_revoke
-
-
-@dataclass
-class _FakeAuth:
-    """Stand-in for ``client.auth`` aggregating jwt + token sub-namespaces."""
-
-    jwt: _FakeJWTAuth
-    token: _FakeTokenAuth
-
-
-@dataclass
-class _FakeSysBackend:
-    """Stand-in for ``client.sys`` covering ``read_health_status``."""
-
-    payload: Any = None
-    raise_on_read: Exception | None = None
-    read_calls: list[dict[str, Any]] = field(default_factory=list)
-
-    def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
-        self.read_calls.append({"method": method})
-        if self.raise_on_read is not None:
-            raise self.raise_on_read
-        return self.payload
 
 
 @dataclass
@@ -296,7 +241,7 @@ async def test_vault_client_for_operator_logs_in_and_yields_authenticated_client
         assert secret["data"]["data"] == {"username": "demo", "password": "s3cret"}
         # The fake captured the token in effect at call time — the
         # post-login one, not the pre-login None.
-        assert fake.secrets.kv.v2.last_token_seen == "fake-vault-token"
+        assert fake.secrets.kv.v2.last_token_seen == fake.auth.jwt.issued_token
 
     # Login was called with the configured role + mount path + raw jwt.
     assert fake.auth.jwt.login_calls == [

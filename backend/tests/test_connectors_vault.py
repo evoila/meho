@@ -53,6 +53,8 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
 from meho_backplane.settings import get_settings
 
+from ._vault_fakes import _FakeAuth, _FakeJWTAuth, _FakeSysBackend, _FakeTokenAuth
+
 # Shared fake for hvac's non-200 health response (standby / active-perf-standby).
 # Defined once here to avoid duplicating the class body in every test that needs it.
 
@@ -104,49 +106,6 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 # Vault fakes (shared seam: vault_module._build_client)
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class _FakeJWTAuth:
-    login_calls: list[dict[str, Any]] = field(default_factory=list)
-    raise_on_login: Exception | None = None
-    issued_token: str = "fake-vault-token"
-    parent: _FakeClient | None = None
-
-    def jwt_login(self, role: str, jwt: str, path: str | None = None) -> dict[str, Any]:
-        self.login_calls.append({"role": role, "jwt": jwt, "path": path})
-        if self.raise_on_login is not None:
-            raise self.raise_on_login
-        if self.parent is not None:
-            self.parent.token = self.issued_token
-        return {"auth": {"client_token": self.issued_token}}
-
-
-@dataclass
-class _FakeTokenAuth:
-    revoke_calls: int = 0
-
-    def revoke_self(self, mount_point: str = "token") -> None:
-        self.revoke_calls += 1
-
-
-@dataclass
-class _FakeAuth:
-    jwt: _FakeJWTAuth
-    token: _FakeTokenAuth
-
-
-@dataclass
-class _FakeSysBackend:
-    payload: Any = None
-    raise_on_read: Exception | None = None
-    read_calls: list[dict[str, Any]] = field(default_factory=list)
-
-    def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
-        self.read_calls.append({"method": method})
-        if self.raise_on_read is not None:
-            raise self.raise_on_read
-        return self.payload
 
 
 @dataclass

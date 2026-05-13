@@ -3,7 +3,7 @@
 
 """Tests for SshConnector adapter (G0.2-T4).
 
-Coverage matrix (per Task #243 acceptance criteria):
+Coverage matrix (per Task #243 acceptance criteria + review findings):
 
 * ``SshConnector`` class exists and is importable from the adapters package.
 * Abstract class cannot be instantiated directly (ABC enforcement).
@@ -11,10 +11,13 @@ Coverage matrix (per Task #243 acceptance criteria):
   commands against an in-process asyncssh server.
 * Per-target connection pool: same ``target.name`` reuses the same
   connection object; different names get distinct connections.
+* Idle TTL eviction: connection idle past ``_POOL_TTL_S`` is replaced on
+  next ``_connect`` call.
 * Key auth path: ``target.secret_ref`` with ``ssh_private_key`` uses the
   private key for authentication.
 * Password auth path: ``target.secret_ref`` with ``password`` (no
   ``ssh_private_key``) uses password authentication as fallback.
+* Missing credentials: ``_auth_config`` raises ``ValueError`` immediately.
 * Connection failure (wrong host / refused port) surfaces as a
   connect-time error from ``_connect``, not a command-time error.
 * Command timeout: ``_run_command(..., timeout=N)`` raises
@@ -27,6 +30,7 @@ Coverage matrix (per Task #243 acceptance criteria):
 from __future__ import annotations
 
 import asyncio
+import time
 import types
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -35,6 +39,7 @@ import asyncssh
 import pytest
 
 from meho_backplane.connectors.adapters import SshConnector
+from meho_backplane.connectors.adapters.ssh import _POOL_TTL_S
 from meho_backplane.connectors.adapters.ssh import SshConnector as _SshConnectorDirect
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
@@ -337,7 +342,7 @@ async def test_run_command_timeout_raises_asyncio_timeout_error() -> None:
         port=22,
         secret_ref={"username": "u", "password": "p"},
     )
-    conn._connections["timeout-target"] = mock_conn
+    conn._connections["timeout-target"] = (mock_conn, time.monotonic())
 
     with pytest.raises(asyncio.TimeoutError):
         await conn._run_command(target, "sleep 60", raw_jwt="jwt", timeout=0.05)
@@ -445,3 +450,41 @@ async def test_auth_config_defaults_username_to_root() -> None:
     cfg = await conn._auth_config(target)
 
     assert cfg["username"] == "root"
+
+
+@pytest.mark.asyncio
+async def test_auth_config_raises_when_no_credentials() -> None:
+    """_auth_config raises ValueError immediately when neither key nor password is present."""
+    conn = _ConcreteSshConnector()
+    target = types.SimpleNamespace(
+        name="no-creds",
+        host="h",
+        port=22,
+        secret_ref={"username": "alice"},
+    )
+
+    with pytest.raises(ValueError, match="ssh_private_key or password"):
+        await conn._auth_config(target)
+
+
+# ---------------------------------------------------------------------------
+# Idle TTL eviction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_idle_ttl_evicts_stale_connection(ssh_server: Any) -> None:
+    """Connection idle past _POOL_TTL_S is evicted and replaced on next _connect."""
+    conn = _ConcreteSshConnector()
+    target = _password_target(name="ttl-test", host=ssh_server.host, port=ssh_server.port)
+
+    ssh_first = await conn._connect(target, "jwt")
+
+    # Backdate last_used to simulate idle expiry.
+    conn._connections["ttl-test"] = (ssh_first, time.monotonic() - _POOL_TTL_S - 1.0)
+
+    ssh_second = await conn._connect(target, "jwt")
+
+    assert ssh_second is not ssh_first
+    assert not ssh_second.is_closed()
+    await conn.aclose()

@@ -145,8 +145,27 @@ this stage it exposes:
   the broadcast feed is the real-time view, the audit row is the
   record-of-truth, and Valkey unreachability never propagates as a
   request-path 5xx. Subscribers reading the stream get at-most-once
-  delivery; T4 SSE (#310), T5 CLI `--watch` (#311), and T6 MCP
-  resource (#312) all build on this single publisher.
+  delivery; T5 CLI `--watch` (#311) and T6 MCP resource (#312) build
+  on T4's SSE surface.
+* Broadcast SSE feed endpoint (G6.1-T4 #310) —
+  `src/meho_backplane/api/v1/feed.py` exposes
+  `GET /api/v1/feed` as a `text/event-stream` Server-Sent Events
+  endpoint. Subscribers issue `XREAD BLOCK 30000` against
+  `meho:feed:{operator.tenant_id}` (stream key derived from the
+  validated JWT — cross-tenant subscription is impossible by
+  construction), filter events post-stream by optional `op_class` /
+  `principal` / `target` query parameters, and emit SSE frames
+  `event: broadcast\ndata: <json>\nid: <entry-id>\n\n`. Replay is
+  driven by the SSE-standard `Last-Event-Id` header (preferred) or
+  the explicit `since` query parameter; default cursor is Valkey's
+  `$` anchor ("live-tail from now"). The generator emits a comment
+  heartbeat `: heartbeat\n\n` every 30s of inactivity to keep
+  intermediaries from idle-timing-out the connection. RBAC requires
+  `operator` role minimum; `read_only` operators get 403. Client
+  disconnect surfaces as `asyncio.CancelledError` and is swallowed
+  so the audit row at session end records a clean 200 close.
+  Subscribers (T5 CLI watch #311, T6 MCP resource #312, future
+  Slack mirror G6.2) consume the same SSE wire shape.
 * Persistence layer (Task #27) — `src/meho_backplane/db/` houses the
   SQLAlchemy 2.x async engine (`engine.py`), the per-request
   session-factory dependency (`get_session`), and the

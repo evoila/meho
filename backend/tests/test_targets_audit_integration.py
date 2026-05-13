@@ -20,7 +20,7 @@ Coverage matrix:
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,15 +29,11 @@ import pytest
 import respx
 import structlog
 from alembic import command
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from meho_backplane.api.v1.targets import router as targets_router
-from meho_backplane.audit import AuditMiddleware, _resolve_target_id
-from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.audit import _resolve_target_id
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
     create_engine_for_url,
@@ -48,14 +44,11 @@ from meho_backplane.db.engine import (
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.middleware import RequestContextMiddleware
-from meho_backplane.settings import get_settings
 from meho_backplane.targets.resolver import (
     TargetNotFoundError,
     resolve_target,
 )
 
-from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import (
     DEFAULT_TENANT_ID,
     make_rsa_keypair,
@@ -63,43 +56,18 @@ from ._oidc_jwt_helpers import (
     mock_discovery_and_jwks,
     public_jwks,
 )
-from ._oidc_jwt_helpers import ISSUER as _ISSUER
+from ._targets_helpers import (
+    _build_app,
+    _empty_connector_registry,  # noqa: F401
+    _isolated_jwks_cache,  # noqa: F401
+    _settings_env,  # noqa: F401
+)
 
 # ---------------------------------------------------------------------------
-# Settings fixtures
+# Module-level constants
 # ---------------------------------------------------------------------------
 
 _DEFAULT_TENANT_UUID = uuid.UUID(DEFAULT_TENANT_ID)
-
-
-@pytest.fixture(autouse=True)
-def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", _ISSUER)
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", _AUDIENCE)
-    monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
-    monkeypatch.setenv("KEYCLOAK_JWT_LEEWAY_SECONDS", "30")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
-    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
-    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
-    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _isolated_jwks_cache() -> Iterator[None]:
-    clear_jwks_cache()
-    yield
-    clear_jwks_cache()
-
-
-@pytest.fixture(autouse=True)
-def _empty_connector_registry() -> Iterator[None]:
-    clear_registry()
-    yield
-    clear_registry()
 
 
 # ---------------------------------------------------------------------------
@@ -170,18 +138,6 @@ async def _fetch_audit_rows(eng: AsyncEngine) -> list[AuditLog]:
         result = await session.execute(select(AuditLog).order_by(AuditLog.occurred_at))
         return list(result.scalars().all())
 
-
-# ---------------------------------------------------------------------------
-# Minimal app builder (no Vault — targets router only)
-# ---------------------------------------------------------------------------
-
-
-def _build_app() -> FastAPI:
-    app = FastAPI()
-    app.add_middleware(AuditMiddleware)
-    app.add_middleware(RequestContextMiddleware)
-    app.include_router(targets_router)
-    return app
 
 
 # ---------------------------------------------------------------------------

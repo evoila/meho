@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/discovery"
 )
 
@@ -74,6 +75,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newStatusCmd())
+	root.AddCommand(targets.NewCommand())
 
 	// G0.2-T6 (#245) — static connector dispatch commands for the
 	// known product set. v0.2 ships vault only; v0.2.next replaces

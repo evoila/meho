@@ -22,6 +22,7 @@ dependencies = [
     "fastembed>=0.7,<1.0",
     "kubernetes-asyncio>=32,<33",
     "tenacity>=9.0",
+    "asyncssh>=2.18,<3.0",
 ]
 
 [dependency-groups]
@@ -199,6 +200,14 @@ ignore_missing_imports = true
 # override scope stays narrow.
 [[tool.mypy.overrides]]
 module = ["testcontainers.k3s"]
+ignore_missing_imports = true
+
+# asyncssh (G0.2-T4) ships no ``py.typed`` marker as of 2.18. The SSH
+# connector adapter (:mod:`meho_backplane.connectors.adapters.ssh`)
+# localises the untyped surface to one module. Drop this override if
+# upstream ships stubs.
+[[tool.mypy.overrides]]
+module = ["asyncssh.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -40,20 +40,18 @@ an autouse ``clear_registry()`` that empties the registry after its last test.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass, field
 from typing import Any
 
 import hvac.exceptions
 import pytest
 import requests.exceptions
 
-from meho_backplane.auth import vault as vault_module
 from meho_backplane.connectors import all_connectors, get_connector
 from meho_backplane.connectors.registry import clear_registry, register_connector
 from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
 from meho_backplane.settings import get_settings
 
-from ._vault_fakes import _FakeAuth, _FakeJWTAuth, _FakeSysBackend, _FakeTokenAuth
+from ._vault_fakes import install_fake_client
 
 # Shared fake for hvac's non-200 health response (standby / active-perf-standby).
 # Defined once here to avoid duplicating the class body in every test that needs it.
@@ -103,84 +101,6 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-# ---------------------------------------------------------------------------
-# Vault fakes (shared seam: vault_module._build_client)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _FakeKVv2:
-    secret: dict[str, Any] = field(default_factory=lambda: {"key": "value"})
-    version: int = 3
-    read_calls: list[dict[str, Any]] = field(default_factory=list)
-    read_exc: Exception | None = None
-
-    def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-        self.read_calls.append({"path": path})
-        if self.read_exc is not None:
-            raise self.read_exc
-        return {
-            "data": {
-                "data": self.secret,
-                "metadata": {"version": self.version, "path": path},
-            }
-        }
-
-
-@dataclass
-class _FakeKV:
-    v2: _FakeKVv2
-
-
-@dataclass
-class _FakeSecrets:
-    kv: _FakeKV
-
-
-@dataclass
-class _FakeClient:
-    url: str
-    timeout: float
-    namespace: str | None
-    token: str | None
-    auth: _FakeAuth
-    sys: _FakeSysBackend
-    secrets: _FakeSecrets
-
-
-def _install_fake_client(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    health_payload: Any = None,
-    health_exc: Exception | None = None,
-    login_exc: Exception | None = None,
-    secret: dict[str, Any] | None = None,
-    version: int = 3,
-    read_exc: Exception | None = None,
-) -> _FakeClient:
-    jwt_auth = _FakeJWTAuth(raise_on_login=login_exc)
-    token_auth = _FakeTokenAuth()
-    sys_backend = _FakeSysBackend(payload=health_payload, raise_on_read=health_exc)
-    kv_v2 = _FakeKVv2(secret=secret or {"key": "value"}, version=version, read_exc=read_exc)
-    fake = _FakeClient(
-        url="https://vault.test",
-        timeout=5.0,
-        namespace=None,
-        token=None,
-        auth=_FakeAuth(jwt=jwt_auth, token=token_auth),
-        sys=sys_backend,
-        secrets=_FakeSecrets(kv=_FakeKV(v2=kv_v2)),
-    )
-    jwt_auth.parent = fake
-
-    def _fake_build_client(_settings: Any, *, token: str | None = None) -> _FakeClient:
-        fake.token = token
-        return fake
-
-    monkeypatch.setattr(vault_module, "_build_client", _fake_build_client)
-    return fake
-
-
 def _make_target(jwt: str = "fake.jwt.value") -> VaultTarget:
     return VaultTarget(raw_jwt=jwt)
 
@@ -213,7 +133,7 @@ def test_vault_connector_has_product_slug() -> None:
 async def test_fingerprint_returns_hashicorp_vault_with_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _install_fake_client(
+    fake = install_fake_client(
         monkeypatch,
         health_payload={
             "initialized": True,
@@ -242,7 +162,7 @@ async def test_fingerprint_version_none_for_non_200_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-dict health payload (hvac standby response) → version=None."""
-    _install_fake_client(monkeypatch, health_payload=_StandbyResponse())
+    install_fake_client(monkeypatch, health_payload=_StandbyResponse())
     result = await VaultConnector().fingerprint(_make_target())
 
     assert result.vendor == "hashicorp"
@@ -258,7 +178,7 @@ async def test_fingerprint_version_none_for_non_200_response(
 async def test_probe_returns_ok_for_unsealed_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_fake_client(
+    install_fake_client(
         monkeypatch,
         health_payload={"initialized": True, "sealed": False, "standby": False},
     )
@@ -281,7 +201,7 @@ async def test_probe_returns_ok_false_for_unhealthy_vault(
     health_payload: dict[str, Any],
     expected_reason: str,
 ) -> None:
-    _install_fake_client(monkeypatch, health_payload=health_payload)
+    install_fake_client(monkeypatch, health_payload=health_payload)
     result = await VaultConnector().probe(_make_target())
 
     assert result.ok is False
@@ -291,7 +211,7 @@ async def test_probe_returns_ok_false_for_unhealthy_vault(
 async def test_probe_returns_ok_true_for_standby_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_fake_client(monkeypatch, health_payload=_StandbyResponse())
+    install_fake_client(monkeypatch, health_payload=_StandbyResponse())
     result = await VaultConnector().probe(_make_target())
 
     assert result.ok is True
@@ -301,7 +221,7 @@ async def test_probe_returns_ok_true_for_standby_vault(
 async def test_probe_returns_ok_false_when_vault_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_fake_client(
+    install_fake_client(
         monkeypatch,
         health_exc=requests.exceptions.ConnectionError("dns failure"),
     )
@@ -320,7 +240,7 @@ async def test_probe_returns_ok_false_when_vault_unreachable(
 async def test_execute_unknown_op_returns_structured_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_fake_client(monkeypatch)
+    install_fake_client(monkeypatch)
     connector = VaultConnector()
     result = await connector.execute(_make_target(), "vault.nonexistent.op", {})
 
@@ -338,10 +258,10 @@ async def test_execute_unknown_op_returns_structured_error(
 async def test_execute_vault_kv_read_returns_secret_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _install_fake_client(
+    fake = install_fake_client(
         monkeypatch,
         secret={"username": "demo", "region": "eu-central-1"},
-        version=7,
+        kv_version=7,
     )
     connector = VaultConnector()
     result = await connector.execute(
@@ -370,7 +290,7 @@ async def test_execute_vault_kv_read_invalid_path_returns_error(
     params: dict[str, Any],
 ) -> None:
     """Missing, non-string, empty, or whitespace-only path returns input-validation error."""
-    _install_fake_client(monkeypatch)
+    install_fake_client(monkeypatch)
     result = await VaultConnector().execute(_make_target(), "vault.kv.read", params)
 
     assert result.status == "error"
@@ -396,7 +316,7 @@ async def test_execute_login_failure_returns_login_phase_error(
     login_exc: Exception,
     expected_exc_type: str,
 ) -> None:
-    _install_fake_client(monkeypatch, login_exc=login_exc)
+    install_fake_client(monkeypatch, login_exc=login_exc)
     result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": "some/path"})
 
     assert result.status == "error"
@@ -423,7 +343,7 @@ async def test_execute_read_failure_returns_read_phase_error(
     expected_exc_type: str,
 ) -> None:
     """Read-phase exceptions (including KeyError from malformed payload) are structured errors."""
-    _install_fake_client(monkeypatch, read_exc=read_exc)
+    install_fake_client(monkeypatch, read_exc=read_exc)
     result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": "some/path"})
 
     assert result.status == "error"

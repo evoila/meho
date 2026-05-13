@@ -104,9 +104,12 @@ class _FakeKVv2:
     secret: dict[str, Any] = field(default_factory=lambda: {"username": "demo"})
     version: int = 7
     read_calls: list[dict[str, Any]] = field(default_factory=list)
+    read_exc: Exception | None = None
 
     def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
         self.read_calls.append({"path": path})
+        if self.read_exc is not None:
+            raise self.read_exc
         return {
             "data": {
                 "data": self.secret,
@@ -187,4 +190,35 @@ def install_fake_vault(
         return fake
 
     monkeypatch.setattr(vault_module, "_build_client", _fake_build_client)
+    return fake
+
+
+def install_fake_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    health_payload: Any = None,
+    health_exc: Exception | None = None,
+    login_exc: Exception | None = None,
+    revoke_exc: Exception | None = None,
+    secret: dict[str, Any] | None = None,
+    kv_version: int | None = None,
+    read_exc: Exception | None = None,
+) -> _FakeClient:
+    """Failure-injecting variant of :func:`install_fake_vault`.
+
+    Builds the same ``_FakeClient`` and then sets each failure-injection
+    attribute in place. Mutating after construction keeps this wrapper
+    tiny (no duplicated ``_FakeClient(url=..., timeout=..., ...)`` body)
+    while exposing every knob the connector / failure-mode suites need:
+    login / revoke / health-read / kv-read exception injection plus
+    secret and KV-version overrides.
+    """
+    fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
+    fake.auth.jwt.raise_on_login = login_exc
+    fake.auth.token.raise_on_revoke = revoke_exc
+    fake.sys.payload = health_payload
+    fake.sys.raise_on_read = health_exc
+    if secret is not None:
+        fake.secrets.kv.v2.secret = secret
+    fake.secrets.kv.v2.read_exc = read_exc
     return fake

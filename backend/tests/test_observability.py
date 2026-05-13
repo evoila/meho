@@ -130,7 +130,8 @@ def test_metrics_endpoint_returns_prometheus_text_format(
 @pytest.mark.skipif(
     platform.system() != "Linux",
     reason=(
-        "prometheus_client.ProcessCollector reads /proc/<pid>/; not available on Darwin or Windows"
+        "prometheus_client.ProcessCollector reads /proc/<pid>/; "
+        "not available on non-Linux platforms"
     ),
 )
 def test_metrics_endpoint_exposes_process_metrics_on_linux(
@@ -140,9 +141,16 @@ def test_metrics_endpoint_exposes_process_metrics_on_linux(
     promised operators. ``prometheus_client.ProcessCollector`` derives these
     from ``/proc/<pid>/`` files and emits no samples on non-Linux platforms,
     so the assertion is scoped to Linux (which is the CI runner pool's OS).
+
+    Repeats the basic ``/metrics`` response asserts from the portable test
+    so a broken endpoint on Linux surfaces as a clear status / content-type
+    failure rather than a confusing missing-substring error.
     """
     client.get("/")
     response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; version=0.0.4; charset=utf-8"
     body = response.text
 
     assert "process_resident_memory_bytes" in body

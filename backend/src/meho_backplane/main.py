@@ -52,6 +52,7 @@ from meho_backplane.api.v1.connectors import router as api_v1_connectors_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
+from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
@@ -236,6 +237,9 @@ app.include_router(api_v1_health_router)
 # privacy-preserving query_hash payload (the raw query is never
 # persisted -- per v0.2 sensitivity defaults).
 app.include_router(api_v1_retrieve_router)
+# G0.3-T3 (#254) — targets CRUD surface. All 5 routes are tenant-scoped
+# via the JWT's tenant_id claim; cross-tenant reads are impossible.
+app.include_router(api_v1_targets_router)
 # G6.1-T4 (#310) -- Server-Sent Events feed at `GET /api/v1/feed`.
 # Streams events XADD'd by T3's publish-on-write hook onto
 # `meho:feed:{tenant_id}`. Same RBAC gate as /api/v1/retrieve

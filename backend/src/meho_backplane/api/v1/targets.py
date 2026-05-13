@@ -148,7 +148,6 @@ async def describe_target(
     404 with near-misses when nothing matches.
     """
     t = await resolve_target(session, operator.tenant_id, name)
-    structlog.contextvars.bind_contextvars(audit_target_id=str(t.id))
     return _to_full(t)
 
 
@@ -167,7 +166,6 @@ async def probe_target(
     unreachable.
     """
     t = await resolve_target(session, operator.tenant_id, name)
-    structlog.contextvars.bind_contextvars(audit_target_id=str(t.id))
     cls = get_connector(t.product)
     if cls is None:
         raise HTTPException(
@@ -206,6 +204,8 @@ async def create_target(
             status_code=409,
             detail=f"target {body.name!r} already exists in tenant",
         ) from exc
+    # Bind target_id so AuditMiddleware writes audit_log.target_id (G0.3-T4).
+    # For create, resolve_target is not called, so we bind directly here.
     structlog.contextvars.bind_contextvars(target_id=str(t.id))
     _log.info(
         "target_created",
@@ -231,7 +231,6 @@ async def update_target(
     ``updated_at`` is always refreshed on a successful write.
     """
     t = await resolve_target(session, operator.tenant_id, name)
-    structlog.contextvars.bind_contextvars(audit_target_id=str(t.id))
     updates = body.model_dump(exclude_unset=True)
     for k, v in updates.items():
         setattr(t, k, v)

@@ -20,10 +20,10 @@ import (
 // when DisableFlagParsing = true.
 func TestParseOpArgs(t *testing.T) {
 	tests := []struct {
-		name      string
-		args      []string
+		name       string
+		args       []string
 		wantTarget string
-		wantJSON  bool
+		wantJSON   bool
 		wantParams map[string]interface{}
 	}{
 		{

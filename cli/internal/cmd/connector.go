@@ -59,11 +59,11 @@ func newConnectorCommands() []*cobra.Command {
 // flows through as params.
 func buildOpCommand(product, op string) *cobra.Command {
 	return &cobra.Command{
-		Use:               op,
-		Short:             fmt.Sprintf("Run %s via the %s connector", op, product),
+		Use:                op,
+		Short:              fmt.Sprintf("Run %s via the %s connector", op, product),
 		DisableFlagParsing: true,
-		SilenceUsage:      true,
-		SilenceErrors:     true,
+		SilenceUsage:       true,
+		SilenceErrors:      true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			parsed, err := parseOpArgs(args)
 			if err != nil {
@@ -91,22 +91,22 @@ func buildOpCommand(product, op string) *cobra.Command {
 
 // parsedOpArgs holds the result of parseOpArgs.
 type parsedOpArgs struct {
-	target   string
-	jsonOut  bool
+	target    string
+	jsonOut   bool
 	backplane string
-	params   map[string]interface{}
+	params    map[string]interface{}
 }
 
 // parseOpArgs processes the raw []string cobra passes when DisableFlagParsing
 // is set. Recognises:
 //
-//   --target <slug>           the target name to run the op against
-//   --json                    emit machine-readable JSON to stdout
-//   --backplane <url>         override the backplane URL
-//   --params <json>           inline JSON object for operation params
-//   --params @<file>          load operation params from a JSON file
-//   --<key> <val>             shorthand for {"key": "val"} in params
-//   --<key>=<val>             same, = form
+//	--target <slug>           the target name to run the op against
+//	--json                    emit machine-readable JSON to stdout
+//	--backplane <url>         override the backplane URL
+//	--params <json>           inline JSON object for operation params
+//	--params @<file>          load operation params from a JSON file
+//	--<key> <val>             shorthand for {"key": "val"} in params
+//	--<key>=<val>             same, = form
 //
 // Unknown flags with no value (boolean flags other than --json) are
 // silently ignored rather than returning an error — forward compatibility.

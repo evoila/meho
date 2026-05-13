@@ -53,6 +53,14 @@ from meho_backplane.connectors.registry import clear_registry, register_connecto
 from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
 from meho_backplane.settings import get_settings
 
+# Shared fake for hvac's non-200 health response (standby / active-perf-standby).
+# Defined once here to avoid duplicating the class body in every test that needs it.
+
+
+class _StandbyResponse:
+    status_code = 429
+
+
 # ---------------------------------------------------------------------------
 # Registry isolation
 # ---------------------------------------------------------------------------
@@ -275,11 +283,7 @@ async def test_fingerprint_version_none_for_non_200_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-dict health payload (hvac standby response) → version=None."""
-
-    class _FakeResp:
-        status_code = 429
-
-    _install_fake_client(monkeypatch, health_payload=_FakeResp())
+    _install_fake_client(monkeypatch, health_payload=_StandbyResponse())
     result = await VaultConnector().fingerprint(_make_target())
 
     assert result.vendor == "hashicorp"
@@ -328,10 +332,7 @@ async def test_probe_returns_ok_false_for_uninitialized_vault(
 async def test_probe_returns_ok_true_for_standby_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeResp:
-        status_code = 429
-
-    _install_fake_client(monkeypatch, health_payload=_FakeResp())
+    _install_fake_client(monkeypatch, health_payload=_StandbyResponse())
     result = await VaultConnector().probe(_make_target())
 
     assert result.ok is True
@@ -380,7 +381,7 @@ async def test_execute_vault_kv_read_returns_secret_data(
 ) -> None:
     fake = _install_fake_client(
         monkeypatch,
-        secret={"username": "demo", "password": "s3cret"},
+        secret={"username": "demo", "region": "eu-central-1"},
         version=7,
     )
     connector = VaultConnector()
@@ -391,7 +392,7 @@ async def test_execute_vault_kv_read_returns_secret_data(
     )
 
     assert result.status == "ok"
-    assert result.result == {"username": "demo", "password": "s3cret"}
+    assert result.result == {"username": "demo", "region": "eu-central-1"}
     assert result.extras.get("version") == 7
     assert fake.auth.jwt.login_calls == [
         {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
@@ -400,27 +401,22 @@ async def test_execute_vault_kv_read_returns_secret_data(
     assert fake.auth.token.revoke_calls == 1
 
 
-async def test_execute_vault_kv_read_missing_path_returns_error(
+@pytest.mark.parametrize(
+    "params",
+    [{}, {"path": 123}, {"path": ""}, {"path": "   "}],
+    ids=["missing", "non-string", "empty-string", "whitespace-only"],
+)
+async def test_execute_vault_kv_read_invalid_path_returns_error(
     monkeypatch: pytest.MonkeyPatch,
+    params: dict[str, Any],
 ) -> None:
+    """Missing, non-string, empty, or whitespace-only path returns input-validation error."""
     _install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(_make_target(), "vault.kv.read", {})
+    result = await VaultConnector().execute(_make_target(), "vault.kv.read", params)
 
     assert result.status == "error"
     assert result.error == "path must be a non-empty string"
-    assert result.duration_ms == 0.0
-
-
-async def test_execute_vault_kv_read_non_string_path_returns_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Non-string truthy path param returns input-validation error, not a read-phase error."""
-    _install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": 123})
-
-    assert result.status == "error"
-    assert result.error == "path must be a non-empty string"
-    assert result.duration_ms == 0.0
+    assert result.duration_ms == 0
 
 
 # ---------------------------------------------------------------------------
@@ -428,32 +424,25 @@ async def test_execute_vault_kv_read_non_string_path_returns_error(
 # ---------------------------------------------------------------------------
 
 
-async def test_execute_vault_unreachable_returns_login_phase_error(
+@pytest.mark.parametrize(
+    "login_exc,expected_exc_type",
+    [
+        (requests.exceptions.ConnectionError("no route"), "VaultUnreachableError"),
+        (hvac.exceptions.Forbidden("role denied"), "VaultRoleDeniedError"),
+    ],
+    ids=["unreachable", "role-denied"],
+)
+async def test_execute_login_failure_returns_login_phase_error(
     monkeypatch: pytest.MonkeyPatch,
+    login_exc: Exception,
+    expected_exc_type: str,
 ) -> None:
-    _install_fake_client(
-        monkeypatch,
-        login_exc=requests.exceptions.ConnectionError("no route"),
-    )
+    _install_fake_client(monkeypatch, login_exc=login_exc)
     result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": "some/path"})
 
     assert result.status == "error"
     assert result.extras.get("phase") == "login"
-    assert result.extras.get("exc_type") == "VaultUnreachableError"
-
-
-async def test_execute_role_denied_returns_login_phase_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_fake_client(
-        monkeypatch,
-        login_exc=hvac.exceptions.Forbidden("role denied"),
-    )
-    result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": "some/path"})
-
-    assert result.status == "error"
-    assert result.extras.get("phase") == "login"
-    assert result.extras.get("exc_type") == "VaultRoleDeniedError"
+    assert result.extras.get("exc_type") == expected_exc_type
 
 
 # ---------------------------------------------------------------------------

@@ -19,44 +19,49 @@ import (
 
 // newStatusCmd returns the `meho status` subcommand.
 //
-// status hits GET /api/v1/health on the backplane the operator last
-// authenticated against and renders the response. The bearer token
-// is read from the same TokenStore `meho login` writes to (OS
-// keyring with file fallback); refresh-on-expiry is best-effort via
-// the AuthedClient's lazy 401-retry path.
+// Two modes:
 //
-// Output discipline (Goal #11 §5):
+//   - Default — single-shot health check against GET /api/v1/health.
+//     Renders operator identity + Vault + DB. Exit codes 0 / 2 / 3 / 4.
 //
-//   - Default: a human-readable summary on stdout. Format is
-//     stable: identity line + Vault + DB.
-//   - --json: the typed HealthResponse, pretty-printed to stdout.
-//   - Errors: structured codes + non-zero exit codes mapped via
-//     output.StructuredError. Errors go to stderr (cobra default);
-//     --json on error mode emits a JSON envelope on stderr.
+//   - --watch — subscribes to GET /api/v1/feed (Server-Sent Events).
+//     Streams one rendered line per event until the operator hits
+//     Ctrl-C. Disconnects retry with exponential backoff using the
+//     SSE Last-Event-Id header for replay. Filters (--op-class,
+//     --principal, --target) forward to the SSE query string. Exit
+//     codes add 5 for insufficient_role (read_only operators).
 //
-// The backplane URL is resolved from `meho login`'s persisted
-// config file. Operators can override per-invocation with
-// `--backplane <url>` (useful for ad-hoc queries against a second
-// environment without re-running login).
+// Both modes share the bearer token resolution (TokenStore that
+// `meho login` writes to, OS keyring with file fallback) and the
+// --backplane / --json output discipline (Goal #11 §5).
 func newStatusCmd() *cobra.Command {
 	var (
 		jsonOut           bool
 		backplaneOverride string
+		watch             bool
+		opClass           string
+		principal         string
+		target            string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show operator identity and backplane health",
+		Short: "Show operator identity + backplane health; --watch streams live activity",
 		Long: "status calls the backplane's authenticated health endpoint " +
 			"(/api/v1/health) with the bearer token stored by `meho login` " +
 			"and prints a summary of the federation chain (operator identity, " +
 			"Vault reachability, DB migration state).\n\n" +
+			"With --watch the command subscribes to /api/v1/feed and streams " +
+			"one rendered line per broadcast event until the operator hits " +
+			"Ctrl-C. Filters (--op-class, --principal, --target) forward to " +
+			"the SSE query string; disconnects retry with exponential " +
+			"backoff using Last-Event-Id for replay.\n\n" +
 			"Output is human-readable by default. Pass --json for a single " +
-			"machine-parseable JSON document on stdout — agents (and the " +
-			"meho install.sh smoke test) consume this shape.\n\n" +
-			"Exit codes: 0 success, 2 auth_expired (no stored token, or the " +
-			"backplane rejected even a refreshed bearer), 3 unreachable, 4 " +
-			"unexpected response shape.",
+			"machine-parseable JSON document on stdout (one JSON object per " +
+			"line in --watch mode) — agents (and the meho install.sh smoke " +
+			"test) consume this shape.\n\n" +
+			"Exit codes: 0 success, 2 auth_expired, 3 unreachable, 4 " +
+			"unexpected response shape, 5 insufficient_role (--watch only).",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		// SilenceErrors so we control error output entirely — JSON
@@ -70,46 +75,18 @@ func newStatusCmd() *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(err.Error()), jsonOut)
 			}
-
-			client, err := api.NewAuthedClient(cmd.Context(), backplaneURL, api.AuthedClientOptions{})
-			if err != nil {
-				if api.IsTokenNotFound(err) {
-					return output.RenderError(cmd.ErrOrStderr(),
-						output.AuthExpired(fmt.Sprintf("no stored credentials for %s; run `meho login %s`", backplaneURL, backplaneURL)),
-						jsonOut)
-				}
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.Unexpected(fmt.Sprintf("build authed client: %v", err)),
-					jsonOut)
+			if watch {
+				return runWatch(cmd.Context(), watchOptions{
+					BackplaneURL: backplaneURL,
+					OpClass:      opClass,
+					Principal:    principal,
+					Target:       target,
+					JSONOut:      jsonOut,
+					Stdout:       cmd.OutOrStdout(),
+					Stderr:       cmd.ErrOrStderr(),
+				})
 			}
-
-			resp, err := client.GetHealth(cmd.Context())
-			if err != nil {
-				if api.IsNoRefreshToken(err) {
-					return output.RenderError(cmd.ErrOrStderr(),
-						output.AuthExpired(fmt.Sprintf("stored token rejected and no refresh_token present; run `meho login %s`", backplaneURL)),
-						jsonOut)
-				}
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, redactedError(err))),
-					jsonOut)
-			}
-
-			if resp.StatusCode() == http.StatusUnauthorized {
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.AuthExpired(fmt.Sprintf("backplane rejected stored credentials; run `meho login %s`", backplaneURL)),
-					jsonOut)
-			}
-			if resp.JSON200 == nil {
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.Unexpected(fmt.Sprintf("HTTP %d from %s", resp.StatusCode(), backplaneURL)),
-					jsonOut)
-			}
-
-			if jsonOut {
-				return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
-			}
-			return output.PrintHealth(cmd.OutOrStdout(), resp.JSON200)
+			return runOneShot(cmd, backplaneURL, jsonOut)
 		},
 	}
 
@@ -117,7 +94,61 @@ func newStatusCmd() *cobra.Command {
 		"emit a single JSON document on stdout instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false,
+		"stream a live SSE feed of broadcast events (one line per event; Ctrl-C to exit)")
+	cmd.Flags().StringVar(&opClass, "op-class", "",
+		"filter --watch events by op_class (read, write, credential_read, audit_query)")
+	cmd.Flags().StringVar(&principal, "principal", "",
+		"filter --watch events by principal_sub (JWT subject claim)")
+	cmd.Flags().StringVar(&target, "target", "",
+		"filter --watch events by target_name (the connector instance name)")
 	return cmd
+}
+
+// runOneShot performs the original single-request health check —
+// extracted from the RunE closure when --watch was added so each
+// dispatch arm stays a single function. Behaviour is unchanged from
+// the pre-T5 status command.
+func runOneShot(cmd *cobra.Command, backplaneURL string, jsonOut bool) error {
+	client, err := api.NewAuthedClient(cmd.Context(), backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		if api.IsTokenNotFound(err) {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.AuthExpired(fmt.Sprintf("no stored credentials for %s; run `meho login %s`", backplaneURL, backplaneURL)),
+				jsonOut)
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("build authed client: %v", err)),
+			jsonOut)
+	}
+
+	resp, err := client.GetHealth(cmd.Context())
+	if err != nil {
+		if api.IsNoRefreshToken(err) {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.AuthExpired(fmt.Sprintf("stored token rejected and no refresh_token present; run `meho login %s`", backplaneURL)),
+				jsonOut)
+		}
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, redactedError(err))),
+			jsonOut)
+	}
+
+	if resp.StatusCode() == http.StatusUnauthorized {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.AuthExpired(fmt.Sprintf("backplane rejected stored credentials; run `meho login %s`", backplaneURL)),
+			jsonOut)
+	}
+	if resp.JSON200 == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("HTTP %d from %s", resp.StatusCode(), backplaneURL)),
+			jsonOut)
+	}
+
+	if jsonOut {
+		return output.PrintJSON(cmd.OutOrStdout(), resp.JSON200)
+	}
+	return output.PrintHealth(cmd.OutOrStdout(), resp.JSON200)
 }
 
 // resolveBackplaneURL picks the backplane to talk to. Priority:

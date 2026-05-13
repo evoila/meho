@@ -352,6 +352,113 @@ The same `eyJ` prefix matches access tokens, refresh tokens, and
 id tokens alike, so the single redaction rule covers every
 credential the CLI persists.
 
+## Watch flow (`meho status --watch`, G6.1-T5)
+
+`--watch` flips `meho status` from a one-shot health probe to a
+long-lived SSE subscriber on the backplane's `/api/v1/feed` endpoint.
+The renderer streams one line per broadcast event until the
+operator hits Ctrl-C; filters (`--op-class`, `--principal`,
+`--target`) forward to the SSE query string, and disconnects
+retry with exponential backoff using `Last-Event-Id` for replay.
+
+### Dispatch
+
+`newStatusCmd`'s `RunE` checks the `--watch` flag and dispatches:
+
+- `false` → `runOneShot` (the original `GET /api/v1/health` flow,
+  extracted from the inline closure when T5 added the second arm).
+- `true` → `runWatch` (the SSE subscriber in `status_watch.go`).
+
+Both arms share the same bearer-token resolution path and the same
+`--backplane` override, so the operator's expectation of "the URL
+in `meho login`" stays consistent.
+
+### SSE wire format
+
+The backplane (`backend/src/meho_backplane/api/v1/feed.py`, G6.1-T4)
+emits frames in the standard WHATWG `EventSource` shape:
+
+```
+event: broadcast
+data: {"event_id":"...", "ts":"...", "principal_sub":"...", ...}
+id: 1715600000000-0
+<blank line>
+```
+
+Heartbeats (`: heartbeat\n\n`) keep the connection alive across
+nginx/ALB idle timeouts and are dropped silently by the parser
+(SSE comment lines, not events). Multi-line `data:` fields are
+joined with `\n` before JSON parsing.
+
+### Reconnect / backoff
+
+`runWatch` retries on every recoverable failure (transport error,
+unexpected EOF, scanner error) using the schedule from the T5 issue
+body: **1s, 2s, 5s, 10s, 30s, then 30s indefinitely**. Each retry
+carries `Last-Event-Id: <id>` with the last successfully-rendered
+event id, so the backplane replays events the operator missed
+during the gap (T4's iter-3 cursor-validation gate enforces the
+ID shape — malformed ids return 400 and break the loop).
+
+Non-recoverable HTTP responses (401 / 403 / 400 / other 5xx) do
+NOT retry: the operator has to take action (`meho login` for 401,
+ask for an operator-role grant for 403, file a bug for unexpected
+status codes). Each surfaces via `output.RenderError` with its
+own structured code:
+
+- **401** → `auth_expired` (exit 2). Same code as the one-shot
+  status path so the operator's mental model stays consistent.
+- **403** → `insufficient_role` (exit 5). New code added in T5
+  because re-running `meho login` won't help — the remedy is a
+  tenant-admin role grant.
+- **400** → `unexpected_response` (exit 4) with the body's detail
+  string. The only realistic 400 today is an invalid SSE cursor
+  the operator hand-edited in a wrapper script.
+
+### Output discipline
+
+Same Goal #11 §5 split as one-shot status:
+
+- **Default human path**: one space-padded line per event
+  (`<ts>  <principal>  <op_id>  <result_status>  <summary>`).
+  Summary is `(aggregate-only)` for `credential_read` and
+  `audit_query` op classes; otherwise `target=<name>` when the
+  event carries a target; otherwise empty.
+- **`--json`**: one raw JSON document per line — the SSE `data:`
+  field byte-identical, with one trailing newline. `meho status
+  --watch --json | jq` is the canonical agent-consumer shape.
+- **Errors**: `RenderError` envelope to stderr; stdout stays clean
+  on the JSON path so a consumer's `jq` doesn't choke on a
+  half-event followed by an error blob.
+
+The bearer token never reaches stdout/stderr — same `eyJ`-prefix
+redaction stance applies, and the unit tests pin the marker.
+
+### Test architecture
+
+`status_watch_test.go` drives end-to-end coverage:
+
+- An in-process `fakeFeed` httptest server records every received
+  Authorization, Last-Event-Id, and query string and serves
+  scripted SSE bodies. Frames are written ONCE across all
+  connections combined so the reconnect-replay path doesn't loop
+  forever (a naive "each connection writes all frames" model
+  busy-loops because the cursor never advances past the same
+  batch). The handler holds the connection open via
+  `<-r.Context().Done()` after the scripted frames so the client's
+  scanner sits in `Scan()` until the test cancels.
+- A `fastBackoff` schedule (five 1 ms slots) collapses the
+  production 1/2/5/10/30 s schedule so the suite runs in
+  milliseconds.
+- A `seedWatchCreds` helper writes a token + config to a
+  `t.TempDir`-backed XDG home, mirroring the one-shot status
+  tests' file-store discipline.
+
+Body-shaping tests (parser, formatter, summariser, URL builder)
+drive the pure helpers directly with table-driven cases; only the
+end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
+`fakeFeed` server.
+
 ## Generated client (`internal/api/`)
 
 `internal/api/client.gen.go` is produced by

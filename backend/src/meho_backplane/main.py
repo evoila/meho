@@ -168,8 +168,25 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await dispose_engine()
-        await dispose_broadcast_client()
+        # Both disposers run unconditionally. asyncpg pool teardown
+        # under FastAPI lifespan exit has a documented loop-attached
+        # failure surface (see the ``run_async`` removal comment in
+        # ``tests/integration/conftest.py``); without per-disposer
+        # try/except a single dispose_engine raise would short-
+        # circuit the rest of the shutdown chain and leak whichever
+        # disposers came after it. structlog captures the failure
+        # class so operators can chase the leak off the "k8s killed
+        # the pod but the broadcast pool stayed open" symptom in
+        # the logs.
+        shutdown_log = structlog.get_logger()
+        try:
+            await dispose_engine()
+        except Exception:
+            shutdown_log.exception("dispose_engine_failed")
+        try:
+            await dispose_broadcast_client()
+        except Exception:
+            shutdown_log.exception("dispose_broadcast_client_failed")
 
 
 app: FastAPI = FastAPI(

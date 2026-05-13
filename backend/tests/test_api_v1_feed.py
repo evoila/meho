@@ -251,6 +251,43 @@ async def _collect_n_frames(
     return frames
 
 
+async def _drive_generator_with_one_batch(
+    items: list[tuple[str, dict[str, str]]],
+    *,
+    op_class: str | None = None,
+    principal: str | None = None,
+    target: str | None = None,
+) -> list[str]:
+    """Mock xread to return *items* once then idle, drive one frame out, return it.
+
+    Skip-path tests (malformed event, unknown field shape) all share
+    the same scaffold: push one batch through ``_feed_generator`` and
+    assert which entry survives the filter. Bundled here so the
+    per-test bodies stop repeating the AsyncMock / patch.object /
+    _feed_generator scaffold (SonarCloud duplication-on-new-code).
+    """
+    broadcast_client = get_broadcast_client()
+    call_count = {"n": 0}
+
+    async def _xread_side_effect(*_a: object, **_k: object) -> object:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return [("meho:feed:<irrelevant>", items)]
+        await asyncio.sleep(0.01)
+        return None
+
+    mock = AsyncMock(side_effect=_xread_side_effect)
+    with patch.object(broadcast_client, "xread", new=mock):
+        gen = _feed_generator(
+            operator=_make_operator(),
+            cursor="$",
+            op_class=op_class,
+            principal=principal,
+            target=target,
+        )
+        return await _collect_n_frames(gen, n=1)
+
+
 # ---------------------------------------------------------------------------
 # HTTP edge — authn / authz / 200 + content-type
 # ---------------------------------------------------------------------------
@@ -643,62 +680,22 @@ class TestFeedGenerator:
     async def test_malformed_event_skipped(self, _feed_env: None) -> None:
         """A bogus JSON in ``event`` doesn't kill the subscriber."""
         good_event = _make_event(op_id="vsphere.vm.list")
-        broadcast_client = get_broadcast_client()
         items = [
             ("1715600000000-0", {"event": "not-json"}),
             ("1715600000001-0", {"event": good_event.model_dump_json()}),
         ]
-        call_count = {"n": 0}
-
-        async def _xread_side_effect(*_a: object, **_k: object) -> object:
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return [("meho:feed:<irrelevant>", items)]
-            await asyncio.sleep(0.01)
-            return None
-
-        mock = AsyncMock(side_effect=_xread_side_effect)
-        with patch.object(broadcast_client, "xread", new=mock):
-            gen = _feed_generator(
-                operator=_make_operator(),
-                cursor="$",
-                op_class=None,
-                principal=None,
-                target=None,
-            )
-            frames = await _collect_n_frames(gen, n=1)
-
+        frames = await _drive_generator_with_one_batch(items)
         assert len(frames) == 1
         assert "id: 1715600000001-0" in frames[0]
 
     async def test_unknown_field_shape_skipped(self, _feed_env: None) -> None:
         """An XADD'd entry without an ``event`` field is logged + skipped."""
         good_event = _make_event(op_id="vsphere.host.info")
-        broadcast_client = get_broadcast_client()
         items = [
             ("1715600000000-0", {"unknown": "field"}),
             ("1715600000001-0", {"event": good_event.model_dump_json()}),
         ]
-        call_count = {"n": 0}
-
-        async def _xread_side_effect(*_a: object, **_k: object) -> object:
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return [("meho:feed:<irrelevant>", items)]
-            await asyncio.sleep(0.01)
-            return None
-
-        mock = AsyncMock(side_effect=_xread_side_effect)
-        with patch.object(broadcast_client, "xread", new=mock):
-            gen = _feed_generator(
-                operator=_make_operator(),
-                cursor="$",
-                op_class=None,
-                principal=None,
-                target=None,
-            )
-            frames = await _collect_n_frames(gen, n=1)
-
+        frames = await _drive_generator_with_one_batch(items)
         assert len(frames) == 1
         assert "id: 1715600000001-0" in frames[0]
 

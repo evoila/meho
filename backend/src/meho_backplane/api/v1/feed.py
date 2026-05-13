@@ -66,10 +66,23 @@ Heartbeat
 =========
 
 The generator emits ``: heartbeat\\n\\n`` (SSE comment line) every
-``_HEARTBEAT_INTERVAL_SECONDS`` of inactivity to keep intermediaries
-from idle-timing-out the connection. The heartbeat fires when the
-``XREAD BLOCK`` call returns no entries within the block window —
-the natural quiet-time signal Valkey gives the loop.
+``_HEARTBEAT_INTERVAL_SECONDS`` of **outbound silence** (no event
+frame yielded to the subscriber) to keep intermediaries from
+idle-timing-out the connection. Two scenarios trigger the heartbeat:
+
+1. **Valkey-quiet** — ``XREAD BLOCK`` returns no entries within the
+   block window. The natural quiet-time signal Valkey gives the loop.
+2. **Subscriber-filtered** — ``XREAD BLOCK`` returns entries but they
+   all fail the operator's ``op_class`` / ``principal`` / ``target``
+   filter, so the generator yields nothing outbound. Without this
+   second path a noisy tenant with a narrow-filtered subscriber
+   would emit zero outbound bytes (events filtered, no heartbeat
+   either) and the nginx / ALB / CloudFront ~60 s idle timeout would
+   drop the connection.
+
+``last_heartbeat`` tracks the wall-clock of the last outbound yield
+(event frame or heartbeat); inbound XREAD activity that doesn't
+produce an outbound frame does NOT reset it.
 
 Disconnect handling
 ===================
@@ -100,12 +113,13 @@ References
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import AsyncIterator, Iterator
 from typing import Final
 
 import structlog
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
@@ -155,6 +169,50 @@ _XREAD_COUNT: Final[int] = 20
 #: a fresh connection without ``Last-Event-Id`` / ``since`` gets the
 #: live tail, not a backlog.
 _LIVE_TAIL_CURSOR: Final[str] = "$"
+
+#: Valkey stream entry id shape — ``<ms-timestamp>`` or
+#: ``<ms-timestamp>-<sequence>``. Accepts both forms because the
+#: bare-timestamp form is legal (Valkey auto-assigns sequence 0) even
+#: though XADD-emitted ids always include the sequence suffix.
+#: Used by :func:`_validate_cursor_or_400` at the route boundary to
+#: reject malformed ``Last-Event-Id`` / ``since`` values before they
+#: reach XREAD and trigger an SSE reconnect loop.
+_VALKEY_STREAM_ID_RE: Final[re.Pattern[str]] = re.compile(r"^\d+(?:-\d+)?$")
+
+
+def _validate_cursor_or_400(cursor: str) -> str:
+    """Validate the SSE replay cursor; raise HTTP 400 on bad input.
+
+    Cursor sources are operator-controlled (``Last-Event-Id`` header,
+    ``since`` query parameter). Without this gate, a malformed cursor
+    propagates verbatim into the ``XREAD`` call and Valkey rejects it
+    with a ``redis.ResponseError`` mid-stream — the SSE response was
+    already sent ``http.response.start``, so the failure surfaces as a
+    connection drop. The browser ``EventSource`` auto-reconnects per
+    the WHATWG spec with the SAME bad cursor and tightens into a
+    reconnect loop.
+
+    Returning HTTP 400 at the route boundary (before any streaming)
+    flips the SSE state machine to ``readyState=CLOSED`` (the spec
+    aborts auto-reconnect on 4xx-class responses), giving the client
+    a recoverable error rather than a hot-loop.
+
+    Accepts:
+
+    * ``"$"`` — Valkey's "live tail" anchor.
+    * ``"<int>"`` or ``"<int>-<int>"`` — Valkey stream id forms.
+
+    Rejects everything else with ``HTTPException(400)``. The detail
+    string deliberately doesn't echo the input — operator-controlled
+    cursors could carry log-injection payloads if reflected verbatim
+    into structured log shippers.
+    """
+    if cursor == _LIVE_TAIL_CURSOR or _VALKEY_STREAM_ID_RE.fullmatch(cursor):
+        return cursor
+    raise HTTPException(
+        status_code=400,
+        detail="invalid_cursor: expected Valkey stream id (e.g. '1715600000000-0') or '$'",
+    )
 
 
 def _stream_key(operator: Operator) -> str:
@@ -405,9 +463,11 @@ async def feed_endpoint(
         the stream into a single response (nginx default behaviour
         would otherwise stall every event behind its buffer flush).
     """
-    cursor = _resolve_cursor(
-        last_event_id_header=request.headers.get("Last-Event-Id"),
-        since=since,
+    cursor = _validate_cursor_or_400(
+        _resolve_cursor(
+            last_event_id_header=request.headers.get("Last-Event-Id"),
+            since=since,
+        )
     )
     generator = _feed_generator(
         operator=operator,

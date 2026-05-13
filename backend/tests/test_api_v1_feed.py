@@ -227,6 +227,17 @@ async def _collect_n_frames(
     ``TimeoutError`` on its way out of the context.
     """
     frames: list[str] = []
+    if n <= 0:
+        # Early-return for cursor-pass-through tests that only need
+        # the helper to drive the generator's first ``xread`` call
+        # without consuming any frames. The post-``async for``
+        # ``aclose`` is still required so the generator's
+        # ``CancelledError`` cleanup path runs (and the structured
+        # disconnect log fires); without ``aclose`` the generator
+        # would be garbage-collected and asyncio 3.13+ would emit
+        # ``Task was destroyed but it is pending`` warnings.
+        await gen.aclose()
+        return frames
     try:
         async with asyncio.timeout(timeout):
             async for chunk in gen:
@@ -245,6 +256,32 @@ async def _collect_n_frames(
 # ---------------------------------------------------------------------------
 
 
+def _mint_authenticated_token(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    kid: str,
+    sub: str,
+    role: TenantRole,
+) -> tuple[str, object]:
+    """Bundle ``install_fake_vault`` + ``make_rsa_keypair`` + ``mint_token``.
+
+    Returns ``(token, key)`` ready to wire into a ``respx.mock`` block.
+    Extracted so HTTP-edge tests can share the JWT-minting boilerplate
+    without tripping SonarCloud's duplication-on-new-code threshold.
+    """
+    from tests._vault_fakes import install_fake_vault
+
+    install_fake_vault(monkeypatch)
+    key = make_rsa_keypair(kid)
+    token = mint_token(
+        key,
+        sub=sub,
+        tenant_id=str(_TENANT_A),
+        tenant_role=role.value,
+    )
+    return token, key
+
+
 class TestFeedEndpoint:
     """Authn/authz layer + the 200 + ``text/event-stream`` happy header."""
 
@@ -260,15 +297,11 @@ class TestFeedEndpoint:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``read_only`` operators can't subscribe; ``operator`` minimum required."""
-        from tests._vault_fakes import install_fake_vault
-
-        install_fake_vault(monkeypatch)
-        key = make_rsa_keypair("kid-feed-read-only")
-        token = mint_token(
-            key,
+        token, key = _mint_authenticated_token(
+            monkeypatch,
+            kid="kid-feed-read-only",
             sub="op-readonly",
-            tenant_id=str(_TENANT_A),
-            tenant_role=TenantRole.READ_ONLY.value,
+            role=TenantRole.READ_ONLY,
         )
         app = _build_app()
         with respx.mock as mock_router:
@@ -281,6 +314,69 @@ class TestFeedEndpoint:
         assert response.status_code == 403
         assert response.json() == {"detail": "insufficient_role"}
 
+    async def test_invalid_last_event_id_returns_400(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Malformed ``Last-Event-Id`` cursor → 400, no SSE reconnect loop.
+
+        The bug class this test pins (iter-3 B1): without route-boundary
+        validation, garbage cursors propagate to ``XREAD`` and Valkey
+        raises ``redis.ResponseError`` mid-stream. ``http.response.start``
+        was already sent, so the failure surfaces as a connection drop.
+        Per the WHATWG SSE spec, browser ``EventSource`` auto-reconnects
+        on stream drop with the SAME ``Last-Event-Id`` — and the bad
+        cursor came FROM the client side. Tight reconnect loop with no
+        recovery.
+
+        Post-fix contract: an HTTP 400 at the route boundary flips
+        ``EventSource.readyState=CLOSED`` per the spec — browsers stop
+        auto-reconnecting on 4xx-class responses.
+        """
+        token, key = _mint_authenticated_token(
+            monkeypatch,
+            kid="kid-feed-bad-cursor",
+            sub="op-bad-cursor",
+            role=TenantRole.OPERATOR,
+        )
+        app = _build_app()
+        with respx.mock as mock_router:
+            mock_discovery_and_jwks(mock_router, public_jwks(key))
+            async with _make_client(app) as client:
+                response = await client.get(
+                    "/api/v1/feed",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Last-Event-Id": "abc-not-a-valkey-id",
+                    },
+                )
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith("invalid_cursor")
+
+    async def test_invalid_since_query_param_returns_400(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Malformed ``since`` query parameter → 400 (same gate as the header)."""
+        token, key = _mint_authenticated_token(
+            monkeypatch,
+            kid="kid-feed-bad-since",
+            sub="op-bad-since",
+            role=TenantRole.OPERATOR,
+        )
+        app = _build_app()
+        with respx.mock as mock_router:
+            mock_discovery_and_jwks(mock_router, public_jwks(key))
+            async with _make_client(app) as client:
+                response = await client.get(
+                    "/api/v1/feed",
+                    params={"since": "drop-table;"},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith("invalid_cursor")
 
 # ---------------------------------------------------------------------------
 # Generator — every body-shaping AC
@@ -544,7 +640,8 @@ class TestFeedGenerator:
     async def test_cursor_passes_through_to_xread(self, _feed_env: None) -> None:
         """The cursor argument (already resolved by the handler) is what xread sees."""
         broadcast_client = get_broadcast_client()
-        mock = _xread_returning([])
+        event = _make_event(tenant_id=_TENANT_A)
+        mock = _xread_returning([event])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _feed_generator(
                 operator=_make_operator(tenant_id=_TENANT_A),
@@ -553,7 +650,7 @@ class TestFeedGenerator:
                 principal=None,
                 target=None,
             )
-            await _collect_n_frames(gen, n=0, timeout=0.2)
+            await _collect_n_frames(gen, n=1, timeout=0.2)
 
         assert mock.await_count >= 1
         cursor_arg = mock.await_args_list[0].args[0]

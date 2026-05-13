@@ -71,12 +71,20 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import jsonschema
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast import (
+    BroadcastEvent,
+    classify_op,
+    publish_event,
+    redact_payload,
+)
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
@@ -262,8 +270,10 @@ async def handle_tools_call(
         }
     finally:
         duration_ms = (time.monotonic() - start) * 1000
+        audit_id = uuid.uuid4()
         try:
             await write_mcp_audit_row(
+                audit_id=audit_id,
                 operator=operator,
                 method="MCP",
                 path=f"/mcp/tools/call/{audit_name}",
@@ -285,6 +295,22 @@ async def handle_tools_call(
                 status_code=status_code,
             )
             raise
+        # G6.1-T3 (#309) publish-on-write hook — runs AFTER the audit
+        # commit succeeds. ``publish_event`` is fail-open by contract,
+        # so a Valkey wobble never converts an OK tool call into a
+        # JSON-RPC -32603. Audit row is the canonical record; broadcast
+        # is the real-time view. The op_id is the tool name verbatim
+        # so :func:`classify_op` matches credential / audit / read /
+        # write suffixes correctly (e.g. ``vault.kv.read`` →
+        # ``credential_read`` → aggregate-only redacted payload).
+        await _publish_mcp_event(
+            audit_id=audit_id,
+            operator=operator,
+            op_id=audit_name,
+            audit_path=f"/mcp/tools/call/{audit_name}",
+            status_code=status_code,
+            audit_payload=audit_payload,
+        )
 
 
 def _operator_meets_required_role(
@@ -430,8 +456,10 @@ async def handle_resources_read(
         }
     finally:
         duration_ms = (time.monotonic() - start) * 1000
+        audit_id = uuid.uuid4()
         try:
             await write_mcp_audit_row(
+                audit_id=audit_id,
                 operator=operator,
                 method="MCP",
                 path=f"/mcp/resources/read/{audit_uri}",
@@ -447,6 +475,102 @@ async def handle_resources_read(
                 status_code=status_code,
             )
             raise
+        # G6.1-T3 publish-on-write hook for the resources/read path.
+        # Resource URIs are per-request unique (e.g. they embed
+        # tenant_id), so the broadcast op_id is the generic
+        # ``mcp.resource.read`` — :func:`classify_op` falls through
+        # to ``other`` (full-detail) which is correct: resources are
+        # not credential reads nor audit queries, just operator-facing
+        # GET-shape calls.
+        await _publish_mcp_event(
+            audit_id=audit_id,
+            operator=operator,
+            op_id="mcp.resource.read",
+            audit_path=f"/mcp/resources/read/{audit_uri}",
+            status_code=status_code,
+            audit_payload=audit_payload,
+        )
+
+
+# ---------------------------------------------------------------------------
+# G6.1-T3 publish-on-write helper
+# ---------------------------------------------------------------------------
+
+
+def _classify_mcp_status(status_code: int) -> str:
+    """Map an MCP audit status_code to the broadcast result-status trichotomy.
+
+    The MCP handlers project JSON-RPC outcomes onto HTTP-shaped codes
+    (200 OK, 400 INVALID_PARAMS, 403 forbidden-via-RBAC, 404
+    unknown-tool, 500 internal). Same split as
+    :func:`meho_backplane.audit._classify_http_status` so subscribers
+    see one taxonomy across HTTP and MCP traffic.
+    """
+    if status_code == 403:
+        return "denied"
+    if status_code >= 400:
+        return "error"
+    return "ok"
+
+
+async def _publish_mcp_event(
+    *,
+    audit_id: uuid.UUID,
+    operator: Operator,
+    op_id: str,
+    audit_path: str,
+    status_code: int,
+    audit_payload: dict[str, Any],
+) -> None:
+    """Build the MCP-side :class:`BroadcastEvent` and publish it.
+
+    Identity is pulled from the validated :class:`Operator` (the
+    dispatcher resolved it via
+    :func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind`); the
+    chassis ``operator_sub`` / ``tenant_id`` contextvars are also
+    bound on the same path but reading them here would duplicate the
+    indirection :class:`Operator` exists to eliminate. The
+    ``audit_path`` argument is the chassis audit row's path column
+    (``/mcp/tools/call/{name}`` or ``/mcp/resources/read/{uri}``);
+    used only for the log line on a publish failure so operators
+    chasing ``broadcast_publish_failed`` events can correlate to the
+    exact audit row that triggered the (failed) publish.
+
+    ``op_id`` differs from ``audit_path`` deliberately: the audit row
+    keeps the per-URI path for forensic queries, while the broadcast
+    event uses the tool-name (tools/call) or a stable
+    ``mcp.resource.read`` constant (resources/read) so
+    :func:`classify_op` matches the sensitivity-class taxonomy
+    correctly without per-URI cardinality blowup on the
+    ``broadcast_events_published_total`` metric.
+    """
+    result_status = _classify_mcp_status(status_code)
+    op_class = classify_op(op_id)
+    event = BroadcastEvent(
+        event_id=uuid.uuid4(),
+        ts=datetime.now(UTC),
+        tenant_id=operator.tenant_id,
+        principal_sub=operator.sub,
+        principal_name=operator.name,
+        op_id=op_id,
+        op_class=op_class,
+        result_status=result_status,
+        audit_id=audit_id,
+        payload=redact_payload(op_class, audit_payload, result_status),
+    )
+    # publish_event is itself fail-open; the wrap here is belt-and-
+    # suspenders against an exception in BroadcastEvent construction
+    # (e.g. a future tightening of the schema). The audit row is
+    # already committed by the time we reach this line.
+    try:
+        await publish_event(event)
+    except Exception:
+        _log.exception(
+            "mcp_broadcast_construction_failed",
+            audit_path=audit_path,
+            op_id=op_id,
+            status_code=status_code,
+        )
 
 
 # ---------------------------------------------------------------------------

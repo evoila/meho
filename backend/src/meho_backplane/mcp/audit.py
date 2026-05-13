@@ -93,7 +93,8 @@ async def write_mcp_audit_row(
     duration_ms: float,
     payload: dict[str, Any],
     request_id: uuid.UUID | None = None,
-) -> None:
+    audit_id: uuid.UUID | None = None,
+) -> uuid.UUID:
     """Commit one ``AuditLog`` row for an MCP tool call or resource read.
 
     Mirrors :func:`~meho_backplane.audit._write_audit_row` (the chassis
@@ -110,12 +111,24 @@ async def write_mcp_audit_row(
     operator's signal to investigate. Detail strings deliberately
     don't leak DSN substrings or exception messages into the audit
     row itself.
+
+    ``audit_id`` is optional. The G6.1-T3 publish-on-write hook
+    (#309) pre-generates the id at the dispatch call site so it can
+    reference the same id on the
+    :class:`~meho_backplane.broadcast.events.BroadcastEvent` after
+    the audit commit succeeds. Callers that don't need the id (e.g.
+    the helper-level test that exercises the writer directly) can
+    omit the kwarg and get a fresh uuid4 generated here. Returns the
+    audit id used for the row so the dispatch call site can plumb it
+    through to ``publish_event`` either way.
     """
     log = structlog.get_logger(__name__)
+    if audit_id is None:
+        audit_id = uuid.uuid4()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row = AuditLog(
-            id=uuid.uuid4(),
+            id=audit_id,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
@@ -142,3 +155,4 @@ async def write_mcp_audit_row(
         status_code=status_code,
         duration_ms=duration_ms,
     )
+    return audit_id

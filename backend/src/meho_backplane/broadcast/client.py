@@ -37,6 +37,7 @@ References
 from __future__ import annotations
 
 import redis.asyncio as redis
+import structlog
 
 from meho_backplane.settings import get_settings
 
@@ -46,6 +47,8 @@ __all__ = [
     "reset_broadcast_client_for_testing",
 ]
 
+
+_log = structlog.get_logger(__name__)
 
 _CLIENT: redis.Redis | None = None
 
@@ -88,12 +91,27 @@ async def dispose_broadcast_client() -> None:
     ``close`` leaves connections reachable only from a different event
     loop, which the GC cannot reliably close. Idempotent: calling
     twice (or before any :func:`get_broadcast_client` call) is a
-    silent no-op.
+    silent no-op even when the first ``aclose`` raises.
+
+    The cache is cleared **before** ``aclose`` is awaited so a failure
+    in the close path doesn't leave the module pointing at a
+    half-closed client; the next ``dispose_broadcast_client`` /
+    ``get_broadcast_client`` call therefore starts from a clean slate
+    rather than re-entering ``aclose`` on the same potentially-broken
+    object. Shutdown-path ``aclose`` failures are logged via structlog
+    (the docstring's "silent no-op" idempotency contract trumps the
+    raise — propagating here would tear down the FastAPI lifespan
+    shutdown and prevent neighbouring disposers from running).
     """
     global _CLIENT
-    if _CLIENT is not None:
-        await _CLIENT.aclose()
+    client = _CLIENT
     _CLIENT = None
+    if client is None:
+        return
+    try:
+        await client.aclose()
+    except Exception:
+        _log.warning("broadcast_dispose_failed", exc_info=True)
 
 
 def reset_broadcast_client_for_testing() -> None:

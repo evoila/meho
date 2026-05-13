@@ -196,6 +196,36 @@ class TestClientLifecycle:
             await dispose_broadcast_client()
         aclose.assert_awaited_once()
 
+    async def test_dispose_swallows_aclose_failure_and_clears_cache(
+        self,
+        _broadcast_env: None,
+    ) -> None:
+        """``aclose`` raising must not leak a stale client into the module cache.
+
+        The docstring's "idempotent: calling twice is a silent no-op"
+        contract has to hold even when the first ``aclose`` fails — a
+        stale ``_CLIENT`` reference would otherwise re-enter ``aclose``
+        on the broken object every subsequent dispose call, defeating
+        the idempotency guarantee the lifespan shutdown relies on.
+        """
+        client = get_broadcast_client()
+        with patch.object(
+            client,
+            "aclose",
+            new=AsyncMock(side_effect=RuntimeError("aclose boom")),
+        ) as aclose:
+            # First dispose: aclose raises; the swallow-log path keeps it
+            # silent so the lifespan shutdown chain continues cleanly.
+            await dispose_broadcast_client()
+            # Second dispose: cache is already clear, aclose is not
+            # reached again — the AsyncMock proves it by recording the
+            # call count.
+            await dispose_broadcast_client()
+        aclose.assert_awaited_once()
+        # Cache cleared: next get builds a fresh client rather than
+        # handing back the broken one.
+        assert get_broadcast_client() is not client
+
 
 # ---------------------------------------------------------------------------
 # Probe outcomes (mocked client) — AC #3

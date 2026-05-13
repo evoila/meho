@@ -22,6 +22,7 @@ dependencies = [
     "fastembed>=0.7,<1.0",
     "kubernetes-asyncio>=32,<33",
     "redis>=5,<8",
+    "tenacity>=9.0",
 ]
 
 [dependency-groups]

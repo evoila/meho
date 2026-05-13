@@ -176,6 +176,53 @@ register_mcp_resource(
 
 Handler receives `(operator, bound_params)` where `bound_params = {"slug": "..."}`. Must validate `operator.tenant_id` matches whatever tenant scope the resource is supposed to honor — cross-tenant reads return 403.
 
+## Manual runbook (pre-release verification)
+
+The automated proof lives in [`backend/tests/integration/test_mcp_inspector.py`](../../backend/tests/integration/test_mcp_inspector.py) — direct JSON-RPC against the dispatch chain, deterministic in CI. Before any release, run the same flow against the running backplane with a real off-machine MCP client; that's what catches spec drift between the wire test and a third-party implementation. Two recommended paths:
+
+### MCP Inspector CLI (deterministic, scriptable)
+
+`@modelcontextprotocol/inspector` ships a non-interactive CLI mode that emits JSON to stdout — runnable from any shell, no UI. Use this for repeatable per-release smoke and for debugging spec interop issues.
+
+```bash
+# Mint a token against the realm with `resource=https://<backplane>/mcp` so
+# the issued `aud` claim matches MCP_RESOURCE_URI. The exact flow depends on
+# how the operator registered the MCP client in Keycloak — see
+# `docs/cross-repo/mcp-client-setup.md` for the recipe.
+TOKEN=$(meho login --print-token)  # or the device-code flow against Keycloak
+
+# Sanity: list tools.
+npx @modelcontextprotocol/inspector --cli \
+  https://meho.example.com/mcp \
+  --transport http \
+  --method tools/list \
+  --header "Authorization: Bearer $TOKEN"
+
+# Call meho.status — exercises the full chain.
+npx @modelcontextprotocol/inspector --cli \
+  https://meho.example.com/mcp \
+  --transport http \
+  --method tools/call \
+  --tool-name meho.status \
+  --header "Authorization: Bearer $TOKEN"
+```
+
+Expected output: `tools/list` shows `meho.status`; `tools/call meho.status` returns the operator-identity bundle from the chassis `/api/v1/health`. A 401 with `WWW-Authenticate: Bearer resource_metadata=...` means the token's `aud` doesn't match `MCP_RESOURCE_URI` — re-check the Keycloak client's `resource` parameter.
+
+### Claude.ai Custom Connector (the dogfooding path)
+
+[Anthropic's Custom Connectors flow](https://modelcontextprotocol.io/docs/develop/connect-remote-servers) is the production-shaped path: Claude.ai (web) → Settings → Connectors → Add custom connector → paste `https://<backplane>/mcp` → complete OAuth in the popup → the MEHO tools appear in the conversation toolbar.
+
+Note that the local-`claude_desktop_config.json` shape documented in the Claude Desktop quickstart is for *stdio* MCP servers spawned as subprocesses; remote HTTPS MCP servers like MEHO route through the Custom Connector UI instead. Operators on Claude Desktop can still verify connectivity locally by hitting Claude.ai in a browser against the same Claude account; the connector persists across both surfaces.
+
+Verification checklist after the connector is wired:
+
+- The connector card shows MEHO's tools (`meho.status` at minimum in v0.2; product tools as G3-G9 land).
+- A chat that prompts "check that MEHO is reachable" should result in Claude calling `meho.status` and surfacing the bundle.
+- The audit_log table on the backplane should grow by one row per `tools/call` and `resources/read` — verify with a quick `SELECT method, path, operator_sub, status_code FROM audit_log ORDER BY occurred_at DESC LIMIT 10`.
+
+If Claude renders a connector error rather than the tools, the OAuth handshake failed — the most common cause is the realm's MCP client missing the `resource_metadata` parameter; the second is `BACKPLANE_URL` resolving to a host the Custom Connector backend can't reach (firewall / private DNS). See [`docs/cross-repo/mcp-client-setup.md`](../cross-repo/mcp-client-setup.md) for the Keycloak-side wiring.
+
 ## What's intentionally out of scope
 
 - **Stdio transport** — MEHO is hosted.

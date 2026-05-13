@@ -72,12 +72,19 @@ def mint_token(
     email: str | None = "damir@example.com",
     tenant_id: str = DEFAULT_TENANT_ID,
     tenant_role: str = DEFAULT_TENANT_ROLE,
+    audience: str | None = None,
 ) -> str:
     """Mint a happy-path JWT signed by *private_key*.
 
     Defaults match the integration suites' baseline operator. Pass
     overrides for ``sub`` / ``name`` / ``email`` when the test asserts
     on those fields downstream (e.g. audit-row read-back).
+
+    ``audience`` defaults to the chassis ``KEYCLOAK_AUDIENCE`` so the
+    existing call sites (chassis ``/api/v1/health`` integration tests)
+    don't change. The MCP acceptance suite passes the canonical MCP
+    resource URI here so the same minter can produce tokens for both
+    audiences without forking a parallel helper.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -86,7 +93,7 @@ def mint_token(
         payload: dict[str, Any] = {
             "sub": sub,
             "iss": ISSUER,
-            "aud": AUDIENCE,
+            "aud": audience if audience is not None else AUDIENCE,
             "iat": now,
             "exp": now + 3600,
             "nbf": now,

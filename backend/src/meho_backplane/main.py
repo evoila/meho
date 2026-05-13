@@ -48,6 +48,7 @@ from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
+from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -234,6 +235,13 @@ app.include_router(api_v1_health_router)
 # privacy-preserving query_hash payload (the raw query is never
 # persisted -- per v0.2 sensitivity defaults).
 app.include_router(api_v1_retrieve_router)
+# G6.1-T4 (#310) -- Server-Sent Events feed at `GET /api/v1/feed`.
+# Streams events XADD'd by T3's publish-on-write hook onto
+# `meho:feed:{tenant_id}`. Same RBAC gate as /api/v1/retrieve
+# (operator role minimum); tenant scoping derives the stream key
+# from the JWT's tenant_id claim so cross-tenant subscription is
+# impossible by construction.
+app.include_router(api_v1_feed_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

@@ -54,7 +54,7 @@ from meho_backplane.connectors.schemas import (
 _SERVER_KEY = asyncssh.generate_private_key("ssh-ed25519")
 _CLIENT_KEY = asyncssh.generate_private_key("ssh-ed25519")
 _CLIENT_PUB = _CLIENT_KEY.convert_to_public()
-_PASSWORD = "test-secret"
+_PASSWORD = "test-secret"  # NOSONAR — in-process asyncssh test server only, no real system
 
 
 # ---------------------------------------------------------------------------

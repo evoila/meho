@@ -62,6 +62,7 @@ async def vault_kv_read(target: Any, params: dict[str, Any]) -> OperationResult:
             error="path must be a non-empty string",
             duration_ms=0.0,
         )
+    path = path.strip()
 
     start = time.monotonic()
 

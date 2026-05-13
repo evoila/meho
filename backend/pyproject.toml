@@ -20,6 +20,7 @@ dependencies = [
     "jsonschema>=4.26.0",
     "pgvector>=0.3,<1.0",
     "fastembed>=0.7,<1.0",
+    "kubernetes-asyncio>=32,<33",
     "redis>=5,<8",
 ]
 
@@ -167,6 +168,37 @@ ignore_missing_imports = true
 # localises the untyped surface to the EmbeddingService wrapper.
 [[tool.mypy.overrides]]
 module = ["fastembed.*"]
+ignore_missing_imports = true
+
+# kubernetes_asyncio (G3.2 Initiative #320, decision #8) ships no
+# ``py.typed`` marker as of 32.x. The connector module
+# (:mod:`meho_backplane.connectors.kubernetes`) localises the untyped
+# surface to the ``ApiClient`` / ``VersionApi`` / ``config.*`` calls;
+# the rest of the codebase never imports kubernetes_asyncio directly.
+# Drop this override if upstream later ships stubs (open issue
+# tomplus/kubernetes_asyncio#260 tracks the request).
+[[tool.mypy.overrides]]
+module = ["kubernetes_asyncio.*"]
+ignore_missing_imports = true
+
+# PyYAML ships ``types-PyYAML`` as a separate stub package on PyPI;
+# the chassis hasn't needed it before (no Python module reads YAML
+# at runtime). The Kubernetes connector parses kubeconfig YAML via
+# ``yaml.safe_load`` in one helper. Whitelisting the module tree
+# avoids pulling ``types-PyYAML`` into the dev image just for that
+# single call site. If a future change broadens YAML usage, swap
+# this override for the stub package.
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
+# testcontainers.k3s ships ``py.typed`` for the core package but the
+# ``k3s`` submodule has no inline annotations on its public surface.
+# Only the integration test
+# (:mod:`tests.integration.test_connectors_k8s_k3d`) imports it; the
+# override scope stays narrow.
+[[tool.mypy.overrides]]
+module = ["testcontainers.k3s"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -58,7 +58,14 @@ jobs:
           python-version: "3.13"
       - name: Install pip-licenses
         if: hashFiles('**/pyproject.toml') != ''
-        run: pip install pip-licenses==5.0.0
+        # 5.5.5 reads PEP 639 ``License-Expression`` metadata; 5.0.0 did
+        # not, so the allow-only gate progressively failed across every
+        # modern transitive dep that has migrated to PEP 639
+        # (MarkupSafe / cffi / pycparser / cryptography / pydantic /
+        # fastapi / starlette / …). Upgrading collapses the
+        # ``--ignore-packages`` set from a chain back to a single entry
+        # for the last holdout (py_rust_stemmers — see comment below).
+        run: pip install pip-licenses==5.5.5
       - name: Install project deps
         if: hashFiles('**/pyproject.toml') != ''
         # Only Python project today is backend/. Promote to a matrix when more land.
@@ -70,17 +77,23 @@ jobs:
         # Multiple identifier forms covered because pip-licenses falls back
         # from PEP 639 License-Expression to Classifier to raw License field.
         #
-        # --ignore-packages "MarkupSafe": MarkupSafe 3.x ships its license
-        # via PEP 639 `License-Expression: BSD-3-Clause` only — no Classifier,
-        # no legacy `License` field. pip-licenses 5.0.0 does not yet read PEP
-        # 639 expressions, so it reports MarkupSafe's license as UNKNOWN and
-        # fails the allow-only gate. BSD-3-Clause is already in the allowlist
-        # below; the package is widely vetted (Pallets); skipping the line-item
-        # check for this one package is safer than broadening the allowlist to
-        # include UNKNOWN. Remove this exception once pip-licenses gains PEP
-        # 639 support upstream.
+        # --ignore-packages "py_rust_stemmers fastembed": two
+        # holdouts even with pip-licenses 5.5.5's PEP 639 support.
+        # py_rust_stemmers (fastembed's tokeniser) ships no license
+        # metadata at all — the crate is MIT in its repo
+        # (github.com/Maxlinn/py-rust-stemmers). fastembed itself
+        # reports its license as "Other/Proprietary License" in PyPI
+        # metadata even though the upstream source
+        # (github.com/qdrant/fastembed) is Apache-2.0 — a packaging
+        # bug, not a real licensing issue. Both packages are widely
+        # vetted via the rest of the retrieval substrate. MIT and
+        # Apache-2.0 are already in the allowlist below; skipping
+        # these two line-items is safer than broadening to UNKNOWN /
+        # Other/Proprietary. Remove either entry when upstream
+        # license metadata is corrected. ``--ignore-packages`` accepts
+        # ``nargs=*`` (space-separated), NOT a semicolon-joined string.
         run: >
-          pip-licenses --format=plain --ignore-packages "MarkupSafe" --allow-only="
+          pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed --allow-only="
           Apache Software License;
           Apache-2.0;
           Apache 2.0;
@@ -101,6 +114,17 @@ jobs:
           Mozilla Public License 2.0 (MPL 2.0);
           MPL-2.0;
           CC0-1.0;
+          Zlib;
+          MIT-CMU;
+          HPND;
+          Apache-2.0 OR BSD-2-Clause;
+          Apache-2.0 OR BSD-3-Clause;
+          Apache-2.0 AND BSD-2-Clause;
+          Apache-2.0 AND MIT;
+          BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0;
+          MIT AND PSF-2.0;
+          MIT OR Apache-2.0;
+          MPL-2.0 AND MIT;
           "
 
   npm-licenses:

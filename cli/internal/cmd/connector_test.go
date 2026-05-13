@@ -15,6 +15,44 @@ import (
 	"github.com/evoila/meho/cli/internal/auth"
 )
 
+// runConnectorCmd is the shared scaffold for connector integration tests.
+// It seeds an XDG tmpdir + a stored token bound to srvURL, builds a fresh
+// root command, wires stdout/stderr buffers, and runs argv. Tests then
+// assert against the captured buffers and any data the test server itself
+// recorded inside its handler closure.
+func runConnectorCmd(t *testing.T, srvURL string, argv []string) (stdout, stderr *bytes.Buffer, err error) {
+	t.Helper()
+	xdg := withTempXDG(t)
+	seedCreds(t, xdg, srvURL, auth.StoredToken{
+		AccessToken:  "eyJ.TEST.TOKEN",
+		RefreshToken: "rt",
+	})
+
+	stdout = &bytes.Buffer{}
+	stderr = &bytes.Buffer{}
+	root := newRootCmd()
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetContext(context.Background())
+	root.SetArgs(argv)
+	err = root.Execute()
+	return
+}
+
+// newJSONServer returns an httptest server that always responds with the
+// supplied status code and raw JSON body. The server is registered with
+// t.Cleanup so callers don't need a defer.
+func newJSONServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // TestParseOpArgs verifies that parseOpArgs correctly extracts --target,
 // --json, and arbitrary --key=value params from the raw args cobra passes
 // when DisableFlagParsing = true.
@@ -107,36 +145,22 @@ func TestConnectorCmdURLConstruction(t *testing.T) {
 		capturedBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		result := map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":      "ok",
 			"op_id":       "vault.kv.read",
 			"result":      map[string]interface{}{"api_key": "s3cr3t"},
 			"duration_ms": 12.3,
 			"extras":      map[string]interface{}{},
-		}
-		_ = json.NewEncoder(w).Encode(result)
+		})
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	xdg := withTempXDG(t)
-	const testToken = "eyJ.TEST-CONNECTOR.TOKEN"
-	seedCreds(t, xdg, srv.URL, auth.StoredToken{
-		AccessToken:  testToken,
-		RefreshToken: "rt",
-	})
-
-	var out, errOut bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&out)
-	root.SetErr(&errOut)
-	root.SetContext(context.Background())
-
-	root.SetArgs([]string{
+	out, errOut, err := runConnectorCmd(t, srv.URL, []string{
 		"vault", "kv.read",
 		"--target", "vault-test",
 		"--path", "secret/meho/test/federation",
 	})
-	if err := root.Execute(); err != nil {
+	if err != nil {
 		t.Fatalf("Execute: %v (stderr: %s)", err, errOut.String())
 	}
 
@@ -166,18 +190,7 @@ func TestConnectorCmdURLConstruction(t *testing.T) {
 
 // TestConnectorCmdUnknownProduct verifies the 404 handler.
 func TestConnectorCmdUnknownProduct(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"detail": "unknown product: bad-product"}`))
-	}))
-	defer srv.Close()
-
-	xdg := withTempXDG(t)
-	seedCreds(t, xdg, srv.URL, auth.StoredToken{
-		AccessToken:  "eyJ.TEST.TOKEN",
-		RefreshToken: "rt",
-	})
+	srv := newJSONServer(t, http.StatusNotFound, `{"detail": "unknown product: bad-product"}`)
 
 	// Temporarily register a "bad-product" connector so cobra routes the command.
 	knownConnectors = append(knownConnectors, connectorSpec{product: "bad-product", ops: []string{"kv.read"}})
@@ -185,14 +198,7 @@ func TestConnectorCmdUnknownProduct(t *testing.T) {
 		knownConnectors = knownConnectors[:len(knownConnectors)-1]
 	})
 
-	var out, errOut bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&out)
-	root.SetErr(&errOut)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"bad-product", "kv.read", "--target", "x"})
-
-	err := root.Execute()
+	_, errOut, err := runConnectorCmd(t, srv.URL, []string{"bad-product", "kv.read", "--target", "x"})
 	if err == nil {
 		t.Fatal("expected error for 404 response")
 	}
@@ -203,18 +209,8 @@ func TestConnectorCmdUnknownProduct(t *testing.T) {
 
 // TestConnectorCmdUnknownOp verifies the 400 handler surfaces the known_ops list.
 func TestConnectorCmdUnknownOp(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"detail": {"error": "unknown_op", "op_id": "vault.bad.op", "known_ops": ["vault.kv.read"]}}`))
-	}))
-	defer srv.Close()
-
-	xdg := withTempXDG(t)
-	seedCreds(t, xdg, srv.URL, auth.StoredToken{
-		AccessToken:  "eyJ.TEST.TOKEN",
-		RefreshToken: "rt",
-	})
+	srv := newJSONServer(t, http.StatusBadRequest,
+		`{"detail": {"error": "unknown_op", "op_id": "vault.bad.op", "known_ops": ["vault.kv.read"]}}`)
 
 	// Register a test op "bad.op" on vault temporarily.
 	knownConnectors[0].ops = append(knownConnectors[0].ops, "bad.op")
@@ -222,14 +218,7 @@ func TestConnectorCmdUnknownOp(t *testing.T) {
 		knownConnectors[0].ops = knownConnectors[0].ops[:len(knownConnectors[0].ops)-1]
 	})
 
-	var out, errOut bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&out)
-	root.SetErr(&errOut)
-	root.SetContext(context.Background())
-	root.SetArgs([]string{"vault", "bad.op", "--target", "x"})
-
-	err := root.Execute()
+	_, errOut, err := runConnectorCmd(t, srv.URL, []string{"vault", "bad.op", "--target", "x"})
 	if err == nil {
 		t.Fatal("expected error for 400 response")
 	}

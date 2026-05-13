@@ -117,7 +117,8 @@ this stage it exposes:
   failures, and never echoes the operator-supplied URL — same
   redaction contract as the Vault and DB probes. T3-T6 (#309-#312)
   build the publish-on-write hook, SSE endpoint, MCP resource, and the
-  `meho status --watch` CLI on top of this foundation.
+  `meho status --watch` CLI on top of this foundation. T3 (publish-on-
+  write) is now landed; T4-T6 (#310-#312) are the remaining subscribers.
 * Broadcast event schema + PII classifier (G6.1-T2 #308) —
   `src/meho_backplane/broadcast/events.py` ships the `BroadcastEvent`
   Pydantic model + `classify_op` / `redact_payload` helpers. Every
@@ -130,6 +131,22 @@ this stage it exposes:
   filter / matched rows never reach the stream. Everything else
   broadcasts in full. Per-op opt-in to flip a sensitive class to full
   detail is a G6.3 surface; T2 ships the conservative default.
+* Broadcast publish-on-write hook (G6.1-T3 #309) —
+  `src/meho_backplane/broadcast/publisher.py` ships `publish_event`,
+  which `XADD`s one `BroadcastEvent` per audited op onto
+  `meho:feed:{tenant_id}` with `MAXLEN ~ 10000` (best-effort trim).
+  Both audit paths fire the hook: `AuditMiddleware.__call__` (HTTP
+  routes) and the MCP `tools/call` / `resources/read` finally blocks
+  each pre-generate the audit row's UUID, pass it into the audit
+  writer, and reference it on the published event so subscribers can
+  JOIN broadcast events back to the canonical audit row. Fail-open by
+  contract: a publish failure logs `broadcast_publish_failed`,
+  increments `broadcast_publish_errors_total`, and returns silently —
+  the broadcast feed is the real-time view, the audit row is the
+  record-of-truth, and Valkey unreachability never propagates as a
+  request-path 5xx. Subscribers reading the stream get at-most-once
+  delivery; T4 SSE (#310), T5 CLI `--watch` (#311), and T6 MCP
+  resource (#312) all build on this single publisher.
 * Persistence layer (Task #27) — `src/meho_backplane/db/` houses the
   SQLAlchemy 2.x async engine (`engine.py`), the per-request
   session-factory dependency (`get_session`), and the

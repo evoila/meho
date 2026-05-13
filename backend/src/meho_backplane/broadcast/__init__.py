@@ -20,13 +20,23 @@ from meho_backplane.broadcast.events import (
     redact_payload,
 )
 from meho_backplane.broadcast.probe import broadcast_readiness_probe
+from meho_backplane.broadcast.publisher import (
+    BROADCAST_EVENTS_PUBLISHED_TOTAL,
+    BROADCAST_MAXLEN,
+    BROADCAST_PUBLISH_ERRORS_TOTAL,
+    publish_event,
+)
 
 __all__ = [
+    "BROADCAST_EVENTS_PUBLISHED_TOTAL",
+    "BROADCAST_MAXLEN",
+    "BROADCAST_PUBLISH_ERRORS_TOTAL",
     "BroadcastEvent",
     "broadcast_readiness_probe",
     "classify_op",
     "dispose_broadcast_client",
     "get_broadcast_client",
+    "publish_event",
     "redact_payload",
     "reset_broadcast_client_for_testing",
 ]

@@ -14,11 +14,19 @@ from meho_backplane.broadcast.client import (
     get_broadcast_client,
     reset_broadcast_client_for_testing,
 )
+from meho_backplane.broadcast.events import (
+    BroadcastEvent,
+    classify_op,
+    redact_payload,
+)
 from meho_backplane.broadcast.probe import broadcast_readiness_probe
 
 __all__ = [
+    "BroadcastEvent",
     "broadcast_readiness_probe",
+    "classify_op",
     "dispose_broadcast_client",
     "get_broadcast_client",
+    "redact_payload",
     "reset_broadcast_client_for_testing",
 ]

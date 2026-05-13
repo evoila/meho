@@ -115,10 +115,21 @@ this stage it exposes:
   `timeout`, `unreachable: <ExcClass>`, `redis_error: <ExcClass>`)
   plus a `check_failed: <ExcClass>` safety net for unexpected
   failures, and never echoes the operator-supplied URL — same
-  redaction contract as the Vault and DB probes. T2-T6 (#308-#312)
-  build the event schema, publish-on-write hook, SSE endpoint, MCP
-  resource, and the `meho status --watch` CLI on top of this
-  foundation.
+  redaction contract as the Vault and DB probes. T3-T6 (#309-#312)
+  build the publish-on-write hook, SSE endpoint, MCP resource, and the
+  `meho status --watch` CLI on top of this foundation.
+* Broadcast event schema + PII classifier (G6.1-T2 #308) —
+  `src/meho_backplane/broadcast/events.py` ships the `BroadcastEvent`
+  Pydantic model + `classify_op` / `redact_payload` helpers. Every
+  audited op produces exactly one `BroadcastEvent` at T3 publish time;
+  the model is frozen so downstream consumers (T4 SSE, T6 MCP resource)
+  can't mutate events mid-pipeline. The classifier locks decision #3's
+  conservative PII defaults: `credential_read` ops (`vault.kv.read`,
+  `vault.kv.list`) and `audit_query` ops (`audit.*` prefix) broadcast
+  aggregate-only — the credential path / key / value and the audit
+  filter / matched rows never reach the stream. Everything else
+  broadcasts in full. Per-op opt-in to flip a sensitive class to full
+  detail is a G6.3 surface; T2 ships the conservative default.
 * Persistence layer (Task #27) — `src/meho_backplane/db/` houses the
   SQLAlchemy 2.x async engine (`engine.py`), the per-request
   session-factory dependency (`get_session`), and the

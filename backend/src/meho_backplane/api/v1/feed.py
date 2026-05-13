@@ -94,7 +94,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Final
 
 import structlog
@@ -223,6 +223,59 @@ def _resolve_cursor(
     return _LIVE_TAIL_CURSOR
 
 
+def _process_entries(
+    items: list[tuple[str, dict[str, str]]],
+    *,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+    stream_key: str,
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(entry_id, sse_frame)`` for every entry that passes the filter.
+
+    Handles three skip paths inline:
+
+    * Unknown field shape (entry XADD'd without an ``event`` field) —
+      log + skip. T3's publisher is currently the only writer; this
+      branch is the safety net against a future Slack-mirror /
+      downstream tool writing alternate field shapes onto the same
+      stream key.
+    * Malformed JSON in the ``event`` field — log + skip rather than
+      tearing the subscriber down. A T3 bug or stream-key collision
+      with a foreign writer surfaces here as a logged warning, not a
+      500.
+    * Filter rejection — silently drop (the operator's filter is
+      working as intended).
+
+    Lifted out of :func:`_feed_generator` so the main loop's
+    cognitive complexity stays under the SonarCloud S3776 ceiling.
+    The helper itself is a single ``for``-loop with three
+    ``continue`` arms.
+    """
+    for entry_id, fields in items:
+        raw_event_json = fields.get("event")
+        if not isinstance(raw_event_json, str):
+            _log.warning(
+                "feed_skipped_unknown_field_shape",
+                stream_key=stream_key,
+                entry_id=entry_id,
+                fields=list(fields.keys()),
+            )
+            continue
+        try:
+            event = BroadcastEvent.model_validate_json(raw_event_json)
+        except ValidationError:
+            _log.warning(
+                "feed_skipped_malformed_event",
+                stream_key=stream_key,
+                entry_id=entry_id,
+            )
+            continue
+        if not _passes_filter(event, op_class, principal, target):
+            continue
+        yield entry_id, _format_event(entry_id, raw_event_json)
+
+
 async def _feed_generator(
     operator: Operator,
     cursor: str,
@@ -230,14 +283,28 @@ async def _feed_generator(
     principal: str | None,
     target: str | None,
 ) -> AsyncIterator[str]:
-    """SSE generator: BLOCK on XREAD, filter, format, heartbeat.
+    """SSE generator: BLOCK on XREAD, delegate parsing, heartbeat-on-silence.
 
-    Cancelled cleanly on client disconnect (Starlette raises
-    :class:`asyncio.CancelledError` into the await point). The
-    ``except`` arm returns silently rather than propagating so the
-    surrounding StreamingResponse doesn't synthesise a 500-shaped
-    audit row at session end — a normal SSE close lands as a clean
-    200.
+    Heartbeat semantics — ``last_heartbeat`` tracks the wall-clock of
+    the **last outbound yield** (event frame or heartbeat), NOT the
+    last inbound XREAD result. A noisy tenant where every event is
+    filtered out for this subscriber still produces zero outbound
+    bytes; without this guarantee the connection would idle-timeout
+    at the nginx / ALB / CloudFront layer. The "all entries filtered
+    out" path therefore emits an inline heartbeat when the idle
+    window has elapsed — both quiet and busy-but-filtered tenants
+    keep the connection alive.
+
+    On client disconnect Starlette raises
+    :class:`asyncio.CancelledError` into the pending ``xread`` await;
+    the handler logs and re-raises per the asyncio cancellation
+    contract (Sonar S7497 — swallowing CancelledError breaks the task
+    tree's unwind invariants and Python 3.13+ asyncio internals re-
+    issue cancellation when it goes unpropagated). The audit row at
+    session end still records a clean 200 close because
+    ``http.response.start`` was sent on the first yield (before any
+    cancellation point), so AuditMiddleware's buffered status_code
+    is already locked at 200.
     """
     client = get_broadcast_client()
     stream_key = _stream_key(operator)
@@ -251,6 +318,7 @@ async def _feed_generator(
                 count=_XREAD_COUNT,
             )
             now = time.monotonic()
+            emitted_any = False
             if entries:
                 # redis-py returns ``[[stream_key, [(entry_id, fields), ...]], ...]``
                 # — one outer tuple per stream queried. We always
@@ -258,58 +326,32 @@ async def _feed_generator(
                 # feed), so ``entries[0][1]`` is the list of
                 # ``(entry_id, fields_dict)`` tuples.
                 _key, items = entries[0]
-                for entry_id, fields in items:
+                for entry_id, frame in _process_entries(
+                    items,
+                    op_class=op_class,
+                    principal=principal,
+                    target=target,
+                    stream_key=stream_key,
+                ):
                     cursor = entry_id
-                    raw_event_json = fields.get("event")
-                    if not isinstance(raw_event_json, str):
-                        # A producer that XADD'd a field other than
-                        # ``event`` would land here. T3's publisher
-                        # is the only writer; this branch is the
-                        # safety net against a future Slack-mirror /
-                        # downstream tool writing alternate field
-                        # shapes onto the same stream key.
-                        _log.warning(
-                            "feed_skipped_unknown_field_shape",
-                            stream_key=stream_key,
-                            entry_id=entry_id,
-                            fields=list(fields.keys()),
-                        )
-                        continue
-                    try:
-                        event = BroadcastEvent.model_validate_json(raw_event_json)
-                    except ValidationError:
-                        # A malformed event on the stream is a T3
-                        # bug or a stream-key collision with a
-                        # foreign writer. Log + skip rather than
-                        # tearing down every subscriber.
-                        _log.warning(
-                            "feed_skipped_malformed_event",
-                            stream_key=stream_key,
-                            entry_id=entry_id,
-                        )
-                        continue
-                    if not _passes_filter(event, op_class, principal, target):
-                        continue
-                    yield _format_event(entry_id, raw_event_json)
+                    yield frame
+                    emitted_any = True
+            if emitted_any:
                 last_heartbeat = now
-                continue
-            # XREAD returned no entries within the block window.
-            # Emit a heartbeat if the wall-clock idle window has
-            # elapsed (it always has, since BLOCK = HEARTBEAT_INTERVAL
-            # by construction — but the explicit check keeps the
-            # contract honest if either constant later changes).
-            if now - last_heartbeat >= _HEARTBEAT_INTERVAL_SECONDS:
+            elif now - last_heartbeat >= _HEARTBEAT_INTERVAL_SECONDS:
                 yield ": heartbeat\n\n"
                 last_heartbeat = now
     except asyncio.CancelledError:
-        # Client disconnect. Suppress propagation so the audit row at
-        # session end reflects a clean 200 close.
+        # Client disconnect. Log the structured event for operator
+        # triage, then re-raise so the task tree unwinds per asyncio's
+        # cancellation contract — Sonar S7497, Python 3.13+ asyncio
+        # internals (re-issue cancellation if it goes unpropagated).
         _log.info(
             "feed_subscriber_disconnected",
             stream_key=stream_key,
             operator_sub=operator.sub,
         )
-        return
+        raise
 
 
 @router.get("/feed")

@@ -217,6 +217,14 @@ async def _collect_n_frames(
     :meth:`__aiter__.aclose` to cancel any pending ``xread`` and
     unwind the generator. Determinism comes from the mocked ``xread``'s
     ``asyncio.sleep`` yield point above.
+
+    ``TimeoutError`` from the ``asyncio.timeout`` wrapper is caught
+    silently because the timeout IS the test's termination mechanism
+    when ``n`` is unreachable (e.g. ``n=0`` for cursor-passes-through
+    cases, or a heartbeat test waiting one cycle past the patched
+    interval). The generator re-raises ``CancelledError`` per its
+    post-M1 contract; ``asyncio.timeout`` converts that to
+    ``TimeoutError`` on its way out of the context.
     """
     frames: list[str] = []
     try:
@@ -225,6 +233,8 @@ async def _collect_n_frames(
                 frames.append(chunk)
                 if len(frames) >= n:
                     break
+    except TimeoutError:
+        pass
     finally:
         await gen.aclose()
     return frames
@@ -381,6 +391,74 @@ class TestFeedGenerator:
             ]
         )
         assert decoded["target_name"] == "rdc-vcenter"
+
+    async def test_heartbeat_emitted_when_all_entries_filter_out(
+        self,
+        _feed_env: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Busy-but-filtered tenants still receive the keep-alive heartbeat.
+
+        The bug class this test pins (B1 / SonarCloud iter-1): a noisy
+        tenant where every event is rejected by the subscriber's filter
+        would otherwise emit zero outbound bytes but reset
+        ``last_heartbeat`` on every xread cycle — the wall-clock idle
+        check would never fire and intermediaries (nginx 60s, AWS ALB
+        60s, CloudFront 60s) would idle-timeout the connection. The
+        post-fix contract: heartbeats track outbound silence, not
+        inbound stream activity.
+
+        Time is compressed via the ``_HEARTBEAT_INTERVAL_SECONDS``
+        constant patched to a sub-second value rather than letting the
+        test wait the production 30 s. Same approach the SonarCloud
+        S7483 comment about timeout context managers anticipates.
+        """
+        from meho_backplane.api.v1 import feed as feed_module
+
+        monkeypatch.setattr(feed_module, "_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+
+        # Every event has op_class=write; the subscriber filters for
+        # op_class=read. xread returns the events on cycle 1; cycle 2+
+        # returns None with a sleep that's long enough for the patched
+        # heartbeat window to elapse.
+        write_event_a = _make_event(op_class="write", op_id="vsphere.vm.create")
+        write_event_b = _make_event(op_class="write", op_id="vsphere.vm.delete")
+        broadcast_client = get_broadcast_client()
+        items = [
+            (f"{1715600000000 + i}-0", {"event": event.model_dump_json()})
+            for i, event in enumerate([write_event_a, write_event_b])
+        ]
+        call_count = {"n": 0}
+
+        async def _xread_side_effect(*_a: object, **_k: object) -> object:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # All entries filter out: subscriber asked for reads,
+                # tenant sent writes.
+                return [("meho:feed:<irrelevant>", items)]
+            # Subsequent cycles sleep past the heartbeat interval so
+            # the next loop iteration emits a heartbeat.
+            await asyncio.sleep(0.1)
+            return None
+
+        mock = AsyncMock(side_effect=_xread_side_effect)
+        with patch.object(broadcast_client, "xread", new=mock):
+            gen = _feed_generator(
+                operator=_make_operator(),
+                cursor="$",
+                op_class="read",
+                principal=None,
+                target=None,
+            )
+            frames = await _collect_n_frames(gen, n=1, timeout=2.0)
+
+        # The single emitted frame is the heartbeat — every event was
+        # filtered out, but the contract still required keep-alive
+        # bytes on the wire. ``_collect_n_frames`` appends the raw
+        # yielded chunk verbatim (no \n\n splitting), so the frame
+        # carries the SSE comment-line shape end-to-end.
+        assert len(frames) == 1
+        assert frames[0] == ": heartbeat\n\n"
 
     async def test_cursor_passes_through_to_xread(self, _feed_env: None) -> None:
         """The cursor argument (already resolved by the handler) is what xread sees."""

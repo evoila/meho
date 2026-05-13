@@ -79,6 +79,28 @@
         }
       }
     },
+    "/api/v1/auth-config": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Auth Config",
+        "description": "Return Keycloak issuer + audience for the CLI's device-code flow.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is trailing-slash-\nnormalised here \u2014 Keycloak's discovery document advertises the\ncanonical form without a trailing slash and the CLI's own URL\nconstruction (``<issuer>/.well-known/openid-configuration``) is\ncleaner against the normalised form.",
+        "operationId": "auth_config_api_v1_auth_config_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfigResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
@@ -107,6 +129,290 @@
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
                 }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/retrieve": {
+      "post": {
+        "tags": [
+          "retrieval"
+        ],
+        "summary": "Retrieve Endpoint",
+        "description": "Run hybrid retrieval against the requesting tenant's corpus.\n\nTenant-scoped to ``operator.tenant_id`` -- there is no surface\nthat accepts a tenant id in the body. ``read_only`` operators get\n403 via :func:`require_role` before reaching this handler.\n\nBinds four ``audit_*`` contextvars **before** the retrieval call\nso the audit_log row's ``payload`` JSONB carries the privacy-\npreserving query trace even if the handler raises mid-retrieval\n(the partial payload is itself a useful incident-postmortem\nsignal). The raw query is never bound -- only its SHA-256 hash.",
+        "operationId": "retrieve_endpoint_api_v1_retrieve_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetrieveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrieveResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/feed": {
+      "get": {
+        "tags": [
+          "feed"
+        ],
+        "summary": "Feed Endpoint",
+        "description": "Stream broadcast events for the operator's tenant as Server-Sent Events.\n\nHeaders:\n    ``Last-Event-Id``: optional SSE reconnect cursor. Takes\n    precedence over the ``since`` query parameter when both are\n    present.\n\nReturns:\n    :class:`StreamingResponse` with ``media_type=text/event-stream``.\n    ``Cache-Control: no-cache, no-store, must-revalidate`` and\n    ``X-Accel-Buffering: no`` keep intermediaries from buffering\n    the stream into a single response (nginx default behaviour\n    would otherwise stall every event behind its buffer flush).",
+        "operationId": "feed_endpoint_api_v1_feed_get",
+        "parameters": [
+          {
+            "name": "op_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by event op_class.",
+              "title": "Op Class"
+            },
+            "description": "Filter by event op_class."
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by principal_sub.",
+              "title": "Principal"
+            },
+            "description": "Filter by principal_sub."
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by target_name.",
+              "title": "Target"
+            },
+            "description": "Filter by target_name."
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Explicit replay cursor; superseded by Last-Event-Id when present.",
+              "title": "Since"
+            },
+            "description": "Explicit replay cursor; superseded by Last-Event-Id when present."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{product}/{op_id}": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Execute Op",
+        "description": "Dispatch an operation to the named connector.\n\nLooks up the connector by product slug, builds a pre-G0.3 target stub,\nand delegates to ``connector.execute(target, op_id, params)``. Returns\nthe ``OperationResult`` as JSON on success. Returns 404 for an unknown\nproduct and 400 for an unknown op-id (with the known ops list in the\nerror body so operators can enumerate what the connector supports).",
+        "operationId": "execute_op_api_v1_connectors__product___op_id__post",
+        "parameters": [
+          {
+            "name": "product",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Product"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectorExecRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Execute Op Api V1 Connectors  Product   Op Id  Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-protected-resource": {
+      "get": {
+        "tags": [
+          "discovery"
+        ],
+        "summary": "Protected Resource Metadata",
+        "description": "Return the RFC 9728 protected-resource metadata document.\n\nFields per RFC 9728 \u00a73:\n\n* ``resource`` (REQUIRED) \u2014 the canonical MCP server URI clients\n  pass as the ``resource`` parameter in OAuth requests per RFC 8707.\n  Resolved via :func:`~meho_backplane.mcp.auth.mcp_resource_uri`,\n  which prefers an explicit ``MCP_RESOURCE_URI`` setting and falls\n  back to ``f\"{backplane_url}/mcp\"``.\n* ``authorization_servers`` \u2014 the Keycloak issuer URL. MCP 2025-06-18\n  \u00a7Authorization Server Discovery requires this to be non-empty.\n* ``scopes_supported`` \u2014 v0.2 ships two scopes that downstream\n  Tasks (T3 RBAC filter, T4 reference tool, T5 audit) consume.\n  Conservative: clients that request only ``mcp:read`` can list /\n  inspect but not invoke side-effecting tools.\n* ``bearer_methods_supported`` \u2014 ``[\"header\"]`` only. MCP transport\n  forbids tokens in the URI query (see \u00a7\"Access Token Usage\").\n\nNo authentication is enforced on this endpoint by design: RFC 9728\ndiscovery is the bootstrap step that lets unauthenticated clients\nlearn how to obtain a token. The chassis middleware chain still\nruns \u2014 the request_id stays bound for log correlation, and\nAuditMiddleware skips the row because no ``operator_sub`` is bound\n(the standard unauthenticated-route path).",
+        "operationId": "protected_resource_metadata__well_known_oauth_protected_resource_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Protected Resource Metadata  Well Known Oauth Protected Resource Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "Mcp Dispatch",
+        "description": "Dispatch a single JSON-RPC 2.0 request or notification.\n\nThe Streamable HTTP body contract (\u00a7\"Sending Messages to the Server\"):\n\n* Input is a JSON object \u2014 batch arrays are unsupported in T1.\n* On a *request* (id present): return 200 + single JSON envelope.\n* On a *notification* (id absent, or method prefix\n  ``notifications/``): return 202 with no body, regardless of\n  whether the handler errored \u2014 JSON-RPC \u00a74.1.2 forbids replying.\n\nAuthentication (G0.5-T2, #247): every request to this route MUST\ncarry a Bearer token whose ``aud`` claim equals the canonical MCP\nresource URI per RFC 8707 \u00a72. Validation runs as a FastAPI\ndependency before the body is parsed, so a missing or invalid\ntoken short-circuits to 401 + ``WWW-Authenticate: Bearer\nresource_metadata=...`` per RFC 9728 \u00a75.1 \u2014 the dispatch pipeline\nnever sees an unauthenticated request. The :class:`Operator` is\ninjected into this handler for downstream use even though T2\nitself doesn't consume the identity beyond the contextvar binding\nside effect; T3 / T4 / T5 will pull tenant / role data off it.\n\nThe function is the orchestrator only; each phase of the dispatch\npipeline lives in its own helper so the per-phase contract is grep-\nable and the cognitive complexity stays under the project's\nSonarCloud threshold:\n\n* :func:`_parse_request_body` \u2014 body \u2192 ``dict`` or transport error.\n* :func:`JsonRpcRequest.model_validate` + :func:`_coerce_request_id`\n  \u2014 envelope shape validation.\n* :func:`_validate_protocol_version_header` \u2014 spec \u00a7\"Protocol\n  Version Header\" enforcement.\n* :func:`_dispatch_to_handler` \u2014 handler lookup + execution + error\n  mapping.\n\nGET requests on this path automatically return HTTP 405 (FastAPI's\ndefault for an unmatched method) which satisfies the spec's\nfallback when the server does not implement the GET-opens-SSE\nbranch of the Streamable HTTP transport.",
+        "operationId": "mcp_dispatch_mcp_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },
@@ -166,6 +472,45 @@
   },
   "components": {
     "schemas": {
+      "AuthConfigResponse": {
+        "properties": {
+          "keycloak_issuer": {
+            "type": "string",
+            "title": "Keycloak Issuer"
+          },
+          "audience": {
+            "type": "string",
+            "title": "Audience"
+          }
+        },
+        "type": "object",
+        "required": [
+          "keycloak_issuer",
+          "audience"
+        ],
+        "title": "AuthConfigResponse",
+        "description": "OAuth discovery surface returned to ``meho login``.\n\nField names match the CLI's expected JSON keys (``keycloak_issuer``\nand ``audience``); renaming either field is a wire-compat break."
+      },
+      "ConnectorExecRequest": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "title": "ConnectorExecRequest",
+        "description": "Request body for connector operation dispatch."
+      },
       "DbStatus": {
         "properties": {
           "migrated": {
@@ -241,6 +586,139 @@
         "title": "OperatorIdentity",
         "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
       },
+      "RetrievalHit": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Document Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "doc_metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Doc Metadata"
+          },
+          "fused_score": {
+            "type": "number",
+            "title": "Fused Score"
+          },
+          "bm25_score": {
+            "type": "number",
+            "nullable": true,
+            "title": "Bm25 Score"
+          },
+          "cosine_score": {
+            "type": "number",
+            "nullable": true,
+            "title": "Cosine Score"
+          },
+          "bm25_rank": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Bm25 Rank"
+          },
+          "cosine_rank": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Cosine Rank"
+          }
+        },
+        "type": "object",
+        "required": [
+          "document_id",
+          "tenant_id",
+          "source",
+          "source_id",
+          "kind",
+          "body",
+          "doc_metadata",
+          "fused_score",
+          "bm25_score",
+          "cosine_score",
+          "bm25_rank",
+          "cosine_rank"
+        ],
+        "title": "RetrievalHit",
+        "description": "One document in a ranked retrieval response.\n\nFrozen pydantic v2 model: the retrieve helper builds these once\nand the API surface (T5) returns them unchanged. The per-signal\nscores + ranks are carried for observability -- callers tuning\nembedding model choice want to see whether the top hit had\ncontributions from both signals or just one.\n\n``fused_score`` is the RRF score the documents are sorted by;\n``bm25_score`` and ``cosine_score`` are the raw per-signal\nscores (None if the document didn't appear in that signal's\ntop-:data:`CANDIDATE_LIMIT`). Likewise ``bm25_rank`` /\n``cosine_rank`` are the 1-based ranks (1 = best) the document\nheld in each signal's list, None when absent."
+      },
+      "RetrieveRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Query"
+          },
+          "source": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Source"
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Kind"
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 10
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "RetrieveRequest",
+        "description": "POST body for ``/api/v1/retrieve``.\n\nField validation is the load-bearing first gate: empty queries\nshort-circuit at the framework (422 Unprocessable Entity) so the\nembedding pipeline never sees a zero-token input, and oversized\nqueries are rejected before they hit the model. The\n``max_length=2000`` cap is a generous upper bound on realistic\nfree-form operator queries; operators with longer payloads\nshould use the embedding pipeline directly via G4 / G5 ingestion\npaths."
+      },
+      "RetrieveResponse": {
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalHit"
+            },
+            "type": "array",
+            "title": "Hits"
+          },
+          "query_duration_ms": {
+            "type": "number",
+            "title": "Query Duration Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hits",
+          "query_duration_ms"
+        ],
+        "title": "RetrieveResponse",
+        "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -303,7 +781,7 @@
           "read_ok"
         ],
         "title": "VaultStatus",
-        "description": "Vault federation-chain status.\n\n``reachable`` is true when ``vault_client_for_operator`` returns a\nlogged-in client (TCP + TLS + JWT/OIDC login all worked). ``read_ok``\nis true when the test secret read succeeded against that client.\n``detail`` carries a short structured string for the CLI to render\non failure paths \u2014 never an unbounded exception message."
+        "description": "Vault federation-chain status.\n\n``reachable`` is true when the OIDC login succeeded (TCP + TLS +\nJWT forward all worked). ``read_ok`` is true when the test secret\nread succeeded against the resulting Vault token. ``detail`` carries\na short structured string for the CLI to render on failure paths \u2014\nnever an unbounded exception message."
       }
     }
   }

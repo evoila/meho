@@ -4,6 +4,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,7 +14,23 @@ import (
 	"strings"
 
 	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
+
+// AuthConfigResponse OAuth discovery surface returned to “meho login“.
+//
+// Field names match the CLI's expected JSON keys (“keycloak_issuer“
+// and “audience“); renaming either field is a wire-compat break.
+type AuthConfigResponse struct {
+	Audience       string `json:"audience"`
+	KeycloakIssuer string `json:"keycloak_issuer"`
+}
+
+// ConnectorExecRequest Request body for connector operation dispatch.
+type ConnectorExecRequest struct {
+	Params *map[string]interface{} `json:"params,omitempty"`
+	Target string                  `json:"target"`
+}
 
 // DbStatus Database migration status.
 //
@@ -61,11 +78,11 @@ type HealthResponse struct {
 
 	// Vault Vault federation-chain status.
 	//
-	// ``reachable`` is true when ``vault_client_for_operator`` returns a
-	// logged-in client (TCP + TLS + JWT/OIDC login all worked). ``read_ok``
-	// is true when the test secret read succeeded against that client.
-	// ``detail`` carries a short structured string for the CLI to render
-	// on failure paths — never an unbounded exception message.
+	// ``reachable`` is true when the OIDC login succeeded (TCP + TLS +
+	// JWT forward all worked). ``read_ok`` is true when the test secret
+	// read succeeded against the resulting Vault token. ``detail`` carries
+	// a short structured string for the CLI to render on failure paths —
+	// never an unbounded exception message.
 	Vault VaultStatus `json:"vault"`
 }
 
@@ -78,6 +95,65 @@ type OperatorIdentity struct {
 	Email *string `json:"email"`
 	Name  *string `json:"name"`
 	Sub   string  `json:"sub"`
+}
+
+// RetrievalHit One document in a ranked retrieval response.
+//
+// Frozen pydantic v2 model: the retrieve helper builds these once
+// and the API surface (T5) returns them unchanged. The per-signal
+// scores + ranks are carried for observability -- callers tuning
+// embedding model choice want to see whether the top hit had
+// contributions from both signals or just one.
+//
+// “fused_score“ is the RRF score the documents are sorted by;
+// “bm25_score“ and “cosine_score“ are the raw per-signal
+// scores (None if the document didn't appear in that signal's
+// top-:data:`CANDIDATE_LIMIT`). Likewise “bm25_rank“ /
+// “cosine_rank“ are the 1-based ranks (1 = best) the document
+// held in each signal's list, None when absent.
+type RetrievalHit struct {
+	Bm25Rank    *int                   `json:"bm25_rank"`
+	Bm25Score   *float32               `json:"bm25_score"`
+	Body        string                 `json:"body"`
+	CosineRank  *int                   `json:"cosine_rank"`
+	CosineScore *float32               `json:"cosine_score"`
+	DocMetadata map[string]interface{} `json:"doc_metadata"`
+	DocumentId  openapi_types.UUID     `json:"document_id"`
+	FusedScore  float32                `json:"fused_score"`
+	Kind        string                 `json:"kind"`
+	Source      string                 `json:"source"`
+	SourceId    string                 `json:"source_id"`
+	TenantId    openapi_types.UUID     `json:"tenant_id"`
+}
+
+// RetrieveRequest POST body for “/api/v1/retrieve“.
+//
+// Field validation is the load-bearing first gate: empty queries
+// short-circuit at the framework (422 Unprocessable Entity) so the
+// embedding pipeline never sees a zero-token input, and oversized
+// queries are rejected before they hit the model. The
+// “max_length=2000“ cap is a generous upper bound on realistic
+// free-form operator queries; operators with longer payloads
+// should use the embedding pipeline directly via G4 / G5 ingestion
+// paths.
+type RetrieveRequest struct {
+	Kind   *string `json:"kind"`
+	Limit  *int    `json:"limit,omitempty"`
+	Query  string  `json:"query"`
+	Source *string `json:"source"`
+}
+
+// RetrieveResponse Successful response shape for “/api/v1/retrieve“.
+//
+// “query_duration_ms“ is the wall-clock time from request entry
+// to response build (covers both the embedding compute and the two
+// SQL round-trips); operators tuning embedding-model choice or
+// debugging retrieval latency consume this value. Frozen so a
+// handler accidentally mutating it post-construction surfaces as a
+// pydantic error rather than a silently-modified response.
+type RetrieveResponse struct {
+	Hits            []RetrievalHit `json:"hits"`
+	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
 // ValidationError defines model for ValidationError.
@@ -102,21 +178,58 @@ type ValidationError_Loc_Item struct {
 
 // VaultStatus Vault federation-chain status.
 //
-// “reachable“ is true when “vault_client_for_operator“ returns a
-// logged-in client (TCP + TLS + JWT/OIDC login all worked). “read_ok“
-// is true when the test secret read succeeded against that client.
-// “detail“ carries a short structured string for the CLI to render
-// on failure paths — never an unbounded exception message.
+// “reachable“ is true when the OIDC login succeeded (TCP + TLS +
+// JWT forward all worked). “read_ok“ is true when the test secret
+// read succeeded against the resulting Vault token. “detail“ carries
+// a short structured string for the CLI to render on failure paths —
+// never an unbounded exception message.
 type VaultStatus struct {
 	Detail    *string `json:"detail"`
 	Reachable bool    `json:"reachable"`
 	ReadOk    bool    `json:"read_ok"`
 }
 
+// ExecuteOpApiV1ConnectorsProductOpIdPostParams defines parameters for ExecuteOpApiV1ConnectorsProductOpIdPost.
+type ExecuteOpApiV1ConnectorsProductOpIdPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// FeedEndpointApiV1FeedGetParams defines parameters for FeedEndpointApiV1FeedGet.
+type FeedEndpointApiV1FeedGetParams struct {
+	// OpClass Filter by event op_class.
+	OpClass *string `form:"op_class,omitempty" json:"op_class,omitempty"`
+
+	// Principal Filter by principal_sub.
+	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
+
+	// Target Filter by target_name.
+	Target *string `form:"target,omitempty" json:"target,omitempty"`
+
+	// Since Explicit replay cursor; superseded by Last-Event-Id when present.
+	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // AuthenticatedHealthApiV1HealthGetParams defines parameters for AuthenticatedHealthApiV1HealthGet.
 type AuthenticatedHealthApiV1HealthGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
+
+// RetrieveEndpointApiV1RetrievePostParams defines parameters for RetrieveEndpointApiV1RetrievePost.
+type RetrieveEndpointApiV1RetrievePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// McpDispatchMcpPostParams defines parameters for McpDispatchMcpPost.
+type McpDispatchMcpPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody defines body for ExecuteOpApiV1ConnectorsProductOpIdPost for application/json ContentType.
+type ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody = ConnectorExecRequest
+
+// RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
+type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
 
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
@@ -256,11 +369,33 @@ type ClientInterface interface {
 	// RootGet request
 	RootGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGet request
+	ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AuthConfigApiV1AuthConfigGet request
+	AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ExecuteOpApiV1ConnectorsProductOpIdPostWithBody request with any body
+	ExecuteOpApiV1ConnectorsProductOpIdPostWithBody(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ExecuteOpApiV1ConnectorsProductOpIdPost(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// FeedEndpointApiV1FeedGet request
+	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// AuthenticatedHealthApiV1HealthGet request
 	AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RetrieveEndpointApiV1RetrievePostWithBody request with any body
+	RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// HealthzHealthzGet request
 	HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// McpDispatchMcpPost request
+	McpDispatchMcpPost(ctx context.Context, params *McpDispatchMcpPostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// MetricsMetricsGet request
 	MetricsMetricsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -284,6 +419,66 @@ func (c *Client) RootGet(ctx context.Context, reqEditors ...RequestEditorFn) (*h
 	return c.Client.Do(req)
 }
 
+func (c *Client) ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAuthConfigApiV1AuthConfigGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExecuteOpApiV1ConnectorsProductOpIdPostWithBody(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody(c.Server, product, opId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ExecuteOpApiV1ConnectorsProductOpIdPost(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewExecuteOpApiV1ConnectorsProductOpIdPostRequest(c.Server, product, opId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewFeedEndpointApiV1FeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAuthenticatedHealthApiV1HealthGetRequest(c.Server, params)
 	if err != nil {
@@ -296,8 +491,44 @@ func (c *Client) AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *
 	return c.Client.Do(req)
 }
 
+func (c *Client) RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetrieveEndpointApiV1RetrievePostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetrieveEndpointApiV1RetrievePostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewHealthzHealthzGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) McpDispatchMcpPost(ctx context.Context, params *McpDispatchMcpPostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewMcpDispatchMcpPostRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +602,241 @@ func NewRootGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest generates requests for ProtectedResourceMetadataWellKnownOauthProtectedResourceGet
+func NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/.well-known/oauth-protected-resource")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAuthConfigApiV1AuthConfigGetRequest generates requests for AuthConfigApiV1AuthConfigGet
+func NewAuthConfigApiV1AuthConfigGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/auth-config")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewExecuteOpApiV1ConnectorsProductOpIdPostRequest calls the generic ExecuteOpApiV1ConnectorsProductOpIdPost builder with application/json body
+func NewExecuteOpApiV1ConnectorsProductOpIdPostRequest(server string, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody(server, product, opId, params, "application/json", bodyReader)
+}
+
+// NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody generates requests for ExecuteOpApiV1ConnectorsProductOpIdPost with any type of body
+func NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody(server string, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "product", runtime.ParamLocationPath, product)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewFeedEndpointApiV1FeedGetRequest generates requests for FeedEndpointApiV1FeedGet
+func NewFeedEndpointApiV1FeedGetRequest(server string, params *FeedEndpointApiV1FeedGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/feed")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.OpClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Principal != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewAuthenticatedHealthApiV1HealthGetRequest generates requests for AuthenticatedHealthApiV1HealthGet
 func NewAuthenticatedHealthApiV1HealthGetRequest(server string, params *AuthenticatedHealthApiV1HealthGetParams) (*http.Request, error) {
 	var err error
@@ -413,6 +879,61 @@ func NewAuthenticatedHealthApiV1HealthGetRequest(server string, params *Authenti
 	return req, nil
 }
 
+// NewRetrieveEndpointApiV1RetrievePostRequest calls the generic RetrieveEndpointApiV1RetrievePost builder with application/json body
+func NewRetrieveEndpointApiV1RetrievePostRequest(server string, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRetrieveEndpointApiV1RetrievePostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRetrieveEndpointApiV1RetrievePostRequestWithBody generates requests for RetrieveEndpointApiV1RetrievePost with any type of body
+func NewRetrieveEndpointApiV1RetrievePostRequestWithBody(server string, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/retrieve")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewHealthzHealthzGetRequest generates requests for HealthzHealthzGet
 func NewHealthzHealthzGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -435,6 +956,48 @@ func NewHealthzHealthzGetRequest(server string) (*http.Request, error) {
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewMcpDispatchMcpPostRequest generates requests for McpDispatchMcpPost
+func NewMcpDispatchMcpPostRequest(server string, params *McpDispatchMcpPostParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/mcp")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -567,11 +1130,33 @@ type ClientWithResponsesInterface interface {
 	// RootGetWithResponse request
 	RootGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*RootGetResponse, error)
 
+	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse request
+	ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse, error)
+
+	// AuthConfigApiV1AuthConfigGetWithResponse request
+	AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error)
+
+	// ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse request with any body
+	ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error)
+
+	ExecuteOpApiV1ConnectorsProductOpIdPostWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error)
+
+	// FeedEndpointApiV1FeedGetWithResponse request
+	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
+
 	// AuthenticatedHealthApiV1HealthGetWithResponse request
 	AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error)
 
+	// RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with any body
+	RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
+
+	RetrieveEndpointApiV1RetrievePostWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
+
 	// HealthzHealthzGetWithResponse request
 	HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error)
+
+	// McpDispatchMcpPostWithResponse request
+	McpDispatchMcpPostWithResponse(ctx context.Context, params *McpDispatchMcpPostParams, reqEditors ...RequestEditorFn) (*McpDispatchMcpPostResponse, error)
 
 	// MetricsMetricsGetWithResponse request
 	MetricsMetricsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*MetricsMetricsGetResponse, error)
@@ -605,6 +1190,96 @@ func (r RootGetResponse) StatusCode() int {
 	return 0
 }
 
+type ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+}
+
+// Status returns HTTPResponse.Status
+func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AuthConfigApiV1AuthConfigGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuthConfigResponse
+}
+
+// Status returns HTTPResponse.Status
+func (r AuthConfigApiV1AuthConfigGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ExecuteOpApiV1ConnectorsProductOpIdPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ExecuteOpApiV1ConnectorsProductOpIdPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ExecuteOpApiV1ConnectorsProductOpIdPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type FeedEndpointApiV1FeedGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r FeedEndpointApiV1FeedGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r FeedEndpointApiV1FeedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type AuthenticatedHealthApiV1HealthGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -628,6 +1303,29 @@ func (r AuthenticatedHealthApiV1HealthGetResponse) StatusCode() int {
 	return 0
 }
 
+type RetrieveEndpointApiV1RetrievePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RetrieveResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RetrieveEndpointApiV1RetrievePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RetrieveEndpointApiV1RetrievePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type HealthzHealthzGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -644,6 +1342,29 @@ func (r HealthzHealthzGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r HealthzHealthzGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type McpDispatchMcpPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r McpDispatchMcpPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r McpDispatchMcpPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -725,6 +1446,50 @@ func (c *ClientWithResponses) RootGetWithResponse(ctx context.Context, reqEditor
 	return ParseRootGetResponse(rsp)
 }
 
+// ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse request returning *ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse
+func (c *ClientWithResponses) ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse, error) {
+	rsp, err := c.ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rsp)
+}
+
+// AuthConfigApiV1AuthConfigGetWithResponse request returning *AuthConfigApiV1AuthConfigGetResponse
+func (c *ClientWithResponses) AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error) {
+	rsp, err := c.AuthConfigApiV1AuthConfigGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAuthConfigApiV1AuthConfigGetResponse(rsp)
+}
+
+// ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse request with arbitrary body returning *ExecuteOpApiV1ConnectorsProductOpIdPostResponse
+func (c *ClientWithResponses) ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error) {
+	rsp, err := c.ExecuteOpApiV1ConnectorsProductOpIdPostWithBody(ctx, product, opId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ExecuteOpApiV1ConnectorsProductOpIdPostWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error) {
+	rsp, err := c.ExecuteOpApiV1ConnectorsProductOpIdPost(ctx, product, opId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse(rsp)
+}
+
+// FeedEndpointApiV1FeedGetWithResponse request returning *FeedEndpointApiV1FeedGetResponse
+func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error) {
+	rsp, err := c.FeedEndpointApiV1FeedGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFeedEndpointApiV1FeedGetResponse(rsp)
+}
+
 // AuthenticatedHealthApiV1HealthGetWithResponse request returning *AuthenticatedHealthApiV1HealthGetResponse
 func (c *ClientWithResponses) AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error) {
 	rsp, err := c.AuthenticatedHealthApiV1HealthGet(ctx, params, reqEditors...)
@@ -734,6 +1499,23 @@ func (c *ClientWithResponses) AuthenticatedHealthApiV1HealthGetWithResponse(ctx 
 	return ParseAuthenticatedHealthApiV1HealthGetResponse(rsp)
 }
 
+// RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with arbitrary body returning *RetrieveEndpointApiV1RetrievePostResponse
+func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error) {
+	rsp, err := c.RetrieveEndpointApiV1RetrievePostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetrieveEndpointApiV1RetrievePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error) {
+	rsp, err := c.RetrieveEndpointApiV1RetrievePost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetrieveEndpointApiV1RetrievePostResponse(rsp)
+}
+
 // HealthzHealthzGetWithResponse request returning *HealthzHealthzGetResponse
 func (c *ClientWithResponses) HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error) {
 	rsp, err := c.HealthzHealthzGet(ctx, reqEditors...)
@@ -741,6 +1523,15 @@ func (c *ClientWithResponses) HealthzHealthzGetWithResponse(ctx context.Context,
 		return nil, err
 	}
 	return ParseHealthzHealthzGetResponse(rsp)
+}
+
+// McpDispatchMcpPostWithResponse request returning *McpDispatchMcpPostResponse
+func (c *ClientWithResponses) McpDispatchMcpPostWithResponse(ctx context.Context, params *McpDispatchMcpPostParams, reqEditors ...RequestEditorFn) (*McpDispatchMcpPostResponse, error) {
+	rsp, err := c.McpDispatchMcpPost(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseMcpDispatchMcpPostResponse(rsp)
 }
 
 // MetricsMetricsGetWithResponse request returning *MetricsMetricsGetResponse
@@ -796,6 +1587,124 @@ func ParseRootGetResponse(rsp *http.Response) (*RootGetResponse, error) {
 	return response, nil
 }
 
+// ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse parses an HTTP response from a ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse call
+func ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rsp *http.Response) (*ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAuthConfigApiV1AuthConfigGetResponse parses an HTTP response from a AuthConfigApiV1AuthConfigGetWithResponse call
+func ParseAuthConfigApiV1AuthConfigGetResponse(rsp *http.Response) (*AuthConfigApiV1AuthConfigGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AuthConfigApiV1AuthConfigGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuthConfigResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse parses an HTTP response from a ExecuteOpApiV1ConnectorsProductOpIdPostWithResponse call
+func ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse(rsp *http.Response) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ExecuteOpApiV1ConnectorsProductOpIdPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseFeedEndpointApiV1FeedGetResponse parses an HTTP response from a FeedEndpointApiV1FeedGetWithResponse call
+func ParseFeedEndpointApiV1FeedGetResponse(rsp *http.Response) (*FeedEndpointApiV1FeedGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &FeedEndpointApiV1FeedGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseAuthenticatedHealthApiV1HealthGetResponse parses an HTTP response from a AuthenticatedHealthApiV1HealthGetWithResponse call
 func ParseAuthenticatedHealthApiV1HealthGetResponse(rsp *http.Response) (*AuthenticatedHealthApiV1HealthGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -812,6 +1721,39 @@ func ParseAuthenticatedHealthApiV1HealthGetResponse(rsp *http.Response) (*Authen
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest HealthResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRetrieveEndpointApiV1RetrievePostResponse parses an HTTP response from a RetrieveEndpointApiV1RetrievePostWithResponse call
+func ParseRetrieveEndpointApiV1RetrievePostResponse(rsp *http.Response) (*RetrieveEndpointApiV1RetrievePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RetrieveEndpointApiV1RetrievePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RetrieveResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -849,6 +1791,39 @@ func ParseHealthzHealthzGetResponse(rsp *http.Response) (*HealthzHealthzGetRespo
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseMcpDispatchMcpPostResponse parses an HTTP response from a McpDispatchMcpPostWithResponse call
+func ParseMcpDispatchMcpPostResponse(rsp *http.Response) (*McpDispatchMcpPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &McpDispatchMcpPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
 
 	}
 

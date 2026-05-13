@@ -34,6 +34,7 @@ from pathlib import Path
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from meho_backplane.db.engine import get_engine
@@ -172,6 +173,37 @@ def _read_current_revision(connection: Connection) -> str | None:
     return context.get_current_revision()
 
 
+def _check_pgvector_extension(connection: Connection) -> bool:
+    """Return ``True`` iff the ``vector`` extension is enabled.
+
+    Queries ``pg_extension`` (the canonical PostgreSQL catalog for
+    installed extensions). Migration ``0003`` (G0.4-T1) runs
+    ``CREATE EXTENSION IF NOT EXISTS vector`` as part of
+    ``alembic upgrade head``, so on a freshly-deployed cluster the
+    extension is always present after the migration Job runs. This
+    probe is the belt-and-suspenders second check that flips
+    ``/ready`` red when:
+
+    * An operator manually ran ``DROP EXTENSION vector CASCADE`` on
+      a live cluster (which silently dropped the
+      ``documents.embedding`` column type too — retrieval is
+      broken until the column is recreated).
+    * The cluster was restored from a backup taken before migration
+      ``0003`` ran, leaving the schema present but the extension
+      absent.
+    * A managed-PG offering disabled the extension via an out-of-
+      band configuration change.
+
+    Called only on the PostgreSQL dialect path (gated by
+    :func:`db_migration_probe`); SQLite has no ``pg_extension``
+    catalog and the extension concept does not apply.
+    """
+    result = connection.execute(
+        text("SELECT 1 FROM pg_extension WHERE extname = 'vector'"),
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def db_migration_probe() -> ProbeResult:
     """Compare the DB's Alembic revision to the code's head.
 
@@ -193,17 +225,32 @@ async def db_migration_probe() -> ProbeResult:
       federation probe in T24 (operator-controllable substrings must
       not leak into a ``/ready`` payload).
 
+    On the PostgreSQL dialect the probe **additionally** verifies the
+    ``vector`` extension is loaded (G0.4-T6, Task #263) — migration
+    ``0003`` runs ``CREATE EXTENSION IF NOT EXISTS vector`` as part
+    of ``alembic upgrade head``, so a successful migration implies
+    the extension is present. The probe catches the post-deploy
+    drift where an operator manually dropped the extension or a
+    backup restore brought back the schema without the catalog
+    entry. The detail in that case is ``revision=<sha>
+    pgvector=missing`` (revision still matches head — only the
+    extension is gone). SQLite skips this check; the dialect has no
+    ``pg_extension`` catalog.
+
     The function is ``async`` because the canonical SQLAlchemy 2.x
     pattern reads the version through an ``AsyncEngine.connect()`` /
     ``run_sync`` pair; it is registered as an async probe by
     :mod:`meho_backplane.main`'s lifespan hook.
     """
+    pgvector_ok = True  # default for non-PG dialects; PG branch overrides below
     try:
         cfg = alembic_config()
         head = ScriptDirectory.from_config(cfg).get_current_head()
         engine = get_engine()
         async with engine.connect() as conn:
             current = await conn.run_sync(_read_current_revision)
+            if engine.dialect.name == "postgresql":
+                pgvector_ok = await conn.run_sync(_check_pgvector_extension)
     except Exception as exc:
         _log.warning(
             "db_migration_probe_failed",
@@ -224,14 +271,27 @@ async def db_migration_probe() -> ProbeResult:
             ok=False,
             detail="no_migrations: head and current are both unset",
         )
-    if current == head:
+    if current != head:
         return ProbeResult(
             name="db",
-            ok=True,
-            detail=f"revision={head}",
+            ok=False,
+            detail=f"current={current} head={head}",
+        )
+    if not pgvector_ok:
+        # Revision matches head but the pgvector extension is gone.
+        # G0.4-T6 (#263) failure mode: operator dropped the extension
+        # post-deploy or a backup restore brought back the schema
+        # without the catalog entry. Surfaced loudly on ``/ready`` so
+        # the kubelet pulls the pod out of service traffic; retrieval
+        # writes / reads against the ``vector(384)`` column would
+        # silently degrade otherwise.
+        return ProbeResult(
+            name="db",
+            ok=False,
+            detail=f"revision={head} pgvector=missing",
         )
     return ProbeResult(
         name="db",
-        ok=False,
-        detail=f"current={current} head={head}",
+        ok=True,
+        detail=f"revision={head}",
     )

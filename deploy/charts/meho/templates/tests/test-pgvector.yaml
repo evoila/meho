@@ -1,0 +1,118 @@
+{{- /*
+  G0.4-T6 (#263) -- helm test that asserts the deployed Postgres has
+  the ``vector`` extension enabled and the ``documents`` table present
+  after the migration Job ran.
+
+  Triggered via ``helm test <release>`` (CI runs it after
+  ``helm install --wait`` lands). The Job is annotated with
+  ``helm.sh/hook: test`` so it's NOT part of the release manifest --
+  ``helm uninstall`` cleans it up implicitly.
+
+  Pod runs the bitnami ``postgres-client`` image (psql only, ~50 MB)
+  and connects through the same DATABASE_URL Secret the backplane
+  Deployment + migration Job consume. Two assertions:
+
+  1. ``SELECT extversion FROM pg_extension WHERE extname='vector'`` --
+     must return a row. If the chassis Postgres image is missing
+     pgvector, the migration Job would have failed earlier on
+     ``CREATE EXTENSION vector`` and the chart wouldn't be installed
+     in the first place; this helm-test is the second-line guard
+     against drift (operator dropped the extension post-deploy,
+     backup restored without the catalog entry, etc.).
+  2. ``SELECT count(*) FROM documents`` -- must not error. Proves
+     migration ``0003`` (the G0.4-T1 table-creation) ran end-to-end.
+     Doesn't assert on the row count (a fresh install has zero docs;
+     a re-deploy has whatever G4 / G5 wrote since).
+
+  Both checks exit non-zero on failure with a clear message; the
+  Pod's terminationGracePeriodSeconds is 0 so ``helm test`` surfaces
+  the failure immediately to the operator.
+*/}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "meho.fullname" . }}-test-pgvector
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+  annotations:
+    # ``test`` hook runs only on ``helm test``; ``test-success`` (the older
+    # alias) is deprecated. ``hook-delete-policy`` removes the pod on
+    # success so a re-run starts clean; failed pods stick so the operator
+    # can ``kubectl logs`` them.
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "meho.serviceAccountName" . }}
+  containers:
+    - name: pgvector-check
+      # Bitnami postgres-client: minimal psql-only image, ~50 MB.
+      # Matches the PostgreSQL major version the migration was
+      # written against (PG 16 per migration 0003 / pgvector/pgvector:pg16).
+      image: bitnami/postgresql:16
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: PGURL
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.postgres.credentialsSecret }}
+              key: url
+      command:
+        - sh
+        - -c
+        - |
+          set -euo pipefail
+          # libpq's URI parser (the C library `psql` links against)
+          # accepts only the bare ``postgresql://`` / ``postgres://``
+          # schemes and rejects SQLAlchemy's driver-prefix form
+          # ``postgresql+<dialect>://`` (e.g. ``postgresql+asyncpg://``)
+          # with `invalid URI scheme`. The chart-side
+          # ``postgres.credentialsSecret`` ships the canonical asyncpg
+          # DSN because the backplane Deployment + migration Job both
+          # consume it via SQLAlchemy. psql does not -- strip the
+          # driver suffix once at the top so both queries below see a
+          # libpq-parseable URI. The chart-side secret keeps its
+          # asyncpg form (single source of truth); the normalisation
+          # is local to this preflight pod. References:
+          # https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-CONNSTRING-URIS
+          PGURL_LIBPQ=$(printf '%s\n' "$PGURL" | sed -E 's|^postgresql\+[a-z0-9_-]+://|postgresql://|')
+
+          # Step 1: pgvector extension must be enabled. The migration
+          # 0003 runs ``CREATE EXTENSION IF NOT EXISTS vector`` so a
+          # successful install implies presence; this check is the
+          # post-deploy drift guard.
+          extversion=$(psql "$PGURL_LIBPQ" -t -A -c \
+            "SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+          if [ -z "$extversion" ]; then
+            echo "FAIL: pgvector extension is NOT enabled on the target Postgres."
+            echo "      Expected migration 0003 to have run CREATE EXTENSION vector."
+            echo "      Check the chassis Postgres image: must be"
+            echo "      pgvector/pgvector:pg16 (or equivalent managed-PG offering"
+            echo "      with the vector extension available)."
+            exit 1
+          fi
+          echo "OK: pgvector extension enabled (version $extversion)"
+
+          # Step 2: the documents table must exist (proves migration 0003
+          # ran end-to-end, not just the CREATE EXTENSION half).
+          count=$(psql "$PGURL_LIBPQ" -t -A -c "SELECT count(*) FROM documents")
+          if [ -z "$count" ]; then
+            echo "FAIL: documents table query returned empty result; migration may not have completed."
+            exit 1
+          fi
+          echo "OK: documents table reachable (row count: $count)"
+      resources:
+        # Tiny resource ask -- this is a 2-query smoke test, not a
+        # workload. The Pod runs once, terminates within seconds.
+        limits:
+          cpu: 100m
+          memory: 64Mi
+        requests:
+          cpu: 10m
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

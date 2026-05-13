@@ -257,6 +257,17 @@ async def _retrieve_in_session(
     """
     log = structlog.get_logger()
     query_embedding = await get_embedding_service().encode_one(query)
+    # pgvector's wire format for a vector literal is a bracketed list
+    # of floats: ``[0.1, 0.2, ...]``. Python's ``str(list)`` produces
+    # exactly that shape, which lets the bound ``$1`` work through
+    # asyncpg's text codec (asyncpg has no native ``vector`` type
+    # registered against the raw ``text()`` statement, so the bind
+    # variable must arrive as a string for ``CAST($1 AS vector)`` to
+    # parse). Without this serialisation asyncpg raises
+    # ``TypeError: expected str, got list`` deep inside the text
+    # codec because Python list -> wire format conversion is gated
+    # on a typed column adapter we don't have here.
+    embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
 
     # BM25 candidates -- top :data:`CANDIDATE_LIMIT` rows whose body
     # contains at least one query term (the ``@@`` filter), ranked by
@@ -312,7 +323,7 @@ async def _retrieve_in_session(
     cosine_result = await session.execute(
         cosine_sql,
         {
-            "emb": query_embedding,
+            "emb": embedding_literal,
             "tenant_id": str(tenant_id),
             "source": source,
             "kind": kind,

@@ -237,6 +237,110 @@ async def test_probe_registers_with_async_runner(
 
 
 # ---------------------------------------------------------------------------
+# G0.4-T6 (#263) pgvector extension probe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_probe_skips_pgvector_check_on_sqlite(
+    sqlite_engine: AsyncEngine,
+) -> None:
+    """SQLite path: probe healthy without ever querying pg_extension.
+
+    The ``vector`` extension is a PostgreSQL concept; SQLite has no
+    ``pg_extension`` catalog. The probe gates on
+    ``engine.dialect.name == "postgresql"`` so the SQLite dev/test
+    driver never sees the extension check. Regression-locks the
+    dialect gate: a refactor that called the check unconditionally
+    would crash with ``no such table: pg_extension`` on SQLite.
+    """
+    await _create_alembic_version_table(sqlite_engine, "headcafe1111")
+    with patch(
+        "meho_backplane.db.migrations.ScriptDirectory.from_config",
+    ) as fake_from_config:
+        fake_from_config.return_value.get_current_head.return_value = "headcafe1111"
+        with patch(
+            "meho_backplane.db.migrations._check_pgvector_extension",
+        ) as fake_pgvector_check:
+            result = await db_migration_probe()
+
+    # Healthy on SQLite without invoking the pgvector helper.
+    assert result.ok is True
+    assert result.detail == "revision=headcafe1111"
+    fake_pgvector_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_probe_unhealthy_when_pgvector_missing(
+    sqlite_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revision matches but pgvector absent → ``ok=False`` with explicit detail.
+
+    Simulates the post-deploy drift mode: schema is correct
+    (alembic head matches DB revision) but the extension was dropped
+    out-of-band (operator ran ``DROP EXTENSION vector CASCADE`` or a
+    backup restored the table without the catalog entry). The probe
+    must flip ``/ready`` red rather than silently allowing retrieval
+    writes against a column whose type the extension defined.
+
+    Patches the dialect to ``postgresql`` (the SQLite engine is the
+    test driver, but the probe gate is on dialect name not the
+    actual driver) and stubs ``_check_pgvector_extension`` to return
+    False -- mirrors the runtime shape without needing a real PG
+    container.
+    """
+    await _create_alembic_version_table(sqlite_engine, "headcafe1111")
+
+    with patch(
+        "meho_backplane.db.migrations.ScriptDirectory.from_config",
+    ) as fake_from_config:
+        fake_from_config.return_value.get_current_head.return_value = "headcafe1111"
+        # Force the dialect-gate to take the PG branch even though the
+        # engine is SQLite -- the helper itself is patched away below.
+        monkeypatch.setattr(sqlite_engine.dialect, "name", "postgresql", raising=False)
+        with patch(
+            "meho_backplane.db.migrations._check_pgvector_extension",
+            return_value=False,
+        ) as fake_pgvector_check:
+            result = await db_migration_probe()
+
+    assert result.ok is False
+    assert result.detail == "revision=headcafe1111 pgvector=missing"
+    fake_pgvector_check.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_healthy_when_pgvector_present(
+    sqlite_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revision matches AND pgvector present → ``ok=True`` with revision detail.
+
+    Mirrors the production happy path: the migration Job ran, the
+    extension is loaded, retrieval is ready. Detail stays the same
+    shape (``revision=<sha>``) as the SQLite happy path so existing
+    operator tooling parsing the detail field doesn't need to
+    branch on dialect.
+    """
+    await _create_alembic_version_table(sqlite_engine, "headcafe1111")
+
+    with patch(
+        "meho_backplane.db.migrations.ScriptDirectory.from_config",
+    ) as fake_from_config:
+        fake_from_config.return_value.get_current_head.return_value = "headcafe1111"
+        monkeypatch.setattr(sqlite_engine.dialect, "name", "postgresql", raising=False)
+        with patch(
+            "meho_backplane.db.migrations._check_pgvector_extension",
+            return_value=True,
+        ):
+            result = await db_migration_probe()
+
+    assert result.ok is True
+    assert result.detail == "revision=headcafe1111"
+
+
+# ---------------------------------------------------------------------------
 # /ready integration
 # ---------------------------------------------------------------------------
 

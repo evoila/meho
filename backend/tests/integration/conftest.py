@@ -69,6 +69,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.rbac_test import router as api_v1_rbac_test_router
+from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
@@ -336,6 +337,8 @@ def build_integration_app() -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     app.include_router(api_v1_health_router)
     app.include_router(api_v1_rbac_test_router)
+    # G0.4-T5 (#262) retrieve route; G0.4-T6 (#263) exercises it end-to-end.
+    app.include_router(api_v1_retrieve_router)
     # MCP transport entrypoint + RFC 9728 protected-resource metadata —
     # mounted unconditionally so the T6 acceptance suite (G0.5-T6, #251)
     # can drive the full lifecycle (initialize → tools/list → tools/call

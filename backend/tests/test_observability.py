@@ -29,6 +29,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import platform
 import re
 from collections.abc import Iterator
 from uuid import UUID
@@ -120,15 +121,32 @@ def test_metrics_endpoint_returns_prometheus_text_format(
     assert response.headers["content-type"] == "text/plain; version=0.0.4; charset=utf-8"
     body = response.text
 
-    # Default process collector metrics — the runtime fingerprint
-    # Goal #11 promised operators.
-    assert "process_resident_memory_bytes" in body
-    assert "process_open_fds" in body
-
     # The application counter, with all three labels populated.
     assert 'http_requests_total{method="GET"' in body
     assert 'path="/"' in body
     assert 'status="200"' in body
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux",
+    reason=(
+        "prometheus_client.ProcessCollector reads /proc/<pid>/; not available on Darwin or Windows"
+    ),
+)
+def test_metrics_endpoint_exposes_process_metrics_on_linux(
+    client: TestClient,
+) -> None:
+    """Default process-collector metrics — the runtime fingerprint Goal #11
+    promised operators. ``prometheus_client.ProcessCollector`` derives these
+    from ``/proc/<pid>/`` files and emits no samples on non-Linux platforms,
+    so the assertion is scoped to Linux (which is the CI runner pool's OS).
+    """
+    client.get("/")
+    response = client.get("/metrics")
+    body = response.text
+
+    assert "process_resident_memory_bytes" in body
+    assert "process_open_fds" in body
 
 
 def test_metrics_endpoint_does_not_increment_for_itself_during_render(

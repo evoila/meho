@@ -100,6 +100,25 @@ this stage it exposes:
   `Authorization:\s*Bearer\s+\S+` regex pass over `capfd` + `caplog`
   on every test exit, fail-closed when any pattern matches.
 
+* Broadcast substrate (G6.1-T1 #307) — `src/meho_backplane/broadcast/`
+  houses the async Valkey client (`client.py`) and the
+  `broadcast_readiness_probe` (`probe.py`). The lifespan hook
+  registers the probe under the `"broadcast"` name and eagerly
+  constructs the client so a malformed `BROADCAST_REDIS_URL` fails
+  startup rather than the first `/ready` poll; redis-py is lazy about
+  TCP so no socket opens until the probe issues its first `PING`.
+  `Settings.broadcast_redis_url` accepts only the
+  redis-py-supported schemes (`redis://`, `rediss://`, `unix://`) —
+  Valkey is wire-compatible under `redis://`, and a `valkey://` typo
+  would otherwise crash on first command. The probe distinguishes
+  four observable outcomes in `ProbeResult.detail` (`reachable`,
+  `timeout`, `unreachable: <ExcClass>`, `redis_error: <ExcClass>`)
+  plus a `check_failed: <ExcClass>` safety net for unexpected
+  failures, and never echoes the operator-supplied URL — same
+  redaction contract as the Vault and DB probes. T2-T6 (#308-#312)
+  build the event schema, publish-on-write hook, SSE endpoint, MCP
+  resource, and the `meho status --watch` CLI on top of this
+  foundation.
 * Persistence layer (Task #27) — `src/meho_backplane/db/` houses the
   SQLAlchemy 2.x async engine (`engine.py`), the per-request
   session-factory dependency (`get_session`), and the

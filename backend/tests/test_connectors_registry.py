@@ -22,7 +22,7 @@ from __future__ import annotations
 import types
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -312,6 +312,8 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch("meho_backplane.main.register_probe"),
             patch("meho_backplane.main.get_engine"),
             patch("meho_backplane.main.dispose_engine"),
+            patch("meho_backplane.main.get_broadcast_client"),
+            patch("meho_backplane.main.dispose_broadcast_client"),
             patch(
                 "meho_backplane.main._eager_import_connectors", side_effect=lambda: called.append(1)
             ),
@@ -323,3 +325,46 @@ def test_lifespan_calls_eager_import_connectors() -> None:
 
     asyncio.run(_run())
     assert called == [1], "_eager_import_connectors must be called exactly once in lifespan"
+
+
+def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> None:
+    """Lifespan shutdown runs every disposer even if an earlier one raises.
+
+    asyncpg pool teardown under FastAPI lifespan exit has a documented
+    loop-attached failure surface — a raise in ``dispose_engine`` must
+    not short-circuit ``dispose_broadcast_client`` and leak the redis
+    connection pool. The per-disposer try/except in
+    :mod:`~meho_backplane.main` is the load-bearing fix this test pins.
+    """
+    import asyncio
+
+    from meho_backplane.main import lifespan
+
+    async def _run() -> None:
+        broadcast_disposed = AsyncMock()
+        with (
+            patch("meho_backplane.main.configure_logging"),
+            patch("meho_backplane.main.register_probe"),
+            patch("meho_backplane.main.get_engine"),
+            patch(
+                "meho_backplane.main.dispose_engine",
+                new=AsyncMock(side_effect=RuntimeError("engine dispose boom")),
+            ),
+            patch("meho_backplane.main.get_broadcast_client"),
+            patch(
+                "meho_backplane.main.dispose_broadcast_client",
+                new=broadcast_disposed,
+            ),
+            patch("meho_backplane.main._eager_import_connectors"),
+            patch("meho_backplane.main.eager_import_mcp_modules"),
+            patch("meho_backplane.main.get_embedding_service"),
+        ):
+            gen = lifespan(None)  # type: ignore[arg-type]
+            await gen.__aenter__()
+            # Lifespan __aexit__ must NOT propagate the engine-dispose
+            # failure (otherwise the per-disposer try/except in main.py
+            # didn't catch it) and MUST still call dispose_broadcast_client.
+            await gen.__aexit__(None, None, None)
+        broadcast_disposed.assert_awaited_once()
+
+    asyncio.run(_run())

@@ -13,12 +13,12 @@ chain end-to-end:
    Keycloak's JWKS, and binds the resulting ``operator_sub`` into
    structlog's contextvars (so every log line under this request carries
    the operator's identity).
-2. The handler enters
-   :func:`~meho_backplane.auth.vault.vault_client_for_operator`, which
-   forwards the *same* validated JWT to Vault's JWT/OIDC auth method.
-   Vault verifies the JWT against its own configured trust of Keycloak
-   (via the ``meho-mcp`` role) and issues a Vault token bound to the
-   operator's identity.
+2. The handler dispatches to
+   :class:`~meho_backplane.connectors.vault.VaultConnector` (via the
+   connector registry), which forwards the *same* validated JWT to
+   Vault's JWT/OIDC auth method. Vault verifies the JWT against its own
+   configured trust of Keycloak (via the ``meho-mcp`` role) and issues a
+   Vault token bound to the operator's identity.
 3. The handler reads ``secret/meho/test/federation`` (KV v2) using the
    per-operator Vault token. The read is the **federation proof**: if
    Vault's audit log shows this operator's ``sub`` against the read,
@@ -42,7 +42,6 @@ controllable URL substrings into a successful 200 response.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import structlog
@@ -50,10 +49,8 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.vault import (
-    VaultClientError,
-    vault_client_for_operator,
-)
+from meho_backplane.connectors import get_connector
+from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.middleware import verify_jwt_and_bind
 
@@ -86,11 +83,11 @@ class OperatorIdentity(BaseModel):
 class VaultStatus(BaseModel):
     """Vault federation-chain status.
 
-    ``reachable`` is true when ``vault_client_for_operator`` returns a
-    logged-in client (TCP + TLS + JWT/OIDC login all worked). ``read_ok``
-    is true when the test secret read succeeded against that client.
-    ``detail`` carries a short structured string for the CLI to render
-    on failure paths — never an unbounded exception message.
+    ``reachable`` is true when the OIDC login succeeded (TCP + TLS +
+    JWT forward all worked). ``read_ok`` is true when the test secret
+    read succeeded against the resulting Vault token. ``detail`` carries
+    a short structured string for the CLI to render on failure paths —
+    never an unbounded exception message.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -133,96 +130,50 @@ class HealthResponse(BaseModel):
 router = APIRouter(prefix="/api/v1", tags=["health"])
 
 
-def _extract_version(secret_payload: Any) -> str:
-    """Pull the KV v2 metadata version from a ``read_secret_version`` payload.
-
-    hvac's KV v2 read returns ``{"data": {"data": ..., "metadata":
-    {"version": int, ...}}}``. Accessing the version through nested
-    ``[]`` calls inside a try/except would obscure the read-OK
-    contract; this helper isolates the unwrap so the route handler stays
-    legible. Any structural surprise (Vault returns an unexpected shape,
-    metadata absent) raises ``KeyError`` / ``TypeError`` from the dict
-    indexing, which the caller maps to ``read_ok=False`` with a
-    ``read_failed`` detail.
-    """
-    data = secret_payload["data"]
-    metadata = data["metadata"]
-    version = metadata["version"]
-    return f"version={version}"
-
-
 async def _probe_vault_federation(
     operator: Operator,
     log: Any,
 ) -> VaultStatus:
-    """Run the federation-proof Vault chain and return its structured status.
+    """Run the federation-proof Vault chain via the connector registry.
 
-    Mirrors the route handler's three failure axes — login failure,
-    secret-read failure, full success — onto a single :class:`VaultStatus`
-    value. Lifted into a helper so the route handler stays focused on
-    response assembly and the function-size budget stays under the
-    code-quality threshold.
+    Dispatches to :class:`~meho_backplane.connectors.vault.VaultConnector`
+    through :func:`~meho_backplane.connectors.get_connector` so the route
+    no longer holds a direct dependency on the auth.vault implementation
+    details. The three failure axes (login failure, read failure, full
+    success) are conveyed through the ``OperationResult.extras["phase"]``
+    and ``extras["exc_type"]`` fields.
 
     Detail strings carry only exception class names; operator-controllable
-    URL substrings never leak into a 200 response body or into a
-    structlog payload.
+    URL substrings never leak into a 200 response body or into a structlog
+    payload.
     """
-    try:
-        async with vault_client_for_operator(operator) as client:
-            try:
-                # hvac's secrets.kv.v2 lives on the synchronous client; the
-                # read is a blocking GET against Vault. Offload it to a
-                # worker thread so the event loop stays free, mirroring
-                # auth/vault.py's _to_thread_jwt_login pattern.
-                secret_payload = await asyncio.to_thread(
-                    client.secrets.kv.v2.read_secret_version,
-                    path=_FEDERATION_PROOF_PATH,
-                    raise_on_deleted_version=False,
-                )
-                # Unwrap inside the same try so a malformed hvac payload
-                # (missing data/metadata/version keys) surfaces as a
-                # structured read failure rather than escaping as an
-                # HTTP 500 — AC #3 forbids 5xx on this endpoint. The
-                # tight (KeyError, TypeError) catch is sufficient for the
-                # dict-indexing failure modes _extract_version can raise;
-                # the broader ``except Exception`` below covers hvac's own
-                # error surface (Forbidden, InvalidPath, RequestException).
-                detail = _extract_version(secret_payload)
-            except (KeyError, TypeError) as exc:
-                log.warning(
-                    "federation_health_read_failed",
-                    vault_read_path=_FEDERATION_PROOF_PATH,
-                    exc_type=type(exc).__name__,
-                )
-                return VaultStatus(
-                    reachable=True,
-                    read_ok=False,
-                    detail=f"read_failed: {type(exc).__name__}",
-                )
-            except Exception as exc:
-                log.warning(
-                    "federation_health_read_failed",
-                    vault_read_path=_FEDERATION_PROOF_PATH,
-                    exc_type=type(exc).__name__,
-                )
-                return VaultStatus(
-                    reachable=True,
-                    read_ok=False,
-                    detail=f"read_failed: {type(exc).__name__}",
-                )
-            log.info("federation_health_ok", vault_read_path=_FEDERATION_PROOF_PATH)
-            return VaultStatus(
-                reachable=True,
-                read_ok=True,
-                detail=detail,
-            )
-    except VaultClientError as exc:
-        log.warning("federation_health_login_failed", exc_type=type(exc).__name__)
-        return VaultStatus(
-            reachable=False,
-            read_ok=False,
-            detail=f"login_failed: {type(exc).__name__}",
-        )
+    # Prefer the registry-dispatched class (populated by lifespan _eager_import_connectors
+    # in production). Fall back to direct instantiation in test contexts where
+    # the connector registry has been cleared by test isolation fixtures.
+    vault_cls = get_connector("vault") or VaultConnector
+
+    target = VaultTarget(raw_jwt=operator.raw_jwt)
+    result = await vault_cls().execute(target, "vault.kv.read", {"path": _FEDERATION_PROOF_PATH})
+
+    if result.status == "ok":
+        version = result.extras.get("version")
+        detail = f"version={version}" if version is not None else "ok"
+        log.info("federation_health_ok", vault_read_path=_FEDERATION_PROOF_PATH)
+        return VaultStatus(reachable=True, read_ok=True, detail=detail)
+
+    phase = result.extras.get("phase", "read")
+    exc_type = result.extras.get("exc_type", "unknown")
+
+    if phase == "login":
+        log.warning("federation_health_login_failed", exc_type=exc_type)
+        return VaultStatus(reachable=False, read_ok=False, detail=f"login_failed: {exc_type}")
+
+    log.warning(
+        "federation_health_read_failed",
+        vault_read_path=_FEDERATION_PROOF_PATH,
+        exc_type=exc_type,
+    )
+    return VaultStatus(reachable=True, read_ok=False, detail=f"read_failed: {exc_type}")
 
 
 async def build_health_response(operator: Operator) -> HealthResponse:

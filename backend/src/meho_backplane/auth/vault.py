@@ -298,31 +298,23 @@ def _classify_health_response(payload: Any) -> tuple[bool, str]:
 async def vault_readiness_probe() -> ProbeResult:
     """Readiness probe — confirm Vault's ``/sys/health`` is reachable.
 
-    Registered with :mod:`meho_backplane.health` at app startup. Hits
-    Vault on every call (no caching); ``/sys/health`` is unauthenticated
-    and explicitly designed to be cheap by HashiCorp's own contract.
-
-    Async because hvac (the only seam to Vault we have) is synchronous
-    and would block the FastAPI event loop on every ``/ready`` poll if
-    called inline. The actual HTTP call is offloaded to a worker thread
-    via :func:`_to_thread_read_health`, mirroring the same pattern the
-    per-request login uses (:func:`_to_thread_jwt_login`).
+    Registered with :mod:`meho_backplane.health` at app startup. Delegates
+    to :class:`~meho_backplane.connectors.vault.VaultConnector` so the
+    health-check and the connector surface share one implementation path.
+    The lazy import avoids the circular import that would arise from
+    ``connectors.vault.connector`` importing from ``auth.vault`` at module
+    load time.
 
     The probe distinguishes three failure shapes in ``detail``:
 
     * ``unreachable: <ExceptionClassName>`` — TCP/TLS/DNS/timeout.
-    * ``sealed`` / ``uninitialized`` — Vault answered, but is not
-      serving. ``/api/v1/health`` callers will get a 503 next.
-    * ``unexpected_status: <code>`` — the contract changed (or a proxy
-      injected an unexpected response). Visible in
-      :mod:`/ready <meho_backplane.health>` for operators to chase.
+    * ``sealed`` / ``uninitialized`` — Vault answered, but is not serving.
+    * ``unexpected_status: <code>`` — the contract changed.
 
-    Detail strings never echo Vault's URL or the operator's namespace —
-    those are operator-controlled inputs and a 503 payload should not
-    surface them.
+    Detail strings never echo Vault's URL or the operator's namespace.
     """
     try:
-        settings = get_settings()
+        get_settings()  # fail-fast before importing the connector
     except Exception as exc:
         return ProbeResult(
             name="vault",
@@ -330,27 +322,13 @@ async def vault_readiness_probe() -> ProbeResult:
             detail=f"settings_unavailable: {type(exc).__name__}",
         )
 
-    client = _build_client(settings)
-    try:
-        payload = await _to_thread_read_health(client)
-    except (
-        requests.exceptions.ConnectionError,
-        requests.exceptions.Timeout,
-    ) as exc:
-        return ProbeResult(
-            name="vault",
-            ok=False,
-            detail=f"unreachable: {type(exc).__name__}",
-        )
-    except hvac.exceptions.VaultError as exc:
-        # ``read_health_status`` is called with ``raise_exception=False``
-        # internally, so reaching this branch implies a Vault response
-        # the adapter could not classify (e.g. wholly malformed body).
-        return ProbeResult(
-            name="vault",
-            ok=False,
-            detail=f"vault_error: {type(exc).__name__}",
-        )
+    # Lazy import: connectors.vault.connector imports auth.vault at module
+    # level, so a top-level import here would create a cycle.
+    from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
 
-    ok, detail = _classify_health_response(payload)
-    return ProbeResult(name="vault", ok=ok, detail=detail)
+    connector_probe = await VaultConnector().probe(VaultTarget())
+    return ProbeResult(
+        name="vault",
+        ok=connector_probe.ok,
+        detail=connector_probe.reason,
+    )

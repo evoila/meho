@@ -68,11 +68,14 @@ FAKE_VAULT_TOKEN: Final[str] = f"vault-fake-{secrets.token_hex(8)}"
 @dataclass
 class _FakeJWTAuth:
     login_calls: list[dict[str, Any]] = field(default_factory=list)
+    raise_on_login: Exception | None = None
     issued_token: str = FAKE_VAULT_TOKEN
-    parent: _FakeClient | None = None
+    parent: Any | None = None
 
     def jwt_login(self, role: str, jwt: str, path: str | None = None) -> dict[str, Any]:
         self.login_calls.append({"role": role, "jwt": jwt, "path": path})
+        if self.raise_on_login is not None:
+            raise self.raise_on_login
         if self.parent is not None:
             self.parent.token = self.issued_token
         return {"auth": {"client_token": self.issued_token}}
@@ -81,16 +84,13 @@ class _FakeJWTAuth:
 @dataclass
 class _FakeTokenAuth:
     revoke_calls: int = 0
+    raise_on_revoke: Exception | None = None
 
     def revoke_self(self, mount_point: str = "token") -> None:
-        # ``mount_point`` is part of the hvac call shape (production code
-        # passes it by keyword); the fake records the call without
-        # branching on the value. The explicit ``_ = mount_point`` rebind
-        # is the use-the-parameter pattern that defeats SonarCloud's
-        # python:S1172 unused-argument rule without forcing a rename
-        # (which would break the keyword call site).
         _ = mount_point
         self.revoke_calls += 1
+        if self.raise_on_revoke is not None:
+            raise self.raise_on_revoke
 
 
 @dataclass
@@ -104,9 +104,12 @@ class _FakeKVv2:
     secret: dict[str, Any] = field(default_factory=lambda: {"username": "demo"})
     version: int = 7
     read_calls: list[dict[str, Any]] = field(default_factory=list)
+    read_exc: Exception | None = None
 
     def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
         self.read_calls.append({"path": path})
+        if self.read_exc is not None:
+            raise self.read_exc
         return {
             "data": {
                 "data": self.secret,
@@ -128,16 +131,13 @@ class _FakeSecrets:
 @dataclass
 class _FakeSysBackend:
     payload: Any = None
+    raise_on_read: Exception | None = None
+    read_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
-        # ``method`` mirrors the hvac signature so production-shaped
-        # callers (``read_health_status(method='HEAD')``) work; the fake
-        # always returns the configured payload regardless of verb. The
-        # explicit ``_ = method`` rebind is the use-the-parameter
-        # pattern that defeats SonarCloud's python:S1172 unused-argument
-        # rule without forcing a rename (which would break the keyword
-        # call site).
-        _ = method
+        self.read_calls.append({"method": method})
+        if self.raise_on_read is not None:
+            raise self.raise_on_read
         return self.payload
 
 
@@ -190,4 +190,35 @@ def install_fake_vault(
         return fake
 
     monkeypatch.setattr(vault_module, "_build_client", _fake_build_client)
+    return fake
+
+
+def install_fake_client(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    health_payload: Any = None,
+    health_exc: Exception | None = None,
+    login_exc: Exception | None = None,
+    revoke_exc: Exception | None = None,
+    secret: dict[str, Any] | None = None,
+    kv_version: int | None = None,
+    read_exc: Exception | None = None,
+) -> _FakeClient:
+    """Failure-injecting variant of :func:`install_fake_vault`.
+
+    Builds the same ``_FakeClient`` and then sets each failure-injection
+    attribute in place. Mutating after construction keeps this wrapper
+    tiny (no duplicated ``_FakeClient(url=..., timeout=..., ...)`` body)
+    while exposing every knob the connector / failure-mode suites need:
+    login / revoke / health-read / kv-read exception injection plus
+    secret and KV-version overrides.
+    """
+    fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
+    fake.auth.jwt.raise_on_login = login_exc
+    fake.auth.token.raise_on_revoke = revoke_exc
+    fake.sys.payload = health_payload
+    fake.sys.raise_on_read = health_exc
+    if secret is not None:
+        fake.secrets.kv.v2.secret = secret
+    fake.secrets.kv.v2.read_exc = read_exc
     return fake

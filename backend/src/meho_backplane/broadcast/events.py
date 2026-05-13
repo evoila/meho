@@ -113,12 +113,21 @@ class BroadcastEvent(BaseModel):
     Valkey stream. SSE subscribers (T4) and MCP resource readers (T6)
     deserialise back to this shape.
 
-    The model is **frozen** (``ConfigDict(frozen=True)``) so once
-    constructed it cannot be mutated. Downstream consumers may pass
-    events through transformation pipelines without risk of an
-    intermediate stage rewriting fields the next stage assumed
-    immutable. Same rationale the chassis
-    :class:`~meho_backplane.auth.operator.Operator` model documents.
+    The model is **frozen** (``ConfigDict(frozen=True)``) — attribute
+    reassignment (``event.payload = new_dict``) raises ``ValidationError``,
+    mirroring the chassis
+    :class:`~meho_backplane.auth.operator.Operator` pattern.
+    ``frozen=True`` is **faux-immutability** in pydantic v2: nested
+    mutable values like the ``payload`` dict CAN still be mutated in
+    place — ``event.payload["k"] = "v"`` succeeds silently because it
+    mutates the inner dict object rather than reassigning the
+    attribute. Downstream consumers MUST NOT mutate ``payload``
+    between construction and publish. The PII contract is enforced
+    upstream by the publisher calling :func:`redact_payload` *before*
+    construction, not by the model itself. A future tightening to
+    ``Mapping[str, Any]`` + ``types.MappingProxyType`` would close
+    the in-place-mutation door but requires a coordinated change to
+    T3 / T4 / T6 deserialisation and is out of scope for T2.
 
     ``payload`` is **always** the redacted view per
     :func:`redact_payload` — callers MUST NOT pass raw params here.
@@ -135,8 +144,12 @@ class BroadcastEvent(BaseModel):
     ts: datetime
     tenant_id: UUID
     principal_sub: str
-    principal_name: str | None
-    target_name: str | None
+    #: Best-effort from the JWT's ``name`` claim cached at audit-write
+    #: time. Many JWTs ship without a ``name`` claim; the publisher
+    #: must be able to omit this field without forcing every call site
+    #: to pass an explicit ``None``. Same reasoning for ``target_name``.
+    principal_name: str | None = None
+    target_name: str | None = None
     op_id: str
     #: One of ``"read"`` / ``"write"`` / ``"credential_read"`` /
     #: ``"audit_query"`` / ``"other"``. Derived from

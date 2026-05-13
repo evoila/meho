@@ -92,10 +92,48 @@ class TestBroadcastEventSchema:
         assert event.principal_name is None
         assert event.target_name is None
 
+    def test_optional_fields_omittable_at_construction(self) -> None:
+        """Pydantic must accept events without ``principal_name`` / ``target_name``.
+
+        T3's publisher (#309) builds events from audit-row data where
+        ``principal_name`` is best-effort from the JWT's ``name`` claim
+        (frequently absent) and ``target_name`` is unknown until the
+        connector resolves the target alias. Forcing callers to pass
+        ``principal_name=None`` / ``target_name=None`` explicitly turns
+        every omission into boilerplate; the ``= None`` defaults on the
+        model make omission the natural path.
+        """
+        event = BroadcastEvent(
+            event_id=_EVENT_ID,
+            ts=_TS,
+            tenant_id=_TENANT_A,
+            principal_sub="op-test",
+            op_id="vsphere.vm.list",
+            op_class="read",
+            result_status="ok",
+            audit_id=_AUDIT_ID,
+        )
+        assert event.principal_name is None
+        assert event.target_name is None
+
     def test_payload_default_is_empty_dict(self) -> None:
-        """Default payload lands at ``{}``, not a shared mutable instance."""
-        a = _make_event()
-        b = _make_event()
+        """Default payload lands at ``{}``, not a shared mutable instance.
+
+        Constructs events that **omit** ``payload`` entirely so the
+        model's ``Field(default_factory=dict)`` actually runs. The prior
+        shape of this test built both events via ``_make_event()`` which
+        always supplied a payload kwarg, so the default-factory path
+        was never traversed — a future regression that swapped
+        ``default_factory=dict`` for ``default={}`` (the literal — the
+        classic mutable-default-argument footgun) would have silently
+        bled payload data across events without failing this test.
+        """
+        base = _make_event().model_dump()
+        base.pop("payload", None)
+        a = BroadcastEvent(**base)
+        b = BroadcastEvent(**base)
+        assert a.payload == {}
+        assert b.payload == {}
         # Mutating the dict on ``a`` after construction would mutate ``b`` too
         # if the field's default_factory were a shared instance; the frozen
         # model itself blocks that path, but verifying object identity

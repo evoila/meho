@@ -7,8 +7,12 @@ Current adapters:
 * :class:`~meho_backplane.connectors.adapters.http.HttpConnector` — abstract
   HTTP-API connector with httpx.AsyncClient pooling, retry/timeout, and
   auth-bearer plumbing (G0.2-T3).
+* :class:`~meho_backplane.connectors.adapters.ssh.SshConnector` — abstract
+  SSH connector with asyncssh connection pooling and key/password auth
+  (G0.2-T4).
 """
 
 from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.adapters.ssh import SshConnector
 
-__all__ = ["HttpConnector"]
+__all__ = ["HttpConnector", "SshConnector"]

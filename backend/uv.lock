@@ -248,6 +248,19 @@ wheels = [
 ]
 
 [[package]]
+name = "asyncssh"
+version = "2.23.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ee/fd/c34fe7e30838b4b9cc91903da26a62c6d33b673c731b3d951fcd70ab1889/asyncssh-2.23.0.tar.gz", hash = "sha256:8c54760953c1f2cf282591bcba5c8c70efc48d645bbf26bd2307a9c66a0ed1a7", size = 542154, upload-time = "2026-05-09T03:15:01.856Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/b5/b1a3979f4840d1271ca8e0978dbccfb18ad2d33b4ece85cf77122fb46e5f/asyncssh-2.23.0-py3-none-any.whl", hash = "sha256:14108bfdaae17457f0c1841e883ad934271bbfdd46458aa4c4d0973451940ad0", size = 375687, upload-time = "2026-05-09T03:15:00.221Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1181,6 +1194,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
+    { name = "asyncssh" },
     { name = "authlib" },
     { name = "fastapi" },
     { name = "fastembed" },
@@ -1216,6 +1230,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", specifier = ">=0.29" },
+    { name = "asyncssh", specifier = ">=2.18,<3.0" },
     { name = "authlib", specifier = ">=1.3" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "fastembed", specifier = ">=0.7,<1.0" },

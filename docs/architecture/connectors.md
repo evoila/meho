@@ -91,35 +91,35 @@ class AuthModel(StrEnum):
 
 Stored on every `Target` row (G0.3); read by the connector at `execute()` time.
 
-## Adapter shapes (planned: G0.2-T3 / T4)
+## Adapter shapes (G0.2-T3 / T4)
 
-> **Status:** None of the subclasses below exist yet. G0.2-T1 (ABC + result models) has landed; G0.2-T3 (HTTP adapter), G0.2-T4 (SSH adapter), and G0.2-T5 (`VaultConnector` reference refactor) are still open. The tree is the target hierarchy each vendor Initiative under [G3 (#214)](https://github.com/evoila/meho/issues/214) will register against once the adapters land.
+> **Status:** G0.2-T1 (ABC + result models), G0.2-T2 (registry), G0.2-T3 (HTTP adapter), and G0.2-T4 (SSH adapter) have landed. G0.2-T5 (`VaultConnector` reference refactor) is still open. The tree is the target hierarchy each vendor Initiative under [G3 (#214)](https://github.com/evoila/meho/issues/214) will register against.
 
 ```text
 Connector (ABC)                                      ← G0.2-T1 (shipped)
-├── HttpConnector       — httpx.AsyncClient pool, tenacity retry, SSL_CERT_FILE   ← G0.2-T3 (planned)
+├── HttpConnector       — httpx.AsyncClient pool, tenacity retry, SSL_CERT_FILE   ← G0.2-T3 (shipped)
 │   ├── VaultConnector  — refactor of auth/vault.py (G0.2-T5; reference impl)     ← G0.2-T5 (planned)
 │   ├── VSphereConnector — vSphere REST API (G3.1)
 │   ├── NSXConnector
 │   ├── HarborConnector
 │   └── ... (HTTP-API vendors)
-└── SshConnector         — asyncssh, key+password, per-target connection pool     ← G0.2-T4 (planned)
+└── SshConnector         — asyncssh, key+password, per-target connection pool     ← G0.2-T4 (shipped)
     ├── Bind9Connector
     ├── PfsenseConnector
     └── HolodeckConnector
 ```
 
-**HTTP adapter** (T3, planned): shared `httpx.AsyncClient` per target with retry on idempotent verbs only, `SSL_CERT_FILE` honored natively for the trust-bundle wiring from PR #212.
+**HTTP adapter** (T3, shipped): shared `httpx.AsyncClient` per target with retry on idempotent verbs only, `SSL_CERT_FILE` honored natively for the trust-bundle wiring from PR #212.
 
-**SSH adapter** (T4, planned): asyncssh (async-native, no thread offload — beats paramiko for the event loop). Per-target connection cached; closed on lifespan teardown.
+**SSH adapter** (T4, shipped): asyncssh (async-native, no thread offload — beats paramiko for the event loop). Per-target connection cached in `SshConnector._connections`; `known_hosts=None` for v0.2 (host-key pinning deferred to v0.2.next). Auth reads `target.secret_ref`: `ssh_private_key` → key auth, `password` → password auth fallback. Closed on lifespan teardown via `aclose()`.
 
 ## Library choices
 
 | Concern | Choice | Why |
 |---|---|---|
 | HTTP transport | `httpx` | Already in chassis, async, http2-capable, honors `SSL_CERT_FILE`. |
-| Retry policy | `tenacity` (planned T3) | Exponential backoff, exception-type filtering. |
-| SSH transport | `asyncssh` (planned T4) | Async-native (no `to_thread` offload). |
+| Retry policy | `tenacity` | Exponential backoff, exception-type filtering. Shipped T3. |
+| SSH transport | `asyncssh` | Async-native (no `to_thread` offload). Shipped T4. |
 | Vault client | `hvac` (chassis-era) | Sync, wrapped in `asyncio.to_thread` already. |
 | Vendor: vSphere | **vSphere REST API** | NOT pyvmomi (SOAP, sync). NOT govc subprocess. v0.2 returns 501 for REST gaps; v0.2.next adds a govc fallback if needed. |
 | Vendor: Kubernetes | **`kubernetes_asyncio`** (locked [decision #8](../planning/v0.2-decisions.md)) | Async fork of the official Python client; mature; broad API coverage; loads kubeconfig from a dict — direct fit for the consumer's `kubeconfig`-in-Vault flow. Rejected: `kr8s` (smaller surface) and `kubectl` subprocess (per-op cost, harder to test). Skeleton landed in [G3.2-T1 (#321)](https://github.com/evoila/meho/issues/321) under [`backend/src/meho_backplane/connectors/kubernetes/`](../../backend/src/meho_backplane/connectors/kubernetes/). |

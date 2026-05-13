@@ -4,12 +4,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -65,6 +67,34 @@ type ListTargetsParams struct {
 	Cursor  *string
 }
 
+// TargetCreateRequest is the POST /api/v1/targets body.
+type TargetCreateRequest struct {
+	Name        string         `json:"name"`
+	Aliases     []string       `json:"aliases"`
+	Product     string         `json:"product"`
+	Host        string         `json:"host"`
+	Port        *int           `json:"port,omitempty"`
+	SecretRef   *string        `json:"secret_ref,omitempty"`
+	AuthModel   string         `json:"auth_model"`
+	VPNRequired bool           `json:"vpn_required"`
+	Extras      map[string]any `json:"extras"`
+	Notes       *string        `json:"notes,omitempty"`
+}
+
+// TargetUpdateRequest is the PATCH /api/v1/targets/{name} body.
+// Nil pointer fields serialize as JSON null, which instructs the
+// server to clear that column (Pydantic exclude_unset behaviour).
+type TargetUpdateRequest struct {
+	Aliases     []string       `json:"aliases"`
+	Host        string         `json:"host"`
+	Port        *int           `json:"port"`
+	SecretRef   *string        `json:"secret_ref"`
+	AuthModel   string         `json:"auth_model"`
+	VPNRequired bool           `json:"vpn_required"`
+	Extras      map[string]any `json:"extras"`
+	Notes       *string        `json:"notes"`
+}
+
 // ListTargets calls GET /api/v1/targets with a one-shot 401-retry.
 // Returns the typed slice on success. On error the response body is
 // parsed for a structured error detail where possible; otherwise
@@ -74,6 +104,9 @@ func (c *AuthedClient) ListTargets(ctx context.Context, params *ListTargetsParam
 	if params != nil {
 		if params.Product != nil && *params.Product != "" {
 			q.Set("product", *params.Product)
+		}
+		if params.Limit != nil {
+			q.Set("limit", strconv.Itoa(*params.Limit))
 		}
 		if params.Cursor != nil {
 			q.Set("cursor", *params.Cursor)
@@ -151,6 +184,44 @@ func (c *AuthedClient) ProbeTarget(ctx context.Context, name string) (*ProbeResu
 	}
 }
 
+// CreateTarget calls POST /api/v1/targets with a one-shot 401-retry.
+// Returns the newly created target on 201, or an error on any other status.
+func (c *AuthedClient) CreateTarget(ctx context.Context, req TargetCreateRequest) (*Target, int, error) {
+	resp, err := c.doRequestWithBody(ctx, http.MethodPost, "/api/v1/targets", req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusCreated {
+		var t Target
+		if jerr := json.Unmarshal(body, &t); jerr != nil {
+			return nil, resp.StatusCode, fmt.Errorf("meho: decode created target: %w", jerr)
+		}
+		return &t, resp.StatusCode, nil
+	}
+	return nil, resp.StatusCode, errFromBody(body, resp.StatusCode)
+}
+
+// UpdateTarget calls PATCH /api/v1/targets/{name} with a one-shot 401-retry.
+// Returns the updated target on 200, or an error on any other status.
+func (c *AuthedClient) UpdateTarget(ctx context.Context, name string, req TargetUpdateRequest) (*Target, int, error) {
+	resp, err := c.doRequestWithBody(ctx, http.MethodPatch, "/api/v1/targets/"+url.PathEscape(name), req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		var t Target
+		if jerr := json.Unmarshal(body, &t); jerr != nil {
+			return nil, resp.StatusCode, fmt.Errorf("meho: decode updated target: %w", jerr)
+		}
+		return &t, resp.StatusCode, nil
+	}
+	return nil, resp.StatusCode, errFromBody(body, resp.StatusCode)
+}
+
 // doGet makes an authenticated GET to backplaneURL+path with optional query
 // parameters, retrying once with a refreshed token on 401.
 func (c *AuthedClient) doGet(ctx context.Context, path string, query url.Values) (*http.Response, error) {
@@ -192,6 +263,42 @@ func (c *AuthedClient) rawRequest(ctx context.Context, method, path string, quer
 		req.Header.Set("Authorization", authorizationHeader(bearer))
 	}
 	req.Header.Set("Accept", "application/json")
+	return c.httpClient.Do(req)
+}
+
+// doRequestWithBody sends method+path with a JSON-marshalled body,
+// retrying once on 401 after a token refresh.
+func (c *AuthedClient) doRequestWithBody(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	resp, err := c.rawRequestWithBody(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	_ = resp.Body.Close()
+	if rerr := c.box.refresh(ctx); rerr != nil {
+		return nil, rerr
+	}
+	return c.rawRequestWithBody(ctx, method, path, body)
+}
+
+func (c *AuthedClient) rawRequestWithBody(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	rawURL := strings.TrimRight(c.backplaneURL, "/") + path
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("meho: marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, bytes.NewReader(b))
+	if err != nil {
+		return nil, fmt.Errorf("meho: build request: %w", err)
+	}
+	bearer := c.box.snapshot()
+	if bearer != "" {
+		req.Header.Set("Authorization", authorizationHeader(bearer))
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
 	return c.httpClient.Do(req)
 }
 

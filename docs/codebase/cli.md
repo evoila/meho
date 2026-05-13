@@ -59,23 +59,25 @@ cli/
     │   ├── login_test.go      # override-resolution + help-flag tests.
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
-    │   └── targets/           # `meho targets` subcommand tree (G0.3-T5 #256).
+    │   └── targets/           # `meho targets` subcommand tree (G0.3-T5/T6 #256/#257).
     │       ├── targets.go     # parent command (NewCommand).
     │       ├── helpers.go     # resolveURL / normalizeURL shared by verbs.
     │       ├── list.go        # `meho targets list [--product P] [--json]`.
     │       ├── describe.go    # `meho targets describe <name|alias> [--json]`.
     │       ├── probe.go       # `meho targets probe <name|alias> [--json]`.
+    │       ├── import.go      # `meho targets import <file> [--update] [--dry-run] [--json]`.
     │       ├── helpers_test.go # withTempXDG / seedCreds / runCobraCmd shared test helpers.
     │       ├── list_test.go   # human/JSON/product-filter/empty/no-creds/override tests.
     │       ├── describe_test.go # human/JSON/404-near-miss/alias/no-creds tests.
-    │       └── probe_test.go  # ok/failed/501-friendly/404/no-creds tests.
+    │       ├── probe_test.go  # ok/failed/501-friendly/404/no-creds tests.
+    │       └── import_test.go # YAML parsing / dry-run / conflict / --update tests.
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.
     ├── output/
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   ├── format_test.go     # human/JSON/exit-code pinning.
-    │   └── targets.go         # PrintTargetsTable / PrintTarget / PrintProbeResult (G0.3-T5 #256).
+    │   └── targets.go         # PrintTargetsTable / PrintTarget / PrintProbeResult / PrintTargetNearMisses (G0.3-T5/T6 #256/#257).
     └── version/
         └── version.go         # build-time identity (Version/Commit/Date).
 ```

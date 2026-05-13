@@ -302,7 +302,7 @@ async def test_connect_failure_raises_at_connect_time() -> None:
         name="bad-host",
         host="unreachable.internal",
         port=22,
-        secret_ref={"username": "u", "password": "p"},
+        secret_ref={"username": "u", "password": "p"},  # NOSONAR
     )
 
     # asyncssh.connect raises OSError on TCP failure; mock it so the test
@@ -340,7 +340,7 @@ async def test_run_command_timeout_raises_asyncio_timeout_error() -> None:
         name="timeout-target",
         host="127.0.0.1",
         port=22,
-        secret_ref={"username": "u", "password": "p"},
+        secret_ref={"username": "u", "password": "p"},  # NOSONAR
     )
     conn._connections["timeout-target"] = (mock_conn, time.monotonic())
 
@@ -426,13 +426,13 @@ async def test_auth_config_password_auth_fallback() -> None:
         name="pwd-cfg",
         host="h",
         port=22,
-        secret_ref={"username": "bob", "password": "hunter2"},
+        secret_ref={"username": "bob", "password": _PASSWORD},
     )
 
     cfg = await conn._auth_config(target)
 
     assert cfg["username"] == "bob"
-    assert cfg.get("password") == "hunter2"
+    assert cfg.get("password") == _PASSWORD
     assert "client_keys" not in cfg
 
 
@@ -444,7 +444,7 @@ async def test_auth_config_defaults_username_to_root() -> None:
         name="no-user",
         host="h",
         port=22,
-        secret_ref={"password": "pw"},
+        secret_ref={"password": _PASSWORD},
     )
 
     cfg = await conn._auth_config(target)

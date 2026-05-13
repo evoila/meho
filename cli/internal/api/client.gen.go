@@ -86,6 +86,27 @@ type HealthResponse struct {
 	Vault VaultStatus `json:"vault"`
 }
 
+// OperationResult Connector op execution result.
+type OperationResult struct {
+	DurationMs float32                 `json:"duration_ms"`
+	Error      *string                 `json:"error"`
+	Extras     *map[string]interface{} `json:"extras,omitempty"`
+	OpId       string                  `json:"op_id"`
+	Result     *OperationResult_Result `json:"result"`
+	Status     string                  `json:"status"`
+}
+
+// OperationResultResult0 defines model for .
+type OperationResultResult0 map[string]interface{}
+
+// OperationResultResult1 defines model for .
+type OperationResultResult1 = []interface{}
+
+// OperationResult_Result defines model for OperationResult.Result.
+type OperationResult_Result struct {
+	union json.RawMessage
+}
+
 // OperatorIdentity Operator identity surface exposed to the CLI.
 //
 // Excludes “raw_jwt“ deliberately — the bearer token must never
@@ -154,6 +175,13 @@ type RetrieveRequest struct {
 type RetrieveResponse struct {
 	Hits            []RetrievalHit `json:"hits"`
 	QueryDurationMs float32        `json:"query_duration_ms"`
+}
+
+// UnknownOpError 400 response body when the connector doesn't know the requested op.
+type UnknownOpError struct {
+	Error    string   `json:"error"`
+	KnownOps []string `json:"known_ops"`
+	OpId     string   `json:"op_id"`
 }
 
 // ValidationError defines model for ValidationError.
@@ -230,6 +258,68 @@ type ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody = ConnectorExecReque
 
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
+
+// AsOperationResultResult0 returns the union data inside the OperationResult_Result as a OperationResultResult0
+func (t OperationResult_Result) AsOperationResultResult0() (OperationResultResult0, error) {
+	var body OperationResultResult0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOperationResultResult0 overwrites any union data inside the OperationResult_Result as the provided OperationResultResult0
+func (t *OperationResult_Result) FromOperationResultResult0(v OperationResultResult0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOperationResultResult0 performs a merge with any union data inside the OperationResult_Result, using the provided OperationResultResult0
+func (t *OperationResult_Result) MergeOperationResultResult0(v OperationResultResult0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOperationResultResult1 returns the union data inside the OperationResult_Result as a OperationResultResult1
+func (t OperationResult_Result) AsOperationResultResult1() (OperationResultResult1, error) {
+	var body OperationResultResult1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOperationResultResult1 overwrites any union data inside the OperationResult_Result as the provided OperationResultResult1
+func (t *OperationResult_Result) FromOperationResultResult1(v OperationResultResult1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOperationResultResult1 performs a merge with any union data inside the OperationResult_Result, using the provided OperationResultResult1
+func (t *OperationResult_Result) MergeOperationResultResult1(v OperationResultResult1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t OperationResult_Result) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *OperationResult_Result) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
 
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
@@ -1237,7 +1327,8 @@ func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
 type ExecuteOpApiV1ConnectorsProductOpIdPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *map[string]interface{}
+	JSON200      *OperationResult
+	JSON400      *UnknownOpError
 	JSON422      *HTTPValidationError
 }
 
@@ -1654,11 +1745,18 @@ func ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse(rsp *http.Response) (*
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest map[string]interface{}
+		var dest OperationResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest UnknownOpError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

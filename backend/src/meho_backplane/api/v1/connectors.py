@@ -30,7 +30,7 @@ G0.3 lands.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any  # used in ConnectorExecRequest.params
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -38,6 +38,7 @@ from pydantic import BaseModel
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import get_connector
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.middleware import verify_jwt_and_bind
 
 __all__ = ["router"]
@@ -52,6 +53,14 @@ class ConnectorExecRequest(BaseModel):
 
     target: str
     params: dict[str, Any] = {}
+
+
+class UnknownOpError(BaseModel):
+    """400 response body when the connector doesn't know the requested op."""
+
+    error: str
+    op_id: str
+    known_ops: list[str]
 
 
 @dataclass(frozen=True)
@@ -75,13 +84,20 @@ def _build_target(operator: Operator, _target_slug: str) -> _TargetStub:
     return _TargetStub(raw_jwt=operator.raw_jwt)
 
 
-@router.post("/{product}/{op_id}")
+@router.post(
+    "/{product}/{op_id}",
+    responses={
+        400: {"model": UnknownOpError, "description": "Unknown operation for this connector"},
+        401: {"description": "Unauthenticated or expired JWT"},
+        404: {"description": "Unknown connector product"},
+    },
+)
 async def execute_op(
     product: str,
     op_id: str,
     request: ConnectorExecRequest,
     operator: Operator = Depends(verify_jwt_and_bind),
-) -> dict[str, Any]:
+) -> OperationResult:
     """Dispatch an operation to the named connector.
 
     Looks up the connector by product slug, builds a pre-G0.3 target stub,
@@ -118,4 +134,4 @@ async def execute_op(
         status=result.status,
         duration_ms=result.duration_ms,
     )
-    return result.model_dump()
+    return result

@@ -65,6 +65,7 @@ func TestParseOpArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseOpArgs: unexpected error: %v", err)
 			}
+
 			if got.target != tc.wantTarget {
 				t.Errorf("target: got %q want %q", got.target, tc.wantTarget)
 			}
@@ -77,6 +78,19 @@ func TestParseOpArgs(t *testing.T) {
 						t.Errorf("params[%q]: got %v want %v", k, got.params[k], v)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestParseOpArgsReservedFlagsMissingValue verifies that reserved flags
+// (--target, --backplane, --params) return an error when no value is provided.
+func TestParseOpArgsReservedFlagsMissingValue(t *testing.T) {
+	for _, flag := range []string{"target", "backplane", "params"} {
+		t.Run(flag, func(t *testing.T) {
+			_, err := parseOpArgs([]string{"--" + flag})
+			if err == nil {
+				t.Errorf("--%s with no value: expected error, got nil", flag)
 			}
 		})
 	}

@@ -174,19 +174,21 @@ def test_unauthenticated_returns_401(client: TestClient) -> None:
     assert resp.status_code == 401
 
 
-def test_missing_path_param_returns_200_with_error_status(
+@pytest.mark.parametrize("params", [{}, {"path": ""}])
+def test_invalid_path_param_returns_200_with_error_status(
     client: TestClient,
     keypair: Any,
     jwt: str,
     monkeypatch: pytest.MonkeyPatch,
+    params: dict[str, str],
 ) -> None:
-    """Missing path param: connector validates and returns error status; route stays 200."""
+    """Missing or empty path: connector validates and returns error status; route stays 200."""
     install_fake_client(monkeypatch)
     with respx.mock:
         _mock_discovery_and_jwks(respx.mock, _public_jwks(keypair))
         resp = client.post(
             _VAULT_KV_READ_URL,
-            json={"target": "vault-test", "params": {}},
+            json={"target": "vault-test", "params": params},
             headers=_auth_headers(jwt),
         )
     assert resp.status_code == 200

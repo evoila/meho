@@ -343,12 +343,26 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "title": "Response Execute Op Api V1 Connectors  Product   Op Id  Post"
+                  "$ref": "#/components/schemas/OperationResult"
                 }
               }
             }
+          },
+          "400": {
+            "description": "Unknown operation for this connector",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnknownOpError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated or expired JWT"
+          },
+          "404": {
+            "description": "Unknown connector product"
           },
           "422": {
             "description": "Validation Error",
@@ -560,6 +574,54 @@
         "title": "HealthResponse",
         "description": "``GET /api/v1/health`` response body."
       },
+      "OperationResult": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ],
+            "nullable": true,
+            "title": "Result"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          },
+          "duration_ms": {
+            "type": "number",
+            "title": "Duration Ms"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "op_id",
+          "duration_ms"
+        ],
+        "title": "OperationResult",
+        "description": "Connector op execution result."
+      },
       "OperatorIdentity": {
         "properties": {
           "sub": {
@@ -718,6 +780,33 @@
         ],
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
+      },
+      "UnknownOpError": {
+        "properties": {
+          "error": {
+            "type": "string",
+            "title": "Error"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "known_ops": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Known Ops"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error",
+          "op_id",
+          "known_ops"
+        ],
+        "title": "UnknownOpError",
+        "description": "400 response body when the connector doesn't know the requested op."
       },
       "ValidationError": {
         "properties": {

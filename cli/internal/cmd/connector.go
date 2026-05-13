@@ -138,7 +138,13 @@ func parseOpArgs(args []string) (parsedOpArgs, error) {
 		}
 		// Flag that takes the next token as its value.
 		if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-			// Single-token flag with no value: skip silently.
+			// Reserved flags require a value; fail fast so operators get
+			// a clear error rather than a confusing downstream failure.
+			switch key {
+			case "target", "backplane", "params":
+				return result, fmt.Errorf("--%s requires a value", key)
+			}
+			// Unknown/forward-compatible flags: skip silently.
 			i++
 			continue
 		}
@@ -285,19 +291,17 @@ func runConnectorOp(
 	}
 }
 
-// printConnectorResult renders an OperationResult map for human consumption.
-// The default rendering prints status + op_id, then the result fields if
-// present. Errors surface the structured detail from the backplane.
-func printConnectorResult(w io.Writer, product, op string, result *map[string]interface{}) error {
+// printConnectorResult renders an OperationResult for human consumption.
+// The default rendering prints the result fields on success; errors surface
+// the structured detail from the backplane.
+func printConnectorResult(w io.Writer, product, op string, result *api.OperationResult) error {
 	if result == nil {
 		fmt.Fprintf(w, "%s %s: (empty response)\n", product, op)
 		return nil
 	}
-	m := *result
-	status, _ := m["status"].(string)
-	if status == "ok" {
-		if res, ok := m["result"]; ok && res != nil {
-			blob, err := json.MarshalIndent(res, "", "  ")
+	if result.Status == "ok" {
+		if result.Result != nil {
+			blob, err := json.MarshalIndent(result.Result, "", "  ")
 			if err != nil {
 				return fmt.Errorf("meho: marshal result: %w", err)
 			}
@@ -308,9 +312,12 @@ func printConnectorResult(w io.Writer, product, op string, result *map[string]in
 		return nil
 	}
 	// Error or denied status.
-	errStr, _ := m["error"].(string)
+	errStr := ""
+	if result.Error != nil {
+		errStr = *result.Error
+	}
 	if errStr == "" {
-		errStr = status
+		errStr = result.Status
 	}
 	fmt.Fprintf(w, "meho: connector error: %s\n", errStr)
 	return nil

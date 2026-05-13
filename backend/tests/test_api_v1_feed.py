@@ -256,18 +256,22 @@ async def _collect_n_frames(
 # ---------------------------------------------------------------------------
 
 
-def _mint_authenticated_token(
+async def _request_feed_authenticated(
     monkeypatch: pytest.MonkeyPatch,
     *,
     kid: str,
     sub: str,
     role: TenantRole,
-) -> tuple[str, object]:
-    """Bundle ``install_fake_vault`` + ``make_rsa_keypair`` + ``mint_token``.
+    extra_headers: dict[str, str] | None = None,
+    params: dict[str, str] | None = None,
+) -> httpx.Response:
+    """One-call HTTP-edge scaffold: vault + key + JWT + respx + client.
 
-    Returns ``(token, key)`` ready to wire into a ``respx.mock`` block.
-    Extracted so HTTP-edge tests can share the JWT-minting boilerplate
-    without tripping SonarCloud's duplication-on-new-code threshold.
+    Collapses the install_fake_vault / make_rsa_keypair / mint_token /
+    respx.mock / _make_client chain that every authenticated-edge test
+    needs into a single helper. Extracted so the three /api/v1/feed
+    edge cases share one body shape instead of three lookalike
+    scaffolds (SonarCloud duplication-on-new-code threshold).
     """
     from tests._vault_fakes import install_fake_vault
 
@@ -279,7 +283,12 @@ def _mint_authenticated_token(
         tenant_id=str(_TENANT_A),
         tenant_role=role.value,
     )
-    return token, key
+    headers = {"Authorization": f"Bearer {token}", **(extra_headers or {})}
+    app = _build_app()
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        async with _make_client(app) as client:
+            return await client.get("/api/v1/feed", headers=headers, params=params)
 
 
 class TestFeedEndpoint:
@@ -297,20 +306,12 @@ class TestFeedEndpoint:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``read_only`` operators can't subscribe; ``operator`` minimum required."""
-        token, key = _mint_authenticated_token(
+        response = await _request_feed_authenticated(
             monkeypatch,
             kid="kid-feed-read-only",
             sub="op-readonly",
             role=TenantRole.READ_ONLY,
         )
-        app = _build_app()
-        with respx.mock as mock_router:
-            mock_discovery_and_jwks(mock_router, public_jwks(key))
-            async with _make_client(app) as client:
-                response = await client.get(
-                    "/api/v1/feed",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
         assert response.status_code == 403
         assert response.json() == {"detail": "insufficient_role"}
 
@@ -334,23 +335,13 @@ class TestFeedEndpoint:
         ``EventSource.readyState=CLOSED`` per the spec — browsers stop
         auto-reconnecting on 4xx-class responses.
         """
-        token, key = _mint_authenticated_token(
+        response = await _request_feed_authenticated(
             monkeypatch,
             kid="kid-feed-bad-cursor",
             sub="op-bad-cursor",
             role=TenantRole.OPERATOR,
+            extra_headers={"Last-Event-Id": "abc-not-a-valkey-id"},
         )
-        app = _build_app()
-        with respx.mock as mock_router:
-            mock_discovery_and_jwks(mock_router, public_jwks(key))
-            async with _make_client(app) as client:
-                response = await client.get(
-                    "/api/v1/feed",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Last-Event-Id": "abc-not-a-valkey-id",
-                    },
-                )
         assert response.status_code == 400
         assert response.json()["detail"].startswith("invalid_cursor")
 
@@ -360,23 +351,16 @@ class TestFeedEndpoint:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Malformed ``since`` query parameter → 400 (same gate as the header)."""
-        token, key = _mint_authenticated_token(
+        response = await _request_feed_authenticated(
             monkeypatch,
             kid="kid-feed-bad-since",
             sub="op-bad-since",
             role=TenantRole.OPERATOR,
+            params={"since": "drop-table;"},
         )
-        app = _build_app()
-        with respx.mock as mock_router:
-            mock_discovery_and_jwks(mock_router, public_jwks(key))
-            async with _make_client(app) as client:
-                response = await client.get(
-                    "/api/v1/feed",
-                    params={"since": "drop-table;"},
-                    headers={"Authorization": f"Bearer {token}"},
-                )
         assert response.status_code == 400
         assert response.json()["detail"].startswith("invalid_cursor")
+
 
 # ---------------------------------------------------------------------------
 # Generator — every body-shaping AC

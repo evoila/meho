@@ -6,7 +6,6 @@ package targets
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -26,7 +25,6 @@ func fullTargetBody(name string) []byte {
 }
 
 func notFoundBody(query string) []byte {
-	// FastAPI HTTPException with dict detail wraps in {"detail": {...}}.
 	envelope := map[string]any{
 		"detail": map[string]any{
 			"error": "no_target",
@@ -42,15 +40,7 @@ func notFoundBody(query string) []byte {
 
 func fakeDescribeServer(t *testing.T, name string, body []byte, status int) string {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/"+name, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write(body)
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv.URL
+	return fakeServer(t, "/api/v1/targets/"+name, jsonHandler(body, status))
 }
 
 func TestDescribe_HumanHappyPath(t *testing.T) {

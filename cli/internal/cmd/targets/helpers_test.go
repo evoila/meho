@@ -6,6 +6,8 @@ package targets
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -47,6 +49,27 @@ func seedCreds(t *testing.T, xdg, backplaneURL string) {
 	if err := auth.SaveConfigAt(filepath.Join(xdg, "meho", "config.json"),
 		auth.Config{BackplaneURL: backplaneURL}); err != nil {
 		t.Fatalf("SaveConfigAt: %v", err)
+	}
+}
+
+// fakeServer starts an httptest.Server that mounts handler at pattern.
+// The server is closed automatically when t finishes.
+func fakeServer(t *testing.T, pattern string, handler http.HandlerFunc) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc(pattern, handler)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// jsonHandler returns a HandlerFunc that writes body with the given status and
+// Content-Type: application/json.
+func jsonHandler(body []byte, status int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
 	}
 }
 

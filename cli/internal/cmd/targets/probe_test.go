@@ -6,7 +6,6 @@ package targets
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -33,19 +32,13 @@ func probeFailedBody() []byte {
 
 func fakeProbeServer(t *testing.T, name string, body []byte, status int) string {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets/"+name+"/probe", func(w http.ResponseWriter, r *http.Request) {
+	return fakeServer(t, "/api/v1/targets/"+name+"/probe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write(body)
+		jsonHandler(body, status)(w, r)
 	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv.URL
 }
 
 func TestProbe_HumanHappyPath(t *testing.T) {

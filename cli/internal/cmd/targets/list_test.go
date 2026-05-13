@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -17,15 +16,7 @@ import (
 
 func fakeListServer(t *testing.T, body []byte, status int) string {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write(body)
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv.URL
+	return fakeServer(t, "/api/v1/targets", jsonHandler(body, status))
 }
 
 func twoTargetsBody() []byte {

@@ -309,24 +309,24 @@ async def test_probe_returns_ok_for_unsealed_vault(
     assert result.reason == "sealed=False"
 
 
-async def test_probe_returns_ok_false_for_sealed_vault(
+@pytest.mark.parametrize(
+    "health_payload,expected_reason",
+    [
+        ({"initialized": True, "sealed": True}, "sealed"),
+        ({"initialized": False, "sealed": False}, "uninitialized"),
+    ],
+    ids=["sealed", "uninitialized"],
+)
+async def test_probe_returns_ok_false_for_unhealthy_vault(
     monkeypatch: pytest.MonkeyPatch,
+    health_payload: dict[str, Any],
+    expected_reason: str,
 ) -> None:
-    _install_fake_client(monkeypatch, health_payload={"initialized": True, "sealed": True})
+    _install_fake_client(monkeypatch, health_payload=health_payload)
     result = await VaultConnector().probe(_make_target())
 
     assert result.ok is False
-    assert result.reason == "sealed"
-
-
-async def test_probe_returns_ok_false_for_uninitialized_vault(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _install_fake_client(monkeypatch, health_payload={"initialized": False, "sealed": False})
-    result = await VaultConnector().probe(_make_target())
-
-    assert result.ok is False
-    assert result.reason == "uninitialized"
+    assert result.reason == expected_reason
 
 
 async def test_probe_returns_ok_true_for_standby_vault(
@@ -450,29 +450,23 @@ async def test_execute_login_failure_returns_login_phase_error(
 # ---------------------------------------------------------------------------
 
 
-async def test_execute_read_exception_returns_read_phase_error(
+@pytest.mark.parametrize(
+    "read_exc,expected_exc_type",
+    [
+        (RuntimeError("secret missing"), "RuntimeError"),
+        (KeyError("data"), "KeyError"),
+    ],
+    ids=["runtime-error", "malformed-payload"],
+)
+async def test_execute_read_failure_returns_read_phase_error(
     monkeypatch: pytest.MonkeyPatch,
+    read_exc: Exception,
+    expected_exc_type: str,
 ) -> None:
-    _install_fake_client(monkeypatch, read_exc=RuntimeError("secret missing"))
+    """Read-phase exceptions (including KeyError from malformed payload) are structured errors."""
+    _install_fake_client(monkeypatch, read_exc=read_exc)
     result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": "some/path"})
 
     assert result.status == "error"
     assert result.extras.get("phase") == "read"
-    assert result.extras.get("exc_type") == "RuntimeError"
-
-
-async def test_execute_malformed_payload_returns_read_phase_key_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Malformed hvac payload (missing data/metadata keys) → KeyError as read failure."""
-    fake = _install_fake_client(monkeypatch)
-    monkeypatch.setattr(
-        fake.secrets.kv.v2,
-        "read_secret_version",
-        lambda path, **_kwargs: {"data": {}},  # missing nested "data" and "metadata"
-    )
-    result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": "some/path"})
-
-    assert result.status == "error"
-    assert result.extras.get("phase") == "read"
-    assert result.extras.get("exc_type") == "KeyError"
+    assert result.extras.get("exc_type") == expected_exc_type

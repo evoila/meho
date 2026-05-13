@@ -55,11 +55,11 @@ async def vault_kv_read(target: Any, params: dict[str, Any]) -> OperationResult:
     re-parsing the raw hvac payload.
     """
     path = params.get("path")
-    if not path:
+    if not isinstance(path, str) or not path.strip():
         return OperationResult(
             status="error",
             op_id="vault.kv.read",
-            error="path required",
+            error="path must be a non-empty string",
             duration_ms=0.0,
         )
 

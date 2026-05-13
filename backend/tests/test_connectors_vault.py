@@ -407,7 +407,19 @@ async def test_execute_vault_kv_read_missing_path_returns_error(
     result = await VaultConnector().execute(_make_target(), "vault.kv.read", {})
 
     assert result.status == "error"
-    assert result.error == "path required"
+    assert result.error == "path must be a non-empty string"
+    assert result.duration_ms == 0.0
+
+
+async def test_execute_vault_kv_read_non_string_path_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-string truthy path param returns input-validation error, not a read-phase error."""
+    _install_fake_client(monkeypatch)
+    result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": 123})
+
+    assert result.status == "error"
+    assert result.error == "path must be a non-empty string"
     assert result.duration_ms == 0.0
 
 

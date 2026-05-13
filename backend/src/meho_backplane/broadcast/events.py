@@ -1,0 +1,269 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Broadcast event schema + PII classifier (G6.1-T2).
+
+The publish-on-write hook (T3, #309) builds one :class:`BroadcastEvent`
+per audited operation and ``XADD``\\ s it to ``meho:feed:{tenant_id}``.
+T4 (#310) reads back from the same stream and serves it via SSE; T6
+(#312) wraps the stream in an MCP resource. This module ships the
+wire-shape contract and the sensitivity classifier that every
+downstream consumer relies on.
+
+PII discipline lives in :func:`classify_op` + :func:`redact_payload`.
+The classifier is policy-locked by decision #3 in
+``docs/planning/v0.2-decisions.md`` — credential reads and audit-query
+responses broadcast aggregate-only by default; everything else
+broadcasts in full. Per-op opt-in to flip a sensitive class to full
+detail is a G6.3 surface; T2 ships the conservative default.
+
+Why a classifier rather than a per-op annotation:
+
+1. Sensitivity is mostly op-class-shaped. ``vault.kv.read`` is no more
+   sensitive than ``vault.kv.list``; ``vsphere.vm.list`` is no more
+   sensitive than ``vsphere.host.list``. A per-op flag would multiply
+   the contract surface for no policy gain.
+2. The classifier is one auditable function. A reviewer can read it in
+   one sitting and verify policy compliance; scattered annotations on
+   every op would require a registry walk.
+
+Why aggregate-only-by-default for the sensitive classes:
+
+* ``credential_read`` — even logging that ``vault.kv.read`` returned OK
+  reveals which secret an operator touched. Path strings frequently
+  carry environment names, target hostnames, or service identifiers
+  that no SSE feed subscriber needs and that no Slack mirror channel
+  should retain. Aggregate-only collapses every credential read into
+  ``{op_class, result_status}`` — enough for "someone touched a
+  credential at 14:23", not enough to reconstruct what.
+* ``audit_query`` — the request filter is the most damaging thing to
+  broadcast: it encodes whoever the querying operator was investigating
+  and on what hunch. The response payload also carries the raw audit
+  rows the query matched, which inherits every other op's sensitivity.
+  Broadcasting only ``{op_class, result_status, row_count}`` keeps the
+  team-coordination signal ("X just queried audit") without leaking
+  the investigation target or the matched evidence.
+
+References
+----------
+
+* Decision #3 — ``docs/planning/v0.2-decisions.md``.
+* MCP audit shape (G0.5-T5, the in-tree precedent for similar
+  redaction discipline) —
+  :func:`meho_backplane.mcp.audit.write_mcp_audit_row`.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Final
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+__all__ = [
+    "BroadcastEvent",
+    "classify_op",
+    "redact_payload",
+]
+
+
+#: Op-ids that classify as ``credential_read``. Extensible — every
+#: future credential-access verb (e.g. ``vault.transit.decrypt``,
+#: ``secretsmanager.get``, ``onepassword.read``) gets added here when
+#: it lands. Membership is the canonical signal; ``vault.kv.``-prefix
+#: matching would over-match a hypothetical future ``vault.kv.stats``
+#: which doesn't read secret content.
+_CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "vault.kv.read",
+        "vault.kv.list",
+    }
+)
+
+#: Op-id suffixes that imply mutation. Append to this tuple when a new
+#: write-shaped verb spelling lands (no current users beyond the four
+#: in decision #3). Order doesn't matter — :meth:`str.endswith` accepts
+#: a tuple and short-circuits on the first match.
+_WRITE_SUFFIXES: Final[tuple[str, ...]] = (
+    ".create",
+    ".update",
+    ".delete",
+    ".patch",
+)
+
+#: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
+#: are the CLI-shaped verbs (``meho vsphere ls``, ``meho meho about``)
+#: that the connector layer maps to the same read class as ``.list`` /
+#: ``.get`` / ``.info``.
+_READ_SUFFIXES: Final[tuple[str, ...]] = (
+    ".list",
+    ".info",
+    ".get",
+    ".about",
+    ".ls",
+)
+
+
+class BroadcastEvent(BaseModel):
+    """One broadcast event — exactly one per audited operation.
+
+    The publish-on-write hook (T3) constructs an instance per audit-log
+    write; ``XADD meho:feed:{tenant_id}`` carries it onto the per-tenant
+    Valkey stream. SSE subscribers (T4) and MCP resource readers (T6)
+    deserialise back to this shape.
+
+    The model is **frozen** (``ConfigDict(frozen=True)``) so once
+    constructed it cannot be mutated. Downstream consumers may pass
+    events through transformation pipelines without risk of an
+    intermediate stage rewriting fields the next stage assumed
+    immutable. Same rationale the chassis
+    :class:`~meho_backplane.auth.operator.Operator` model documents.
+
+    ``payload`` is **always** the redacted view per
+    :func:`redact_payload` — callers MUST NOT pass raw params here.
+    The class can't enforce this from the type system alone (any
+    ``dict[str, Any]`` satisfies the annotation), so the contract is
+    documented in the publisher's docstring (T3) and verified by
+    integration tests that read back from the stream and assert
+    forbidden keys are absent.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    event_id: UUID
+    ts: datetime
+    tenant_id: UUID
+    principal_sub: str
+    principal_name: str | None
+    target_name: str | None
+    op_id: str
+    #: One of ``"read"`` / ``"write"`` / ``"credential_read"`` /
+    #: ``"audit_query"`` / ``"other"``. Derived from
+    #: :func:`classify_op` at publish time.
+    op_class: str
+    #: One of ``"ok"`` / ``"error"`` / ``"denied"``. The handler
+    #: produces it; the broadcast publisher does not re-classify.
+    result_status: str
+    #: FK to ``audit_log.id``. The broadcast event is downstream of the
+    #: audit write — audit is the canonical record, broadcast is the
+    #: real-time view. A subscriber that wants the full untruncated row
+    #: queries audit_log by this id.
+    audit_id: UUID
+    #: Redacted view per :func:`redact_payload`. NEVER raw params for
+    #: ``credential_read`` or ``audit_query`` classes — the redaction
+    #: contract is upstream of this field.
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+def classify_op(op_id: str) -> str:
+    """Map an op-id to one of the five sensitivity classes.
+
+    Match order is policy-significant:
+
+    1. ``credential_read`` — the explicit allowlist comes first so a
+       hypothetical future ``vault.kv.audit-list`` (read of audit
+       metadata, not secret content) could opt out of the credential
+       class by being absent from :data:`_CREDENTIAL_READ_OPS` and
+       falling through to the suffix check.
+    2. ``audit_query`` — every op-id with the ``audit.`` prefix
+       classifies as audit_query regardless of the verb suffix. Audit
+       responses carry rows that inherit every other op's sensitivity,
+       so the whole namespace is aggregate-only.
+    3. ``write`` — mutation suffixes (``.create`` / ``.update`` /
+       ``.delete`` / ``.patch``). Same break-when-first-matches rule
+       as ``.endswith`` on a tuple.
+    4. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
+       ``.get`` / ``.about`` / ``.ls``).
+    5. ``other`` — everything else. Falls through to full-detail
+       broadcast per decision #3.
+
+    Examples
+    --------
+
+    >>> classify_op("vault.kv.read")
+    'credential_read'
+    >>> classify_op("audit.query")
+    'audit_query'
+    >>> classify_op("vsphere.vm.list")
+    'read'
+    >>> classify_op("vsphere.vm.create")
+    'write'
+    >>> classify_op("some.unknown.op")
+    'other'
+    """
+    if op_id in _CREDENTIAL_READ_OPS:
+        return "credential_read"
+    if op_id.startswith("audit."):
+        return "audit_query"
+    if op_id.endswith(_WRITE_SUFFIXES):
+        return "write"
+    if op_id.endswith(_READ_SUFFIXES):
+        return "read"
+    return "other"
+
+
+def _maybe_row_count(raw_params: dict[str, Any]) -> int | None:
+    """Extract ``row_count`` from the publisher's combined params dict.
+
+    The publish-on-write hook (T3) merges request params and response
+    summary into one dict before calling :func:`redact_payload`. For
+    ``audit_query`` ops the response carries a ``row_count`` field
+    (per the G8 audit-query API in #334); for older or non-conforming
+    callers it may be absent.
+
+    Returns ``None`` rather than ``0`` when the field is missing so
+    subscribers can distinguish "the query matched zero rows" from
+    "the publisher didn't surface a count". Coerces to ``int`` defensively
+    — a stringified count from a JSON round-trip would otherwise serialise
+    back as a string.
+    """
+    raw = raw_params.get("row_count")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def redact_payload(
+    op_class: str,
+    raw_params: dict[str, Any],
+    result_status: str,
+) -> dict[str, Any]:
+    """Return the broadcast-safe payload view for *op_class*.
+
+    Three branches, locked by decision #3:
+
+    * ``credential_read`` → ``{op_class, result_status}``. No path, no
+      key names, no values. The mere fact that an operator read a
+      credential is broadcast; the *what* never leaves the audit row.
+    * ``audit_query`` → ``{op_class, result_status, row_count}``. The
+      filter is the most damaging field to broadcast (encodes the
+      investigation target), and the response rows inherit every other
+      op's sensitivity. Aggregate-only collapses to "X ran an audit
+      query that matched N rows".
+    * everything else → ``{op_class, params=raw_params, result_status}``.
+      Full request detail; nested objects pass through verbatim.
+
+    Forward-compatibility note: the return shape is a plain ``dict``
+    rather than a typed model because the downstream
+    :attr:`BroadcastEvent.payload` field is already ``dict[str, Any]``.
+    Promoting either side to a structured model would require a
+    coordinated change to all of T3 / T4 / T6 and is out of scope for
+    T2.
+    """
+    if op_class == "credential_read":
+        return {"op_class": op_class, "result_status": result_status}
+    if op_class == "audit_query":
+        return {
+            "op_class": op_class,
+            "result_status": result_status,
+            "row_count": _maybe_row_count(raw_params),
+        }
+    return {
+        "op_class": op_class,
+        "params": raw_params,
+        "result_status": result_status,
+    }

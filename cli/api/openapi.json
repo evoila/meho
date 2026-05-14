@@ -590,7 +590,7 @@
           "targets"
         ],
         "summary": "Probe Target",
-        "description": "Invoke the registered connector's ``probe`` method for a target.\n\nReturns 501 when no connector is registered for the target's\nproduct slug. The connector is free to return a failed probe\n(``ok=False``) with a reason; that is still a 200 response \u2014\nthe route succeeded, the connector reported the target as\nunreachable.",
+        "description": "Invoke the registered connector's ``fingerprint`` method for a target.\n\nThe probe verb returns the connector's\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` and\npersists it to ``targets.fingerprint`` so the G0.6 resolver (#388)\ncan pick an implementation without re-probing the live target. Per\nthe 2026-05-14 amendment to Initiative #224 the probe verb is the\n*only* writer to the column \u2014 :class:`TargetCreate` and\n:class:`TargetUpdate` reject the field with 422.\n\nReturns 501 when no connector is registered for the target's\nproduct slug; in that case the DB row is **not** touched, so the\npreviously-cached fingerprint (if any) survives. A connector that\nraises propagates the exception (rolling back the outer\ntransaction); the DB row again stays untouched. The column\ntherefore always reflects the *last successful* probe.",
         "operationId": "probe_target_api_v1_targets__name__probe_post",
         "parameters": [
           {
@@ -619,7 +619,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProbeResult"
+                  "$ref": "#/components/schemas/FingerprintResult"
                 }
               }
             }
@@ -1267,6 +1267,61 @@
         "title": "EvalResult",
         "description": "Top-level eval result \u2014 the shape the API + CLI return.\n\n``overall_verdict`` is the worst-of every surface (a red surface\nflips the whole result red); the CLI's exit-1-on-red CI-gate\nsemantics key off this field. ``ran_at`` is the UTC timestamp\nthe runner started; consumers comparing two saved baselines see\nwhen each was captured."
       },
+      "FingerprintResult": {
+        "properties": {
+          "vendor": {
+            "type": "string",
+            "title": "Vendor"
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
+          "build": {
+            "type": "string",
+            "nullable": true,
+            "title": "Build"
+          },
+          "edition": {
+            "type": "string",
+            "nullable": true,
+            "title": "Edition"
+          },
+          "reachable": {
+            "type": "boolean",
+            "title": "Reachable"
+          },
+          "probed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Probed At"
+          },
+          "probe_method": {
+            "type": "string",
+            "title": "Probe Method"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          }
+        },
+        "type": "object",
+        "required": [
+          "vendor",
+          "product",
+          "reachable",
+          "probed_at",
+          "probe_method"
+        ],
+        "title": "FingerprintResult",
+        "description": "Connector fingerprint per consumer-needs L95."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1471,36 +1526,6 @@
         ],
         "title": "OperatorIdentity",
         "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
-      },
-      "ProbeResult": {
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "title": "Ok"
-          },
-          "reason": {
-            "type": "string",
-            "nullable": true,
-            "title": "Reason"
-          },
-          "latency_ms": {
-            "type": "number",
-            "nullable": true,
-            "title": "Latency Ms"
-          },
-          "probed_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Probed At"
-          }
-        },
-        "type": "object",
-        "required": [
-          "ok",
-          "probed_at"
-        ],
-        "title": "ProbeResult",
-        "description": "Lightweight reachability + auth-challenge result."
       },
       "QueryResult": {
         "properties": {
@@ -1853,6 +1878,17 @@
             "nullable": true,
             "title": "Notes"
           },
+          "fingerprint": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Fingerprint"
+          },
+          "preferred_impl_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preferred Impl Id"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -1879,11 +1915,13 @@
           "vpn_required",
           "extras",
           "notes",
+          "fingerprint",
+          "preferred_impl_id",
           "created_at",
           "updated_at"
         ],
         "title": "Target",
-        "description": "Full read shape \u2014 returned by GET /targets/{name} and the resolver.\n\nMaps 1:1 to the ``targets`` table columns. Frozen so callers\ncan safely stash instances in request state or structured logs\nwithout fear of mutation.\n\n``aliases`` uses ``tuple[str, ...]`` and ``extras`` uses\n``Mapping[str, Any]`` so frozen instances cannot be mutated in-place\nvia list.append / dict.__setitem__ \u2014 matching the immutability contract\nthe docstring documents."
+        "description": "Full read shape \u2014 returned by GET /targets/{name} and the resolver.\n\nMaps 1:1 to the ``targets`` table columns. Frozen so callers\ncan safely stash instances in request state or structured logs\nwithout fear of mutation.\n\n``aliases`` uses ``tuple[str, ...]`` and ``extras`` uses\n``Mapping[str, Any]`` so frozen instances cannot be mutated in-place\nvia list.append / dict.__setitem__ \u2014 matching the immutability contract\nthe docstring documents.\n\n``fingerprint`` mirrors the persisted\n:class:`~meho_backplane.connectors.schemas.FingerprintResult` shape\n(JSON-safe dict from ``model_dump(mode='json')``) or ``None`` until\nthe first successful probe. ``preferred_impl_id`` is the operator's\noptional override for the G0.6 connector-impl resolver."
       },
       "TargetCreate": {
         "properties": {
@@ -1947,8 +1985,15 @@
             "type": "string",
             "nullable": true,
             "title": "Notes"
+          },
+          "preferred_impl_id": {
+            "type": "string",
+            "maxLength": 200,
+            "nullable": true,
+            "title": "Preferred Impl Id"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -1956,7 +2001,7 @@
           "host"
         ],
         "title": "TargetCreate",
-        "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default."
+        "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override."
       },
       "TargetSummary": {
         "properties": {
@@ -2048,11 +2093,18 @@
             "type": "string",
             "nullable": true,
             "title": "Notes"
+          },
+          "preferred_impl_id": {
+            "type": "string",
+            "maxLength": 200,
+            "nullable": true,
+            "title": "Preferred Impl Id"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "TargetUpdate",
-        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` and ``product`` are absent \u2014 rename = delete\n+ create."
+        "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` and ``product`` are absent \u2014 rename = delete\n+ create.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
       },
       "Thresholds": {
         "properties": {

@@ -69,7 +69,7 @@ class TargetNotFoundError(HTTPException):
             detail={
                 "error": "no_target",
                 "query": query,
-                "matches": [m.model_dump() for m in matches],
+                "matches": [m.model_dump(mode="json") for m in matches],
             },
         )
 
@@ -90,7 +90,7 @@ class AmbiguousTargetError(HTTPException):
             detail={
                 "error": "ambiguous_target",
                 "query": query,
-                "matches": [m.model_dump() for m in matches],
+                "matches": [m.model_dump(mode="json") for m in matches],
             },
         )
 

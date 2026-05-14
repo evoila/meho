@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/discovery"
 )
@@ -81,6 +82,13 @@ func newRootCmd() *cobra.Command {
 	// retire-checklist T6 #445) graft onto the same parent in their own
 	// PRs.
 	root.AddCommand(retrieval.NewRootCmd())
+
+	// G0.6-T13 (#481) -- operation meta-tool surface for the G0.6
+	// dispatcher substrate. `meho operation groups/search/call` wrap
+	// the three /api/v1/operations/* routes shipped by G0.6-T8 (#399).
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in verb names.
+	root.AddCommand(operation.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

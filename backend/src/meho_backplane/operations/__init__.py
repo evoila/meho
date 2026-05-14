@@ -6,14 +6,27 @@
 The G0.6 substrate (#388) and G0.7 ingestion pipeline (#389) both
 live here. G0.6 ships the underlying ``endpoint_descriptor`` +
 ``operation_group`` tables (T1 #392), the :class:`Connector` ABC
-registry-v2 metadata (T3 #394), and :func:`register_typed_operation`
+registry-v2 metadata (T3 #394), :func:`register_typed_operation`
 — the async helper typed connectors call at init time to populate
-the tables (T4 #395). G0.7 ships the operator review-queue state
-machine that gates ingested (auto-derived) connectors before any
-of their operations reach agents (T4 #402).
+the tables (T4 #395) — and :func:`dispatch` (T5 #396), the single
+entry point every operation flows through. G0.7 ships the operator
+review-queue state machine that gates ingested (auto-derived)
+connectors before any of their operations reach agents (T4 #402).
 
 Sub-modules:
 
+* :mod:`.dispatcher` — :func:`dispatch` and the orchestration of the
+  eight-phase pipeline (parse → lookup → validate → policy → resolve
+  → branch → reduce → audit+broadcast). Hosts the
+  ``parent_audit_id_var`` contextvar that T7 (#398) composite
+  recursion will populate, and the module-level reducer slot
+  (:func:`set_default_reducer`) that T6 (#397) will register the
+  real ``Reducer`` against.
+* :mod:`.reducer` — the v0.2 :class:`PassThroughReducer` stub +
+  :class:`Reducer` Protocol + :class:`ResultHandle`. T6 (#397) will
+  ship the full reducer implementation; the dispatcher already
+  invokes the reducer slot so today's pass-through gets swapped in
+  cleanly later.
 * :mod:`.typed_register` — :func:`register_typed_operation` and its
   :class:`HandlerRefError` for typed-connector init-time
   registration (re-exported at the package level for convenience).
@@ -23,12 +36,26 @@ Sub-modules:
   the bulk-upsert helper (T2 #403), and the LLM-grouping pass
   (T3 #404).
 
-The dispatcher (G0.6-T5, #396) reads ``endpoint_descriptor`` rows
-directly via the ORM; the meta-tools (T8, #399) hit the same
-surface via the retrieval helpers in
-:mod:`meho_backplane.operations.search` (G0.6-T6 / T7 territory).
+The dispatcher reads ``endpoint_descriptor`` rows directly via the
+ORM; the meta-tools (T8, #399) will hit the same surface via the
+retrieval helpers in :mod:`meho_backplane.operations.search`
+(G0.6-T6 / T7 territory).
 """
 
+from meho_backplane.operations.dispatcher import (
+    Dispatcher,
+    compute_params_hash,
+    dispatch,
+    import_handler,
+    parent_audit_id_var,
+    reset_dispatcher_caches,
+    set_default_reducer,
+)
+from meho_backplane.operations.reducer import (
+    PassThroughReducer,
+    Reducer,
+    ResultHandle,
+)
 from meho_backplane.operations.typed_register import (
     HandlerRefError,
     TypedOpHandler,
@@ -36,7 +63,17 @@ from meho_backplane.operations.typed_register import (
 )
 
 __all__ = [
+    "Dispatcher",
     "HandlerRefError",
+    "PassThroughReducer",
+    "Reducer",
+    "ResultHandle",
     "TypedOpHandler",
+    "compute_params_hash",
+    "dispatch",
+    "import_handler",
+    "parent_audit_id_var",
     "register_typed_operation",
+    "reset_dispatcher_caches",
+    "set_default_reducer",
 ]

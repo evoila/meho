@@ -24,21 +24,33 @@ from meho_backplane.connectors.resolver import (
 )
 from meho_backplane.connectors.schemas import (
     AuthModel,
+    CandidateHint,
+    EdgeHint,
+    EdgeKind,
     FingerprintResult,
+    NodeHint,
+    NodeKind,
     OperationResult,
     ProbeResult,
     ResultHandle,
+    TopologyHints,
 )
 
 __all__ = [
     "AmbiguousConnectorResolution",
     "AuthModel",
+    "CandidateHint",
     "Connector",
+    "EdgeHint",
+    "EdgeKind",
     "FingerprintResult",
     "NoMatchingConnector",
+    "NodeHint",
+    "NodeKind",
     "OperationResult",
     "ProbeResult",
     "ResultHandle",
+    "TopologyHints",
     "all_connectors",
     "all_connectors_v2",
     "get_connector",

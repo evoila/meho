@@ -9,9 +9,10 @@ live here. G0.6 ships the underlying ``endpoint_descriptor`` +
 registry-v2 metadata (T3 #394), :func:`register_typed_operation`
 — the async helper typed connectors call at init time to populate
 the tables (T4 #395) — and :func:`dispatch` (T5 #396), the single
-entry point every operation flows through. G0.7 ships the operator
-review-queue state machine that gates ingested (auto-derived)
-connectors before any of their operations reach agents (T4 #402).
+entry point every operation flows through. G0.7 ships the OpenAPI
+parser (T1 #401) and the operator review-queue state machine that
+gates ingested (auto-derived) connectors before any of their
+operations reach agents (T4 #402).
 
 Sub-modules:
 
@@ -30,11 +31,11 @@ Sub-modules:
 * :mod:`.typed_register` — :func:`register_typed_operation` and its
   :class:`HandlerRefError` for typed-connector init-time
   registration (re-exported at the package level for convenience).
-* :mod:`.ingest` — G0.7 spec-ingestion pipeline. Today: the
-  :class:`~meho_backplane.operations.ingest.ReviewService`
-  state machine (T4 #402). Later: the OpenAPI parser (T1 #401),
-  the bulk-upsert helper (T2 #403), and the LLM-grouping pass
-  (T3 #404).
+* :mod:`.ingest` — G0.7 spec-ingestion pipeline. Today:
+  :func:`~meho_backplane.operations.ingest.parse_openapi` (T1 #401)
+  + the :class:`~meho_backplane.operations.ingest.ReviewService`
+  state machine (T4 #402). Later: the bulk-upsert helper (T2 #403)
+  and the LLM-grouping pass (T3 #404).
 
 The dispatcher reads ``endpoint_descriptor`` rows directly via the
 ORM; the meta-tools (T8, #399) will hit the same surface via the

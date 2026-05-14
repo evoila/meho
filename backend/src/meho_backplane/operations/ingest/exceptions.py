@@ -1,19 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Domain exceptions for the G0.7 ingest-review state machine.
+"""Domain exceptions for the G0.7 spec-ingestion pipeline.
 
-The two exception classes here are the documented failure modes
-:class:`~meho_backplane.operations.ingest.ReviewService` raises:
+Two unrelated families of failure modes share this module so T1
+(OpenAPI parser, #401) and T4 (review-queue state machine, #402)
+agree on an import path:
 
-* :class:`InvalidStateTransition` — the caller asked for a
+Parser failures (T1 #401) — raised from
+:func:`~meho_backplane.operations.ingest.parse_openapi`:
+
+* :class:`InvalidSpecError` — the document is not a structurally
+  valid OpenAPI spec or the local file referenced cannot be read.
+* :class:`UnsupportedSpecError` — the document is valid OpenAPI but
+  ships a flavour the parser doesn't ingest (Swagger 2.0, OpenAPI
+  4.x, cross-document ``$ref``).
+* :class:`InvalidSchemaError` — a referenced JSON Schema is
+  structurally broken (dangling ``$ref``, component-path drill-down,
+  non-list parameters).
+
+Review-queue failures (T4 #402) — raised from
+:class:`~meho_backplane.operations.ingest.ReviewService`:
+
+* :class:`InvalidStateTransitionError` — the caller asked for a
   state transition the machine forbids (e.g. ``enabled → staged``).
   This is a programming bug at the call site, not an operator-
   recoverable condition, but the message is kept structured so the
   CLI / API layers (T5 / T6) can map it onto a 400 with a clear
   detail field.
-
-* :class:`ConnectorNotFound` — the
+* :class:`ConnectorNotFoundError` — the
   ``(product, version, impl_id)`` triple the caller targeted has no
   matching rows visible to the operator. Returned uniformly for
   three failure modes: (a) the connector genuinely does not exist,
@@ -26,16 +41,54 @@ The two exception classes here are the documented failure modes
   enumerate another tenant's connectors by probing for ``HTTP 404``
   vs ``HTTP 403`` boundaries.
 
-Both classes inherit from :class:`Exception` directly (not
-:class:`RuntimeError` or any other stdlib subtype) so callers can
-``except`` them precisely without catching unrelated runtime faults.
+The parser classes inherit from :class:`ValueError` so callers that
+already catch parsing errors via ``except ValueError`` keep working;
+the review-queue classes inherit from :class:`Exception` directly so
+callers can ``except`` them precisely without catching unrelated
+runtime faults.
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-__all__ = ["ConnectorNotFoundError", "InvalidStateTransitionError"]
+__all__ = [
+    "ConnectorNotFoundError",
+    "InvalidSchemaError",
+    "InvalidSpecError",
+    "InvalidStateTransitionError",
+    "UnsupportedSpecError",
+]
+
+
+class InvalidSpecError(ValueError):
+    """The document is not a structurally valid OpenAPI spec.
+
+    Raised when the root document lacks the ``paths`` key, isn't a
+    mapping, or otherwise fails structural validation that does NOT
+    depend on the OpenAPI version (those raise
+    :exc:`UnsupportedSpecError`).
+    """
+
+
+class UnsupportedSpecError(ValueError):
+    """The document is structurally valid but ships a flavour the parser doesn't ingest.
+
+    Raised for Swagger 2.0, OpenAPI 4.x, cross-document ``$ref``, and
+    similar known-unsupported cases. The exception message always
+    names the offending shape so the operator can decide whether to
+    file a v0.2.next request or pre-process the spec.
+    """
+
+
+class InvalidSchemaError(ValueError):
+    """A referenced JSON Schema is structurally broken.
+
+    Raised when a ``$ref`` points at a component that doesn't exist,
+    when a path's parameter list isn't a list, or when the spec uses
+    a structurally unsupported shape (component-path drill-down
+    refs, for example).
+    """
 
 
 class InvalidStateTransitionError(Exception):

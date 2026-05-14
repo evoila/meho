@@ -360,6 +360,50 @@ jobs:
           kubectl -n meho-test create secret generic meho-postgres \
             --from-literal=url='postgresql+asyncpg://meho:test-pw-not-secret@pgvector:5432/meho'
 
+      - name: Pre-create ServiceAccount referenced by the migration Job hook
+        # G6.1-T8 (#432) — chart hook-ordering workaround.
+        #
+        # The migration Job at templates/migration-job.yaml is a
+        # ``pre-install`` Helm hook (hook-weight: -10). Its Pod
+        # template references the ``meho-test`` ServiceAccount via
+        # ``serviceAccountName: {{ include "meho.serviceAccountName" . }}``.
+        #
+        # The ServiceAccount itself (templates/serviceaccount.yaml)
+        # is NOT a hook — it's a regular release resource. Helm 3
+        # applies pre-install hooks BEFORE main release manifests
+        # (https://helm.sh/docs/topics/charts_hooks/), so when the
+        # migration Job tries to create its Pod the SA doesn't
+        # exist yet. Kubernetes' ServiceAccount admission controller
+        # rejects the Pod creation silently — the Job stays in a
+        # ``status.ready: 0`` state with no active / succeeded /
+        # failed counters because the controller can't create a Pod
+        # to count. ``helm install --wait-for-jobs`` then times out
+        # after 5 minutes and rolls back.
+        #
+        # The clean fix lives in the chart (add ``helm.sh/hook:
+        # pre-install,pre-upgrade`` + ``hook-weight: -20`` to the
+        # ServiceAccount template so it precedes the migration Job),
+        # but that's a chart-template change affecting production
+        # deploys. T8's scope is the workflow only; pre-creating
+        # the SA here unblocks helm-test now and the chart-template
+        # follow-up lands separately (filed as adjacent for the
+        # post-merge backlog).
+        run: |
+          kubectl -n meho-test create serviceaccount meho-test
+          kubectl -n meho-test annotate serviceaccount meho-test \
+            kubernetes.io/enforce-mountable-secrets=false
+          # Tell Helm this resource is owned by the release so the
+          # chart's own ServiceAccount template (which renders with
+          # the same name) doesn't trip ``conflicts with existing
+          # resource``. The chart applies its SA AFTER hooks, but
+          # using the ``meta.helm.sh/release-name`` label lets
+          # Helm 3.14+ adopt the existing resource cleanly.
+          kubectl -n meho-test label serviceaccount meho-test \
+            app.kubernetes.io/managed-by=Helm
+          kubectl -n meho-test annotate serviceaccount meho-test \
+            meta.helm.sh/release-name=meho-test \
+            meta.helm.sh/release-namespace=meho-test
+
       - name: Helm install meho chart
         # ``--wait-for-jobs`` blocks until every hook Job (the
         # migration Job in our case) completes successfully or fails.
@@ -427,18 +471,38 @@ jobs:
           helm status meho-test --namespace meho-test || true
           echo "=== Pods ==="
           kubectl -n meho-test get pods -o wide || true
+          echo "=== Namespace events (sorted by lastTimestamp) ==="
+          # Events surface admission-rejection / scheduling / pull
+          # failures that ``get -o yaml`` on the Job hides. Sorting
+          # by lastTimestamp puts the relevant signal at the bottom
+          # of the dump.
+          kubectl -n meho-test get events --sort-by=.lastTimestamp || true
           echo "=== Jobs ==="
           kubectl -n meho-test get jobs -o yaml || true
+          echo "=== Migration Job describe (controller events) ==="
+          # ``describe`` includes the Job controller's per-event log
+          # (e.g. ``FailedCreate``, ``SuccessfulCreate`` on Pod
+          # creation attempts) which ``get -o yaml`` strips.
+          kubectl -n meho-test describe job/meho-test-migrate || true
           echo "=== Deployments ==="
           kubectl -n meho-test get deployments -o wide || true
-          echo "=== Migration Job logs ==="
+          echo "=== Migration Job logs (current + previous) ==="
+          # ``--previous`` catches container logs from a Pod that
+          # restarted and was garbage-collected between the failure
+          # and this diagnostic step.
           kubectl -n meho-test logs -l job-name=meho-test-migrate || true
+          kubectl -n meho-test logs -l job-name=meho-test-migrate --previous || true
           echo "=== pgvector logs ==="
           kubectl -n meho-test logs deploy/pgvector || true
           echo "=== broadcast (Valkey) logs ==="
           kubectl -n meho-test logs deploy/meho-test-broadcast || true
           echo "=== kind cluster loaded images ==="
           docker exec meho-helm-test-control-plane crictl images || true
+          echo "=== Namespace labels (Pod Security Standards) ==="
+          # PSS labels on the namespace gate the strict
+          # ``runAsNonRoot/runAsUser=1001/seccomp=RuntimeDefault``
+          # securityContext the migration Job inherits.
+          kubectl get namespace meho-test -o yaml | grep -A2 labels || true
 
   publish:
     name: Package + push + sign chart

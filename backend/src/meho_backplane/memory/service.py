@@ -61,6 +61,7 @@ from meho_backplane.memory.schemas import (
     MemoryScope,
     kind_for_scope,
     scope_for_kind,
+    validate_slug,
 )
 from meho_backplane.retrieval.indexer import index_document
 from meho_backplane.retrieval.retriever import RetrievalHit, retrieve
@@ -120,7 +121,12 @@ class MemoryService:
                 f"role={operator.tenant_role.value} cannot write scope={scope.value}",
             )
 
-        resolved_slug = slug if slug is not None else auto_slug()
+        # validate_slug runs in addition to MemoryEntryCreate's Field
+        # pattern so direct callers (not going through Pydantic) cannot
+        # smuggle a slug containing ``:`` past the safe-character gate;
+        # the ``source_id`` encoding scheme is asymmetric on colons and
+        # would silently truncate the returned MemoryEntry.slug on read.
+        resolved_slug = validate_slug(slug) if slug is not None else auto_slug()
         source_id = encode_source_id(
             scope=scope,
             user_sub=operator.sub,

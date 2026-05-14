@@ -23,6 +23,7 @@ returned entry in a log record or audit row without fear of mutation;
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -31,13 +32,56 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "SLUG_PATTERN",
     "MemoryEntry",
     "MemoryEntryCreate",
     "MemoryEntrySearchHit",
     "MemoryScope",
     "kind_for_scope",
     "scope_for_kind",
+    "validate_slug",
 ]
+
+
+#: Regex anchoring the slug character set the service accepts.
+#: Constrains operator-supplied slugs to the safe-URL alphabet so the
+#: ``source_id`` encoding scheme in :mod:`meho_backplane.memory._internal`
+#: (colon-separated segments) stays uniquely decodable. Without this
+#: constraint, an operator-supplied slug containing ``:`` would round-
+#: trip asymmetrically: ``encode_source_id`` joins on ``:``,
+#: ``slug_from_source_id`` reverses with ``rsplit(':', 1)``, so a slug
+#: like ``"foo:bar"`` would be silently truncated to ``"bar"`` on
+#: read. The pattern admits letters, digits, hyphen, underscore, and
+#: dot -- enough for human-friendly identifiers (``wine-preference``,
+#: ``k8s.rollout-note``) and machine-generated ones (the
+#: :func:`~meho_backplane.memory._internal.auto_slug` hex prefix)
+#: while excluding colon, slash, and whitespace.
+SLUG_PATTERN: str = r"^[A-Za-z0-9_\-\.]+$"
+
+#: Compiled form of :data:`SLUG_PATTERN`. Module-level so the
+#: service-layer slug validator at write boundaries does not pay
+#: per-call compile cost.
+_SLUG_RE: re.Pattern[str] = re.compile(SLUG_PATTERN)
+
+
+def validate_slug(slug: str) -> str:
+    """Validate *slug* against :data:`SLUG_PATTERN` and return it on success.
+
+    Raises :class:`ValueError` when *slug* contains characters outside
+    the safe set. Service-layer write boundaries
+    (:meth:`MemoryService.remember`, :meth:`MemoryService.forget`,
+    :meth:`MemoryService.recall`) call this so direct (non-Pydantic)
+    callers cannot smuggle a colon-containing slug past the
+    :class:`MemoryEntryCreate` validator. Pure function; returns the
+    input unchanged on success so call sites can use
+    ``slug = validate_slug(slug)`` for fluent composition.
+    """
+    if not _SLUG_RE.fullmatch(slug):
+        raise ValueError(
+            f"slug {slug!r} contains characters outside the safe set "
+            f"(allowed: letters, digits, hyphen, underscore, dot)"
+        )
+    return slug
 
 
 class MemoryScope(StrEnum):
@@ -148,7 +192,16 @@ class MemoryEntryCreate(BaseModel):
 
     scope: MemoryScope
     body: str = Field(min_length=1)
-    slug: str | None = None
+    # ``slug`` is constrained to the safe-URL alphabet so the colon
+    # the ``source_id`` encoding uses as a segment separator can
+    # never appear inside a slug. Without this guard, the round-trip
+    # asymmetry between :func:`encode_source_id` (joins on ``:``) and
+    # :func:`slug_from_source_id` (reverses with rsplit) would
+    # silently truncate operator-supplied slugs containing ``:``.
+    # Pydantic's :class:`Field` ``pattern`` runs at model
+    # construction time; the service-layer :func:`validate_slug` is
+    # the parallel gate for non-Pydantic call paths.
+    slug: str | None = Field(default=None, pattern=SLUG_PATTERN)
     metadata: dict[str, Any] | None = None
     expires_at: datetime | None = None
     target_name: str | None = None

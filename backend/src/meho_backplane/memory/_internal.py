@@ -104,12 +104,20 @@ def encode_source_id(
     if scope is MemoryScope.USER_TENANT:
         return f"user-tenant:{user_sub}:{slug}"
     if scope is MemoryScope.USER_TARGET:
-        assert target_name is not None  # guarded by caller
+        # Service-layer _require_target_name guards before reaching
+        # here, but an explicit raise (instead of `assert`) keeps the
+        # invariant under `python -O` (which strips asserts) and lets
+        # a direct-import caller (test, future adapter) get a clear
+        # error rather than the silent f-string interpolation of
+        # "None" into the source_id.
+        if target_name is None:
+            raise ValueError(f"target_name required for {scope.value}")
         return f"user-target:{user_sub}:{target_name}:{slug}"
     if scope is MemoryScope.TENANT:
         return f"tenant:{slug}"
     if scope is MemoryScope.TARGET:
-        assert target_name is not None  # guarded by caller
+        if target_name is None:
+            raise ValueError(f"target_name required for {scope.value}")
         return f"target:{target_name}:{slug}"
     raise ValueError(f"unknown scope {scope!r}")  # pragma: no cover
 

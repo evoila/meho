@@ -39,7 +39,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.memory.rbac import PermissionDeniedError
-from meho_backplane.memory.schemas import MemoryScope
+from meho_backplane.memory.schemas import MemoryEntryCreate, MemoryScope
 from meho_backplane.memory.service import MemoryService
 from meho_backplane.retrieval.retriever import RetrievalHit
 from meho_backplane.settings import get_settings
@@ -645,6 +645,102 @@ async def test_search_memories_with_scope_narrows_kind_filter() -> None:
         )
     call_kwargs = retrieve_mock.await_args.kwargs
     assert call_kwargs["kind"] == "memory-tenant"
+
+
+# ---------------------------------------------------------------------------
+# Slug validation (B1 regression — round-trip asymmetry on colon-bearing slugs)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_slug", ["foo:bar", "k8s:prod", "a:b:c", "with space", "slash/path"])
+@pytest.mark.asyncio
+async def test_remember_rejects_slugs_with_colons_or_unsafe_chars(
+    _fake_embedding_service: None, bad_slug: str
+) -> None:
+    """Slugs outside the safe set raise before the indexer is reached.
+
+    The ``source_id`` encoding scheme joins on ``:`` and reverses with
+    ``rsplit(':', 1)`` -- a slug containing ``:`` would round-trip
+    asymmetrically (stored ``source_id='user:<sub>:foo:bar'`` decodes
+    back to ``slug='bar'``). The service-layer ``validate_slug`` is
+    the gate for direct-import callers; ``MemoryEntryCreate``'s
+    pydantic ``Field(pattern=...)`` guards request bodies through the
+    API surface (T2 #422). Both paths must reject.
+    """
+    operator = _op()
+    service = MemoryService()
+    with pytest.raises(ValueError, match="slug"):
+        await service.remember(
+            operator=operator,
+            scope=MemoryScope.USER,
+            body="x",
+            slug=bad_slug,
+        )
+
+
+def test_memory_entry_create_rejects_slug_with_colon() -> None:
+    """Pydantic request-body path rejects unsafe slugs at construction.
+
+    Mirrors the service-layer guard in
+    :func:`test_remember_rejects_slugs_with_colons_or_unsafe_chars`
+    so the API surface (T2 #422) inherits the same constraint via
+    :class:`MemoryEntryCreate` without re-validating in route code.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        MemoryEntryCreate(scope=MemoryScope.USER, body="x", slug="foo:bar")
+
+
+@pytest.mark.parametrize("good_slug", ["wine-preference", "k8s.rollout-note", "abc123", "a_b_c"])
+@pytest.mark.asyncio
+async def test_remember_accepts_safe_slugs(_fake_embedding_service: None, good_slug: str) -> None:
+    """Slugs in the safe-URL alphabet (letters, digits, ``-_.``) round-trip cleanly.
+
+    Pins that the safe set is wide enough for the operator-friendly
+    identifiers consumer-needs.md §G5 names (``wine-preference``,
+    ``k8s-rollout``, ``project-context``) plus the
+    :func:`auto_slug` hex-prefix shape.
+    """
+    operator = _op()
+    service = MemoryService()
+    stored = await service.remember(
+        operator=operator,
+        scope=MemoryScope.USER,
+        body="x",
+        slug=good_slug,
+    )
+    assert stored.slug == good_slug
+    recalled = await service.recall(operator=operator, scope=MemoryScope.USER, slug=good_slug)
+    assert recalled is not None
+    assert recalled.slug == good_slug
+
+
+# ---------------------------------------------------------------------------
+# encode_source_id defensive raise (m1 — replace assert with explicit raise)
+# ---------------------------------------------------------------------------
+
+
+def test_encode_source_id_raises_when_target_name_missing() -> None:
+    """Direct-import callers get a clear error, not a silent ``None`` interpolation.
+
+    The service layer's :func:`_require_target_name` guards before
+    reaching the helper, but a test / future adapter calling
+    :func:`encode_source_id` directly with ``target_name=None`` on a
+    target-scoped value would have silently produced
+    ``"user-target:<sub>:None:<slug>"`` under ``python -O`` (which
+    strips ``assert``). Explicit raise locks the invariant.
+    """
+    from meho_backplane.memory._internal import encode_source_id
+
+    for scope in (MemoryScope.USER_TARGET, MemoryScope.TARGET):
+        with pytest.raises(ValueError, match="target_name required"):
+            encode_source_id(
+                scope=scope,
+                user_sub="op-42",
+                target_name=None,
+                slug="any",
+            )
 
 
 # ---------------------------------------------------------------------------

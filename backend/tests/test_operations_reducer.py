@@ -602,3 +602,68 @@ async def test_dispatch_passes_context_to_reducer(
     # ``audit_id`` is a uuid4 the dispatcher generates per-call — assert
     # it's present and parseable rather than pinning a value.
     assert UUID(ctx["audit_id"])
+
+
+@pytest.mark.asyncio
+async def test_dispatch_returns_connector_error_when_reducer_raises(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """Reducer exception lands as ``connector_error`` — dispatcher never raises.
+
+    The dispatcher's module docstring contracts "never raises". v0.2's
+    pass-through reducer can't raise, but ``set_default_reducer(...)``
+    invites swappable real reducers (MinIO/S3 I/O, schema validation)
+    that will. A reducer that raises must be caught inside ``dispatch()``,
+    converted to a structured ``connector_error`` :class:`OperationResult`,
+    audited, and broadcast — same shape the handler-call exception path
+    produces.
+    """
+
+    class _ExplodingReducer:
+        async def reduce(
+            self,
+            payload: Any,
+            schema: dict[str, Any] | None = None,
+            context: dict[str, Any] | None = None,
+        ) -> tuple[Any, ResultHandle | None]:
+            raise RuntimeError("simulated reducer explosion")
+
+    register_connector_v2(
+        product="vault",
+        version="",
+        impl_id="",
+        cls=_NoOpVaultConnector,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.list",
+        handler=_module_handler_target_params_only,
+        summary="List secrets.",
+        description="List secrets.",
+        parameter_schema={"type": "object"},
+        embedding_service=stub_embedding_service,
+    )
+
+    set_default_reducer(_ExplodingReducer())
+    try:
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vault-1.x",
+            op_id="vault.kv.list",
+            target=_FakeTarget(product="vault"),
+            params={"path": "/secret"},
+        )
+    finally:
+        set_default_reducer(PassThroughReducer())
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_error:")
+    assert result.extras["error_code"] == "connector_error"
+    assert result.extras["exception_class"] == "RuntimeError"
+    # Audit row + broadcast event still fired — the failure is observable.
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "error"

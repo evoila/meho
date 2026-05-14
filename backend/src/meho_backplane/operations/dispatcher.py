@@ -98,6 +98,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import (
     NoMatchingConnector,
     OperationResult,
+    ResultHandle,
     resolve_connector,
 )
 from meho_backplane.connectors.base import Connector
@@ -365,20 +366,20 @@ async def _execute_and_audit(
         )
         return result_connector_error(op_id, exc, duration_ms)
 
-    reducer_context: dict[str, Any] = {
-        "op_id": op_id,
-        "operator_sub": operator.sub,
-        "audit_id": str(audit_id),
-        "source_kind": descriptor.source_kind,
-    }
-    target_id = getattr(target, "id", None)
-    if target_id is not None:
-        reducer_context["target_id"] = str(target_id)
-    summary, handle = await _DEFAULT_REDUCER.reduce(
-        raw,
-        descriptor.response_schema,
-        reducer_context,
+    reduced = await _reduce_or_error(
+        op_id=op_id,
+        descriptor=descriptor,
+        operator=operator,
+        target=target,
+        params=params,
+        params_hash=params_hash,
+        audit_id=audit_id,
+        raw=raw,
+        started=started,
     )
+    if isinstance(reduced, OperationResult):
+        return reduced
+    summary, handle = reduced
     duration_ms = _elapsed_ms(started)
     await audit_and_broadcast_safe(
         audit_id=audit_id,
@@ -391,6 +392,59 @@ async def _execute_and_audit(
         duration_ms=duration_ms,
     )
     return wrap_ok_result(op_id, summary, duration_ms, handle)
+
+
+async def _reduce_or_error(
+    *,
+    op_id: str,
+    descriptor: EndpointDescriptor,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    params_hash: str,
+    audit_id: uuid.UUID,
+    raw: Any,
+    started: float,
+) -> tuple[Any, ResultHandle | None] | OperationResult:
+    """Run the JSONFlux reducer; return ``(summary, handle)`` or a structured error.
+
+    The dispatcher's module docstring contracts "never raises". v0.2's
+    :class:`~meho_backplane.operations.reducer.PassThroughReducer` can't
+    raise, but :func:`set_default_reducer` invites swappable real reducers
+    (MinIO/S3 I/O, schema validation) that will. Any reducer exception is
+    converted to a structured ``connector_error``
+    :class:`OperationResult` — same shape the handler-call exception path
+    produces — and the audit row + broadcast event still fire so the
+    failure is observable.
+    """
+    reducer_context: dict[str, Any] = {
+        "op_id": op_id,
+        "operator_sub": operator.sub,
+        "audit_id": str(audit_id),
+        "source_kind": descriptor.source_kind,
+    }
+    target_id = getattr(target, "id", None)
+    if target_id is not None:
+        reducer_context["target_id"] = str(target_id)
+    try:
+        return await _DEFAULT_REDUCER.reduce(
+            raw,
+            descriptor.response_schema,
+            reducer_context,
+        )
+    except Exception as exc:
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="error",
+            duration_ms=duration_ms,
+        )
+        return result_connector_error(op_id, exc, duration_ms)
 
 
 async def dispatch(

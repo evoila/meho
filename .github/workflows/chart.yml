@@ -205,12 +205,28 @@ jobs:
     # reachable -- the second-line guard against post-deploy drift
     # the migration Job's own ``CREATE EXTENSION`` doesn't catch.
     #
+    # G6.1-T8 (#432) -- two image-availability fixes so the job runs
+    # to completion on PR builds (image.yml only pushes ``:test`` on
+    # main, so on PRs the migration Job would hang on
+    # ``ImagePullBackOff`` without these):
+    #
+    #   1. Build the backplane image locally (single-arch amd64; kind
+    #      nodes on GitHub-hosted runners are amd64) and
+    #      ``kind load docker-image`` it into the cluster. The chart's
+    #      default ``image.pullPolicy: IfNotPresent`` then uses the
+    #      locally-loaded image without trying GHCR.
+    #   2. Pre-pull + ``kind load`` the Valkey image too. The broadcast
+    #      subchart's ``valkey/valkey:9.0-alpine`` ships from Docker
+    #      Hub, and kind's anonymous pull is the same path that's
+    #      tripped Docker Hub's rate-limit on this repo's other CI
+    #      lanes -- pre-loading sidesteps it.
+    #
     # ``continue-on-error: true`` is the v0.2 transitional posture:
     # the job runs on every chart-affecting PR + push but does not
     # block merge while operators iterate on kind/k3d wiring nuances
     # (image-pull caches, runner-side Docker permissions, etc.). A
     # follow-up issue lands the hardening pass that removes
-    # continue-on-error once we have ~10 green runs.
+    # continue-on-error once we have ~10 green runs (per G6.1-T8 AC).
     #
     # Runs on ``ubuntu-latest`` (NOT ``meho-runners``) because kind
     # needs Docker-in-Docker support that the self-hosted runner
@@ -238,6 +254,72 @@ jobs:
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3  # v1.12.0
         with:
           cluster_name: meho-helm-test
+
+      - name: Set up Docker Buildx
+        # Required by docker/build-push-action to use buildkit. Same
+        # version digest image.yml pins for the same action so the
+        # two lanes converge on a single buildx version.
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+
+      - name: Build backplane image locally (load into Docker, not push)
+        # ``load: true`` (= ``--output=type=docker``) leaves the image
+        # in the local Docker daemon so the next step can ``kind load``
+        # it into the cluster. PR builds don't push ``:test`` to GHCR
+        # (image.yml line 177 gates push on non-pull_request), so the
+        # only way to get a usable ``ghcr.io/evoila/meho:test`` here
+        # is to build it in-line. Single-arch amd64 because kind nodes
+        # on GitHub-hosted ubuntu-latest runners are amd64-only --
+        # multi-arch with ``load: true`` would error out
+        # ("docker exporter does not currently support exporting
+        # manifest lists").
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
+        with:
+          context: backend
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/evoila/meho:test
+          # Share the gha-backed cache with the image.yml lane so
+          # warm PR builds reuse layers from main-push runs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Load images into kind
+        # The chart's default ``image.pullPolicy: IfNotPresent`` (per
+        # deploy/charts/meho/values.yaml:30) means kind will use the
+        # locally-loaded images and skip the upstream pull entirely.
+        # Three images get sideloaded:
+        #
+        #   - ghcr.io/evoila/meho:test         locally built above
+        #   - valkey/valkey:9.0-alpine         broadcast subchart pod
+        #   - bitnami/postgresql:16            helm-test ``pgvector-check``
+        #                                      container (psql client) --
+        #                                      see note below
+        #
+        # Pre-loading the Docker Hub images sidesteps Docker Hub's
+        # anonymous-pull rate-limit that's tripped this repo's other
+        # CI lanes (Python lane, image build, Semgrep) on busy days.
+        #
+        # ``bitnami/postgresql:16`` deprecation workaround: Bitnami
+        # moved its Docker Hub catalog to the ``bitnamilegacy/``
+        # namespace in August 2025; ``docker pull bitnami/postgresql:16``
+        # now returns 404. The chart's
+        # templates/tests/test-pgvector.yaml still references the
+        # original tag. We pull from the new namespace and re-tag
+        # to the chart's expected reference before sideloading --
+        # keeps the chart untouched (its ``imagePullPolicy: IfNotPresent``
+        # resolves the loaded image locally by name). The proper fix
+        # belongs in a follow-up that updates the chart's test pod
+        # image to ``postgres:16-alpine`` (no Bitnami dependency); T8
+        # stays workflow-only.
+        run: |
+          docker pull valkey/valkey:9.0-alpine
+          docker pull bitnamilegacy/postgresql:16
+          docker tag bitnamilegacy/postgresql:16 bitnami/postgresql:16
+          kind load docker-image \
+            ghcr.io/evoila/meho:test \
+            valkey/valkey:9.0-alpine \
+            bitnami/postgresql:16 \
+            --name meho-helm-test
 
       - name: Deploy pgvector sidecar (Postgres + extension)
         # Install pgvector/pgvector:pg16 as a single-pod Deployment in
@@ -301,6 +383,50 @@ jobs:
           kubectl -n meho-test create secret generic meho-postgres \
             --from-literal=url='postgresql+asyncpg://meho:test-pw-not-secret@pgvector:5432/meho'
 
+      - name: Pre-create ServiceAccount referenced by the migration Job hook
+        # G6.1-T8 (#432) — chart hook-ordering workaround.
+        #
+        # The migration Job at templates/migration-job.yaml is a
+        # ``pre-install`` Helm hook (hook-weight: -10). Its Pod
+        # template references the ``meho-test`` ServiceAccount via
+        # ``serviceAccountName: {{ include "meho.serviceAccountName" . }}``.
+        #
+        # The ServiceAccount itself (templates/serviceaccount.yaml)
+        # is NOT a hook — it's a regular release resource. Helm 3
+        # applies pre-install hooks BEFORE main release manifests
+        # (https://helm.sh/docs/topics/charts_hooks/), so when the
+        # migration Job tries to create its Pod the SA doesn't
+        # exist yet. Kubernetes' ServiceAccount admission controller
+        # rejects the Pod creation silently — the Job stays in a
+        # ``status.ready: 0`` state with no active / succeeded /
+        # failed counters because the controller can't create a Pod
+        # to count. ``helm install --wait-for-jobs`` then times out
+        # after 5 minutes and rolls back.
+        #
+        # The clean fix lives in the chart (add ``helm.sh/hook:
+        # pre-install,pre-upgrade`` + ``hook-weight: -20`` to the
+        # ServiceAccount template so it precedes the migration Job),
+        # but that's a chart-template change affecting production
+        # deploys. T8's scope is the workflow only; pre-creating
+        # the SA here unblocks helm-test now and the chart-template
+        # follow-up lands separately (filed as adjacent for the
+        # post-merge backlog).
+        run: |
+          kubectl -n meho-test create serviceaccount meho-test
+          kubectl -n meho-test annotate serviceaccount meho-test \
+            kubernetes.io/enforce-mountable-secrets=false
+          # Tell Helm this resource is owned by the release so the
+          # chart's own ServiceAccount template (which renders with
+          # the same name) doesn't trip ``conflicts with existing
+          # resource``. The chart applies its SA AFTER hooks, but
+          # using the ``meta.helm.sh/release-name`` label lets
+          # Helm 3.14+ adopt the existing resource cleanly.
+          kubectl -n meho-test label serviceaccount meho-test \
+            app.kubernetes.io/managed-by=Helm
+          kubectl -n meho-test annotate serviceaccount meho-test \
+            meta.helm.sh/release-name=meho-test \
+            meta.helm.sh/release-namespace=meho-test
+
       - name: Helm install meho chart
         # ``--wait-for-jobs`` blocks until every hook Job (the
         # migration Job in our case) completes successfully or fails.
@@ -310,6 +436,13 @@ jobs:
         # Job + the test Pod matter. The migration Job alone proves
         # the chart + pgvector glue works; ``helm test`` proves the
         # post-deploy assertion fires.
+        #
+        # G6.1-T8 (#432): broadcast subchart is enabled (default per
+        # values.yaml). The Valkey Deployment is part of the helm-
+        # installed release and gates the chaos-arm follow-up in
+        # G6.1-T9 (#433); a separate ``rollout status`` step below
+        # blocks until it's healthy because ``--wait-for-jobs`` only
+        # covers hook Jobs, not Deployments / StatefulSets.
         run: |
           helm install meho-test ./deploy/charts/meho \
             --namespace meho-test \
@@ -318,7 +451,6 @@ jobs:
             --set image.tag=test \
             --set ingress.enabled=false \
             --set networkPolicy.enabled=false \
-            --set broadcast.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set postgres.host=pgvector \
             --set vault.address=https://vault.test \
@@ -328,16 +460,39 @@ jobs:
             --set config.vaultAddr=https://vault.test \
             --set retrieval.modelCache.enabled=false
 
+      - name: Wait for broadcast (Valkey) Deployment to roll out
+        # G6.1-T8 (#432) AC: ``meho-test-broadcast-valkey`` pod is
+        # healthy at helm-test time. ``helm install --wait-for-jobs``
+        # only blocks on hook Jobs (the migration Job), so the
+        # broadcast Deployment may still be coming up when we hand
+        # off to ``helm test``. ``kubectl rollout status`` blocks
+        # until ``.status.readyReplicas`` matches ``.spec.replicas``
+        # (1 in v0.1 per the chart's hard cap), or the timeout fires.
+        #
+        # The Deployment name follows ``broadcast.fullname``:
+        # ``<release>-<chart-name>`` -> ``meho-test-broadcast``.
+        run: |
+          kubectl -n meho-test rollout status \
+            deployment/meho-test-broadcast \
+            --timeout=120s
+
       - name: Run helm test (pgvector preflight Job)
         # G0.4-T6 acceptance: the Helm test Pod must pass.
-        # ``helm test --logs`` prints the Pod's stdout/stderr on
-        # failure so a CI failure points at the exact assertion that
-        # tripped (pgvector missing vs documents table missing).
+        #
+        # G6.1-T8 (#432) note on ``--logs``: the chart's test pod has
+        # ``helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded``,
+        # so on success Helm deletes the pod immediately. ``helm test
+        # --logs`` then tries to fetch logs from a now-missing pod and
+        # exits 1 with "pods ... not found", masking a successful
+        # test as a failure. On FAILED test the pod sticks (hook-succeeded
+        # only deletes successes), so logs are still reachable via the
+        # diagnostic step below. Dropping ``--logs`` lets the success
+        # path exit 0 cleanly and the failure path falls back to the
+        # diagnostics dump.
         run: |
           helm test meho-test \
             --namespace meho-test \
-            --timeout 2m \
-            --logs
+            --timeout 2m
 
       - name: Dump diagnostics on failure
         if: failure()
@@ -346,12 +501,38 @@ jobs:
           helm status meho-test --namespace meho-test || true
           echo "=== Pods ==="
           kubectl -n meho-test get pods -o wide || true
+          echo "=== Namespace events (sorted by lastTimestamp) ==="
+          # Events surface admission-rejection / scheduling / pull
+          # failures that ``get -o yaml`` on the Job hides. Sorting
+          # by lastTimestamp puts the relevant signal at the bottom
+          # of the dump.
+          kubectl -n meho-test get events --sort-by=.lastTimestamp || true
           echo "=== Jobs ==="
           kubectl -n meho-test get jobs -o yaml || true
-          echo "=== Migration Job logs ==="
+          echo "=== Migration Job describe (controller events) ==="
+          # ``describe`` includes the Job controller's per-event log
+          # (e.g. ``FailedCreate``, ``SuccessfulCreate`` on Pod
+          # creation attempts) which ``get -o yaml`` strips.
+          kubectl -n meho-test describe job/meho-test-migrate || true
+          echo "=== Deployments ==="
+          kubectl -n meho-test get deployments -o wide || true
+          echo "=== Migration Job logs (current + previous) ==="
+          # ``--previous`` catches container logs from a Pod that
+          # restarted and was garbage-collected between the failure
+          # and this diagnostic step.
           kubectl -n meho-test logs -l job-name=meho-test-migrate || true
+          kubectl -n meho-test logs -l job-name=meho-test-migrate --previous || true
           echo "=== pgvector logs ==="
           kubectl -n meho-test logs deploy/pgvector || true
+          echo "=== broadcast (Valkey) logs ==="
+          kubectl -n meho-test logs deploy/meho-test-broadcast || true
+          echo "=== kind cluster loaded images ==="
+          docker exec meho-helm-test-control-plane crictl images || true
+          echo "=== Namespace labels (Pod Security Standards) ==="
+          # PSS labels on the namespace gate the strict
+          # ``runAsNonRoot/runAsUser=1001/seccomp=RuntimeDefault``
+          # securityContext the migration Job inherits.
+          kubectl get namespace meho-test -o yaml | grep -A2 labels || true
 
   publish:
     name: Package + push + sign chart

@@ -58,7 +58,14 @@ spec:
               name: {{ .Values.postgres.credentialsSecret }}
               key: url
       command:
-        - sh
+        # ``bash`` rather than ``sh`` because the script uses
+        # ``set -o pipefail`` which is bash-only. The base image's
+        # ``/bin/sh`` is ``dash`` (no pipefail support). bitnami
+        # postgres-client images bundle bash at ``/bin/bash`` for
+        # exactly this case (Bitnami's library scripts also rely
+        # on it). Bash also keeps ``set -eu`` semantics matching
+        # what the script below expects.
+        - bash
         - -c
         - |
           set -euo pipefail

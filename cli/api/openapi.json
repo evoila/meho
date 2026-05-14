@@ -981,6 +981,403 @@
         }
       }
     },
+    "/api/v1/connectors/ingest": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Ingest Endpoint",
+        "description": "Run the full ingestion pipeline (T1 \u2192 T2 \u2192 T3) for one connector.\n\n``dry_run=true`` parses every spec but writes nothing; the\nresponse carries the parser's ``inserted_count`` projection and\n``grouping=None``. The real path runs the parse \u2192 register_\ningested \u2192 run_llm_grouping pipeline serially and returns the\naggregated counts + grouping result.\n\nTenant scoping: the operator's tenant_id from the JWT is used\nas the write scope unless the operator is ``tenant_admin``\n(built-in ingest, ``tenant_id=NULL``). For v0.2 the route always\nwrites under the operator's tenant_id; built-in ingest is the\nsame call shape from a tenant_admin operator whose tenant_id\nhappens to be the \"built-in\" admin tenant. The CLI / MCP\nsiblings can target the built-in scope explicitly when needed\nby hitting :class:`IngestionPipelineService` directly with\n``tenant_id=None``.",
+        "operationId": "ingest_endpoint_api_v1_connectors_ingest_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "List Endpoint",
+        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nThe response is wrapped in ``{\"connectors\": [...]}`` so future\npaging / cursor fields can land non-breakingly. The route\nserialises through :meth:`ConnectorListResponse.model_dump`\nrather than annotating ``response_model=ConnectorListResponse``\nbecause the per-item ``tenant_id`` UUID needs to render as a\nstring in the JSON (the default Pydantic-v2 serialiser\nhandles this).",
+        "operationId": "list_endpoint_api_v1_connectors_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "staged",
+                "enabled",
+                "disabled",
+                "all"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "title": "Response List Endpoint Api V1 Connectors Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/review": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Get Review Endpoint",
+        "description": "Return the full review payload for *connector_id*.\n\nOperator-level read: any operator can inspect a connector their\ntenant owns plus built-ins. Editing the payload requires\n``tenant_admin`` via the PATCH routes. Cross-tenant /\nnon-existent connector \u2192 404 (the deliberate conflation).",
+        "operationId": "get_review_endpoint_api_v1_connectors__connector_id__review_get",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorReviewPayload"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/groups/{group_key}": {
+      "patch": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Edit Group Endpoint",
+        "description": "Edit a group's ``when_to_use`` / ``name`` overrides.\n\nAt least one of the two body fields must be set; an empty body\nyields 400. Writes one ``meho.connector.edit_group`` audit row\nvia the service layer. Returns 204 on success.",
+        "operationId": "edit_group_endpoint_api_v1_connectors__connector_id__groups__group_key__patch",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "group_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Group Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditGroupBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/operations/{op_id}": {
+      "patch": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Edit Op Endpoint",
+        "description": "Edit a per-op operator override.\n\nAt least one of ``custom_description`` / ``safety_level`` /\n``requires_approval`` / ``is_enabled`` must be set; an empty\nbody yields 400. Writes one ``meho.connector.edit_op`` audit\nrow. Returns 204 on success.\n\nThe ``op_id`` path parameter uses the ``:path`` converter so\noperations whose natural key contains slashes\n(``\"GET:/api/vcenter/cluster\"``) round-trip without\nURL-encoding the colon-prefixed path segment.",
+        "operationId": "edit_op_endpoint_api_v1_connectors__connector_id__operations__op_id__patch",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Op Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditOpBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/enable": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Enable Endpoint",
+        "description": "Transition every group in *connector_id* to ``enabled``.\n\nIdempotent: a re-call against a fully-enabled connector writes\nno audit row and returns 204. State-machine guards apply (see\n:meth:`ReviewService.enable_connector`); a forbidden source\nstate yields 409.",
+        "operationId": "enable_endpoint_api_v1_connectors__connector_id__enable_post",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/{connector_id}/disable": {
+      "post": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Disable Endpoint",
+        "description": "Transition every group in *connector_id* to ``disabled``.\n\nIdempotent and state-machine-guarded \u2014 same shape as the enable\nhandler.",
+        "operationId": "disable_endpoint_api_v1_connectors__connector_id__disable_post",
+        "parameters": [
+          {
+            "name": "connector_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/.well-known/oauth-protected-resource": {
       "get": {
         "tags": [
@@ -1151,6 +1548,152 @@
         "title": "CallOperationBody",
         "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution)."
       },
+      "ConnectorReviewGroup": {
+        "properties": {
+          "group_key": {
+            "type": "string",
+            "title": "Group Key"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "when_to_use": {
+            "type": "string",
+            "title": "When To Use"
+          },
+          "review_status": {
+            "type": "string",
+            "title": "Review Status"
+          },
+          "op_count": {
+            "type": "integer",
+            "title": "Op Count"
+          },
+          "ops": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewOp"
+            },
+            "type": "array",
+            "title": "Ops"
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_key",
+          "name",
+          "when_to_use",
+          "review_status",
+          "op_count",
+          "ops"
+        ],
+        "title": "ConnectorReviewGroup",
+        "description": "One group within the review payload.\n\nCarries the LLM-generated group metadata\n(``group_key``, ``name``, ``when_to_use``), the current\n``review_status``, and the full list of child operations. The\noperator-facing review UI iterates this list to render the\nreview queue; ``op_count`` is the cheap precomputed length for\nthe CLI's ``meho connector review`` summary view (T5)."
+      },
+      "ConnectorReviewOp": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "summary": {
+            "type": "string",
+            "nullable": true,
+            "title": "Summary"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Description"
+          },
+          "custom_description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Custom Description"
+          },
+          "safety_level": {
+            "type": "string",
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "title": "Requires Approval"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "title": "Is Enabled"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "summary",
+          "description",
+          "custom_description",
+          "safety_level",
+          "requires_approval",
+          "is_enabled",
+          "tags"
+        ],
+        "title": "ConnectorReviewOp",
+        "description": "One operation within a group, as rendered in the review payload.\n\nCarries the operator-relevant subset of\n:class:`~meho_backplane.db.models.EndpointDescriptor`: the\nidentifiers (``op_id``), the descriptive fields (``summary``,\n``description``, ``custom_description``), the policy hooks\n(``safety_level``, ``requires_approval``), the dispatchability\nflag (``is_enabled``), and the ``tags`` array. Notably **omits**\n``parameter_schema`` / ``response_schema`` / ``embedding`` \u2014\nthose are dispatch-time concerns, not review-time concerns, and\nsending 4 KB of schema per op would balloon the review payload\nfor connectors with thousands of operations (vCenter has 961\npaths in v0.2)."
+      },
+      "ConnectorReviewPayload": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "impl_id": {
+            "type": "string",
+            "title": "Impl Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewGroup"
+            },
+            "type": "array",
+            "title": "Groups"
+          },
+          "total_op_count": {
+            "type": "integer",
+            "title": "Total Op Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "product",
+          "version",
+          "impl_id",
+          "tenant_id",
+          "groups",
+          "total_op_count"
+        ],
+        "title": "ConnectorReviewPayload",
+        "description": "Top-level review payload returned by :meth:`ReviewService.get_review_payload`.\n\n``connector_id`` is the operator-facing string the request\ntargeted (echoed back verbatim for round-trip clarity).\n``product`` / ``version`` / ``impl_id`` are the parsed triple\nderived via\n:func:`~meho_backplane.operations.ingest.parser.parse_connector_id`;\nthe CLI / API layers surface them in operator output so the\nconvention is self-documenting. ``tenant_id`` is the scope the\npayload was queried under (``None`` for built-in)."
+      },
       "DailyUsageBucket": {
         "properties": {
           "date": {
@@ -1205,6 +1748,61 @@
         ],
         "title": "DbStatus",
         "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe."
+      },
+      "EditGroupBody": {
+        "properties": {
+          "when_to_use": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "nullable": true,
+            "title": "When To Use"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "title": "EditGroupBody",
+        "description": "PATCH body for ``/api/v1/connectors/{id}/groups/{key}``.\n\nBoth fields optional but at least one must be set; the route\nlayer translates \"neither set\" into a 400. ``when_to_use`` is\nthe load-bearing operator-authored prose the LLM proposed at\ngrouping time; ``name`` is the Title Case display name.\n\nPydantic-side ``max_length`` caps line up with the underlying\n:class:`OperationGroup.when_to_use` /\n:class:`OperationGroup.name` columns. Empty strings are\nrejected \u2014 operators that want to \"clear\" the field should\nre-run grouping rather than blank it."
+      },
+      "EditOpBody": {
+        "properties": {
+          "custom_description": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Custom Description"
+          },
+          "safety_level": {
+            "type": "string",
+            "enum": [
+              "safe",
+              "caution",
+              "dangerous"
+            ],
+            "nullable": true,
+            "title": "Safety Level"
+          },
+          "requires_approval": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Requires Approval"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Is Enabled"
+          }
+        },
+        "type": "object",
+        "title": "EditOpBody",
+        "description": "PATCH body for ``/api/v1/connectors/{id}/operations/{op_id}``.\n\nPer-op operator overrides. At least one field must be set.\n\n``safety_level`` is the bounded enum from\n:class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`\n(``safe`` / ``caution`` / ``dangerous``); a value outside the set\nis rejected by Pydantic before the service layer sees it.\n\n``is_enabled`` is the per-op override that wins over the group\ncascade (see :meth:`ReviewService.edit_op` for the full\nsemantics). ``requires_approval`` flips the per-op flag that\nforces the dispatcher to write an audit row in\n``status='pending'`` and wait for an operator decision before\nexecuting.\n\n``custom_description`` is the operator's free-form override\nthat the agent surfaces in place of the upstream spec's\n``description`` field; capped at 4096 chars to keep audit-log\npayloads bounded."
       },
       "EvalRequest": {
         "properties": {
@@ -1322,6 +1920,45 @@
         "title": "FingerprintResult",
         "description": "Connector fingerprint per consumer-needs L95."
       },
+      "GroupingResultModel": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "groups_created": {
+            "type": "integer",
+            "title": "Groups Created"
+          },
+          "operations_assigned": {
+            "type": "integer",
+            "title": "Operations Assigned"
+          },
+          "operations_unassigned": {
+            "type": "integer",
+            "title": "Operations Unassigned"
+          },
+          "llm_call_count": {
+            "type": "integer",
+            "title": "Llm Call Count"
+          },
+          "llm_duration_ms": {
+            "type": "number",
+            "title": "Llm Duration Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "groups_created",
+          "operations_assigned",
+          "operations_unassigned",
+          "llm_call_count",
+          "llm_duration_ms"
+        ],
+        "title": "GroupingResultModel",
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.\n\nMirrors the dataclass; rendered alongside :class:`IngestionResultModel`\nin the ingest response so the operator sees both counts."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1355,6 +1992,113 @@
         ],
         "title": "HealthResponse",
         "description": "``GET /api/v1/health`` response body."
+      },
+      "IngestRequest": {
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Version"
+          },
+          "impl_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Impl Id"
+          },
+          "specs": {
+            "items": {
+              "$ref": "#/components/schemas/SpecSource"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "minItems": 1,
+            "title": "Specs"
+          },
+          "base_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Base Url"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "product",
+          "version",
+          "impl_id",
+          "specs"
+        ],
+        "title": "IngestRequest",
+        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL)."
+      },
+      "IngestResponse": {
+        "properties": {
+          "ingestion": {
+            "$ref": "#/components/schemas/IngestionResultModel"
+          },
+          "grouping": {
+            "$ref": "#/components/schemas/GroupingResultModel",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "ingestion"
+        ],
+        "title": "IngestResponse",
+        "description": "Response shape for ``POST /api/v1/connectors/ingest``.\n\n``ingestion`` is always present. ``grouping`` is ``None`` for the\ndry-run path (no DB writes, no LLM call) and for the no-op\nre-run path (every op already grouped from a prior pass).\n\nThe response carries no audit_log id explicitly \u2014 the chassis\naudit middleware writes one row per HTTP request with the route\npath bound, and the service-level helpers\n(:func:`register_ingested_operations`, :func:`run_llm_grouping`)\nwrite their own per-call rows under\n``meho.connector.llm_grouping`` etc."
+      },
+      "IngestionResultModel": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "inserted_count": {
+            "type": "integer",
+            "title": "Inserted Count"
+          },
+          "updated_count": {
+            "type": "integer",
+            "title": "Updated Count"
+          },
+          "skipped_count": {
+            "type": "integer",
+            "title": "Skipped Count"
+          },
+          "connector_registered": {
+            "type": "boolean",
+            "title": "Connector Registered"
+          },
+          "operations_grouped": {
+            "type": "boolean",
+            "title": "Operations Grouped"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "inserted_count",
+          "updated_count",
+          "skipped_count",
+          "connector_registered",
+          "operations_grouped"
+        ],
+        "title": "IngestionResultModel",
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.\n\nThe dataclass lives in :mod:`register_ingested` so the helper\ncan stay framework-agnostic; this model is the wire-format twin\nthe routes return. Fields mirror the dataclass one-for-one with\nan extra ``connector_id`` echo for round-trip clarity."
       },
       "OperationDescriptor": {
         "properties": {
@@ -1727,6 +2471,22 @@
         ],
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
+      },
+      "SpecSource": {
+        "properties": {
+          "uri": {
+            "type": "string",
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Uri"
+          }
+        },
+        "type": "object",
+        "required": [
+          "uri"
+        ],
+        "title": "SpecSource",
+        "description": "One spec to ingest under a connector triple.\n\n``uri`` carries the operator's spec identifier. Three forms are\naccepted by the underlying :func:`parse_openapi` resolver:\n\n* Absolute local path \u2014 ``/abs/path/to/spec.yaml``.\n* HTTP(S) URL \u2014 ``https://api.example.com/openapi.yaml``.\n* ``docs:<connector-id>/<file>`` shorthand \u2014 resolves against the\n  consumer's checked-in docs/ directory; CLI / API layers expand\n  this before calling the parser.\n\nWrapped in its own model so future per-spec knobs (auth headers,\ndialect pinning, content-type override) can land without\nreshaping :class:`IngestRequest`."
       },
       "SurfaceResult": {
         "properties": {

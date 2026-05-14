@@ -149,6 +149,22 @@ Schema decisions for :class:`Target`:
   (binary, GIN-friendly), generic JSON on SQLite. Escape hatch for
   per-product structured data without DDL changes.
 * ``notes`` — Text, nullable. Free-form operator notes.
+* ``fingerprint`` — JSON nullable. Cached
+  :class:`~meho_backplane.connectors.schemas.FingerprintResult` from
+  the last successful probe (vendor / product / version / build /
+  reachable / probed_at / probe_method / extras). ``NULL`` until first
+  probe; populated by the probe route via
+  :meth:`~meho_backplane.connectors.base.Connector.fingerprint`. The
+  G0.6 resolver reads this column to pick a connector implementation
+  without re-probing the live target. Added by migration ``0009``.
+* ``preferred_impl_id`` — Text nullable. Operator override for the
+  G0.6 resolver's tie-break ladder (#393): when multiple connector
+  impls advertise overlapping ``(product, version)`` ranges, the
+  resolver consults this column first and falls back to
+  :attr:`~meho_backplane.connectors.base.Connector.priority` only when
+  ``preferred_impl_id`` is ``NULL``. Plain text in v0.2 — same soft-FK
+  discipline as ``product`` (matched against the in-process connector
+  registry). Added by migration ``0009``.
 * ``created_at`` / ``updated_at`` — ``timestamptz`` NOT NULL.
   PG-side ``now()`` server default via the migration; the ORM also
   declares ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
@@ -702,6 +718,20 @@ class Target(Base):
         default=dict,
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Cached :class:`FingerprintResult` from the last successful probe.
+    # NULL until first probe; the probe route persists
+    # ``FingerprintResult.model_dump(mode='json')`` here. Added by
+    # migration ``0009``. JSONB on PG, generic JSON (text) on SQLite.
+    fingerprint: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    # Operator override for the G0.6 resolver's tie-break ladder when
+    # multiple connector impls advertise overlapping ``(product, version)``
+    # ranges. Soft-FK to ``Connector.impl_id`` (no real FK in v0.2 — the
+    # registry is in-process). Added by migration ``0009``.
+    preferred_impl_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Pydantic schemas for the targets surface (G0.3 T2).
+"""Pydantic schemas for the targets surface (G0.3 T2, amended by T1.5).
 
 Four models cover the full CRUD + list contract:
 
@@ -12,9 +12,23 @@ Four models cover the full CRUD + list contract:
   to keep list payloads small. Frozen.
 * :class:`TargetCreate` — POST body. All required fields explicit; optional
   fields have documented defaults matching the ORM column defaults.
+  Rejects unknown fields (``extra='forbid'``).
 * :class:`TargetUpdate` — PATCH body. Every field optional; only fields
   that are not ``None`` are applied by the route handler. ``name`` and
   ``product`` are intentionally absent — rename = delete + create.
+  Rejects unknown fields (``extra='forbid'``).
+
+The G0.3-T1.5 (#477) amendment added two fields to :class:`Target`:
+
+* ``fingerprint`` — cached
+  :class:`~meho_backplane.connectors.schemas.FingerprintResult` from
+  the last successful probe. Server-managed: only the probe route
+  writes it. **Not** acceptable on :class:`TargetCreate` or
+  :class:`TargetUpdate` — both reject ``fingerprint`` with 422 via
+  ``extra='forbid'`` so clients cannot seed the G0.6 resolver with
+  fabricated values.
+* ``preferred_impl_id`` — operator override for the G0.6 resolver's
+  tie-break ladder. Acceptable on both write schemas.
 
 ``AuthModel`` is imported from :mod:`meho_backplane.connectors.schemas`
 (G0.2-T1) and re-used here so the enum value set stays in one place.
@@ -69,6 +83,12 @@ class Target(BaseModel):
     ``Mapping[str, Any]`` so frozen instances cannot be mutated in-place
     via list.append / dict.__setitem__ — matching the immutability contract
     the docstring documents.
+
+    ``fingerprint`` mirrors the persisted
+    :class:`~meho_backplane.connectors.schemas.FingerprintResult` shape
+    (JSON-safe dict from ``model_dump(mode='json')``) or ``None`` until
+    the first successful probe. ``preferred_impl_id`` is the operator's
+    optional override for the G0.6 connector-impl resolver.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -86,6 +106,8 @@ class Target(BaseModel):
     vpn_required: bool
     extras: Mapping[str, Any]
     notes: str | None
+    fingerprint: Mapping[str, Any] | None
+    preferred_impl_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -96,7 +118,16 @@ class TargetCreate(BaseModel):
     ``name`` and ``product`` are immutable after creation; to rename a
     target, delete + re-create. ``auth_model`` defaults to
     ``shared_service_account`` matching the DB column default.
+
+    ``fingerprint`` is **not** accepted — it is server-managed and only
+    written by the probe handler from the connector's response. Sending
+    ``fingerprint`` in the create body raises 422 via ``extra='forbid'``
+    so clients cannot seed the G0.6 resolver's tie-break input with
+    fabricated values. ``preferred_impl_id`` is accepted as an optional
+    operator override.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=200)
     aliases: list[str] = Field(default_factory=list)
@@ -109,6 +140,7 @@ class TargetCreate(BaseModel):
     vpn_required: bool = False
     extras: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
+    preferred_impl_id: str | None = Field(default=None, max_length=200)
 
 
 class TargetUpdate(BaseModel):
@@ -119,7 +151,14 @@ class TargetUpdate(BaseModel):
     value to clear a nullable column (``fqdn``, ``secret_ref``,
     ``notes``). ``name`` and ``product`` are absent — rename = delete
     + create.
+
+    ``fingerprint`` is **not** accepted via PATCH — it is server-managed
+    and rewritten by every successful probe. Sending ``fingerprint``
+    raises 422 via ``extra='forbid'`` for the same reason
+    :class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     aliases: list[str] | None = None
     host: str | None = Field(default=None, max_length=512)
@@ -130,3 +169,4 @@ class TargetUpdate(BaseModel):
     vpn_required: bool | None = None
     extras: dict[str, Any] | None = None
     notes: str | None = None
+    preferred_impl_id: str | None = Field(default=None, max_length=200)

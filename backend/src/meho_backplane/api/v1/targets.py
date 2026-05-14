@@ -38,10 +38,24 @@ Probe route
 -----------
 
 The probe route delegates to the product's registered
-:class:`~meho_backplane.connectors.base.Connector`. If no connector is
-registered for the target's product (connector not yet implemented, or G0.2
-not fully landed), the route returns 501. The target must exist for the probe
-to fire — a non-existent target returns 404 via ``resolve_target``.
+:class:`~meho_backplane.connectors.base.Connector`. Per the 2026-05-14
+amendment to Initiative #224 (G0.3-T1.5 / Task #477) the probe verb
+calls :meth:`Connector.fingerprint` (returning
+:class:`~meho_backplane.connectors.schemas.FingerprintResult`), persists
+the result to ``targets.fingerprint`` (server-managed; never writeable
+via PATCH), and returns the fingerprint to the caller. The G0.6
+resolver (#388) reads the persisted column to pick a connector
+implementation without re-probing the live target.
+
+If no connector is registered for the target's product (connector
+not yet implemented, or G0.2 not fully landed), the route returns 501
+and does **not** touch the DB row — any previously-cached fingerprint
+survives. A connector that raises propagates the exception (the outer
+``session.begin()`` in :func:`~meho_backplane.db.engine.get_session`
+rolls back), again leaving the row untouched. The column therefore
+always reflects the *last successful* probe. The target must exist
+for the probe to fire — a non-existent target returns 404 via
+``resolve_target``.
 """
 
 from __future__ import annotations
@@ -58,7 +72,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors.registry import get_connector
-from meho_backplane.connectors.schemas import AuthModel, ProbeResult
+from meho_backplane.connectors.schemas import AuthModel, FingerprintResult
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.targets.resolver import resolve_target
@@ -105,6 +119,8 @@ def _to_full(t: TargetORM) -> Target:
         vpn_required=t.vpn_required,
         extras=t.extras,
         notes=t.notes,
+        fingerprint=t.fingerprint,
+        preferred_impl_id=t.preferred_impl_id,
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
@@ -151,19 +167,28 @@ async def describe_target(
     return _to_full(t)
 
 
-@router.post("/{name}/probe", response_model=ProbeResult)
+@router.post("/{name}/probe", response_model=FingerprintResult)
 async def probe_target(
     name: str,
     operator: Operator = _require_operator,
     session: AsyncSession = Depends(get_session),
-) -> ProbeResult:
-    """Invoke the registered connector's ``probe`` method for a target.
+) -> FingerprintResult:
+    """Invoke the registered connector's ``fingerprint`` method for a target.
+
+    The probe verb returns the connector's
+    :class:`~meho_backplane.connectors.schemas.FingerprintResult` and
+    persists it to ``targets.fingerprint`` so the G0.6 resolver (#388)
+    can pick an implementation without re-probing the live target. Per
+    the 2026-05-14 amendment to Initiative #224 the probe verb is the
+    *only* writer to the column — :class:`TargetCreate` and
+    :class:`TargetUpdate` reject the field with 422.
 
     Returns 501 when no connector is registered for the target's
-    product slug. The connector is free to return a failed probe
-    (``ok=False``) with a reason; that is still a 200 response —
-    the route succeeded, the connector reported the target as
-    unreachable.
+    product slug; in that case the DB row is **not** touched, so the
+    previously-cached fingerprint (if any) survives. A connector that
+    raises propagates the exception (rolling back the outer
+    transaction); the DB row again stays untouched. The column
+    therefore always reflects the *last successful* probe.
     """
     t = await resolve_target(session, operator.tenant_id, name)
     cls = get_connector(t.product)
@@ -172,7 +197,18 @@ async def probe_target(
             status_code=501,
             detail=f"no connector registered for product={t.product!r}",
         )
-    return await cls().probe(t)
+    fp = await cls().fingerprint(t)
+    # ``model_dump(mode='json')`` produces a JSONB-safe dict (datetime
+    # → ISO string, enum → value, UUID → str). Plain ``model_dump()``
+    # would leak Python-native types into the JSON column, breaking
+    # round-tripping through PG's JSONB binary representation.
+    t.fingerprint = fp.model_dump(mode="json")
+    # The outer ``async with session.begin()`` in ``get_session``
+    # commits on clean exit; ``flush`` makes the write visible to any
+    # follow-up SELECT in this request without forcing an explicit
+    # commit (which would close the outer transaction mid-handler).
+    await session.flush()
+    return fp
 
 
 @router.post("", response_model=Target, status_code=201)

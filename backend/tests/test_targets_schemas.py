@@ -74,6 +74,8 @@ def test_target_is_frozen() -> None:
         vpn_required=False,
         extras={},
         notes=None,
+        fingerprint=None,
+        preferred_impl_id=None,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
@@ -113,6 +115,8 @@ def _make_target(**overrides: Any) -> Target:
         "vpn_required": True,
         "extras": {"datacenter": "fra1"},
         "notes": "Production vCenter",
+        "fingerprint": None,
+        "preferred_impl_id": None,
         "created_at": datetime.now(UTC),
         "updated_at": datetime.now(UTC),
     }

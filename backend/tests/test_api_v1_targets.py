@@ -277,26 +277,36 @@ def test_probe_target_not_found_returns_404(client: TestClient) -> None:
 
 @pytest.mark.asyncio
 async def test_probe_invokes_connector(client: TestClient) -> None:
-    """When a connector is registered, probe returns its ProbeResult."""
+    """When a connector is registered, probe returns the FingerprintResult.
+
+    Post-G0.3-T1.5 (#477) the probe verb returns the connector's
+    :class:`FingerprintResult` (not :class:`ProbeResult` — that change
+    was the 2026-05-14 amendment to Initiative #224). Persistence
+    round-tripping against the DB is covered in
+    :mod:`test_targets_fingerprint`; here we only assert the wire
+    contract.
+    """
     from meho_backplane.connectors.base import Connector
     from meho_backplane.connectors.registry import register_connector
     from meho_backplane.connectors.schemas import FingerprintResult, OperationResult
 
-    probe_result = ProbeResult(
-        ok=True,
-        reason="reachable",
-        latency_ms=12.0,
+    fingerprint = FingerprintResult(
+        vendor="hashicorp",
+        product="vault",
+        version="1.15.0",
+        reachable=True,
         probed_at=datetime.now(UTC),
+        probe_method="sys-health",
     )
 
     class _FakeConnector(Connector):
         product = "vault"
 
         async def probe(self, target: Any) -> ProbeResult:
-            return probe_result
+            raise NotImplementedError
 
         async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
-            raise NotImplementedError
+            return fingerprint
 
         async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
             raise NotImplementedError
@@ -318,8 +328,12 @@ async def test_probe_invokes_connector(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert response.json()["reason"] == "reachable"
+    body = response.json()
+    assert body["vendor"] == "hashicorp"
+    assert body["product"] == "vault"
+    assert body["version"] == "1.15.0"
+    assert body["reachable"] is True
+    assert body["probe_method"] == "sys-health"
 
 
 # ---------------------------------------------------------------------------

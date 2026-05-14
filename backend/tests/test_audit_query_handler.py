@@ -171,6 +171,51 @@ async def test_tenant_scoping_ignores_tenant_id_on_filter_object(
     assert result.rows == []
 
 
+@pytest.mark.asyncio
+async def test_tenant_scoping_target_name_does_not_leak_cross_tenant(
+    session: AsyncSession,
+) -> None:
+    """Cross-tenant ``target_id`` resolves to ``target_name=None``, not the
+    other tenant's name.
+
+    ``audit_log.target_id`` is a soft column (no FK in v0.2 per the chassis
+    discipline), so a write-path bug could in principle persist a target_id
+    that belongs to a different tenant. The read substrate must scope the
+    LEFT JOIN by ``Target.tenant_id`` so the denormalized ``target_name``
+    never surfaces another tenant's data — even if the rest of the audit row
+    is correctly tenant-scoped, leaking the target name alone is a
+    tenant-isolation violation.
+    """
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    cross_target_id = await _seed_target(session, tenant_id=tenant_b, name="tenant-b-secret")
+    own_target_id = await _seed_target(session, tenant_id=tenant_a, name="tenant-a-public")
+    await session.commit()
+
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_a,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        target_id=cross_target_id,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_a,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        target_id=own_target_id,
+    )
+    await session.commit()
+
+    result = await query_audit(AuditQueryFilters(), tenant_id=tenant_a, session=session)
+    by_target = {entry.target_id: entry.target_name for entry in result.rows}
+
+    # Cross-tenant target_id surfaces with target_name=None — the JOIN's
+    # tenant scope filtered out tenant B's target row.
+    assert by_target[cross_target_id] is None
+    # Same-tenant target_id resolves normally.
+    assert by_target[own_target_id] == "tenant-a-public"
+
+
 # ---------------------------------------------------------------------------
 # Cursor pagination (AC5)
 # ---------------------------------------------------------------------------
@@ -348,6 +393,44 @@ async def test_op_id_glob_matches_http_derived_op_id(session: AsyncSession) -> N
 
     assert len(result.rows) == 1
     assert result.rows[0].method == "GET"
+
+
+@pytest.mark.asyncio
+async def test_op_id_glob_escapes_sql_wildcards(session: AsyncSession) -> None:
+    """A literal ``%`` in ``op_id`` is escaped, not interpreted as SQL wildcard.
+
+    Without escaping the LIKE metacharacters in operator-controllable input,
+    a filter like ``op_id="foo%bar"`` would match every op_id starting with
+    ``foo`` and ending in ``bar`` (the embedded ``%`` would act as the SQL
+    wildcard) rather than the exact literal substring. ``_`` has the same
+    risk — it matches any single character in LIKE.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        path="/mcp",
+        payload={"op_id": "foo%bar"},
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        path="/mcp",
+        payload={"op_id": "fooXXXbar"},
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(op_id="foo%bar"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    # Only the literal-percent row matches; the wildcard-expansion candidate
+    # is excluded because ``%`` in the filter was escaped to a literal.
+    assert {entry.op_id for entry in result.rows} == {"foo%bar"}
 
 
 @pytest.mark.asyncio

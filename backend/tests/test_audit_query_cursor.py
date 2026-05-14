@@ -63,6 +63,21 @@ def test_cursor_rejects_invalid_base64() -> None:
         decode_cursor("not%%base64$$")
 
 
+def test_cursor_strict_base64_rejects_trailing_garbage() -> None:
+    """A valid base64 prefix followed by non-base64 garbage is rejected.
+
+    Python's lenient ``base64.urlsafe_b64decode`` silently discards
+    non-base64 bytes — e.g. ``aGVsbG8=!`` decodes to ``b"hello"`` without
+    raising — which the docstring's "any tampering ... InvalidCursorError"
+    contract forbids. The strict-validate decoder catches this.
+    """
+    # Valid b64 (``aGVsbG8=`` = "hello") + trailing ``!`` which is not in the
+    # urlsafe-base64 alphabet. The lax decoder accepts and returns b"hello";
+    # strict validation rejects.
+    with pytest.raises(InvalidCursorError):
+        decode_cursor("aGVsbG8=!")
+
+
 def test_cursor_rejects_valid_base64_but_invalid_json() -> None:
     """Base64 that decodes to non-JSON raises :class:`InvalidCursorError`."""
     token = base64.urlsafe_b64encode(b"this is not json").decode("ascii")

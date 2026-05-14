@@ -47,7 +47,7 @@ Field-to-source mapping:
 | `tenant_id` | `audit_log.tenant_id` |
 | `principal_sub` | `audit_log.operator_sub` |
 | `target_id` | `audit_log.target_id` |
-| `target_name` | LEFT JOIN `targets.name ON audit_log.target_id = targets.id` |
+| `target_name` | LEFT JOIN `targets.name ON audit_log.target_id = targets.id AND targets.tenant_id = :tenant_id`. The tenant-id half of the ON clause is defence-in-depth: `audit_log.target_id` has no FK in v0.2 (soft column per chassis discipline) so a cross-tenant value resolves to `target_name=None` rather than leaking another tenant's name. |
 | `method` / `path` / `status_code` / `request_id` / `duration_ms` / `payload` | Columns of the same name on `audit_log`. |
 | `op_id` | `payload['op_id']` if a string, else `f"http.{method.lower()}:{path}"`. |
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. |
@@ -71,13 +71,14 @@ end of the matching set under the current filter).
 
 ## Control flow
 
-```
+```text
 query_audit(filters, tenant_id, session)
   │
   ├─ Validate filters: parent_audit_id / agent_session_id → UnsupportedFilterError
   │
   ├─ Build SELECT audit_log, targets.name
   │     OUTER JOIN targets ON audit_log.target_id = targets.id
+  │                       AND targets.tenant_id   = :tenant_id   ← JOIN-scope defence
   │     WHERE audit_log.tenant_id = :tenant_id      ← always first
   │       [+ audit_id = :audit_id]
   │       [+ operator_sub ILIKE :principal]

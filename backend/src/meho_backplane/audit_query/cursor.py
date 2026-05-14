@@ -73,7 +73,11 @@ def decode_cursor(token: str) -> CursorPosition:
     underlying reason without leaking it through the operator-facing error.
     """
     try:
-        raw = base64.urlsafe_b64decode(token.encode("ascii"))
+        raw = base64.b64decode(
+            token.encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
     except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
         raise InvalidCursorError("cursor is not valid base64") from exc
 

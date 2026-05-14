@@ -46,7 +46,6 @@ Filter coverage
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,27 +73,47 @@ class UnsupportedFilterError(ValueError):
     """
 
 
-def query_audit(
-    filters: AuditQueryFilters,
-    *,
-    tenant_id: uuid.UUID,
-    session: AsyncSession,
-) -> Any:
-    """Tenant-scoped paginated query over ``audit_log``.
+#: Escape character for LIKE patterns built from operator-controllable input.
+#: ``%`` / ``_`` in the raw ``op_id`` value are protected via this escape so
+#: only the explicit ``*`` glob translates to a wildcard.
+_LIKE_ESCAPE: str = "\\"
 
-    Returns an awaitable resolving to :class:`AuditQueryResult`. The
-    function is declared as an async wrapper so callers can ``await`` it
-    directly; the wrapper body is :func:`_query_audit_impl`.
+
+def _build_op_id_like_pattern(raw: str) -> str:
+    """Escape SQL LIKE metacharacters in *raw*, then translate glob ``*`` to ``%``.
+
+    Order matters: escape the backslash first (so a literal ``\\`` in the
+    input doesn't double-escape later additions), then ``%`` / ``_`` (so
+    operator-controllable values can't smuggle SQL wildcards), then translate
+    the user-facing ``*`` glob into ``%``. The result is paired with
+    ``escape="\\"`` on the :meth:`like` call so the SQL ``ESCAPE`` clause
+    treats the backslash as a literal-marker on both PostgreSQL and SQLite.
     """
-    return _query_audit_impl(filters, tenant_id=tenant_id, session=session)
+    return (
+        raw.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+        .replace("*", "%")
+    )
 
 
-async def _query_audit_impl(
+async def query_audit(
     filters: AuditQueryFilters,
     *,
     tenant_id: uuid.UUID,
     session: AsyncSession,
 ) -> AuditQueryResult:
+    """Tenant-scoped paginated query over ``audit_log``.
+
+    ``tenant_id`` is a mandatory keyword-only argument — never sourced from
+    :class:`AuditQueryFilters` — so cross-tenant queries are impossible by
+    construction. The first SQL WHERE clause is always
+    ``audit_log.tenant_id = :tenant_id``; the LEFT JOIN to ``targets`` for
+    ``target_name`` denormalization is *also* scoped on ``Target.tenant_id``
+    so a cross-tenant ``target_id`` (allowed today because ``audit_log``
+    keeps no FK on the column per v0.2's soft-FK discipline) resolves to
+    ``target_name=None`` rather than leaking the other tenant's target name.
+    """
     if filters.parent_audit_id is not None:
         raise UnsupportedFilterError(
             "parent_audit_id filter not supported in v0.2 — column lands with G0.6-T7 (#398)",
@@ -106,7 +125,13 @@ async def _query_audit_impl(
 
     stmt = (
         sa.select(AuditLog, Target.name.label("target_name"))
-        .outerjoin(Target, AuditLog.target_id == Target.id)
+        .outerjoin(
+            Target,
+            sa.and_(
+                AuditLog.target_id == Target.id,
+                Target.tenant_id == tenant_id,
+            ),
+        )
         .where(AuditLog.tenant_id == tenant_id)
     )
 
@@ -131,15 +156,15 @@ async def _query_audit_impl(
         stmt = stmt.where(AuditLog.target_id.in_(target_ids_subq))
 
     if filters.op_id is not None:
-        like_pattern = filters.op_id.replace("*", "%")
+        like_pattern = _build_op_id_like_pattern(filters.op_id)
         payload_op_id = AuditLog.payload["op_id"].as_string()
         derived_op_id = (
             sa.literal("http.") + sa.func.lower(AuditLog.method) + sa.literal(":") + AuditLog.path
         )
         stmt = stmt.where(
             sa.or_(
-                payload_op_id.like(like_pattern),
-                derived_op_id.like(like_pattern),
+                payload_op_id.like(like_pattern, escape=_LIKE_ESCAPE),
+                derived_op_id.like(like_pattern, escape=_LIKE_ESCAPE),
             ),
         )
 

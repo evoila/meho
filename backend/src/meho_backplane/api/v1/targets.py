@@ -81,7 +81,10 @@ def _to_summary(t: TargetORM) -> TargetSummary:
     return TargetSummary(
         id=t.id,
         name=t.name,
-        aliases=t.aliases,
+        # ORM stores aliases as ``list[str]`` (mutable JSON column);
+        # the response schema declares ``tuple[str, ...]`` for
+        # frozen-model immutability. Coerce at the boundary.
+        aliases=tuple(t.aliases),
         product=t.product,
         host=t.host,
     )
@@ -92,7 +95,7 @@ def _to_full(t: TargetORM) -> Target:
         id=t.id,
         tenant_id=t.tenant_id,
         name=t.name,
-        aliases=t.aliases,
+        aliases=tuple(t.aliases),
         product=t.product,
         host=t.host,
         port=t.port,

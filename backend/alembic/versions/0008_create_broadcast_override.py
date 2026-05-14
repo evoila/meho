@@ -3,8 +3,8 @@
 
 """Create the broadcast_override table for G6.3 PII opt-in/opt-out controls.
 
-Revision ID: 0007
-Revises: 0006
+Revision ID: 0008
+Revises: 0007
 Create Date: 2026-05-14
 
 This migration is the schema substrate of Task #378 (G6.3-T1) under
@@ -21,11 +21,26 @@ The Initiative body in #376 and the Task body in #378 reference this
 migration as ``0004_create_broadcast_override.py`` revising ``0003``.
 That was the issue author's draft assumption at filing time, when only
 migrations 0001 / 0002 / 0003 existed. By 2026-05-14 the chassis has
-shipped through ``0006_add_audit_log_parent_audit_id`` (the G0.6-T7
-composite-recursion column), so the next sequential revision is
-``0007``. The Task's acceptance criteria are about migration *existence*
-and *behaviour*, not filename literal; renumbering to 0007 satisfies the
-contract without papering over the in-tree state.
+shipped through ``0007_create_topology_graph`` (G9.1-T1's topology
+substrate, Task #448, which raced ahead of #458 and took the
+next-available revision slot during the merge resolution). The next
+free revision after ``0007`` is ``0008``, which is what this file is.
+The Task's acceptance criteria are about migration *existence* and
+*behaviour*, not filename literal; the renumbering preserves both.
+
+Post-#458-squash-merge artifact (this commit repairs it)
+--------------------------------------------------------
+
+PR #458's pre-merge state had this file at ``revision = "0008"``,
+``down_revision = "0007"`` on the feature branch, matching its
+``0008_*.py`` filename and chaining cleanly behind the G9.1 topology
+migration ``0007``. GitHub's squash-merge dropped that
+content edit during the merge — the file landed on ``main`` at the
+``0008_*.py`` filename but with the pre-rename ``revision = "0007"``
+/ ``down_revision = "0006"`` constants intact. Two migrations
+therefore both claimed revision ``0007`` and ``alembic upgrade head``
+failed with ``Multiple head revisions are present`` until this
+commit restored the intended chain.
 
 What this migration adds
 ------------------------
@@ -131,8 +146,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0007"
-down_revision: str | None = "0006"
+revision: str = "0008"
+down_revision: str | None = "0007"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

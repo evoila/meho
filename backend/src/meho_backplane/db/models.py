@@ -200,6 +200,7 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 __all__ = [
     "AuditLog",
     "Base",
+    "BroadcastOverride",
     "Document",
     "EndpointDescriptor",
     "GraphEdge",
@@ -1388,5 +1389,169 @@ class GraphEdge(Base):
         sa.CheckConstraint(
             _ck_in("source", _GRAPH_EDGE_SOURCES),
             name="ck_graph_edge_source",
+        ),
+    )
+
+
+class BroadcastOverride(Base):
+    """A per-tenant override rule for the G6.1 broadcast classifier.
+
+    G6.3-T1 (Task #378) schema substrate under Initiative #376.
+    Tenant admins write rows here to downgrade normally-full-detail
+    operations to ``aggregate``-only on the SSE feed (and, via G6.2,
+    the Slack mirror) -- the durable, scope-aware counterpart to the
+    per-call ``X-Broadcast-Detail`` header that T3 will add.
+
+    Resolution precedence (implemented in T2's
+    :func:`compute_effective_broadcast_detail`):
+    per-call request override > matching :class:`BroadcastOverride`
+    row > the static :func:`classify_op` default in
+    :mod:`meho_backplane.broadcast.events`. T1 ships only the table;
+    the resolver and its per-tenant cache land in T2 (#379).
+
+    Schema decisions:
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape
+      every other model uses; PG gets ``gen_random_uuid()`` via the
+      migration, the ORM falls back to ``default=uuid.uuid4`` on
+      SQLite.
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES
+      tenant(id)`` FK. Same precedent as :class:`Document`: a
+      brand-new table with no chassis-era rows and a clean downgrade
+      that drops the whole table can enforce the FK at the substrate
+      boundary without a backfill/cascade trade-off. Orphan rows for
+      a typo'd / deleted / replayed tenant id surface as
+      :class:`IntegrityError` at insert time, not as unreachable
+      override rows at resolver time.
+    * ``op_id_pattern`` -- Text NOT NULL. Glob (``*`` plus literal);
+      regex is deliberately rejected at the API layer (T4) -- see
+      Initiative #376 "Out of scope". A glob like ``vault.kv.*`` or
+      ``k8s.configmap.info`` (exact match) is the operator-facing
+      shape; the resolver in T2 walks the per-tenant rule set in
+      Python, so no DB-side glob index is needed in v0.2.
+    * ``scope_field`` -- Text, nullable. ``NULL`` means an op-wide
+      rule; non-null is one of a small allowlist (``"namespace"``
+      for Kubernetes-shaped scope, ``"target_name"`` for
+      vSphere/Vault-shaped scope). The allowlist is enforced at the
+      Pydantic layer in T4 rather than as a DB ``CHECK`` constraint
+      so future scope fields land without a migration. The
+      :class:`Tenant` / :class:`EndpointDescriptor` / :class:`Target`
+      precedents use DB-side ``CHECK`` for bounded enums; the
+      forward-compat argument is what flips the decision here.
+    * ``scope_value`` -- Text, nullable. The matching value for
+      ``scope_field`` (e.g. ``"kube-system"``); ``NULL`` when
+      ``scope_field`` is ``NULL``. The resolver treats the
+      ``(scope_field, scope_value)`` pair atomically -- both NULL is
+      "op-wide", both non-null is "scoped".
+    * ``detail`` -- Text NOT NULL. ``"full"`` or ``"aggregate"`` --
+      Pydantic ``Literal`` at the API layer (T4) is the enforcement
+      point, mirroring the ``scope_field`` argument. The op-class
+      label is **not** stored on the override row; the override
+      shapes the publish-time detail decision and the static
+      classifier still owns op-class assignment.
+    * ``created_by_sub`` -- Text NOT NULL. JWT ``sub`` of the
+      tenant-admin who wrote the rule -- captures who flipped a
+      sensitivity floor for audit-trail / forensics. T4's CRUD verbs
+      stamp this from the bound :class:`~meho_backplane.auth.operator.Operator`.
+    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL.
+      PG-side ``now()`` server defaults via the migration; the ORM
+      also declares ``default=lambda: datetime.now(UTC)`` plus
+      ``onupdate=lambda: datetime.now(UTC)`` on ``updated_at`` so
+      ORM-side row edits (T4 ``PATCH``) bump the timestamp. Raw-SQL
+      UPDATEs against PG do **not** fire the ORM hook, which is
+      acceptable in v0.2 because the substrate's only writer is the
+      ORM-backed T4 layer.
+
+    Composite uniqueness on
+    ``(tenant_id, op_id_pattern, scope_field, scope_value)`` is
+    enforced by the named ``broadcast_override_tenant_unique_idx``
+    -- a tenant admin who races two CRUD calls against the same
+    ``(pattern, scope)`` triple lands the second insert as an
+    :class:`IntegrityError` rather than as a duplicate-rule shadow
+    that the resolver would have to disambiguate. The named index
+    pattern matches the :class:`Tenant` / :class:`Target` /
+    :class:`Document` precedent (single source of uniqueness, no
+    PG-side duplicate from ``unique=True`` on the column). SQL's
+    ``NULL != NULL`` semantics technically let two rows with
+    ``(NULL, NULL)`` for the scope pair coexist under a vanilla
+    composite UNIQUE; that is acceptable here because the op-wide
+    rule is fully described by ``(tenant_id, op_id_pattern)`` and
+    a duplicate ``(NULL, NULL)`` differs from a duplicate
+    ``(\"namespace\", \"kube-system\")`` only in resolver
+    ambiguity, which T2's resolver handles via deterministic
+    tie-break (first-match by ``created_at`` order). A partial-
+    index split like :class:`OperationGroup` uses is therefore not
+    warranted in v0.2; if duplicate op-wide rules become an
+    operational problem the tightening can ship in v0.2.next.
+
+    Indexes on :class:`BroadcastOverride`:
+
+    * ``broadcast_override_tenant_unique_idx`` -- unique composite
+      b-tree on ``(tenant_id, op_id_pattern, scope_field,
+      scope_value)``. The natural-key target for T4's upsert; the
+      composite shape pins the per-tenant rule set down to a single
+      row.
+    * ``broadcast_override_tenant_idx`` -- b-tree on ``tenant_id``.
+      Drives the resolver's tenant-scoped rule pull at publish time
+      (T2's per-tenant cache hydrates from
+      ``SELECT * FROM broadcast_override WHERE tenant_id = :id``).
+
+    The model deliberately ships with no helper methods -- read /
+    write paths land in T2 (the resolver + per-tenant cache) and T4
+    (the CRUD verbs). The ORM class is a pure data shape.
+    """
+
+    __tablename__ = "broadcast_override"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NOT NULL with a real REFERENCES tenant(id) FK -- see class
+    # docstring for the Document-precedent rationale. Orphan-row
+    # insertion (typo / deleted / replayed contextvar) becomes an
+    # IntegrityError at insert time rather than a silently dangling
+    # override row at resolver time.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    op_id_pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL -> op-wide rule; non-null is enforced against a small
+    # allowlist by the Pydantic layer in T4 (no DB CHECK so future
+    # scope fields land without a migration).
+    scope_field: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "full" | "aggregate". Pydantic Literal at the API layer (T4).
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "broadcast_override_tenant_unique_idx",
+            "tenant_id",
+            "op_id_pattern",
+            "scope_field",
+            "scope_value",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "broadcast_override_tenant_idx",
+            "tenant_id",
+            postgresql_using="btree",
         ),
     )

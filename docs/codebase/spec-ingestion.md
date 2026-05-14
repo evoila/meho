@@ -127,7 +127,7 @@ dispatcher's concern (G0.6-T5 + T2's tracking of `components.schemas`).
 
 ```text
 register_ingested_operations
-├─ _detect_op_id_collisions    # set scan; raise OpIdCollision before DB writes
+├─ _detect_op_id_collisions    # set scan; raise OpIdCollision (within-batch) before DB writes
 ├─ ensure_connector_class_registered
 │  ├─ all_connectors_v2()       # check v2 registry for (product, version, impl_id)
 │  ├─ type(cls_name, ...)       # synthesise GenericRestConnector subclass
@@ -138,6 +138,8 @@ register_ingested_operations
       ├─ compute_embedding_text_hash
       ├─ natural-key lookup     # (product, version, impl_id, op_id)
       │                         # + partial tenant_id index match
+      ├─ cross-call collision   # existing row's spec:<src> tag != ctx.spec_source
+      │                         # → raise OpIdCollision (cross-call branch)
       ├─ skip-re-embed path     # hash matches persisted row
       ├─ re-embed path          # row exists, embedding text changed
       └─ first-register path    # brand-new row, embedding computed
@@ -149,6 +151,17 @@ re-ingest: an unchanged 3,000-op vCenter spec must not re-embed
 recomposed text (via `build_embedding_text`), so no `body_hash`
 column is needed in v0.2 — the cost is one recompose-and-hash per
 op, well under the ONNX inference budget.
+
+`OpIdCollision` fires from two distinct sites: the up-front within-
+batch set scan (two ops in one call share `op_id`) and the per-row
+cross-call check (this call's `spec_source` differs from the
+persisted row's `spec:<src>` tag for the same natural key). Both
+sites use the same exception type so callers can write one
+`except OpIdCollision`; the cross-call site fills
+`existing_spec_source` and `incoming_spec_source` so the operator-
+facing message names both colliding specs. Same-`spec_source`
+re-ingest of an unchanged spec stays on the skip-re-embed path —
+the cross-call check only fires on a true `spec_source` mismatch.
 
 ## Dependencies
 

@@ -36,8 +36,11 @@ from meho_backplane.operations.embed import (
     compute_embedding_text_hash,
     encode_endpoint_text,
 )
+from meho_backplane.operations.ingest.exceptions import OpIdCollision
 from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 from meho_backplane.retrieval.embedding import EmbeddingService
+
+_SPEC_TAG_PREFIX = "spec:"
 
 __all__ = [
     "UpsertContext",
@@ -105,6 +108,22 @@ def build_upsert_context(
         incoming_hash=compute_embedding_text_hash(incoming_text),
         now=now,
     )
+
+
+def _extract_persisted_spec_source(existing: EndpointDescriptor) -> str | None:
+    """Recover the ``spec_source`` of an already-persisted row.
+
+    The synthetic ``f"spec:{spec_source}"`` marker is appended once
+    per row at first-register (and re-applied on the re-embed path),
+    so a well-formed row carries exactly one ``spec:`` tag. If the
+    tag is missing (older rows, hand-edited fixtures), return
+    ``None`` and let the caller skip the cross-call check rather
+    than raise a spurious collision.
+    """
+    for tag in existing.tags or []:
+        if tag.startswith(_SPEC_TAG_PREFIX):
+            return tag[len(_SPEC_TAG_PREFIX) :]
+    return None
 
 
 async def _lookup_existing_descriptor(
@@ -211,6 +230,27 @@ async def upsert_one_operation(
     existing = await _lookup_existing_descriptor(session, ctx)
 
     if existing is not None:
+        # Cross-call op_id collision: the existing row was written by a
+        # prior register_ingested_operations() call under a *different*
+        # spec_source. Silently re-embedding would replace the prior
+        # spec's method / path / summary / description / schemas with
+        # this call's payload — never what the operator wants.
+        # Per Task #403 the operator must see a structured exception
+        # naming both spec sources so they can decide whether to rename
+        # one op_id or skip the offending spec. Same-spec_source
+        # re-ingest stays on the existing skip-re-embed / re-embed
+        # branches below; only a true spec_source mismatch fires.
+        existing_spec_source = _extract_persisted_spec_source(existing)
+        if existing_spec_source is not None and existing_spec_source != ctx.spec_source:
+            raise OpIdCollision(
+                op_ids=[ctx.proto.op_id],
+                product=ctx.product,
+                version=ctx.version,
+                impl_id=ctx.impl_id,
+                existing_spec_source=existing_spec_source,
+                incoming_spec_source=ctx.spec_source,
+            )
+
         existing_text = build_embedding_text(
             summary=existing.summary or "",
             description=existing.description or "",

@@ -287,8 +287,18 @@ async def register_ingested_operations(
         runs grouping next).
 
     Raises:
-        OpIdCollision: Two operations in *operations* share an
-            ``op_id``. Raised before any DB write.
+        OpIdCollision: Either (a) two operations in *operations*
+            share an ``op_id`` -- raised before any DB write by the
+            within-batch set scan, or (b) a prior
+            :func:`register_ingested_operations` call under the
+            same ``(product, version, impl_id)`` triple persisted
+            this ``op_id`` from a different ``spec_source`` --
+            raised per-row in :func:`_upsert.upsert_one_operation`
+            after the natural-key lookup, before the embedding
+            hash comparison. The exception's
+            ``existing_spec_source`` / ``incoming_spec_source``
+            attributes name both colliding specs in the cross-call
+            case.
     """
     _detect_op_id_collisions(
         operations,

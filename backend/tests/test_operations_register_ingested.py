@@ -463,6 +463,97 @@ async def test_op_id_collision_raised_before_any_db_write(
     assert rows == []
 
 
+@pytest.mark.asyncio
+async def test_op_id_collision_across_calls_with_different_spec_sources_raises(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A second ingest under the same triple with a different ``spec_source``
+    sharing an ``op_id`` raises :exc:`OpIdCollision` instead of silently
+    overwriting the first row.
+
+    This is the cross-call branch the Task #403 body calls out: *"the
+    second call to ``register_ingested_operations()`` UPDATEs the row
+    ... T2 detects this and raises ``OpIdCollision``"*. The within-batch
+    set scan in ``_detect_op_id_collisions`` can't see across calls; the
+    detection has to live in the per-row upsert path against the
+    persisted ``spec:<src>`` marker.
+    """
+    common_kwargs: dict[str, Any] = {
+        "product": "petstore",
+        "version": "1.0",
+        "impl_id": "petstore-rest",
+        "embedding_service": stub_embedding_service,
+    }
+    first_result = await register_ingested_operations(
+        spec_source="petstore.yaml",
+        operations=[_proto("GET:/pets", path="/pets", summary="First spec list-pets")],
+        **common_kwargs,
+    )
+    assert first_result.inserted_count == 1
+
+    # Snapshot the persisted row so the post-collision assertion can
+    # prove the original payload survived unchanged.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        original_row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "GET:/pets")
+            )
+        ).scalar_one()
+        original_summary = original_row.summary
+        original_tags = list(original_row.tags or [])
+        original_updated_at = original_row.updated_at
+
+    # Track embedding-service call count: the cross-call raise must
+    # fire BEFORE the re-embed branch, so the embedding service is
+    # not invoked a second time.
+    encode_calls_before = stub_embedding_service.encode_one.call_count
+
+    with pytest.raises(OpIdCollision) as excinfo:
+        await register_ingested_operations(
+            spec_source="petstore-admin.yaml",
+            operations=[
+                _proto("GET:/pets", path="/pets", summary="Conflicting admin list-pets"),
+            ],
+            **common_kwargs,
+        )
+    assert excinfo.value.op_ids == ["GET:/pets"]
+    assert excinfo.value.product == "petstore"
+    assert excinfo.value.version == "1.0"
+    assert excinfo.value.impl_id == "petstore-rest"
+    assert excinfo.value.existing_spec_source == "petstore.yaml"
+    assert excinfo.value.incoming_spec_source == "petstore-admin.yaml"
+    # Both spec sources are named in the rendered message so the
+    # operator-facing CLI / API surfaces the disambiguation without
+    # extra threading.
+    msg = str(excinfo.value)
+    assert "petstore.yaml" in msg
+    assert "petstore-admin.yaml" in msg
+
+    # No second encode call: the raise short-circuits the re-embed path.
+    assert stub_embedding_service.encode_one.call_count == encode_calls_before
+
+    # The original row is unchanged -- the second spec's payload did
+    # not overwrite the first spec's summary / tags / updated_at.
+    async with sessionmaker() as fresh:
+        rows = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.op_id == "GET:/pets")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    surviving = rows[0]
+    assert surviving.summary == original_summary
+    assert list(surviving.tags or []) == original_tags
+    assert "spec:petstore.yaml" in (surviving.tags or [])
+    assert "spec:petstore-admin.yaml" not in (surviving.tags or [])
+    assert surviving.updated_at == original_updated_at
+
+
 # ---------------------------------------------------------------------------
 # Connector class auto-registration
 # ---------------------------------------------------------------------------

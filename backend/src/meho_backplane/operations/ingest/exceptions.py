@@ -22,15 +22,27 @@ Parser failures (T1 #401) — raised from
 Registration failures (T2 #403) — raised from
 :func:`~meho_backplane.operations.ingest.register_ingested_operations`:
 
-* :class:`OpIdCollision` — two operations in a single ingest batch
-  carry the same ``op_id``. The natural key
+* :class:`OpIdCollision` — two operations under the same
+  ``(product, version, impl_id)`` triple carry the same ``op_id``,
+  raised in two distinct branches:
+
+  * **Within-batch** — two ops in a single ingest call collide.
+    Caught up-front by a set scan before any DB write.
+  * **Cross-call** — a second ingest call under the same triple
+    submits an ``op_id`` already persisted from a prior call with
+    a different ``spec_source``. Caught per-row after the natural-
+    key lookup, before the embedding hash comparison.
+
+  Both branches raise the same exception type so callers can write
+  one ``except OpIdCollision`` and handle both. The natural key
   ``(product, version, impl_id, op_id)`` is unique by partial index
   on ``endpoint_descriptor``; merging two specs that happen to
   expose the same ``op_id`` would silently UPDATE the first row
   with the second's payload, which is never what the operator
   wants. The exception names every colliding ``op_id`` so the
   operator can decide whether to rename one (out-of-scope for v0.2)
-  or skip the offending spec pair.
+  or skip the offending spec pair; for cross-call collisions it
+  also names both ``spec_source`` values to disambiguate.
 
 Review-queue failures (T4 #402) — raised from
 :class:`~meho_backplane.operations.ingest.ReviewService`:
@@ -106,20 +118,51 @@ class InvalidSchemaError(ValueError):
 
 
 class OpIdCollision(ValueError):  # noqa: N818 -- Task #403 API contract pins this name verbatim
-    """Two operations in one ingest batch carry the same ``op_id``.
+    """An ``op_id`` collides with another op under the same connector triple.
+
+    Two raise sites, one exception type:
+
+    * **Within-batch collision** — two operations in a single
+      :func:`register_ingested_operations` call share an ``op_id``.
+      Caught up-front by ``_detect_op_id_collisions`` (a set scan)
+      before any DB write. ``existing_spec_source`` /
+      ``incoming_spec_source`` are ``None`` here — both colliding ops
+      came from the same ingest call, so the spec-source dimension
+      doesn't apply.
+
+    * **Cross-call collision** — a second
+      :func:`register_ingested_operations` call under the same
+      ``(product, version, impl_id)`` triple submits an ``op_id``
+      that's already persisted from a prior call with a different
+      ``spec_source``. Caught in ``upsert_one_operation`` (per-row)
+      after the natural-key lookup, before the embedding hash
+      comparison. Both ``existing_spec_source`` (read off the
+      persisted row's ``spec:<src>`` tag) and ``incoming_spec_source``
+      (the current call's argument) are set so the operator can see
+      which two specs are fighting over the ``op_id``.
 
     Attributes
     ----------
     op_ids:
         The colliding ``op_id`` values, sorted for stable error
-        messages and diff-friendly test assertions. At least two
-        entries — a one-element list would imply no collision.
+        messages and diff-friendly test assertions. Within-batch
+        collisions list every distinct duplicate; cross-call
+        collisions list a single ``op_id`` (the row the second
+        upsert would clobber).
     product, version, impl_id:
         The connector coordinates being ingested. Surfaced on the
         exception so the operator-facing CLI / API can render a
         complete "couldn't ingest spec X into connector Y because Z"
         message without re-threading the connector identity from
         the call site.
+    existing_spec_source:
+        For cross-call collisions, the ``spec_source`` of the
+        already-persisted row (the prior call's spec). ``None`` for
+        within-batch collisions.
+    incoming_spec_source:
+        For cross-call collisions, the ``spec_source`` of the
+        in-flight call (the call that just hit the collision).
+        ``None`` for within-batch collisions.
 
     Inherits from :class:`ValueError` so callers that already catch
     parser-shaped errors via ``except ValueError`` keep working
@@ -135,14 +178,25 @@ class OpIdCollision(ValueError):  # noqa: N818 -- Task #403 API contract pins th
         product: str,
         version: str,
         impl_id: str,
+        existing_spec_source: str | None = None,
+        incoming_spec_source: str | None = None,
     ) -> None:
         self.op_ids = sorted(op_ids)
         self.product = product
         self.version = version
         self.impl_id = impl_id
+        self.existing_spec_source = existing_spec_source
+        self.incoming_spec_source = incoming_spec_source
+        spec_suffix = ""
+        if existing_spec_source is not None or incoming_spec_source is not None:
+            spec_suffix = (
+                f" between spec_source={existing_spec_source!r} (persisted) "
+                f"and spec_source={incoming_spec_source!r} (incoming)"
+            )
         super().__init__(
             f"op_id collision while ingesting into "
             f"({product!r}, {version!r}, {impl_id!r}): {self.op_ids!r}"
+            f"{spec_suffix}"
         )
 
 

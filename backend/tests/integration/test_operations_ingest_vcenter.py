@@ -32,17 +32,25 @@ import pytest
 from meho_backplane.operations.ingest import parse_openapi
 
 
-def _resolve_vcenter_spec() -> Path | None:
+def _resolve_vcenter_spec() -> str | None:
+    """Resolve the vCenter spec from env vars.
+
+    Returns either an ``http(s)://`` URL or a local filesystem path,
+    both of which ``parse_openapi`` accepts. ``None`` when no source
+    is configured — the integration test skips in that case.
+    """
     explicit = os.getenv("MEHO_VCENTER_OPENAPI")
     if explicit:
+        if explicit.startswith(("http://", "https://")):
+            return explicit
         candidate = Path(explicit)
         if candidate.exists():
-            return candidate
+            return str(candidate)
     consumer_docs = os.getenv("MEHO_CONSUMER_DOCS_ROOT")
     if consumer_docs:
         candidate = Path(consumer_docs) / "vcenter-9.0" / "vcenter.yaml"
         if candidate.exists():
-            return candidate
+            return str(candidate)
     return None
 
 
@@ -57,7 +65,7 @@ def _resolve_vcenter_spec() -> Path | None:
 def test_parse_vcenter_meets_path_coverage_threshold() -> None:
     spec_path = _resolve_vcenter_spec()
     assert spec_path is not None  # guarded by skipif above
-    rows = parse_openapi(str(spec_path), spec_source="spec:vcenter.yaml")
+    rows = parse_openapi(spec_path, spec_source="spec:vcenter.yaml")
     distinct_paths = {row.path for row in rows}
     assert len(rows) >= 950, f"got {len(rows)} rows; acceptance threshold is 950"
     assert len(distinct_paths) >= 950, (
@@ -69,6 +77,8 @@ def test_parse_vcenter_meets_path_coverage_threshold() -> None:
     caution = [r for r in rows if r.method == "POST"]
     dangerous = [r for r in rows if r.method == "DELETE"]
     assert safe, "spec must have at least one GET"
+    assert caution, "spec must have at least one POST"
+    assert dangerous, "spec must have at least one DELETE"
     assert all(r.safety_level == "safe" for r in safe[:5])
     assert all(r.safety_level == "caution" for r in caution[:5])
     assert all(r.safety_level == "dangerous" for r in dangerous[:5])

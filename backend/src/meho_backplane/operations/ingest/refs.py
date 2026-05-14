@@ -78,12 +78,25 @@ def select_media_type_schema(
     content: dict[str, Any],
     component_schemas: dict[str, Any],
 ) -> dict[str, object] | None:
-    """Pick the JSON-leaning media type out of an OpenAPI ``content`` map."""
+    """Pick the JSON-leaning media type out of an OpenAPI ``content`` map.
+
+    Try each preferred media type in priority order; only return when
+    its schema actually resolves. If none of the preferred types yield
+    a resolvable schema, fall through to the catch-all loop over the
+    remaining declared media types. The earlier shape returned ``None``
+    as soon as a preferred type was present but unresolvable, silently
+    dropping perfectly valid wildcard/fallback schemas.
+    """
     for media_type in PREFERRED_MEDIA_TYPES:
-        if media_type in content:
-            return shallow_resolve_schema_field(content[media_type], component_schemas)
+        if media_type not in content:
+            continue
+        resolved = shallow_resolve_schema_field(content[media_type], component_schemas)
+        if resolved is not None:
+            return resolved
     for media_type, payload in content.items():
         if not isinstance(media_type, str):
+            continue
+        if media_type in PREFERRED_MEDIA_TYPES:
             continue
         resolved = shallow_resolve_schema_field(payload, component_schemas)
         if resolved is not None:

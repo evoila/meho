@@ -69,7 +69,7 @@ also keeps the surface trivially testable.
 
 ## Control flow
 
-```
+```text
 parse_openapi
 ├─ _load_spec_bytes        # file:// or http(s)://; httpx with a 30s timeout
 ├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON

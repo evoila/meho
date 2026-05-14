@@ -286,16 +286,25 @@ jobs:
       - name: Load images into kind
         # The chart's default ``image.pullPolicy: IfNotPresent`` (per
         # deploy/charts/meho/values.yaml:30) means kind will use the
-        # locally-loaded image and skip the GHCR pull entirely. Same
-        # for the Valkey image -- pre-loading sidesteps Docker Hub's
+        # locally-loaded images and skip the upstream pull entirely.
+        # Three images get sideloaded:
+        #
+        #   - ghcr.io/evoila/meho:test         locally built above
+        #   - valkey/valkey:9.0-alpine         broadcast subchart pod
+        #   - bitnami/postgresql:16            helm-test ``pgvector-check``
+        #                                      container (psql client)
+        #
+        # Pre-loading the two Docker Hub images sidesteps Docker Hub's
         # anonymous-pull rate-limit that's tripped this repo's other
         # CI lanes (Python lane, image build, Semgrep) on busy days.
         run: |
-          # Pull the Valkey image to the runner so kind can sideload it.
+          # Pull the Docker Hub images to the runner so kind can sideload them.
           docker pull valkey/valkey:9.0-alpine
+          docker pull bitnami/postgresql:16
           kind load docker-image \
             ghcr.io/evoila/meho:test \
             valkey/valkey:9.0-alpine \
+            bitnami/postgresql:16 \
             --name meho-helm-test
 
       - name: Deploy pgvector sidecar (Postgres + extension)

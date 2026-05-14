@@ -202,6 +202,8 @@ __all__ = [
     "Base",
     "Document",
     "EndpointDescriptor",
+    "GraphEdge",
+    "GraphNode",
     "OperationGroup",
     "Target",
     "Tenant",
@@ -1083,5 +1085,308 @@ class EndpointDescriptor(Base):
         sa.CheckConstraint(
             "safety_level IN ('safe', 'caution', 'dangerous')",
             name="ck_endpoint_descriptor_safety_level",
+        ),
+    )
+
+
+#: Closed enum of :attr:`GraphNode.kind` values. Mirrored verbatim in
+#: migration ``0007``'s ``_NODE_KINDS`` constant; the two MUST stay in
+#: lock-step or the DB-layer CHECK constraint will reject ORM-shaped
+#: inserts. Widening the vocabulary (G9.2's curated extensions) is a
+#: migration that updates both sides at once.
+_GRAPH_NODE_KINDS: tuple[str, ...] = (
+    "target",
+    "vm",
+    "host",
+    "network",
+    "datastore",
+    "namespace",
+    "pod",
+    "service",
+    "ingress",
+    "node",
+    "principal",
+    "vault-role",
+    "vault-mount",
+    "volume",
+)
+
+#: Closed enum of :attr:`GraphEdge.kind` -- the v0.2 auto-discoverable
+#: subset. G9.2 ships a follow-up migration that widens this with the
+#: operator-curated cross-system edge vocabulary; until then, every
+#: ``graph_edge.kind`` value at write time MUST be one of these four.
+_GRAPH_EDGE_KINDS: tuple[str, ...] = (
+    "runs-on",
+    "mounts",
+    "routes-through",
+    "belongs-to",
+)
+
+#: Closed enum of :attr:`GraphEdge.source` -- ``auto`` for
+#: probe-derived edges (T3 refresh), ``curated`` reserved for the
+#: operator-asserted edges G9.2 lands. v0.2 writes ``auto`` exclusively.
+_GRAPH_EDGE_SOURCES: tuple[str, ...] = ("auto", "curated")
+
+
+def _ck_in(column: str, values: tuple[str, ...]) -> str:
+    """Render a portable ``column IN ('a', 'b', ...)`` CHECK body."""
+    return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
+
+
+class GraphNode(Base):
+    """A node in the per-tenant topology graph.
+
+    Initiative #363 (G9.1) substrate, Task #448 (T1). Each row models
+    one object an agent may need to reason about: a registered target,
+    a VM, a host, a network, a datastore, a namespace, a pod, a
+    service, an ingress, a node, a principal, a vault mount, a vault
+    role, a volume. The closed enum (``kind``) is documented on the
+    migration; widening it is a coordinated DB + model change.
+
+    Schema decisions for :class:`GraphNode`:
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape the
+      rest of the model graph uses; PG production gets a
+      ``gen_random_uuid()`` server default via migration ``0007``, the
+      ORM falls back to ``default=uuid.uuid4`` on SQLite and for
+      out-of-band inserts.
+    * ``tenant_id`` -- UUID NOT NULL with a real
+      ``REFERENCES tenant(id)`` FK. Unlike :attr:`AuditLog.tenant_id`
+      (chassis-era rows with no real tenant to point at; FK deferred
+      to v0.2.next backfill), :class:`GraphNode` is a brand-new
+      substrate with no pre-existing rows. Enforcing the FK at the DB
+      layer is the cheapest point to make the ownership invariant
+      unbreakable: T3's refresh service cannot silently insert orphan
+      rows for a typo'd / deleted / replayed tenant id. No
+      ``ondelete`` clause -- tenant deletion is a major operation
+      that must clear the tenant's graph first; the default
+      ``NO ACTION`` blocks the cascade.
+    * ``kind`` -- Text NOT NULL with a DB-layer
+      ``CHECK kind IN (...)`` constraint enforced by migration
+      ``0007`` (see :data:`_GRAPH_NODE_KINDS` for the v0.2 vocabulary).
+    * ``name`` -- Text NOT NULL. Human-readable handle within the
+      tenant + kind axis. Uniqueness is enforced by the named
+      ``graph_node_tenant_kind_name_idx`` (unique b-tree on
+      ``(tenant_id, kind, name)``).
+    * ``target_id`` -- UUID NULL with a real
+      ``REFERENCES targets(id) ON DELETE SET NULL`` FK. NULL when the
+      node is not itself a registered target (an inner-graph VM, pod,
+      datastore). ``SET NULL`` because removing a target should not
+      cascade-delete the topology data the agent may still want to
+      reason about; the node lives on as a non-target row.
+    * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
+      ``{}``. Per-node structured data the connector populates at
+      discover time (e.g. a VM's power state, a pod's status phase);
+      the column is the forward-compat escape hatch for shape
+      evolution without DDL changes.
+    * ``discovered_by`` -- Text NOT NULL. Connector product slug
+      (``vmware``, ``kubernetes``, ``vault``, ...) when probe-derived,
+      or ``curated`` for operator-asserted rows (G9.2). No CHECK
+      constraint -- the value space is open-ended as new connectors
+      land.
+    * ``first_seen`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
+      server default via the migration; the ORM also declares
+      ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
+    * ``last_seen`` -- ``timestamptz`` NULL. Refresh writes a
+      timestamp on every observation; the refresh service nulls it
+      out once a node has been absent past the configured threshold
+      (the spec's soft-delete signal -- the row stays queryable for
+      G9.3 history replay but is filtered out of default queries).
+
+    Indexes on :class:`GraphNode`:
+
+    * ``graph_node_tenant_kind_name_idx`` -- unique b-tree on
+      ``(tenant_id, kind, name)``. Enforces the "one (kind, name) per
+      tenant" invariant at the DB layer. Named index only; no
+      ``unique=True`` on the column triple to avoid PG auto-generating
+      a duplicate anonymous index alongside it.
+
+    The model deliberately ships with no helper methods -- write paths
+    land in T3's refresh service, read paths in T4's recursive-CTE
+    traversal helpers and the API/CLI/MCP fronts in T5--T7.
+    """
+
+    __tablename__ = "graph_node"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        ForeignKey("targets.id", ondelete="SET NULL"),
+        nullable=True,
+        default=None,
+    )
+    properties: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    discovered_by: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    last_seen: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "graph_node_tenant_kind_name_idx",
+            "tenant_id",
+            "kind",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("kind", _GRAPH_NODE_KINDS),
+            name="ck_graph_node_kind",
+        ),
+    )
+
+
+class GraphEdge(Base):
+    """A directed edge between two :class:`GraphNode` rows.
+
+    Initiative #363 (G9.1) substrate, Task #448 (T1). Adjacency-list
+    shape -- ``from_node_id`` and ``to_node_id`` are explicit columns
+    -- so PG 16's ``WITH RECURSIVE ... CYCLE`` clause (§7.8.2.2 of
+    the PG manual) can walk dependents (reverse) and dependencies
+    (forward) without a graph extension.
+
+    Schema decisions for :class:`GraphEdge`:
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape.
+    * ``tenant_id`` -- UUID NOT NULL with a real
+      ``REFERENCES tenant(id)`` FK. Same rationale as
+      :attr:`GraphNode.tenant_id`.
+    * ``from_node_id`` / ``to_node_id`` -- UUID NOT NULL with real
+      ``REFERENCES graph_node(id) ON DELETE CASCADE`` FKs.
+      Hard-deleting a node hard-deletes its edges; refresh-driven
+      soft-deletes (``GraphNode.last_seen=NULL``) leave the edges
+      alone, so the cascade is invisible during normal operation and
+      exists only for tenant purges + test cleanup.
+    * ``kind`` -- Text NOT NULL with a DB-layer
+      ``CHECK kind IN (...)`` constraint. The v0.2 auto-discoverable
+      vocabulary is :data:`_GRAPH_EDGE_KINDS`; G9.2 widens it.
+    * ``source`` -- Text NOT NULL with a DB-layer
+      ``CHECK source IN (...)`` constraint. ``auto`` for
+      probe-derived (T3 refresh); ``curated`` reserved for the
+      operator-asserted edges G9.2 lands.
+    * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
+      ``{}``. Per-edge structured data (e.g. a mount's options, a
+      route's port). Same forward-compat escape-hatch shape as
+      :attr:`GraphNode.properties`.
+    * ``discovered_by`` -- Text NOT NULL. Connector slug or
+      ``curated``; same shape as :attr:`GraphNode.discovered_by`.
+    * ``first_seen`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
+      server default; ORM falls back to
+      ``default=lambda: datetime.now(UTC)`` on SQLite.
+    * ``last_seen`` -- ``timestamptz`` NULL. Same soft-delete
+      semantics as :attr:`GraphNode.last_seen` -- refresh writes a
+      timestamp on observation, NULL signals soft-delete.
+
+    Indexes on :class:`GraphEdge`:
+
+    * ``graph_edge_tenant_endpoints_kind_idx`` -- unique b-tree on
+      ``(tenant_id, from_node_id, to_node_id, kind)``. At most one
+      edge of a given ``kind`` between a pair of nodes within a
+      tenant.
+    * ``graph_edge_tenant_from_idx`` -- b-tree on
+      ``(tenant_id, from_node_id)``. Drives the *dependencies*
+      (forward) recursive-CTE traversal in T4.
+    * ``graph_edge_tenant_to_idx`` -- b-tree on
+      ``(tenant_id, to_node_id)``. Drives the *dependents* (reverse)
+      recursive-CTE traversal in T4.
+
+    The model deliberately ships with no helper methods -- read /
+    write paths live in the refresh service (T3) and the
+    recursive-CTE traversal module (T4).
+    """
+
+    __tablename__ = "graph_edge"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    from_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("graph_node.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    to_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("graph_node.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    properties: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    discovered_by: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    last_seen: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "graph_edge_tenant_endpoints_kind_idx",
+            "tenant_id",
+            "from_node_id",
+            "to_node_id",
+            "kind",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "graph_edge_tenant_from_idx",
+            "tenant_id",
+            "from_node_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "graph_edge_tenant_to_idx",
+            "tenant_id",
+            "to_node_id",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("kind", _GRAPH_EDGE_KINDS),
+            name="ck_graph_edge_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("source", _GRAPH_EDGE_SOURCES),
+            name="ck_graph_edge_source",
         ),
     )

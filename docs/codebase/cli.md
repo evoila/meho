@@ -541,19 +541,88 @@ the present-refresh-token branch isn't yet exercised under unit
 test because mocking Keycloak's well-known + token-exchange is
 heavyweight — that path is covered by the G2.8 integration suite).
 
-## Operation dispatch (canonical surface, G0.6-T8 #399)
+## Operation dispatch (`meho operation`, G0.6-T13 #481)
 
-Operators dispatch operations through the v2 substrate at
-`POST /api/v1/operations/call` against the typed `AuthedClient`. The
-v1 chassis route `POST /api/v1/connectors/{product}/{op_id}` shipped by
-G0.2-T6 (#245) was deprecated and removed by G0.6-T11 (#412); two
-parallel dispatch surfaces violated CLAUDE.md postulate 5's
-narrow-waist contract. Until a typed `meho operation call <connector>
-<op>` verb lands as a follow-up Task, operators invoke the v2 route
-directly via the generated client (`PostCallApiV1OperationsCallPost`)
-or via `curl` with their refreshed bearer token. The MCP transport
-exposes the same call site via `call_operation`; CLI verb parity
-ships next.
+`cli/internal/cmd/operation/` registers the three cobra verbs that
+wrap the G0.6 substrate's operation meta-tool surface (G0.6-T8 #399).
+The verbs are operator-side parity for the agent-facing MCP tools
+(`list_operation_groups`, `search_operations`, `call_operation`); the
+agent and the operator hit the same dispatcher path. The earlier v1
+chassis route `POST /api/v1/connectors/{product}/{op_id}` from G0.2-T6
+(#245) was deprecated and removed by G0.6-T11 (#412) — two parallel
+dispatch surfaces violated [CLAUDE.md](../../CLAUDE.md) postulate 5's
+narrow-waist contract.
+
+### Subcommands
+
+- `meho operation groups <connector_id>` — calls
+  `GET /api/v1/operations/groups`. Lists the enabled
+  `OperationGroupSummary` rows for the connector with `operation_count`
+  per group + a `when_to_use` blurb the agent consults to pick a group
+  to search within. Unknown `connector_id` returns an empty `groups`
+  list (operationally meaningful, never 404).
+- `meho operation search <connector_id> <query> [--group K] [--limit N]`
+  — calls `GET /api/v1/operations/search`. Runs hybrid BM25 + cosine
+  RRF over `endpoint_descriptor` rows scoped to the connector
+  (optionally narrowed to one `group_key`) and renders the top hits
+  with `fused_score`. `--limit` is clamped by the API at 50.
+- `meho operation call <connector_id> <op_id> --target <slug> [--params ...]`
+  — calls `POST /api/v1/operations/call`. Invokes the G0.6 dispatcher
+  end-to-end (parameter validation, policy gate, audit, JSONFlux,
+  broadcast). The dispatcher always returns a structured
+  `OperationResult` envelope; HTTP 200 carries both `status="ok"` and
+  `status="error"` outcomes. The verb exits 1 on a non-ok envelope so
+  shell pipelines see the gate-failed signal.
+
+### Reserved flags (same shape across all three verbs)
+
+- `--json` — emit the raw JSON envelope to stdout instead of the human
+  render. Useful for piping into `jq` or capturing for diff.
+- `--backplane <url>` — override the backplane URL (defaults to the URL
+  recorded by `meho login`).
+- `--params '<json>'` / `--params @<file>` (call only) — operation
+  params. Inline JSON object or `@`-prefixed file path. The empty case
+  (`--params` omitted) sends no `params` key on the wire — typed
+  handlers that don't read params see an empty mapping at the
+  validation layer.
+
+### HTTP shape
+
+All three verbs route through `api.NewAuthedClient(...)` for bearer
+injection + 401-refresh-retry. The shared `doAuthedRequest` helper in
+`operation.go` builds the request manually (rather than using the
+generated `ClientWithResponses`) because the openapi spec types the
+three routes' responses as `dict[str, Any]`; the generated `JSON200`
+is `*map[string]interface{}` which doesn't expose the typed
+`OperationGroupSummary` / `OperationSearchHit` / `OperationResult`
+shapes the renderer needs. Hand-written structs (`GroupSummary`,
+`SearchHit`, `CallResult`) mirror the backend Pydantic models
+one-for-one; backend tests + CLI tests lock the contract on both
+sides.
+
+### Exit codes
+
+- `0` — verb ran cleanly; for `call`, `status == "ok"`.
+- `1` — `call` only: dispatcher returned `status == "error"` or
+  `status == "denied"` (connector raised, schema validation rejected,
+  or policy denied — the three structured-failure envelopes the
+  backend `Connector.execute` contract defines). Surfaced via the
+  `errOpError` sentinel.
+- `2` — `auth_expired` (no stored credentials, or refresh failed).
+- `3` — `unreachable` (network / transport failure).
+- `4` — `unexpected_response` (parse error, malformed JSON, etc.).
+
+### MCP parity
+
+The same three handlers also back the MCP tools registered in
+[backend/src/meho_backplane/mcp/tools/operations.py](../../backend/src/meho_backplane/mcp/tools/operations.py)
+(`list_operation_groups`, `search_operations`, `call_operation`).
+Agents call the MCP tools; operators call the CLI verbs; both hit
+the same backend functions in
+[backend/src/meho_backplane/operations/meta_tools.py](../../backend/src/meho_backplane/operations/meta_tools.py).
+The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
+admin diagnostic for `llm_instructions` inspection) is deferred — the
+G0.6-T13 DoD was "three CLI verbs", not four.
 
 ## Server-driven discovery (`internal/discovery/`)
 

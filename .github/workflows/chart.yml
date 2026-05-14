@@ -205,12 +205,28 @@ jobs:
     # reachable -- the second-line guard against post-deploy drift
     # the migration Job's own ``CREATE EXTENSION`` doesn't catch.
     #
+    # G6.1-T8 (#432) -- two image-availability fixes so the job runs
+    # to completion on PR builds (image.yml only pushes ``:test`` on
+    # main, so on PRs the migration Job would hang on
+    # ``ImagePullBackOff`` without these):
+    #
+    #   1. Build the backplane image locally (single-arch amd64; kind
+    #      nodes on GitHub-hosted runners are amd64) and
+    #      ``kind load docker-image`` it into the cluster. The chart's
+    #      default ``image.pullPolicy: IfNotPresent`` then uses the
+    #      locally-loaded image without trying GHCR.
+    #   2. Pre-pull + ``kind load`` the Valkey image too. The broadcast
+    #      subchart's ``valkey/valkey:9.0-alpine`` ships from Docker
+    #      Hub, and kind's anonymous pull is the same path that's
+    #      tripped Docker Hub's rate-limit on this repo's other CI
+    #      lanes -- pre-loading sidesteps it.
+    #
     # ``continue-on-error: true`` is the v0.2 transitional posture:
     # the job runs on every chart-affecting PR + push but does not
     # block merge while operators iterate on kind/k3d wiring nuances
     # (image-pull caches, runner-side Docker permissions, etc.). A
     # follow-up issue lands the hardening pass that removes
-    # continue-on-error once we have ~10 green runs.
+    # continue-on-error once we have ~10 green runs (per G6.1-T8 AC).
     #
     # Runs on ``ubuntu-latest`` (NOT ``meho-runners``) because kind
     # needs Docker-in-Docker support that the self-hosted runner
@@ -238,6 +254,49 @@ jobs:
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3  # v1.12.0
         with:
           cluster_name: meho-helm-test
+
+      - name: Set up Docker Buildx
+        # Required by docker/build-push-action to use buildkit. Same
+        # version digest image.yml pins for the same action so the
+        # two lanes converge on a single buildx version.
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+
+      - name: Build backplane image locally (load into Docker, not push)
+        # ``load: true`` (= ``--output=type=docker``) leaves the image
+        # in the local Docker daemon so the next step can ``kind load``
+        # it into the cluster. PR builds don't push ``:test`` to GHCR
+        # (image.yml line 177 gates push on non-pull_request), so the
+        # only way to get a usable ``ghcr.io/evoila/meho:test`` here
+        # is to build it in-line. Single-arch amd64 because kind nodes
+        # on GitHub-hosted ubuntu-latest runners are amd64-only --
+        # multi-arch with ``load: true`` would error out
+        # ("docker exporter does not currently support exporting
+        # manifest lists").
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
+        with:
+          context: backend
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/evoila/meho:test
+          # Share the gha-backed cache with the image.yml lane so
+          # warm PR builds reuse layers from main-push runs.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Load images into kind
+        # The chart's default ``image.pullPolicy: IfNotPresent`` (per
+        # deploy/charts/meho/values.yaml:30) means kind will use the
+        # locally-loaded image and skip the GHCR pull entirely. Same
+        # for the Valkey image -- pre-loading sidesteps Docker Hub's
+        # anonymous-pull rate-limit that's tripped this repo's other
+        # CI lanes (Python lane, image build, Semgrep) on busy days.
+        run: |
+          # Pull the Valkey image to the runner so kind can sideload it.
+          docker pull valkey/valkey:9.0-alpine
+          kind load docker-image \
+            ghcr.io/evoila/meho:test \
+            valkey/valkey:9.0-alpine \
+            --name meho-helm-test
 
       - name: Deploy pgvector sidecar (Postgres + extension)
         # Install pgvector/pgvector:pg16 as a single-pod Deployment in
@@ -310,6 +369,13 @@ jobs:
         # Job + the test Pod matter. The migration Job alone proves
         # the chart + pgvector glue works; ``helm test`` proves the
         # post-deploy assertion fires.
+        #
+        # G6.1-T8 (#432): broadcast subchart is enabled (default per
+        # values.yaml). The Valkey Deployment is part of the helm-
+        # installed release and gates the chaos-arm follow-up in
+        # G6.1-T9 (#433); a separate ``rollout status`` step below
+        # blocks until it's healthy because ``--wait-for-jobs`` only
+        # covers hook Jobs, not Deployments / StatefulSets.
         run: |
           helm install meho-test ./deploy/charts/meho \
             --namespace meho-test \
@@ -318,7 +384,6 @@ jobs:
             --set image.tag=test \
             --set ingress.enabled=false \
             --set networkPolicy.enabled=false \
-            --set broadcast.enabled=false \
             --set postgres.credentialsSecret=meho-postgres \
             --set postgres.host=pgvector \
             --set vault.address=https://vault.test \
@@ -327,6 +392,22 @@ jobs:
             --set config.keycloakAudience=meho-backplane \
             --set config.vaultAddr=https://vault.test \
             --set retrieval.modelCache.enabled=false
+
+      - name: Wait for broadcast (Valkey) Deployment to roll out
+        # G6.1-T8 (#432) AC: ``meho-test-broadcast-valkey`` pod is
+        # healthy at helm-test time. ``helm install --wait-for-jobs``
+        # only blocks on hook Jobs (the migration Job), so the
+        # broadcast Deployment may still be coming up when we hand
+        # off to ``helm test``. ``kubectl rollout status`` blocks
+        # until ``.status.readyReplicas`` matches ``.spec.replicas``
+        # (1 in v0.1 per the chart's hard cap), or the timeout fires.
+        #
+        # The Deployment name follows ``broadcast.fullname``:
+        # ``<release>-<chart-name>`` -> ``meho-test-broadcast``.
+        run: |
+          kubectl -n meho-test rollout status \
+            deployment/meho-test-broadcast \
+            --timeout=120s
 
       - name: Run helm test (pgvector preflight Job)
         # G0.4-T6 acceptance: the Helm test Pod must pass.
@@ -348,10 +429,16 @@ jobs:
           kubectl -n meho-test get pods -o wide || true
           echo "=== Jobs ==="
           kubectl -n meho-test get jobs -o yaml || true
+          echo "=== Deployments ==="
+          kubectl -n meho-test get deployments -o wide || true
           echo "=== Migration Job logs ==="
           kubectl -n meho-test logs -l job-name=meho-test-migrate || true
           echo "=== pgvector logs ==="
           kubectl -n meho-test logs deploy/pgvector || true
+          echo "=== broadcast (Valkey) logs ==="
+          kubectl -n meho-test logs deploy/meho-test-broadcast || true
+          echo "=== kind cluster loaded images ==="
+          docker exec meho-helm-test-control-plane crictl images || true
 
   publish:
     name: Package + push + sign chart

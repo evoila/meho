@@ -61,6 +61,9 @@ from meho_backplane.operations.ingest.exceptions import (
     UnsupportedSpecError,
 )
 from meho_backplane.operations.ingest.refs import (
+    normalize_boolean_schema as _normalize_boolean_schema,
+)
+from meho_backplane.operations.ingest.refs import (
     resolve_shallow_ref as _resolve_shallow_ref,
 )
 from meho_backplane.operations.ingest.refs import (
@@ -345,8 +348,19 @@ def _build_proto(
         component_schemas=component_schemas,
     )
 
-    raw_tags = operation.get("tags") or []
-    tags: list[str] = [t for t in raw_tags if isinstance(t, str)]
+    raw_tags = operation.get("tags")
+    if raw_tags is None:
+        tags: list[str] = []
+    elif isinstance(raw_tags, list):
+        tags = [t for t in raw_tags if isinstance(t, str)]
+    else:
+        # ``tags: "admin"`` would otherwise be iterated as characters
+        # by the list comprehension. Fail fast so the spec-author /
+        # operator sees the mistake at ingest time rather than after
+        # the rows are persisted.
+        raise InvalidSchemaError(
+            f"paths.{path}.{method.lower()}.tags must be a list, got {type(raw_tags).__name__}"
+        )
     if spec_source is not None:
         tags.append(spec_source)
 
@@ -463,11 +477,26 @@ def _build_param_property(
     wins; the legacy form falls back to ``{"type": <type>}`` synthesis.
     Description / example metadata is hoisted into the property
     schema so the dispatcher's error messages stay informative.
+
+    OpenAPI 3.1 (aligned with JSON Schema 2020-12) lets ``schema`` be
+    a bare boolean: ``true`` accepts every value, ``false`` rejects
+    every value. Both are normalised to their dict equivalents via
+    :func:`_normalize_boolean_schema` so the rest of the parser can
+    treat the property as a regular dict.
     """
     schema = param.get("schema")
     out: dict[str, object]
-    if isinstance(schema, dict):
-        out = dict(_resolve_shallow_ref(schema, component_schemas))
+    if isinstance(schema, bool):
+        normalised = _normalize_boolean_schema(schema)
+        # _normalize_boolean_schema always returns a dict for bool input.
+        assert normalised is not None
+        out = dict(normalised)
+    elif isinstance(schema, dict):
+        resolved = _resolve_shallow_ref(schema, component_schemas)
+        resolved_normalised = _normalize_boolean_schema(resolved)
+        # ``None`` here means the resolved value isn't a dict OR a bool —
+        # treat as untyped (matches anything). Real specs don't trip this.
+        out = {} if resolved_normalised is None else dict(resolved_normalised)
     elif "type" in param:
         out = {"type": param["type"]}
     else:

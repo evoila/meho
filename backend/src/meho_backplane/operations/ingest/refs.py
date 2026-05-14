@@ -20,10 +20,41 @@ from meho_backplane.operations.ingest.exceptions import (
 
 __all__ = [
     "PREFERRED_MEDIA_TYPES",
+    "normalize_boolean_schema",
     "resolve_shallow_ref",
     "select_media_type_schema",
     "shallow_resolve_schema_field",
 ]
+
+
+def normalize_boolean_schema(schema: Any) -> dict[str, object] | None:
+    """Map a JSON Schema 2020-12 boolean schema to its dict equivalent.
+
+    OpenAPI 3.1 aligns with JSON Schema 2020-12, which permits a bare
+    boolean wherever a schema object is expected: ``true`` accepts
+    every value, ``false`` rejects every value. The rest of the parser
+    pipeline (parameter flattening, body extraction, response
+    extraction) treats schemas as dicts so it can attach
+    ``x-meho-param-loc`` and stitch them into the parent
+    ``parameter_schema`` object. Rather than pushing ``bool | dict``
+    union types through every helper, callers normalise here.
+
+    * ``True`` → ``{}`` — the empty object schema matches everything,
+      same semantics as ``true``.
+    * ``False`` → ``{"not": {}}`` — ``not`` of the always-matches
+      schema matches nothing, same semantics as ``false``.
+    * ``dict`` → returned as-is. Callers wrap in ``dict(...)`` if
+      they need a mutable copy.
+    * Anything else → ``None``. Callers decide whether to drop the
+      schema, raise, or fall back.
+    """
+    if schema is True:
+        return {}
+    if schema is False:
+        return {"not": {}}
+    if isinstance(schema, dict):
+        return schema
+    return None
 
 
 # OpenAPI request bodies and responses are keyed by media type. We
@@ -108,13 +139,24 @@ def shallow_resolve_schema_field(
     media_type_obj: Any,
     component_schemas: dict[str, Any],
 ) -> dict[str, object] | None:
-    """Return the resolved ``schema`` field of an OpenAPI media-type object."""
+    """Return the resolved ``schema`` field of an OpenAPI media-type object.
+
+    A boolean schema (OpenAPI 3.1 / JSON Schema 2020-12) is normalised
+    to its dict equivalent via :func:`normalize_boolean_schema` so the
+    parser doesn't have to thread ``bool | dict`` through every helper.
+    Refs that resolve to a boolean component schema receive the same
+    treatment.
+    """
     if not isinstance(media_type_obj, dict):
         return None
     schema = media_type_obj.get("schema")
-    if not isinstance(schema, dict):
+    normalised = normalize_boolean_schema(schema)
+    if normalised is None:
         return None
-    resolved = resolve_shallow_ref(schema, component_schemas)
-    if not isinstance(resolved, dict):
-        return None
-    return dict(resolved)
+    if isinstance(schema, dict):
+        resolved = resolve_shallow_ref(schema, component_schemas)
+        resolved_normalised = normalize_boolean_schema(resolved)
+        if resolved_normalised is None:
+            return None
+        return dict(resolved_normalised)
+    return dict(normalised)

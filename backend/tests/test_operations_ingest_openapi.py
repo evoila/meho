@@ -320,6 +320,82 @@ paths:
         parse_openapi(str(spec))
 
 
+def test_non_list_tags_raises(tmp_path: Path) -> None:
+    """A spec with ``tags: "admin"`` would otherwise iterate as characters."""
+    spec = tmp_path / "bad_tags.yaml"
+    spec.write_text(
+        """
+openapi: '3.0.3'
+info: {title: x, version: '1'}
+paths:
+  /x:
+    get:
+      tags: admin
+      responses:
+        "200":
+          description: ok
+        """.lstrip()
+    )
+    with pytest.raises(InvalidSchemaError, match=r"tags must be a list"):
+        parse_openapi(str(spec))
+
+
+def test_openapi_31_boolean_parameter_schema(tmp_path: Path) -> None:
+    """OpenAPI 3.1 allows ``schema: true`` / ``schema: false`` on parameters."""
+    spec = tmp_path / "bool_param.yaml"
+    spec.write_text(
+        """
+openapi: '3.1.0'
+info: {title: x, version: '1'}
+paths:
+  /any:
+    get:
+      parameters:
+        - {name: anything, in: query, schema: true}
+        - {name: nothing, in: query, schema: false}
+      responses:
+        "200":
+          description: ok
+        """.lstrip()
+    )
+    rows = parse_openapi(str(spec))
+    props = rows[0].parameter_schema["properties"]
+    assert isinstance(props, dict)
+    # true → {} (matches anything)
+    assert props["anything"] == {"x-meho-param-loc": "query"}
+    # false → {"not": {}} (matches nothing) + the loc keyword
+    assert props["nothing"] == {"not": {}, "x-meho-param-loc": "query"}
+
+
+def test_openapi_31_boolean_body_and_response_schema(tmp_path: Path) -> None:
+    """Boolean body / response schemas survive the parser pipeline."""
+    spec = tmp_path / "bool_body.yaml"
+    spec.write_text(
+        """
+openapi: '3.1.0'
+info: {title: x, version: '1'}
+paths:
+  /any:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: true
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: false
+        """.lstrip()
+    )
+    rows = parse_openapi(str(spec))
+    body = rows[0].parameter_schema["properties"]["body"]
+    assert body == {"x-meho-param-loc": "body"}  # true → {} merged with loc keyword
+    assert rows[0].response_schema == {"not": {}}  # false → {"not": {}}
+
+
 def test_drilldown_schema_ref_raises(tmp_path: Path) -> None:
     spec = tmp_path / "drilldown.yaml"
     spec.write_text(

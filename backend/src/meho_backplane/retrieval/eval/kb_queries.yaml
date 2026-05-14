@@ -1,0 +1,126 @@
+# MEHO retrieval eval — KB seed corpus (G4.3-T1, #440).
+#
+# 10 queries covering the per-product mix of the consumer's kb/ at
+# evoila-bosnia/claude-rdc-hetzner-dc/kb/. Sourced from operator
+# Slack history + recent claude-rdc-hetzner-dc Claude session logs.
+# Per-entry `notes` records the originating context — keep when
+# editing so human review on regression has the why.
+#
+# Schema: meho_backplane.retrieval.eval.corpus.KbCorpusQuery.
+#
+# Editing rules:
+# * Each `expected_hits` entry must be a slug present in the consumer
+#   kb directory at HEAD. Slug = filename without `.md`. The matching
+#   test (`test_kb_corpus_slugs_align_with_consumer_kb_snapshot`)
+#   guards drift against the snapshot below.
+# * Order matters: first slug is the ideal top-1 (drives MRR scoring
+#   in T2), subsequent slugs are acceptable top-N (drives precision
+#   credit in T2).
+# * Product mix targets: vCenter/vSphere x2, Holodeck/VCF x2, NSX x1,
+#   Vault x1, Hetzner x1, ArgoCD/k8s x2, general/cross-product x1.
+#   A regression in any one product surfaces because at least one
+#   query targets it.
+
+- query: how do I run esxcli on an ESXi 9.0 host
+  expected_hits:
+    - esxi-9.0-esxcli
+    - esxi-9.0-disk-operations
+  notes: >-
+    operator phrasing from Claude session log 2026-04 — they wanted to
+    inspect storage state via the host shell rather than vCenter UI.
+    esxcli is the canonical entry; disk-operations is the acceptable
+    near-neighbour because it covers the same ESXi shell surface.
+
+- query: vCenter 9.0 govc coverage gaps
+  expected_hits:
+    - vcenter-9.0-govc-coverage
+    - vmware-automation-surface-2026
+  notes: >-
+    operator question pre-G3.1 — "which vSphere ops can I drive from
+    govc and which still need pyvmomi?". The govc-coverage entry is
+    the direct answer; the 2026 automation-surface overview is the
+    acceptable broader context.
+
+- query: how do I take and restore a Vault raft snapshot on 1.21
+  expected_hits:
+    - vault-1.21-raft-snapshot
+    - vault-1.x-backup-restore
+    - vault-1.x-overview
+  notes: >-
+    operator phrasing from #vault Slack thread 2026-03 (raft snapshot
+    rotation runbook). The version-pinned 1.21 entry is the exact
+    answer; vault-1.x-backup-restore is the acceptable broader
+    version-agnostic guide; vault-1.x-overview is the long-tail
+    acceptable hit.
+
+- query: detach a vSphere host from a VDS via the API
+  expected_hits:
+    - vsphere-9.0-host-detach-from-vds-via-api
+    - esxi-9.0-vds-vmkernel-removal-cuts-vcenter
+  notes: >-
+    operator question around the "VDS removal cuts the vCenter
+    connection" footgun — they wanted the safe API procedure. The
+    direct procedure is top-1; the failure-mode entry is the
+    acceptable adjacent because the safe procedure references it.
+
+- query: NSX 9.0 overview for a new operator
+  expected_hits:
+    - nsx-9.0-overview
+  notes: >-
+    onboarding question from a new operator pulling baseline context
+    on the NSX install. Single ground-truth slug — there is no other
+    NSX entry in the consumer kb at this time.
+
+- query: rotate the Harbor admin password
+  expected_hits:
+    - harbor-2.x-admin-password-rotation
+  notes: >-
+    operator runbook question — Harbor 2.x is the only Harbor version
+    documented in the consumer kb so the version-pinned slug is the
+    only acceptable answer.
+
+- query: ArgoCD 3.x ignoreDifferences pattern for SSA conflicts
+  expected_hits:
+    - argocd-3.x-ssa-ignoredifferences-pattern
+    - argocd-3.3-helm-oci-url-bug
+  notes: >-
+    operator phrasing from #argocd Slack — they hit the SSA conflict
+    on a Helm chart. The SSA-ignoredifferences pattern entry is the
+    exact answer; the Helm OCI URL bug entry is the acceptable
+    near-neighbour because it surfaces in the same Helm-on-Argo flow.
+
+- query: what is the pod MTU on RKE2 with canal CNI
+  expected_hits:
+    - rke2-canal-pod-mtu
+    - gcs-workload-identity-from-private-rke2
+  notes: >-
+    operator phrasing from #networking — the MTU mismatch surfaced as
+    GCS upload failures from in-cluster pods. The MTU entry is the
+    direct cause; the GCS-from-private-RKE2 entry is the acceptable
+    adjacent because it covers the upload path the symptom appeared
+    on.
+
+- query: Hetzner Robot read-only API surface in 2026-04
+  expected_hits:
+    - hetzner-robot-2026-04-readonly-surface
+    - hetzner-robot-2026-04-overview
+    - hetzner-robot-2026-04-mutation-surface
+  notes: >-
+    operator question pre-Hetzner-connector design (G3.x backlog) —
+    they wanted a pull on the safe / read-only Robot endpoints
+    before sketching the connector. The readonly-surface entry is
+    the direct answer; the overview is the acceptable wider context;
+    the mutation-surface entry is the acceptable long-tail (they end
+    up needing it in the same session).
+
+- query: Holodeck 9.0 deploy runbook from scratch
+  expected_hits:
+    - holodeck-9.0-deploy-runbook
+    - holodeck-9.0-overview
+    - holodeck-9.0-known-issues
+  notes: >-
+    operator phrasing from #holodeck Slack thread on a fresh deploy.
+    The runbook is the exact answer; the overview is the acceptable
+    context-setting alternative; known-issues is the acceptable
+    long-tail (operators almost always re-read this during a
+    first-time deploy).

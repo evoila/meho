@@ -53,12 +53,11 @@ type callRequestBody struct {
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
 //
-// Exit codes:
+// Exit codes (mirrors `meho retrieval eval`'s gate-failed semantic
+// for the status != "ok" case — dispatcher errors come back in the
+// `error` / `extras` envelope, not as transport failures):
 //   - 0   operation invoked + status == "ok"
-//   - 1   operation invoked but status == "error" (dispatcher's
-//         structured-error envelope; details come back in `error` /
-//         `extras`). Mirrors `meho retrieval eval`'s "ran cleanly but
-//         the gate is red" semantic.
+//   - 1   operation invoked but status == "error"
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected response shape

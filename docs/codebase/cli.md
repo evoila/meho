@@ -550,7 +550,7 @@ The verbs are operator-side parity for the agent-facing MCP tools
 agent and the operator hit the same dispatcher path. The earlier v1
 chassis route `POST /api/v1/connectors/{product}/{op_id}` from G0.2-T6
 (#245) was deprecated and removed by G0.6-T11 (#412) — two parallel
-dispatch surfaces violated [CLAUDE.md](CLAUDE.md) postulate 5's
+dispatch surfaces violated [CLAUDE.md](../../CLAUDE.md) postulate 5's
 narrow-waist contract.
 
 ### Subcommands
@@ -612,11 +612,11 @@ sides.
 ### MCP parity
 
 The same three handlers also back the MCP tools registered in
-[backend/src/meho_backplane/mcp/tools/operations.py](backend/src/meho_backplane/mcp/tools/operations.py)
+[backend/src/meho_backplane/mcp/tools/operations.py](../../backend/src/meho_backplane/mcp/tools/operations.py)
 (`list_operation_groups`, `search_operations`, `call_operation`).
 Agents call the MCP tools; operators call the CLI verbs; both hit
 the same backend functions in
-[backend/src/meho_backplane/operations/meta_tools.py](backend/src/meho_backplane/operations/meta_tools.py).
+[backend/src/meho_backplane/operations/meta_tools.py](../../backend/src/meho_backplane/operations/meta_tools.py).
 The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
 admin diagnostic for `llm_instructions` inspection) is deferred — the
 G0.6-T13 DoD was "three CLI verbs", not four.

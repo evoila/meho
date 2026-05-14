@@ -103,6 +103,17 @@ type searchOptions struct {
 }
 
 func runSearch(cmd *cobra.Command, opts searchOptions) error {
+	// Fail fast on out-of-range --limit. The API clamps at 50 on the
+	// upper bound (so passing 100 silently lands 50; documented), but
+	// negative / zero values would fall through to the API default and
+	// surprise operators who explicitly asked for "no results please".
+	if opts.Limit < 1 {
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("--limit must be >= 1; got %d", opts.Limit)),
+			opts.JSONOut,
+		)
+	}
 	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)

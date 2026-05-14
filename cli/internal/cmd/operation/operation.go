@@ -154,6 +154,21 @@ func renderRequestError(
 			jsonOut,
 		)
 	}
+	// HTTP-level errors from the backplane (4xx/5xx with a body) come
+	// back wrapped in *httpError. Those are structured responses, not
+	// transport failures — classify as unexpected_response (exit 4) so
+	// the operator sees the right "this is a backend disagreement" hint
+	// rather than the "your network is down" one. Pure transport errors
+	// (timeouts, DNS, connection refused) still fall through to
+	// unreachable (exit 3).
+	var he *httpError
+	if errors.As(err, &he) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
+				backplaneURL, he.StatusCode, he.Body)),
+			jsonOut,
+		)
+	}
 	return output.RenderError(cmd.ErrOrStderr(),
 		output.Unreachable(fmt.Sprintf("call %s: %v", backplaneURL, err)),
 		jsonOut,

@@ -124,9 +124,108 @@ from meho_backplane.retrieval.embedding import EmbeddingService
 __all__ = [
     "HandlerRefError",
     "TypedOpHandler",
+    "clear_typed_op_registrars",
     "derive_handler_ref",
+    "register_typed_op_registrar",
     "register_typed_operation",
+    "run_typed_op_registrars",
 ]
+
+
+#: Type alias for the no-arg async registrar callables connector
+#: subpackages append at import time via
+#: :func:`register_typed_op_registrar`. Each callable runs
+#: :func:`register_typed_operation` for every typed op the connector
+#: ships. Keyword args (e.g. ``embedding_service``) are passed by the
+#: runner so tests can inject stubs without rebinding the registrar
+#: itself.
+type TypedOpRegistrar = Callable[..., Awaitable[None]]
+
+
+# Module-scope registrar list. Connector subpackages append at import
+# time (from their ``__init__.py``); the FastAPI lifespan
+# (``meho_backplane.main.lifespan``) calls
+# :func:`run_typed_op_registrars` after
+# :func:`~meho_backplane.connectors.registry._eager_import_connectors`
+# has walked the subpackages. The two-phase shape (sync import-time
+# registration of v2 connector classes + async lifespan-time
+# registration of typed ops) keeps every ``__init__.py`` sync while
+# letting the typed-op upserts await on the DB + the embedding
+# pipeline. The list is preserved across tests by default; the
+# autouse fixture in ``tests/conftest.py`` only resets it when the
+# test file explicitly drives the lifespan (e.g. via TestClient).
+_TYPED_OP_REGISTRARS: list[TypedOpRegistrar] = []
+
+
+def register_typed_op_registrar(registrar: TypedOpRegistrar) -> None:
+    """Append *registrar* to the module-level typed-op registrar list.
+
+    Called once per connector subpackage at Python module-import time
+    so the lifespan-driven runner can iterate every shipped connector
+    without explicit per-connector wiring in
+    :mod:`meho_backplane.main`. The registrar itself is an async
+    callable that runs :func:`register_typed_operation` for every op
+    the connector exposes.
+
+    Idempotency at runtime: the runner tolerates the same registrar
+    appearing twice (it would just upsert the same row twice, which
+    is itself a no-op for the embedding pipeline). The
+    test-isolation fixture in ``tests/conftest.py`` clears the list
+    between modules that drive the lifespan via TestClient so
+    duplicate appends from re-imports don't accumulate.
+    """
+    _TYPED_OP_REGISTRARS.append(registrar)
+
+
+def clear_typed_op_registrars() -> None:
+    """Empty the registrar list. Test-only.
+
+    Production code never calls this; the registrar list is a
+    one-shot append at module-import time, and the lifespan is the
+    only consumer. Tests that mock the lifespan (or that exercise
+    the registrar runner in isolation) use this hook to start each
+    test from an empty list.
+    """
+    _TYPED_OP_REGISTRARS.clear()
+
+
+async def run_typed_op_registrars(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Invoke every registered typed-op registrar in registration order.
+
+    Called from the FastAPI lifespan after
+    :func:`~meho_backplane.connectors.registry._eager_import_connectors`
+    so every shipped connector has self-registered its registrar by
+    the time the runner iterates. Registrars run sequentially — the
+    embedding pipeline is single-threaded per process, and the
+    descriptor upserts are quick (one DB round-trip per op on the
+    skip-re-embed path) so parallelism would buy nothing.
+
+    A failure in one registrar **propagates**: a connector that
+    can't upsert its typed-op rows is a deploy bug, not a runtime
+    condition, and should surface as a lifespan crash so the
+    operator sees the CrashLoopBackOff rather than a quietly-broken
+    dispatch. Operators reading the traceback see the connector's
+    own module path in the registrar identity, which points at the
+    failing op directly.
+
+    The ``embedding_service`` parameter is the test seam: production
+    callers leave it ``None`` and each registrar resolves the
+    process-wide singleton via the
+    :func:`register_typed_operation` body; test callers (chassis
+    integration tests) inject a stub so the suite doesn't pull the
+    ONNX model on every run.
+    """
+    log = structlog.get_logger(__name__)
+    for registrar in _TYPED_OP_REGISTRARS:
+        log.info(
+            "typed_op_registrar_running",
+            registrar=f"{registrar.__module__}.{registrar.__qualname__}",
+        )
+        await registrar(embedding_service=embedding_service)
+
 
 #: Type alias for typed-op handlers -- async callables returning a
 #: result dict. The dispatcher binds the connector instance for

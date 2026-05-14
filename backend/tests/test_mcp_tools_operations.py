@@ -23,15 +23,11 @@ operator-or-above to pass the registry's RBAC list-time filter.
 from __future__ import annotations
 
 import json
-import uuid
-from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import OperationGroup
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -132,34 +128,23 @@ def test_tools_list_descriptions_include_when_to_use_guidance(
 def test_tools_call_list_operation_groups_returns_seeded_groups(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``tools/call list_operation_groups`` round-trips through the handler."""
+    """``tools/call list_operation_groups`` round-trips through the handler.
+
+    Post-G0.6-T-Refactor-Vault, the FastAPI lifespan runs
+    :func:`~meho_backplane.operations.run_typed_op_registrars` which
+    calls :func:`~meho_backplane.connectors.vault.ops.register_vault_typed_operations`
+    and creates an :class:`OperationGroup` row for
+    ``(product="vault", version="1.x", impl_id="vault",
+    group_key="kv")`` as a side-effect of registering the
+    ``vault.kv.read`` op. The pre-refactor variant of this test
+    inserted its own ``OperationGroup`` row to give the handler
+    something to enumerate; that insert now races with the
+    lifespan's own and trips the partial-unique constraint. We rely
+    on the lifespan-created group instead — the test's contract
+    (the handler returns a group for ``connector_id="vault-1.x"``)
+    is unchanged.
+    """
     client, op = client_with_operator
-
-    # Seed a built-in group so the handler has something to return.
-    # The TestClient enters the FastAPI lifespan (the fixture uses
-    # `with TestClient(app)`), so the DB is migrated and ready.
-    async def _seed() -> None:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as s, s.begin():
-            s.add(
-                OperationGroup(
-                    id=uuid.uuid4(),
-                    tenant_id=None,
-                    product="vault",
-                    version="1.x",
-                    impl_id="vault",
-                    group_key="kv",
-                    name="KV v2",
-                    when_to_use="Use for reading and writing KV v2 secrets.",
-                    review_status="enabled",
-                    created_at=datetime.now(UTC),
-                    updated_at=datetime.now(UTC),
-                )
-            )
-
-    import asyncio
-
-    asyncio.run(_seed())
 
     response = post_mcp(
         client,

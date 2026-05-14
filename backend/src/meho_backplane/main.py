@@ -73,6 +73,7 @@ from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.operations import run_typed_op_registrars
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.settings import parse_bool_env
 from meho_backplane.version import router as version_router
@@ -80,118 +81,115 @@ from meho_backplane.version import router as version_router
 _APP_NAME: Final[str] = "meho-backplane"
 
 
+async def _preload_embedding_model() -> None:
+    """Eagerly load the fastembed ONNX model.
+
+    Failure here is loud-but-non-fatal: the model can still load
+    lazily on first request, and a transient network blip on weight
+    download must not turn into a CrashLoopBackOff. Operators see
+    the failure class in structlog so genuine misconfigurations
+    (wrong model name, unwritable cache dir) chase off the
+    ``embedding_preload_failed`` event.
+    """
+    log = structlog.get_logger()
+    try:
+        await get_embedding_service().encode_one("embedding model preload")
+        log.info("embedding_preload_succeeded")
+    except Exception as exc:
+        log.warning(
+            "embedding_preload_failed",
+            error_class=type(exc).__name__,
+            error_message=str(exc),
+        )
+
+
+async def _run_lifespan_shutdown() -> None:
+    """Dispose every long-lived resource the lifespan opened.
+
+    Per-disposer ``try`` / ``except`` so an asyncpg-pool teardown
+    failure in :func:`dispose_engine` cannot short-circuit
+    :func:`dispose_broadcast_client` and leak the redis pool;
+    structlog captures the failure class so operators can chase
+    the leak from logs.
+    """
+    log = structlog.get_logger()
+    try:
+        await dispose_engine()
+    except Exception:
+        log.exception("dispose_engine_failed")
+    try:
+        await dispose_broadcast_client()
+    except Exception:
+        log.exception("dispose_broadcast_client_failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Application lifespan hook.
 
-    Configures structlog at startup so every log line emitted from this
-    point onwards (including the very first request) is JSON-formatted,
-    and registers the Keycloak + Vault + DB-migration-state readiness
-    probes with the registry so ``/ready`` reflects whether each
-    dependency is reachable. Probes are registered even though no
-    request-path consumer of the dependency may have landed yet -
+    Configures structlog at startup so every log line emitted from
+    this point onwards (including the very first request) is JSON-
+    formatted, and registers the Keycloak + Vault + DB-migration-state
+    readiness probes with the registry so ``/ready`` reflects whether
+    each dependency is reachable. Probes are registered even though
+    no request-path consumer of the dependency may have landed yet -
     readiness is a deployment-shape concern, not a request-path
     concern.
 
-    The SQLAlchemy async engine is **eagerly** instantiated here (via
-    :func:`get_engine`) so that the pool is built and the
+    The SQLAlchemy async engine is **eagerly** instantiated here
+    (via :func:`get_engine`) so that the pool is built and the
     ``DATABASE_URL`` is validated at startup, not on the first
-    request. Without this pre-warm the very first ``/ready`` poll the
-    kubelet sends absorbs the engine-construction cost, which both
-    inflates first-request latency and risks a race where the readiness
-    probe is asked to query a database whose engine hasn't been
-    constructed yet. The engine factory itself stays lazy
-    (process-level cache); the lifespan call is what flips it from
-    "lazy on first request" to "eager at process boot".
+    request. The fastembed model (G0.4-T2 #259) and the async Valkey
+    client backing G6's activity broadcast (#228) are similarly
+    eagerly initialised — each owns a helper above for its
+    success-or-warn shape.
 
-    On shutdown the SQLAlchemy async engine is disposed so the asyncpg
-    connection pool releases its connections cleanly; without the
-    explicit ``await engine.dispose()`` the SQLAlchemy 2.x async docs
-    warn that the underlying connections may stay reachable only from
-    a different event loop, which the GC cannot reliably close.
+    G0.6 (#388) added the typed-op registration step: after
+    :func:`_eager_import_connectors` runs every connector
+    subpackage's import-time ``register_connector_v2`` call,
+    :func:`run_typed_op_registrars` walks the registrar list each
+    subpackage appended to and runs each registrar against the DB so
+    the ``endpoint_descriptor`` rows the dispatcher reads are
+    populated before the first request arrives. Failure here is a
+    deploy bug, not a runtime condition — the exception propagates
+    and the lifespan crashes so the operator sees CrashLoopBackOff
+    instead of a quietly-broken dispatch.
 
-    The fastembed embedding model (G0.4-T2 #259) is also **eagerly**
-    preloaded here so the first ``index_document`` / ``retrieve`` call
-    doesn't absorb the ~1-2 s ONNX model load cost. Failure to preload
-    is logged as a warning rather than aborting startup: the model
-    can still load lazily on first use, and a transient network blip
-    on weight download must not turn into a CrashLoopBackOff. A real
-    misconfiguration (wrong model name, unwritable cache dir) will
-    surface on the first ``/api/v1/retrieve`` call with a clear
-    fastembed-side error.
-
-    The async Valkey client backing the G6 activity-broadcast
-    Initiative (#228) is also constructed eagerly via
-    :func:`get_broadcast_client`. The construction parses
-    ``BROADCAST_REDIS_URL`` (failing startup on a malformed scheme,
-    per :class:`Settings`'s validator) but the actual TCP connection
-    stays lazy — no socket opens until the first ``PING`` from the
-    readiness probe (T1) or the first ``XADD`` from the publish hook
-    (T3). On shutdown :func:`dispose_broadcast_client` releases the
-    connection pool the same way :func:`dispose_engine` releases the
-    SQLAlchemy pool.
+    On shutdown :func:`_run_lifespan_shutdown` releases the
+    SQLAlchemy + Valkey pools with per-disposer try/except so a
+    single failure can't leak a sibling pool.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
     register_probe("vault", vault_readiness_probe)
     register_probe("db", db_migration_probe)
     register_probe("broadcast", broadcast_readiness_probe)
-    # Eager engine construction - see lifespan docstring for why.
+    # Eager engine construction (G2.3-T2 #258); validates ``DATABASE_URL``
+    # at startup so first-request latency doesn't absorb the pool build.
     get_engine()
-    # Eager broadcast client construction (G6.1-T1 #307) - same rationale
-    # as the engine. URL-parse failures surface here, not on first /ready.
+    # Eager broadcast client construction (G6.1-T1 #307); URL parse
+    # failures surface here, not on first /ready.
     get_broadcast_client()
     # Connector auto-discovery (G0.2-T2, #241). Walks every subpackage
-    # under `connectors/` so the top-level `register_connector` calls
-    # in each product's `__init__.py` run before the first request
-    # arrives. Empty until G0.2-T5+ lands the first concrete connector;
-    # the helper handles the empty-package case silently.
+    # under `connectors/` so the top-level `register_connector` /
+    # `register_connector_v2` calls in each product's `__init__.py`
+    # run before the first request arrives.
     _eager_import_connectors()
-    # MCP tool / resource auto-discovery (G0.5-T3, #248). Walks every
-    # module under `mcp/tools/` and `mcp/resources/` so the top-level
-    # `register_mcp_tool` / `register_mcp_resource` calls in each module
-    # run before the first `tools/list` request arrives. Both
-    # subpackages are empty in T3 (T4 adds the first tool / resource);
-    # the helper handles the empty-package case silently.
+    # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
+    # docstring for the contract; runs registrars connectors appended
+    # to during the import pass above so descriptor rows are populated
+    # before the first dispatch.
+    await run_typed_op_registrars()
+    # MCP tool / resource auto-discovery (G0.5-T3, #248). Same shape
+    # as connector auto-discovery: top-level register_mcp_tool /
+    # register_mcp_resource calls run at module import.
     eager_import_mcp_modules()
-    # Eager embedding-model preload (G0.4-T2 #259) - see lifespan docstring.
-    log = structlog.get_logger()
-    try:
-        await get_embedding_service().encode_one("embedding model preload")
-        log.info("embedding_preload_succeeded")
-    except Exception as exc:
-        # Catch-all because any failure mode here (fastembed import,
-        # ONNX runtime init, weight download, cache-dir permissions)
-        # should be loud-but-non-fatal: lazy reload on first request
-        # is the fallback. A genuine misconfiguration surfaces at the
-        # next embedding call with a fastembed-specific error.
-        log.warning(
-            "embedding_preload_failed",
-            error_class=type(exc).__name__,
-            error_message=str(exc),
-        )
+    # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
+    await _preload_embedding_model()
     try:
         yield
     finally:
-        # Both disposers run unconditionally. asyncpg pool teardown
-        # under FastAPI lifespan exit has a documented loop-attached
-        # failure surface (see the ``run_async`` removal comment in
-        # ``tests/integration/conftest.py``); without per-disposer
-        # try/except a single dispose_engine raise would short-
-        # circuit the rest of the shutdown chain and leak whichever
-        # disposers came after it. structlog captures the failure
-        # class so operators can chase the leak off the "k8s killed
-        # the pod but the broadcast pool stayed open" symptom in
-        # the logs.
-        shutdown_log = structlog.get_logger()
-        try:
-            await dispose_engine()
-        except Exception:
-            shutdown_log.exception("dispose_engine_failed")
-        try:
-            await dispose_broadcast_client()
-        except Exception:
-            shutdown_log.exception("dispose_broadcast_client_failed")
+        await _run_lifespan_shutdown()
 
 
 app: FastAPI = FastAPI(

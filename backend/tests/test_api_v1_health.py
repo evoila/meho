@@ -41,12 +41,14 @@ Test strategy:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import respx
@@ -55,7 +57,10 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.vault import VaultConnector, register_vault_typed_operations
 from meho_backplane.main import app
+from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -93,6 +98,47 @@ def _isolated_jwks_cache() -> Iterator[None]:
     clear_jwks_cache()
     yield
     clear_jwks_cache()
+
+
+@pytest.fixture(autouse=True)
+def _registered_vault_substrate(_settings_env: None) -> Iterator[None]:
+    """Re-establish the v2 connector entry + the ``vault.kv.read`` descriptor row.
+
+    The TestClient fixture intentionally does **not** use the
+    ``with TestClient(app) as client`` form (entering it would re-run
+    ``configure_logging`` via the lifespan and clobber the log
+    capture), so the lifespan's ``run_typed_op_registrars`` step
+    never runs in this test file. We replicate the two things the
+    lifespan would have done — v2 registry entry + typed-op
+    descriptor upsert — directly in this autouse fixture so the
+    dispatcher's natural-key lookup finds the row at request time.
+
+    A stub embedding service avoids the ONNX model load that the
+    autouse default ``register_typed_operation`` would otherwise
+    pull from disk on every test.
+    """
+    clear_registry()
+    register_connector_v2(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        cls=VaultConnector,
+    )
+    reset_dispatcher_caches()
+    stub_embedding_service = AsyncMock()
+    stub_embedding_service.encode_one.return_value = [0.1] * 384
+    stub_embedding_service.encode.return_value = [[0.1] * 384]
+    stub_embedding_service.dimension = 384
+    # ``register_vault_typed_operations`` is async; we run it on a
+    # dedicated loop here so the sync TestClient driving the request
+    # afterwards isn't sharing an event loop with the registration
+    # commit. ``asyncio.run`` spins up + tears down the loop cleanly
+    # without leaking it into the request-time event loop pytest-asyncio
+    # creates per test.
+    asyncio.run(register_vault_typed_operations(embedding_service=stub_embedding_service))
+    yield
+    reset_dispatcher_caches()
+    clear_registry()
 
 
 # ---------------------------------------------------------------------------

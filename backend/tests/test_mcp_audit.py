@@ -96,10 +96,24 @@ def test_params_hash_differs_for_distinct_inputs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tools_call_meho_status_writes_one_audit_row(
+async def test_tools_call_meho_status_writes_one_mcp_audit_row(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """AC #1: tools/call meho.status writes one row, method=MCP, status_code=200."""
+    """AC #1: tools/call meho.status writes one ``method="MCP"`` row.
+
+    Post-G0.6-T-Refactor-Vault, the ``meho.status`` handler reaches
+    :func:`~meho_backplane.api.v1.health.build_health_response` which
+    dispatches ``vault.kv.read`` through the G0.6 dispatcher; the
+    dispatcher writes its own ``method="DISPATCH"`` audit row for the
+    typed-op call. That row is a separate granularity (per-operation
+    inside the MCP envelope) and does **not** invalidate AC #1 — the
+    invariant the test pins is the **MCP-envelope** row that the
+    chassis writes, not the dispatcher's internal accounting.
+
+    Concretely: filter the audit table on ``method="MCP"`` to assert
+    the single envelope row; the dispatcher row is verified
+    independently in :mod:`tests.test_operations_dispatcher`.
+    """
     client, op = client_with_operator
 
     response = post_mcp(
@@ -115,8 +129,9 @@ async def test_tools_call_meho_status_writes_one_audit_row(
     assert response.json()["result"]["isError"] is False
 
     rows = await _audit_rows()
-    assert len(rows) == 1
-    row = rows[0]
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    row = mcp_rows[0]
     assert row.operator_sub == op.sub
     assert row.tenant_id == op.tenant_id
     assert row.method == "MCP"
@@ -200,12 +215,17 @@ async def test_resources_read_tenant_info_writes_one_audit_row(
 async def test_mcp_envelope_does_not_produce_chassis_audit_row(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """The chassis ``AuditMiddleware`` skips ``/mcp`` so one POST = one row.
+    """The chassis ``AuditMiddleware`` skips ``/mcp`` so the JSON-RPC POST
+    contributes zero rows; the MCP handler writes the single envelope row.
 
     Without the path-prefix exclusion in :class:`AuditMiddleware`, the
     middleware would write a row per JSON-RPC POST (wrong granularity)
     AND each MCP handler would write its own row (correct granularity).
-    The test pins the single-row outcome.
+    Post-G0.6-T-Refactor-Vault, the ``meho.status`` handler also routes
+    through the G0.6 dispatcher (which writes a per-operation
+    ``method="DISPATCH"`` row); the contract this test pins is that
+    no *chassis-middleware* row appears for the JSON-RPC POST itself —
+    so we filter on ``method="MCP"`` to isolate the envelope-level row.
     """
     client, _op = client_with_operator
 
@@ -221,11 +241,18 @@ async def test_mcp_envelope_does_not_produce_chassis_audit_row(
     assert response.status_code == 200
 
     rows = await _audit_rows()
-    # Exactly one row from the MCP handler; the chassis AuditMiddleware
-    # path-prefix exclusion (audit.py:_AUDIT_SKIP_PATH_PREFIXES) keeps
-    # the JSON-RPC envelope from adding a second.
-    assert len(rows) == 1
-    assert rows[0].method == "MCP"
+    # Exactly one ``method="MCP"`` row from the MCP handler; the chassis
+    # AuditMiddleware path-prefix exclusion
+    # (audit.py:_AUDIT_SKIP_PATH_PREFIXES) keeps the JSON-RPC envelope
+    # from adding an HTTP-method row. The G0.6 dispatcher additionally
+    # contributes a ``method="DISPATCH"`` row for the inner
+    # ``vault.kv.read`` call; that row is intentional and verified
+    # separately in :mod:`tests.test_operations_dispatcher`.
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    assert mcp_rows[0].method == "MCP"
+    http_rows = [r for r in rows if r.method in ("GET", "POST", "PUT", "DELETE", "PATCH")]
+    assert http_rows == [], "chassis AuditMiddleware should skip /mcp paths; found HTTP-method rows"
 
 
 # ---------------------------------------------------------------------------

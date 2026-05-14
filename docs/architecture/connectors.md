@@ -2,21 +2,22 @@
 
 > ## ⚠️ Architectural correction (2026-05-14)
 >
-> The content below describes the **v0.2 transitional shape** that shipped with G0.2 (#223). The final substrate is defined by [CLAUDE.md](../../CLAUDE.md) postulates + two new Initiatives:
+> The content below describes the **v0.2 transitional shape** that shipped with G0.2 (#223). The substrate that supersedes it has landed:
 >
-> - **[#388 G0.6 Operation registry + resolver + dispatcher + JSONFlux substrate](https://github.com/evoila/meho/issues/388)** — `endpoint_descriptor` + `operation_group` tables; connector registry v2 keyed on `(product, version, impl_id)`; target↔connector resolver via fingerprint; dispatcher (lookup → validate → typed-handler OR generic-httpx-from-descriptor → JSONFlux → audit → broadcast); composite-operation recursion.
-> - **[#389 G0.7 Spec ingestion pipeline](https://github.com/evoila/meho/issues/389)** — OpenAPI 3.0/3.1 parser + vi-json multi-spec merge + LLM-summarised operation groups + operator review queue.
+> - **[operations-substrate.md](operations-substrate.md)** — canonical reference for the G0.6 substrate as-shipped: `endpoint_descriptor` + `operation_group` tables, the v2 connector registry, the dispatcher's eight-phase pipeline, composite recursion + audit-tree linkage, the JSONFlux reducer Protocol, and the three operation meta-tools. Read this first; the content below remains as historical baseline.
+> - **[connector-resolution.md](connector-resolution.md)** — the resolver's tie-break ladder with three worked examples.
+> - **[#389 G0.7 Spec ingestion pipeline](https://github.com/evoila/meho/issues/389)** — OpenAPI 3.0/3.1 parser + vi-json multi-spec merge + LLM-summarised operation groups + operator review queue. Architecture doc lands separately.
 >
-> Connector kinds (two, both first-class, both versioned, multi-impl per product):
-> - **Generic connectors** — operations auto-derived from a vendor OpenAPI spec by G0.7 into the `endpoint_descriptor` table (`source_kind='ingested'`). Examples: `vmware-rest-9.0`, `nsx-4.2`, `sddc-manager-9.0`, `harbor-2.x`, VCF mgmt plane, `hetzner-robot-2026-04`.
-> - **Typed connectors** — operations hand-coded against a vendor SDK; register into the same `endpoint_descriptor` table via `register_typed_operation()` at connector init (`source_kind='typed'`). Examples: `vault-1.x`, `k8s-1.x` (kubernetes_asyncio per decision #8), `bind9-9.x`, `pfsense-2.7`, `holodeck-9.0`.
-> - **Composite operations** are a third operation kind within a connector — hand-authored handlers that orchestrate other operations via the dispatcher's recursive `dispatch(...)` call (`source_kind='composite'`).
+> Connector kinds (three, all first-class, all versioned, multi-impl per product):
+> - **Generic (ingested) connectors** — operations auto-derived from a vendor OpenAPI spec by G0.7 into `endpoint_descriptor` rows (`source_kind='ingested'`). Examples planned: `vmware-rest-9.0`, `nsx-4.2`, `harbor-2.x`, `hetzner-robot-2026-04`.
+> - **Typed connectors** — operations hand-coded against a vendor SDK; register into `endpoint_descriptor` via `register_typed_operation()` driven by `register_typed_op_registrar()` + the lifespan-run registrar list (`source_kind='typed'`). Shipped: `vault-1.x`, `k8s-1.x` (kubernetes_asyncio per decision #8). Planned: `bind9-9.x`, `pfsense-2.7`, `holodeck-9.0`.
+> - **Composite operations** — hand-authored handlers that orchestrate other operations via the dispatcher's recursive sub-call (`source_kind='composite'`), with bounded recursion and audit-tree linkage.
 >
 > **No per-op MCP tools.** The agent surface is ~17 meta-tools per CLAUDE.md. Vendor operations reach the agent via `search_operations(connector_id, query, group?)` + `call_operation(connector_id, op_id, target?, params)`. CLI alias verbs (`meho vmware vm list / cluster list / ...`) remain as operator-friendly conveniences that internally resolve to `call_operation` against the dispatcher.
 >
-> The `_op_map` pattern and `<product>.<resource>.<verb>` op-id namespace described below are **v0.2 transitional**. Operations now live in `endpoint_descriptor` rows; op_ids for ingested ops are `<METHOD>:<path>` (e.g. `GET:/api/vcenter/cluster`); op_ids for typed ops keep their dotted-namespace shape (`vault.kv.read`) but are stored as table rows, not in-code dicts. The shipped Vault + K8s connectors get refactored under [#390](https://github.com/evoila/meho/issues/390) + [#391](https://github.com/evoila/meho/issues/391).
+> The `_op_map` pattern and `<product>.<resource>.<verb>` op-id namespace described below are **v0.2 transitional**. Operations now live in `endpoint_descriptor` rows; op_ids for ingested ops are `<METHOD>:<path>` (e.g. `GET:/api/vcenter/cluster`); op_ids for typed ops keep their dotted-namespace shape (`vault.kv.read`) but are stored as table rows, not in-code dicts. The shipped Vault + K8s connectors were refactored under [#390](https://github.com/evoila/meho/issues/390) + [#391](https://github.com/evoila/meho/issues/391).
 >
-> Read this header first; treat the body content as the historical baseline G0.6 + G0.7 evolve from.
+> Read [operations-substrate.md](operations-substrate.md) first; treat the body content below as the historical baseline G0.6 + G0.7 evolved from.
 
 ---
 

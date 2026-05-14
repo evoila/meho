@@ -5,11 +5,11 @@
 > The content below was written under the **v0.2 transitional shape** (every G3-G9 verb gets a parallel MCP tool). That model was wrong against [CLAUDE.md](../../CLAUDE.md) postulate 5. The corrected shape:
 >
 > - **The agent surface is ~17 meta-tools** registered by G0.5 (#226 updated): `search_connectors`, `list_connectors`, `list_operation_groups`, `search_operations`, `call_operation`, `search_knowledge`, `add_to_knowledge`, `search_memory`, `add_to_memory`, `broadcast_recent`, `broadcast_announce`, `broadcast_watch`, `list_targets`, `query_topology`, `query_audit`, `result_query`, `result_aggregate`, `result_export`, `result_describe`.
-> - **No per-vendor MCP tools.** Vendor operations (e.g. vCenter's 3,000+ paths, K8s's 13 typed ops) reach the agent through `call_operation(connector_id, op_id, target?, params)`, backed by [#388 G0.6 dispatcher](https://github.com/evoila/meho/issues/388).
+> - **No per-vendor MCP tools.** Vendor operations (e.g. vCenter's 3,000+ paths, K8s's 13 typed ops) reach the agent through `call_operation(connector_id, op_id, target?, params)`, backed by the G0.6 dispatcher — see [operations-substrate.md](operations-substrate.md) for the canonical reference (tables, registry v2, dispatcher pipeline, composite recursion, JSONFlux reducer, meta-tools).
 > - **Admin operations** (override management, replay, annotation) use the `meho.*` admin namespace (`meho.broadcast.overrides.set`, `meho.audit.replay`, `meho.topology.annotate`, `meho.memory.promote`), tenant_admin role required, visible in `tools/list` only with admin scope.
-> - **The `_op_map` pattern** described later in this doc is v0.2 transitional. Operations live in G0.6's `endpoint_descriptor` table; typed connectors register via `register_typed_operation()` at connector init.
+> - **The `_op_map` pattern** described later in this doc is v0.2 transitional. Operations live in G0.6's `endpoint_descriptor` table; typed connectors register via `register_typed_operation()` (driven by `register_typed_op_registrar()` + the lifespan-run registrar list).
 >
-> Read [CLAUDE.md](../../CLAUDE.md) for the canonical surface contract. Treat the body content below as the historical baseline that G0.5 amendment + G0.6 + G0.7 evolve from.
+> Read [CLAUDE.md](../../CLAUDE.md) for the canonical surface contract and [operations-substrate.md](operations-substrate.md) for the dispatcher + registry + tables. Treat the body content below as the historical baseline that G0.5 amendment + G0.6 + G0.7 evolved from.
 
 ---
 

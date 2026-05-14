@@ -1,0 +1,48 @@
+openapi: 3.1.0
+info:
+  title: Petstore31
+  version: 2.0.0
+paths:
+  /vets:
+    get:
+      summary: List vets
+      tags:
+        - vets
+      parameters:
+        - name: speciality
+          in: query
+          schema:
+            type: string
+      responses:
+        "2XX":
+          description: A list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Vet"
+    post:
+      summary: Create a vet
+      tags:
+        - vets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Vet"
+      responses:
+        "201":
+          description: Created.
+components:
+  schemas:
+    Vet:
+      type: object
+      required:
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string

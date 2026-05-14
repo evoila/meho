@@ -1,0 +1,131 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.0.0
+paths:
+  /pets:
+    parameters:
+      - name: X-Tenant
+        in: header
+        required: false
+        schema:
+          type: string
+        description: Optional tenant override
+    get:
+      summary: List pets
+      description: Returns a paginated list of pets.
+      tags:
+        - pets
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: A page of pets.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PetPage"
+    post:
+      summary: Create a pet
+      tags:
+        - pets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pet"
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get a pet
+      tags:
+        - pets
+      responses:
+        "200":
+          description: One pet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+    delete:
+      summary: Delete a pet
+      tags:
+        - pets
+        - destructive
+      responses:
+        "204":
+          description: Removed.
+  /pets/{petId}/photos:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      summary: Replace photos
+      tags:
+        - pets
+      requestBody:
+        required: false
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Replaced.
+    head:
+      summary: Probe photos exist
+      tags:
+        - pets
+      responses:
+        "200":
+          description: OK.
+components:
+  schemas:
+    Pet:
+      type: object
+      required:
+        - name
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        tag:
+          $ref: "#/components/schemas/Tag"
+    PetPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Pet"
+        next_cursor:
+          type: string
+    Tag:
+      type: object
+      properties:
+        slug:
+          type: string

@@ -214,3 +214,77 @@ async def test_run_grep_baseline_handles_query_starting_with_dash(
 
     slugs = await run_grep_baseline("-flag", kb, k=5)
     assert slugs == ["flag-discussion"]
+
+
+@pytest.mark.asyncio
+async def test_run_grep_baseline_timeout_raises_config_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged grep is bounded by GREP_TIMEOUT_SECONDS + raises cleanly.
+
+    Substitute a tiny `sleep` shim for the grep binary so the
+    subprocess hangs past the timeout; the helper kills the child,
+    drains pipes, and raises :class:`BaselineConfigError`. Verifies
+    the route can never be hung indefinitely by a stuck subprocess.
+    """
+    kb = _seed_kb(tmp_path)
+
+    # Use /bin/sh -c 'sleep 5' as the grep binary surrogate; sleeps
+    # longer than the (overridden) 0.5s timeout. Module-scope
+    # GREP_BINARY swap is supported by the implementation; the helper
+    # accepts any path that runs.
+    from meho_backplane.retrieval.eval import baseline_grep as bg_mod
+
+    sleeper = tmp_path / "fake-grep"
+    sleeper.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+    sleeper.chmod(0o755)
+
+    monkeypatch.setattr(bg_mod, "GREP_BINARY", str(sleeper))
+    monkeypatch.setattr(bg_mod, "GREP_TIMEOUT_SECONDS", 0.5)
+
+    with pytest.raises(BaselineConfigError, match="timed out"):
+        await run_grep_baseline("anything", kb, k=5)
+
+
+@pytest.mark.asyncio
+async def test_run_grep_baseline_non_zero_exit_does_not_log_raw_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The error-path log line redacts the raw query.
+
+    The route's documented PII posture (retrieve_eval.py docstring)
+    is aggregate-only audit + no raw-query logging — operator-
+    sensitive queries (e.g. "is the operator searching for the
+    disk-failure runbook?") must not leak via structured logs into
+    cluster log aggregation (Loki / CloudWatch / Splunk). The error
+    log writes ``query_len`` + ``query_sha256`` only.
+    """
+    import logging
+
+    from meho_backplane.retrieval.eval import baseline_grep as bg_mod
+
+    # Stub a grep that exits 2 with a stderr message.
+    fake_grep = tmp_path / "fake-grep"
+    fake_grep.write_text(
+        "#!/bin/sh\necho 'grep: permission denied' >&2\nexit 2\n",
+        encoding="utf-8",
+    )
+    fake_grep.chmod(0o755)
+    monkeypatch.setattr(bg_mod, "GREP_BINARY", str(fake_grep))
+
+    kb = _seed_kb(tmp_path)
+
+    secret_query = "investigating-the-disk-failure-runbook-very-sensitive"
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(BaselineConfigError):
+        await run_grep_baseline(secret_query, kb, k=5)
+
+    # The structured log line lives in caplog as text from structlog's
+    # processor pipeline. Assert the raw query is not present and the
+    # redaction fields are.
+    combined_text = " ".join(rec.getMessage() for rec in caplog.records)
+    assert secret_query not in combined_text, "raw query leaked into log: " + combined_text

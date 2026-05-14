@@ -66,6 +66,8 @@ Out of scope
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -73,9 +75,21 @@ import structlog
 
 __all__ = [
     "GREP_BINARY",
+    "GREP_TIMEOUT_SECONDS",
     "BaselineConfigError",
     "run_grep_baseline",
 ]
+
+#: Hard wall-clock cap on a single grep invocation. A wedged grep
+#: (network FS, large symlink loop, runaway corpus root) would
+#: otherwise hang the FastAPI worker that called us, since the route
+#: is request-path. The kb corpus is checked-in + small (<1k files,
+#: <100KB each), so 15s is comfortably above the p99 walk time but
+#: well below the operator-perceptible "the route is stuck" threshold.
+#: Tunable at module scope so a future server-side corpus snapshot
+#: with a larger tree can raise the cap without touching the call
+#: site (T7 / v0.2.next).
+GREP_TIMEOUT_SECONDS: float = 15.0
 
 #: The grep binary the baseline shells out to. Module-level so tests
 #: can patch it (e.g. to point at a stub script) without monkeypatching
@@ -247,17 +261,54 @@ async def _spawn_grep(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    # Wall-clock cap on the subprocess to guarantee the FastAPI worker
+    # is never blocked indefinitely by a wedged grep (network FS, big
+    # symlink loop, etc.). On TimeoutError we kill -9 the child and
+    # drain its pipes before raising, so we don't leak a zombie. The
+    # raise path uses an aggregate-only message (no raw ``query``)
+    # consistent with the route's audit_query PII posture.
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=GREP_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        proc.kill()
+        # Drain stdout/stderr pipes so the kernel reclaims the FDs
+        # immediately; we discard the bytes since the call timed out.
+        # The drain itself is best-effort — if the kernel already
+        # reaped the child between kill() and communicate() we don't
+        # care, the FDs go either way.
+        with contextlib.suppress(Exception):
+            await proc.communicate()
+        structlog.get_logger().warning(
+            "baseline_grep_timeout",
+            timeout_seconds=GREP_TIMEOUT_SECONDS,
+            query_len=len(query),
+            query_sha256=hashlib.sha256(query.encode("utf-8")).hexdigest()[:16],
+            corpus_root=str(corpus_root),
+        )
+        raise BaselineConfigError(
+            f"grep baseline timed out after {GREP_TIMEOUT_SECONDS:.0f}s"
+        ) from exc
 
     # grep exit codes: 0 = matches found, 1 = no matches, 2 = error.
     # Treat 0/1 as success-with-different-result-shapes; anything else
     # is an operator-actionable failure.
     if proc.returncode not in (0, 1):
+        # Operator-sensitive queries ("is the operator searching for
+        # the disk-failure runbook?") must not leak into structured
+        # logs — the route's documented PII-aware aggregate-only
+        # audit posture (retrieve_eval.py docstring) wins. Record
+        # length + truncated hash so we can correlate the failure to
+        # a specific input without writing the content to disk /
+        # log-aggregation pipelines.
         structlog.get_logger().warning(
             "baseline_grep_nonzero_exit",
             returncode=proc.returncode,
             stderr=stderr_bytes.decode("utf-8", errors="replace")[:500],
-            query=query,
+            query_len=len(query),
+            query_sha256=hashlib.sha256(query.encode("utf-8")).hexdigest()[:16],
             corpus_root=str(corpus_root),
         )
         raise BaselineConfigError(

@@ -165,6 +165,7 @@ def async_pg_url() -> Iterator[str]:
     # the fixture body means modules that inherit this conftest don't
     # crash at collection time on a no-Docker sandbox — they collect
     # fine and skip the consuming tests.
+    from docker.errors import APIError as _DockerAPIError
     from testcontainers.postgres import PostgresContainer
 
     # pgvector/pgvector:pg16 — Postgres 16 with the pgvector extension
@@ -181,7 +182,23 @@ def async_pg_url() -> Iterator[str]:
     # env-knob shape ``test_db_engine`` / ``test_migration_rollback``
     # honour.
     image = os.environ.get("MEHO_TEST_PGVECTOR_IMAGE", "pgvector/pgvector:pg16")
-    with PostgresContainer(image) as pg:
+    pg = PostgresContainer(image)
+    try:
+        pg.start()
+    except _DockerAPIError as exc:
+        # Docker Hub rate-limit (429 / "too many requests") surfaces here
+        # when CI runners exhaust the unauthenticated pull quota. Convert
+        # to a skip rather than a hard failure so the suite's pass/fail
+        # signal stays meaningful. Fix: set MEHO_TEST_PGVECTOR_IMAGE to a
+        # GHCR or Harbor mirror, or add Docker Hub credentials to CI.
+        msg = str(exc).lower()
+        if "rate limit" in msg or "too many requests" in msg or "429" in msg:
+            pytest.skip(
+                f"Docker Hub pull rate-limited for {image!r}; "
+                "set MEHO_TEST_PGVECTOR_IMAGE to a GHCR/Harbor mirror to fix"
+            )
+        raise
+    try:
         sync_url = pg.get_connection_url()
         async_url = _async_url_from(sync_url)
 
@@ -203,6 +220,8 @@ def async_pg_url() -> Iterator[str]:
                 os.environ.pop("DATABASE_URL", None)
             else:
                 os.environ["DATABASE_URL"] = previous_url
+    finally:
+        pg.stop()
 
 
 # ---------------------------------------------------------------------------

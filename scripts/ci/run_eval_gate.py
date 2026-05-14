@@ -59,8 +59,9 @@ Exit codes
 ----------
 
 * 0 — green or yellow verdict, no regression vs baseline.
-* 1 — red verdict, OR baseline regression detected, OR runtime
-  exception (corpus malformed, etc.).
+* 1 — red verdict, OR baseline regression detected, OR baseline
+  file missing (fail-loud — see ``run_eval_gate``'s missing-baseline
+  branch), OR runtime exception (corpus malformed, etc.).
 """
 
 from __future__ import annotations
@@ -168,12 +169,22 @@ async def _run() -> int:
         return 1
 
     if not args.compare_baseline.exists():
+        # Fail loud — a missing baseline file makes the gate a no-op,
+        # which is the worst possible CI signal: green when there is
+        # literally no comparison happening. Operators wouldn't notice
+        # the regression check stopped running. The baseline is
+        # checked-in (``ci/eval-baseline.json``) so a missing file
+        # means it got renamed, deleted, or path-shadowed — every one
+        # of those is a regression in the gate itself and must block
+        # merge until corrected. To regenerate, run the script with
+        # ``--save-baseline``.
         print(
-            f"\nNo baseline at {args.compare_baseline} — "
-            "run with --save-baseline to create one. Skipping regression check.",
+            f"\nGATE FAILED: baseline missing at {args.compare_baseline}. "
+            "Regenerate with `--save-baseline` and commit the result, "
+            "or restore the file at the expected path.",
             file=sys.stderr,
         )
-        return 0
+        return 1
 
     baseline = load_baseline(args.compare_baseline)
     regressions = compare_baseline(today, baseline)

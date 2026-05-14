@@ -24,9 +24,11 @@ Filter coverage
 ===============
 
 * Column-mapped filters are SQL-side: ``audit_id`` (exact), ``principal``
-  (``operator_sub ILIKE`` partial match), ``since`` / ``until`` (range on
-  ``occurred_at``), ``target`` (name match against ``targets`` in the same
-  tenant — alias resolution is the T2 router's job).
+  (``operator_sub ILIKE`` partial match — LIKE metacharacters escaped so
+  ``%`` / ``_`` in the operator-supplied value match literally),
+  ``since`` / ``until`` (range on ``occurred_at``), ``target`` (name match
+  against ``targets`` in the same tenant — alias resolution is the T2
+  router's job).
 * ``op_id`` (glob with ``*`` ↔ ``%``) and ``op_class`` (exact) match either
   the value stored in ``payload`` JSON (MCP-written rows carry ``op_id`` /
   ``op_class`` in ``payload`` per ``mcp/handlers.py:214-221``) **OR** the
@@ -74,27 +76,37 @@ class UnsupportedFilterError(ValueError):
 
 
 #: Escape character for LIKE patterns built from operator-controllable input.
-#: ``%`` / ``_`` in the raw ``op_id`` value are protected via this escape so
-#: only the explicit ``*`` glob translates to a wildcard.
+#: ``%`` / ``_`` in the raw value are protected via this escape so only the
+#: explicit ``*`` glob (in ``op_id``) translates to a wildcard, and substring
+#: matches (in ``principal``) treat their input verbatim.
 _LIKE_ESCAPE: str = "\\"
 
 
-def _build_op_id_like_pattern(raw: str) -> str:
-    """Escape SQL LIKE metacharacters in *raw*, then translate glob ``*`` to ``%``.
+def _escape_like_literal(raw: str) -> str:
+    """Escape SQL LIKE metacharacters in *raw* so it matches literally.
 
-    Order matters: escape the backslash first (so a literal ``\\`` in the
-    input doesn't double-escape later additions), then ``%`` / ``_`` (so
-    operator-controllable values can't smuggle SQL wildcards), then translate
-    the user-facing ``*`` glob into ``%``. The result is paired with
-    ``escape="\\"`` on the :meth:`like` call so the SQL ``ESCAPE`` clause
-    treats the backslash as a literal-marker on both PostgreSQL and SQLite.
+    Order matters: the backslash is escaped first so a literal ``\\`` in the
+    input doesn't double-escape later additions, then ``%`` and ``_`` (the
+    two SQL LIKE wildcards). Paired with ``escape="\\"`` on the
+    :meth:`like` / :meth:`ilike` call so the SQL ``ESCAPE`` clause treats the
+    backslash as a literal-marker on both PostgreSQL and SQLite.
     """
     return (
         raw.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
         .replace("%", _LIKE_ESCAPE + "%")
         .replace("_", _LIKE_ESCAPE + "_")
-        .replace("*", "%")
     )
+
+
+def _build_op_id_like_pattern(raw: str) -> str:
+    """Escape SQL LIKE metacharacters in *raw*, then translate glob ``*`` to ``%``.
+
+    Builds on :func:`_escape_like_literal` and adds the consumer-facing glob
+    translation: a ``*`` in the input becomes a SQL ``%`` wildcard. Literal
+    ``%`` / ``_`` in the operator-supplied value are still matched verbatim
+    because the escape pass runs first.
+    """
+    return _escape_like_literal(raw).replace("*", "%")
 
 
 async def query_audit(
@@ -139,7 +151,10 @@ async def query_audit(
         stmt = stmt.where(AuditLog.id == filters.audit_id)
 
     if filters.principal is not None:
-        stmt = stmt.where(AuditLog.operator_sub.ilike(f"%{filters.principal}%"))
+        escaped = _escape_like_literal(filters.principal)
+        stmt = stmt.where(
+            AuditLog.operator_sub.ilike(f"%{escaped}%", escape=_LIKE_ESCAPE),
+        )
 
     if filters.since is not None:
         stmt = stmt.where(AuditLog.occurred_at >= filters.since)

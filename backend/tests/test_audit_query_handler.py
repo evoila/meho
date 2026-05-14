@@ -554,6 +554,43 @@ async def test_principal_partial_match(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_principal_escapes_sql_wildcards(session: AsyncSession) -> None:
+    """Literal ``_`` / ``%`` in ``principal`` matches the character, not a wildcard.
+
+    Mirror of ``test_op_id_glob_escapes_sql_wildcards`` for the ``principal``
+    filter. Without escaping the LIKE metacharacters, a filter value like
+    ``"user_test"`` would also match ``"userXtest"`` (``_`` acting as the
+    SQL single-character wildcard) — a real concern for deployments that
+    use username-style JWT subs rather than UUIDs.
+    """
+    tenant_id = uuid.uuid4()
+    for operator_sub in ("user_test", "userXtest", "alice%bob", "aliceXbob"):
+        await _seed_audit_row(
+            session,
+            tenant_id=tenant_id,
+            occurred_at=datetime.now(UTC),
+            operator_sub=operator_sub,
+        )
+    await session.commit()
+
+    # Literal underscore — only the exact ``user_test`` row matches.
+    result = await query_audit(
+        AuditQueryFilters(principal="user_test"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert {entry.principal_sub for entry in result.rows} == {"user_test"}
+
+    # Literal percent — only the exact ``alice%bob`` row matches.
+    result = await query_audit(
+        AuditQueryFilters(principal="alice%bob"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert {entry.principal_sub for entry in result.rows} == {"alice%bob"}
+
+
+@pytest.mark.asyncio
 async def test_since_until_range(session: AsyncSession) -> None:
     """``since`` and ``until`` bracket the ``occurred_at`` range."""
     tenant_id = uuid.uuid4()

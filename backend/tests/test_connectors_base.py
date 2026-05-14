@@ -118,6 +118,104 @@ def test_concrete_connector_instantiates() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Registry v2 metadata class attrs (G0.6-T3 #394)
+# ---------------------------------------------------------------------------
+
+
+class _MinimalConnector(Connector):
+    """Subclass that sets only ``product`` — exercises v1 backward-compat defaults."""
+
+    product = "minimal"
+
+    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+        raise NotImplementedError
+
+
+class _OverridingConnector(Connector):
+    """Subclass that sets every registry-v2 attr — exercises override path."""
+
+    product = "vmware"
+    version = "9.0"
+    impl_id = "vmware-rest"
+    supported_version_range = ">=8.5,<10.0"
+    priority = 10
+
+    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> OperationResult:  # type: ignore[override]
+        raise NotImplementedError
+
+
+def test_connector_class_attr_defaults_preserve_v1_behaviour() -> None:
+    # ABC-level defaults — read via the class directly (no instance needed).
+    assert Connector.version == ""
+    assert Connector.impl_id == ""
+    assert Connector.supported_version_range is None
+    assert Connector.priority == 0
+
+
+def test_connector_subclass_without_overrides_inherits_defaults() -> None:
+    # The registry-v2 resolver (#393) reads these as class attrs; a v1-style
+    # subclass that sets only `product` must read back the documented defaults.
+    assert _MinimalConnector.version == ""
+    assert _MinimalConnector.impl_id == ""
+    assert _MinimalConnector.supported_version_range is None
+    assert _MinimalConnector.priority == 0
+
+    inst = _MinimalConnector()
+    assert inst.version == ""
+    assert inst.impl_id == ""
+    assert inst.supported_version_range is None
+    assert inst.priority == 0
+
+
+def test_connector_subclass_overrides_read_back_at_class_level() -> None:
+    # Class-level access is what registry v2 reads.
+    assert _OverridingConnector.version == "9.0"
+    assert _OverridingConnector.impl_id == "vmware-rest"
+    assert _OverridingConnector.supported_version_range == ">=8.5,<10.0"
+    assert _OverridingConnector.priority == 10
+
+
+def test_connector_subclass_overrides_read_back_at_instance_level() -> None:
+    inst = _OverridingConnector()
+    assert inst.version == "9.0"
+    assert inst.impl_id == "vmware-rest"
+    assert inst.supported_version_range == ">=8.5,<10.0"
+    assert inst.priority == 10
+
+
+def test_shipped_v1_subclasses_still_import_unmodified() -> None:
+    # Backward-compat guard: the shipped VaultConnector (#244) and the
+    # KubernetesConnector skeleton (#321) only set `product`; they must
+    # remain importable and inherit the new defaults without code change.
+    from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+    from meho_backplane.connectors.vault.connector import VaultConnector
+
+    assert VaultConnector.product == "vault"
+    assert VaultConnector.version == ""
+    assert VaultConnector.impl_id == ""
+    assert VaultConnector.supported_version_range is None
+    assert VaultConnector.priority == 0
+
+    assert KubernetesConnector.product == "kubernetes"
+    assert KubernetesConnector.version == ""
+    assert KubernetesConnector.impl_id == ""
+    assert KubernetesConnector.supported_version_range is None
+    assert KubernetesConnector.priority == 0
+
+
+# ---------------------------------------------------------------------------
 # AuthModel enum
 # ---------------------------------------------------------------------------
 

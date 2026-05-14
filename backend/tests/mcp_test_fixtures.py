@@ -130,10 +130,11 @@ def isolated_registry() -> Iterator[None]:
     runs.
     """
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
-    from meho_backplane.mcp.tools import meho_status
+    from meho_backplane.mcp.tools import meho_status, operations
 
     clear_registries()
     importlib.reload(meho_status)
+    importlib.reload(operations)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     yield

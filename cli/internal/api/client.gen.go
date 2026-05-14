@@ -12,9 +12,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
+)
+
+// Defines values for AuthModel.
+const (
+	Impersonation        AuthModel = "impersonation"
+	PerUser              AuthModel = "per_user"
+	SharedServiceAccount AuthModel = "shared_service_account"
 )
 
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
@@ -24,6 +32,24 @@ import (
 type AuthConfigResponse struct {
 	Audience       string `json:"audience"`
 	KeycloakIssuer string `json:"keycloak_issuer"`
+}
+
+// AuthModel Per-target identity model per v0.1-spec L447-454.
+type AuthModel string
+
+// CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
+//
+// Mirrors the :func:`call_operation` “arguments“ shape so the route
+// and the MCP handler share validation. “target“ is a partial
+// descriptor (“{"name": "rdc-vcenter"}“) the handler resolves via
+// :func:`~meho_backplane.targets.resolver.resolve_target`; “None“
+// means the operation does not need a target (typed handlers that
+// don't read it; composite handlers that do their own resolution).
+type CallOperationBody struct {
+	ConnectorId string                  `json:"connector_id"`
+	OpId        string                  `json:"op_id"`
+	Params      *map[string]interface{} `json:"params,omitempty"`
+	Target      *map[string]interface{} `json:"target"`
 }
 
 // ConnectorExecRequest Request body for connector operation dispatch.
@@ -86,6 +112,41 @@ type HealthResponse struct {
 	Vault VaultStatus `json:"vault"`
 }
 
+// OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
+//
+// Returned by :func:`describe_descriptor` (and the
+// “GET /api/v1/operations/{descriptor_id}“ route). “embedding“ is
+// deliberately omitted — it's a 384-dim float vector that adds wire
+// bulk with no operator value at the descriptor-inspection layer.
+// “llm_instructions“ IS included; the route is gated on
+// “tenant_admin“ so the per-op agent prompt stays out of read-only
+// operators' hands.
+type OperationDescriptor struct {
+	CustomDescription *string                 `json:"custom_description"`
+	CustomNotes       *string                 `json:"custom_notes"`
+	Description       *string                 `json:"description"`
+	GroupId           *openapi_types.UUID     `json:"group_id"`
+	GroupKey          *string                 `json:"group_key"`
+	HandlerRef        *string                 `json:"handler_ref"`
+	Id                openapi_types.UUID      `json:"id"`
+	ImplId            string                  `json:"impl_id"`
+	IsEnabled         bool                    `json:"is_enabled"`
+	LlmInstructions   *map[string]interface{} `json:"llm_instructions"`
+	Method            *string                 `json:"method"`
+	OpId              string                  `json:"op_id"`
+	ParameterSchema   map[string]interface{}  `json:"parameter_schema"`
+	Path              *string                 `json:"path"`
+	Product           string                  `json:"product"`
+	RequiresApproval  bool                    `json:"requires_approval"`
+	ResponseSchema    *map[string]interface{} `json:"response_schema"`
+	SafetyLevel       string                  `json:"safety_level"`
+	SourceKind        string                  `json:"source_kind"`
+	Summary           *string                 `json:"summary"`
+	Tags              []string                `json:"tags"`
+	TenantId          *openapi_types.UUID     `json:"tenant_id"`
+	Version           string                  `json:"version"`
+}
+
 // OperationResult Connector op execution result.
 type OperationResult struct {
 	DurationMs float32                 `json:"duration_ms"`
@@ -116,6 +177,14 @@ type OperatorIdentity struct {
 	Email *string `json:"email"`
 	Name  *string `json:"name"`
 	Sub   string  `json:"sub"`
+}
+
+// ProbeResult Lightweight reachability + auth-challenge result.
+type ProbeResult struct {
+	LatencyMs *float32  `json:"latency_ms"`
+	Ok        bool      `json:"ok"`
+	ProbedAt  time.Time `json:"probed_at"`
+	Reason    *string   `json:"reason"`
 }
 
 // RetrievalHit One document in a ranked retrieval response.
@@ -175,6 +244,92 @@ type RetrieveRequest struct {
 type RetrieveResponse struct {
 	Hits            []RetrievalHit `json:"hits"`
 	QueryDurationMs float32        `json:"query_duration_ms"`
+}
+
+// Target Full read shape — returned by GET /targets/{name} and the resolver.
+//
+// Maps 1:1 to the “targets“ table columns. Frozen so callers
+// can safely stash instances in request state or structured logs
+// without fear of mutation.
+//
+// “aliases“ uses “tuple[str, ...]“ and “extras“ uses
+// “Mapping[str, Any]“ so frozen instances cannot be mutated in-place
+// via list.append / dict.__setitem__ — matching the immutability contract
+// the docstring documents.
+type Target struct {
+	Aliases []string `json:"aliases"`
+
+	// AuthModel Per-target identity model per v0.1-spec L447-454.
+	AuthModel   AuthModel              `json:"auth_model"`
+	CreatedAt   time.Time              `json:"created_at"`
+	Extras      map[string]interface{} `json:"extras"`
+	Fqdn        *string                `json:"fqdn"`
+	Host        string                 `json:"host"`
+	Id          openapi_types.UUID     `json:"id"`
+	Name        string                 `json:"name"`
+	Notes       *string                `json:"notes"`
+	Port        *int                   `json:"port"`
+	Product     string                 `json:"product"`
+	SecretRef   *string                `json:"secret_ref"`
+	TenantId    openapi_types.UUID     `json:"tenant_id"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+	VpnRequired bool                   `json:"vpn_required"`
+}
+
+// TargetCreate POST /api/v1/targets body.
+//
+// “name“ and “product“ are immutable after creation; to rename a
+// target, delete + re-create. “auth_model“ defaults to
+// “shared_service_account“ matching the DB column default.
+type TargetCreate struct {
+	Aliases *[]string `json:"aliases,omitempty"`
+
+	// AuthModel Per-target identity model per v0.1-spec L447-454.
+	AuthModel   *AuthModel              `json:"auth_model,omitempty"`
+	Extras      *map[string]interface{} `json:"extras,omitempty"`
+	Fqdn        *string                 `json:"fqdn"`
+	Host        string                  `json:"host"`
+	Name        string                  `json:"name"`
+	Notes       *string                 `json:"notes"`
+	Port        *int                    `json:"port"`
+	Product     string                  `json:"product"`
+	SecretRef   *string                 `json:"secret_ref"`
+	VpnRequired *bool                   `json:"vpn_required,omitempty"`
+}
+
+// TargetSummary Short shape for list endpoints.
+//
+// Omits “notes“, “extras“, and connection-auth details to keep
+// list responses fast and small. The “aliases“ field is included
+// because list consumers (CLI “meho target list“, autocomplete)
+// need it to display secondary names.
+type TargetSummary struct {
+	Aliases []string           `json:"aliases"`
+	Host    string             `json:"host"`
+	Id      openapi_types.UUID `json:"id"`
+	Name    string             `json:"name"`
+	Product string             `json:"product"`
+}
+
+// TargetUpdate PATCH /api/v1/targets/{name} body.
+//
+// All fields are optional. The route handler applies only the fields
+// that are not “None“; callers must send an explicit “null“ JSON
+// value to clear a nullable column (“fqdn“, “secret_ref“,
+// “notes“). “name“ and “product“ are absent — rename = delete
+// + create.
+type TargetUpdate struct {
+	Aliases *[]string `json:"aliases"`
+
+	// AuthModel Per-target identity model per v0.1-spec L447-454.
+	AuthModel   *AuthModel              `json:"auth_model,omitempty"`
+	Extras      *map[string]interface{} `json:"extras"`
+	Fqdn        *string                 `json:"fqdn"`
+	Host        *string                 `json:"host"`
+	Notes       *string                 `json:"notes"`
+	Port        *int                    `json:"port"`
+	SecretRef   *string                 `json:"secret_ref"`
+	VpnRequired *bool                   `json:"vpn_required"`
 }
 
 // UnknownOpError 400 response body when the connector doesn't know the requested op.
@@ -243,8 +398,61 @@ type AuthenticatedHealthApiV1HealthGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// PostCallApiV1OperationsCallPostParams defines parameters for PostCallApiV1OperationsCallPost.
+type PostCallApiV1OperationsCallPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetGroupsApiV1OperationsGroupsGetParams defines parameters for GetGroupsApiV1OperationsGroupsGet.
+type GetGroupsApiV1OperationsGroupsGetParams struct {
+	ConnectorId   string  `form:"connector_id" json:"connector_id"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
+type GetSearchApiV1OperationsSearchGetParams struct {
+	ConnectorId   string  `form:"connector_id" json:"connector_id"`
+	Query         string  `form:"query" json:"query"`
+	Group         *string `form:"group,omitempty" json:"group,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetDescriptorApiV1OperationsDescriptorIdGetParams defines parameters for GetDescriptorApiV1OperationsDescriptorIdGet.
+type GetDescriptorApiV1OperationsDescriptorIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // RetrieveEndpointApiV1RetrievePostParams defines parameters for RetrieveEndpointApiV1RetrievePost.
 type RetrieveEndpointApiV1RetrievePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
+type ListTargetsApiV1TargetsGetParams struct {
+	Product       *string `form:"product,omitempty" json:"product,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CreateTargetApiV1TargetsPostParams defines parameters for CreateTargetApiV1TargetsPost.
+type CreateTargetApiV1TargetsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DescribeTargetApiV1TargetsNameGetParams defines parameters for DescribeTargetApiV1TargetsNameGet.
+type DescribeTargetApiV1TargetsNameGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UpdateTargetApiV1TargetsNamePatchParams defines parameters for UpdateTargetApiV1TargetsNamePatch.
+type UpdateTargetApiV1TargetsNamePatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ProbeTargetApiV1TargetsNameProbePostParams defines parameters for ProbeTargetApiV1TargetsNameProbePost.
+type ProbeTargetApiV1TargetsNameProbePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -256,8 +464,17 @@ type McpDispatchMcpPostParams struct {
 // ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody defines body for ExecuteOpApiV1ConnectorsProductOpIdPost for application/json ContentType.
 type ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody = ConnectorExecRequest
 
+// PostCallApiV1OperationsCallPostJSONRequestBody defines body for PostCallApiV1OperationsCallPost for application/json ContentType.
+type PostCallApiV1OperationsCallPostJSONRequestBody = CallOperationBody
+
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
+
+// CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
+type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
+
+// UpdateTargetApiV1TargetsNamePatchJSONRequestBody defines body for UpdateTargetApiV1TargetsNamePatch for application/json ContentType.
+type UpdateTargetApiV1TargetsNamePatchJSONRequestBody = TargetUpdate
 
 // AsOperationResultResult0 returns the union data inside the OperationResult_Result as a OperationResultResult0
 func (t OperationResult_Result) AsOperationResultResult0() (OperationResultResult0, error) {
@@ -476,10 +693,43 @@ type ClientInterface interface {
 	// AuthenticatedHealthApiV1HealthGet request
 	AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// PostCallApiV1OperationsCallPostWithBody request with any body
+	PostCallApiV1OperationsCallPostWithBody(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostCallApiV1OperationsCallPost(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetGroupsApiV1OperationsGroupsGet request
+	GetGroupsApiV1OperationsGroupsGet(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSearchApiV1OperationsSearchGet request
+	GetSearchApiV1OperationsSearchGet(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetDescriptorApiV1OperationsDescriptorIdGet request
+	GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RetrieveEndpointApiV1RetrievePostWithBody request with any body
 	RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListTargetsApiV1TargetsGet request
+	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateTargetApiV1TargetsPostWithBody request with any body
+	CreateTargetApiV1TargetsPostWithBody(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateTargetApiV1TargetsPost(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DescribeTargetApiV1TargetsNameGet request
+	DescribeTargetApiV1TargetsNameGet(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateTargetApiV1TargetsNamePatchWithBody request with any body
+	UpdateTargetApiV1TargetsNamePatchWithBody(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UpdateTargetApiV1TargetsNamePatch(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, body UpdateTargetApiV1TargetsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ProbeTargetApiV1TargetsNameProbePost request
+	ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// HealthzHealthzGet request
 	HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -581,6 +831,66 @@ func (c *Client) AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *
 	return c.Client.Do(req)
 }
 
+func (c *Client) PostCallApiV1OperationsCallPostWithBody(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostCallApiV1OperationsCallPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostCallApiV1OperationsCallPost(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostCallApiV1OperationsCallPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetGroupsApiV1OperationsGroupsGet(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetGroupsApiV1OperationsGroupsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetSearchApiV1OperationsSearchGet(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSearchApiV1OperationsSearchGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetDescriptorApiV1OperationsDescriptorIdGet(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(c.Server, descriptorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRetrieveEndpointApiV1RetrievePostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
@@ -595,6 +905,90 @@ func (c *Client) RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, 
 
 func (c *Client) RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRetrieveEndpointApiV1RetrievePostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListTargetsApiV1TargetsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTargetApiV1TargetsPostWithBody(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTargetApiV1TargetsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateTargetApiV1TargetsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DescribeTargetApiV1TargetsNameGet(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDescribeTargetApiV1TargetsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateTargetApiV1TargetsNamePatchWithBody(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateTargetApiV1TargetsNamePatchRequestWithBody(c.Server, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateTargetApiV1TargetsNamePatch(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, body UpdateTargetApiV1TargetsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateTargetApiV1TargetsNamePatchRequest(c.Server, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewProbeTargetApiV1TargetsNameProbePostRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -969,6 +1363,274 @@ func NewAuthenticatedHealthApiV1HealthGetRequest(server string, params *Authenti
 	return req, nil
 }
 
+// NewPostCallApiV1OperationsCallPostRequest calls the generic PostCallApiV1OperationsCallPost builder with application/json body
+func NewPostCallApiV1OperationsCallPostRequest(server string, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostCallApiV1OperationsCallPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostCallApiV1OperationsCallPostRequestWithBody generates requests for PostCallApiV1OperationsCallPost with any type of body
+func NewPostCallApiV1OperationsCallPostRequestWithBody(server string, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/call")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetGroupsApiV1OperationsGroupsGetRequest generates requests for GetGroupsApiV1OperationsGroupsGet
+func NewGetGroupsApiV1OperationsGroupsGetRequest(server string, params *GetGroupsApiV1OperationsGroupsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/groups")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "connector_id", runtime.ParamLocationQuery, params.ConnectorId); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetSearchApiV1OperationsSearchGetRequest generates requests for GetSearchApiV1OperationsSearchGet
+func NewGetSearchApiV1OperationsSearchGetRequest(server string, params *GetSearchApiV1OperationsSearchGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/search")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "connector_id", runtime.ParamLocationQuery, params.ConnectorId); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "query", runtime.ParamLocationQuery, params.Query); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.Group != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "group", runtime.ParamLocationQuery, *params.Group); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetDescriptorApiV1OperationsDescriptorIdGetRequest generates requests for GetDescriptorApiV1OperationsDescriptorIdGet
+func NewGetDescriptorApiV1OperationsDescriptorIdGetRequest(server string, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "descriptor_id", runtime.ParamLocationPath, descriptorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/operations/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewRetrieveEndpointApiV1RetrievePostRequest calls the generic RetrieveEndpointApiV1RetrievePost builder with application/json body
 func NewRetrieveEndpointApiV1RetrievePostRequest(server string, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -1005,6 +1667,317 @@ func NewRetrieveEndpointApiV1RetrievePostRequestWithBody(server string, params *
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListTargetsApiV1TargetsGetRequest generates requests for ListTargetsApiV1TargetsGet
+func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV1TargetsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Product != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "product", runtime.ParamLocationQuery, *params.Product); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateTargetApiV1TargetsPostRequest calls the generic CreateTargetApiV1TargetsPost builder with application/json body
+func NewCreateTargetApiV1TargetsPostRequest(server string, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateTargetApiV1TargetsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateTargetApiV1TargetsPostRequestWithBody generates requests for CreateTargetApiV1TargetsPost with any type of body
+func NewCreateTargetApiV1TargetsPostRequestWithBody(server string, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDescribeTargetApiV1TargetsNameGetRequest generates requests for DescribeTargetApiV1TargetsNameGet
+func NewDescribeTargetApiV1TargetsNameGetRequest(server string, name string, params *DescribeTargetApiV1TargetsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUpdateTargetApiV1TargetsNamePatchRequest calls the generic UpdateTargetApiV1TargetsNamePatch builder with application/json body
+func NewUpdateTargetApiV1TargetsNamePatchRequest(server string, name string, params *UpdateTargetApiV1TargetsNamePatchParams, body UpdateTargetApiV1TargetsNamePatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateTargetApiV1TargetsNamePatchRequestWithBody(server, name, params, "application/json", bodyReader)
+}
+
+// NewUpdateTargetApiV1TargetsNamePatchRequestWithBody generates requests for UpdateTargetApiV1TargetsNamePatch with any type of body
+func NewUpdateTargetApiV1TargetsNamePatchRequestWithBody(server string, name string, params *UpdateTargetApiV1TargetsNamePatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewProbeTargetApiV1TargetsNameProbePostRequest generates requests for ProbeTargetApiV1TargetsNameProbePost
+func NewProbeTargetApiV1TargetsNameProbePostRequest(server string, name string, params *ProbeTargetApiV1TargetsNameProbePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/%s/probe", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -1237,10 +2210,43 @@ type ClientWithResponsesInterface interface {
 	// AuthenticatedHealthApiV1HealthGetWithResponse request
 	AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error)
 
+	// PostCallApiV1OperationsCallPostWithBodyWithResponse request with any body
+	PostCallApiV1OperationsCallPostWithBodyWithResponse(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostCallApiV1OperationsCallPostResponse, error)
+
+	PostCallApiV1OperationsCallPostWithResponse(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostCallApiV1OperationsCallPostResponse, error)
+
+	// GetGroupsApiV1OperationsGroupsGetWithResponse request
+	GetGroupsApiV1OperationsGroupsGetWithResponse(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*GetGroupsApiV1OperationsGroupsGetResponse, error)
+
+	// GetSearchApiV1OperationsSearchGetWithResponse request
+	GetSearchApiV1OperationsSearchGetWithResponse(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*GetSearchApiV1OperationsSearchGetResponse, error)
+
+	// GetDescriptorApiV1OperationsDescriptorIdGetWithResponse request
+	GetDescriptorApiV1OperationsDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*GetDescriptorApiV1OperationsDescriptorIdGetResponse, error)
+
 	// RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with any body
 	RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
 
 	RetrieveEndpointApiV1RetrievePostWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
+
+	// ListTargetsApiV1TargetsGetWithResponse request
+	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
+
+	// CreateTargetApiV1TargetsPostWithBodyWithResponse request with any body
+	CreateTargetApiV1TargetsPostWithBodyWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error)
+
+	CreateTargetApiV1TargetsPostWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error)
+
+	// DescribeTargetApiV1TargetsNameGetWithResponse request
+	DescribeTargetApiV1TargetsNameGetWithResponse(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*DescribeTargetApiV1TargetsNameGetResponse, error)
+
+	// UpdateTargetApiV1TargetsNamePatchWithBodyWithResponse request with any body
+	UpdateTargetApiV1TargetsNamePatchWithBodyWithResponse(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateTargetApiV1TargetsNamePatchResponse, error)
+
+	UpdateTargetApiV1TargetsNamePatchWithResponse(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, body UpdateTargetApiV1TargetsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateTargetApiV1TargetsNamePatchResponse, error)
+
+	// ProbeTargetApiV1TargetsNameProbePostWithResponse request
+	ProbeTargetApiV1TargetsNameProbePostWithResponse(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*ProbeTargetApiV1TargetsNameProbePostResponse, error)
 
 	// HealthzHealthzGetWithResponse request
 	HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error)
@@ -1394,6 +2400,98 @@ func (r AuthenticatedHealthApiV1HealthGetResponse) StatusCode() int {
 	return 0
 }
 
+type PostCallApiV1OperationsCallPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PostCallApiV1OperationsCallPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostCallApiV1OperationsCallPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetGroupsApiV1OperationsGroupsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetGroupsApiV1OperationsGroupsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetGroupsApiV1OperationsGroupsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetSearchApiV1OperationsSearchGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSearchApiV1OperationsSearchGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSearchApiV1OperationsSearchGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetDescriptorApiV1OperationsDescriptorIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *OperationDescriptor
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetDescriptorApiV1OperationsDescriptorIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RetrieveEndpointApiV1RetrievePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -1411,6 +2509,121 @@ func (r RetrieveEndpointApiV1RetrievePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RetrieveEndpointApiV1RetrievePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListTargetsApiV1TargetsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]TargetSummary
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListTargetsApiV1TargetsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListTargetsApiV1TargetsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateTargetApiV1TargetsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *Target
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateTargetApiV1TargetsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateTargetApiV1TargetsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DescribeTargetApiV1TargetsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Target
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DescribeTargetApiV1TargetsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DescribeTargetApiV1TargetsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UpdateTargetApiV1TargetsNamePatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Target
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateTargetApiV1TargetsNamePatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateTargetApiV1TargetsNamePatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ProbeTargetApiV1TargetsNameProbePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ProbeResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ProbeTargetApiV1TargetsNameProbePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ProbeTargetApiV1TargetsNameProbePostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -1590,6 +2803,50 @@ func (c *ClientWithResponses) AuthenticatedHealthApiV1HealthGetWithResponse(ctx 
 	return ParseAuthenticatedHealthApiV1HealthGetResponse(rsp)
 }
 
+// PostCallApiV1OperationsCallPostWithBodyWithResponse request with arbitrary body returning *PostCallApiV1OperationsCallPostResponse
+func (c *ClientWithResponses) PostCallApiV1OperationsCallPostWithBodyWithResponse(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostCallApiV1OperationsCallPostResponse, error) {
+	rsp, err := c.PostCallApiV1OperationsCallPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostCallApiV1OperationsCallPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostCallApiV1OperationsCallPostWithResponse(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostCallApiV1OperationsCallPostResponse, error) {
+	rsp, err := c.PostCallApiV1OperationsCallPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostCallApiV1OperationsCallPostResponse(rsp)
+}
+
+// GetGroupsApiV1OperationsGroupsGetWithResponse request returning *GetGroupsApiV1OperationsGroupsGetResponse
+func (c *ClientWithResponses) GetGroupsApiV1OperationsGroupsGetWithResponse(ctx context.Context, params *GetGroupsApiV1OperationsGroupsGetParams, reqEditors ...RequestEditorFn) (*GetGroupsApiV1OperationsGroupsGetResponse, error) {
+	rsp, err := c.GetGroupsApiV1OperationsGroupsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetGroupsApiV1OperationsGroupsGetResponse(rsp)
+}
+
+// GetSearchApiV1OperationsSearchGetWithResponse request returning *GetSearchApiV1OperationsSearchGetResponse
+func (c *ClientWithResponses) GetSearchApiV1OperationsSearchGetWithResponse(ctx context.Context, params *GetSearchApiV1OperationsSearchGetParams, reqEditors ...RequestEditorFn) (*GetSearchApiV1OperationsSearchGetResponse, error) {
+	rsp, err := c.GetSearchApiV1OperationsSearchGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSearchApiV1OperationsSearchGetResponse(rsp)
+}
+
+// GetDescriptorApiV1OperationsDescriptorIdGetWithResponse request returning *GetDescriptorApiV1OperationsDescriptorIdGetResponse
+func (c *ClientWithResponses) GetDescriptorApiV1OperationsDescriptorIdGetWithResponse(ctx context.Context, descriptorId openapi_types.UUID, params *GetDescriptorApiV1OperationsDescriptorIdGetParams, reqEditors ...RequestEditorFn) (*GetDescriptorApiV1OperationsDescriptorIdGetResponse, error) {
+	rsp, err := c.GetDescriptorApiV1OperationsDescriptorIdGet(ctx, descriptorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp)
+}
+
 // RetrieveEndpointApiV1RetrievePostWithBodyWithResponse request with arbitrary body returning *RetrieveEndpointApiV1RetrievePostResponse
 func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error) {
 	rsp, err := c.RetrieveEndpointApiV1RetrievePostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -1605,6 +2862,67 @@ func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithResponse(ctx 
 		return nil, err
 	}
 	return ParseRetrieveEndpointApiV1RetrievePostResponse(rsp)
+}
+
+// ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
+func (c *ClientWithResponses) ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error) {
+	rsp, err := c.ListTargetsApiV1TargetsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListTargetsApiV1TargetsGetResponse(rsp)
+}
+
+// CreateTargetApiV1TargetsPostWithBodyWithResponse request with arbitrary body returning *CreateTargetApiV1TargetsPostResponse
+func (c *ClientWithResponses) CreateTargetApiV1TargetsPostWithBodyWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error) {
+	rsp, err := c.CreateTargetApiV1TargetsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTargetApiV1TargetsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateTargetApiV1TargetsPostWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error) {
+	rsp, err := c.CreateTargetApiV1TargetsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateTargetApiV1TargetsPostResponse(rsp)
+}
+
+// DescribeTargetApiV1TargetsNameGetWithResponse request returning *DescribeTargetApiV1TargetsNameGetResponse
+func (c *ClientWithResponses) DescribeTargetApiV1TargetsNameGetWithResponse(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*DescribeTargetApiV1TargetsNameGetResponse, error) {
+	rsp, err := c.DescribeTargetApiV1TargetsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDescribeTargetApiV1TargetsNameGetResponse(rsp)
+}
+
+// UpdateTargetApiV1TargetsNamePatchWithBodyWithResponse request with arbitrary body returning *UpdateTargetApiV1TargetsNamePatchResponse
+func (c *ClientWithResponses) UpdateTargetApiV1TargetsNamePatchWithBodyWithResponse(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateTargetApiV1TargetsNamePatchResponse, error) {
+	rsp, err := c.UpdateTargetApiV1TargetsNamePatchWithBody(ctx, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateTargetApiV1TargetsNamePatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UpdateTargetApiV1TargetsNamePatchWithResponse(ctx context.Context, name string, params *UpdateTargetApiV1TargetsNamePatchParams, body UpdateTargetApiV1TargetsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateTargetApiV1TargetsNamePatchResponse, error) {
+	rsp, err := c.UpdateTargetApiV1TargetsNamePatch(ctx, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateTargetApiV1TargetsNamePatchResponse(rsp)
+}
+
+// ProbeTargetApiV1TargetsNameProbePostWithResponse request returning *ProbeTargetApiV1TargetsNameProbePostResponse
+func (c *ClientWithResponses) ProbeTargetApiV1TargetsNameProbePostWithResponse(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*ProbeTargetApiV1TargetsNameProbePostResponse, error) {
+	rsp, err := c.ProbeTargetApiV1TargetsNameProbePost(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp)
 }
 
 // HealthzHealthzGetWithResponse request returning *HealthzHealthzGetResponse
@@ -1836,6 +3154,138 @@ func ParseAuthenticatedHealthApiV1HealthGetResponse(rsp *http.Response) (*Authen
 	return response, nil
 }
 
+// ParsePostCallApiV1OperationsCallPostResponse parses an HTTP response from a PostCallApiV1OperationsCallPostWithResponse call
+func ParsePostCallApiV1OperationsCallPostResponse(rsp *http.Response) (*PostCallApiV1OperationsCallPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostCallApiV1OperationsCallPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetGroupsApiV1OperationsGroupsGetResponse parses an HTTP response from a GetGroupsApiV1OperationsGroupsGetWithResponse call
+func ParseGetGroupsApiV1OperationsGroupsGetResponse(rsp *http.Response) (*GetGroupsApiV1OperationsGroupsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetGroupsApiV1OperationsGroupsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetSearchApiV1OperationsSearchGetResponse parses an HTTP response from a GetSearchApiV1OperationsSearchGetWithResponse call
+func ParseGetSearchApiV1OperationsSearchGetResponse(rsp *http.Response) (*GetSearchApiV1OperationsSearchGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSearchApiV1OperationsSearchGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse parses an HTTP response from a GetDescriptorApiV1OperationsDescriptorIdGetWithResponse call
+func ParseGetDescriptorApiV1OperationsDescriptorIdGetResponse(rsp *http.Response) (*GetDescriptorApiV1OperationsDescriptorIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetDescriptorApiV1OperationsDescriptorIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest OperationDescriptor
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseRetrieveEndpointApiV1RetrievePostResponse parses an HTTP response from a RetrieveEndpointApiV1RetrievePostWithResponse call
 func ParseRetrieveEndpointApiV1RetrievePostResponse(rsp *http.Response) (*RetrieveEndpointApiV1RetrievePostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -1852,6 +3302,171 @@ func ParseRetrieveEndpointApiV1RetrievePostResponse(rsp *http.Response) (*Retrie
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest RetrieveResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListTargetsApiV1TargetsGetResponse parses an HTTP response from a ListTargetsApiV1TargetsGetWithResponse call
+func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsApiV1TargetsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListTargetsApiV1TargetsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []TargetSummary
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateTargetApiV1TargetsPostResponse parses an HTTP response from a CreateTargetApiV1TargetsPostWithResponse call
+func ParseCreateTargetApiV1TargetsPostResponse(rsp *http.Response) (*CreateTargetApiV1TargetsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateTargetApiV1TargetsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest Target
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDescribeTargetApiV1TargetsNameGetResponse parses an HTTP response from a DescribeTargetApiV1TargetsNameGetWithResponse call
+func ParseDescribeTargetApiV1TargetsNameGetResponse(rsp *http.Response) (*DescribeTargetApiV1TargetsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DescribeTargetApiV1TargetsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Target
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateTargetApiV1TargetsNamePatchResponse parses an HTTP response from a UpdateTargetApiV1TargetsNamePatchWithResponse call
+func ParseUpdateTargetApiV1TargetsNamePatchResponse(rsp *http.Response) (*UpdateTargetApiV1TargetsNamePatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateTargetApiV1TargetsNamePatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Target
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseProbeTargetApiV1TargetsNameProbePostResponse parses an HTTP response from a ProbeTargetApiV1TargetsNameProbePostWithResponse call
+func ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp *http.Response) (*ProbeTargetApiV1TargetsNameProbePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ProbeTargetApiV1TargetsNameProbePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ProbeResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

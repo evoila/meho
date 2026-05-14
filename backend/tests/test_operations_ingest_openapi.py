@@ -225,6 +225,17 @@ def test_invalid_spec_non_mapping_root_raises(tmp_path: Path) -> None:
         parse_openapi(str(spec))
 
 
+def test_missing_local_file_raises_invalid_spec(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.yaml"
+    with pytest.raises(InvalidSpecError, match="could not read spec"):
+        parse_openapi(str(missing))
+
+
+def test_directory_path_raises_invalid_spec(tmp_path: Path) -> None:
+    with pytest.raises(InvalidSpecError, match="could not read spec"):
+        parse_openapi(str(tmp_path))
+
+
 def test_malformed_yaml_bubbles_up(tmp_path: Path) -> None:
     spec = tmp_path / "bad.yaml"
     spec.write_text("openapi: '3.0.3'\npaths:\n  /x:\n   get:\n   summary: oops\n  : bad\n")

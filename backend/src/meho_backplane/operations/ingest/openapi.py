@@ -158,7 +158,13 @@ def parse_openapi(
         silently skipped.
 
     Raises:
-        InvalidSpecError: Document is not a mapping or lacks ``paths``.
+        InvalidSpecError: Document is not a mapping, lacks ``paths``,
+            or the local file referenced by ``spec_path_or_uri`` cannot
+            be read (missing / not a regular file / permission denied).
+            Local-file OS errors are re-raised as ``InvalidSpecError``
+            so callers see one parser-shaped error type; HTTP fetch
+            failures still bubble as ``httpx.HTTPError`` because those
+            are a transport concern.
         UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, or the
             document references a cross-document ``$ref``.
         InvalidSchemaError: A local ``$ref`` points at a missing
@@ -199,10 +205,14 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
     """Resolve ``spec_path_or_uri`` to raw spec bytes.
 
     Local-file inputs are read in binary mode so YAML's BOM handling
-    + UTF-8 decoding stay inside the loader. HTTP(S) inputs are
-    fetched with httpx and a 30 s timeout; non-2xx responses raise
-    :exc:`httpx.HTTPStatusError` (which is a
-    :exc:`httpx.HTTPError` subclass).
+    + UTF-8 decoding stay inside the loader; missing files /
+    permission errors raise :exc:`InvalidSpecError` with the original
+    OS error chained via ``from`` so callers see a single
+    parser-shaped error type. HTTP(S) inputs are fetched with httpx
+    and a 30 s timeout; non-2xx responses raise
+    :exc:`httpx.HTTPStatusError` (an :exc:`httpx.HTTPError` subclass)
+    unwrapped — fetch failures are a transport concern, not a spec
+    concern.
     """
     parsed = urlparse(spec_path_or_uri)
     if parsed.scheme in {"http", "https"}:
@@ -215,8 +225,13 @@ def _load_spec_bytes(spec_path_or_uri: str) -> bytes:
     if parsed.scheme == "file":
         from urllib.request import url2pathname
 
-        return Path(url2pathname(parsed.path)).read_bytes()
-    return Path(spec_path_or_uri).read_bytes()
+        path = Path(url2pathname(parsed.path))
+    else:
+        path = Path(spec_path_or_uri)
+    try:
+        return path.read_bytes()
+    except (FileNotFoundError, IsADirectoryError, PermissionError, OSError) as exc:
+        raise InvalidSpecError(f"could not read spec from {spec_path_or_uri!r}: {exc}") from exc
 
 
 def _decode_spec(content: bytes) -> dict[str, Any]:

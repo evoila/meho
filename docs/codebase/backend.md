@@ -406,6 +406,21 @@ this stage it exposes:
   follow-up T7 that lands once chart-CI hardening (#347 follow-up)
   makes the helm-test job gating.
 
+* Broadcast load harness (G6.1-T7 shape #1, #386) —
+  `backend/tests/integration/test_broadcast_load.py` drives the
+  publish→SSE→MCP seam at 50 RPS for 30 s across two tenants (1500
+  events total) and asserts: every published event reaches the SSE
+  consumer; the tenant boundary holds throughout; the publish-errors
+  Prometheus counter has zero delta; p99 publish→SSE-receive latency
+  is under 5 s (the AC's hard-fail threshold; the < 1 s target is
+  logged informationally); each tenant's MCP resource snapshot shows
+  the last 50 events tagged with that tenant. Drives `_feed_generator`
+  and `_tenant_feed_handler` directly to avoid the httpx + ASGI
+  cancellation race PR #353 documented. Gated by `@pytest.mark.slow`
+  + `MEHO_RUN_SLOW_TESTS=1`; CI's slow lane runs it, the default
+  unit suite skips. Shape #2 (chart-CI integration + Valkey-pod
+  restart chaos) follows once chart-CI hardening lands.
+
 * MCP tool + resource registries (Task #248, G0.5-T3) — the substrate
   every G3–G9 verb registers against. `backend/src/meho_backplane/mcp/registry.py`
   exposes `register_mcp_tool(definition, handler)` /

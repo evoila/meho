@@ -121,14 +121,27 @@ async def resolve_target(
         AmbiguousTargetError: Multiple targets match *query* (alias collision).
     """
     # Step 1: exact name match.
+    # Use limit(2) instead of scalar_one_or_none() so data-drift duplicates
+    # (unique index violation repaired mid-flight, or a restored backup with
+    # a relaxed constraint) raise AmbiguousTargetError (409) rather than
+    # leaking MultipleResultsFound as an unhandled 500.
     stmt = select(TargetORM).where(
         TargetORM.tenant_id == tenant_id,
         TargetORM.name == query,
     )
-    result = await session.execute(stmt)
-    exact = result.scalar_one_or_none()
-    if exact is not None:
-        return exact
+    result = await session.execute(stmt.limit(2))
+    exact_hits = list(result.scalars().all())
+    if len(exact_hits) == 1:
+        return exact_hits[0]
+    if len(exact_hits) > 1:
+        summaries = [_to_summary(t) for t in exact_hits]
+        _log.warning(
+            "ambiguous_exact_name",
+            tenant_id=str(tenant_id),
+            query=query,
+            matches=[s.name for s in summaries],
+        )
+        raise AmbiguousTargetError(query, summaries)
 
     # Step 2: alias match — dialect-aware.
     alias_hits = await _alias_match(session, tenant_id, query)

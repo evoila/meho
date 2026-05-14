@@ -141,7 +141,7 @@ def test_target_summary_round_trip_lossless() -> None:
 
 def test_target_round_trip_with_empty_aliases() -> None:
     t = _make_target(aliases=[])
-    assert Target.model_validate(t.model_dump()).aliases == []
+    assert Target.model_validate(t.model_dump()).aliases == ()
 
 
 def test_target_round_trip_with_null_optional_fields() -> None:

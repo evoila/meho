@@ -22,6 +22,7 @@ Four models cover the full CRUD + list contract:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -52,7 +53,7 @@ class TargetSummary(BaseModel):
 
     id: UUID
     name: str
-    aliases: list[str]
+    aliases: tuple[str, ...]
     product: str
     host: str
 
@@ -63,6 +64,11 @@ class Target(BaseModel):
     Maps 1:1 to the ``targets`` table columns. Frozen so callers
     can safely stash instances in request state or structured logs
     without fear of mutation.
+
+    ``aliases`` uses ``tuple[str, ...]`` and ``extras`` uses
+    ``Mapping[str, Any]`` so frozen instances cannot be mutated in-place
+    via list.append / dict.__setitem__ — matching the immutability contract
+    the docstring documents.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -70,7 +76,7 @@ class Target(BaseModel):
     id: UUID
     tenant_id: UUID
     name: str
-    aliases: list[str]
+    aliases: tuple[str, ...]
     product: str
     host: str
     port: int | None
@@ -78,7 +84,7 @@ class Target(BaseModel):
     secret_ref: str | None
     auth_model: AuthModel
     vpn_required: bool
-    extras: dict[str, Any]
+    extras: Mapping[str, Any]
     notes: str | None
     created_at: datetime
     updated_at: datetime

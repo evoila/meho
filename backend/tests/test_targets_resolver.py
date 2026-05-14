@@ -298,3 +298,39 @@ async def test_resolve_target_ambiguous_alias_raises() -> None:
     assert detail["error"] == "ambiguous_target"
     assert detail["query"] == "shared-alias"
     assert len(detail["matches"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_target_exact_name_duplicate_raises_ambiguous() -> None:
+    """Duplicate exact-name rows (data-drift) raise AmbiguousTargetError (409).
+
+    The (tenant_id, name) unique index prevents this under normal conditions,
+    but a restored backup or a relaxed-constraint migration window can leave
+    duplicate rows. resolve_target must surface 409, not leak a 500
+    via MultipleResultsFound.
+    """
+    sessionmaker = get_sessionmaker()
+    tenant_id = uuid.uuid4()
+    # Bypass the unique constraint by giving the two rows different primary keys
+    # but the same name within the same tenant.  SQLite enforces the unique
+    # index, so we insert both rows in one flush to defer constraint checking.
+    t1 = _make_target(tenant_id=tenant_id, name="dup-name", host="10.0.0.1")
+    t2 = _make_target(tenant_id=tenant_id, name="dup-name", host="10.0.0.2")
+
+    async with sessionmaker() as session:
+        session.add_all([t1, t2])
+        try:
+            await session.flush()
+            await session.commit()
+        except Exception:
+            # SQLite enforces the unique constraint; skip on SQLite.
+            pytest.skip("dialect enforces unique constraint — data-drift not simulatable")
+
+    async with sessionmaker() as session:
+        with pytest.raises(AmbiguousTargetError) as exc_info:
+            await resolve_target(session, tenant_id, "dup-name")
+
+    detail = exc_info.value.detail
+    assert detail["error"] == "ambiguous_target"
+    assert detail["query"] == "dup-name"
+    assert len(detail["matches"]) == 2

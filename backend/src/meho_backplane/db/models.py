@@ -187,7 +187,15 @@ from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
-__all__ = ["AuditLog", "Base", "Document", "Target", "Tenant"]
+__all__ = [
+    "AuditLog",
+    "Base",
+    "Document",
+    "EndpointDescriptor",
+    "OperationGroup",
+    "Target",
+    "Tenant",
+]
 
 
 #: Portable JSON column type — :class:`JSONB` on PostgreSQL (binary
@@ -699,5 +707,353 @@ class Target(Base):
         sa.CheckConstraint(
             "auth_model IN ('impersonation', 'shared_service_account', 'per_user')",
             name="ck_targets_auth_model",
+        ),
+    )
+
+
+class OperationGroup(Base):
+    """A named grouping of operations within one connector implementation.
+
+    Initiative #388 (G0.6) substrate. Every row carries an
+    LLM-summarised ``when_to_use`` blurb that the
+    ``list_operation_groups`` meta-tool (T8 #399) returns verbatim so
+    the agent can pick the right group before calling
+    ``search_operations`` against it. Examples per connector:
+    ``vmware-rest/9.0`` → ``vm-lifecycle`` / ``cluster`` / ``network``;
+    ``vault/1.x`` → ``kv`` / ``sys`` / ``auth``.
+
+    ``tenant_id`` is NULL for built-in / global groups (shipped by spec
+    ingestion at G0.7 or by typed connectors at register-time) and
+    populated for tenant-curated groups. No FK to ``tenant.id`` in
+    v0.2 — same soft-FK discipline as ``audit_log.tenant_id``.
+
+    Uniqueness is enforced by **two partial unique indexes** rather
+    than a single composite UNIQUE because SQL's NULL != NULL
+    semantics mean a single ``UNIQUE (tenant_id, product, version,
+    impl_id, group_key)`` constraint would not catch duplicate
+    built-in rows. Migration ``0005`` documents the pattern; the same
+    split applies to :class:`EndpointDescriptor`.
+
+    ``review_status`` is a bounded enum enforced via a DB-layer CHECK
+    (``'staged'`` → freshly ingested, awaiting operator review;
+    ``'enabled'`` → live for dispatch; ``'disabled'`` → hidden from
+    retrieval). Portable enum-shape across PG + SQLite — see
+    :class:`Target.auth_model` for the precedent.
+
+    The model deliberately ships with no helper methods — population
+    happens via T4's ``register_typed_operation()`` and G0.7's
+    ingestion pipeline; queries land at the dispatcher and the
+    meta-tools (T5 / T8).
+    """
+
+    __tablename__ = "operation_group"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NULL → built-in/global group; non-null → tenant-curated.
+    # No FK clause in v0.2 by soft-FK discipline.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    group_key: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    when_to_use: Mapped[str] = mapped_column(Text, nullable=False)
+    review_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="staged",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Partial unique on (product, version, impl_id, group_key) for
+        # built-in/global rows. WHERE clause emitted by SQLAlchemy on
+        # both dialects via the postgresql_where / sqlite_where pair.
+        Index(
+            "operation_group_global_idx",
+            "product",
+            "version",
+            "impl_id",
+            "group_key",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        # Partial unique on (tenant_id, product, version, impl_id,
+        # group_key) for tenant-scoped rows.
+        Index(
+            "operation_group_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "group_key",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+        sa.CheckConstraint(
+            "review_status IN ('staged', 'enabled', 'disabled')",
+            name="ck_operation_group_review_status",
+        ),
+    )
+
+
+class EndpointDescriptor(Base):
+    """A single operation an agent can dispatch through the G0.6 substrate.
+
+    Initiative #388 (G0.6) substrate. One row per
+    (product, version, impl_id, op_id) — covers every operation the
+    dispatcher (T5 #396) might route to, regardless of whether the
+    operation was auto-derived from an OpenAPI spec (G0.7,
+    ``source_kind='ingested'``), hand-coded into a typed connector
+    (G3.x via T4 ``register_typed_operation()``,
+    ``source_kind='typed'``), or authored as a composite
+    (``source_kind='composite'`` with ``handler_ref`` pointing at a
+    Python function that calls ``dispatch(...)`` recursively).
+
+    ``op_id`` is the connector-side natural key. Examples:
+
+    * Ingested HTTP — ``"GET:/api/vcenter/cluster"`` (method + path).
+    * Typed — ``"vault.kv.read"`` / ``"k8s.pod.list"`` (dotted handle).
+    * Composite — ``"vmware.composite.vm.create"`` (dotted handle).
+
+    The ``method`` / ``path`` columns are populated for ingested rows
+    and NULL for typed/composite; ``handler_ref`` (a Python dotted
+    path) is populated for typed/composite and NULL for ingested. The
+    dispatcher (T5) branches on ``source_kind`` to know which fields
+    to consult.
+
+    ``parameter_schema`` and ``response_schema`` are JSON Schema 2020-12
+    documents (OpenAPI 3.1-compatible). The dispatcher validates
+    inbound params against ``parameter_schema`` before routing; T4's
+    helper and G0.7's ingestion populate both columns from the
+    upstream source.
+
+    ``safety_level`` + ``requires_approval`` are the policy-gate
+    hooks. ``safety_level='safe'`` operations execute under the
+    default-allow policy (v0.2); ``'caution'`` and ``'dangerous'``
+    flow through G7 / G10 policy logic once those Goals land.
+    ``requires_approval=true`` (independent of ``safety_level``)
+    forces the dispatcher to write an audit row in
+    ``status='pending'`` and wait for an operator decision before
+    executing.
+
+    ``llm_instructions`` carries per-op agent guidance (when to call,
+    parameter collection hints, response interpretation tips). The
+    field is JSON-shaped because consumers will want structured
+    sub-fields (``"when_to_call"`` / ``"parameter_hints"`` /
+    ``"output_format"``) without a schema change.
+
+    ``embedding`` is :class:`pgvector.sqlalchemy.Vector(384)` on PG
+    via the ``with_variant`` override, JSON-encoded :class:`Text` on
+    SQLite via the shared :class:`_PortableVector384` decorator. Same
+    dim (384) as :attr:`Document.embedding` — the agent's hybrid
+    retrieval index (T8's ``search_operations``) shares the embedding
+    pipeline G0.4 already set up. Nullable on both dialects because
+    T1 ships the column shape only; T4 populates it before the row
+    is dispatchable for retrieval.
+
+    ``custom_description`` / ``custom_notes`` are operator-authored
+    overrides applied at G0.7 ingest-review time. The ingestion
+    pipeline writes ``description`` and ``summary`` verbatim from the
+    upstream spec; the reviewer's customisation lives in
+    ``custom_*`` so the original source-of-truth values stay
+    auditable.
+
+    Schema decisions for :class:`EndpointDescriptor`:
+
+    * ``id`` — UUID primary key. Same portable :class:`Uuid` shape
+      every other model uses.
+    * ``tenant_id`` — UUID nullable. NULL → built-in/global op;
+      non-null → tenant-scoped (composite owned by one tenant). No
+      FK to ``tenant.id`` in v0.2 by soft-FK discipline.
+    * ``group_id`` — UUID nullable with a real ``REFERENCES
+      operation_group(id) ON DELETE SET NULL`` FK. Group-less
+      descriptors stay dispatchable when their group is deleted; the
+      operator's admin UI can re-group them later. See migration
+      ``0005`` docstring for the cascade rationale.
+    * Bounded enums (``source_kind``, ``safety_level``) — TEXT NOT
+      NULL with DB-layer ``CHECK (column IN (...))`` constraints
+      enforced by migration ``0005``. Same portable pattern
+      :class:`Target.auth_model` uses.
+
+    Indexes on :class:`EndpointDescriptor`:
+
+    * Two partial unique indexes on
+      ``(product, version, impl_id, op_id)`` — one ``WHERE
+      tenant_id IS NULL`` for built-in rows, one ``WHERE
+      tenant_id IS NOT NULL`` including ``tenant_id`` in the key
+      for tenant-scoped rows. See :class:`OperationGroup` for the
+      rationale on the partial-index split.
+    * ``endpoint_descriptor_lookup_idx`` — b-tree on
+      ``(product, version, impl_id, group_id, is_enabled)``. Drives
+      "list every enabled op in group X for connector
+      (product, version, impl_id)" queries from the dispatcher and
+      the ``search_operations`` meta-tool.
+    * ``endpoint_descriptor_bm25_idx`` (PG only) — GIN over
+      ``to_tsvector('english', coalesce(summary, '') || ' ' ||
+      coalesce(description, ''))``. Powers the BM25 half of
+      ``search_operations``'s hybrid retrieval. Declared in
+      migration ``0005`` via raw SQL because Alembic has no clean
+      API for expression-based GIN; intentionally **not** in
+      :attr:`__table_args__` because declaring it would force
+      SQLite to attempt creation and fail.
+    * ``endpoint_descriptor_embedding_idx`` (PG only) — IVFFlat over
+      ``embedding`` with ``vector_cosine_ops`` and ``lists = 100``.
+      Powers the cosine half of ``search_operations``'s hybrid
+      retrieval. Same migration-only handling as the FTS index.
+      The IVFFlat empty-table caveat applies (see migration
+      docstring): ``REINDEX INDEX endpoint_descriptor_embedding_idx``
+      after the first batch of operations is registered.
+
+    The model deliberately ships with no helper methods — write
+    paths are T4 (``register_typed_operation()``) and G0.7
+    (ingestion), read paths are T5 (dispatcher) and T8 (meta-tools).
+    """
+
+    __tablename__ = "endpoint_descriptor"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    method: Mapped[str | None] = mapped_column(Text, nullable=True)
+    path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    handler_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # FK with ON DELETE SET NULL — see model docstring.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        ForeignKey("operation_group.id", ondelete="SET NULL"),
+        nullable=True,
+        default=None,
+    )
+    tags: Mapped[list[str]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=list,
+    )
+    parameter_schema: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    response_schema: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    llm_instructions: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    safety_level: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="safe",
+    )
+    requires_approval: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+    )
+    is_enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=True,
+    )
+    # Nullable on both dialects — T1 ships the column shape only;
+    # T4 populates it before the descriptor is dispatchable for
+    # retrieval. Round-trips as list[float] via _PORTABLE_VECTOR_384
+    # (JSON-encoded Text on SQLite, native vector(384) on PG).
+    embedding: Mapped[list[float] | None] = mapped_column(
+        _PORTABLE_VECTOR_384,
+        nullable=True,
+        default=None,
+    )
+    custom_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    custom_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "endpoint_descriptor_global_idx",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "endpoint_descriptor_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "op_id",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+        Index(
+            "endpoint_descriptor_lookup_idx",
+            "product",
+            "version",
+            "impl_id",
+            "group_id",
+            "is_enabled",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            "source_kind IN ('ingested', 'typed', 'composite')",
+            name="ck_endpoint_descriptor_source_kind",
+        ),
+        sa.CheckConstraint(
+            "safety_level IN ('safe', 'caution', 'dangerous')",
+            name="ck_endpoint_descriptor_safety_level",
         ),
     )

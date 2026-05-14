@@ -107,6 +107,13 @@ async def resolve_target(
     need the Pydantic read shape convert with
     ``Target.model_validate(row, from_attributes=True)``.
 
+    On success the resolved target's ``id`` is bound into structlog's
+    contextvars under the key ``target_id`` (G0.3-T4). The
+    :class:`~meho_backplane.audit.AuditMiddleware` reads this value at
+    audit-write time and writes it to ``audit_log.target_id``. Binding
+    happens here — the single canonical exit point — rather than in each
+    caller, so no route can accidentally skip the binding.
+
     Args:
         session: Active async DB session (must be inside an open transaction).
         tenant_id: The tenant scope — only targets belonging to this tenant
@@ -120,6 +127,8 @@ async def resolve_target(
         TargetNotFoundError: No target matches *query* in *tenant_id*.
         AmbiguousTargetError: Multiple targets match *query* (alias collision).
     """
+    target: TargetORM | None = None
+
     # Step 1: exact name match.
     # Use limit(2) instead of scalar_one_or_none() so data-drift duplicates
     # (unique index violation repaired mid-flight, or a restored backup with
@@ -132,8 +141,8 @@ async def resolve_target(
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
     if len(exact_hits) == 1:
-        return exact_hits[0]
-    if len(exact_hits) > 1:
+        target = exact_hits[0]
+    elif len(exact_hits) > 1:
         summaries = [_to_summary(t) for t in exact_hits]
         _log.warning(
             "ambiguous_exact_name",
@@ -142,31 +151,40 @@ async def resolve_target(
             matches=[s.name for s in summaries],
         )
         raise AmbiguousTargetError(query, summaries)
+    else:
+        target = None
 
-    # Step 2: alias match — dialect-aware.
-    alias_hits = await _alias_match(session, tenant_id, query)
-    if len(alias_hits) == 1:
-        return alias_hits[0]
-    if len(alias_hits) > 1:
-        summaries = [_to_summary(t) for t in alias_hits]
-        _log.warning(
-            "ambiguous_target",
+    if target is None:
+        # Step 2: alias match — dialect-aware.
+        alias_hits = await _alias_match(session, tenant_id, query)
+        if len(alias_hits) == 1:
+            target = alias_hits[0]
+        elif len(alias_hits) > 1:
+            summaries = [_to_summary(t) for t in alias_hits]
+            _log.warning(
+                "ambiguous_target",
+                tenant_id=str(tenant_id),
+                query=query,
+                matches=[s.name for s in summaries],
+            )
+            raise AmbiguousTargetError(query, summaries)
+
+    if target is None:
+        # Step 3: near-miss for 404 detail.
+        near = await _near_misses(session, tenant_id, query)
+        summaries = [_to_summary(t) for t in near]
+        _log.info(
+            "target_not_found",
             tenant_id=str(tenant_id),
             query=query,
-            matches=[s.name for s in summaries],
+            near_misses=[s.name for s in summaries],
         )
-        raise AmbiguousTargetError(query, summaries)
+        raise TargetNotFoundError(query, summaries)
 
-    # Step 3: near-miss for 404 detail.
-    near = await _near_misses(session, tenant_id, query)
-    summaries = [_to_summary(t) for t in near]
-    _log.info(
-        "target_not_found",
-        tenant_id=str(tenant_id),
-        query=query,
-        near_misses=[s.name for s in summaries],
-    )
-    raise TargetNotFoundError(query, summaries)
+    # Single exit point — bind target_id for AuditMiddleware (G0.3-T4).
+    structlog.contextvars.bind_contextvars(target_id=str(target.id))
+    _log.info("target_resolved", target_id=str(target.id), name=target.name)
+    return target
 
 
 async def _alias_match(

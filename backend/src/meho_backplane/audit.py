@@ -179,11 +179,41 @@ def _resolve_audit_payload() -> dict[str, Any]:
     return payload
 
 
+def _resolve_target_id() -> uuid.UUID | None:
+    """Pull ``target_id`` out of contextvars and parse it as :class:`uuid.UUID`.
+
+    :func:`~meho_backplane.targets.resolver.resolve_target` binds
+    ``target_id`` as ``str(target.id)`` at its single exit point
+    (G0.3-T4). Requests that never call ``resolve_target`` (list,
+    create, and all non-target routes) have ``target_id=None`` from
+    :func:`~meho_backplane.middleware.verify_jwt_and_bind`'s slot
+    initialisation; those land as ``None`` here, which is correct.
+
+    A bound value that fails UUID parse indicates a programming error
+    (the resolver only binds the ORM-generated UUID, which is always
+    valid). The row is still committed with ``target_id=None`` and the
+    malformed value is logged so the invariant violation is visible.
+    """
+    raw = structlog.contextvars.get_contextvars().get("target_id")
+    if raw is None:
+        return None
+    log = structlog.get_logger()
+    if not isinstance(raw, str):
+        log.error("audit_malformed_target_id", value=raw)
+        return None
+    try:
+        return uuid.UUID(raw)
+    except (ValueError, AttributeError):
+        log.error("audit_malformed_target_id", value=raw)
+        return None
+
+
 async def _write_audit_row(
     *,
     audit_id: uuid.UUID,
     operator_sub: str,
     tenant_id: uuid.UUID | None,
+    target_id: uuid.UUID | None,
     method: str,
     path: str,
     status_code: int,
@@ -221,6 +251,7 @@ async def _write_audit_row(
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
             tenant_id=tenant_id,
+            target_id=target_id,
             method=method,
             path=path,
             status_code=status_code,
@@ -567,11 +598,13 @@ class AuditMiddleware:
             log=log,
         )
         audit_id = uuid.uuid4()
+        target_id = _resolve_target_id()
         try:
             payload = await _write_audit_row(
                 audit_id=audit_id,
                 operator_sub=operator_sub,
                 tenant_id=tenant_id,
+                target_id=target_id,
                 method=method,
                 path=path,
                 status_code=status_code,

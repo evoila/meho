@@ -41,10 +41,15 @@ Sub-modules:
   :class:`HandlerRefError` for typed-connector init-time
   registration (re-exported at the package level for convenience).
 * :mod:`.ingest` — G0.7 spec-ingestion pipeline. Today:
-  :func:`~meho_backplane.operations.ingest.parse_openapi` (T1 #401)
-  + the :class:`~meho_backplane.operations.ingest.ReviewService`
-  state machine (T4 #402). Later: the bulk-upsert helper (T2 #403)
-  and the LLM-grouping pass (T3 #404).
+  :func:`~meho_backplane.operations.ingest.parse_openapi` (T1 #401),
+  the :class:`~meho_backplane.operations.ingest.ReviewService` state
+  machine (T4 #402), and
+  :func:`~meho_backplane.operations.ingest.register_ingested_operations`
+  (T2 #403) — the async bulk-upsert that takes parser output through
+  to ``endpoint_descriptor`` rows in ``staged`` state, auto-registers
+  an :class:`HttpConnector` shim for first-time triples, and supports
+  multi-spec merge under one connector_id. Later: the LLM-grouping
+  pass (T3 #404).
 
 The dispatcher reads ``endpoint_descriptor`` rows directly via the
 ORM; the meta-tools (T8, #399) will hit the same surface via the
@@ -65,6 +70,11 @@ from meho_backplane.operations.dispatcher import (
     reset_dispatcher_caches,
     set_default_reducer,
 )
+from meho_backplane.operations.ingest import (
+    IngestionResult,
+    OpIdCollision,
+    register_ingested_operations,
+)
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
@@ -81,6 +91,8 @@ __all__ = [
     "DispatchChild",
     "Dispatcher",
     "HandlerRefError",
+    "IngestionResult",
+    "OpIdCollision",
     "PassThroughReducer",
     "Reducer",
     "ResultHandle",
@@ -89,6 +101,7 @@ __all__ = [
     "dispatch",
     "import_handler",
     "parent_audit_id_var",
+    "register_ingested_operations",
     "register_typed_operation",
     "reset_dispatcher_caches",
     "set_default_reducer",

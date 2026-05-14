@@ -67,6 +67,79 @@ The function is synchronous because callers are CLI / one-shot
 ingestion endpoints that have no in-flight event loop concern. It
 also keeps the surface trivially testable.
 
+### `register_ingested_operations(...)` (`ingest/register_ingested.py`)
+
+T2 (#403). Async bulk-upsert that takes the parser output through
+to `endpoint_descriptor` rows in **staged** state. Parallel pathway
+to `register_typed_operation()` (G0.6-T4); both write to the same
+table but differ in:
+
+| | `register_typed_operation` | `register_ingested_operations` |
+|---|---|---|
+| Trigger | Connector init (lifespan startup) | Operator command (`meho connector ingest`) |
+| Input | One proto per call | Batch of protos in one call |
+| `source_kind` | `'typed'` | `'ingested'` |
+| `handler_ref` | Dotted Python path | `NULL` (dispatch via `method` + `path`) |
+| `is_enabled` | `True` (built-in connectors trusted) | `False` (operator must enable per row via T4) |
+| `tenant_id` | Always `NULL` | `NULL` (built-in) or UUID (tenant-curated) |
+| `spec_source` tag | n/a | Required; written as `spec:<source>` |
+
+The helper returns an `IngestionResult` Pydantic model with
+inserted / updated / skipped counts, a `connector_registered` flag,
+and an `operations_grouped` flag (always `False` from T2 — T3 owns
+LLM grouping).
+
+**Body-hash skip.** Same algorithm as `register_typed_operation`:
+the embedding text is composed from `summary + description +
+custom_description + tags`; the SHA-256 hash of the composed text
+is recomputed for the persisted row and compared to the incoming
+hash. Match → skip-re-embed branch (update non-text columns,
+advance `updated_at`, count as `skipped`). Mismatch → re-embed and
+update every body-derived column (count as `updated`).
+
+**Multi-spec merge.** One `connector_id` (e.g. `vmware-rest-9.0`)
+accepts multiple specs ingested in separate calls, each with its
+own `spec_source` (`vcenter.yaml`, `vi-json.yaml`). Rows from each
+spec carry a `spec:<source>` marker in `tags` so operators can
+browse per spec. The natural key
+`(product, version, impl_id, op_id)` is unique per row, so:
+
+* **Disjoint op-ids across specs** (the typical vSphere case;
+  vcenter.yaml exposes `GET:/api/vcenter/...`, vi-json.yaml exposes
+  `POST:/ClusterComputeResource/{moId}/Method`) → both specs land
+  cleanly under one connector.
+* **Overlapping op-ids across specs** → `OpIdCollision` raised
+  before any row is written. Operator resolves manually (rename
+  one op via `custom_description` at T4 review, or skip the
+  conflicting spec).
+
+**Connector class auto-registration.** First ingestion of a
+`(product, version, impl_id)` triple registers a thin
+`HttpConnector` subclass via `register_connector_v2()` (G0.6-T2).
+The shim:
+
+* Fixes the v2 registry-key attributes so the resolver can route
+  to it.
+* Derives `supported_version_range` from the version's major.minor
+  prefix (e.g. `"9.0"` → `">=9.0,<10.0"`, `"9.0.1"` → same window;
+  `"latest"` → `None`).
+* Raises `NotImplementedError` from `fingerprint`, `probe`,
+  `execute`, and `auth_headers` with a message naming the G3.x
+  Initiative responsible for shipping the real subclass.
+
+Subsequent ingestions against the same triple skip registration
+(`connector_registered=False`). Per-product auth quirks (G3.1
+vSphere session creation, G3.5 NSX XSRF, G3.6 vCF dual-plane) ship
+as real subclasses per G3.x Initiative; that subclass REPLACES the
+auto-shim at code-merge time (real subclasses register at module
+import — lifespan startup runs before the operator can re-ingest).
+
+**Stale operations.** Ops that exist in the DB under this
+connector but do NOT appear in the incoming batch are NOT
+auto-deleted in v0.2. Operators handle obsolete ops via T4's per-op
+`edit_op(is_enabled=False)` flow. Auto-deletion on re-ingest is
+v0.2.next.
+
 ## Control flow
 
 ```text
@@ -128,9 +201,14 @@ operations go live.
 
 ## References
 
-* Issue #401 — T1 task.
+* Issue #401 — T1 task (OpenAPI parser).
+* Issue #403 — T2 task (`register_ingested_operations`).
 * Initiative #389 — G0.7 spec-ingestion pipeline.
 * Goal #221 — G0 foundational substrate.
 * `meho_backplane/db/models.py::EndpointDescriptor` — the ORM target.
+* `meho_backplane/operations/typed_register.py` — parallel pathway
+  for typed (hand-coded) connectors; same body-hash algorithm.
+* `meho_backplane/connectors/registry.py` — `register_connector_v2`
+  the auto-shim writes to.
 * OpenAPI 3.0.3 spec: https://spec.openapis.org/oas/v3.0.3.html
 * OpenAPI 3.1.1 spec: https://spec.openapis.org/oas/v3.1.1.html

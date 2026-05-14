@@ -13,11 +13,15 @@ REST routes at T6, admin MCP tools at T7) import from
 private module layout.
 """
 
+from meho_backplane.operations.ingest.connector_registration import (
+    ensure_connector_class_registered,
+)
 from meho_backplane.operations.ingest.exceptions import (
     ConnectorNotFoundError,
     InvalidSchemaError,
     InvalidSpecError,
     InvalidStateTransitionError,
+    OpIdCollision,
     UnsupportedSpecError,
 )
 from meho_backplane.operations.ingest.openapi import (
@@ -29,6 +33,10 @@ from meho_backplane.operations.ingest.payload import (
     ConnectorReviewGroup,
     ConnectorReviewOp,
     ConnectorReviewPayload,
+)
+from meho_backplane.operations.ingest.register_ingested import (
+    IngestionResult,
+    register_ingested_operations,
 )
 from meho_backplane.operations.ingest.schemas import (
     EndpointDescriptorProto,
@@ -42,13 +50,17 @@ __all__ = [
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
     "EndpointDescriptorProto",
+    "IngestionResult",
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
+    "OpIdCollision",
     "ReviewService",
     "SafetyLevel",
     "UnsupportedSpecError",
     "detect_spec_format",
+    "ensure_connector_class_registered",
     "parse_connector_id",
     "parse_openapi",
+    "register_ingested_operations",
 ]

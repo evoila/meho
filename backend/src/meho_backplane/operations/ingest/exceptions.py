@@ -3,9 +3,9 @@
 
 """Domain exceptions for the G0.7 spec-ingestion pipeline.
 
-Two unrelated families of failure modes share this module so T1
-(OpenAPI parser, #401) and T4 (review-queue state machine, #402)
-agree on an import path:
+Three families of failure modes share this module so the sibling
+tasks (parser T1 #401, register-ingested T2 #403, review-queue T4
+#402) agree on an import path:
 
 Parser failures (T1 #401) — raised from
 :func:`~meho_backplane.operations.ingest.parse_openapi`:
@@ -18,6 +18,17 @@ Parser failures (T1 #401) — raised from
 * :class:`InvalidSchemaError` — a referenced JSON Schema is
   structurally broken (dangling ``$ref``, component-path drill-down,
   non-list parameters).
+
+Bulk-upsert failures (T2 #403) — raised from
+:func:`~meho_backplane.operations.ingest.register_ingested_operations`:
+
+* :class:`OpIdCollision` — the incoming spec carries an ``op_id`` a
+  row already on the connector was ingested from a *different* spec
+  source. The natural key
+  ``(product, version, impl_id, op_id)`` is unique per row, so the
+  helper refuses to silently overlay one spec's payload onto another
+  spec's row; the operator picks the resolution (rename one op via
+  ``custom_description`` at T4 review, or skip the conflicting spec).
 
 Review-queue failures (T4 #402) — raised from
 :class:`~meho_backplane.operations.ingest.ReviewService`:
@@ -43,9 +54,11 @@ Review-queue failures (T4 #402) — raised from
 
 The parser classes inherit from :class:`ValueError` so callers that
 already catch parsing errors via ``except ValueError`` keep working;
-the review-queue classes inherit from :class:`Exception` directly so
-callers can ``except`` them precisely without catching unrelated
-runtime faults.
+:class:`OpIdCollision` inherits from :class:`ValueError` for the
+same reason (ingestion call sites already wrap ``parse_openapi`` in
+a ``except ValueError`` block). The review-queue classes inherit
+from :class:`Exception` directly so callers can ``except`` them
+precisely without catching unrelated runtime faults.
 """
 
 from __future__ import annotations
@@ -57,6 +70,7 @@ __all__ = [
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
+    "OpIdCollision",
     "UnsupportedSpecError",
 ]
 
@@ -89,6 +103,51 @@ class InvalidSchemaError(ValueError):
     a structurally unsupported shape (component-path drill-down
     refs, for example).
     """
+
+
+class OpIdCollision(ValueError):  # noqa: N818 -- name pinned by Task #403 contract
+    """An incoming op_id collides with an existing row from a different spec.
+
+    Raised by
+    :func:`~meho_backplane.operations.ingest.register_ingested_operations`
+    when the bulk upsert would overlay one spec's parsed operation
+    onto a row another spec already populated under the same
+    ``(product, version, impl_id, op_id)`` natural key.
+
+    Attributes
+    ----------
+    incoming_spec_source:
+        The ``spec_source`` value passed to the failing call (e.g.
+        ``"vi-json.yaml"``).
+    colliding_op_ids:
+        The list of ``op_id`` values the helper refused to overlay,
+        sorted alphabetically for stable error messages.
+    existing_spec_sources:
+        ``{op_id: spec_source}`` mapping of the spec-source tag
+        recovered from the existing row's ``tags`` column for each
+        colliding op-id. Empty string when the existing row has no
+        ``spec:*`` tag (legacy row predating multi-spec merge).
+
+    The exception is raised **before** any row is written, so a
+    collision aborts the entire batch — partial ingestion under
+    contention is not a supported state.
+    """
+
+    def __init__(
+        self,
+        *,
+        incoming_spec_source: str,
+        colliding_op_ids: list[str],
+        existing_spec_sources: dict[str, str],
+    ) -> None:
+        self.incoming_spec_source = incoming_spec_source
+        self.colliding_op_ids = sorted(colliding_op_ids)
+        self.existing_spec_sources = existing_spec_sources
+        joined = ", ".join(
+            f"{op_id!r} (existing spec={existing_spec_sources.get(op_id, '') or '<untagged>'!r})"
+            for op_id in self.colliding_op_ids
+        )
+        super().__init__(f"spec_source={incoming_spec_source!r} collides on op_id(s): {joined}")
 
 
 class InvalidStateTransitionError(Exception):

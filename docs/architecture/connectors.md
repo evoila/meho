@@ -62,7 +62,7 @@ class Connector(ABC):
 
 Three required methods (`fingerprint` / `probe` / `execute`) plus two **non-abstract** topology hooks (G9.1-T2 #449). The topology hooks ship base-class defaults so every v1 subclass (VaultConnector #244, KubernetesConnector skeleton #321) keeps working without code change; per-product overrides land in the G3.x Initiatives.
 
-**Op-id namespace** is `<product>.<resource>.<verb>` — e.g., `vsphere.vm.list`, `vault.kv.read`, `bind9.zone.create`.
+**Op-id namespace** depends on source kind: typed ops use `<product>.<resource>.<verb>` (e.g., `vault.kv.read`, `bind9.zone.create`), while ingested ops use `<METHOD>:<path>` (e.g., `GET:/api/vcenter/cluster`). The `Connector.execute` docstring at [`base.py`](../../backend/src/meho_backplane/connectors/base.py) is the source-of-truth contract.
 
 The G9.1-T3 refresh service calls `discover_topology(target)` on demand + on schedule and diffs the returned `TopologyHints` against `graph_node` + `graph_edge` rows for the same `(tenant_id, target_id)`. The G9.1-T6 `meho targets discover` verb calls `list_candidates(seed_target)` and surfaces candidates to the operator — auto-registration is intentionally out of scope.
 

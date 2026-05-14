@@ -50,6 +50,12 @@ type AuthedClient struct {
 	store   auth.TokenStore
 	service string
 	user    string
+
+	// backplaneURL and httpClient are stored for the hand-written
+	// targets/retrieve methods (doGet / doPost) that are not yet
+	// covered by the oapi-codegen generated surface.
+	backplaneURL string
+	httpClient   *http.Client
 }
 
 // AuthedClientOptions configures NewAuthedClient. Every field has a
@@ -141,6 +147,8 @@ func NewAuthedClient(_ context.Context, backplaneURL string, opts AuthedClientOp
 		store:               store,
 		service:             service,
 		user:                user,
+		backplaneURL:        backplaneURL,
+		httpClient:          httpClient,
 	}
 	box.onRefresh = authed.persistRefresh
 	return authed, nil

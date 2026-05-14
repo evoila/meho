@@ -52,12 +52,6 @@ type CallOperationBody struct {
 	Target      *map[string]interface{} `json:"target"`
 }
 
-// ConnectorExecRequest Request body for connector operation dispatch.
-type ConnectorExecRequest struct {
-	Params *map[string]interface{} `json:"params,omitempty"`
-	Target string                  `json:"target"`
-}
-
 // DbStatus Database migration status.
 //
 // “migrated“ is “True“ when the DB-migration-state probe reports
@@ -332,12 +326,6 @@ type TargetUpdate struct {
 	VpnRequired *bool                   `json:"vpn_required"`
 }
 
-// UnknownOpError 400 response body when the connector doesn't know the requested op.
-type UnknownOpError struct {
-	Error    string   `json:"error"`
-	KnownOps []string `json:"known_ops"`
-	OpId     string   `json:"op_id"`
-}
 
 // ValidationError defines model for ValidationError.
 type ValidationError struct {
@@ -370,11 +358,6 @@ type VaultStatus struct {
 	Detail    *string `json:"detail"`
 	Reachable bool    `json:"reachable"`
 	ReadOk    bool    `json:"read_ok"`
-}
-
-// ExecuteOpApiV1ConnectorsProductOpIdPostParams defines parameters for ExecuteOpApiV1ConnectorsProductOpIdPost.
-type ExecuteOpApiV1ConnectorsProductOpIdPostParams struct {
-	Authorization *string `json:"authorization,omitempty"`
 }
 
 // FeedEndpointApiV1FeedGetParams defines parameters for FeedEndpointApiV1FeedGet.
@@ -460,9 +443,6 @@ type ProbeTargetApiV1TargetsNameProbePostParams struct {
 type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
-
-// ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody defines body for ExecuteOpApiV1ConnectorsProductOpIdPost for application/json ContentType.
-type ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody = ConnectorExecRequest
 
 // PostCallApiV1OperationsCallPostJSONRequestBody defines body for PostCallApiV1OperationsCallPost for application/json ContentType.
 type PostCallApiV1OperationsCallPostJSONRequestBody = CallOperationBody
@@ -682,11 +662,6 @@ type ClientInterface interface {
 	// AuthConfigApiV1AuthConfigGet request
 	AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// ExecuteOpApiV1ConnectorsProductOpIdPostWithBody request with any body
-	ExecuteOpApiV1ConnectorsProductOpIdPostWithBody(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
-
-	ExecuteOpApiV1ConnectorsProductOpIdPost(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
-
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -773,30 +748,6 @@ func (c *Client) ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx
 
 func (c *Client) AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAuthConfigApiV1AuthConfigGetRequest(c.Server)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) ExecuteOpApiV1ConnectorsProductOpIdPostWithBody(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody(c.Server, product, opId, params, contentType, body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
-}
-
-func (c *Client) ExecuteOpApiV1ConnectorsProductOpIdPost(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewExecuteOpApiV1ConnectorsProductOpIdPostRequest(c.Server, product, opId, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -1135,75 +1086,6 @@ func NewAuthConfigApiV1AuthConfigGetRequest(server string) (*http.Request, error
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewExecuteOpApiV1ConnectorsProductOpIdPostRequest calls the generic ExecuteOpApiV1ConnectorsProductOpIdPost builder with application/json body
-func NewExecuteOpApiV1ConnectorsProductOpIdPostRequest(server string, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody(server, product, opId, params, "application/json", bodyReader)
-}
-
-// NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody generates requests for ExecuteOpApiV1ConnectorsProductOpIdPost with any type of body
-func NewExecuteOpApiV1ConnectorsProductOpIdPostRequestWithBody(server string, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "product", runtime.ParamLocationPath, product)
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/api/v1/connectors/%s/%s", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	if params != nil {
-
-		if params.Authorization != nil {
-			var headerParam0 string
-
-			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
-			if err != nil {
-				return nil, err
-			}
-
-			req.Header.Set("authorization", headerParam0)
-		}
-
 	}
 
 	return req, nil
@@ -2199,11 +2081,6 @@ type ClientWithResponsesInterface interface {
 	// AuthConfigApiV1AuthConfigGetWithResponse request
 	AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error)
 
-	// ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse request with any body
-	ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error)
-
-	ExecuteOpApiV1ConnectorsProductOpIdPostWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error)
-
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
@@ -2324,30 +2201,6 @@ func (r AuthConfigApiV1AuthConfigGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type ExecuteOpApiV1ConnectorsProductOpIdPostResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *OperationResult
-	JSON400      *UnknownOpError
-	JSON422      *HTTPValidationError
-}
-
-// Status returns HTTPResponse.Status
-func (r ExecuteOpApiV1ConnectorsProductOpIdPostResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r ExecuteOpApiV1ConnectorsProductOpIdPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -2768,23 +2621,6 @@ func (c *ClientWithResponses) AuthConfigApiV1AuthConfigGetWithResponse(ctx conte
 	return ParseAuthConfigApiV1AuthConfigGetResponse(rsp)
 }
 
-// ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse request with arbitrary body returning *ExecuteOpApiV1ConnectorsProductOpIdPostResponse
-func (c *ClientWithResponses) ExecuteOpApiV1ConnectorsProductOpIdPostWithBodyWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error) {
-	rsp, err := c.ExecuteOpApiV1ConnectorsProductOpIdPostWithBody(ctx, product, opId, params, contentType, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse(rsp)
-}
-
-func (c *ClientWithResponses) ExecuteOpApiV1ConnectorsProductOpIdPostWithResponse(ctx context.Context, product string, opId string, params *ExecuteOpApiV1ConnectorsProductOpIdPostParams, body ExecuteOpApiV1ConnectorsProductOpIdPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error) {
-	rsp, err := c.ExecuteOpApiV1ConnectorsProductOpIdPost(ctx, product, opId, params, body, reqEditors...)
-	if err != nil {
-		return nil, err
-	}
-	return ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse(rsp)
-}
-
 // FeedEndpointApiV1FeedGetWithResponse request returning *FeedEndpointApiV1FeedGetResponse
 func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error) {
 	rsp, err := c.FeedEndpointApiV1FeedGet(ctx, params, reqEditors...)
@@ -3042,46 +2878,6 @@ func ParseAuthConfigApiV1AuthConfigGetResponse(rsp *http.Response) (*AuthConfigA
 			return nil, err
 		}
 		response.JSON200 = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse parses an HTTP response from a ExecuteOpApiV1ConnectorsProductOpIdPostWithResponse call
-func ParseExecuteOpApiV1ConnectorsProductOpIdPostResponse(rsp *http.Response) (*ExecuteOpApiV1ConnectorsProductOpIdPostResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &ExecuteOpApiV1ConnectorsProductOpIdPostResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OperationResult
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
-		var dest UnknownOpError
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON400 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
-		var dest HTTPValidationError
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON422 = &dest
 
 	}
 

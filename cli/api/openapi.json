@@ -727,94 +727,6 @@
         }
       }
     },
-    "/api/v1/connectors/{product}/{op_id}": {
-      "post": {
-        "tags": [
-          "connectors"
-        ],
-        "summary": "Execute Op",
-        "description": "Dispatch an operation to the named connector.\n\nLooks up the connector by product slug, builds a pre-G0.3 target stub,\nand delegates to ``connector.execute(target, op_id, params)``. Returns\nthe ``OperationResult`` as JSON on success. Returns 404 for an unknown\nproduct and 400 for an unknown op-id (with the known ops list in the\nerror body so operators can enumerate what the connector supports).",
-        "operationId": "execute_op_api_v1_connectors__product___op_id__post",
-        "parameters": [
-          {
-            "name": "product",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Product"
-            }
-          },
-          {
-            "name": "op_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Op Id"
-            }
-          },
-          {
-            "name": "authorization",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true,
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConnectorExecRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OperationResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Unknown operation for this connector",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UnknownOpError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated or expired JWT"
-          },
-          "404": {
-            "description": "Unknown connector product"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/operations/groups": {
       "get": {
         "tags": [
@@ -1239,26 +1151,6 @@
         "title": "CallOperationBody",
         "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution)."
       },
-      "ConnectorExecRequest": {
-        "properties": {
-          "target": {
-            "type": "string",
-            "title": "Target"
-          },
-          "params": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Params",
-            "default": {}
-          }
-        },
-        "type": "object",
-        "required": [
-          "target"
-        ],
-        "title": "ConnectorExecRequest",
-        "description": "Request body for connector operation dispatch."
-      },
       "DailyUsageBucket": {
         "properties": {
           "date": {
@@ -1554,58 +1446,6 @@
         "title": "OperationDescriptor",
         "description": "Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.\n\nReturned by :func:`describe_descriptor` (and the\n``GET /api/v1/operations/{descriptor_id}`` route). ``embedding`` is\ndeliberately omitted \u2014 it's a 384-dim float vector that adds wire\nbulk with no operator value at the descriptor-inspection layer.\n``llm_instructions`` IS included; the route is gated on\n``tenant_admin`` so the per-op agent prompt stays out of read-only\noperators' hands."
       },
-      "OperationResult": {
-        "properties": {
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "op_id": {
-            "type": "string",
-            "title": "Op Id"
-          },
-          "result": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "items": {},
-                "type": "array"
-              }
-            ],
-            "nullable": true,
-            "title": "Result"
-          },
-          "error": {
-            "type": "string",
-            "nullable": true,
-            "title": "Error"
-          },
-          "duration_ms": {
-            "type": "number",
-            "title": "Duration Ms"
-          },
-          "handle": {
-            "$ref": "#/components/schemas/ResultHandle",
-            "nullable": true
-          },
-          "extras": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Extras"
-          }
-        },
-        "type": "object",
-        "required": [
-          "status",
-          "op_id",
-          "duration_ms"
-        ],
-        "title": "OperationResult",
-        "description": "Connector op execution result.\n\n``handle`` is populated by JSONFlux-aware reducers when the raw response\nis set-shaped and large enough to spill out-of-band; v0.2's pass-through\nreducer always leaves it ``None``. Consumers should treat\n``result + handle`` as a tagged union: ``result`` carries either the raw\npayload (no reduction) or the reduced summary (reduction happened), and\n``handle is not None`` is the signal that the **full** payload is\naddressable via the reducer's backing store rather than inlined here."
-      },
       "OperatorIdentity": {
         "properties": {
           "sub": {
@@ -1729,52 +1569,6 @@
         ],
         "title": "QueryResult",
         "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
-      },
-      "ResultHandle": {
-        "properties": {
-          "handle_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Handle Id"
-          },
-          "summary_md": {
-            "type": "string",
-            "title": "Summary Md"
-          },
-          "schema_": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Schema",
-            "description": "JSON Schema (Draft 2020-12) of the underlying payload shape."
-          },
-          "total_rows": {
-            "type": "integer",
-            "nullable": true,
-            "title": "Total Rows"
-          },
-          "sample_rows": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "nullable": true,
-            "title": "Sample Rows"
-          },
-          "ttl_seconds": {
-            "type": "integer",
-            "title": "Ttl Seconds"
-          }
-        },
-        "type": "object",
-        "required": [
-          "handle_id",
-          "summary_md",
-          "schema_",
-          "ttl_seconds"
-        ],
-        "title": "ResultHandle",
-        "description": "Reference to a set-shaped payload stored out-of-band (MinIO / S3 / \u2026).\n\nJSONFlux contract per v0.1-spec L294-311. The v0.2 default reducer\n(:class:`~meho_backplane.operations.reducer.PassThroughReducer`) **never**\nproduces a handle \u2014 the field on :class:`OperationResult` stays ``None``\non every successful dispatch in v0.2. Real reduction lands in a separate\nInitiative once the first generic-ingested connectors produce real\nresponse payloads to calibrate against; that work populates the handle\non >50-row / >4 KB set-shaped responses, stores the full payload in an\naddressable backing store (MinIO/S3/Valkey), and ships the\n``result_query`` / ``result_aggregate`` meta-tools that read it back.\n\n``schema_`` (trailing underscore) is the JSON Schema of the underlying\npayload \u2014 the trailing underscore avoids collision with Pydantic's own\ndeprecated ``BaseModel.schema()`` API and is serialised as ``schema_``\nin the wire format. ``model_config = ConfigDict(frozen=True)`` plus the\n:class:`types.MappingProxyType` wrapping in :meth:`_freeze_nested` so\ncallers can't mutate a handle after the reducer hands it back \u2014 neither\nat the field level nor through the nested ``schema_`` dict or\n``sample_rows`` list (mirrors the sibling-models'\n:attr:`FingerprintResult.extras` / :attr:`OperationResult.extras`\npattern)."
       },
       "RetrievalHit": {
         "properties": {
@@ -2287,33 +2081,6 @@
         "type": "object",
         "title": "Thresholds",
         "description": "Per-metric green-band thresholds for a verdict computation.\n\nFrozen so the threshold object passed into :func:`verdict` cannot\nbe mutated mid-run (a stale or rewritten threshold mid-eval would\ninvalidate every subsequent verdict and silently shift the CI\ngate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,\nnot stored \u2014 keeping it derived means the contract \"yellow is 70%\nof green\" can't drift between green-threshold customisation and\nthe yellow boundary.\n\nDefaults match the Initiative #373 / Task #441 contract; tests and\nfuture re-tunings construct ``Thresholds(...)`` with explicit\nvalues."
-      },
-      "UnknownOpError": {
-        "properties": {
-          "error": {
-            "type": "string",
-            "title": "Error"
-          },
-          "op_id": {
-            "type": "string",
-            "title": "Op Id"
-          },
-          "known_ops": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Known Ops"
-          }
-        },
-        "type": "object",
-        "required": [
-          "error",
-          "op_id",
-          "known_ops"
-        ],
-        "title": "UnknownOpError",
-        "description": "400 response body when the connector doesn't know the requested op."
       },
       "UsageReport": {
         "properties": {

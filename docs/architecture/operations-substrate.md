@@ -100,9 +100,9 @@ Keyword-only — three positional strings would invite ordering bugs. Duplicate 
 
 ### Two registry layers
 
-The pre-G0.6 single-key `dict[product, type[Connector]]` lives on as the **v1 layer**. It's still consulted by the chassis `POST /api/v1/connectors/{product}/{op_id}` route and a few startup probes; v2-aware code resolves through the new layer.
+The pre-G0.6 single-key `dict[product, type[Connector]]` lives on as the **v1 layer** for `get_connector(product)` callers — the Kubernetes resolver tests, the `/api/v1/health` Vault federation probe shape, and a few startup checks. The chassis dispatch route it originally backed (`POST /api/v1/connectors/{product}/{op_id}`) was deprecated and removed by T11 (#412); v2-aware code resolves through the new layer.
 
-The shipped v1 entry point `register_connector(product, cls)` dual-writes to **both** tables — v2 gets `(product, "", "")`. Existing v1 registrations participate in v2 resolution without code change. The `KubernetesConnector` still calls `register_connector("k8s", …)` for backward compatibility with the chassis route during the deprecation window; the `VaultConnector` does **not** (its `(version="1.x", impl_id="vault")` v2 entry would race the v1 entry through the resolver tie-break ladder).
+The shipped v1 entry point `register_connector(product, cls)` dual-writes to **both** tables — v2 gets `(product, "", "")`. Existing v1 registrations participate in v2 resolution without code change. The `KubernetesConnector` still calls `register_connector("k8s", …)` for backward compatibility with the `get_connector("k8s")` callers above; the `VaultConnector` does **not** (its `(version="1.x", impl_id="vault")` v2 entry would race the v1 entry through the resolver tie-break ladder).
 
 ### `resolve_connector(target)` — the tie-break ladder
 
@@ -131,7 +131,7 @@ class Connector(ABC):
 
 Class-level (not instance-level): the resolver consults them on the class itself before the registry creates any instance. PEP 440 specifier grammar via `packaging.specifiers.SpecifierSet` backs the range comparison.
 
-The role of `execute()` post-G0.6 — the original ABC method `Connector.execute(target, op_id, params) -> OperationResult` shipped in G0.2 — is now a **dispatcher shim** in both refactored connectors. Shipped `VaultConnector.execute()` and `KubernetesConnector.execute()` thin-wrap `dispatch(...)` so the chassis route at `/api/v1/connectors/{product}/{op_id}` keeps working through the G0.6 → G0.7 transition. T11 (#412) deprecates the chassis route in favour of `POST /api/v1/operations/call`.
+The role of `execute()` post-G0.6 — the original ABC method `Connector.execute(target, op_id, params) -> OperationResult` shipped in G0.2 — is now a **dispatcher shim** in both refactored connectors. Shipped `VaultConnector.execute()` and `KubernetesConnector.execute()` thin-wrap `dispatch(...)`. The original chassis route at `/api/v1/connectors/{product}/{op_id}` that motivated the shim was deprecated and removed by T11 (#412); `POST /api/v1/operations/call` is the canonical dispatch surface. `execute()` stays as the typed-connector branch of the dispatcher (`source_kind == "typed"`) — composite handlers and code paths that build their own `OperationResult` continue to call `connector.execute(target, op_id, params)` directly.
 
 ## Operation registration paths
 

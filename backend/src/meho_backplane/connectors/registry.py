@@ -6,10 +6,14 @@
 Two registry layers coexist:
 
 * **v1** — single-key ``dict[product, type[Connector]]`` shipped in G0.2-T2
-  (#241). Used by lifespan eager-import and by the existing
-  ``/api/v1/connectors/{product}/{op_id}`` dispatch route until G0.6 lands
-  the v2 dispatcher. Public surface: :func:`register_connector`,
-  :func:`get_connector`, :func:`all_connectors`.
+  (#241). Retained for ``get_connector(product)`` callers (Kubernetes
+  resolver tests, the ``/api/v1/health`` Vault federation probe shape,
+  and a few startup checks). The chassis dispatch route it originally
+  backed (``POST /api/v1/connectors/{product}/{op_id}``) was deprecated
+  and removed by G0.6-T11 (#412); the canonical dispatch surface is
+  now ``POST /api/v1/operations/call`` against the v2 layer. Public
+  surface: :func:`register_connector`, :func:`get_connector`,
+  :func:`all_connectors`.
 * **v2** — three-tuple key ``dict[(product, version, impl_id), type[Connector]]``
   added in G0.6-T2 (#393) so multiple implementations per product can
   coexist (e.g. ``vmware-pyvmomi-7.0`` and ``vmware-rest-9.0``). Public

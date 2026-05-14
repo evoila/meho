@@ -82,15 +82,6 @@ func newRootCmd() *cobra.Command {
 	// PRs.
 	root.AddCommand(retrieval.NewRootCmd())
 
-	// G0.2-T6 (#245) — static connector dispatch commands for the
-	// known product set. v0.2 ships vault only; v0.2.next replaces
-	// this with manifest-driven discovery. Registered before
-	// registerDynamicSubcommands so the backplane manifest cannot
-	// shadow a built-in connector name.
-	for _, connCmd := range newConnectorCommands() {
-		root.AddCommand(connCmd)
-	}
-
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists
 	// the full set of operations the backplane advertises. v0.1

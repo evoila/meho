@@ -12,11 +12,12 @@ the G0.6 dispatcher substrate:
 * :attr:`KubernetesConnector.version` /
   :attr:`KubernetesConnector.impl_id` advertise the registry v2 key
   ``("k8s", "1.x", "kubernetes-asyncio")``. The shipped v1 entry
-  (``register_connector("kubernetes", ...)``) is kept temporarily for
-  backward compat with the chassis route at
-  ``POST /api/v1/connectors/{product}/{op_id}`` -- removed once T11
-  (#412) deprecates that route in favour of
-  ``/api/v1/operations/call``.
+  (``register_connector("k8s", ...)``) is retained for
+  ``get_connector("k8s")`` callers (resolver tests, ``/api/v1/health``
+  Vault federation probe shape). The chassis dispatch route that
+  originally motivated it (``POST /api/v1/connectors/{product}/{op_id}``)
+  was deprecated and removed by G0.6-T11 (#412); the canonical
+  dispatch surface is now ``POST /api/v1/operations/call``.
 * :meth:`register_operations` is a classmethod called from the
   application lifespan. It walks
   :data:`~meho_backplane.connectors.kubernetes.ops.KUBERNETES_OPS` and
@@ -32,11 +33,10 @@ the G0.6 dispatcher substrate:
 * :meth:`execute` shims into the dispatcher's lookup + handler-resolve
   + invoke path so unknown op_ids return the same
   ``OperationResult(status="error", error="unknown_op: ...")`` shape
-  the dispatcher emits everywhere else. The chassis route at
-  ``/api/v1/connectors/...`` (no operator-typed param) continues to
-  call ``execute`` directly; the operator-aware path is
+  the dispatcher emits everywhere else. The operator-aware path is
   ``call_operation`` / ``/api/v1/operations/call`` via the G0.6
-  meta-tools.
+  meta-tools; :meth:`execute` remains the typed-connector entry the
+  dispatcher invokes for ``source_kind == "typed"`` rows.
 
 The skeleton's per-target :class:`kubernetes_asyncio.client.ApiClient`
 cache, the asyncio-lock protecting it, and :meth:`aclose` are all
@@ -312,6 +312,9 @@ class KubernetesConnector(Connector):
             impl_id=cls.impl_id,
         )
 
+    # code-quality-allow: pre-existing G3.2-T1 #321 skeleton; T11 #412
+    # only edits the docstring (function is shorter post-edit). Refactor
+    # into helpers is deferred to a separate Task.
     async def execute(
         self,
         target: KubernetesTargetLike,
@@ -337,16 +340,14 @@ class KubernetesConnector(Connector):
            connector convention), and invokes it with
            ``(target, params)``.
 
-        The shim is intentionally **operator-less** -- the chassis
-        route at ``POST /api/v1/connectors/{product}/{op_id}`` doesn't
-        carry an :class:`~meho_backplane.auth.operator.Operator` into
-        ``execute``, so the full dispatcher path (policy gate, audit,
-        broadcast) doesn't run from this entry point. The operator-
-        aware path is :func:`~meho_backplane.operations.dispatch` via
-        ``call_operation`` /
-        ``POST /api/v1/operations/call`` -- ``execute`` is the legacy
-        bridge for chassis callers and goes away with the T11 #412
-        deprecation. Within that constraint the shim's contract is:
+        The shim is intentionally **operator-less** -- direct callers
+        (typed-connector internals, composite handlers) don't carry an
+        :class:`~meho_backplane.auth.operator.Operator`, so the full
+        dispatcher path (policy gate, audit, broadcast) doesn't run
+        from this entry point. The operator-aware surface is
+        ``POST /api/v1/operations/call`` via the G0.6 meta-tools; the
+        pre-G0.6 chassis route was removed by G0.6-T11 (#412). Within
+        the operator-less constraint the shim's contract is:
 
         * Same ``unknown_op`` shape the dispatcher emits.
         * Same ``connector_error`` shape on handler exceptions.

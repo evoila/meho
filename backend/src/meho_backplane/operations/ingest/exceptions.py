@@ -33,6 +33,8 @@ Both classes inherit from :class:`Exception` directly (not
 
 from __future__ import annotations
 
+from uuid import UUID
+
 __all__ = ["ConnectorNotFoundError", "InvalidStateTransitionError"]
 
 
@@ -95,7 +97,7 @@ class ConnectorNotFoundError(Exception):
         self,
         *,
         connector_id: str,
-        tenant_id: object,
+        tenant_id: UUID | None,
     ) -> None:
         self.connector_id = connector_id
         self.tenant_id = tenant_id

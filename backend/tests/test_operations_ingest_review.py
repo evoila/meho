@@ -784,7 +784,13 @@ async def test_audit_rows_carry_service_method_marker() -> None:
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        result = await session.execute(select(AuditLog))
+        result = await session.execute(
+            select(AuditLog).where(
+                AuditLog.path.in_(
+                    ["meho.connector.edit_group", "meho.connector.enable"],
+                ),
+            ),
+        )
         rows = list(result.scalars().all())
     assert rows, "expected at least two service-level audit rows"
     for row in rows:

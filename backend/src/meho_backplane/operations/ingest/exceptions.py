@@ -3,9 +3,9 @@
 
 """Domain exceptions for the G0.7 spec-ingestion pipeline.
 
-Two unrelated families of failure modes share this module so T1
-(OpenAPI parser, #401) and T4 (review-queue state machine, #402)
-agree on an import path:
+Three unrelated families of failure modes share this module so T1
+(OpenAPI parser, #401), T2 (registration helper, #403), and T4
+(review-queue state machine, #402) agree on an import path:
 
 Parser failures (T1 #401) — raised from
 :func:`~meho_backplane.operations.ingest.parse_openapi`:
@@ -18,6 +18,19 @@ Parser failures (T1 #401) — raised from
 * :class:`InvalidSchemaError` — a referenced JSON Schema is
   structurally broken (dangling ``$ref``, component-path drill-down,
   non-list parameters).
+
+Registration failures (T2 #403) — raised from
+:func:`~meho_backplane.operations.ingest.register_ingested_operations`:
+
+* :class:`OpIdCollision` — two operations in a single ingest batch
+  carry the same ``op_id``. The natural key
+  ``(product, version, impl_id, op_id)`` is unique by partial index
+  on ``endpoint_descriptor``; merging two specs that happen to
+  expose the same ``op_id`` would silently UPDATE the first row
+  with the second's payload, which is never what the operator
+  wants. The exception names every colliding ``op_id`` so the
+  operator can decide whether to rename one (out-of-scope for v0.2)
+  or skip the offending spec pair.
 
 Review-queue failures (T4 #402) — raised from
 :class:`~meho_backplane.operations.ingest.ReviewService`:
@@ -41,11 +54,11 @@ Review-queue failures (T4 #402) — raised from
   enumerate another tenant's connectors by probing for ``HTTP 404``
   vs ``HTTP 403`` boundaries.
 
-The parser classes inherit from :class:`ValueError` so callers that
-already catch parsing errors via ``except ValueError`` keep working;
-the review-queue classes inherit from :class:`Exception` directly so
-callers can ``except`` them precisely without catching unrelated
-runtime faults.
+The parser and registration classes inherit from :class:`ValueError`
+so callers that already catch parsing errors via
+``except ValueError`` keep working; the review-queue classes inherit
+from :class:`Exception` directly so callers can ``except`` them
+precisely without catching unrelated runtime faults.
 """
 
 from __future__ import annotations
@@ -57,6 +70,7 @@ __all__ = [
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
+    "OpIdCollision",
     "UnsupportedSpecError",
 ]
 
@@ -89,6 +103,47 @@ class InvalidSchemaError(ValueError):
     a structurally unsupported shape (component-path drill-down
     refs, for example).
     """
+
+
+class OpIdCollision(ValueError):  # noqa: N818 -- Task #403 API contract pins this name verbatim
+    """Two operations in one ingest batch carry the same ``op_id``.
+
+    Attributes
+    ----------
+    op_ids:
+        The colliding ``op_id`` values, sorted for stable error
+        messages and diff-friendly test assertions. At least two
+        entries — a one-element list would imply no collision.
+    product, version, impl_id:
+        The connector coordinates being ingested. Surfaced on the
+        exception so the operator-facing CLI / API can render a
+        complete "couldn't ingest spec X into connector Y because Z"
+        message without re-threading the connector identity from
+        the call site.
+
+    Inherits from :class:`ValueError` so callers that already catch
+    parser-shaped errors via ``except ValueError`` keep working
+    without a targeted ``except OpIdCollision``. The targeted class
+    still exists so tests can assert on the precise shape and so the
+    CLI layer can map it onto a structured 400 detail field.
+    """
+
+    def __init__(
+        self,
+        *,
+        op_ids: list[str],
+        product: str,
+        version: str,
+        impl_id: str,
+    ) -> None:
+        self.op_ids = sorted(op_ids)
+        self.product = product
+        self.version = version
+        self.impl_id = impl_id
+        super().__init__(
+            f"op_id collision while ingesting into "
+            f"({product!r}, {version!r}, {impl_id!r}): {self.op_ids!r}"
+        )
 
 
 class InvalidStateTransitionError(Exception):

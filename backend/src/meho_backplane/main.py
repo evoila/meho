@@ -48,6 +48,7 @@ from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
+from meho_backplane.api.v1.connectors import router as api_v1_connectors_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
@@ -242,6 +243,10 @@ app.include_router(api_v1_retrieve_router)
 # from the JWT's tenant_id claim so cross-tenant subscription is
 # impossible by construction.
 app.include_router(api_v1_feed_router)
+# G0.2-T6 (#245) -- generic connector dispatch at POST /api/v1/connectors/{product}/{op_id}.
+# Auth-required (verify_jwt_and_bind); the operator's JWT is forwarded
+# to the connector's execute() as part of the pre-G0.3 target stub.
+app.include_router(api_v1_connectors_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

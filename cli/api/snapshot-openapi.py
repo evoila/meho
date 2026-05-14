@@ -36,20 +36,25 @@ from typing import Any
 def _downgrade_anyof_null(node: Any) -> Any:
     """Recursively rewrite OpenAPI 3.1 nullable anyOf patterns to 3.0 nullable."""
     if isinstance(node, dict):
-        # anyOf collapse: [<schema>, {"type": "null"}] → schema with nullable: true.
+        # anyOf collapse: remove {"type": "null"} branches and add nullable:true.
+        #   [<schema>, {"type":"null"}]           → schema + nullable:true  (simple)
+        #   [s1, s2, ..., {"type":"null"}]        → {anyOf:[s1,s2,...], nullable:true}
         any_of = node.get("anyOf")
-        if isinstance(any_of, list) and len(any_of) == 2:
+        if isinstance(any_of, list):
             null_branches = [s for s in any_of if isinstance(s, dict) and s.get("type") == "null"]
             non_null = [s for s in any_of if not (isinstance(s, dict) and s.get("type") == "null")]
-            if len(null_branches) == 1 and len(non_null) == 1:
-                replacement = dict(non_null[0])
-                replacement["nullable"] = True
-                # Preserve sibling keys (title, description, default, etc.).
-                for key, value in node.items():
-                    if key == "anyOf":
-                        continue
-                    # Don't overwrite a copied key from the surviving branch.
-                    replacement.setdefault(key, value)
+            if null_branches:
+                sibling = {k: v for k, v in node.items() if k != "anyOf"}
+                if len(non_null) == 1:
+                    # Simple: collapse to single schema + nullable.
+                    replacement = dict(non_null[0])
+                    replacement["nullable"] = True
+                    for key, value in sibling.items():
+                        replacement.setdefault(key, value)
+                else:
+                    # Complex: keep anyOf without null, add nullable at parent.
+                    replacement = {"anyOf": non_null, "nullable": True}
+                    replacement.update(sibling)
                 return _downgrade_anyof_null(replacement)
         return {k: _downgrade_anyof_null(v) for k, v in node.items()}
     if isinstance(node, list):

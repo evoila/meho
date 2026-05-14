@@ -167,6 +167,17 @@ this stage it exposes:
   so the audit row at session end records a clean 200 close.
   Subscribers (T5 CLI watch #311, T6 MCP resource #312, future
   Slack mirror G6.2) consume the same SSE wire shape.
+* Connector dispatch (G0.2-T6 #245) —
+  `src/meho_backplane/api/v1/connectors.py` exposes
+  `POST /api/v1/connectors/{product}/{op_id}`. The route resolves
+  `product` against the connector registry, builds a pre-G0.3 target
+  stub from the operator JWT, and delegates to
+  `connector.execute(target, op_id, params)`. HTTP contract: 404 for
+  unknown product, 400 for unknown op-id (with `known_ops` list), 401
+  for missing/expired JWT, 200 for all other outcomes including
+  connector-side errors (callers inspect `OperationResult.status`).
+  The `_TargetStub` placeholder is replaced with a real
+  `resolve_target` call once G0.3 (#224) lands.
 * Persistence layer (Task #27) — `src/meho_backplane/db/` houses the
   SQLAlchemy 2.x async engine (`engine.py`), the per-request
   session-factory dependency (`get_session`), and the

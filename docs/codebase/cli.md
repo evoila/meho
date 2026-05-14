@@ -541,6 +541,43 @@ the present-refresh-token branch isn't yet exercised under unit
 test because mocking Keycloak's well-known + token-exchange is
 heavyweight — that path is covered by the G2.8 integration suite).
 
+## Connector dispatch (`meho <product> <op>`, G0.2-T6 #245)
+
+`connector.go` registers one cobra subcommand per known connector product
+at startup. v0.2 ships `vault` with `kv.read`. Each product command has one
+child per operation; child commands use `DisableFlagParsing = true` so
+arbitrary `--<key> <value>` pairs flow through to the backplane as operation
+params without declaring them in advance.
+
+### Argument parsing
+
+`parseOpArgs` handles the raw arg slice cobra passes. Reserved flags:
+
+- `--target <slug>` — connector target to execute against (required).
+- `--json` — emit raw JSON to stdout instead of human output.
+- `--backplane <url>` — override the backplane URL.
+- `--params @<file.json>` — load params from a JSON file.
+- `--params '<json>'` — inline JSON params object.
+- `--<key> <value>` — shorthand for `{"key": "val"}` in params.
+
+### HTTP dispatch
+
+`runConnectorOp` calls `POST /api/v1/connectors/{product}/{op_id}` via the
+typed `AuthedClient` (same bearer-injection + refresh-on-401 machinery that
+`meho status` uses). The response is rendered:
+
+- `status == "ok"` → JSON `result` field printed (or full response with `--json`).
+- `status == "error"` → structured error message from the connector.
+- HTTP 400 (unknown op-id) → error with known_ops list from backplane.
+- HTTP 404 (unknown product) → "unknown connector product" error.
+- HTTP 401 → "auth_expired" with `meho login` hint.
+
+### Known connectors
+
+`knownConnectors` in `connector.go` is the v0.2 product registry. To add a
+connector before manifest-driven discovery lands: append to `knownConnectors`
+and the root command automatically grows the new product subtree.
+
 ## Server-driven discovery (`internal/discovery/`)
 
 Goal #11 §5 mandates server-driven `--help`: adding an operation to

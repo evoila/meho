@@ -570,14 +570,40 @@ jobs:
           EOF
 
           # ─── Phase B — chaos: kill the broadcast pod mid-load ─────
+          # Capture the victim pod name BEFORE the kill so the chaos
+          # subprocess deletes by name, not by label. A label-selector
+          # miss returns non-zero from ``kubectl delete``; we want
+          # the chaos arm to fail loudly in that case, not silently
+          # no-op into a false-positive PASS on the recovery probe
+          # below (review B1 on this PR).
+          VICTIM_POD="$(kubectl -n meho-test get pod \
+            -l app.kubernetes.io/name=broadcast \
+            -o jsonpath='{.items[0].metadata.name}')"
+          if [ -z "$VICTIM_POD" ]; then
+            echo "FAIL: no broadcast pod found to kill"
+            exit 1
+          fi
+          echo "chaos victim: $VICTIM_POD"
+
           # Background subprocess fires at t=5s so it lands while
-          # the load runner is mid-stream.
+          # the load runner is mid-stream. AC #2 condition 1 — "pod
+          # returns to Ready within 30s of the kill" — is enforced
+          # INSIDE this subprocess so the 30s timer is anchored at
+          # the kill, not at the rollout-status invocation. A
+          # post-load rollout-status check would start the timer at
+          # the wrong point (the new pod could be Ready 5s after
+          # kill and the post-load check 25s later would still pass,
+          # but the contract is "30s from kill" specifically).
           (
             sleep 5
-            echo "chaos: killing broadcast pod..."
-            kubectl -n meho-test delete pod \
-              -l app.kubernetes.io/name=broadcast \
-              --grace-period=0 --wait=false
+            echo "chaos: killing broadcast pod $VICTIM_POD..."
+            # --wait=true (the default) blocks until the API server
+            # has removed the Pod. That's the synchronization point
+            # we anchor the 30s SLA timer at.
+            kubectl -n meho-test delete pod "$VICTIM_POD" \
+              --grace-period=0 --wait=true
+            kubectl -n meho-test rollout status \
+              deployment/meho-test-broadcast --timeout=30s
           ) &
           CHAOS_PID=$!
 
@@ -590,18 +616,13 @@ jobs:
             --for=jsonpath='{.status.phase}=Succeeded' \
             --timeout=180s
 
-          # Reap the chaos subprocess.
-          wait "$CHAOS_PID" || true
+          # ─── Phase D — reap the chaos subprocess ──────────────────
+          # Dropping ``|| true`` is load-bearing: any chaos-arm
+          # failure (delete miss, rollout-status timeout exceeding
+          # the 30s SLA) now fails the step.
+          wait "$CHAOS_PID"
           echo "load-runner logs:"
           kubectl -n meho-test logs pod/broadcast-load-runner
-
-          # ─── Phase D — AC #2 condition 1: broadcast pod is Ready ──
-          # The Recreate strategy on the broadcast Deployment means
-          # one pod was deleted and one new pod is rolling. Block
-          # until the new pod's readiness probe (XINFO STREAM on
-          # port 6379) clears.
-          kubectl -n meho-test rollout status \
-            deployment/meho-test-broadcast --timeout=60s
 
           # ─── Phase E — AC #2 conditions 2 + 3: XADD + XLEN work ───
           # Spin a second Pod that exercises a single round-trip

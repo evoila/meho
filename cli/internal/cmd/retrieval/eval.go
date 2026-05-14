@@ -60,10 +60,10 @@ type EvalSurfaceResult struct {
 // EvalResult mirrors the backend EvalResult model — the top-level
 // shape returned by POST /api/v1/retrieve/eval.
 type EvalResult struct {
-	RanAt           string              `json:"ran_at"`
-	Surfaces        []EvalSurfaceResult `json:"surfaces"`
-	OverallVerdict  string              `json:"overall_verdict"`
-	Thresholds      json.RawMessage     `json:"thresholds"`
+	RanAt          string              `json:"ran_at"`
+	Surfaces       []EvalSurfaceResult `json:"surfaces"`
+	OverallVerdict string              `json:"overall_verdict"`
+	Thresholds     json.RawMessage     `json:"thresholds"`
 }
 
 // evalRequest is the POST body shape; mirrors the backend EvalRequest.
@@ -93,12 +93,12 @@ type evalRequest struct {
 //   - 4   unexpected response shape
 func newEvalCmd() *cobra.Command {
 	var (
-		surface           string
-		baseline          string
-		saveBaselinePath  string
+		surface             string
+		baseline            string
+		saveBaselinePath    string
 		compareBaselinePath string
-		jsonOut           bool
-		backplaneOverride string
+		jsonOut             bool
+		backplaneOverride   string
 	)
 
 	cmd := &cobra.Command{
@@ -163,7 +163,11 @@ type evalOptions struct {
 func runEval(cmd *cobra.Command, opts evalOptions) error {
 	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(err.Error()), opts.JSONOut)
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			classifyBackplaneError(err),
+			opts.JSONOut,
+		)
 	}
 
 	result, err := postEval(cmd.Context(), backplaneURL, opts)
@@ -286,6 +290,19 @@ func postEvalWithBearer(
 	return client.Do(req)
 }
 
+// errNoBackplaneConfigured wraps auth.ErrConfigNotFound so callers
+// can distinguish "operator never logged in" (→ auth_expired exit
+// code 2 — the right fix is `meho login`) from URL-parse failures
+// (→ unexpected exit code 4 — the right fix is correcting argv).
+// Wrapped via %w so errors.Is(err, auth.ErrConfigNotFound) still
+// matches; the user-facing message points at the actionable fix.
+type errNoBackplaneConfigured struct{ inner error }
+
+func (e *errNoBackplaneConfigured) Error() string {
+	return "no backplane URL configured; run `meho login <url>` first or pass --backplane <url>"
+}
+func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
+
 // resolveBackplane re-implements the host-trimming + parsing rules
 // the cmd package's resolveBackplaneURL applies. We can't import
 // cmd from a subpackage without an import cycle (cmd/root.go grafts
@@ -298,11 +315,30 @@ func resolveBackplane(override string) (string, error) {
 	cfg, err := auth.LoadConfig()
 	if err != nil {
 		if errors.Is(err, auth.ErrConfigNotFound) {
-			return "", errors.New("no backplane URL configured; run `meho login <url>` first or pass --backplane <url>")
+			return "", &errNoBackplaneConfigured{inner: err}
 		}
 		return "", err
 	}
 	return normaliseURL(cfg.BackplaneURL)
+}
+
+// classifyBackplaneError maps a resolveBackplane error to the right
+// output.StructuredError category. The documented exit codes (see
+// runEval header) name 2 = auth_expired vs 3 = unreachable vs 4 =
+// unexpected; collapsing every error to auth_expired (the previous
+// shape) sends operators down the `meho login` path when the actual
+// cause was a typo in --backplane or a stale config file. Classify:
+//
+//   - ErrConfigNotFound (or our wrapper) → auth_expired: operator
+//     hasn't run `meho login` yet, that's exactly the fix.
+//   - everything else (parse errors, file-system errors from
+//     LoadConfig) → unexpected: the cause is operator argv or a
+//     corrupt config, not an expired token.
+func classifyBackplaneError(err error) *output.StructuredError {
+	if errors.Is(err, auth.ErrConfigNotFound) {
+		return output.AuthExpired(err.Error())
+	}
+	return output.Unexpected(err.Error())
 }
 
 // normaliseURL strips trailing slashes + parses the URL to fail
@@ -425,7 +461,7 @@ func diffOneSurface(
 ) []string {
 	out := []string{}
 	for _, pair := range []struct {
-		Name              string
+		Name               string
 		TodayV, BaseV, Eps float64
 	}{
 		{"precision_at_5", t.PrecisionAt5, b.PrecisionAt5, eps.PrecisionAt5},
@@ -453,7 +489,18 @@ func printEvalTable(w io.Writer, r *EvalResult, regressions []string) {
 	for _, s := range r.Surfaces {
 		fmt.Fprintf(w, "%-12s %-7s %10d %10.3f %10.3f %10.3f\n",
 			s.Surface, s.Verdict, s.QueryCount, s.PrecisionAt5, s.MRR, s.Coverage)
-		if s.BaselineKind != nil && s.BaselinePrecisionAt5 != nil {
+		// Guard all four baseline metric pointers: the backend
+		// SurfaceResult model declares each ``baseline_*`` field as
+		// independently nullable, so a partial-population shape (e.g.
+		// only precision_at_5 set) would nil-deref the CLI. The runner
+		// today always populates the trio together via
+		// ``_aggregate_baseline``, but the contract surfaced in the
+		// result model permits any subset — defensive gate keeps the
+		// CLI safe against future partial baselines.
+		if s.BaselineKind != nil &&
+			s.BaselinePrecisionAt5 != nil &&
+			s.BaselineMRR != nil &&
+			s.BaselineCoverage != nil {
 			fmt.Fprintf(w, "%-12s %-7s %10s %10.3f %10.3f %10.3f\n",
 				"  baseline:"+*s.BaselineKind,
 				strDeref(s.BaselineVerdict),

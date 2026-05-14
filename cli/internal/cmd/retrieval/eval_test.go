@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/auth"
 )
 
 // TestDiffEvalResultsNoRegression — identical metrics on every
@@ -211,5 +213,26 @@ func TestErrEvalGateIsSentinel(t *testing.T) {
 	}
 	if errors.Is(errEvalGate, errors.New("other")) {
 		t.Fatalf("errEvalGate should not match arbitrary errors")
+	}
+}
+
+// TestClassifyBackplaneErrorRoutesByCause — ErrConfigNotFound (or
+// any error wrapping it) maps to AuthExpired (exit 2 = the operator
+// needs to run `meho login`). Every other error maps to Unexpected
+// (exit 4 = the cause is operator argv or a corrupt config). The
+// pre-fix shape mapped everything to AuthExpired which sent
+// operators down the `meho login` path even for a typo in
+// `--backplane http:/example`.
+func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
+	wrappedNotFound := &errNoBackplaneConfigured{inner: auth.ErrConfigNotFound}
+	se := classifyBackplaneError(wrappedNotFound)
+	if se == nil || se.Code != "auth_expired" {
+		t.Fatalf("ErrConfigNotFound wrapper should classify as auth_expired; got %+v", se)
+	}
+
+	parseFailure := errors.New("invalid backplane URL")
+	se = classifyBackplaneError(parseFailure)
+	if se == nil || se.Code != "unexpected_response" {
+		t.Fatalf("parse failure should classify as unexpected; got %+v", se)
 	}
 }

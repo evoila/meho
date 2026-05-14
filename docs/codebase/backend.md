@@ -432,6 +432,25 @@ this stage it exposes:
   unit suite skips. Shape #2 (chart-CI integration + Valkey-pod
   restart chaos) follows once chart-CI hardening lands.
 
+* Broadcast chart-CI chaos test (G6.1-T9 shape #2, #433) — a
+  kubectl-orchestrated step in `.github/workflows/chart.yml`'s
+  `helm-test` job that verifies the helm-installed broadcast
+  subchart can carry 1500 XADDs AND recovers from a forced
+  Valkey-pod restart. The test runs entirely in-cluster: one Pod
+  (`broadcast-load-runner`) issues 1500 `XADD` commands via
+  `redis-cli` against the broadcast Service while a background
+  subprocess kills the broadcast Pod mid-run; a second Pod
+  (`broadcast-recovery-probe`) then asserts the AC #2 contract —
+  Deployment returns to Ready within 30 s, post-restart `XADD`
+  succeeds, post-restart `XLEN` returns the new entry. The chart's
+  `save ""` + `appendonly no` config (per the v0.1 ephemeral-streams
+  stance) means a pod restart drops 100 % of in-flight stream data;
+  the test asserts **pipeline recovery**, not data preservation,
+  which matches what the chart actually contracts (see the AC
+  reframe note on #433). Lives in the chart-CI workflow's
+  `continue-on-error: true` lane alongside the helm-test step
+  until the gating-posture flip (#432 follow-up).
+
 * MCP tool + resource registries (Task #248, G0.5-T3) — the substrate
   every G3–G9 verb registers against. `backend/src/meho_backplane/mcp/registry.py`
   exposes `register_mcp_tool(definition, handler)` /

@@ -48,7 +48,7 @@ type callRequestBody struct {
 // CLI shape:
 //
 //	meho operation call <connector_id> <op_id> \
-//	  --target <slug>                          # target name (required)
+//	  [--target <slug>]                        # target name (required for ops that read a target)
 //	  [--params '<json>' | @<file>]            # operation params (object)
 //	  [--json]                                 # machine-readable output
 //	  [--backplane <url>]                      # override the backplane URL
@@ -76,9 +76,13 @@ func newCallCmd() *cobra.Command {
 			"params against the registered endpoint_descriptor schema, " +
 			"runs the op, writes an audit row, and returns a structured " +
 			"OperationResult envelope. The envelope's `status` field is " +
-			"\"ok\" on success or \"error\" on a connector-side failure; the " +
-			"HTTP status is 200 in both cases, so dispatcher errors don't " +
-			"masquerade as transport errors.\n\n" +
+			"\"ok\" on success or \"error\" / \"denied\" on a dispatcher-" +
+			"reported failure (connector raised, schema-validation rejected, " +
+			"or policy denied); the HTTP status is 200 in all three cases " +
+			"so dispatcher outcomes don't masquerade as transport errors.\n\n" +
+			"--target is required for ops that read a target (most vendor " +
+			"ops); typed handlers that resolve their own context (e.g. some " +
+			"composite handlers) can be invoked without it.\n\n" +
 			"--params accepts inline JSON (`--params '{\"path\":\"secret/x\"}'`) " +
 			"or a file reference (`--params @./params.json`). The empty case " +
 			"(`--params` omitted) sends no params key on the wire — typed " +
@@ -132,30 +136,19 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	if opts.JSONOut {
-		if err := output.PrintJSON(cmd.OutOrStdout(), result); err != nil {
-			return err
-		}
-	} else {
-		printCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
-	}
-	// Branch on the OperationResult.status field. The backend
+	// Classify status BEFORE rendering. The backend
 	// `Connector.execute` contract (see
 	// `backend/src/meho_backplane/connectors/schemas.py`) defines three
-	// valid values: "ok" / "error" / "denied". "ok" → success.
-	// "error" / "denied" → dispatcher-reported failure (connector raised,
-	// schema-validation rejected, policy denied) → exit 1 via errOpError
-	// so shell pipelines see the gate-failed signal. Anything else
-	// (empty, unknown literal) is a malformed response — surface as
-	// unexpected_response (exit 4) so the operator distinguishes
-	// "backend disagreement on the contract" from "operation ran but
-	// failed". Matches the error-classification ladder
-	// renderRequestError applies to transport vs HTTP errors.
+	// valid values: "ok" / "error" / "denied". Anything else is a
+	// malformed response — surface as unexpected_response (exit 4)
+	// without printing the result envelope first. Pre-fix-3 we
+	// rendered then classified, which (a) misled the operator into
+	// thinking they had a real result before the trailing error fired
+	// and (b) produced two JSON objects on stdout in --json mode,
+	// breaking pipe-into-jq usage.
 	switch result.Status {
-	case "ok":
-		return nil
-	case "error", "denied":
-		return errOpError
+	case "ok", "error", "denied":
+		// fall through to rendering + exit-code branching below.
 	default:
 		return output.RenderError(
 			cmd.ErrOrStderr(),
@@ -166,6 +159,19 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 			opts.JSONOut,
 		)
 	}
+	if opts.JSONOut {
+		if err := output.PrintJSON(cmd.OutOrStdout(), result); err != nil {
+			return err
+		}
+	} else {
+		printCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
+	}
+	// "ok" → success (exit 0). "error" / "denied" → exit 1 via
+	// errOpError so shell pipelines see the gate-failed signal.
+	if result.Status == "ok" {
+		return nil
+	}
+	return errOpError
 }
 
 // errOpError is the sentinel returned when the dispatcher reported

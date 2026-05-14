@@ -32,23 +32,12 @@ func newProbeCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			backplaneURL, err := resolveURL(backplane)
+			client, backplaneURL, err := buildClient(cmd, backplane, jsonOut)
 			if err != nil {
-				return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(err.Error()), jsonOut)
-			}
-			client, err := api.NewAuthedClient(cmd.Context(), backplaneURL, api.AuthedClientOptions{})
-			if err != nil {
-				if api.IsTokenNotFound(err) {
-					return output.RenderError(cmd.ErrOrStderr(),
-						output.AuthExpired(fmt.Sprintf("no stored credentials for %s; run `meho login %s`", backplaneURL, backplaneURL)),
-						jsonOut)
-				}
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.Unexpected(fmt.Sprintf("build client: %v", err)),
-					jsonOut)
+				return err
 			}
 
-			pr, status, err := client.ProbeTarget(cmd.Context(), name)
+			pr, status, detail, err := client.ProbeTarget(cmd.Context(), name)
 			if err != nil {
 				if api.IsNoRefreshToken(err) {
 					return output.RenderError(cmd.ErrOrStderr(),
@@ -65,8 +54,20 @@ func newProbeCmd() *cobra.Command {
 						output.Unexpected("insufficient role: operator role required"),
 						jsonOut)
 				case http.StatusNotFound:
+					if detail != nil {
+						output.PrintTargetNearMisses(cmd.ErrOrStderr(), name, detail.Matches)
+					} else {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Target %q not found.\n", name)
+					}
 					return output.RenderError(cmd.ErrOrStderr(),
 						output.Unexpected(fmt.Sprintf("target %q not found", name)),
+						jsonOut)
+				case http.StatusConflict:
+					if detail != nil {
+						output.PrintAmbiguousTarget(cmd.ErrOrStderr(), name, detail.Matches)
+					}
+					return output.RenderError(cmd.ErrOrStderr(),
+						output.Unexpected(fmt.Sprintf("ambiguous query %q: use the canonical name", name)),
 						jsonOut)
 				case http.StatusNotImplemented:
 					// 501: no connector registered yet for this product — friendly message.

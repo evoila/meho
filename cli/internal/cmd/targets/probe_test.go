@@ -126,6 +126,29 @@ func TestProbe_NotFound(t *testing.T) {
 	}
 }
 
+func TestProbe_NotFound_ShowsNearMisses(t *testing.T) {
+	xdg := withTempXDG(t)
+	body, _ := json.Marshal(map[string]any{
+		"detail": map[string]any{
+			"error": "no_target",
+			"query": "alph",
+			"matches": []map[string]any{
+				{"id": "aaa", "name": "alpha", "aliases": []string{}, "product": "rke2", "host": "10.0.0.1"},
+			},
+		},
+	})
+	url := fakeProbeServer(t, "alph", body, http.StatusNotFound)
+	seedCreds(t, xdg, url)
+
+	_, stderr, err := runCobraCmd(t, newProbeCmd(), "alph")
+	if err == nil {
+		t.Fatal("expected error on 404")
+	}
+	if !strings.Contains(stderr.String(), "alpha") {
+		t.Errorf("expected near-miss 'alpha' in stderr, got: %q", stderr)
+	}
+}
+
 func TestProbe_NoCreds(t *testing.T) {
 	_ = withTempXDG(t)
 	_, stderr, err := runCobraCmd(t, newProbeCmd(), "alpha")

@@ -24,21 +24,23 @@ type TargetSummary struct {
 
 // Target is the full read shape returned by GET /api/v1/targets/{name}.
 type Target struct {
-	ID          string         `json:"id"`
-	TenantID    string         `json:"tenant_id"`
-	Name        string         `json:"name"`
-	Aliases     []string       `json:"aliases"`
-	Product     string         `json:"product"`
-	Host        string         `json:"host"`
-	Port        *int           `json:"port"`
-	FQDN        *string        `json:"fqdn"`
-	SecretRef   *string        `json:"secret_ref"`
-	AuthModel   string         `json:"auth_model"`
-	VPNRequired bool           `json:"vpn_required"`
-	Extras      map[string]any `json:"extras"`
-	Notes       *string        `json:"notes"`
-	CreatedAt   string         `json:"created_at"`
-	UpdatedAt   string         `json:"updated_at"`
+	ID              string         `json:"id"`
+	TenantID        string         `json:"tenant_id"`
+	Name            string         `json:"name"`
+	Aliases         []string       `json:"aliases"`
+	Product         string         `json:"product"`
+	Host            string         `json:"host"`
+	Port            *int           `json:"port"`
+	FQDN            *string        `json:"fqdn"`
+	SecretRef       *string        `json:"secret_ref"`
+	AuthModel       string         `json:"auth_model"`
+	VPNRequired     bool           `json:"vpn_required"`
+	Extras          map[string]any `json:"extras"`
+	Notes           *string        `json:"notes"`
+	Fingerprint     map[string]any `json:"fingerprint,omitempty"`
+	PreferredImplID *string        `json:"preferred_impl_id,omitempty"`
+	CreatedAt       string         `json:"created_at"`
+	UpdatedAt       string         `json:"updated_at"`
 }
 
 // ProbeResult is the shape returned by POST /api/v1/targets/{name}/probe.
@@ -123,21 +125,30 @@ func (c *AuthedClient) DescribeTarget(ctx context.Context, name string) (*Target
 }
 
 // ProbeTarget calls POST /api/v1/targets/{name}/probe with a one-shot 401-retry.
-func (c *AuthedClient) ProbeTarget(ctx context.Context, name string) (*ProbeResult, int, error) {
+// On 404 / 409, the structured near-miss detail is returned alongside the error.
+func (c *AuthedClient) ProbeTarget(ctx context.Context, name string) (*ProbeResult, int, *TargetErrorDetail, error) {
 	resp, err := c.doPost(ctx, "/api/v1/targets/"+url.PathEscape(name)+"/probe", nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
 		var pr ProbeResult
 		if jerr := json.Unmarshal(body, &pr); jerr != nil {
-			return nil, resp.StatusCode, fmt.Errorf("meho: decode probe result: %w", jerr)
+			return nil, resp.StatusCode, nil, fmt.Errorf("meho: decode probe result: %w", jerr)
 		}
-		return &pr, resp.StatusCode, nil
+		return &pr, resp.StatusCode, nil, nil
+	case http.StatusNotFound, http.StatusConflict:
+		var envelope struct {
+			Detail TargetErrorDetail `json:"detail"`
+		}
+		_ = json.Unmarshal(body, &envelope)
+		return nil, resp.StatusCode, &envelope.Detail, errFromBody(body, resp.StatusCode)
+	default:
+		return nil, resp.StatusCode, nil, errFromBody(body, resp.StatusCode)
 	}
-	return nil, resp.StatusCode, errFromBody(body, resp.StatusCode)
 }
 
 // doGet makes an authenticated GET to backplaneURL+path with optional query

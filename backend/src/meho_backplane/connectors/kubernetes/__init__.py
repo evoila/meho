@@ -1,14 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""meho_backplane.connectors.kubernetes — KubernetesConnector package.
+"""meho_backplane.connectors.kubernetes -- KubernetesConnector package.
 
 Importing the package registers :class:`KubernetesConnector` against
-the connector registry when one is available. The registry itself
-lands with G0.2-T2 (PR #295, issue #241); until that PR merges, the
-registration block degrades to a no-op import-time log line so the
-package is still importable. Once #241 lands, registration succeeds
-automatically — no code change in this module is required.
+both the v1 single-product registry and the v2 three-tuple registry:
+
+* **v1 entry** -- ``register_connector("k8s", KubernetesConnector)``.
+  Kept temporarily so the chassis route at
+  ``POST /api/v1/connectors/{product}/{op_id}`` keeps resolving for
+  the deprecation window. Removed once T11 (#412) lands the
+  ``/api/v1/operations/call`` cutover.
+* **v2 entry** -- ``register_connector_v2(product="k8s",
+  version="1.x", impl_id="kubernetes-asyncio",
+  cls=KubernetesConnector)`` (G0.6-T2 #393). The v2 entry is what the
+  G0.6 dispatcher's
+  :func:`~meho_backplane.connectors.resolver.resolve_connector` reads;
+  the ``connector_id="kubernetes-asyncio-1.x"`` produced by
+  :func:`~meho_backplane.operations._lookup.parse_connector_id`
+  resolves through this entry.
+
+The registry is imported eagerly at app startup via
+:func:`~meho_backplane.connectors.registry._eager_import_connectors`
+(called from the FastAPI lifespan hook). Operation registration
+(``register_typed_operation`` for every row in
+:data:`~meho_backplane.connectors.kubernetes.ops.KUBERNETES_OPS`) runs
+via :meth:`KubernetesConnector.register_operations` from the lifespan
+hook *after* the eager import, because it needs an active async DB
+session.
 """
 
 from meho_backplane.connectors.kubernetes.connector import (
@@ -21,38 +40,62 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
     load_kubeconfig_from_vault,
     parse_kubeconfig_yaml,
 )
+from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS, KubernetesOp
+from meho_backplane.connectors.registry import (
+    register_connector,
+    register_connector_v2,
+)
+from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+
+async def register_kubernetes_typed_operations() -> None:
+    """Module-level registrar wrapper for ``KubernetesConnector.register_operations``.
+
+    The canonical typed-op registration pattern (G0.6-T-Refactor-Vault
+    #390) is a module-level ``async def register_xxx_typed_operations``
+    queued onto ``run_typed_op_registrars`` via
+    :func:`register_typed_op_registrar`. K8s implements the underlying
+    op walk as a classmethod on :class:`KubernetesConnector` so the
+    test suite can exercise it without lifespan plumbing; this wrapper
+    is the seam that lets the standard registrar mechanism drive it.
+    """
+    await KubernetesConnector.register_operations()
+
 
 __all__ = [
+    "KUBERNETES_OPS",
     "KubeconfigLoader",
     "KubernetesConnector",
+    "KubernetesOp",
     "KubernetesTargetLike",
     "load_kubeconfig_from_vault",
     "parse_kubeconfig_yaml",
     "product_from_git_version",
+    "register_kubernetes_typed_operations",
 ]
 
-_REGISTRY_MODULE = "meho_backplane.connectors.registry"
+# v1 entry -- backward-compatible with the shipped chassis route.
+# Also writes to the v2 table as ``("k8s", "", "")`` so v2-aware code
+# that doesn't yet know the version/impl_id can still resolve through
+# the chassis fallback. Removed when T11 #412 deprecates the chassis
+# route.
+register_connector("k8s", KubernetesConnector)
 
-try:
-    # The registry lands with G0.2-T2 (#241, PR #295). Until that PR
-    # merges into main, the module does not exist; the ``type: ignore``
-    # is the targeted suppression. Drop it when #241 lands.
-    from meho_backplane.connectors.registry import (  # type: ignore[import-untyped, unused-ignore]
-        register_connector,
-    )
-except ModuleNotFoundError as exc:  # pragma: no cover — exercised once G0.2-T2 (#241) lands.
-    # Re-raise on any ModuleNotFoundError whose root cause is *not* the
-    # registry module itself. After #241 lands, this discriminator stops
-    # the broad-except from masking genuine import bugs inside the
-    # registry tree (missing transitive dep, circular import, etc.).
-    if exc.name != _REGISTRY_MODULE:
-        raise
-    import structlog
+# v2 entry -- the canonical resolver key. Picked over the v1 fallback
+# by the resolver's tie-break ladder (most-specific-version-match
+# wins; this entry advertises a concrete version + impl_id, the v1
+# entry advertises empty strings).
+register_connector_v2(
+    product="k8s",
+    version="1.x",
+    impl_id="kubernetes-asyncio",
+    cls=KubernetesConnector,
+)
 
-    structlog.get_logger(__name__).info(
-        "connector_registry_deferred",
-        product="kubernetes",
-        reason=f"{_REGISTRY_MODULE} not yet importable (G0.2-T2 / #241 open)",
-    )
-else:
-    register_connector("kubernetes", KubernetesConnector)
+# Queue the typed-op upsert onto the lifespan-driven registrar list.
+# The registrar list is module-scope on
+# meho_backplane.operations.typed_register; the lifespan calls
+# ``run_typed_op_registrars`` after _eager_import_connectors so every
+# connector subpackage has self-registered by the time the runner
+# iterates. Mirrors the Vault pattern from #390 (T-Refactor-Vault).
+register_typed_op_registrar(register_kubernetes_typed_operations)

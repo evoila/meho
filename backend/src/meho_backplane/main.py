@@ -41,7 +41,7 @@ v0.2 adds:
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Final
+from typing import Any, Final
 
 import structlog
 from fastapi import FastAPI, Response

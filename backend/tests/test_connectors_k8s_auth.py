@@ -33,6 +33,7 @@ Coverage matrix (per #321 acceptance criteria):
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -50,6 +51,26 @@ from meho_backplane.connectors.kubernetes import (
 from meho_backplane.connectors.kubernetes.connector import _DEFAULT_K8S_PORT
 from meho_backplane.connectors.kubernetes.kubeconfig import load_kubeconfig_from_vault
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
+from meho_backplane.settings import get_settings
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin every env var :class:`Settings` requires.
+
+    The G0.6 refactor (#391) made ``execute`` hit the descriptor table
+    via the DB engine, so the lookup path needs ``Settings`` to
+    construct -- which requires the three Keycloak/Vault env vars.
+    Fingerprint / probe tests don't touch the DB but the fixture is
+    autouse so all tests in the module see a consistent env.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
 
 # ---------------------------------------------------------------------------
 # Target stub — satisfies KubernetesTargetLike Protocol structurally.
@@ -124,8 +145,14 @@ def _make_connector_with_stub_kubeconfig() -> KubernetesConnector:
 
 
 def test_kubernetes_connector_subclasses_connector_abc() -> None:
+    # G0.6 refactor (#391) flipped ``product`` from ``"kubernetes"`` to
+    # the v2-canonical ``"k8s"`` so the dispatcher's connector_id parser
+    # (``"kubernetes-asyncio-1.x"`` -> ``("k8s", "1.x", "kubernetes-asyncio")``)
+    # round-trips cleanly.
     assert issubclass(KubernetesConnector, Connector)
-    assert KubernetesConnector.product == "kubernetes"
+    assert KubernetesConnector.product == "k8s"
+    assert KubernetesConnector.version == "1.x"
+    assert KubernetesConnector.impl_id == "kubernetes-asyncio"
 
 
 def test_default_loader_raises_until_g03_lands() -> None:
@@ -343,17 +370,27 @@ async def test_probe_reports_healthz_in_reason_when_both_endpoints_fail() -> Non
 
 @pytest.mark.asyncio
 async def test_execute_returns_unknown_op_for_every_op_id() -> None:
+    """Unknown op_ids surface the dispatcher's structured ``unknown_op`` shape.
+
+    Post-G0.6 (#391) the connector's ``execute`` is a thin shim that
+    delegates to a global ``endpoint_descriptor`` lookup; an op_id that
+    nothing registered (here ``k8s.pod.list``, which T2-T5 of #320 will
+    land) hits :func:`~meho_backplane.operations._errors.result_unknown_op`
+    and returns the dispatcher's canonical error envelope rather than
+    the pre-refactor hard-coded ``{"known_ops": []}`` shape.
+    """
     connector = _make_connector_with_stub_kubeconfig()
     result = await connector.execute(_TARGET_A, "k8s.pod.list", {"namespace": "argocd"})
     assert isinstance(result, OperationResult)
     assert result.status == "error"
     assert result.op_id == "k8s.pod.list"
-    assert result.error is not None and "unknown_op" in result.error
-    # ``duration_ms`` is hard-coded to ``0.0`` for the skeleton dispatcher;
-    # using a tolerance comparison rather than ``== 0.0`` satisfies SonarCloud's
-    # "no float equality" rule without weakening the assertion.
-    assert result.duration_ms == pytest.approx(0.0)
-    assert dict(result.extras) == {"known_ops": []}
+    assert result.error is not None and result.error.startswith("unknown_op:")
+    # Dispatcher's error envelope carries ``error_code`` + a numeric
+    # ``known_op_count`` (the count of *enabled* descriptors for the
+    # connector's natural-key triple) so callers can show a
+    # "did-you-mean" hint without enumerating every op.
+    assert result.extras.get("error_code") == "unknown_op"
+    assert isinstance(result.extras.get("known_op_count"), int)
 
 
 # ---------------------------------------------------------------------------

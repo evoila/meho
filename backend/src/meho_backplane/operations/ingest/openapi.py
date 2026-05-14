@@ -527,7 +527,12 @@ def _build_body_property(
         return None
     return {
         "schema": media_type_schema,
-        "required": bool(resolved.get("required", False)),
+        # Strict identity check — OpenAPI's requestBody.required is a
+        # boolean per spec, and accepting truthy strings ("yes") or
+        # numbers would mis-mark mistyped specs as required-body when
+        # the author meant something else. Anything not literally
+        # ``True`` is treated as not-required.
+        "required": resolved.get("required") is True,
     }
 
 

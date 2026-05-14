@@ -220,9 +220,13 @@ def test_shipped_subclasses_advertise_v2_metadata_per_their_initiative() -> None
     assert VaultConnector.supported_version_range is None
     assert VaultConnector.priority == 0
 
-    assert KubernetesConnector.product == "kubernetes"
-    assert KubernetesConnector.version == ""
-    assert KubernetesConnector.impl_id == ""
+    # G0.6 refactor (#391) flipped the K8s connector from the v1 single-
+    # product slug ``"kubernetes"`` to the v2-canonical ``"k8s"`` /
+    # ``"1.x"`` / ``"kubernetes-asyncio"`` triple. ``supported_version_range``
+    # and ``priority`` still inherit the ABC defaults from G0.6-T3 (#394).
+    assert KubernetesConnector.product == "k8s"
+    assert KubernetesConnector.version == "1.x"
+    assert KubernetesConnector.impl_id == "kubernetes-asyncio"
     assert KubernetesConnector.supported_version_range is None
     assert KubernetesConnector.priority == 0
 

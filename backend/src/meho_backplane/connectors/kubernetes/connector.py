@@ -1,29 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""KubernetesConnector — fingerprint / probe / op-dispatch skeleton.
+"""KubernetesConnector -- fingerprint / probe / dispatcher-shim.
 
-T1 ships the canary surface for the Kubernetes connector Initiative
-(#320). Operations are filled in by T2-T5; this module only wires:
+The G3.2-T1 (#321) skeleton wired ``fingerprint`` + ``probe`` + a stub
+``execute`` that returned ``unknown_op`` for every op_id. The G0.6
+refactor (#391) keeps the fingerprint + probe paths byte-for-byte
+unchanged and refactors ``execute`` into a thin shim that delegates to
+the G0.6 dispatcher substrate:
 
-* Async kubeconfig load via an injectable :data:`KubeconfigLoader`.
-* Per-target :class:`kubernetes_asyncio.client.ApiClient` cache,
-  protected by a single :class:`asyncio.Lock` so concurrent first-use
-  for the same target reads kubeconfig once.
-* :meth:`fingerprint` against ``GET /version`` (``VersionApi.get_code``).
-* :meth:`probe` as a kubeconfig-free TCP+TLS reachability check
-  against ``/readyz`` — explicitly does **not** use the operator's
-  kubeconfig so an auth misconfiguration never surfaces as a probe
-  failure.
-* :meth:`execute` returning a structured ``unknown_op`` error for
-  every op_id (the per-op handlers land in T2+).
-* :meth:`aclose` releasing every cached :class:`ApiClient` — wired
-  from the FastAPI lifespan teardown by the registry once G0.2-T2
-  (#241) lands.
+* :attr:`KubernetesConnector.version` /
+  :attr:`KubernetesConnector.impl_id` advertise the registry v2 key
+  ``("k8s", "1.x", "kubernetes-asyncio")``. The shipped v1 entry
+  (``register_connector("kubernetes", ...)``) is kept temporarily for
+  backward compat with the chassis route at
+  ``POST /api/v1/connectors/{product}/{op_id}`` -- removed once T11
+  (#412) deprecates that route in favour of
+  ``/api/v1/operations/call``.
+* :meth:`register_operations` is a classmethod called from the
+  application lifespan. It walks
+  :data:`~meho_backplane.connectors.kubernetes.ops.KUBERNETES_OPS` and
+  upserts each row into ``endpoint_descriptor`` via
+  :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
+  Idempotent (the helper's body-hash skip-re-embed branch keeps pod
+  restarts cheap).
+* :meth:`about` is the canary op the refactor registers against the
+  new substrate. The handler reuses the same
+  ``kubernetes_asyncio.client.VersionApi.get_code`` call
+  :meth:`fingerprint` already issues, returning a flat dict the
+  dispatcher's reducer wraps into ``OperationResult.result``.
+* :meth:`execute` shims into the dispatcher's lookup + handler-resolve
+  + invoke path so unknown op_ids return the same
+  ``OperationResult(status="error", error="unknown_op: ...")`` shape
+  the dispatcher emits everywhere else. The chassis route at
+  ``/api/v1/connectors/...`` (no operator-typed param) continues to
+  call ``execute`` directly; the operator-aware path is
+  ``call_operation`` / ``/api/v1/operations/call`` via the G0.6
+  meta-tools.
+
+The skeleton's per-target :class:`kubernetes_asyncio.client.ApiClient`
+cache, the asyncio-lock protecting it, and :meth:`aclose` are all
+preserved verbatim.
 
 Product flavour (``"rke2"`` / ``"k3s"`` / ``"eks"`` / ``"gke"`` /
 ``"aks"`` / ``"vanilla"``) is derived from the ``gitVersion`` suffix
-returned by the API server — sufficient for v0.2's version-tagged
+returned by the API server -- sufficient for v0.2's version-tagged
 doc/kb lookup and broadcast classifier without an extra round-trip.
 """
 
@@ -42,6 +63,7 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
     KubernetesTargetLike,
     load_kubeconfig_from_vault,
 )
+from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -80,9 +102,18 @@ def product_from_git_version(git_version: str) -> str:
 
 
 class KubernetesConnector(Connector):
-    """Kubernetes connector — reads kubeconfig per target, caches the client."""
+    """Kubernetes connector -- reads kubeconfig per target, caches the client."""
 
-    product = "kubernetes"
+    # Registry v2 metadata (G0.6-T3 #394 + #391 refactor). The product
+    # slug ``"k8s"`` is the v2 canonical form aligned with the
+    # ``connector_id="k8s-1.x"`` shape the dispatcher's parser produces
+    # (:func:`~meho_backplane.operations._lookup.parse_connector_id`).
+    # The v1 entry registered in :mod:`__init__` uses ``"kubernetes"``
+    # for chassis-route backward compat -- both keys resolve to the
+    # same connector class via the registry's two-layer storage.
+    product = "k8s"
+    version = "1.x"
+    impl_id = "kubernetes-asyncio"
 
     def __init__(
         self,
@@ -167,25 +198,241 @@ class KubernetesConnector(Connector):
             probed_at=probed_at,
         )
 
+    async def about(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return product flavour + version snapshot for *target*.
+
+        Op-id: ``k8s.about``. The dispatcher routes here after the JSON
+        Schema validator has accepted ``params`` (declared empty in
+        :data:`~meho_backplane.connectors.kubernetes.ops.KUBERNETES_OPS`)
+        and the reducer wraps the returned dict into
+        ``OperationResult.result``. The handler reuses the same
+        :meth:`kubernetes_asyncio.client.VersionApi.get_code` call
+        :meth:`fingerprint` issues so the cluster pays one round-trip per
+        ``k8s.about`` dispatch regardless of how many other ops touch
+        ``VersionApi``.
+
+        The returned dict is intentionally flat -- no nested
+        ``extras`` -- because the dispatcher's
+        :class:`~meho_backplane.operations.reducer.PassThroughReducer`
+        forwards the value verbatim. Future reducers (real JSONFlux
+        reduction in a follow-on Initiative) flatten nested shapes
+        anyway; staying flat now means the v0.2 callers see the same
+        keys before and after the reducer swap.
+        """
+        del params  # declared in schema; the handler intentionally ignores them
+        api_client = await self._get_api_client(target)
+        version_api = client.VersionApi(api_client)
+        version = await version_api.get_code()
+        return {
+            "product": product_from_git_version(version.git_version),
+            "git_version": version.git_version,
+            "build_date": version.build_date,
+            "major": version.major,
+            "minor": version.minor,
+            "platform": version.platform,
+            "go_version": version.go_version,
+            "git_commit": version.git_commit,
+            "git_tree_state": version.git_tree_state,
+        }
+
+    @classmethod
+    async def register_operations(cls) -> None:
+        """Upsert every op in :data:`KUBERNETES_OPS` into ``endpoint_descriptor``.
+
+        Called from the application lifespan after the registry has
+        eager-imported every connector module. Walks
+        :data:`~meho_backplane.connectors.kubernetes.ops.KUBERNETES_OPS`
+        and routes each row through
+        :func:`~meho_backplane.operations.typed_register.register_typed_operation`,
+        which:
+
+        * Derives ``handler_ref`` from the bound method's
+          ``__module__`` + ``__qualname__`` (e.g.
+          ``"meho_backplane.connectors.kubernetes.connector.KubernetesConnector.about"``).
+        * Inserts a new row on first call; skips the embedding compute
+          on re-call with unchanged summary / description / tags
+          (body-hash skip-re-embed branch).
+        * Always advances ``updated_at`` so operators can grep the
+          last-registration timestamp.
+
+        Idempotent across pod restarts. Errors propagate to the
+        lifespan; the fail-fast deployment shape the rest of the
+        chassis tasks established is what the operator wants here
+        (a missing migration or a partial DB state is a deploy bug,
+        not a runtime degradation).
+        """
+        # Imported lazily so a test that imports the connector module
+        # without the operations package available (e.g. an isolated
+        # unit test of ``product_from_git_version``) still works -- the
+        # operations package transitively imports the embedding service,
+        # which pulls in ONNX runtime and a 100 MB+ model on first
+        # touch.
+        from meho_backplane.operations.typed_register import register_typed_operation
+
+        # Bind handler attrs once into a list of (op, bound-method)
+        # tuples so the error message names the op_id when a typo in
+        # KUBERNETES_OPS' handler_attr would otherwise surface as a
+        # confusing ``AttributeError`` deep inside the helper.
+        bindings: list[tuple[Any, Any]] = []
+        for op in KUBERNETES_OPS:
+            handler = getattr(cls, op.handler_attr, None)
+            if handler is None:
+                raise AttributeError(
+                    f"KubernetesConnector op {op.op_id!r} declares "
+                    f"handler_attr={op.handler_attr!r} but the class has no such attribute"
+                )
+            bindings.append((op, handler))
+
+        for op, handler in bindings:
+            await register_typed_operation(
+                product=cls.product,
+                version=cls.version,
+                impl_id=cls.impl_id,
+                op_id=op.op_id,
+                handler=handler,
+                summary=op.summary,
+                description=op.description,
+                parameter_schema=op.parameter_schema,
+                response_schema=op.response_schema,
+                group_key=op.group_key,
+                tags=list(op.tags),
+                safety_level=op.safety_level,
+                requires_approval=op.requires_approval,
+                llm_instructions=op.llm_instructions,
+            )
+        _log.info(
+            "kubernetes_operations_registered",
+            count=len(bindings),
+            product=cls.product,
+            version=cls.version,
+            impl_id=cls.impl_id,
+        )
+
     async def execute(
         self,
         target: KubernetesTargetLike,
         op_id: str,
         params: dict[str, Any],
     ) -> OperationResult:
-        """Skeleton dispatcher — every op_id returns a structured ``unknown_op``.
+        """Dispatcher shim -- delegates to G0.6's ``dispatch``-shaped lookup.
 
-        T2-T5 of #320 fill in the per-op handlers via a per-product
-        ``_op_map``. Until then the canonical error shape is in place so
-        callers can distinguish "connector exists but op unwired" from
-        "no connector for product".
+        Routes for *op_id* by:
+
+        1. Looking up the descriptor for
+           ``(product=cls.product, version=cls.version, impl_id=cls.impl_id, op_id)``
+           against the global / built-in row set
+           (``tenant_id IS NULL`` -- typed registrations are always
+           global by construction).
+        2. Unknown op_id -> the structured ``unknown_op``
+           :class:`OperationResult` the dispatcher itself produces, via
+           :func:`~meho_backplane.operations._errors.result_unknown_op`.
+        3. Known op_id -> resolves ``descriptor.handler_ref`` via
+           :func:`~meho_backplane.operations._handler_resolve.import_handler`,
+           binds it against this instance when the resolved symbol is
+           an unbound method (the bound-method case is the typed-
+           connector convention), and invokes it with
+           ``(target, params)``.
+
+        The shim is intentionally **operator-less** -- the chassis
+        route at ``POST /api/v1/connectors/{product}/{op_id}`` doesn't
+        carry an :class:`~meho_backplane.auth.operator.Operator` into
+        ``execute``, so the full dispatcher path (policy gate, audit,
+        broadcast) doesn't run from this entry point. The operator-
+        aware path is :func:`~meho_backplane.operations.dispatch` via
+        ``call_operation`` /
+        ``POST /api/v1/operations/call`` -- ``execute`` is the legacy
+        bridge for chassis callers and goes away with the T11 #412
+        deprecation. Within that constraint the shim's contract is:
+
+        * Same ``unknown_op`` shape the dispatcher emits.
+        * Same ``connector_error`` shape on handler exceptions.
+        * Same ``invalid_params`` shape on schema-validation failures.
+
+        Result envelope mirrors :class:`OperationResult` so the
+        FastAPI route's ``unknown_op``-extraction logic continues to
+        work unchanged.
         """
+        # Lazy imports for the same rationale documented on
+        # ``register_operations`` -- pure-python tests that exercise
+        # ``fingerprint``/``probe`` shouldn't pay the operations
+        # package's import cost.
+        from sqlalchemy import select
+
+        from meho_backplane.db.engine import get_sessionmaker
+        from meho_backplane.db.models import EndpointDescriptor
+        from meho_backplane.operations._errors import (
+            result_connector_error,
+            result_invalid_params,
+            result_unknown_op,
+        )
+        from meho_backplane.operations._handler_resolve import (
+            import_handler,
+            is_unbound_method,
+        )
+        from meho_backplane.operations._lookup import count_known_ops
+        from meho_backplane.operations._validate import validate_params
+
+        start = time.monotonic()
+
+        def _elapsed() -> float:
+            return (time.monotonic() - start) * 1000.0
+
+        # Global-only descriptor lookup. The dispatcher's
+        # ``lookup_descriptor`` takes an operator tenant_id for the
+        # tenant-scoped-first fallback; the chassis path lacks one, so
+        # we hit only the global row set. Typed registrations are
+        # always global (``tenant_id IS NULL``) by construction.
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.tenant_id.is_(None),
+                    EndpointDescriptor.product == self.product,
+                    EndpointDescriptor.version == self.version,
+                    EndpointDescriptor.impl_id == self.impl_id,
+                    EndpointDescriptor.op_id == op_id,
+                    EndpointDescriptor.is_enabled.is_(True),
+                )
+            )
+            descriptor = result.scalar_one_or_none()
+
+        if descriptor is None:
+            known_op_count = await count_known_ops(
+                product=self.product,
+                version=self.version,
+                impl_id=self.impl_id,
+            )
+            return result_unknown_op(op_id, known_op_count, _elapsed())
+
+        # Parameter validation. The dispatcher runs this before the
+        # policy gate; the shim runs it before invocation for the
+        # same reason (cheap rejection of malformed inputs).
+        validation_errors = validate_params(descriptor.parameter_schema, params)
+        if validation_errors:
+            return result_invalid_params(op_id, validation_errors, _elapsed())
+
+        # Handler resolution + bound-method binding. ``import_handler``
+        # walks the dotted path via importlib + getattr; the bound-
+        # method shape (``module.ClassName.method``) returns the
+        # unbound function, which we rebind against ``self``.
+        handler = import_handler(descriptor.handler_ref or "")
+        if is_unbound_method(handler, type(self)):
+            handler = handler.__get__(self, type(self))
+
+        try:
+            raw = await handler(target=target, params=params)
+        except Exception as exc:
+            return result_connector_error(op_id, exc, _elapsed())
+
         return OperationResult(
-            status="error",
+            status="ok",
             op_id=op_id,
-            error=f"unknown_op: {op_id}",
-            duration_ms=0.0,
-            extras={"known_ops": []},
+            result=raw if isinstance(raw, (dict, list)) else {"value": raw},
+            duration_ms=_elapsed(),
         )
 
     async def aclose(self) -> None:

@@ -53,6 +53,7 @@ from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
+from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
@@ -238,6 +239,14 @@ app.include_router(api_v1_health_router)
 # privacy-preserving query_hash payload (the raw query is never
 # persisted -- per v0.2 sensitivity defaults).
 app.include_router(api_v1_retrieve_router)
+# G4.3-T5 (#444) -- audit-backed retrieval usage telemetry
+# (`GET /api/v1/retrieve/usage`). Operator role minimum; the route uses
+# `require_role(TenantRole.OPERATOR)` and gates the `tenant_filter`
+# cross-tenant parameter behind tenant_admin. Broadcast publishes
+# under the canonical op_id `meho.retrieval.usage` + aggregate-only
+# `audit_query` class via the `audit_op_id` / `audit_op_class`
+# contextvar overrides honoured by the chassis broadcast publisher.
+app.include_router(api_v1_retrieve_usage_router)
 # G0.3-T3 (#254) — targets CRUD surface. All 5 routes are tenant-scoped
 # via the JWT's tenant_id claim; cross-tenant reads are impossible.
 app.include_router(api_v1_targets_router)

@@ -118,19 +118,24 @@ def isolated_registry() -> Iterator[None]:
     to re-execute so each test starts from a known registered state
     regardless of cross-file ordering.
 
-    Reloading both ``meho_status`` and ``tenant_info`` unconditionally
+    Reloading ``meho_status`` and both resource modules unconditionally
     is harmless even for tool-only / resource-only test files: the
     tests assert specific entries exist, not that the registry is
-    minimal. Folding both reloads here keeps the autouse fixture
+    minimal. Folding the reloads here keeps the autouse fixture
     single-shape across test files (the duplication driver Sonar
-    flagged pre-T5).
+    flagged pre-T5). ``tenant_feed`` (G6.1-T6a, #312) joins the
+    reload list for the same reason — without it, this fixture's
+    ``clear_registries()`` would leave the feed resource unregistered
+    in any test file that imports the fixture after the first one
+    runs.
     """
-    from meho_backplane.mcp.resources import tenant_info
+    from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import meho_status
 
     clear_registries()
     importlib.reload(meho_status)
     importlib.reload(tenant_info)
+    importlib.reload(tenant_feed)
     yield
     clear_registries()
 

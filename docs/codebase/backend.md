@@ -382,6 +382,30 @@ this stage it exposes:
   during T4 so the chassis route and the MCP tool share the same
   federation-proof probe chain rather than diverging.
 
+* MCP tenant activity feed resource (G6.1-T6a, #312) —
+  `backend/src/meho_backplane/mcp/resources/tenant_feed.py` registers
+  `meho://tenant/{tenant_id}/feed` as a `ResourceTemplateDefinition`
+  (required role: `operator`). The handler validates the URI-bound
+  `tenant_id` against `operator.tenant_id` *before* any Valkey call
+  (same boundary discipline as `tenant_info`), then issues
+  `XREVRANGE meho:feed:{tenant_id} + - COUNT 50` and reverses the
+  result into chronological (oldest-first) order. Response shape:
+  `{tenant_id, count, events: [<BroadcastEvent.model_dump(mode="json")>]}`.
+  The MCP server advertises no `subscribe` capability (per the
+  2025-06-18 spec, an omitted field declares no subscription
+  support — the correct shape for a poll-only resource); clients
+  needing live push use `GET /api/v1/feed` (SSE, T4) or
+  `meho status --watch` (T5). Entries with an unknown field shape
+  or whose `event` JSON doesn't validate as a `BroadcastEvent` are
+  logged and skipped — same forward-compat safety net the SSE
+  generator at `api/v1/feed.py` uses against a future Slack-mirror
+  / downstream tool writing alternate shapes onto the same stream
+  key. T6 originally bundled a load-test acceptance + Valkey-restart
+  chaos test on the same task; the `/auto-implement-issue` Phase 4
+  pushback split T6 into T6a (this resource + onboarding doc) and a
+  follow-up T7 that lands once chart-CI hardening (#347 follow-up)
+  makes the helm-test job gating.
+
 * MCP tool + resource registries (Task #248, G0.5-T3) — the substrate
   every G3–G9 verb registers against. `backend/src/meho_backplane/mcp/registry.py`
   exposes `register_mcp_tool(definition, handler)` /

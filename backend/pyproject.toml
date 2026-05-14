@@ -93,6 +93,7 @@ select = [
 "tests/test_mcp_audit.py" = ["F811"]
 "tests/test_mcp_tool_meho_status.py" = ["F811"]
 "tests/test_mcp_resource_tenant_info.py" = ["F811"]
+"tests/test_mcp_resource_tenant_feed.py" = ["F811"]
 # A005 flags any module name that matches a stdlib module by short name,
 # regardless of package path. These two are namespaced under
 # `meho_backplane.*` and are never imported as bare `operator` / `logging`,

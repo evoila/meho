@@ -22,8 +22,16 @@ from meho_backplane.operations.ingest.exceptions import (
     InvalidSchemaError,
     InvalidSpecError,
     InvalidStateTransitionError,
+    LlmOutputInvalid,
     OpIdCollision,
     UnsupportedSpecError,
+)
+from meho_backplane.operations.ingest.llm_groups import (
+    DEFAULT_GROUPING_BATCH_SIZE,
+    GroupingResult,
+    GroupProposal,
+    LlmClient,
+    run_llm_grouping,
 )
 from meho_backplane.operations.ingest.openapi import (
     detect_spec_format,
@@ -46,16 +54,21 @@ from meho_backplane.operations.ingest.schemas import (
 from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
+    "DEFAULT_GROUPING_BATCH_SIZE",
     "ConnectorNotFoundError",
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
     "EndpointDescriptorProto",
     "GenericRestConnector",
+    "GroupProposal",
+    "GroupingResult",
     "IngestionResult",
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
+    "LlmClient",
+    "LlmOutputInvalid",
     "OpIdCollision",
     "ReviewService",
     "SafetyLevel",
@@ -65,4 +78,5 @@ __all__ = [
     "parse_connector_id",
     "parse_openapi",
     "register_ingested_operations",
+    "run_llm_grouping",
 ]

@@ -82,6 +82,7 @@ __all__ = [
     "InvalidSchemaError",
     "InvalidSpecError",
     "InvalidStateTransitionError",
+    "LlmOutputInvalid",
     "OpIdCollision",
     "UnsupportedSpecError",
 ]
@@ -235,6 +236,62 @@ class InvalidStateTransitionError(Exception):
         suffix = f" (group={group_key})" if group_key is not None else ""
         super().__init__(
             f"cannot transition {current_status!r} -> {requested_status!r}{suffix}",
+        )
+
+
+class LlmOutputInvalid(Exception):  # noqa: N818 -- Task #404 API contract pins this name
+    """Raised when an LLM grouping-pass response fails schema validation.
+
+    The chassis LLM client is prompted to emit a tightly-shaped JSON
+    payload (an array of group proposals for Pass 1, an op_id-to-
+    group_key map for Pass 2). When the model returns prose around the
+    JSON, malformed JSON, or a JSON value that fails its Pydantic
+    schema, T3 surfaces this exception so the operator-facing CLI / API
+    layer can log the raw output and prompt for a retry rather than
+    persisting half-baked taxonomy.
+
+    Attributes
+    ----------
+    pass_name:
+        Which of the two passes produced the bad output --
+        ``"propose_groups"`` (Pass 1) or ``"assign_ops"`` (Pass 2). Used
+        by the CLI's retry prompt and by analytics that bucket prompt
+        failures per pass.
+    raw_output:
+        The verbatim string the LLM returned, before any parsing or
+        normalisation. Truncated to 8 KiB in the message to keep the
+        exception printable; the full value is preserved on the
+        attribute for debug logging.
+    parse_error:
+        The underlying parser / validator exception, attached as the
+        cause for ``raise ... from ...`` chains. Lifted onto a named
+        attribute so callers can inspect the structured pydantic
+        ``ValidationError`` shape without crawling ``__cause__``.
+
+    Distinct from :class:`InvalidSpecError` and :class:`InvalidSchemaError`
+    (which describe upstream OpenAPI breakage) -- this exception is
+    specifically about LLM output quality, an operational concern that
+    deserves its own retry path.
+    """
+
+    _MESSAGE_PREVIEW_LIMIT = 8 * 1024
+
+    def __init__(
+        self,
+        *,
+        pass_name: str,
+        raw_output: str,
+        parse_error: Exception,
+    ) -> None:
+        self.pass_name = pass_name
+        self.raw_output = raw_output
+        self.parse_error = parse_error
+        preview = raw_output
+        if len(preview) > self._MESSAGE_PREVIEW_LIMIT:
+            preview = preview[: self._MESSAGE_PREVIEW_LIMIT] + "...<truncated>"
+        super().__init__(
+            f"LLM output failed validation in pass {pass_name!r}: "
+            f"{parse_error!r}; raw_output={preview!r}",
         )
 
 

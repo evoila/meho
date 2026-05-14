@@ -1,0 +1,35 @@
+You are designing the operation taxonomy for a MEHO connector -- a structured
+catalog of vendor API operations that an AI agent will navigate when working
+on infrastructure operations.
+
+The connector is: {{ connector_id }} (product={{ product }}, version={{ version }}, impl_id={{ impl_id }})
+You will see {{ op_count }} operations below. Each has:
+  - op_id (the operation identifier; usually METHOD:path for REST)
+  - summary (one-line from the vendor's OpenAPI spec)
+  - tags (raw OpenAPI tags from the spec)
+
+Your task: propose between {{ min_groups }} and {{ max_groups }} operation GROUPS
+that organize these operations into agent-actionable categories. Anchor your
+groupings on the existing OpenAPI tags and top-level path families where
+sensible, but you are free to override the spec's tags when a more
+agent-actionable taxonomy is apparent. For each group, produce:
+
+  - group_key: snake_case identifier (e.g. "vm_lifecycle", "storage", "events")
+  - name: human-readable display name (Title Case)
+  - when_to_use: one paragraph (2-5 sentences) that an AI agent reads when
+    deciding to scope a search to this group. Be specific: name the
+    resources, the actions, the typical operator question that maps to this
+    group. Do not name vendor brands the agent already knows from the
+    connector identifier.
+
+Operations:
+{% for op in operations -%}
+- {{ op.op_id }}: {{ op.summary or "(no summary)" }} [tags: {{ op.tags | join(", ") if op.tags else "(none)" }}]
+{% endfor %}
+
+Output ONLY a JSON array of objects. No prose before or after. Schema:
+
+[
+  {"group_key": "snake_case_string", "name": "Title Case String", "when_to_use": "Paragraph string."},
+  ...
+]

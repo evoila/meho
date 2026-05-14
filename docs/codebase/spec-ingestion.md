@@ -27,8 +27,14 @@ The pipeline is broken into work items per Initiative #389:
   registry on first ingest of a `(product, version, impl_id)` triple;
   the shim raises `NotImplementedError` on `auth_headers` / `execute`
   until a per-G3.x Initiative replaces it with a hand-coded subclass.
-* **T3 — LLM-summarised grouping.** Proposes operation groups and
-  assigns each op to one, writing `operation_group` rows.
+* **T3 — LLM-summarised grouping** (`ingest/llm_groups.py` +
+  `ingest/_llm_grouping_internals.py` + `ingest/prompts/`). Two-pass
+  LLM run: (1) propose 8–15 groups from the full op list, (2) assign
+  each op to a group in batches of 50. Proposed groups land
+  `review_status='staged'`; each per-op `group_id` is set in the same
+  transaction as the audit row. The LLM is injected as the
+  :class:`LlmClient` Protocol; production T5 wires the chassis
+  Anthropic adapter, tests inject a deterministic stub.
 * **T4 — Review-queue state machine** (`ingest/service.py`). Operators
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
@@ -39,6 +45,50 @@ The pipeline is broken into work items per Initiative #389:
 T1 produces the proto shape every other stage consumes; T2 is the
 single write path into `endpoint_descriptor` for ingested rows; T3
 groups them; T4 gates dispatchability behind operator review.
+
+### T3 (LLM grouping) at a glance
+
+`run_llm_grouping()` opens its own transaction and runs:
+
+1. **Pass 1 (group derivation)** — only when no `operation_group`
+   rows yet exist for the connector triple. Sends every unassigned
+   op's `(op_id, summary, tags)` to the LLM and asks for an array of
+   `{group_key, name, when_to_use}` proposals. Output is validated
+   against `GroupProposal` (snake_case key, non-empty fields, bounded
+   lengths, no duplicate keys) and persisted as
+   `OperationGroup` rows in `review_status='staged'`.
+2. **Pass 2 (per-op assignment)** — splits the unassigned-op set
+   into batches of `batch_size` (default 50). Each batch asks the LLM
+   for a JSON object mapping `op_id` to `group_key`, where
+   `group_key` is either one of the Pass-1 keys or the sentinel
+   `"none"`. Each row's `EndpointDescriptor.group_id` is set to the
+   matching group's UUID; sentinel and unknown-key entries leave
+   `group_id=NULL`.
+
+The function commits exactly once at the end of both passes, in the
+same transaction as a single `meho.connector.llm_grouping` audit row
+that records `{connector_id, groups_created, operations_assigned,
+operations_unassigned, llm_call_count, batch_size}`. Partial failure
+(LLM output that fails schema validation) raises
+`LlmOutputInvalid`, rolls back the transaction, and leaves the
+connector in whatever state preceded the call — operator retries via
+the CLI verb T5 will ship.
+
+Idempotency:
+
+* No unassigned ops → true no-op, zero LLM calls, no audit row.
+* Existing `operation_group` rows present but some ops still
+  unassigned → Pass 1 skipped, Pass 2 only runs against the
+  unassigned-op subset using the existing groups verbatim. This is
+  the "partial-regrouping" branch.
+* Fully fresh connector → both passes run, all groups + assignments
+  persist in one transaction.
+
+The LLM client is injected as a `LlmClient` `Protocol` (one async
+method, `generate_json`). Tests pass a deterministic stub from
+`tests/fixtures/llm_groups/{small,medium}_corpus.py`. The chassis
+adapter (Anthropic Messages API) lands with T5 (#405) which will
+also surface the model id + retry policy as `Settings` knobs.
 
 ## Key types
 
@@ -67,6 +117,30 @@ T2 owns the rest of the ORM columns: `tenant_id`, `source_kind`
 owns `group_id` (NULL until grouping runs). T4 owns
 `custom_description`, `custom_notes`, `llm_instructions` (operator-
 authored overrides at review time).
+
+### `GroupProposal` / `GroupingResult` / `GroupingConfig` (`ingest/llm_groups.py`)
+
+Pydantic `frozen=True` model + two frozen-slotted dataclasses, one
+per role in the T3 grouping run:
+
+* `GroupProposal` — the per-group dict the LLM emits in Pass 1
+  (`group_key`, `name`, `when_to_use`). Snake-case key enforced via
+  validator; oversized prose rejected via bounded `max_length`.
+* `GroupingResult` — counts + timings the orchestrator returns
+  (`groups_created`, `operations_assigned`, `operations_unassigned`,
+  `llm_call_count`, `llm_duration_ms`). Surfaced in the operator-
+  facing CLI / API at T5.
+* `GroupingConfig` — tunable knobs (`batch_size`, `min_groups`,
+  `max_groups`). Constructed from the keyword arguments to
+  `run_llm_grouping()`; `validate()` raises `ValueError` before any
+  LLM or DB I/O.
+
+`LlmOutputInvalid` (in `exceptions.py`) raises when either pass
+returns malformed JSON or output that fails schema validation. It
+carries `pass_name` (`"propose_groups"` / `"assign_ops"`),
+`raw_output` (the verbatim model response, capped in the message
+preview), and `parse_error` (the underlying `ValidationError` or
+`JSONDecodeError`).
 
 ### `IngestionResult` (`ingest/register_ingested.py`)
 
@@ -163,6 +237,36 @@ facing message names both colliding specs. Same-`spec_source`
 re-ingest of an unchanged spec stays on the skip-re-embed path —
 the cross-call check only fires on a true `spec_source` mismatch.
 
+### T3 control flow
+
+```text
+run_llm_grouping
+├─ GroupingConfig.validate     # bounds check on min/max/batch_size
+├─ load_unassigned_ops         # group_id IS NULL + scope match
+│  └─ early return GroupingResult(...zeros...) if none
+├─ _resolve_groups_for_pass2
+│  ├─ load_existing_groups
+│  ├─ if existing → project rows into GroupProposal list (skip Pass 1)
+│  └─ else
+│     ├─ render_propose_groups_prompt
+│     ├─ llm_client.generate_json   # Pass 1 LLM call
+│     ├─ parse_proposal_response   # GroupProposal schema validation
+│     └─ _persist_proposed_groups  # session.add per row + flush
+├─ _assign_ops_in_batches
+│  └─ for each batch of `batch_size` ops:
+│     ├─ render_assign_ops_prompt
+│     ├─ llm_client.generate_json   # Pass 2 LLM call
+│     └─ parse_assignment_response  # filter unknown ops + coerce unknown keys
+├─ _apply_assignments_to_rows   # mutate EndpointDescriptor.group_id
+├─ _write_grouping_audit_row    # meho.connector.llm_grouping
+└─ session.commit               # atomic: groups + assignments + audit
+```
+
+The two passes use distinct system prompts (`PROPOSE_GROUPS_SYSTEM_PROMPT`
+/ `ASSIGN_OPS_SYSTEM_PROMPT`) so each pass's cacheable prefix on the
+Anthropic Messages API stays stable across batches; per-call dynamism
+lives in the user-prompt body rendered from the Jinja templates.
+
 ## Dependencies
 
 * **PyYAML 6.0+** — already a transitive dep; we exercise
@@ -172,6 +276,10 @@ the cross-call check only fires on a true `spec_source` mismatch.
 * **httpx 0.27+** — fetch for `http(s)://` URLs. The chassis already
   depends on httpx for Keycloak JWKS + connector adapters.
 * **Pydantic v2** — `EndpointDescriptorProto` uses `ConfigDict(frozen=True)`.
+* **Jinja2 3.1+** — renders the T3 prompt templates from `ingest/prompts/`.
+  Used with `StrictUndefined` so any missing template variable raises
+  immediately, and `autoescape` disabled because the rendered output
+  goes to an LLM (not HTML).
 
 No spec-side validation library (e.g. `openapi-spec-validator`) is
 pulled in. The parser tolerates partial / underspecified docs and
@@ -202,6 +310,7 @@ operations go live.
 
 * Issue #401 — T1 task.
 * Issue #403 — T2 task.
+* Issue #404 — T3 task (LLM grouping; this module).
 * Issue #402 — T4 task.
 * Initiative #389 — G0.7 spec-ingestion pipeline.
 * Goal #221 — G0 foundational substrate.

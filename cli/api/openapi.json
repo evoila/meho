@@ -205,7 +205,7 @@
           "retrieval"
         ],
         "summary": "Usage Endpoint",
-        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping\n==============\n\n* ``operator`` / ``read_only`` callers: report scoped to\n  ``operator.tenant_id``. A non-null ``tenant_filter`` returns\n  403 (``insufficient_role`` semantics \u2014 only\n  ``tenant_admin`` may cross tenants).\n* ``tenant_admin`` callers: ``tenant_filter`` overrides the\n  default. ``tenant_filter=None`` still scopes to the\n  caller's tenant (matches the chassis \"default to your own\n  tenant\" UX); a future cross-tenant\n  ``tenant_filter=__all__`` token is v0.2.next territory.\n\nTime window\n===========\n\n*since* accepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601\ndate / datetime (absolute). Malformed values surface as 400 with\na parser-friendly detail string. *until* is always\n:func:`datetime.now`; the open-ended right edge keeps the report\n\"as of now\" without operators having to compute a sentinel.\n\nSurface filter\n==============\n\n``surface=all`` (default) covers kb + memory + operations.\n``surface=<one>`` narrows. Empty result for the requested\nsurface is a structured zero report (200 with empty\n``buckets``), not 404 \u2014 distinguishing \"the surface exists but\nsees no traffic\" from \"the surface is misspelt\".\n\nAudit contextvars\n=================\n\nBinds the audit overrides (op_id / op_class) plus enrichment\nfields **before** :func:`compute_usage` runs so a handler\nexception still produces an audit row with partial payload\n(incident postmortem hook).",
+        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping: ``operator`` / ``read_only`` callers are scoped\nto ``operator.tenant_id``; passing a non-null ``tenant_filter``\nreturns 403. Only ``tenant_admin`` may cross tenants. *since*\naccepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601 date;\nmalformed \u2192 400. ``surface=all`` (default) covers all three;\n``surface=<one>`` narrows. Empty result is a structured zero\nreport, not 404. Audit overrides + enrichment contextvars are\nbound before :func:`compute_usage` runs so a handler exception\nstill produces an audit row with partial payload.",
         "operationId": "usage_endpoint_api_v1_retrieve_usage_get",
         "parameters": [
           {
@@ -264,6 +264,60 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UsageReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/retrieve/eval": {
+      "post": {
+        "tags": [
+          "retrieval"
+        ],
+        "summary": "Eval Endpoint",
+        "description": "Run the eval corpus against the retrieving tenant's substrate.\n\nTenant-scoped to ``operator.tenant_id`` \u2014 no surface accepts a\ndifferent tenant id from the body. ``read_only`` operators get\n403 via :func:`require_role` before reaching this handler.\n\nThe request's ``surface`` value flows through to\n:func:`~meho_backplane.retrieval.eval.runner.eval_all`; ``\"all\"``\nruns every shipped corpus, single-surface values scope the run.\nThe ``baseline=\"grep\"`` flag is honoured for kb only (v0.2 ships\nno operations / memory baseline); other surfaces silently ignore\nit.\n\nAudit overrides + enrichment contextvars are bound **before** the\nrunner kicks off so a handler exception still produces an audit\nrow with partial payload. The runner itself is in-process \u2014\nno HTTP round-trip back to ``/api/v1/retrieve``.",
+        "operationId": "eval_endpoint_api_v1_retrieve_eval_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalResult"
                 }
               }
             }
@@ -1257,6 +1311,67 @@
         "title": "DbStatus",
         "description": "Database migration status.\n\n``migrated`` is ``True`` when the DB-migration-state probe reports\nhealthy (current Alembic revision matches head), ``False`` when\nthe probe reports unhealthy for any reason (DB unreachable,\nrevision diverged, ``alembic_version`` table absent). v0.1 ships\nno opinions on retry / repair \u2014 operators see the probe's\n``detail`` string on the ``/ready`` payload (and downstream tooling\nin T29 enforces the migration-runner contract). The field stays\n``bool | None`` for forward compatibility with response decoders\nthat were generated against the chassis-stage shape, but the\nhandler now always populates it from the probe."
       },
+      "EvalRequest": {
+        "properties": {
+          "surface": {
+            "type": "string",
+            "enum": [
+              "kb",
+              "memory",
+              "operations",
+              "all"
+            ],
+            "title": "Surface",
+            "default": "all"
+          },
+          "baseline": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Baseline"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "EvalRequest",
+        "description": "POST body for ``/api/v1/retrieve/eval``.\n\nFrozen + extra=forbid so a typo (``surfaces`` instead of\n``surface``) fails 422 at the framework boundary rather than\nsilently running the default surface and giving the caller a\nconfusing \"I asked for memory, why did kb run?\" response."
+      },
+      "EvalResult": {
+        "properties": {
+          "ran_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ran At"
+          },
+          "surfaces": {
+            "items": {
+              "$ref": "#/components/schemas/SurfaceResult"
+            },
+            "type": "array",
+            "title": "Surfaces"
+          },
+          "overall_verdict": {
+            "type": "string",
+            "enum": [
+              "green",
+              "yellow",
+              "red"
+            ],
+            "title": "Overall Verdict"
+          },
+          "thresholds": {
+            "$ref": "#/components/schemas/Thresholds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ran_at",
+          "surfaces",
+          "overall_verdict"
+        ],
+        "title": "EvalResult",
+        "description": "Top-level eval result \u2014 the shape the API + CLI return.\n\n``overall_verdict`` is the worst-of every surface (a red surface\nflips the whole result red); the CLI's exit-1-on-red CI-gate\nsemantics key off this field. ``ran_at`` is the UTC timestamp\nthe runner started; consumers comparing two saved baselines see\nwhen each was captured."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1544,6 +1659,74 @@
         "title": "ProbeResult",
         "description": "Lightweight reachability + auth-challenge result."
       },
+      "QueryResult": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "expected_hits": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Expected Hits"
+          },
+          "meho_hits": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Meho Hits"
+          },
+          "precision_at_5": {
+            "type": "number",
+            "title": "Precision At 5"
+          },
+          "reciprocal_rank": {
+            "type": "number",
+            "title": "Reciprocal Rank"
+          },
+          "coverage_at_5": {
+            "type": "number",
+            "title": "Coverage At 5"
+          },
+          "baseline_hits": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Baseline Hits"
+          },
+          "baseline_precision_at_5": {
+            "type": "number",
+            "nullable": true,
+            "title": "Baseline Precision At 5"
+          },
+          "baseline_reciprocal_rank": {
+            "type": "number",
+            "nullable": true,
+            "title": "Baseline Reciprocal Rank"
+          },
+          "baseline_coverage_at_5": {
+            "type": "number",
+            "nullable": true,
+            "title": "Baseline Coverage At 5"
+          }
+        },
+        "type": "object",
+        "required": [
+          "query",
+          "expected_hits",
+          "meho_hits",
+          "precision_at_5",
+          "reciprocal_rank",
+          "coverage_at_5"
+        ],
+        "title": "QueryResult",
+        "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
+      },
       "ResultHandle": {
         "properties": {
           "handle_id": {
@@ -1722,6 +1905,93 @@
         ],
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
+      },
+      "SurfaceResult": {
+        "properties": {
+          "surface": {
+            "type": "string",
+            "enum": [
+              "kb",
+              "memory",
+              "operations"
+            ],
+            "title": "Surface"
+          },
+          "query_count": {
+            "type": "integer",
+            "title": "Query Count"
+          },
+          "precision_at_5": {
+            "type": "number",
+            "title": "Precision At 5"
+          },
+          "mrr": {
+            "type": "number",
+            "title": "Mrr"
+          },
+          "coverage": {
+            "type": "number",
+            "title": "Coverage"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "green",
+              "yellow",
+              "red"
+            ],
+            "title": "Verdict"
+          },
+          "baseline_kind": {
+            "type": "string",
+            "const": "grep",
+            "nullable": true,
+            "title": "Baseline Kind"
+          },
+          "baseline_precision_at_5": {
+            "type": "number",
+            "nullable": true,
+            "title": "Baseline Precision At 5"
+          },
+          "baseline_mrr": {
+            "type": "number",
+            "nullable": true,
+            "title": "Baseline Mrr"
+          },
+          "baseline_coverage": {
+            "type": "number",
+            "nullable": true,
+            "title": "Baseline Coverage"
+          },
+          "baseline_verdict": {
+            "type": "string",
+            "enum": [
+              "green",
+              "yellow",
+              "red"
+            ],
+            "nullable": true,
+            "title": "Baseline Verdict"
+          },
+          "queries": {
+            "items": {
+              "$ref": "#/components/schemas/QueryResult"
+            },
+            "type": "array",
+            "title": "Queries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "surface",
+          "query_count",
+          "precision_at_5",
+          "mrr",
+          "coverage",
+          "verdict"
+        ],
+        "title": "SurfaceResult",
+        "description": "Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.\n\nThe verdict band is computed from the macro-mean metrics against\nthe configured :class:`Thresholds` (default\n:data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A\nsurface with ``query_count == 0`` (corpus YAML hasn't shipped\nyet) returns ``verdict=\"green\"`` deliberately \u2014 see runner.py\ndocstring.\n\n``baseline_verdict`` is computed only when the baseline ran;\n``None`` otherwise. The MEHO-\u2265-baseline overlay applies in the\naggregate verdict (see runner._apply_baseline_check)."
       },
       "Target": {
         "properties": {
@@ -1986,6 +2256,34 @@
         "type": "object",
         "title": "TargetUpdate",
         "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` and ``product`` are absent \u2014 rename = delete\n+ create."
+      },
+      "Thresholds": {
+        "properties": {
+          "precision_at_5": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Precision At 5",
+            "default": 0.8
+          },
+          "mrr": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Mrr",
+            "default": 0.5
+          },
+          "coverage": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Coverage",
+            "default": 0.9
+          }
+        },
+        "type": "object",
+        "title": "Thresholds",
+        "description": "Per-metric green-band thresholds for a verdict computation.\n\nFrozen so the threshold object passed into :func:`verdict` cannot\nbe mutated mid-run (a stale or rewritten threshold mid-eval would\ninvalidate every subsequent verdict and silently shift the CI\ngate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,\nnot stored \u2014 keeping it derived means the contract \"yellow is 70%\nof green\" can't drift between green-threshold customisation and\nthe yellow boundary.\n\nDefaults match the Initiative #373 / Task #441 contract; tests and\nfuture re-tunings construct ``Thresholds(...)`` with explicit\nvalues."
       },
       "UnknownOpError": {
         "properties": {

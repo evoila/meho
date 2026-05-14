@@ -1,0 +1,225 @@
+{
+  "overall_verdict": "green",
+  "ran_at": "2026-05-14T16:28:01.597525Z",
+  "surfaces": [
+    {
+      "baseline_coverage": null,
+      "baseline_kind": null,
+      "baseline_mrr": null,
+      "baseline_precision_at_5": null,
+      "baseline_verdict": null,
+      "coverage": 1.0,
+      "mrr": 1.0,
+      "precision_at_5": 1.0,
+      "queries": [
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "esxi-9.0-esxcli",
+            "esxi-9.0-disk-operations"
+          ],
+          "meho_hits": [
+            "esxi-9.0-esxcli"
+          ],
+          "precision_at_5": 1.0,
+          "query": "how do I run esxcli on an ESXi 9.0 host",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "vcenter-9.0-govc-coverage",
+            "vmware-automation-surface-2026"
+          ],
+          "meho_hits": [
+            "vcenter-9.0-govc-coverage"
+          ],
+          "precision_at_5": 1.0,
+          "query": "vCenter 9.0 govc coverage gaps",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "vault-1.21-raft-snapshot",
+            "vault-1.x-backup-restore",
+            "vault-1.x-overview"
+          ],
+          "meho_hits": [
+            "vault-1.21-raft-snapshot"
+          ],
+          "precision_at_5": 1.0,
+          "query": "how do I take and restore a Vault raft snapshot on 1.21",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "vsphere-9.0-host-detach-from-vds-via-api",
+            "esxi-9.0-vds-vmkernel-removal-cuts-vcenter"
+          ],
+          "meho_hits": [
+            "vsphere-9.0-host-detach-from-vds-via-api"
+          ],
+          "precision_at_5": 1.0,
+          "query": "detach a vSphere host from a VDS via the API",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "nsx-9.0-overview"
+          ],
+          "meho_hits": [
+            "nsx-9.0-overview"
+          ],
+          "precision_at_5": 1.0,
+          "query": "NSX 9.0 overview for a new operator",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "harbor-2.x-admin-password-rotation"
+          ],
+          "meho_hits": [
+            "harbor-2.x-admin-password-rotation"
+          ],
+          "precision_at_5": 1.0,
+          "query": "rotate the Harbor admin password",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "argocd-3.x-ssa-ignoredifferences-pattern",
+            "argocd-3.3-helm-oci-url-bug"
+          ],
+          "meho_hits": [
+            "argocd-3.x-ssa-ignoredifferences-pattern"
+          ],
+          "precision_at_5": 1.0,
+          "query": "ArgoCD 3.x ignoreDifferences pattern for SSA conflicts",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "rke2-canal-pod-mtu",
+            "gcs-workload-identity-from-private-rke2"
+          ],
+          "meho_hits": [
+            "rke2-canal-pod-mtu"
+          ],
+          "precision_at_5": 1.0,
+          "query": "what is the pod MTU on RKE2 with canal CNI",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "hetzner-robot-2026-04-readonly-surface",
+            "hetzner-robot-2026-04-overview",
+            "hetzner-robot-2026-04-mutation-surface"
+          ],
+          "meho_hits": [
+            "hetzner-robot-2026-04-readonly-surface"
+          ],
+          "precision_at_5": 1.0,
+          "query": "Hetzner Robot read-only API surface in 2026-04",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "holodeck-9.0-deploy-runbook",
+            "holodeck-9.0-overview",
+            "holodeck-9.0-known-issues"
+          ],
+          "meho_hits": [
+            "holodeck-9.0-deploy-runbook"
+          ],
+          "precision_at_5": 1.0,
+          "query": "Holodeck 9.0 deploy runbook from scratch",
+          "reciprocal_rank": 1.0
+        }
+      ],
+      "query_count": 10,
+      "surface": "kb",
+      "verdict": "green"
+    },
+    {
+      "baseline_coverage": null,
+      "baseline_kind": null,
+      "baseline_mrr": null,
+      "baseline_precision_at_5": null,
+      "baseline_verdict": null,
+      "coverage": 0.0,
+      "mrr": 0.0,
+      "precision_at_5": 0.0,
+      "queries": [],
+      "query_count": 0,
+      "surface": "memory",
+      "verdict": "green"
+    },
+    {
+      "baseline_coverage": null,
+      "baseline_kind": null,
+      "baseline_mrr": null,
+      "baseline_precision_at_5": null,
+      "baseline_verdict": null,
+      "coverage": 0.0,
+      "mrr": 0.0,
+      "precision_at_5": 0.0,
+      "queries": [],
+      "query_count": 0,
+      "surface": "operations",
+      "verdict": "green"
+    }
+  ],
+  "thresholds": {
+    "coverage": 0.9,
+    "mrr": 0.5,
+    "precision_at_5": 0.8
+  }
+}

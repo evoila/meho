@@ -192,6 +192,47 @@ func IsTokenNotFound(err error) bool {
 	return errors.Is(err, auth.ErrTokenNotFound)
 }
 
+// HTTPClient returns the underlying http.Client the AuthedClient
+// uses for all backplane traffic. Exposed so subcommand files that
+// call endpoints not yet wrapped by the oapi-codegen-generated
+// methods (e.g. /api/v1/retrieve/eval before the next
+// `make generate` pass) can issue typed JSON requests on the same
+// transport — same TLS config, same proxy settings, same timeouts
+// — as the generated client.
+//
+// The returned client carries no bearer-injecting RoundTripper;
+// callers are expected to set the Authorization header themselves
+// using the bearer returned from AccessToken (and to invoke Refresh
+// on a 401, mirroring GetHealth's one-shot-retry behaviour).
+func (c *AuthedClient) HTTPClient() *http.Client {
+	return c.box.httpClient
+}
+
+// AccessToken returns the current bearer string the AuthedClient
+// would attach to a generated-client call. Exposed for the same
+// reason as HTTPClient: subcommand files calling unwrapped endpoints
+// need the bearer the editor function would have injected.
+//
+// Reads under the tokenBox mutex so an in-flight refresh on another
+// goroutine can't surface a torn string.
+func (c *AuthedClient) AccessToken() string {
+	return c.box.snapshot()
+}
+
+// Refresh runs a one-shot refresh exchange against the IdP, replacing
+// the in-memory bearer if the IdP returns a fresh token. Returns
+// errNoRefreshToken (matched by IsNoRefreshToken) when the stored
+// token didn't carry a refresh_token; any other refresh failure
+// propagates verbatim.
+//
+// Subcommand files that issue unwrapped HTTP calls invoke Refresh
+// after a 401 to mirror GetHealth's transparent-retry behaviour.
+// Concurrent calls serialise on the tokenBox mutex so the IdP is
+// hit at most once per stale access token.
+func (c *AuthedClient) Refresh(ctx context.Context) error {
+	return c.box.refresh(ctx)
+}
+
 // IsNoRefreshToken reports whether err is the "stored token never
 // carried a refresh_token" sentinel. Lets the cobra command map
 // the refresh-impossible case onto output.AuthExpired (the

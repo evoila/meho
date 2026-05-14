@@ -197,11 +197,14 @@ def _resolve_target_id() -> uuid.UUID | None:
     raw = structlog.contextvars.get_contextvars().get("target_id")
     if raw is None:
         return None
+    log = structlog.get_logger()
     if not isinstance(raw, str):
+        log.error("audit_malformed_target_id", value=raw)
         return None
     try:
         return uuid.UUID(raw)
     except (ValueError, AttributeError):
+        log.error("audit_malformed_target_id", value=raw)
         return None
 
 

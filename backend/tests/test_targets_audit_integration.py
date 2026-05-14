@@ -105,7 +105,6 @@ async def _fetch_audit_rows(eng: AsyncEngine) -> list[AuditLog]:
         return list(result.scalars().all())
 
 
-
 # ---------------------------------------------------------------------------
 # Unit tests — resolve_target contextvar binding
 # ---------------------------------------------------------------------------

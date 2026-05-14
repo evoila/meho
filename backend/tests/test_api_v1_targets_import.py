@@ -20,15 +20,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 import respx
 from fastapi.testclient import TestClient
-
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Target as TargetORM
 
 from ._oidc_jwt_helpers import (
     DEFAULT_TENANT_ID,
@@ -40,6 +35,7 @@ from ._targets_helpers import (
     _admin_token,
     _build_app,
     _empty_connector_registry,  # noqa: F401
+    _insert_target,
     _isolated_jwks_cache,  # noqa: F401
     _operator_token,
     _settings_env,  # noqa: F401
@@ -53,29 +49,6 @@ from ._targets_helpers import (
 @pytest.fixture
 def client() -> Iterator[TestClient]:
     yield TestClient(_build_app())
-
-
-async def _insert_target(**kwargs: Any) -> TargetORM:
-    defaults: dict[str, Any] = {
-        "id": uuid.uuid4(),
-        "tenant_id": uuid.UUID(DEFAULT_TENANT_ID),
-        "name": "default-target",
-        "product": "ssh",
-        "host": "10.0.0.1",
-        "aliases": [],
-        "vpn_required": False,
-        "auth_model": "shared_service_account",
-        "extras": {},
-        "created_at": datetime.now(UTC),
-        "updated_at": datetime.now(UTC),
-    }
-    defaults.update(kwargs)
-    t = TargetORM(**defaults)
-    sm = get_sessionmaker()
-    async with sm() as session:
-        session.add(t)
-        await session.commit()
-    return t
 
 
 # ---------------------------------------------------------------------------

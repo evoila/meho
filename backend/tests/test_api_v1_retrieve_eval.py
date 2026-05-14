@@ -307,7 +307,15 @@ def test_eval_route_unknown_field_rejects_with_422(client: TestClient) -> None:
 async def test_eval_route_audit_payload_carries_overrides_and_enrichment(
     client: TestClient,
 ) -> None:
-    """The audit_log row carries op_id / op_class / surface / baseline / row_count."""
+    """The audit_log row carries op_id / op_class / surface / row_count.
+
+    Uses the no-baseline path because v0.2 rejects explicit baseline
+    values with 501 — see
+    :func:`test_eval_route_baseline_request_returns_501` for the
+    rejection contract. The audit-row contract is identical for the
+    happy path (200) since the bindings happen before the runner
+    kicks off.
+    """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key, sub="op-audit", tenant_role=TenantRole.OPERATOR.value)
 
@@ -319,7 +327,7 @@ async def test_eval_route_audit_payload_carries_overrides_and_enrichment(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.post(
             "/api/v1/retrieve/eval",
-            json={"surface": "kb", "baseline": "grep"},
+            json={"surface": "kb"},
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -339,9 +347,79 @@ async def test_eval_route_audit_payload_carries_overrides_and_enrichment(
     assert payload.get("op_id") == "meho.retrieval.eval"
     assert payload.get("op_class") == "audit_query"
     assert payload.get("eval_surface") == "kb"
-    assert payload.get("eval_baseline") == "grep"
+    assert payload.get("eval_baseline") == ""
     # row_count = total queries actually evaluated across surfaces.
     assert payload.get("row_count") == 7
+
+
+def test_eval_route_baseline_request_returns_501(client: TestClient) -> None:
+    """``baseline="grep"`` → 501 Not Implemented.
+
+    Silent-drop is the worst possible posture: a caller that POSTs
+    ``{"surface": "kb", "baseline": "grep"}`` reasonably expects the
+    baseline to run, but the v0.2 server has no checked-in corpus
+    snapshot. The CLI runs the baseline locally instead; the API
+    rejects loud-and-honest so API-only consumers get a clear signal.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-501", tenant_role=TenantRole.OPERATOR.value)
+
+    fake_eval = AsyncMock(return_value=_stub_eval_result())
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.retrieve_eval.eval_all", new=fake_eval),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/retrieve/eval",
+            json={"surface": "kb", "baseline": "grep"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 501
+    body = response.json()
+    assert "baseline" in body.get("detail", "").lower()
+    # The runner must not run on the rejection path.
+    fake_eval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_eval_route_baseline_request_still_writes_audit(
+    client: TestClient,
+) -> None:
+    """501 rejection still produces an audit row recording operator intent.
+
+    The audit context is bound *before* the baseline gate so a
+    rejected request still feeds the audit pipeline. Operators
+    querying ``audit_log`` for "who tried to run a server-side
+    baseline?" can correlate via ``op_id='meho.retrieval.eval'`` +
+    ``eval_baseline='grep'``.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-501-audit", tenant_role=TenantRole.OPERATOR.value)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/retrieve/eval",
+            json={"surface": "kb", "baseline": "grep"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 501
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (await session.execute(select(AuditLog))).scalars().all()
+        audit_rows = [r for r in rows if r.operator_sub == "op-501-audit"]
+        assert audit_rows, "no audit row for op-501-audit"
+        row = audit_rows[-1]
+
+    payload: dict[str, Any] = row.payload
+    assert payload.get("op_id") == "meho.retrieval.eval"
+    assert payload.get("op_class") == "audit_query"
+    assert payload.get("eval_surface") == "kb"
+    assert payload.get("eval_baseline") == "grep"
 
 
 @pytest.mark.asyncio

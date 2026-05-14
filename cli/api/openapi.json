@@ -322,6 +322,9 @@
               }
             }
           },
+          "501": {
+            "description": "Server-side baseline evaluation is not implemented; the request body's ``baseline`` field is non-empty and v0.2 has no checked-in corpus snapshot. Run the baseline locally via ``meho retrieval eval --baseline grep``."
+          },
           "422": {
             "description": "Validation Error",
             "content": {

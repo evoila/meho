@@ -54,6 +54,13 @@ not the per-surface row count.
 Out of scope
 ------------
 
+* **Server-side baseline evaluation.** v0.2 has no checked-in
+  corpus snapshot on the server; an explicit ``baseline=grep`` in
+  the request body is rejected with 501 Not Implemented (the field
+  is kept on the schema so the rejection is honest rather than
+  silent). The CLI runs the baseline locally against the operator's
+  checked-out ``kb/`` snapshot. T7 / v0.2.next will wire a
+  server-side corpus path and unblock this surface.
 * **Save / compare baseline workflow.** The CLI handles disk
   serialisation; the API route returns the raw EvalResult and lets
   the caller persist it as they choose. (A future API surface for
@@ -68,7 +75,7 @@ Out of scope
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -102,9 +109,15 @@ class EvalRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     surface: EvalRequestSurface = Field(default="all")
-    # Optional baseline kind. Only ``"grep"`` is supported in v0.2;
-    # adding ``"yq"`` (operations baseline) lands with T3 (#442). The
-    # API rejects unknown values via the Literal type.
+    # Optional baseline kind. v0.2 server has no checked-in corpus
+    # snapshot to evaluate against, so any non-empty value is rejected
+    # at the handler with 501 Not Implemented (see
+    # :func:`eval_endpoint`). Operators run the baseline locally via
+    # the CLI verb instead. The field is kept on the schema so the
+    # rejection surface is honest (`baseline=grep` → 501 with a
+    # message pointing operators at the CLI) rather than silently
+    # dropping the value. T7 / v0.2.next wires server-side corpus
+    # storage and removes the rejection.
     baseline: str | None = Field(default=None, max_length=16)
 
 
@@ -129,7 +142,20 @@ def _bind_request_audit_context(
     )
 
 
-@router.post("/eval", response_model=EvalResult)
+@router.post(
+    "/eval",
+    response_model=EvalResult,
+    responses={
+        501: {
+            "description": (
+                "Server-side baseline evaluation is not implemented; "
+                "the request body's ``baseline`` field is non-empty "
+                "and v0.2 has no checked-in corpus snapshot. Run the "
+                "baseline locally via ``meho retrieval eval --baseline grep``."
+            ),
+        },
+    },
+)
 async def eval_endpoint(
     body: EvalRequest,
     operator: Operator = _require_operator,
@@ -154,16 +180,31 @@ async def eval_endpoint(
     """
     _bind_request_audit_context(surface=body.surface, baseline=body.baseline)
 
+    # The grep baseline isn't wired to a server-side corpus root in
+    # v0.2 — operators run the baseline locally via the CLI verb
+    # against a checked-in snapshot. Reject explicit baseline values
+    # with 501 Not Implemented rather than silently dropping the
+    # field: silent-drop produces a 200 with ``baseline_kind=null``
+    # per surface, which a caller may not notice — and the CI signal
+    # for "MEHO ≥ baseline" (retire-criterion #4 of Initiative #373)
+    # would silently never fire on the API path. The audit context
+    # is bound *before* this gate so the rejection still records the
+    # operator's intent for follow-up review. T7 / v0.2.next will
+    # wire a server-side corpus snapshot and unblock this path.
+    if body.baseline:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=(
+                "server-side baseline evaluation is not implemented; "
+                "run `meho retrieval eval --baseline grep` from a "
+                "machine that has the kb/ snapshot checked out"
+            ),
+        )
+
     # Resolve the surface filter for the runner. ``"all"`` -> None,
     # which the runner interprets as "every shipped surface".
     surfaces = None if body.surface == "all" else [body.surface]
 
-    # The grep baseline isn't wired to a server-side corpus root in
-    # v0.2 — operators run the baseline locally via the CLI verb
-    # against a checked-in snapshot. The API surface accepts the flag
-    # for forward-compat (T7 / v0.2.next can wire a server-side
-    # snapshot path) but ignores it today; the response carries
-    # ``baseline_kind=null`` per surface to signal that.
     result = await eval_all(
         tenant_id=operator.tenant_id,
         surfaces=surfaces,

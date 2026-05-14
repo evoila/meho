@@ -54,11 +54,13 @@ _log = structlog.get_logger(__name__)
 
 
 #: ContextVar carrying the parent audit row id when a composite handler
-#: dispatches a sub-op. T5 binds this before each composite handler call
-#: (so a nested dispatch reads it from the contextvar); T7 (#398) will
-#: ship the full audit-tree column on ``audit_log`` and the
-#: bounded-recursion guard. Defaulting to ``None`` is correct -- a
-#: top-level dispatch has no parent.
+#: dispatches a sub-op. T7 (#398) builds the ``dispatch_child`` callable
+#: that binds + resets this contextvar around every recursive dispatch
+#: from inside a composite handler; the AuditMiddleware (this module's
+#: :func:`write_audit_row`) reads it and writes it into the real
+#: ``audit_log.parent_audit_id`` column added by migration ``0006``.
+#: Defaulting to ``None`` is correct -- a top-level dispatch has no
+#: parent.
 parent_audit_id_var: ContextVar[uuid.UUID | None] = ContextVar(
     "parent_audit_id",
     default=None,
@@ -72,10 +74,12 @@ def _build_audit_payload(
 ) -> dict[str, Any]:
     """Compose the ``audit_log.payload`` dict for the dispatcher row.
 
-    Includes the optional ``parent_audit_id`` (from the contextvar)
-    when a composite handler is mid-recursion -- T7 will promote it to
-    a real column, but the payload-linkage shape lets composite
-    sub-call linkage already work today.
+    Includes a *mirror* of the ``parent_audit_id`` contextvar value
+    in the payload for the v0.2 broadcast-event surface (the
+    broadcast schema is JSON-shaped and consumers parse the payload,
+    not the audit row); the canonical linkage now lives in the real
+    ``audit_log.parent_audit_id`` column added by migration ``0006``
+    and written by :func:`write_audit_row`.
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -127,6 +131,7 @@ async def write_audit_row(
     sessionmaker = get_sessionmaker()
     payload = _build_audit_payload(descriptor, params_hash, result_status)
     target_id = _resolve_target_id(target)
+    parent_audit_id = parent_audit_id_var.get()
     async with sessionmaker() as session:
         row = AuditLog(
             id=audit_id,
@@ -134,6 +139,7 @@ async def write_audit_row(
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
             target_id=target_id,
+            parent_audit_id=parent_audit_id,
             method="DISPATCH",
             path=descriptor.op_id,
             status_code=status_code_for_result(result_status),

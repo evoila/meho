@@ -249,6 +249,24 @@ class Settings(BaseModel):
         Default 24 matches the locked v0.2 decision-3 contract. T3
         (#309) will use this to set ``XADD MAXLEN`` / ``MINID`` trim
         on every publish; T1 only carries the knob.
+    composite_max_depth:
+        Hard cap on the recursion depth a composite operation
+        (``source_kind='composite'``) may reach via successive
+        ``dispatch_child(...)`` calls. Composite handlers orchestrate
+        multi-step flows (e.g. vSphere VM provisioning ~5 atomic
+        calls) and may legitimately nest a composite inside another
+        composite, but unbounded recursion is a foot-gun: a handler
+        that accidentally re-dispatches itself would spin forever
+        and exhaust the audit-log + DB-pool capacity before failing.
+        Default 8 -- four levels above any realistic v0.2 composite
+        depth (sequential vSphere VM creation is depth-1, an
+        operator-authored composite of composites is depth-2; 8
+        gives 4x headroom for legitimate use while catching the
+        runaway pattern in seconds rather than minutes). Operators
+        whose connectors need deeper composition override via the
+        ``COMPOSITE_MAX_DEPTH`` env var. Read once per
+        ``dispatch_child`` call -- no caching beyond
+        :func:`get_settings`'s :func:`lru_cache`.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -281,6 +299,7 @@ class Settings(BaseModel):
         min_length=1,
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
+    composite_max_depth: int = Field(default=8, gt=0)
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -394,5 +413,8 @@ def get_settings() -> Settings:
         ),
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
+        ),
+        composite_max_depth=int(
+            os.environ.get("COMPOSITE_MAX_DEPTH", "8"),
         ),
     )

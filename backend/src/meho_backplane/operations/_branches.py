@@ -230,21 +230,29 @@ async def dispatch_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch: Callable[..., Awaitable[Any]],
+    dispatch_child: Callable[..., Awaitable[Any]],
 ) -> Any:
     """Invoke a ``source_kind='composite'`` handler with the dispatcher seam.
 
-    Composite handlers receive ``(operator, target, params, dispatch)``;
-    they call :func:`dispatch` recursively for sub-ops. T7 (#398) ships
-    the full recursion infrastructure (audit-tree linkage via the
-    ``parent_audit_id_var`` contextvar, bounded recursion depth, sub-op
-    accounting). T5's job is to ensure the branch exists and the
-    contextvar is bound before the recursive call so T7 has a clean
-    extension point.
+    Composite handlers receive ``(operator, target, params,
+    dispatch_child)``; they call ``dispatch_child(...)`` recursively for
+    sub-ops. The ``dispatch_child`` callable is built by
+    :func:`~meho_backplane.operations.composite.get_dispatch_child` and
+    wraps :func:`~meho_backplane.operations.dispatcher.dispatch` so that
+    the audit-tree linkage (``parent_audit_id_var`` contextvar -> real
+    ``audit_log.parent_audit_id`` column) and bounded-recursion guard
+    (``composite_depth_var`` contextvar checked against
+    :attr:`~meho_backplane.settings.Settings.composite_max_depth`) are
+    applied automatically -- the handler reads as plain business logic.
+
+    The keyword the handler sees is ``dispatch_child`` (not raw
+    ``dispatch``); composite handlers annotate the parameter against
+    the :class:`~meho_backplane.operations.composite.DispatchChild`
+    Protocol for static type checking.
     """
     return await handler(
         operator=operator,
         target=target,
         params=params,
-        dispatch=dispatch,
+        dispatch_child=dispatch_child,
     )

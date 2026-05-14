@@ -407,6 +407,73 @@ targets:
 	}
 }
 
+func TestImport_Update_PatchBodyIsSparse(t *testing.T) {
+	// Verify that PATCH body only contains fields explicitly set in the YAML.
+	// Fields absent from YAML (vpn_required, auth_model, aliases) must not be
+	// sent so the backend's exclude_unset logic leaves them untouched.
+	xdg := withTempXDG(t)
+	var patchBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal([]map[string]any{
+			{"id": "aaa", "name": "alpha", "aliases": []string{}, "product": "rke2", "host": "10.0.0.1"},
+		})
+		_, _ = w.Write(b)
+	})
+	mux.HandleFunc("/api/v1/targets/alpha", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&patchBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(map[string]any{
+			"id": "aaa", "tenant_id": "ttt",
+			"name": "alpha", "aliases": []string{},
+			"product": "rke2", "host": "10.0.0.1",
+			"auth_model": "shared_service_account",
+			"vpn_required": false, "extras": map[string]any{},
+			"created_at": "2026-01-01T00:00:00Z",
+			"updated_at": "2026-01-01T00:00:00Z",
+		})
+		_, _ = w.Write(b)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	seedCreds(t, xdg, srv.URL)
+
+	f := writeTempYAML(t, `
+targets:
+  - name: alpha
+    product: rke2
+    host: 10.0.0.1
+    notes: "only this field"
+`)
+	_, _, err := runCobraCmd(t, newImportCmd(), f, "--update")
+	if err != nil {
+		t.Fatalf("import --update returned error: %v", err)
+	}
+	if _, ok := patchBody["vpn_required"]; ok {
+		t.Errorf("PATCH body must not include vpn_required when absent from YAML, got: %v", patchBody)
+	}
+	if _, ok := patchBody["auth_model"]; ok {
+		t.Errorf("PATCH body must not include auth_model when absent from YAML, got: %v", patchBody)
+	}
+	if _, ok := patchBody["aliases"]; ok {
+		t.Errorf("PATCH body must not include aliases when absent from YAML, got: %v", patchBody)
+	}
+	if patchBody["notes"] != "only this field" {
+		t.Errorf("PATCH body should include notes='only this field', got: %v", patchBody)
+	}
+	if patchBody["host"] != "10.0.0.1" {
+		t.Errorf("PATCH body should always include host, got: %v", patchBody)
+	}
+}
+
 func TestImport_NoCreds(t *testing.T) {
 	_ = withTempXDG(t)
 	f := writeTempYAML(t, `

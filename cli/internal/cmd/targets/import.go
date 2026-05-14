@@ -44,6 +44,10 @@ type importEntry struct {
 	Notes       *string
 	AuthModel   string
 	Extras      map[string]any
+	// presentFields tracks which optional YAML keys were explicitly set.
+	// Used by entryToUpdateRequest to build a sparse PATCH body so that
+	// fields absent from the YAML do not clobber existing target data.
+	presentFields map[string]bool
 }
 
 // importAction describes what the import will do with a single entry.
@@ -172,6 +176,7 @@ func parseTargetsYAML(data []byte) ([]importEntry, error) {
 
 func parseYAMLEntry(i int, raw map[string]any) (importEntry, error) {
 	var e importEntry
+	e.presentFields = make(map[string]bool)
 
 	name, ok := raw["name"].(string)
 	if !ok || name == "" {
@@ -200,6 +205,7 @@ func parseYAMLEntry(i int, raw map[string]any) (importEntry, error) {
 				}
 			}
 		}
+		e.presentFields["aliases"] = true
 	}
 
 	if raw["port"] != nil {
@@ -214,6 +220,7 @@ func parseYAMLEntry(i int, raw map[string]any) (importEntry, error) {
 
 	if v, ok := raw["vpn_required"].(bool); ok {
 		e.VPNRequired = v
+		e.presentFields["vpn_required"] = true
 	}
 
 	if v, ok := raw["notes"].(string); ok {
@@ -222,6 +229,7 @@ func parseYAMLEntry(i int, raw map[string]any) (importEntry, error) {
 
 	if v, ok := raw["auth_model"].(string); ok {
 		e.AuthModel = v
+		e.presentFields["auth_model"] = true
 	} else {
 		e.AuthModel = "shared_service_account"
 	}
@@ -379,17 +387,33 @@ func entryToCreateRequest(e importEntry) api.TargetCreateRequest {
 	}
 }
 
-func entryToUpdateRequest(e importEntry) api.TargetUpdateRequest {
-	return api.TargetUpdateRequest{
-		Aliases:     e.Aliases,
-		Host:        e.Host,
-		Port:        e.Port,
-		SecretRef:   e.SecretRef,
-		AuthModel:   e.AuthModel,
-		VPNRequired: e.VPNRequired,
-		Extras:      e.Extras,
-		Notes:       e.Notes,
+func entryToUpdateRequest(e importEntry) map[string]any {
+	// host is required in YAML, always included.
+	m := map[string]any{"host": e.Host}
+	// Optional fields: only send what was explicitly set in the YAML so that
+	// the backend's exclude_unset logic leaves all other fields untouched.
+	if e.presentFields["aliases"] {
+		m["aliases"] = e.Aliases
 	}
+	if e.Port != nil {
+		m["port"] = *e.Port
+	}
+	if e.SecretRef != nil {
+		m["secret_ref"] = *e.SecretRef
+	}
+	if e.presentFields["vpn_required"] {
+		m["vpn_required"] = e.VPNRequired
+	}
+	if e.Notes != nil {
+		m["notes"] = *e.Notes
+	}
+	if e.presentFields["auth_model"] {
+		m["auth_model"] = e.AuthModel
+	}
+	if len(e.Extras) > 0 {
+		m["extras"] = e.Extras
+	}
+	return m
 }
 
 func filterActions(actions []importAction, kind string) []importAction {

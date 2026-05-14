@@ -81,20 +81,6 @@ type TargetCreateRequest struct {
 	Notes       *string        `json:"notes,omitempty"`
 }
 
-// TargetUpdateRequest is the PATCH /api/v1/targets/{name} body.
-// Nil pointer fields serialize as JSON null, which instructs the
-// server to clear that column (Pydantic exclude_unset behaviour).
-type TargetUpdateRequest struct {
-	Aliases     []string       `json:"aliases"`
-	Host        string         `json:"host"`
-	Port        *int           `json:"port"`
-	SecretRef   *string        `json:"secret_ref"`
-	AuthModel   string         `json:"auth_model"`
-	VPNRequired bool           `json:"vpn_required"`
-	Extras      map[string]any `json:"extras"`
-	Notes       *string        `json:"notes"`
-}
-
 // ListTargets calls GET /api/v1/targets with a one-shot 401-retry.
 // Returns the typed slice on success. On error the response body is
 // parsed for a structured error detail where possible; otherwise
@@ -204,9 +190,11 @@ func (c *AuthedClient) CreateTarget(ctx context.Context, req TargetCreateRequest
 }
 
 // UpdateTarget calls PATCH /api/v1/targets/{name} with a one-shot 401-retry.
+// body is a sparse map — only keys present in the map are sent to the server,
+// so the backend's exclude_unset logic leaves unmentioned fields untouched.
 // Returns the updated target on 200, or an error on any other status.
-func (c *AuthedClient) UpdateTarget(ctx context.Context, name string, req TargetUpdateRequest) (*Target, int, error) {
-	resp, err := c.doRequestWithBody(ctx, http.MethodPatch, "/api/v1/targets/"+url.PathEscape(name), req)
+func (c *AuthedClient) UpdateTarget(ctx context.Context, name string, body map[string]any) (*Target, int, error) {
+	resp, err := c.doRequestWithBody(ctx, http.MethodPatch, "/api/v1/targets/"+url.PathEscape(name), body)
 	if err != nil {
 		return nil, 0, err
 	}

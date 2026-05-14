@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/discovery"
 )
 
@@ -74,6 +75,12 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newStatusCmd())
+
+	// G4.3-T2 (#441) -- retrieval-quality + migration-decision tooling.
+	// `meho retrieval eval` ships first; sibling verbs (usage T5b #464,
+	// retire-checklist T6 #445) graft onto the same parent in their own
+	// PRs.
+	root.AddCommand(retrieval.NewRootCmd())
 
 	// G0.2-T6 (#245) — static connector dispatch commands for the
 	// known product set. v0.2 ships vault only; v0.2.next replaces

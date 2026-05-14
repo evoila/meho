@@ -24,6 +24,10 @@ return ``[]`` until then so T2's runner can iterate every surface
 without crashing on a missing file.
 """
 
+from meho_backplane.retrieval.eval.baseline_grep import (
+    BaselineConfigError,
+    run_grep_baseline,
+)
 from meho_backplane.retrieval.eval.corpus import (
     CorpusValidationError,
     KbCorpusQuery,
@@ -31,11 +35,57 @@ from meho_backplane.retrieval.eval.corpus import (
     OperationCorpusQuery,
     load_corpus,
 )
+from meho_backplane.retrieval.eval.metrics import (
+    GREEN_DEFAULTS,
+    Thresholds,
+    Verdict,
+    coverage_at_k,
+    mean_metric,
+    precision_at_k,
+    reciprocal_rank,
+    verdict,
+)
+from meho_backplane.retrieval.eval.runner import (
+    DEFAULT_K,
+    EvalRequestSurface,
+    EvalResult,
+    QueryResult,
+    RegressionEpsilon,
+    RetrieveCallable,
+    SurfaceResult,
+    compare_baseline,
+    eval_all,
+    eval_surface,
+    load_baseline,
+    save_baseline,
+)
 
 __all__ = [
+    "DEFAULT_K",
+    "GREEN_DEFAULTS",
+    "BaselineConfigError",
     "CorpusValidationError",
+    "EvalRequestSurface",
+    "EvalResult",
     "KbCorpusQuery",
     "MemoryCorpusQuery",
     "OperationCorpusQuery",
+    "QueryResult",
+    "RegressionEpsilon",
+    "RetrieveCallable",
+    "SurfaceResult",
+    "Thresholds",
+    "Verdict",
+    "compare_baseline",
+    "coverage_at_k",
+    "eval_all",
+    "eval_surface",
+    "load_baseline",
     "load_corpus",
+    "mean_metric",
+    "precision_at_k",
+    "reciprocal_rank",
+    "run_grep_baseline",
+    "save_baseline",
+    "verdict",
 ]

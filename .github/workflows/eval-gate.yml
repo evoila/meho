@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Retrieval-quality CI gate (G4.3-T2 #441).
+#
+# Runs the retrieval-eval engine against the checked-in eval corpus
+# on every PR that touches the retrieval substrate or the eval
+# library; fails the build when the eval verdict goes red OR when
+# any per-surface metric regresses against the checked-in baseline
+# (`ci/eval-baseline.json`) by more than the noise floor (0.02).
+#
+# Path-scoped so PRs that don't touch retrieval skip this gate
+# entirely (matches the existing migration-compat / pr-smoke
+# convention).
+#
+# What this gate proves and what it doesn't
+# -----------------------------------------
+#
+# Today the gate exercises the runner / metrics / verdict layer
+# end-to-end against a deterministic stub retrieve_fn that returns
+# the corpus's first expected hit per query. This catches:
+#
+# * regressions in the metric math (precision_at_k, MRR, coverage),
+# * regressions in the verdict bands (green / yellow / red),
+# * regressions in the corpus loader (malformed kb_queries.yaml),
+# * regressions in the per-surface dispatch (broken hits-to-slugs).
+#
+# It does **not** today exercise the live BM25+cosine+RRF retrieval
+# substrate. That coverage lives in `tests/integration/test_retrieval_e2e.py`
+# (PG via testcontainers + fastembed) and the chart.yml `helm-test`
+# job (Helm test Pod + pgvector). When G4.3-T6 (#445)'s
+# `retire-checklist` verb wires a per-surface threshold check
+# against the live substrate, this gate becomes the inner ring +
+# a new "live eval" job becomes the outer ring.
+#
+# Required status check candidate (after T6 #445 lands the
+# live-substrate version of the gate; today this gate is
+# advisory-strict — it fails the workflow but isn't yet in branch
+# protection).
+#
+# All third-party actions pinned to immutable SHAs with the
+# human-readable tag in a trailing comment (devops_best_practices:
+# SHA-pin every action). Same SHAs as ci.yml so a single
+# supply-chain audit covers both.
+
+name: eval-gate
+
+on:
+  pull_request:
+    paths:
+      - 'backend/src/meho_backplane/retrieval/**'
+      - 'backend/src/meho_backplane/api/v1/retrieve_eval.py'
+      - 'scripts/ci/run_eval_gate.py'
+      - 'ci/eval-baseline.json'
+      - '.github/workflows/eval-gate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval-gate:
+    name: Retrieval-eval gate
+    # Fork-PR guard: never execute project code from a fork on the
+    # self-hosted runner pool. Mirrors ci.yml's stance.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        # --locked refuses to update uv.lock; if pyproject.toml drifted
+        # from the lock, CI fails here rather than silently bumping
+        # deps. Same pattern as ci.yml's python-lint-test job.
+        run: uv sync --locked --all-groups
+
+      - name: Run retrieval-eval gate
+        # The script returns 0 on green/yellow + no regression vs
+        # ci/eval-baseline.json; 1 on red verdict OR baseline
+        # regression. Fail-loud — no continue-on-error: a red gate
+        # is the whole point of the workflow.
+        run: uv run python ../scripts/ci/run_eval_gate.py --compare-baseline ../ci/eval-baseline.json

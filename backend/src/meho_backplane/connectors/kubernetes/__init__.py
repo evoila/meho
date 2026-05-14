@@ -7,10 +7,12 @@ Importing the package registers :class:`KubernetesConnector` against
 both the v1 single-product registry and the v2 three-tuple registry:
 
 * **v1 entry** -- ``register_connector("k8s", KubernetesConnector)``.
-  Kept temporarily so the chassis route at
-  ``POST /api/v1/connectors/{product}/{op_id}`` keeps resolving for
-  the deprecation window. Removed once T11 (#412) lands the
-  ``/api/v1/operations/call`` cutover.
+  Retained for ``get_connector("k8s")`` callers (Kubernetes resolver
+  tests, the ``/api/v1/health`` Vault federation probe shape, and
+  startup checks). The chassis route that originally motivated it
+  (``POST /api/v1/connectors/{product}/{op_id}``) was deprecated and
+  removed by G0.6-T11 (#412); ``POST /api/v1/operations/call`` is the
+  canonical dispatch surface.
 * **v2 entry** -- ``register_connector_v2(product="k8s",
   version="1.x", impl_id="kubernetes-asyncio",
   cls=KubernetesConnector)`` (G0.6-T2 #393). The v2 entry is what the

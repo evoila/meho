@@ -212,21 +212,23 @@ get_connector("vsphere")  # → VSphereConnector class
 
 Eager-imported at app startup via the FastAPI `lifespan` so module-side `register_connector(...)` calls land before the first request. Duplicate registration raises `RuntimeError` — programmer bug, surfaces at boot, never at request time.
 
-## Op dispatch flow (target shape, once G0.2-T2 / G0.3 land)
+## Op dispatch flow (G0.6 substrate)
 
-> **Status:** today's shipped substrate is the ABC + result models. The remaining pieces — connector registry ([G0.2-T2 / PR #295, open](https://github.com/evoila/meho/pull/295)), targets-as-data ([G0.3 / #224, open](https://github.com/evoila/meho/issues/224)), `_op_map` per connector, the `/api/v1/connectors/...` route surface, and the G6 broadcast hook — are not yet wired. The flow below is the **target shape** every Initiative under #214 / #220 / #217 will land against.
+> **Status:** the G0.6 operation substrate (Initiative #388) is the canonical dispatch surface. The earlier v1 chassis route `POST /api/v1/connectors/{product}/{op_id}` from G0.2-T6 was deprecated and removed by G0.6-T11 (#412); see [operations-substrate.md](operations-substrate.md) for the full dispatcher path.
 
-For a CLI call like `meho vsphere vm.list --target rdc-vcenter`:
+For an operator call like `meho operation call vmware-rest-9.0 vm.list --target rdc-vcenter` (CLI verb is the upcoming follow-up to G0.6-T8; the API route is live today):
 
-1. CLI → `POST /api/v1/connectors/vsphere/vm.list` body `{target: "rdc-vcenter", params: {...}}`
-2. FastAPI handler → `resolve_target(operator.tenant_id, "rdc-vcenter")` (G0.3) → `Target` row.
-3. → `get_connector("vsphere")` → `VSphereConnector` class.
-4. → `connector.execute(target, "vsphere.vm.list", params)`.
-5. Connector looks up `op_id` in its per-product `_op_map`, runs the operation against the vendor.
-6. Returns `OperationResult(status="ok", result=[...], duration_ms=42.3)`.
-7. `AuditMiddleware` writes one row with `tenant_id`, `target_id`, `op_id`, `params_hash`.
-8. G6 broadcast publishes an event (aggregate-only for `credential_read` op-class per decision #3 in [v0.2-decisions.md](../planning/v0.2-decisions.md)).
-9. MCP path mirrors this: `tools/call name="vsphere.vm.list"` dispatches via the same `_op_map`.
+1. CLI / MCP / direct HTTP → `POST /api/v1/operations/call` body `{connector_id: "vmware-rest-9.0", op_id: "vm.list", target: {"name": "rdc-vcenter"}, params: {...}}`.
+2. FastAPI handler → `operations.dispatch(operator, connector_id, op_id, target, params)`.
+3. → `resolve_target(operator.tenant_id, "rdc-vcenter")` (G0.3) → `Target` row.
+4. → `resolve_connector(target)` against the v2 registry (`(product, version, impl_id)` keyed) → `VSphereConnector` class instance.
+5. → `endpoint_descriptor` lookup by `(connector_id, op_id)`, `parameter_schema` validation, policy gate.
+6. → Branch on `source_kind`: `ingested` builds the HTTP request from `method` + `path`, `typed` resolves `handler_ref` to a callable, `composite` runs the handler with a recursive `dispatch` callable.
+7. → JSONFlux reducer wraps the response (pass-through default in v0.2).
+8. Returns `OperationResult(status="ok", result=[...], duration_ms=42.3)`.
+9. `AuditMiddleware` writes one row with `tenant_id`, `target_id`, `op_id`, `params_hash`, plus any `parent_audit_id` for composite-child dispatches.
+10. G6 broadcast publishes an event (aggregate-only for `credential_read` op-class per decision #3 in [v0.2-decisions.md](../planning/v0.2-decisions.md)).
+11. MCP path mirrors this: `tools/call name="call_operation"` dispatches through the same substrate. Vendor-specific identifiers (`vmware-rest-9.0`, `vm.list`) live in arguments, never in the MCP tool surface — see [CLAUDE.md](../../CLAUDE.md) postulate 5.
 
 ## Adding a new connector
 

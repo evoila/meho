@@ -37,11 +37,13 @@ flows through :func:`meho_backplane.operations.dispatch`, which handles
 parameter validation, the policy gate, audit-log write, broadcast
 publish, and JSONFlux reduction in one place. The connector's
 :meth:`VaultConnector.execute` method is now a thin shim that delegates
-to :func:`dispatch` so legacy callers (the pre-G0.6
-``/api/v1/connectors/{product}/{op_id}`` HTTP surface,
-:mod:`meho_backplane.auth.vault.vault_readiness_probe`) keep working
-unchanged while the typed-op pipeline carries the real semantics. Newer
-callers (``/api/v1/health`` post-refactor, the
+to :func:`dispatch` so operator-less callers
+(:mod:`meho_backplane.auth.vault.vault_readiness_probe`) keep working
+unchanged while the typed-op pipeline carries the real semantics. The
+pre-G0.6 chassis route at ``/api/v1/connectors/{product}/{op_id}`` that
+used to depend on this shim was deprecated and removed by G0.6-T11
+(#412); the canonical dispatch surface is ``POST /api/v1/operations/call``.
+Operator-aware callers (``/api/v1/health`` post-refactor, the
 ``/api/v1/operations/call_operation`` meta-tool, MCP ``call_operation``)
 construct the :class:`~meho_backplane.auth.operator.Operator` and call
 :func:`dispatch` directly.
@@ -204,13 +206,16 @@ class VaultConnector(Connector):
 
         Thin shim that turns the ABC-defined
         ``(target, op_id, params)`` surface into a
-        :func:`~meho_backplane.operations.dispatch` call so legacy
-        callers (the pre-G0.6 ``/api/v1/connectors/{product}/{op_id}``
-        HTTP route, :mod:`meho_backplane.auth.vault.vault_readiness_probe`)
+        :func:`~meho_backplane.operations.dispatch` call so operator-less
+        callers (:mod:`meho_backplane.auth.vault.vault_readiness_probe`,
+        and the dispatcher's own ``source_kind == "typed"`` branch)
         get the new substrate's behaviour — parameter validation against
         the registered ``endpoint_descriptor.parameter_schema``,
         policy gate, audit-log write, broadcast publish, JSONFlux
-        wrapping — without changing their call sites.
+        wrapping — without changing their call sites. The pre-G0.6
+        chassis route at ``/api/v1/connectors/{product}/{op_id}`` that
+        used to depend on this shim was deprecated and removed by
+        G0.6-T11 (#412).
 
         Operator identity is synthesised from a fixed system-tenant
         sentinel because :class:`Connector.execute`'s ABC signature

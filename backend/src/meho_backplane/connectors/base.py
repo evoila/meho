@@ -24,12 +24,39 @@ type Target = Any
 class Connector(ABC):
     """Abstract base for all MEHO connectors.
 
-    Subclasses register operations via the per-product op_map (see T5
-    reference impl). Three required methods cover the v0.2 surface;
-    v0.2.next may add streaming.
+    Subclasses advertise themselves through five class-level attributes that
+    the G0.6 registry v2 (#393) keys on:
+
+    * :attr:`product` — product slug, e.g. ``"vsphere"``, ``"vault"``,
+      ``"bind9"``.
+    * :attr:`version` — connector implementation version
+      (e.g. ``"9.0"`` for a vSphere 9.0 connector). Empty string means
+      "unversioned" and preserves v1 single-product registry behaviour.
+    * :attr:`impl_id` — implementation discriminator, e.g.
+      ``"vmware-rest"`` vs ``"vmware-pyvmomi"``. Empty string preserves
+      v1 behaviour.
+    * :attr:`supported_version_range` — PEP 440-style version spec
+      (e.g. ``">=8.5,<10.0"``) the connector advertises against a
+      target's fingerprinted product version. ``None`` means "any
+      version" and preserves v1 behaviour.
+    * :attr:`priority` — integer tie-break for the registry v2 resolver
+      (#393) when two connectors match the same ``(product, version)``;
+      higher wins.
+
+    The defaults on the four new attributes are chosen so existing v1
+    subclasses (VaultConnector — #244; KubernetesConnector skeleton —
+    #321) keep working without modification. Three required async methods
+    cover the v0.2 surface; v0.2.next may add streaming.
     """
 
-    product: str  # set on subclass: "vsphere", "vault", "bind9", etc.
+    # Set on subclass: "vsphere", "vault", "bind9", etc.
+    product: str
+
+    # G0.6-T3 (#394) — registry v2 metadata. Defaults preserve v1 behaviour.
+    version: str = ""
+    impl_id: str = ""
+    supported_version_range: str | None = None
+    priority: int = 0
 
     @abstractmethod
     async def fingerprint(self, target: Target) -> FingerprintResult:
@@ -46,4 +73,22 @@ class Connector(ABC):
         op_id: str,
         params: dict[str, Any],
     ) -> OperationResult:
-        """Run a typed operation. op_id namespace: <product>.<resource>.<verb>."""
+        """Run a typed operation.
+
+        op_id namespace varies by source_kind:
+
+        * ``'ingested'``  — ``"{METHOD}:{path}"``
+          (e.g. ``"GET:/api/vcenter/cluster"``).
+        * ``'typed'``     — dotted shape per product
+          (e.g. ``"vault.kv.read"``).
+        * ``'composite'`` — dotted with ``.composite`` suffix
+          (e.g. ``"vmware.composite.vm.create"``).
+
+        In v0.2.next post-G0.6, this method is typically called BY the
+        G0.6 dispatcher AFTER lookup + validation; subclasses don't
+        implement their own dispatch tables (``register_typed_operation()``
+        handles registration). Subclasses MAY still override ``execute()``
+        for special transport semantics (streaming, batching) but the
+        common path is "look up handler_ref from endpoint_descriptor,
+        call the handler".
+        """

@@ -54,13 +54,13 @@ type callRequestBody struct {
 //	  [--backplane <url>]                      # override the backplane URL
 //
 // Exit codes (mirrors `meho retrieval eval`'s gate-failed semantic
-// for the status != "ok" case — dispatcher errors come back in the
-// `error` / `extras` envelope, not as transport failures):
+// for the structured-failure case — dispatcher errors come back in
+// the `error` / `extras` envelope, not as transport failures):
 //   - 0   operation invoked + status == "ok"
-//   - 1   operation invoked but status == "error"
+//   - 1   operation invoked but status == "error" or status == "denied"
 //   - 2   auth_expired
 //   - 3   unreachable
-//   - 4   unexpected response shape
+//   - 4   unexpected response shape (incl. unknown / missing status)
 func newCallCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -139,21 +139,42 @@ func runCall(cmd *cobra.Command, opts callOptions) error {
 	} else {
 		printCallResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, result)
 	}
-	// Exit non-zero on dispatcher-side error so shell pipelines see
-	// the gate-failed signal. Same shape as retrieval/eval.go's
-	// errEvalGate sentinel.
-	if result.Status != "ok" {
+	// Branch on the OperationResult.status field. The backend
+	// `Connector.execute` contract (see
+	// `backend/src/meho_backplane/connectors/schemas.py`) defines three
+	// valid values: "ok" / "error" / "denied". "ok" → success.
+	// "error" / "denied" → dispatcher-reported failure (connector raised,
+	// schema-validation rejected, policy denied) → exit 1 via errOpError
+	// so shell pipelines see the gate-failed signal. Anything else
+	// (empty, unknown literal) is a malformed response — surface as
+	// unexpected_response (exit 4) so the operator distinguishes
+	// "backend disagreement on the contract" from "operation ran but
+	// failed". Matches the error-classification ladder
+	// renderRequestError applies to transport vs HTTP errors.
+	switch result.Status {
+	case "ok":
+		return nil
+	case "error", "denied":
 		return errOpError
+	default:
+		return output.RenderError(
+			cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"backplane returned invalid OperationResult.status %q (expected one of: ok / error / denied)",
+				result.Status,
+			)),
+			opts.JSONOut,
+		)
 	}
-	return nil
 }
 
 // errOpError is the sentinel returned when the dispatcher reported
-// a structured-error result (status != "ok"). main translates non-
-// nil RunE errors into a non-zero exit; cobra's SilenceErrors is
-// true on the command so the error string isn't double-printed.
-// Same shape as retrieval/eval.go's errEvalGate.
-var errOpError = errors.New("operation status != ok")
+// a structured-failure result (status == "error" or status ==
+// "denied"). main translates non-nil RunE errors into a non-zero
+// exit; cobra's SilenceErrors is true on the command so the error
+// string isn't double-printed. Same shape as retrieval/eval.go's
+// errEvalGate.
+var errOpError = errors.New("operation status not ok")
 
 func postCall(
 	ctx context.Context,

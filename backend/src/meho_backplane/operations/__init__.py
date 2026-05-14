@@ -19,10 +19,19 @@ Sub-modules:
 * :mod:`.dispatcher` — :func:`dispatch` and the orchestration of the
   eight-phase pipeline (parse → lookup → validate → policy → resolve
   → branch → reduce → audit+broadcast). Hosts the
-  ``parent_audit_id_var`` contextvar that T7 (#398) composite
-  recursion will populate, and the module-level reducer slot
+  ``parent_audit_id_var`` contextvar (populated by composite-recursion
+  T7 #398), and the module-level reducer slot
   (:func:`set_default_reducer`) that T6 (#397) will register the
   real ``Reducer`` against.
+* :mod:`.composite` — :class:`DispatchChild` Protocol +
+  :func:`get_dispatch_child` factory + :data:`composite_depth_var`
+  contextvar + :class:`CompositeRecursionLimitExceeded` for the
+  composite-operation recursion infrastructure (T7 #398). The
+  dispatcher's ``source_kind='composite'`` branch builds a
+  ``DispatchChild`` callable via :func:`get_dispatch_child` and
+  hands it to the composite handler in place of raw
+  :func:`dispatch`; the callable owns the audit-tree linkage +
+  bounded-depth guard so handlers read as plain business logic.
 * :mod:`.reducer` — the v0.2 :class:`PassThroughReducer` stub +
   :class:`Reducer` Protocol + :class:`ResultHandle`. T6 (#397) will
   ship the full reducer implementation; the dispatcher already
@@ -43,6 +52,10 @@ retrieval helpers in :mod:`meho_backplane.operations.search`
 (G0.6-T6 / T7 territory).
 """
 
+from meho_backplane.operations.composite import (
+    CompositeRecursionLimitExceeded,
+    DispatchChild,
+)
 from meho_backplane.operations.dispatcher import (
     Dispatcher,
     compute_params_hash,
@@ -64,6 +77,8 @@ from meho_backplane.operations.typed_register import (
 )
 
 __all__ = [
+    "CompositeRecursionLimitExceeded",
+    "DispatchChild",
     "Dispatcher",
     "HandlerRefError",
     "PassThroughReducer",

@@ -87,6 +87,13 @@ Schema decisions for :class:`AuditLog`:
   specific target. Generic requests (health, policy listing) leave
   it NULL. No FK to ``targets.id`` in v0.2 by the same soft-FK
   discipline established for ``tenant_id``.
+* ``parent_audit_id`` — UUID, nullable. Added by migration ``0006``;
+  the G0.6 dispatcher writes the parent composite operation's
+  ``audit_log.id`` here when a composite handler issues a recursive
+  ``dispatch_child(...)`` call. Top-level dispatches leave it NULL.
+  Drives the recursive-CTE traversal at audit-replay time (G8.1 /
+  G8.2). No FK to ``audit_log.id`` in v0.2 by the same soft-FK
+  discipline established for ``tenant_id`` / ``target_id``.
 
 Indexes on :class:`AuditLog`:
 
@@ -102,6 +109,9 @@ Indexes on :class:`AuditLog`:
   G0.1 sibling tasks T2/T3 wire the column writes.
 * ``audit_log_target_id_idx`` — b-tree on ``target_id`` so
   per-target audit queries hit the index. Added by migration ``0004``.
+* ``audit_log_parent_audit_id_idx`` — b-tree on ``parent_audit_id``
+  so the recursive-CTE traversal at audit-replay time hits the index.
+  Added by migration ``0006``.
 
 Schema decisions for :class:`Target`:
 
@@ -347,6 +357,19 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Nullable on purpose — top-level dispatches leave this NULL.
+    # Populated by the G0.6 dispatcher (#396) when a composite handler
+    # (``source_kind='composite'``) issues a recursive ``dispatch_child``
+    # call: the child row's ``parent_audit_id`` points at the composite
+    # parent's ``audit_log.id``. Drives the recursive-CTE traversal at
+    # audit-replay time (G8.1 / G8.2). No FK to ``audit_log.id`` in
+    # v0.2 -- same soft-FK discipline as ``tenant_id`` / ``target_id``.
+    # Added by migration ``0006``.
+    parent_audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -367,6 +390,11 @@ class AuditLog(Base):
         Index(
             "audit_log_target_id_idx",
             "target_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_parent_audit_id_idx",
+            "parent_audit_id",
             postgresql_using="btree",
         ),
     )

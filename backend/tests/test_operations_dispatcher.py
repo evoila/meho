@@ -211,14 +211,18 @@ async def _module_composite_handler(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch: Any,
+    dispatch_child: Any,
 ) -> dict[str, Any]:
-    """Composite handler that recurses into ``vault.kv.list`` then returns."""
-    child_result = await dispatch(
-        operator=operator,
+    """Composite handler that recurses into ``vault.kv.list`` then returns.
+
+    Uses the ``dispatch_child`` keyword (per T7 #398's
+    :class:`~meho_backplane.operations.composite.DispatchChild`
+    Protocol); the callable wraps :func:`dispatch` and handles
+    audit-tree linkage + bounded-recursion automatically.
+    """
+    child_result = await dispatch_child(
         connector_id="vault-1.x",
         op_id="vault.kv.list",
-        target=target,
         params={"path": params.get("path", "/")},
     )
     return {"parent": "ok", "child_status": child_result.status}
@@ -816,11 +820,14 @@ async def test_dispatch_composite_receives_dispatch_and_emits_child_row(
     assert "vault.kv.list" in by_path
     parent = by_path["vault.composite.audit"]
     child = by_path["vault.kv.list"]
-    # The child row carries the parent's audit_id on its payload --
-    # T7 (#398) will promote this to a real column; T5 ships the
-    # payload linkage.
+    # T7 (#398) ships the real ``audit_log.parent_audit_id`` column;
+    # the child row carries the composite parent's id on the column
+    # directly. The payload mirror is preserved for the broadcast-
+    # event surface.
+    assert child.parent_audit_id == parent.id
     assert child.payload.get("parent_audit_id") == str(parent.id)
     # The parent row has no parent of its own.
+    assert parent.parent_audit_id is None
     assert "parent_audit_id" not in parent.payload
 
 

@@ -138,12 +138,19 @@ from meho_backplane.operations._validate import (
     policy_gate,
     validate_params,
 )
+from meho_backplane.operations.composite import (
+    CompositeRecursionLimitExceeded,
+    DispatchChild,
+    get_dispatch_child,
+)
 from meho_backplane.operations.reducer import (
     PassThroughReducer,
     Reducer,
 )
 
 __all__ = [
+    "CompositeRecursionLimitExceeded",
+    "DispatchChild",
     "Dispatcher",
     "compute_params_hash",
     "dispatch",
@@ -285,17 +292,29 @@ async def _run_source_kind_branch(
     if descriptor.source_kind == "composite":
         handler = import_handler(descriptor.handler_ref or "")
         handler = _maybe_bind_method(handler, connector_instance)
-        token = parent_audit_id_var.set(audit_id)
-        try:
-            return await dispatch_composite(
-                handler=handler,
-                operator=operator,
-                target=target,
-                params=params,
-                dispatch=dispatch,
-            )
-        finally:
-            parent_audit_id_var.reset(token)
+        # Build the ``dispatch_child`` callable bound to this
+        # composite's context. The callable owns the parent_audit_id
+        # contextvar binding + the composite-depth guard internally so
+        # the dispatcher itself stays unaware of recursion semantics
+        # -- composite handlers see a plain callable, the audit-tree
+        # column gets written automatically, and over-depth attempts
+        # raise :class:`CompositeRecursionLimitExceeded` *before* a
+        # rogue recursive dispatch fires (handled by the surrounding
+        # exception branch in :func:`_execute_and_audit`).
+        dispatch_child = get_dispatch_child(
+            dispatch=dispatch,
+            parent_operator=operator,
+            parent_target=target,
+            parent_audit_id=audit_id,
+            parent_op_id=descriptor.op_id,
+        )
+        return await dispatch_composite(
+            handler=handler,
+            operator=operator,
+            target=target,
+            params=params,
+            dispatch_child=dispatch_child,
+        )
     # The DB CHECK constraint on source_kind prevents this in practice;
     # the explicit raise keeps the dispatcher's error contract honest
     # if a future migration adds a kind without updating this branch.

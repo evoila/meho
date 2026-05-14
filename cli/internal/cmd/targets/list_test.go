@@ -69,16 +69,13 @@ func TestList_JSONOutput(t *testing.T) {
 func TestList_ProductFilter_SentAsQueryParam(t *testing.T) {
 	xdg := withTempXDG(t)
 	var gotProduct string
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
+	url := fakeServer(t, "/api/v1/targets", func(w http.ResponseWriter, r *http.Request) {
 		gotProduct = r.URL.Query().Get("product")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("[]"))
 	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	seedCreds(t, xdg, srv.URL)
+	seedCreds(t, xdg, url)
 
 	_, _, err := runCobraCmd(t, newListCmd(), "--product", "vcenter")
 	if err != nil {

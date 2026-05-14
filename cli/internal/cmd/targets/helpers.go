@@ -9,7 +9,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/spf13/cobra"
+
+	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/output"
 )
 
 // resolveURL resolves the backplane URL from the --backplane flag or
@@ -28,6 +32,28 @@ func resolveURL(override string) (string, error) {
 		return "", err
 	}
 	return normalizeURL(cfg.BackplaneURL)
+}
+
+// buildClient resolves the backplane URL and builds an AuthedClient, rendering
+// a structured error for the well-known failure modes (no config, no creds,
+// generic build failure). The returned URL is always valid when error is nil.
+func buildClient(cmd *cobra.Command, override string, jsonOut bool) (*api.AuthedClient, string, error) {
+	backplaneURL, err := resolveURL(override)
+	if err != nil {
+		return nil, "", output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(err.Error()), jsonOut)
+	}
+	client, err := api.NewAuthedClient(cmd.Context(), backplaneURL, api.AuthedClientOptions{})
+	if err != nil {
+		if api.IsTokenNotFound(err) {
+			return nil, backplaneURL, output.RenderError(cmd.ErrOrStderr(),
+				output.AuthExpired(fmt.Sprintf("no stored credentials for %s; run `meho login %s`", backplaneURL, backplaneURL)),
+				jsonOut)
+		}
+		return nil, backplaneURL, output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("build client: %v", err)),
+			jsonOut)
+	}
+	return client, backplaneURL, nil
 }
 
 func normalizeURL(s string) (string, error) {

@@ -31,20 +31,9 @@ func newListCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backplaneURL, err := resolveURL(backplane)
+			client, backplaneURL, err := buildClient(cmd, backplane, jsonOut)
 			if err != nil {
-				return output.RenderError(cmd.ErrOrStderr(), output.AuthExpired(err.Error()), jsonOut)
-			}
-			client, err := api.NewAuthedClient(cmd.Context(), backplaneURL, api.AuthedClientOptions{})
-			if err != nil {
-				if api.IsTokenNotFound(err) {
-					return output.RenderError(cmd.ErrOrStderr(),
-						output.AuthExpired(fmt.Sprintf("no stored credentials for %s; run `meho login %s`", backplaneURL, backplaneURL)),
-						jsonOut)
-				}
-				return output.RenderError(cmd.ErrOrStderr(),
-					output.Unexpected(fmt.Sprintf("build client: %v", err)),
-					jsonOut)
+				return err
 			}
 
 			params := &api.ListTargetsParams{}

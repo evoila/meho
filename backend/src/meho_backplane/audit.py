@@ -280,6 +280,29 @@ async def _publish_broadcast_event(
     today's chassis has no such routes, but the separator keeps the
     invariant honest as new routes land.
 
+    Route-level overrides
+    ---------------------
+
+    A route may publish under a connector-style ``op_id`` (e.g. the
+    G4.3 retrieval-usage route at ``GET /api/v1/retrieve/usage`` binds
+    ``audit_op_id="meho.retrieval.usage"`` +
+    ``audit_op_class="audit_query"`` so the broadcast classifier sees
+    the canonical name instead of the HTTP-shape default). The
+    override flows through the existing ``audit_*`` contextvar payload
+    mechanism: :func:`_resolve_audit_payload` strips the ``audit_``
+    prefix, so ``audit_op_id`` lands in ``payload`` as ``op_id``. This
+    helper prefers the override when present and falls back to the
+    HTTP heuristic otherwise. Same shape for ``op_class`` — required
+    because :func:`classify_op` would otherwise classify
+    ``meho.retrieval.usage`` as ``other`` (no ``audit.`` prefix, no
+    read/write verb suffix) and broadcast the full request payload,
+    defeating the aggregate-only-for-audit-query discipline in
+    decision #3 of ``docs/planning/v0.2-decisions.md``.
+
+    The override is per-route opt-in; routes that don't bind these
+    contextvars (every chassis-era surface) get the unchanged
+    HTTP-shape + :func:`classify_op` behaviour.
+
     ``principal_name`` / ``target_name`` are ``None`` for HTTP-path
     events — the JWT name claim isn't bound to contextvars by
     :func:`~meho_backplane.middleware.verify_jwt_and_bind` (only
@@ -289,8 +312,18 @@ async def _publish_broadcast_event(
     JOIN against ``audit_log`` by ``audit_id`` for any enrichment
     a downstream consumer needs.
     """
-    op_id = f"http.{method.lower()}:{path}"
-    op_class = classify_op(op_id)
+    op_id_override = payload.get("op_id")
+    op_id = (
+        op_id_override
+        if isinstance(op_id_override, str) and op_id_override
+        else f"http.{method.lower()}:{path}"
+    )
+    op_class_override = payload.get("op_class")
+    op_class = (
+        op_class_override
+        if isinstance(op_class_override, str) and op_class_override
+        else classify_op(op_id)
+    )
     result_status = _classify_http_status(status_code, handler_exc)
     event = BroadcastEvent(
         event_id=uuid.uuid4(),

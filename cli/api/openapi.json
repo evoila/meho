@@ -199,6 +199,88 @@
         }
       }
     },
+    "/api/v1/retrieve/usage": {
+      "get": {
+        "tags": [
+          "retrieval"
+        ],
+        "summary": "Usage Endpoint",
+        "description": "Return audit-backed retrieval usage aggregates for *operator*.\n\nTenant scoping\n==============\n\n* ``operator`` / ``read_only`` callers: report scoped to\n  ``operator.tenant_id``. A non-null ``tenant_filter`` returns\n  403 (``insufficient_role`` semantics \u2014 only\n  ``tenant_admin`` may cross tenants).\n* ``tenant_admin`` callers: ``tenant_filter`` overrides the\n  default. ``tenant_filter=None`` still scopes to the\n  caller's tenant (matches the chassis \"default to your own\n  tenant\" UX); a future cross-tenant\n  ``tenant_filter=__all__`` token is v0.2.next territory.\n\nTime window\n===========\n\n*since* accepts ``<N>d`` / ``<N>h`` (relative) or an ISO-8601\ndate / datetime (absolute). Malformed values surface as 400 with\na parser-friendly detail string. *until* is always\n:func:`datetime.now`; the open-ended right edge keeps the report\n\"as of now\" without operators having to compute a sentinel.\n\nSurface filter\n==============\n\n``surface=all`` (default) covers kb + memory + operations.\n``surface=<one>`` narrows. Empty result for the requested\nsurface is a structured zero report (200 with empty\n``buckets``), not 404 \u2014 distinguishing \"the surface exists but\nsees no traffic\" from \"the surface is misspelt\".\n\nAudit contextvars\n=================\n\nBinds the audit overrides (op_id / op_class) plus enrichment\nfields **before** :func:`compute_usage` runs so a handler\nexception still produces an audit row with partial payload\n(incident postmortem hook).",
+        "operationId": "usage_endpoint_api_v1_retrieve_usage_get",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "30d",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "surface",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "kb",
+                "memory",
+                "operations",
+                "all"
+              ],
+              "type": "string",
+              "default": "all",
+              "title": "Surface"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -1120,6 +1202,46 @@
         "title": "ConnectorExecRequest",
         "description": "Request body for connector operation dispatch."
       },
+      "DailyUsageBucket": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "kb",
+              "memory",
+              "operations"
+            ],
+            "title": "Surface"
+          },
+          "search_count": {
+            "type": "integer",
+            "title": "Search Count"
+          },
+          "distinct_operators": {
+            "type": "integer",
+            "title": "Distinct Operators"
+          },
+          "action_conversion_pct": {
+            "type": "number",
+            "title": "Action Conversion Pct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "surface",
+          "search_count",
+          "distinct_operators",
+          "action_conversion_pct"
+        ],
+        "title": "DailyUsageBucket",
+        "description": "One ``(date, surface)`` row of the usage report.\n\nFrozen so callers (CLI table renderer, ``--json`` consumers,\nMarkdown report generators) can pass instances around without\naccidental mutation. ``action_conversion_pct`` is rounded to two\ndecimals at construction time so JSON serialisation is stable\nacross runs."
+      },
       "DbStatus": {
         "properties": {
           "migrated": {
@@ -1347,6 +1469,10 @@
             "type": "number",
             "title": "Duration Ms"
           },
+          "handle": {
+            "$ref": "#/components/schemas/ResultHandle",
+            "nullable": true
+          },
           "extras": {
             "additionalProperties": true,
             "type": "object",
@@ -1360,7 +1486,7 @@
           "duration_ms"
         ],
         "title": "OperationResult",
-        "description": "Connector op execution result."
+        "description": "Connector op execution result.\n\n``handle`` is populated by JSONFlux-aware reducers when the raw response\nis set-shaped and large enough to spill out-of-band; v0.2's pass-through\nreducer always leaves it ``None``. Consumers should treat\n``result + handle`` as a tagged union: ``result`` carries either the raw\npayload (no reduction) or the reduced summary (reduction happened), and\n``handle is not None`` is the signal that the **full** payload is\naddressable via the reducer's backing store rather than inlined here."
       },
       "OperatorIdentity": {
         "properties": {
@@ -1417,6 +1543,52 @@
         ],
         "title": "ProbeResult",
         "description": "Lightweight reachability + auth-challenge result."
+      },
+      "ResultHandle": {
+        "properties": {
+          "handle_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Handle Id"
+          },
+          "summary_md": {
+            "type": "string",
+            "title": "Summary Md"
+          },
+          "schema_": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Schema",
+            "description": "JSON Schema (Draft 2020-12) of the underlying payload shape."
+          },
+          "total_rows": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Total Rows"
+          },
+          "sample_rows": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Sample Rows"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "title": "Ttl Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "handle_id",
+          "summary_md",
+          "schema_",
+          "ttl_seconds"
+        ],
+        "title": "ResultHandle",
+        "description": "Reference to a set-shaped payload stored out-of-band (MinIO / S3 / \u2026).\n\nJSONFlux contract per v0.1-spec L294-311. The v0.2 default reducer\n(:class:`~meho_backplane.operations.reducer.PassThroughReducer`) **never**\nproduces a handle \u2014 the field on :class:`OperationResult` stays ``None``\non every successful dispatch in v0.2. Real reduction lands in a separate\nInitiative once the first generic-ingested connectors produce real\nresponse payloads to calibrate against; that work populates the handle\non >50-row / >4 KB set-shaped responses, stores the full payload in an\naddressable backing store (MinIO/S3/Valkey), and ships the\n``result_query`` / ``result_aggregate`` meta-tools that read it back.\n\n``schema_`` (trailing underscore) is the JSON Schema of the underlying\npayload \u2014 the trailing underscore avoids collision with Pydantic's own\ndeprecated ``BaseModel.schema()`` API and is serialised as ``schema_``\nin the wire format. ``model_config = ConfigDict(frozen=True)`` plus the\n:class:`types.MappingProxyType` wrapping in :meth:`_freeze_nested` so\ncallers can't mutate a handle after the reducer hands it back \u2014 neither\nat the field level nor through the nested ``schema_`` dict or\n``sample_rows`` list (mirrors the sibling-models'\n:attr:`FingerprintResult.extras` / :attr:`OperationResult.extras`\npattern)."
       },
       "RetrievalHit": {
         "properties": {
@@ -1841,6 +2013,55 @@
         ],
         "title": "UnknownOpError",
         "description": "400 response body when the connector doesn't know the requested op."
+      },
+      "UsageReport": {
+        "properties": {
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Until"
+          },
+          "surfaces": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Surfaces"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/DailyUsageBucket"
+            },
+            "type": "array",
+            "title": "Buckets"
+          },
+          "total_searches": {
+            "type": "integer",
+            "title": "Total Searches"
+          }
+        },
+        "type": "object",
+        "required": [
+          "since",
+          "until",
+          "surfaces",
+          "tenant_id",
+          "buckets",
+          "total_searches"
+        ],
+        "title": "UsageReport",
+        "description": "Top-level shape returned by :func:`compute_usage` + the API route.\n\n``buckets`` is sorted by ``(date, surface)`` ascending \u2014 the text\ntable renderer relies on this for its grouping behaviour, and\n``--json`` consumers (T6's retire-checklist, future dashboards)\nbenefit from deterministic ordering even when nothing else\npins it.\n\n``tenant_id`` is the tenant the report is scoped to (the\noperator's own tenant by default, or the\n``tenant_admin``-supplied filter). ``None`` is reserved for the\ncross-tenant case; v0.2 has one production tenant so this is\neffectively a v0.2.next placeholder, but the shape is locked\ntoday so consumers don't break when the cross-tenant verb lands."
       },
       "ValidationError": {
         "properties": {

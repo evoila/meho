@@ -203,6 +203,14 @@ async def probe_target(
     # would leak Python-native types into the JSON column, breaking
     # round-tripping through PG's JSONB binary representation.
     t.fingerprint = fp.model_dump(mode="json")
+    # Refresh ``updated_at`` on every successful probe persist so the
+    # row's write-tracking matches the sibling ``update_target`` path
+    # (L274) — both routes are the only writers to the row and both
+    # must bump the timestamp on every successful mutation. The 501
+    # no-connector branch and a connector that raises both leave the
+    # row untouched (no flush), so the previously-cached fingerprint
+    # and its ``updated_at`` survive.
+    t.updated_at = datetime.now(UTC)
     # The outer ``async with session.begin()`` in ``get_session``
     # commits on clean exit; ``flush`` makes the write visible to any
     # follow-up SELECT in this request without forcing an explicit

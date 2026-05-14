@@ -29,11 +29,11 @@ Coverage matrix (Task #378 / G6.3-T1 acceptance criteria):
 * Migration installs the table + both indexes; the dialect-portable
   shape (b-tree indexes only, no PG-only GIN/IVFFlat additions) survives
   on SQLite.
-* Migration ``0007`` is fully reversible: ``alembic upgrade head`` →
-  ``alembic downgrade 0006`` drops the table and both indexes; the
+* Migration ``0008`` is fully reversible: ``alembic upgrade head`` →
+  ``alembic downgrade 0007`` drops the table and both indexes; the
   earlier schema (audit_log, tenant, documents, targets, operation
-  substrate) survives intact; re-upgrading to ``head`` restores
-  everything.
+  substrate, topology graph) survives intact; re-upgrading to ``head``
+  restores everything.
 
 The tests run against ``sqlite+aiosqlite`` via the shared engine cache
 that the autouse ``_default_database_url`` fixture in
@@ -220,7 +220,7 @@ async def test_broadcast_override_orm_defaults_fire_on_sqlite() -> None:
 async def test_broadcast_override_composite_unique_rejects_duplicates() -> None:
     """Two rows sharing (tenant_id, op_id_pattern, scope_field, scope_value) → IntegrityError.
 
-    Locks in that migration ``0007``'s
+    Locks in that migration ``0008``'s
     ``broadcast_override_tenant_unique_idx`` is the natural-key target
     T4's upsert will use. Without DB-layer uniqueness, two concurrent
     tenant-admin CRUD calls could land duplicate rules for the same
@@ -615,18 +615,19 @@ def test_migration_upgrade_then_downgrade_is_reversible(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``alembic upgrade head`` → ``alembic downgrade 0006`` is a clean cycle.
+    """``alembic upgrade head`` → ``alembic downgrade 0007`` is a clean cycle.
 
-    Proves migration ``0007`` is fully reversible: after downgrading by
-    exactly one revision (back to ``0006``), the new table and both
-    indexes must be gone while the rest of the schema (``targets``,
-    ``documents``, ``tenant``, ``audit_log``, ``operation_group``,
-    ``endpoint_descriptor``) remains intact. Re-upgrading to ``head``
-    must restore everything.
+    Proves migration ``0008`` is fully reversible: after downgrading by
+    exactly one revision (back to ``0007`` -- G9.1 topology graph), the
+    new table and both indexes must be gone while the rest of the
+    schema (``targets``, ``documents``, ``tenant``, ``audit_log``,
+    ``operation_group``, ``endpoint_descriptor``, ``graph_node``,
+    ``graph_edge``) remains intact. Re-upgrading to ``head`` must
+    restore everything.
 
-    The downgrade target is the previous revision (``0006``); we spell
+    The downgrade target is the previous revision (``0007``); we spell
     it explicitly rather than relying on ``-1`` arithmetic so a future
-    revision inserted between ``0006`` and ``0007`` surfaces as a test
+    revision inserted between ``0007`` and ``0008`` surfaces as a test
     failure rather than a silent no-op.
     """
     from alembic import command
@@ -639,9 +640,9 @@ def test_migration_upgrade_then_downgrade_is_reversible(
             inspector = sa_inspect(conn)
             assert "broadcast_override" in set(inspector.get_table_names())
 
-        # Downgrade by exactly one revision -- back to 0006 (audit_log
-        # parent_audit_id).
-        command.downgrade(cfg, "0006")
+        # Downgrade by exactly one revision -- back to 0007 (G9.1
+        # topology graph).
+        command.downgrade(cfg, "0007")
 
         with sync_eng.connect() as conn:
             inspector = sa_inspect(conn)
@@ -650,6 +651,8 @@ def test_migration_upgrade_then_downgrade_is_reversible(
                 "downgrade must drop broadcast_override table"
             )
             # Earlier-migration schema survives.
+            assert "graph_node" in tables, "G9.1 graph_node must survive"
+            assert "graph_edge" in tables, "G9.1 graph_edge must survive"
             assert "operation_group" in tables, "G0.6 operation_group must survive"
             assert "endpoint_descriptor" in tables, "G0.6 endpoint_descriptor must survive"
             assert "targets" in tables, "v0.2 targets must survive"
@@ -657,7 +660,7 @@ def test_migration_upgrade_then_downgrade_is_reversible(
             assert "tenant" in tables, "v0.2 tenant must survive"
             assert "audit_log" in tables, "v0.1 audit_log must survive"
 
-        # Re-upgrade -- must be idempotent from 0006 back to head.
+        # Re-upgrade -- must be idempotent from 0007 back to head.
         command.upgrade(cfg, "head")
         with sync_eng.connect() as conn:
             inspector = sa_inspect(conn)

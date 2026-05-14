@@ -200,6 +200,60 @@ def _default_database_url(
 
 
 @pytest.fixture(autouse=True)
+def _default_retrieval_model_cache_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> Iterator[None]:
+    """Redirect fastembed's ONNX model cache to a writable per-test dir.
+
+    The production default at :attr:`Settings.retrieval_model_cache_dir`
+    is ``/var/cache/fastembed`` so the Helm chart's PVC mount survives
+    pod restarts without re-downloading the ~120 MB ONNX blob. That
+    path is read-only on macOS dev sandboxes and on the
+    gha-runner-scale-set CI sandbox (every recent merged PR on main
+    shows 3 FAILURE statuses in ``statusCheckRollup`` for exactly this
+    reason; see Task #472).
+
+    Failure surface: the FastAPI lifespan in
+    :mod:`meho_backplane.main` calls
+    :func:`run_typed_op_registrars` post-G0.6-T-Refactor-Vault/K8s
+    (#461 / #463); each shipped registrar goes through
+    :func:`register_typed_operation` which computes
+    :attr:`EndpointDescriptor.embedding` for every brand-new descriptor
+    row. The :class:`~meho_backplane.retrieval.embedding.EmbeddingService`
+    resolves its ``cache_dir`` from ``settings.retrieval_model_cache_dir``;
+    its lazy ``_ensure_loaded`` hits ``os.makedirs(cache_dir)`` on
+    first embed and raises ``PermissionError: [Errno 13] Permission
+    denied: '/var/cache'`` against a read-only parent.
+
+    Tests touched by this failure surface: the entire
+    ``test_mcp_*`` family that boots the FastAPI app via
+    :class:`TestClient`, plus a handful of middleware /
+    auth_config tests that exercise the lifespan transitively. Setting
+    the env var here, before any test imports
+    :func:`get_settings`, ensures every settings construction in the
+    test process resolves to a writable :class:`tmp_path`-scoped dir.
+
+    Why a sibling fixture instead of merging into
+    :func:`_default_database_url`: the responsibilities are genuinely
+    distinct (one pins the DB + pre-migrates it, one pins the model
+    cache); a future refactor that fully stubs out
+    :class:`EmbeddingService` for tests via the existing
+    :func:`run_typed_op_registrars` test seam can delete this fixture
+    cleanly without disturbing the DB-bootstrap flow.
+
+    The ``get_settings.cache_clear()`` brackets mirror the existing
+    autouse pattern — without them a stale cached ``Settings`` from
+    an earlier test would survive into the next test and silently
+    return the previous cache_dir value.
+    """
+    monkeypatch.setenv("RETRIEVAL_MODEL_CACHE_DIR", str(tmp_path / "fastembed-cache"))
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_secret_leak_sweep(
     caplog: pytest.LogCaptureFixture,
     capfd: pytest.CaptureFixture[str],

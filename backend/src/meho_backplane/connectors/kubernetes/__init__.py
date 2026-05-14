@@ -46,9 +46,13 @@ from meho_backplane.connectors.registry import (
     register_connector_v2,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
+from meho_backplane.retrieval.embedding import EmbeddingService
 
 
-async def register_kubernetes_typed_operations() -> None:
+async def register_kubernetes_typed_operations(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
     """Module-level registrar wrapper for ``KubernetesConnector.register_operations``.
 
     The canonical typed-op registration pattern (G0.6-T-Refactor-Vault
@@ -58,6 +62,21 @@ async def register_kubernetes_typed_operations() -> None:
     op walk as a classmethod on :class:`KubernetesConnector` so the
     test suite can exercise it without lifespan plumbing; this wrapper
     is the seam that lets the standard registrar mechanism drive it.
+
+    The ``embedding_service`` keyword-only parameter mirrors the
+    :func:`~meho_backplane.connectors.vault.ops.register_vault_typed_operations`
+    contract (#463) -- :func:`run_typed_op_registrars` passes the
+    process-wide :class:`EmbeddingService` (or a chassis-test stub) to
+    every registrar via ``registrar(embedding_service=...)``, so each
+    registrar **must** accept the kwarg or the lifespan crashes with
+    ``TypeError`` (see Task #475 for the post-#461/#463 ordering
+    incident this signature repairs). The wrapper currently does not
+    forward the value because
+    :meth:`KubernetesConnector.register_operations` resolves the
+    embedding service via :func:`register_typed_operation`'s
+    process-wide singleton fallback; end-to-end threading (so chassis
+    tests can stub the singleton for K8s-registrar-specific runs) is a
+    v0.2.next refinement called out in #475's Out-of-scope.
     """
     await KubernetesConnector.register_operations()
 

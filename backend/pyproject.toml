@@ -24,6 +24,7 @@ dependencies = [
     "redis>=5,<8",
     "tenacity>=9.0",
     "asyncssh>=2.18,<3.0",
+    "packaging>=24.0",
 ]
 
 [dependency-groups]

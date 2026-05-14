@@ -49,10 +49,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors import get_connector
-from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
+from meho_backplane.connectors.vault.connector import VaultTarget
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.middleware import verify_jwt_and_bind
+from meho_backplane.operations import dispatch
 
 __all__ = ["build_health_response", "router"]
 
@@ -130,41 +130,99 @@ class HealthResponse(BaseModel):
 router = APIRouter(prefix="/api/v1", tags=["health"])
 
 
+#: Vault exception class names that indicate a login-phase failure (the
+#: OIDC forward to Vault failed before any secret read attempted). The
+#: dispatcher's ``connector_error`` branch reports the raised exception's
+#: class name verbatim in ``extras["exception_class"]``; we string-match
+#: by name rather than by ``issubclass`` so the health route avoids a
+#: hard import of ``meho_backplane.auth.vault`` at module top-level
+#: (which would pull the hvac client into every health probe import).
+#:
+#: ``VaultClientError`` covers any future subclass added under it; the
+#: two named subclasses are listed explicitly so the rendered ``detail``
+#: string is stable across hvac upgrades that swap which subclass fires.
+_VAULT_LOGIN_PHASE_EXCEPTION_CLASSES: frozenset[str] = frozenset(
+    {
+        "VaultClientError",
+        "VaultUnreachableError",
+        "VaultRoleDeniedError",
+    }
+)
+
+
 async def _probe_vault_federation(
     operator: Operator,
     log: Any,
 ) -> VaultStatus:
-    """Run the federation-proof Vault chain via the connector registry.
+    """Run the federation-proof Vault chain via the G0.6 dispatcher.
 
-    Dispatches to :class:`~meho_backplane.connectors.vault.VaultConnector`
-    through :func:`~meho_backplane.connectors.get_connector` so the route
-    no longer holds a direct dependency on the auth.vault implementation
-    details. The three failure axes (login failure, read failure, full
-    success) are conveyed through the ``OperationResult.extras["phase"]``
-    and ``extras["exc_type"]`` fields.
+    Dispatches the ``vault.kv.read`` typed op through
+    :func:`~meho_backplane.operations.dispatch` so the route inherits the
+    substrate's parameter validation, policy gate, audit-log write,
+    broadcast publish, and JSONFlux wrapping in one place. The
+    connector's :func:`~meho_backplane.connectors.vault.ops.vault_kv_read`
+    handler is module-level and is invoked by the dispatcher's typed
+    branch directly — :class:`VaultConnector`'s ``execute`` shim is **not**
+    in this call chain.
 
-    Detail strings carry only exception class names; operator-controllable
-    URL substrings never leak into a 200 response body or into a structlog
-    payload.
+    The three failure axes (login failure, read failure, full success)
+    are conveyed through:
+
+    * ``result.status == "ok"`` -> full success; ``result.result``
+      carries ``{"data": <secret>, "version": <int|None>}``.
+    * ``result.status == "error"`` + ``error_code == "connector_error"``
+      with ``exception_class`` in :data:`_VAULT_LOGIN_PHASE_EXCEPTION_CLASSES`
+      -> login-phase failure (Vault unreachable, role denied, or any
+      future :class:`VaultClientError` subclass).
+    * Any other error shape -> read-phase failure (KV miss, malformed
+      hvac payload, jsonschema validation miss, etc.).
+
+    Detail strings carry only exception class names; operator-
+    controllable URL substrings never leak into a 200 response body
+    or into a structlog payload.
     """
-    # Prefer the registry-dispatched class (populated by lifespan _eager_import_connectors
-    # in production). Fall back to direct instantiation in test contexts where
-    # the connector registry has been cleared by test isolation fixtures.
-    vault_cls = get_connector("vault") or VaultConnector
-
     target = VaultTarget(raw_jwt=operator.raw_jwt)
-    result = await vault_cls().execute(target, "vault.kv.read", {"path": _FEDERATION_PROOF_PATH})
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.read",
+        target=target,
+        params={"path": _FEDERATION_PROOF_PATH},
+    )
 
     if result.status == "ok":
-        version = result.extras.get("version")
+        # The handler returns ``{"data": <secret>, "version": <int|None>}``;
+        # the dispatcher's :class:`PassThroughReducer` lands it as
+        # ``result.result`` unchanged.
+        payload = result.result if isinstance(result.result, dict) else {}
+        version = payload.get("version")
         detail = f"version={version}" if version is not None else "ok"
         log.info("federation_health_ok", vault_read_path=_FEDERATION_PROOF_PATH)
         return VaultStatus(reachable=True, read_ok=True, detail=detail)
 
-    phase = result.extras.get("phase", "read")
-    exc_type = result.extras.get("exc_type", "unknown")
+    exc_type = result.extras.get("exception_class")
+    if not isinstance(exc_type, str):
+        # Non-connector_error shapes (``unknown_op``, ``invalid_params``,
+        # ``no_connector``, ``denied``) don't carry an
+        # ``exception_class`` -- map them to the read-phase failure
+        # path so the smoke test's "never a 5xx" contract holds. The
+        # ``error_code`` value lands in the detail string so operators
+        # see the dispatcher-side classification on the CLI without
+        # parsing the audit log.
+        error_code = result.extras.get("error_code", "unknown")
+        log.warning(
+            "federation_health_dispatch_failed",
+            vault_read_path=_FEDERATION_PROOF_PATH,
+            error_code=error_code,
+            error_message=result.error,
+        )
+        return VaultStatus(
+            reachable=True,
+            read_ok=False,
+            detail=f"read_failed: {error_code}",
+        )
 
-    if phase == "login":
+    if exc_type in _VAULT_LOGIN_PHASE_EXCEPTION_CLASSES:
         log.warning("federation_health_login_failed", exc_type=exc_type)
         return VaultStatus(reachable=False, read_ok=False, detail=f"login_failed: {exc_type}")
 

@@ -73,7 +73,10 @@ from meho_backplane.operations.reducer import (
 from meho_backplane.operations.typed_register import (
     HandlerRefError,
     TypedOpHandler,
+    clear_typed_op_registrars,
+    register_typed_op_registrar,
     register_typed_operation,
+    run_typed_op_registrars,
 )
 
 __all__ = [
@@ -85,11 +88,14 @@ __all__ = [
     "Reducer",
     "ResultHandle",
     "TypedOpHandler",
+    "clear_typed_op_registrars",
     "compute_params_hash",
     "dispatch",
     "import_handler",
     "parent_audit_id_var",
+    "register_typed_op_registrar",
     "register_typed_operation",
     "reset_dispatcher_caches",
+    "run_typed_op_registrars",
     "set_default_reducer",
 ]

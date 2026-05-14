@@ -31,18 +31,58 @@ from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 __all__ = [
     "AuthModel",
+    "CandidateHint",
+    "EdgeHint",
+    "EdgeKind",
     "FingerprintResult",
+    "NodeHint",
+    "NodeKind",
     "OperationResult",
     "ProbeResult",
     "ResultHandle",
+    "TopologyHints",
 ]
+
+
+NodeKind = Literal[
+    "target",
+    "vm",
+    "host",
+    "network",
+    "datastore",
+    "namespace",
+    "pod",
+    "service",
+    "ingress",
+    "node",
+    "principal",
+    "vault-role",
+    "vault-mount",
+    "volume",
+]
+"""Closed enum of node kinds the v0.2 graph supports.
+
+The vocabulary is the auto-discoverable subset agreed in G9.1 (#363) —
+the curated cross-system kinds (e.g. ``"workload"``, ``"deployment"``)
+land in G9.2 once operator annotation flows ship.
+"""
+
+
+EdgeKind = Literal["runs-on", "mounts", "routes-through", "belongs-to"]
+"""The four edge kinds high-confidence probes can derive.
+
+Cross-system semantic edges (``"authenticates-via"``, ``"depends-on"``,
+``"replicates-to"``, ``"backed-up-by"``) need explicit operator
+assertion and land in G9.2 — auto-inferring them from probes is the
+failure mode this split guards against (per Initiative #363).
+"""
 
 
 class AuthModel(StrEnum):
@@ -153,6 +193,116 @@ class ResultHandle(BaseModel):
         if value is None:
             return None
         return [dict(row) for row in value]
+
+
+class NodeHint(BaseModel):
+    """One node a connector's :meth:`Connector.discover_topology` returns.
+
+    The G9.1-T3 refresh service translates a list of these (plus
+    :class:`EdgeHint` entries) into ``graph_node`` rows, scoped to the
+    tenant of the seed target. ``properties`` is a free-form bag for
+    connector-supplied detail (e.g. a VM's power state, a pod's QoS
+    class) that the refresh service persists as JSONB.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: NodeKind
+    name: str
+    properties: Mapping[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _freeze_properties(self) -> "NodeHint":
+        object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+        return self
+
+    @field_serializer("properties")
+    def _serialize_properties(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)
+
+
+class EdgeHint(BaseModel):
+    """One edge a connector's :meth:`Connector.discover_topology` returns.
+
+    Edges are directed (``from`` → ``to``) and identified by the
+    ``(kind, name)`` tuples of the endpoints, not by node IDs — the
+    refresh service maps the tuples to ``graph_node.id`` rows on apply.
+    The kind/name pair is unique within ``(tenant_id, kind)`` per the
+    ``graph_node`` schema in G9.1-T1.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    from_kind: NodeKind
+    from_name: str
+    to_kind: NodeKind
+    to_name: str
+    kind: EdgeKind
+    properties: Mapping[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _freeze_properties(self) -> "EdgeHint":
+        object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+        return self
+
+    @field_serializer("properties")
+    def _serialize_properties(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)
+
+
+class TopologyHints(BaseModel):
+    """Connector-supplied topology snapshot for one target.
+
+    Returned by :meth:`Connector.discover_topology`. The G9.1-T3 refresh
+    service diffs this against existing ``graph_node`` + ``graph_edge``
+    rows for the same ``(tenant_id, target_id)`` and applies inserts /
+    updates / soft-deletes.
+
+    ``nodes`` and ``edges`` are :class:`tuple` — not :class:`list` — so
+    the frozen model is deeply immutable end-to-end, mirroring the
+    :attr:`ResultHandle.sample_rows` pattern. A ``list`` argument at
+    construction is accepted and converted by Pydantic's validation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    nodes: tuple[NodeHint, ...] = ()
+    edges: tuple[EdgeHint, ...] = ()
+    discovered_at: datetime
+
+
+class CandidateHint(BaseModel):
+    """One candidate target a connector's :meth:`Connector.list_candidates` returns.
+
+    Candidates are potentially-reachable targets the connector inferred
+    from an existing seed (e.g. a vCenter exposing its managed ESXi
+    hosts; a kubeconfig listing peer cluster contexts). The
+    G9.1-T6 ``meho targets discover`` CLI verb surfaces these to the
+    operator; auto-registration is intentionally out of scope per
+    Initiative #363 (operator runs ``meho targets create`` after review).
+
+    ``evidence`` is the debugging payload — whatever made the connector
+    think this candidate exists (e.g. ``{"source": "kubeconfig",
+    "context_name": "cluster-2"}``); ``confidence`` is the connector's
+    self-assessment of probe-vs-curation reliability.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    host: str
+    port: int | None = None
+    evidence: Mapping[str, Any]
+    confidence: Literal["high", "medium", "low"]
+
+    @model_validator(mode="after")
+    def _freeze_evidence(self) -> "CandidateHint":
+        object.__setattr__(self, "evidence", MappingProxyType(dict(self.evidence)))
+        return self
+
+    @field_serializer("evidence")
+    def _serialize_evidence(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)
 
 
 class OperationResult(BaseModel):

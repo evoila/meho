@@ -200,9 +200,10 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 __all__ = [
     "AuditLog",
     "Base",
-    "BroadcastOverride",
     "Document",
     "EndpointDescriptor",
+    "GraphEdge",
+    "GraphNode",
     "OperationGroup",
     "Target",
     "Tenant",
@@ -1088,165 +1089,304 @@ class EndpointDescriptor(Base):
     )
 
 
-class BroadcastOverride(Base):
-    """A per-tenant override rule for the G6.1 broadcast classifier.
+#: Closed enum of :attr:`GraphNode.kind` values. Mirrored verbatim in
+#: migration ``0007``'s ``_NODE_KINDS`` constant; the two MUST stay in
+#: lock-step or the DB-layer CHECK constraint will reject ORM-shaped
+#: inserts. Widening the vocabulary (G9.2's curated extensions) is a
+#: migration that updates both sides at once.
+_GRAPH_NODE_KINDS: tuple[str, ...] = (
+    "target",
+    "vm",
+    "host",
+    "network",
+    "datastore",
+    "namespace",
+    "pod",
+    "service",
+    "ingress",
+    "node",
+    "principal",
+    "vault-role",
+    "vault-mount",
+    "volume",
+)
 
-    G6.3-T1 (Task #378) schema substrate under Initiative #376.
-    Tenant admins write rows here to downgrade normally-full-detail
-    operations to ``aggregate``-only on the SSE feed (and, via G6.2,
-    the Slack mirror) -- the durable, scope-aware counterpart to the
-    per-call ``X-Broadcast-Detail`` header that T3 will add.
+#: Closed enum of :attr:`GraphEdge.kind` -- the v0.2 auto-discoverable
+#: subset. G9.2 ships a follow-up migration that widens this with the
+#: operator-curated cross-system edge vocabulary; until then, every
+#: ``graph_edge.kind`` value at write time MUST be one of these four.
+_GRAPH_EDGE_KINDS: tuple[str, ...] = (
+    "runs-on",
+    "mounts",
+    "routes-through",
+    "belongs-to",
+)
 
-    Resolution precedence (implemented in T2's
-    :func:`compute_effective_broadcast_detail`):
-    per-call request override > matching :class:`BroadcastOverride`
-    row > the static :func:`classify_op` default in
-    :mod:`meho_backplane.broadcast.events`. T1 ships only the table;
-    the resolver and its per-tenant cache land in T2 (#379).
+#: Closed enum of :attr:`GraphEdge.source` -- ``auto`` for
+#: probe-derived edges (T3 refresh), ``curated`` reserved for the
+#: operator-asserted edges G9.2 lands. v0.2 writes ``auto`` exclusively.
+_GRAPH_EDGE_SOURCES: tuple[str, ...] = ("auto", "curated")
 
-    Schema decisions:
 
-    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape
-      every other model uses; PG gets ``gen_random_uuid()`` via the
-      migration, the ORM falls back to ``default=uuid.uuid4`` on
-      SQLite.
-    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES
-      tenant(id)`` FK. Same precedent as :class:`Document`: a
-      brand-new table with no chassis-era rows and a clean downgrade
-      that drops the whole table can enforce the FK at the substrate
-      boundary without a backfill/cascade trade-off. Orphan rows for
-      a typo'd / deleted / replayed tenant id surface as
-      :class:`IntegrityError` at insert time, not as unreachable
-      override rows at resolver time.
-    * ``op_id_pattern`` -- Text NOT NULL. Glob (``*`` plus literal);
-      regex is deliberately rejected at the API layer (T4) -- see
-      Initiative #376 "Out of scope". A glob like ``vault.kv.*`` or
-      ``k8s.configmap.info`` (exact match) is the operator-facing
-      shape; the resolver in T2 walks the per-tenant rule set in
-      Python, so no DB-side glob index is needed in v0.2.
-    * ``scope_field`` -- Text, nullable. ``NULL`` means an op-wide
-      rule; non-null is one of a small allowlist (``"namespace"``
-      for Kubernetes-shaped scope, ``"target_name"`` for
-      vSphere/Vault-shaped scope). The allowlist is enforced at the
-      Pydantic layer in T4 rather than as a DB ``CHECK`` constraint
-      so future scope fields land without a migration. The
-      :class:`Tenant` / :class:`EndpointDescriptor` / :class:`Target`
-      precedents use DB-side ``CHECK`` for bounded enums; the
-      forward-compat argument is what flips the decision here.
-    * ``scope_value`` -- Text, nullable. The matching value for
-      ``scope_field`` (e.g. ``"kube-system"``); ``NULL`` when
-      ``scope_field`` is ``NULL``. The resolver treats the
-      ``(scope_field, scope_value)`` pair atomically -- both NULL is
-      "op-wide", both non-null is "scoped".
-    * ``detail`` -- Text NOT NULL. ``"full"`` or ``"aggregate"`` --
-      Pydantic ``Literal`` at the API layer (T4) is the enforcement
-      point, mirroring the ``scope_field`` argument. The op-class
-      label is **not** stored on the override row; the override
-      shapes the publish-time detail decision and the static
-      classifier still owns op-class assignment.
-    * ``created_by_sub`` -- Text NOT NULL. JWT ``sub`` of the
-      tenant-admin who wrote the rule -- captures who flipped a
-      sensitivity floor for audit-trail / forensics. T4's CRUD verbs
-      stamp this from the bound :class:`~meho_backplane.auth.operator.Operator`.
-    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL.
-      PG-side ``now()`` server defaults via the migration; the ORM
-      also declares ``default=lambda: datetime.now(UTC)`` plus
-      ``onupdate=lambda: datetime.now(UTC)`` on ``updated_at`` so
-      ORM-side row edits (T4 ``PATCH``) bump the timestamp. Raw-SQL
-      UPDATEs against PG do **not** fire the ORM hook, which is
-      acceptable in v0.2 because the substrate's only writer is the
-      ORM-backed T4 layer.
+def _ck_in(column: str, values: tuple[str, ...]) -> str:
+    """Render a portable ``column IN ('a', 'b', ...)`` CHECK body."""
+    return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
 
-    Composite uniqueness on
-    ``(tenant_id, op_id_pattern, scope_field, scope_value)`` is
-    enforced by the named ``broadcast_override_tenant_unique_idx``
-    -- a tenant admin who races two CRUD calls against the same
-    ``(pattern, scope)`` triple lands the second insert as an
-    :class:`IntegrityError` rather than as a duplicate-rule shadow
-    that the resolver would have to disambiguate. The named index
-    pattern matches the :class:`Tenant` / :class:`Target` /
-    :class:`Document` precedent (single source of uniqueness, no
-    PG-side duplicate from ``unique=True`` on the column). SQL's
-    ``NULL != NULL`` semantics technically let two rows with
-    ``(NULL, NULL)`` for the scope pair coexist under a vanilla
-    composite UNIQUE; that is acceptable here because the op-wide
-    rule is fully described by ``(tenant_id, op_id_pattern)`` and
-    a duplicate ``(NULL, NULL)`` differs from a duplicate
-    ``(\"namespace\", \"kube-system\")`` only in resolver
-    ambiguity, which T2's resolver handles via deterministic
-    tie-break (first-match by ``created_at`` order). A partial-
-    index split like :class:`OperationGroup` uses is therefore not
-    warranted in v0.2; if duplicate op-wide rules become an
-    operational problem the tightening can ship in v0.2.next.
 
-    Indexes on :class:`BroadcastOverride`:
+class GraphNode(Base):
+    """A node in the per-tenant topology graph.
 
-    * ``broadcast_override_tenant_unique_idx`` -- unique composite
-      b-tree on ``(tenant_id, op_id_pattern, scope_field,
-      scope_value)``. The natural-key target for T4's upsert; the
-      composite shape pins the per-tenant rule set down to a single
-      row.
-    * ``broadcast_override_tenant_idx`` -- b-tree on ``tenant_id``.
-      Drives the resolver's tenant-scoped rule pull at publish time
-      (T2's per-tenant cache hydrates from
-      ``SELECT * FROM broadcast_override WHERE tenant_id = :id``).
+    Initiative #363 (G9.1) substrate, Task #448 (T1). Each row models
+    one object an agent may need to reason about: a registered target,
+    a VM, a host, a network, a datastore, a namespace, a pod, a
+    service, an ingress, a node, a principal, a vault mount, a vault
+    role, a volume. The closed enum (``kind``) is documented on the
+    migration; widening it is a coordinated DB + model change.
 
-    The model deliberately ships with no helper methods -- read /
-    write paths land in T2 (the resolver + per-tenant cache) and T4
-    (the CRUD verbs). The ORM class is a pure data shape.
+    Schema decisions for :class:`GraphNode`:
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape the
+      rest of the model graph uses; PG production gets a
+      ``gen_random_uuid()`` server default via migration ``0007``, the
+      ORM falls back to ``default=uuid.uuid4`` on SQLite and for
+      out-of-band inserts.
+    * ``tenant_id`` -- UUID NOT NULL with a real
+      ``REFERENCES tenant(id)`` FK. Unlike :attr:`AuditLog.tenant_id`
+      (chassis-era rows with no real tenant to point at; FK deferred
+      to v0.2.next backfill), :class:`GraphNode` is a brand-new
+      substrate with no pre-existing rows. Enforcing the FK at the DB
+      layer is the cheapest point to make the ownership invariant
+      unbreakable: T3's refresh service cannot silently insert orphan
+      rows for a typo'd / deleted / replayed tenant id. No
+      ``ondelete`` clause -- tenant deletion is a major operation
+      that must clear the tenant's graph first; the default
+      ``NO ACTION`` blocks the cascade.
+    * ``kind`` -- Text NOT NULL with a DB-layer
+      ``CHECK kind IN (...)`` constraint enforced by migration
+      ``0007`` (see :data:`_GRAPH_NODE_KINDS` for the v0.2 vocabulary).
+    * ``name`` -- Text NOT NULL. Human-readable handle within the
+      tenant + kind axis. Uniqueness is enforced by the named
+      ``graph_node_tenant_kind_name_idx`` (unique b-tree on
+      ``(tenant_id, kind, name)``).
+    * ``target_id`` -- UUID NULL with a real
+      ``REFERENCES targets(id) ON DELETE SET NULL`` FK. NULL when the
+      node is not itself a registered target (an inner-graph VM, pod,
+      datastore). ``SET NULL`` because removing a target should not
+      cascade-delete the topology data the agent may still want to
+      reason about; the node lives on as a non-target row.
+    * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
+      ``{}``. Per-node structured data the connector populates at
+      discover time (e.g. a VM's power state, a pod's status phase);
+      the column is the forward-compat escape hatch for shape
+      evolution without DDL changes.
+    * ``discovered_by`` -- Text NOT NULL. Connector product slug
+      (``vmware``, ``kubernetes``, ``vault``, ...) when probe-derived,
+      or ``curated`` for operator-asserted rows (G9.2). No CHECK
+      constraint -- the value space is open-ended as new connectors
+      land.
+    * ``first_seen`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
+      server default via the migration; the ORM also declares
+      ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
+    * ``last_seen`` -- ``timestamptz`` NULL. Refresh writes a
+      timestamp on every observation; the refresh service nulls it
+      out once a node has been absent past the configured threshold
+      (the spec's soft-delete signal -- the row stays queryable for
+      G9.3 history replay but is filtered out of default queries).
+
+    Indexes on :class:`GraphNode`:
+
+    * ``graph_node_tenant_kind_name_idx`` -- unique b-tree on
+      ``(tenant_id, kind, name)``. Enforces the "one (kind, name) per
+      tenant" invariant at the DB layer. Named index only; no
+      ``unique=True`` on the column triple to avoid PG auto-generating
+      a duplicate anonymous index alongside it.
+
+    The model deliberately ships with no helper methods -- write paths
+    land in T3's refresh service, read paths in T4's recursive-CTE
+    traversal helpers and the API/CLI/MCP fronts in T5--T7.
     """
 
-    __tablename__ = "broadcast_override"
+    __tablename__ = "graph_node"
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),
         primary_key=True,
         default=uuid.uuid4,
     )
-    # NOT NULL with a real REFERENCES tenant(id) FK -- see class
-    # docstring for the Document-precedent rationale. Orphan-row
-    # insertion (typo / deleted / replayed contextvar) becomes an
-    # IntegrityError at insert time rather than a silently dangling
-    # override row at resolver time.
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),
         ForeignKey("tenant.id"),
         nullable=False,
     )
-    op_id_pattern: Mapped[str] = mapped_column(Text, nullable=False)
-    # NULL -> op-wide rule; non-null is enforced against a small
-    # allowlist by the Pydantic layer in T4 (no DB CHECK so future
-    # scope fields land without a migration).
-    scope_field: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scope_value: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # "full" | "aggregate". Pydantic Literal at the API layer (T4).
-    detail: Mapped[str] = mapped_column(Text, nullable=False)
-    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        ForeignKey("targets.id", ondelete="SET NULL"),
+        nullable=True,
+        default=None,
+    )
+    properties: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    discovered_by: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
-    updated_at: Mapped[datetime] = mapped_column(
+    last_seen: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(UTC),
-        onupdate=lambda: datetime.now(UTC),
+        nullable=True,
+        default=None,
     )
 
     __table_args__ = (
         Index(
-            "broadcast_override_tenant_unique_idx",
+            "graph_node_tenant_kind_name_idx",
             "tenant_id",
-            "op_id_pattern",
-            "scope_field",
-            "scope_value",
+            "kind",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("kind", _GRAPH_NODE_KINDS),
+            name="ck_graph_node_kind",
+        ),
+    )
+
+
+class GraphEdge(Base):
+    """A directed edge between two :class:`GraphNode` rows.
+
+    Initiative #363 (G9.1) substrate, Task #448 (T1). Adjacency-list
+    shape -- ``from_node_id`` and ``to_node_id`` are explicit columns
+    -- so PG 16's ``WITH RECURSIVE ... CYCLE`` clause (§7.8.2.2 of
+    the PG manual) can walk dependents (reverse) and dependencies
+    (forward) without a graph extension.
+
+    Schema decisions for :class:`GraphEdge`:
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape.
+    * ``tenant_id`` -- UUID NOT NULL with a real
+      ``REFERENCES tenant(id)`` FK. Same rationale as
+      :attr:`GraphNode.tenant_id`.
+    * ``from_node_id`` / ``to_node_id`` -- UUID NOT NULL with real
+      ``REFERENCES graph_node(id) ON DELETE CASCADE`` FKs.
+      Hard-deleting a node hard-deletes its edges; refresh-driven
+      soft-deletes (``GraphNode.last_seen=NULL``) leave the edges
+      alone, so the cascade is invisible during normal operation and
+      exists only for tenant purges + test cleanup.
+    * ``kind`` -- Text NOT NULL with a DB-layer
+      ``CHECK kind IN (...)`` constraint. The v0.2 auto-discoverable
+      vocabulary is :data:`_GRAPH_EDGE_KINDS`; G9.2 widens it.
+    * ``source`` -- Text NOT NULL with a DB-layer
+      ``CHECK source IN (...)`` constraint. ``auto`` for
+      probe-derived (T3 refresh); ``curated`` reserved for the
+      operator-asserted edges G9.2 lands.
+    * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
+      ``{}``. Per-edge structured data (e.g. a mount's options, a
+      route's port). Same forward-compat escape-hatch shape as
+      :attr:`GraphNode.properties`.
+    * ``discovered_by`` -- Text NOT NULL. Connector slug or
+      ``curated``; same shape as :attr:`GraphNode.discovered_by`.
+    * ``first_seen`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
+      server default; ORM falls back to
+      ``default=lambda: datetime.now(UTC)`` on SQLite.
+    * ``last_seen`` -- ``timestamptz`` NULL. Same soft-delete
+      semantics as :attr:`GraphNode.last_seen` -- refresh writes a
+      timestamp on observation, NULL signals soft-delete.
+
+    Indexes on :class:`GraphEdge`:
+
+    * ``graph_edge_tenant_endpoints_kind_idx`` -- unique b-tree on
+      ``(tenant_id, from_node_id, to_node_id, kind)``. At most one
+      edge of a given ``kind`` between a pair of nodes within a
+      tenant.
+    * ``graph_edge_tenant_from_idx`` -- b-tree on
+      ``(tenant_id, from_node_id)``. Drives the *dependencies*
+      (forward) recursive-CTE traversal in T4.
+    * ``graph_edge_tenant_to_idx`` -- b-tree on
+      ``(tenant_id, to_node_id)``. Drives the *dependents* (reverse)
+      recursive-CTE traversal in T4.
+
+    The model deliberately ships with no helper methods -- read /
+    write paths live in the refresh service (T3) and the
+    recursive-CTE traversal module (T4).
+    """
+
+    __tablename__ = "graph_edge"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    from_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("graph_node.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    to_node_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("graph_node.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    properties: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    discovered_by: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    last_seen: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "graph_edge_tenant_endpoints_kind_idx",
+            "tenant_id",
+            "from_node_id",
+            "to_node_id",
+            "kind",
             unique=True,
             postgresql_using="btree",
         ),
         Index(
-            "broadcast_override_tenant_idx",
+            "graph_edge_tenant_from_idx",
             "tenant_id",
+            "from_node_id",
             postgresql_using="btree",
+        ),
+        Index(
+            "graph_edge_tenant_to_idx",
+            "tenant_id",
+            "to_node_id",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("kind", _GRAPH_EDGE_KINDS),
+            name="ck_graph_edge_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("source", _GRAPH_EDGE_SOURCES),
+            name="ck_graph_edge_source",
         ),
     )

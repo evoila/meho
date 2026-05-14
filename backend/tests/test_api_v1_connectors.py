@@ -20,17 +20,27 @@ container; Keycloak is mocked via respx + RSA fixture key.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.jwt import clear_jwks_cache
-from meho_backplane.connectors.registry import clear_registry, register_connector
-from meho_backplane.connectors.vault.connector import VaultConnector
+from meho_backplane.connectors.registry import (
+    clear_registry,
+    register_connector,
+    register_connector_v2,
+)
+from meho_backplane.connectors.vault import (
+    VaultConnector,
+    register_vault_typed_operations,
+)
 from meho_backplane.main import app
+from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -66,11 +76,36 @@ def _clear_jwks_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _registry_with_vault() -> Iterator[None]:
-    """Ensure VaultConnector is the only registered connector for each test."""
+def _registry_with_vault(_settings_env: None) -> Iterator[None]:
+    """Re-establish VaultConnector + the typed-op descriptor row.
+
+    The legacy ``/api/v1/connectors/{product}/{op_id}`` route looks up
+    via :func:`get_connector` (v1 registry), so we keep the v1
+    registration in place. Post-G0.6-T-Refactor-Vault, the
+    :meth:`VaultConnector.execute` shim delegates to
+    :func:`~meho_backplane.operations.dispatch`; the dispatcher's
+    natural-key lookup runs against the v2 key ``("vault", "1.x",
+    "vault")``, so the test fixture additionally registers the v2
+    entry and upserts the typed-op descriptor row (the lifespan's
+    ``run_typed_op_registrars`` step is bypassed because the
+    ``TestClient(app)`` fixture doesn't enter the lifespan).
+    """
     clear_registry()
     register_connector("vault", VaultConnector)
+    register_connector_v2(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        cls=VaultConnector,
+    )
+    reset_dispatcher_caches()
+    stub_embedding_service = AsyncMock()
+    stub_embedding_service.encode_one.return_value = [0.1] * 384
+    stub_embedding_service.encode.return_value = [[0.1] * 384]
+    stub_embedding_service.dimension = 384
+    asyncio.run(register_vault_typed_operations(embedding_service=stub_embedding_service))
     yield
+    reset_dispatcher_caches()
     clear_registry()
 
 
@@ -126,8 +161,13 @@ def test_vault_kv_read_happy_path(
     body = resp.json()
     assert body["status"] == "ok"
     assert body["op_id"] == "vault.kv.read"
-    assert body["result"] == {"api_key": "s3cr3t"}
-    assert body["extras"]["version"] == 42
+    # Post-G0.6-T-Refactor-Vault the handler returns
+    # ``{"data": <secret>, "version": <int|None>}`` and the
+    # dispatcher's PassThroughReducer lands that dict as ``result``.
+    # The pre-refactor shape ``result == <secret>`` +
+    # ``extras["version"] == 42`` is gone -- ``version`` now lives
+    # under ``result`` alongside ``data``.
+    assert body["result"] == {"data": {"api_key": "s3cr3t"}, "version": 42}
     _ = fake  # referenced to confirm the fake was installed
 
 
@@ -149,12 +189,22 @@ def test_unknown_product_returns_404(
     assert "unknown product" in resp.json()["detail"]
 
 
-def test_unknown_op_returns_400_with_known_ops(
+def test_unknown_op_returns_400(
     client: TestClient,
     keypair: Any,
     jwt: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Unknown op_id surfaces as 400 with the dispatcher's structured shape.
+
+    Post-G0.6-T-Refactor-Vault, the in-connector ``known_ops`` listing
+    moved to the meta-tools (G0.6-T8 #399); the route's
+    ``unknown_op`` 400 still fires (the route detects the
+    ``"unknown_op:"`` prefix on ``result.error``) but the enumerated
+    op list is empty in the detail payload. The pre-G0.6
+    ``detail["known_ops"]`` list is now best-resolved via
+    ``GET /api/v1/operations`` (T8 #399).
+    """
     install_fake_client(monkeypatch)
     with respx.mock:
         _mock_discovery_and_jwks(respx.mock, _public_jwks(keypair))
@@ -166,7 +216,8 @@ def test_unknown_op_returns_400_with_known_ops(
     assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert detail["error"] == "unknown_op"
-    assert "vault.kv.read" in detail["known_ops"]
+    assert detail["op_id"] == "vault.unknown.op"
+    assert detail["known_ops"] == []
 
 
 def test_unauthenticated_returns_401(client: TestClient) -> None:
@@ -175,14 +226,23 @@ def test_unauthenticated_returns_401(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("params", [{}, {"path": ""}])
-def test_invalid_path_param_returns_200_with_error_status(
+def test_invalid_path_param_returns_200_with_invalid_params_error(
     client: TestClient,
     keypair: Any,
     jwt: str,
     monkeypatch: pytest.MonkeyPatch,
     params: dict[str, str],
 ) -> None:
-    """Missing or empty path: connector validates and returns error status; route stays 200."""
+    """Missing or empty path: dispatcher's ``invalid_params`` shape; route stays 200.
+
+    Post-G0.6-T-Refactor-Vault, the dispatcher's
+    :class:`Draft202012Validator` validates ``params`` against the
+    registered parameter_schema (``"path": {"type": "string",
+    "minLength": 1, "pattern": "\\S"}``) before invoking the handler.
+    The route still returns 200 with an error-status :class:`OperationResult`;
+    the ``error`` string now starts with ``"invalid_params:"`` and
+    the structured detail lives in ``extras["validation_errors"]``.
+    """
     install_fake_client(monkeypatch)
     with respx.mock:
         _mock_discovery_and_jwks(respx.mock, _public_jwks(keypair))
@@ -194,16 +254,30 @@ def test_invalid_path_param_returns_200_with_error_status(
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "error"
-    assert "path" in (body["error"] or "")
+    assert (body["error"] or "").startswith("invalid_params:")
+    assert body["extras"]["error_code"] == "invalid_params"
+    assert isinstance(body["extras"]["validation_errors"], list)
+    assert body["extras"]["validation_errors"]
 
 
-def test_vault_login_failure_returns_200_with_error_status(
+def test_vault_login_failure_returns_200_with_connector_error_status(
     client: TestClient,
     keypair: Any,
     jwt: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Vault login failure: connector returns error result; route stays 200."""
+    """Vault login failure: dispatcher's ``connector_error`` shape; route stays 200.
+
+    Post-G0.6-T-Refactor-Vault the handler raises the
+    :class:`~meho_backplane.auth.vault.VaultClientError` (or a subclass)
+    on login failure rather than returning ``status="error"`` with
+    ``extras["phase"]="login"``. The dispatcher's ``connector_error``
+    branch catches the exception and records the class name in
+    ``extras["exception_class"]``; callers distinguish login-phase
+    failure from read-phase failure by string-matching the class
+    name against the known :class:`VaultClientError` subclasses
+    (see :data:`meho_backplane.api.v1.health._VAULT_LOGIN_PHASE_EXCEPTION_CLASSES`).
+    """
     from meho_backplane.auth.vault import VaultClientError
 
     install_fake_client(monkeypatch, login_exc=VaultClientError("auth failed"))
@@ -217,4 +291,6 @@ def test_vault_login_failure_returns_200_with_error_status(
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "error"
-    assert body["extras"]["phase"] == "login"
+    assert (body["error"] or "").startswith("connector_error:")
+    assert body["extras"]["error_code"] == "connector_error"
+    assert body["extras"]["exception_class"] == "VaultClientError"

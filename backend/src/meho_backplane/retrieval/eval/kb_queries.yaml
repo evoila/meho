@@ -16,10 +16,13 @@
 # * Order matters: first slug is the ideal top-1 (drives MRR scoring
 #   in T2), subsequent slugs are acceptable top-N (drives precision
 #   credit in T2).
-# * Product mix targets: vCenter/vSphere x2, Holodeck/VCF x2, NSX x1,
-#   Vault x1, Hetzner x1, ArgoCD/k8s x2, general/cross-product x1.
+# * Product mix: the 10 queries span vSphere/ESXi/vCenter x3, NSX x1,
+#   Vault x1, Harbor x1, ArgoCD/k8s x2, Hetzner x1, Holodeck/VCF x1.
 #   A regression in any one product surfaces because at least one
-#   query targets it.
+#   query targets it. Add/remove queries only with a matching update
+#   here so the comment doesn't drift from reality (the
+#   `test_kb_corpus_covers_multiple_products` test checks distinct
+#   prefix count, not exact counts).
 
 - query: how do I run esxcli on an ESXi 9.0 host
   expected_hits:

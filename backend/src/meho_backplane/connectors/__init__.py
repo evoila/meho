@@ -27,6 +27,7 @@ from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
     ProbeResult,
+    ResultHandle,
 )
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "NoMatchingConnector",
     "OperationResult",
     "ProbeResult",
+    "ResultHandle",
     "all_connectors",
     "all_connectors_v2",
     "get_connector",

@@ -365,7 +365,20 @@ async def _execute_and_audit(
         )
         return result_connector_error(op_id, exc, duration_ms)
 
-    summary, handle = await _DEFAULT_REDUCER.reduce(raw, descriptor.response_schema)
+    reducer_context: dict[str, Any] = {
+        "op_id": op_id,
+        "operator_sub": operator.sub,
+        "audit_id": str(audit_id),
+        "source_kind": descriptor.source_kind,
+    }
+    target_id = getattr(target, "id", None)
+    if target_id is not None:
+        reducer_context["target_id"] = str(target_id)
+    summary, handle = await _DEFAULT_REDUCER.reduce(
+        raw,
+        descriptor.response_schema,
+        reducer_context,
+    )
     duration_ms = _elapsed_ms(started)
     await audit_and_broadcast_safe(
         audit_id=audit_id,

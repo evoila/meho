@@ -881,11 +881,12 @@ async def test_dispatch_uses_swapped_reducer(
     class _RecordingReducer(PassThroughReducer):
         async def reduce(
             self,
-            response: Any,
-            response_schema: dict[str, Any] | None,
+            payload: Any,
+            schema: dict[str, Any] | None = None,
+            context: dict[str, Any] | None = None,
         ) -> tuple[Any, Any]:
-            seen.append(response)
-            return await super().reduce(response, response_schema)
+            seen.append(payload)
+            return await super().reduce(payload, schema, context)
 
     register_connector_v2(
         product="vault",

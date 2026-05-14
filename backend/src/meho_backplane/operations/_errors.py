@@ -22,8 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from meho_backplane.connectors import OperationResult
-from meho_backplane.operations.reducer import ResultHandle
+from meho_backplane.connectors import OperationResult, ResultHandle
 
 __all__ = [
     "result_connector_error",
@@ -143,23 +142,20 @@ def wrap_ok_result(
     :class:`OperationResult.result` is typed ``dict[str, Any] |
     list[Any] | None``; scalars are wrapped in a single-key
     ``{"value": ...}`` dict so the contract stays honest. The
-    :class:`ResultHandle` (when non-None) is recorded in ``extras`` --
-    T6 (#397) will promote it to a first-class field on
-    :class:`OperationResult`.
+    :class:`ResultHandle` (when non-None) lands on the dedicated
+    :attr:`OperationResult.handle` field — T6 (#397) promoted it from
+    the ``extras`` stash T5 used to surface it.
     """
     if payload is None or isinstance(payload, (dict, list)):
         result_value: dict[str, Any] | list[Any] | None = payload
     else:
         result_value = {"value": payload}
-    extras: dict[str, Any] = {}
-    if handle is not None:
-        extras["result_handle"] = repr(handle)
     return OperationResult(
         status="ok",
         op_id=op_id,
         result=result_value,
         duration_ms=duration_ms,
-        extras=extras,
+        handle=handle,
     )
 
 

@@ -49,9 +49,22 @@ class Connector(ABC):
     async def execute(
         self, target: Target, op_id: str, params: dict[str, Any]
     ) -> OperationResult: ...
+
+    # G9.1-T2 (#449) — topology discovery hooks. Non-abstract; defaults
+    # return empty hints so every shipped v1 subclass remains compilable
+    # without modification. Per-product overrides land in G3.x.
+    async def discover_topology(self, target: Target) -> TopologyHints: ...
+
+    async def list_candidates(
+        self, seed_target: Target | None = None
+    ) -> list[CandidateHint]: ...
 ```
 
-Three required methods, all async. **Op-id namespace** is `<product>.<resource>.<verb>` — e.g., `vsphere.vm.list`, `vault.kv.read`, `bind9.zone.create`.
+Three required methods (`fingerprint` / `probe` / `execute`) plus two **non-abstract** topology hooks (G9.1-T2 #449). The topology hooks ship base-class defaults so every v1 subclass (VaultConnector #244, KubernetesConnector skeleton #321) keeps working without code change; per-product overrides land in the G3.x Initiatives.
+
+**Op-id namespace** depends on source kind: typed ops use `<product>.<resource>.<verb>` (e.g., `vault.kv.read`, `bind9.zone.create`), while ingested ops use `<METHOD>:<path>` (e.g., `GET:/api/vcenter/cluster`). The `Connector.execute` docstring at [`base.py`](../../backend/src/meho_backplane/connectors/base.py) is the source-of-truth contract.
+
+The G9.1-T3 refresh service calls `discover_topology(target)` on demand + on schedule and diffs the returned `TopologyHints` against `graph_node` + `graph_edge` rows for the same `(tenant_id, target_id)`. The G9.1-T6 `meho targets discover` verb calls `list_candidates(seed_target)` and surfaces candidates to the operator — auto-registration is intentionally out of scope.
 
 ## Result models
 
@@ -110,6 +123,49 @@ class AuthModel(StrEnum):
 ```
 
 Stored on every `Target` row (G0.3); read by the connector at `execute()` time.
+
+### Topology hint models (G9.1-T2 #449)
+
+The four models a connector populates when overriding `discover_topology` + `list_candidates`. All frozen end-to-end (matching the `FingerprintResult.extras` discipline — nested `properties` / `evidence` are wrapped in `MappingProxyType` so in-place mutation also raises).
+
+```python
+NodeKind = Literal[
+    "target", "vm", "host", "network", "datastore", "namespace",
+    "pod", "service", "ingress", "node", "principal",
+    "vault-role", "vault-mount", "volume",
+]  # auto-discoverable subset; curated kinds land in G9.2
+
+EdgeKind = Literal["runs-on", "mounts", "routes-through", "belongs-to"]
+# cross-system semantic edges ("authenticates-via", "depends-on", ...)
+# need operator assertion and land in G9.2
+
+class NodeHint(BaseModel):
+    kind: NodeKind
+    name: str
+    properties: Mapping[str, Any]  # frozen via MappingProxyType
+
+class EdgeHint(BaseModel):
+    from_kind: NodeKind
+    from_name: str
+    to_kind: NodeKind
+    to_name: str
+    kind: EdgeKind
+    properties: Mapping[str, Any]
+
+class TopologyHints(BaseModel):
+    nodes: tuple[NodeHint, ...]   # tuple so the frozen model is deeply immutable
+    edges: tuple[EdgeHint, ...]
+    discovered_at: datetime       # stamped at call time
+
+class CandidateHint(BaseModel):
+    name: str
+    host: str
+    port: int | None
+    evidence: Mapping[str, Any]   # debugging payload — what made the connector think this candidate exists
+    confidence: Literal["high", "medium", "low"]
+```
+
+`NodeKind` is the v0.2 auto-discoverable vocabulary; per-connector kinds (e.g. `"vault-role"`, `"vault-mount"`) are extensible per Initiative #363 via a migration. `EdgeKind` is intentionally narrow — the four high-confidence probe-derived edges. Probe-derived edges have to be high-confidence because a wrong edge in `topology dependents` output misleads the operator on the very op the verb is supposed to make safer.
 
 ## Adapter shapes (G0.2-T3 / T4)
 

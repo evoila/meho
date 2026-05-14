@@ -10,9 +10,16 @@ in T5 once G0.3 lands the Target model.
 """
 
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
 from typing import Any
 
-from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
+from meho_backplane.connectors.schemas import (
+    CandidateHint,
+    FingerprintResult,
+    OperationResult,
+    ProbeResult,
+    TopologyHints,
+)
 
 __all__ = ["Connector"]
 
@@ -92,3 +99,44 @@ class Connector(ABC):
         common path is "look up handler_ref from endpoint_descriptor,
         call the handler".
         """
+
+    # G9.1-T2 (#449) — topology discovery hooks. Default no-op implementations
+    # keep every shipped subclass compilable without modification; per-product
+    # overrides land in G3.x Initiative tasks (vSphere, Kubernetes, Vault).
+    async def discover_topology(self, target: Target) -> TopologyHints:
+        """Return the topology snapshot for ``target``.
+
+        The G9.1-T3 refresh service calls this method on demand and on a
+        scheduled cadence; the returned :class:`TopologyHints` is diffed
+        against existing ``graph_node`` + ``graph_edge`` rows for the
+        same ``(tenant_id, target_id)`` and applied as inserts /
+        updates / soft-deletes.
+
+        The base-class default returns an empty :class:`TopologyHints`
+        with ``discovered_at`` stamped at call time. Connectors that
+        can derive nodes + edges from a probe (vSphere, Kubernetes,
+        Vault — per Initiative #363) override this method; connectors
+        with nothing to contribute inherit the no-op default.
+        """
+        return TopologyHints(discovered_at=datetime.now(UTC))
+
+    async def list_candidates(
+        self,
+        seed_target: Target | None = None,
+    ) -> list[CandidateHint]:
+        """Return potentially-reachable targets the connector inferred.
+
+        The G9.1-T6 ``meho targets discover`` CLI verb surfaces these
+        candidates to the operator; ``seed_target`` is optional and lets
+        a connector scope the discovery to one known target's reach
+        (e.g. for Kubernetes, ``seed_target=cluster-1`` can surface peer
+        clusters present in the same kubeconfig context tree).
+
+        The base-class default returns ``[]``. Connectors that can list
+        candidates (vSphere — ESXi hosts a vCenter sees but no target
+        exists for; Kubernetes — peer cluster contexts) override.
+        Auto-registration is out of scope (Initiative #363): the
+        operator reviews returned candidates and runs ``meho targets
+        create`` to register them.
+        """
+        return []

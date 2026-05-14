@@ -230,7 +230,7 @@ def _to_summary(t: TargetORM) -> TargetSummary:
     return TargetSummary(
         id=t.id,
         name=t.name,
-        aliases=t.aliases,
+        aliases=tuple(t.aliases),
         product=t.product,
         host=t.host,
     )

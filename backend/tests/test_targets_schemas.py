@@ -256,5 +256,5 @@ def test_target_update_rejects_port_out_of_range() -> None:
 
 def test_target_update_name_and_product_absent() -> None:
     """name and product are not patchable — absent from TargetUpdate."""
-    assert not hasattr(TargetUpdate, "name")
-    assert not hasattr(TargetUpdate, "product")
+    assert "name" not in TargetUpdate.model_fields
+    assert "product" not in TargetUpdate.model_fields

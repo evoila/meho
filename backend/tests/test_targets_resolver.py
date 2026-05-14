@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
@@ -322,8 +323,9 @@ async def test_resolve_target_exact_name_duplicate_raises_ambiguous() -> None:
         try:
             await session.flush()
             await session.commit()
-        except Exception:
+        except IntegrityError:
             # SQLite enforces the unique constraint; skip on SQLite.
+            await session.rollback()
             pytest.skip("dialect enforces unique constraint — data-drift not simulatable")
 
     async with sessionmaker() as session:

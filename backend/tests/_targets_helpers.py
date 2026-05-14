@@ -89,9 +89,7 @@ def _admin_token(key: Any, tenant_id: str = DEFAULT_TENANT_ID) -> str:
 
 
 def _operator_token(key: Any, tenant_id: str = DEFAULT_TENANT_ID) -> str:
-    return mint_token(
-        key, sub="op-1", tenant_role=TenantRole.OPERATOR.value, tenant_id=tenant_id
-    )
+    return mint_token(key, sub="op-1", tenant_role=TenantRole.OPERATOR.value, tenant_id=tenant_id)
 
 
 async def _insert_target(**kwargs: Any) -> TargetORM:

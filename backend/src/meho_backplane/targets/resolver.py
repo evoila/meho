@@ -141,7 +141,7 @@ async def resolve_target(
     result = await session.execute(stmt.limit(2))
     exact_hits = list(result.scalars().all())
     if len(exact_hits) == 1:
-        target: TargetORM | None = exact_hits[0]
+        target = exact_hits[0]
     elif len(exact_hits) > 1:
         summaries = [_to_summary(t) for t in exact_hits]
         _log.warning(

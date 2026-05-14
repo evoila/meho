@@ -13,6 +13,16 @@ REST routes at T6, admin MCP tools at T7) import from
 private module layout.
 """
 
+from meho_backplane.operations.ingest.admin_service import (
+    ConnectorAdminService,
+    ConnectorListResponse,
+    ConnectorStatusFilter,
+    ConnectorSummary,
+    IngestRequest,
+    IngestResponse,
+    IngestSpecRef,
+    SpecIngestionOutcome,
+)
 from meho_backplane.operations.ingest.connector_registration import (
     GenericRestConnector,
     ensure_connector_class_registered,
@@ -55,14 +65,21 @@ from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
+    "ConnectorAdminService",
+    "ConnectorListResponse",
     "ConnectorNotFoundError",
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
+    "ConnectorStatusFilter",
+    "ConnectorSummary",
     "EndpointDescriptorProto",
     "GenericRestConnector",
     "GroupProposal",
     "GroupingResult",
+    "IngestRequest",
+    "IngestResponse",
+    "IngestSpecRef",
     "IngestionResult",
     "InvalidSchemaError",
     "InvalidSpecError",
@@ -72,6 +89,7 @@ __all__ = [
     "OpIdCollision",
     "ReviewService",
     "SafetyLevel",
+    "SpecIngestionOutcome",
     "UnsupportedSpecError",
     "detect_spec_format",
     "ensure_connector_class_registered",

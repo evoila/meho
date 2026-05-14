@@ -39,6 +39,15 @@ The pipeline is broken into work items per Initiative #389:
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
 * **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline.
+  T7 ships first (PR for #407) with two service classes:
+  `ConnectorAdminService` (`ingest/admin_service.py`) for
+  `ingest()` + `list_connectors()`, and `ReviewService`
+  (`ingest/service.py`, from T4) for the read + edit + state-
+  machine methods. T5 (CLI) and T6 (REST) consume the same
+  service surface. The agent's daily tool list stays unchanged;
+  the seven admin tools live under the `meho.connector.*`
+  namespace and only `tenant_admin` operators (plus the two
+  read tools at `operator` role) see them in `tools/list`.
 * **T8 — vSphere canary** — ingest both vCenter specs end-to-end.
 * **T9 — Docs.**
 
@@ -89,6 +98,36 @@ method, `generate_json`). Tests pass a deterministic stub from
 `tests/fixtures/llm_groups/{small,medium}_corpus.py`. The chassis
 adapter (Anthropic Messages API) lands with T5 (#405) which will
 also surface the model id + retry policy as `Settings` knobs.
+
+### T7 (admin MCP tools) at a glance
+
+`backend/src/meho_backplane/mcp/tools/connector_admin.py` registers
+seven MCP tools at module import:
+
+| Tool | Required role | Wraps |
+|------|---------------|-------|
+| `meho.connector.ingest` | `tenant_admin` | `ConnectorAdminService.ingest()` |
+| `meho.connector.list` | `operator` | `ConnectorAdminService.list_connectors()` |
+| `meho.connector.review` | `operator` | `ReviewService.get_review_payload()` |
+| `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
+| `meho.connector.edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
+| `meho.connector.enable` | `tenant_admin` | `ReviewService.enable_connector()` |
+| `meho.connector.disable` | `tenant_admin` | `ReviewService.disable_connector()` |
+
+These are administrative tools per CLAUDE.md's "What MEHO is NOT"
+note — distinct from the agent-surface meta-tools (`search_connectors`,
+`call_operation`, etc.). The registry's
+`all_tools_for(operator)` filter hides them from `tools/list` for
+operators whose role doesn't meet the `required_role` rank, and the
+`handle_tools_call` dispatcher re-checks the rank at invocation time
+so a client that guesses a hidden name is still rejected.
+
+Each tool's handler is a thin shim that constructs the right
+service class (`ConnectorAdminService` for ingest/list, `ReviewService`
+for everything else), translates the JSON-Schema-validated arguments
+into the service method's keyword arguments, and `model_dump(mode="json")`s
+the typed response. No business logic in the handler — the service
+classes are what T5 (CLI) and T6 (REST) also consume.
 
 ## Key types
 

@@ -398,11 +398,17 @@ def _apply_assignments_to_rows(
     Updates *totals.operations_assigned* and
     *totals.operations_unassigned* in place. The orchestrator's
     surrounding transaction is what makes the mutations durable.
+
+    Ops the LLM omitted from its Pass-2 response (``op_id`` absent from
+    *assignment_map*) and ops explicitly mapped to
+    :data:`NONE_GROUP_KEY` are both counted exactly once as
+    ``operations_unassigned``. This preserves the
+    ``operations_assigned + operations_unassigned == len(operations)``
+    reconciliation invariant the audit row depends on.
     """
-    all_op_ids = {op.op_id for op in operations}
     for op_row in operations:
-        assigned_key = assignment_map.get(op_row.op_id, NONE_GROUP_KEY)
-        if assigned_key == NONE_GROUP_KEY:
+        assigned_key = assignment_map.get(op_row.op_id)
+        if assigned_key is None or assigned_key == NONE_GROUP_KEY:
             totals.operations_unassigned += 1
             continue
         group_uuid = group_key_to_id.get(assigned_key)
@@ -411,9 +417,6 @@ def _apply_assignments_to_rows(
             continue
         op_row.group_id = group_uuid
         totals.operations_assigned += 1
-    # Ops the LLM omitted from its response are also unassigned.
-    missing = all_op_ids - assignment_map.keys()
-    totals.operations_unassigned += len(missing)
 
 
 # ---------------------------------------------------------------------------

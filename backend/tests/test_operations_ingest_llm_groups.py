@@ -552,6 +552,102 @@ async def test_run_llm_grouping_writes_audit_row(
     assert payload["batch_size"] == DEFAULT_GROUPING_BATCH_SIZE
 
 
+@pytest.mark.asyncio
+async def test_run_llm_grouping_omitted_ops_counted_once(
+    stub_embedding_service: Any,
+) -> None:
+    """Regression for CodeRabbit B1 (PR #485).
+
+    The Pass-2 stub deliberately omits two of the five small-corpus
+    op_ids from its response. The buggy ``_apply_assignments_to_rows``
+    counted omitted ops twice: once via the ``NONE_GROUP_KEY`` default
+    in the per-row loop and again via a trailing
+    ``missing = all_op_ids - assignment_map.keys()`` block, inflating
+    ``operations_unassigned`` and breaking the
+    ``assigned + unassigned == len(operations)`` reconciliation
+    invariant the audit row depends on.
+
+    With the fix, omitted ops are counted exactly once. For a 5-op
+    corpus with 3 assigned and 2 omitted, ``operations_unassigned``
+    must equal 2 (not 4), and the audit-row payload must match.
+    """
+    await _ingest_small_corpus(stub_embedding_service)
+
+    # Pass-2 response omits the two DELETE/snapshot op_ids entirely.
+    # The parser keeps the three present-and-valid entries; the
+    # remaining two ops should be counted as unassigned exactly once.
+    partial_assignment_response = json.dumps(
+        {
+            "GET:/api/vcenter/cluster": "inventory",
+            "GET:/api/vcenter/vm": "inventory",
+            "POST:/api/vcenter/vm": "vm_lifecycle",
+            # "DELETE:/api/vcenter/vm/{vm}" -- omitted
+            # "POST:/api/vcenter/vm/{vm}/snapshot" -- omitted
+        },
+    )
+    stub = StubLlmClient(
+        responses=[
+            small_corpus.STUB_PROPOSE_RESPONSE,
+            partial_assignment_response,
+        ],
+    )
+    result = await run_llm_grouping(
+        llm_client=stub,
+        operator_sub=_OPERATOR_SUB,
+        operator_tenant_id=_OPERATOR_TENANT,
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+    )
+
+    # Core invariant: each op is counted exactly once.
+    assert result.operations_assigned + result.operations_unassigned == len(
+        small_corpus.PROTOS,
+    )
+    assert result.operations_assigned == 3
+    # Without the fix, this would be 4 (the two omitted ops are
+    # counted once via the per-row loop's NONE_GROUP_KEY default and
+    # again via the trailing all_op_ids/missing block).
+    assert result.operations_unassigned == 2
+
+    # Audit-row payload reflects the same (correct) total.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == OP_LLM_GROUPING)))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    payload = rows[0].payload
+    assert isinstance(payload, dict)
+    assert payload["operations_assigned"] == 3
+    assert payload["operations_unassigned"] == 2
+    assert payload["operations_assigned"] + payload["operations_unassigned"] == len(
+        small_corpus.PROTOS
+    )
+
+    # Per-row ORM mutations also follow the same invariant: only the
+    # three assigned ops carry a group_id; the two omitted rows stay
+    # NULL (unassigned).
+    async with sessionmaker() as fresh:
+        ops = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor)
+                    .where(EndpointDescriptor.product == "vmware")
+                    .order_by(EndpointDescriptor.op_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assigned_count = sum(1 for op in ops if op.group_id is not None)
+    unassigned_count = sum(1 for op in ops if op.group_id is None)
+    assert assigned_count == 3
+    assert unassigned_count == 2
+
+
 # ---------------------------------------------------------------------------
 # Medium corpus -- AC-pinned batching + unassigned-op path
 # ---------------------------------------------------------------------------

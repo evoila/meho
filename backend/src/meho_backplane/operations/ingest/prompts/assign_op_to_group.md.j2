@@ -1,0 +1,22 @@
+Assign each operation below to ONE of the groups listed. If no group is a
+clear fit, return "none" -- the operator will assign manually during review.
+
+The connector is: {{ connector_id }} (product={{ product }}, version={{ version }}).
+
+Groups:
+{% for group in groups -%}
+- {{ group.group_key }} ({{ group.name }}): {{ group.when_to_use }}
+{% endfor %}
+
+Operations:
+{% for op in operations -%}
+- {{ op.op_id }}: {{ op.summary or "(no summary)" }} [tags: {{ op.tags | join(", ") if op.tags else "(none)" }}]
+{% endfor %}
+
+Output ONLY a JSON object mapping each op_id (verbatim) to one group_key (or
+"none"). No prose before or after. Schema:
+
+{
+  "<op_id>": "<group_key>",
+  ...
+}

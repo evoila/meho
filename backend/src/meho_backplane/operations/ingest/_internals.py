@@ -39,6 +39,7 @@ __all__ = [
     "OP_EDIT_OP",
     "OP_ENABLE_CONNECTOR",
     "OP_ENABLE_GROUP",
+    "OP_LLM_GROUPING",
     "VALID_SAFETY_LEVELS",
     "ConnectorScope",
     "cascade_is_enabled",
@@ -62,6 +63,7 @@ OP_DISABLE_CONNECTOR: Final[str] = "meho.connector.disable"
 OP_ENABLE_GROUP: Final[str] = "meho.connector.enable_group"
 OP_EDIT_GROUP: Final[str] = "meho.connector.edit_group"
 OP_EDIT_OP: Final[str] = "meho.connector.edit_op"
+OP_LLM_GROUPING: Final[str] = "meho.connector.llm_grouping"
 
 #: Allowed values for :attr:`EndpointDescriptor.safety_level`. The
 #: same set is enforced by the DB CHECK constraint; the Python-side

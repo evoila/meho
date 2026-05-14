@@ -16,8 +16,8 @@
 # * Order matters: first slug is the ideal top-1 (drives MRR scoring
 #   in T2), subsequent slugs are acceptable top-N (drives precision
 #   credit in T2).
-# * Product mix: the 10 queries span vSphere/ESXi/vCenter x3, NSX x1,
-#   Vault x1, Harbor x1, ArgoCD/k8s x2, Hetzner x1, Holodeck/VCF x1.
+# * Product mix: the 10 queries span vSphere/ESXi/vCenter x3, Vault x1,
+#   NSX x1, Harbor x1, ArgoCD x1, RKE2/k8s x1, Hetzner x1, Holodeck x1.
 #   A regression in any one product surfaces because at least one
 #   query targets it. Add/remove queries only with a matching update
 #   here so the comment doesn't drift from reality (the

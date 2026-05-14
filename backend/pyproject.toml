@@ -25,6 +25,7 @@ dependencies = [
     "tenacity>=9.0",
     "asyncssh>=2.18,<3.0",
     "packaging>=24.0",
+    "python-frontmatter>=1.1.0",
 ]
 
 [dependency-groups]
@@ -211,6 +212,16 @@ ignore_missing_imports = true
 # upstream ships stubs.
 [[tool.mypy.overrides]]
 module = ["asyncssh.*"]
+ignore_missing_imports = true
+
+# python-frontmatter (G4.1-T1 #415) ships no ``py.typed`` marker as
+# of 1.1.0. Used by :mod:`meho_backplane.kb.file_walker` for the
+# Markdown front-matter parse step (``frontmatter.loads``); the
+# ``Post.metadata`` / ``Post.content`` surface is the only API the
+# walker touches. Whitelisting localises the untyped surface to the
+# walker module. Drop if upstream adds stubs.
+[[tool.mypy.overrides]]
+module = ["frontmatter.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

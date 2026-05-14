@@ -292,15 +292,29 @@ jobs:
         #   - ghcr.io/evoila/meho:test         locally built above
         #   - valkey/valkey:9.0-alpine         broadcast subchart pod
         #   - bitnami/postgresql:16            helm-test ``pgvector-check``
-        #                                      container (psql client)
+        #                                      container (psql client) --
+        #                                      see note below
         #
-        # Pre-loading the two Docker Hub images sidesteps Docker Hub's
+        # Pre-loading the Docker Hub images sidesteps Docker Hub's
         # anonymous-pull rate-limit that's tripped this repo's other
         # CI lanes (Python lane, image build, Semgrep) on busy days.
+        #
+        # ``bitnami/postgresql:16`` deprecation workaround: Bitnami
+        # moved its Docker Hub catalog to the ``bitnamilegacy/``
+        # namespace in August 2025; ``docker pull bitnami/postgresql:16``
+        # now returns 404. The chart's
+        # templates/tests/test-pgvector.yaml still references the
+        # original tag. We pull from the new namespace and re-tag
+        # to the chart's expected reference before sideloading --
+        # keeps the chart untouched (its ``imagePullPolicy: IfNotPresent``
+        # resolves the loaded image locally by name). The proper fix
+        # belongs in a follow-up that updates the chart's test pod
+        # image to ``postgres:16-alpine`` (no Bitnami dependency); T8
+        # stays workflow-only.
         run: |
-          # Pull the Docker Hub images to the runner so kind can sideload them.
           docker pull valkey/valkey:9.0-alpine
-          docker pull bitnami/postgresql:16
+          docker pull bitnamilegacy/postgresql:16
+          docker tag bitnamilegacy/postgresql:16 bitnami/postgresql:16
           kind load docker-image \
             ghcr.io/evoila/meho:test \
             valkey/valkey:9.0-alpine \

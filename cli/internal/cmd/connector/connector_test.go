@@ -1,0 +1,815 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 evoila Group
+
+package connector
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/evoila/meho/cli/internal/auth"
+)
+
+// ---------- helper tests (pure-function) ----------
+
+// TestTruncatePassthroughAndCut covers the rune-aware truncate
+// helper. Same shape as the operation sibling's test — duplicated
+// because cmd/connector can't import cmd/operation without an
+// import cycle, and a future re-shape on either copy would diverge
+// silently without an in-package pin.
+func TestTruncatePassthroughAndCut(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     string
+		maxLen int
+		want   string
+	}{
+		{"within budget", "abc", 5, "abc"},
+		{"over budget ascii", "abcdef", 4, "abc…"},
+		{"multi-byte safe", "café world", 5, "café…"},
+		{"zero budget", "x", 0, ""},
+	}
+	for _, tt := range tests {
+		if got := truncate(tt.in, tt.maxLen); got != tt.want {
+			t.Errorf("%s: truncate(%q, %d) = %q; want %q", tt.name, tt.in, tt.maxLen, got, tt.want)
+		}
+	}
+}
+
+// TestNormaliseURLBasic mirrors the operation sibling — trailing
+// slash trimming + reject-empty are the load-bearing properties.
+func TestNormaliseURLBasic(t *testing.T) {
+	got, err := normaliseURL("https://meho.test/")
+	if err != nil {
+		t.Fatalf("normaliseURL: %v", err)
+	}
+	if got != "https://meho.test" {
+		t.Fatalf("expected trailing slash stripped; got %q", got)
+	}
+	if _, err := normaliseURL("   "); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty should reject; got %v", err)
+	}
+}
+
+// TestClassifyBackplaneErrorRoutesByCause — ErrConfigNotFound (or
+// any wrapping error) maps to AuthExpired; everything else maps
+// to Unexpected. Same routing as the operation sibling.
+func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
+	wrapped := &errNoBackplaneConfigured{inner: auth.ErrConfigNotFound}
+	se := classifyBackplaneError(wrapped)
+	if se == nil || se.Code != "auth_expired" {
+		t.Fatalf("wrapped ErrConfigNotFound should classify as auth_expired; got %+v", se)
+	}
+	se = classifyBackplaneError(errors.New("parse failure"))
+	if se == nil || se.Code != "unexpected_response" {
+		t.Fatalf("parse failure should classify as unexpected_response; got %+v", se)
+	}
+}
+
+// TestPathEscapeOpIDColonsAndSlashes — op_id values carry method
+// + path (`GET:/api/vcenter/cluster`); the escape must keep them
+// safe for URL path segments.
+func TestPathEscapeOpIDColonsAndSlashes(t *testing.T) {
+	got := pathEscapeOpID("GET:/api/vcenter/cluster")
+	// url.PathEscape leaves ':' unescaped (RFC 3986 sub-delim-ok in
+	// path segments) but escapes '/'. Both behaviours are correct;
+	// we only assert that the result decodes back to the input.
+	decoded, err := url.PathUnescape(got)
+	if err != nil {
+		t.Fatalf("PathUnescape: %v", err)
+	}
+	if decoded != "GET:/api/vcenter/cluster" {
+		t.Fatalf("escape round-trip: got %q want %q", decoded, "GET:/api/vcenter/cluster")
+	}
+	if strings.Contains(got, "/") {
+		t.Fatalf("op_id slashes should be escaped; got %q", got)
+	}
+}
+
+// ---------- resolveSpecURI ----------
+
+// TestResolveSpecURIFile — file:// passes through verbatim.
+func TestResolveSpecURIFile(t *testing.T) {
+	got, err := resolveSpecURI("file:///abs/path/spec.yaml")
+	if err != nil {
+		t.Fatalf("file scheme: %v", err)
+	}
+	if got != "file:///abs/path/spec.yaml" {
+		t.Fatalf("file scheme passthrough; got %q", got)
+	}
+}
+
+// TestResolveSpecURIHTTPS — http(s) passes through verbatim.
+func TestResolveSpecURIHTTPS(t *testing.T) {
+	got, err := resolveSpecURI("https://example.com/spec.yaml")
+	if err != nil {
+		t.Fatalf("https scheme: %v", err)
+	}
+	if got != "https://example.com/spec.yaml" {
+		t.Fatalf("https passthrough; got %q", got)
+	}
+}
+
+// TestResolveSpecURIDocsWithEnv — `docs:` shorthand resolves to a
+// file:// path when CLAUDE_RDC_DOCS is set.
+func TestResolveSpecURIDocsWithEnv(t *testing.T) {
+	t.Setenv("CLAUDE_RDC_DOCS", "/opt/rdc/docs")
+	got, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
+	if err != nil {
+		t.Fatalf("docs shorthand: %v", err)
+	}
+	want := "file:///opt/rdc/docs/vcenter-9.0/vcenter.yaml"
+	if got != want {
+		t.Fatalf("docs shorthand: got %q want %q", got, want)
+	}
+}
+
+// TestResolveSpecURIDocsNoEnv — `docs:` passes through verbatim
+// when CLAUDE_RDC_DOCS is unset so the backplane can resolve it.
+func TestResolveSpecURIDocsNoEnv(t *testing.T) {
+	t.Setenv("CLAUDE_RDC_DOCS", "")
+	got, err := resolveSpecURI("docs:vcenter-9.0/vcenter.yaml")
+	if err != nil {
+		t.Fatalf("docs shorthand, no env: %v", err)
+	}
+	if got != "docs:vcenter-9.0/vcenter.yaml" {
+		t.Fatalf("docs shorthand passthrough; got %q", got)
+	}
+}
+
+// TestResolveSpecURIUnknownScheme — anything not file/http(s)/docs
+// rejects with a clear message.
+func TestResolveSpecURIUnknownScheme(t *testing.T) {
+	_, err := resolveSpecURI("ftp://example.com/spec.yaml")
+	if err == nil || !strings.Contains(err.Error(), "unknown URI scheme") {
+		t.Fatalf("unknown scheme should reject; got %v", err)
+	}
+}
+
+// TestResolveSpecURIEmpty — empty input rejects.
+func TestResolveSpecURIEmpty(t *testing.T) {
+	_, err := resolveSpecURI("   ")
+	if err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty spec should reject; got %v", err)
+	}
+}
+
+// ---------- loadTextFlag ----------
+
+// TestLoadTextFlagUnsetReturnsNotPresent — flag not provided ⇒ present=false
+// so callers can omit the field from the PATCH body.
+func TestLoadTextFlagUnsetReturnsNotPresent(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	cmd.Flags().String("name", "", "")
+	cmd.SetArgs([]string{})
+	if err := cmd.ParseFlags(nil); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	val, present, err := loadTextFlag(cmd, "name")
+	if err != nil {
+		t.Fatalf("loadTextFlag: %v", err)
+	}
+	if present {
+		t.Fatalf("unset flag should report present=false")
+	}
+	if val != "" {
+		t.Fatalf("unset flag should return empty val; got %q", val)
+	}
+}
+
+// TestLoadTextFlagInlineText — `--name foo` ⇒ ("foo", true, nil).
+func TestLoadTextFlagInlineText(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	cmd.Flags().String("name", "", "")
+	if err := cmd.ParseFlags([]string{"--name", "foo"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	val, present, err := loadTextFlag(cmd, "name")
+	if err != nil {
+		t.Fatalf("loadTextFlag: %v", err)
+	}
+	if !present || val != "foo" {
+		t.Fatalf("inline text: got (%q, %v); want (\"foo\", true)", val, present)
+	}
+}
+
+// TestLoadTextFlagFileReference — `--name @path` ⇒ reads + trims
+// trailing newline.
+func TestLoadTextFlagFileReference(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blob.md")
+	if err := os.WriteFile(path, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatalf("setup write: %v", err)
+	}
+	cmd := &cobra.Command{Use: "x"}
+	cmd.Flags().String("name", "", "")
+	if err := cmd.ParseFlags([]string{"--name", "@" + path}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	val, present, err := loadTextFlag(cmd, "name")
+	if err != nil {
+		t.Fatalf("loadTextFlag @file: %v", err)
+	}
+	if !present || val != "hello world" {
+		t.Fatalf("file ref: got (%q, %v); want (\"hello world\", true)", val, present)
+	}
+}
+
+// TestLoadTextFlagMissingFile — `@nonexistent` surfaces a read
+// failure with the path name.
+func TestLoadTextFlagMissingFile(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	cmd.Flags().String("name", "", "")
+	if err := cmd.ParseFlags([]string{"--name", "@/nonexistent/path/blob.md"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	_, _, err := loadTextFlag(cmd, "name")
+	if err == nil || !strings.Contains(err.Error(), "read --name file") {
+		t.Fatalf("missing file: should report read failure; got %v", err)
+	}
+}
+
+// TestLoadTextFlagPresentEmpty — `--name ""` ⇒ ("", true, nil).
+// This is load-bearing for the "clear an override" PATCH semantic.
+func TestLoadTextFlagPresentEmpty(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	cmd.Flags().String("name", "", "")
+	if err := cmd.ParseFlags([]string{"--name", ""}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	val, present, err := loadTextFlag(cmd, "name")
+	if err != nil {
+		t.Fatalf("loadTextFlag empty: %v", err)
+	}
+	if !present || val != "" {
+		t.Fatalf("--name '': got (%q, %v); want (\"\", true)", val, present)
+	}
+}
+
+// ---------- renderers ----------
+
+// TestPrintIngestSummaryDryRun — dry-run header + counts; no
+// "Connector is in review_status=staged" trailer because that
+// only applies after a real ingest.
+func TestPrintIngestSummaryDryRun(t *testing.T) {
+	r := &IngestResponse{
+		Ingestion: IngestionResult{
+			ConnectorID:     "vmware-rest-9.0",
+			TotalOperations: 12,
+			Inserted:        12,
+			PerSpecCounts:   map[string]int{"vcenter.yaml": 9, "vi-json.yaml": 3},
+		},
+	}
+	opts := ingestOptions{Product: "vmware", Version: "9.0", ImplID: "vmware-rest", DryRun: true}
+	var buf bytes.Buffer
+	printIngestSummary(&buf, opts, r)
+	out := buf.String()
+	for _, want := range []string{"DRY RUN", "12 total", "vcenter.yaml: 9 ops", "vi-json.yaml: 3 ops"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run render missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "review_status=staged") {
+		t.Errorf("dry-run render should not announce review_status=staged; got:\n%s", out)
+	}
+}
+
+// TestPrintIngestSummaryNonDryRun — happy-path render includes
+// connector_id + next-steps hint.
+func TestPrintIngestSummaryNonDryRun(t *testing.T) {
+	r := &IngestResponse{
+		Ingestion: IngestionResult{
+			ConnectorID:        "vmware-rest-9.0",
+			TotalOperations:    961,
+			Inserted:           961,
+			EmbeddingsComputed: 961,
+		},
+		Grouping: &GroupingResult{
+			GroupsProposed:     9,
+			OperationsAssigned: 961,
+			Model:              "claude-3-5-sonnet-20241022",
+		},
+	}
+	opts := ingestOptions{Product: "vmware", Version: "9.0", ImplID: "vmware-rest", DryRun: false}
+	var buf bytes.Buffer
+	printIngestSummary(&buf, opts, r)
+	out := buf.String()
+	for _, want := range []string{"connector_id=vmware-rest-9.0", "961 total", "embeddings: 961 computed", "9 groups", "claude-3-5-sonnet", "review_status=staged", "meho connector review vmware-rest-9.0", "meho connector enable vmware-rest-9.0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("non-dry-run render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintListTableEmpty — zero connectors renders the count line.
+func TestPrintListTableEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	printListTable(&buf, "staged", &ListResponse{})
+	if !strings.Contains(buf.String(), "0 connector(s) with status=staged") {
+		t.Errorf("empty list: missing 0-count line; got:\n%s", buf.String())
+	}
+}
+
+// TestPrintListTableHappyPath — happy-path render with two connectors;
+// built-in connectors (TenantID="") render as "(built-in)".
+func TestPrintListTableHappyPath(t *testing.T) {
+	r := &ListResponse{
+		Connectors: []Summary{
+			{ConnectorID: "vault-1.x", ReviewStatus: "enabled", GroupCount: 2, OperationCount: 7, TenantID: ""},
+			{ConnectorID: "vmware-rest-9.0", ReviewStatus: "staged", GroupCount: 9, OperationCount: 961, TenantID: "tenant-a"},
+		},
+	}
+	var buf bytes.Buffer
+	printListTable(&buf, "all", r)
+	out := buf.String()
+	for _, want := range []string{"2 connector(s) with status=all", "vault-1.x", "enabled", "(built-in)", "vmware-rest-9.0", "staged", "tenant-a", "961"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("list render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintReviewTableHappyPath — review render shows groups + ops
+// + flags.
+func TestPrintReviewTableHappyPath(t *testing.T) {
+	summary := "List vSphere clusters"
+	r := &ReviewPayload{
+		ConnectorID:  "vmware-rest-9.0",
+		Product:      "vmware",
+		Version:      "9.0",
+		ImplID:       "vmware-rest",
+		ReviewStatus: "staged",
+		Groups: []ReviewGroup{
+			{
+				GroupKey:  "cluster",
+				Name:      "Cluster",
+				WhenToUse: "Use for vSphere cluster lifecycle ops.",
+				Operations: []ReviewOperation{
+					{OpID: "GET:/api/vcenter/cluster", Summary: &summary, SafetyLevel: "safe", IsEnabled: false},
+					{OpID: "DELETE:/api/vcenter/cluster/{id}", SafetyLevel: "dangerous", RequiresApproval: true, IsEnabled: false},
+				},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"vmware-rest-9.0", "staged", "[cluster]", "Cluster", "vSphere cluster lifecycle", "GET:/api/vcenter/cluster", "safe", "DELETE:/api/vcenter/cluster", "dangerous"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintReviewTableEmptyGroups — zero-group connector renders
+// the explanation line.
+func TestPrintReviewTableEmptyGroups(t *testing.T) {
+	r := &ReviewPayload{ConnectorID: "k8s-1.x", ReviewStatus: "staged", Groups: nil}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	if !strings.Contains(buf.String(), "no groups") {
+		t.Errorf("empty review: missing explanation; got:\n%s", buf.String())
+	}
+}
+
+// ---------- EditOpBody marshal ----------
+
+// TestEditOpBodyMarshalOmitsUnset — a body with only IsEnabled set
+// must marshal to exactly that one field; absent fields stay absent
+// (no explicit null) so the PATCH semantic on the backend stays
+// "leave unchanged".
+func TestEditOpBodyMarshalOmitsUnset(t *testing.T) {
+	enabled := true
+	body := EditOpBody{IsEnabled: &enabled}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(raw) != `{"is_enabled":true}` {
+		t.Fatalf("unset fields should be omitted; got %s", raw)
+	}
+}
+
+// TestEditOpBodyMarshalAllFields — all-fields-set marshal round-
+// trips with the right keys.
+func TestEditOpBodyMarshalAllFields(t *testing.T) {
+	desc := "Read a vault KV secret"
+	safety := "caution"
+	req := true
+	enabled := false
+	body := EditOpBody{
+		CustomDescription: &desc,
+		SafetyLevel:       &safety,
+		RequiresApproval:  &req,
+		IsEnabled:         &enabled,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"custom_description":"Read a vault KV secret"`, `"safety_level":"caution"`, `"requires_approval":true`, `"is_enabled":false`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("marshal missing %q in %s", want, raw)
+		}
+	}
+}
+
+// TestIsEmptyEditOpBody — both branches.
+func TestIsEmptyEditOpBody(t *testing.T) {
+	if !isEmptyEditOpBody(EditOpBody{}) {
+		t.Fatalf("zero-value body should be empty")
+	}
+	enabled := true
+	if isEmptyEditOpBody(EditOpBody{IsEnabled: &enabled}) {
+		t.Fatalf("body with IsEnabled set should not be empty")
+	}
+}
+
+// ---------- transition + confirm ----------
+
+// TestConfirmYes — typing y on stdin returns true.
+func TestConfirmYes(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	cmd.SetIn(strings.NewReader("y\n"))
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if !confirm(cmd, "really?") {
+		t.Fatalf("confirm 'y' should return true")
+	}
+}
+
+// TestConfirmNo — typing n returns false.
+func TestConfirmNo(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	cmd.SetIn(strings.NewReader("n\n"))
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if confirm(cmd, "really?") {
+		t.Fatalf("confirm 'n' should return false")
+	}
+}
+
+// TestConfirmEOF — closed stdin returns false (scripted/no-tty
+// path should not accidentally enable).
+func TestConfirmEOF(t *testing.T) {
+	cmd := &cobra.Command{Use: "x"}
+	cmd.SetIn(strings.NewReader(""))
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	if confirm(cmd, "really?") {
+		t.Fatalf("confirm with empty stdin should return false")
+	}
+}
+
+// TestPrintTransitionResult — happy-path render.
+func TestPrintTransitionResult(t *testing.T) {
+	r := &TransitionResponse{
+		ConnectorID:       "vmware-rest-9.0",
+		ReviewStatus:      "enabled",
+		GroupsUpdated:     9,
+		OperationsUpdated: 961,
+	}
+	var buf bytes.Buffer
+	printTransitionResult(&buf, "enable", r)
+	out := buf.String()
+	for _, want := range []string{"enable vmware-rest-9.0", "review_status=enabled", "9 groups", "961 ops"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("transition render missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// ---------- httpError ----------
+
+// TestHTTPErrorString — Error() format pins the renderer's input
+// shape.
+func TestHTTPErrorString(t *testing.T) {
+	he := &httpError{StatusCode: 403, Body: "forbidden"}
+	if he.Error() != "HTTP 403: forbidden" {
+		t.Fatalf("httpError format: got %q", he.Error())
+	}
+}
+
+// ---------- HTTP wire shape (mocked) ----------
+
+// TestPostIngestRoundTripWithMockServer — pins the wire contract
+// between T5 and T6 (#406). The CLI POSTs the IngestRequest, the
+// (mocked) T6 endpoint validates the shape and returns an
+// IngestResponse; the CLI decodes it back. Used for the JSON
+// contract sanity check that doesn't require a live backplane —
+// true end-to-end coverage lives in the T8 canary (#408).
+func TestPostIngestRoundTripWithMockServer(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			var req IngestRequest
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Errorf("decode IngestRequest body: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			if req.Product != "vmware" || req.Version != "9.0" || req.ImplID != "vmware-rest" {
+				t.Errorf("unexpected triple: %+v", req)
+			}
+			if len(req.Specs) != 1 || req.Specs[0].URI != "file:///abs/vcenter.yaml" {
+				t.Errorf("unexpected specs: %+v", req.Specs)
+			}
+			resp := IngestResponse{
+				Ingestion: IngestionResult{
+					ConnectorID:     "vmware-rest-9.0",
+					Inserted:        961,
+					TotalOperations: 961,
+				},
+				Grouping: &GroupingResult{GroupsProposed: 9, OperationsAssigned: 961},
+			}
+			writeJSON(t, w, 200, resp)
+		},
+	})
+	defer srv.Close()
+
+	primeToken(t, srv.URL)
+	got, err := postIngest(context.Background(), srv.URL, IngestRequest{
+		Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
+		Specs: []SpecSource{{URI: "file:///abs/vcenter.yaml"}},
+	})
+	if err != nil {
+		t.Fatalf("postIngest: %v", err)
+	}
+	if got.Ingestion.ConnectorID != "vmware-rest-9.0" || got.Ingestion.TotalOperations != 961 {
+		t.Fatalf("unexpected ingest result: %+v", got)
+	}
+	if got.Grouping == nil || got.Grouping.GroupsProposed != 9 {
+		t.Fatalf("unexpected grouping: %+v", got.Grouping)
+	}
+}
+
+// TestGetListWithMockServer — validates the status query param
+// shape and the list response decode.
+func TestGetListWithMockServer(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/connectors": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("status") != "staged" {
+				t.Errorf("expected status=staged; got %q", r.URL.Query().Get("status"))
+			}
+			writeJSON(t, w, 200, ListResponse{
+				Connectors: []Summary{
+					{ConnectorID: "vmware-rest-9.0", ReviewStatus: "staged", GroupCount: 9, OperationCount: 961},
+				},
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	got, err := getList(context.Background(), srv.URL, "staged")
+	if err != nil {
+		t.Fatalf("getList: %v", err)
+	}
+	if len(got.Connectors) != 1 || got.Connectors[0].ConnectorID != "vmware-rest-9.0" {
+		t.Fatalf("unexpected list: %+v", got)
+	}
+}
+
+// TestGetListAllOmitsStatusQueryParam — the `all` filter sends no
+// `status` param (T6 treats absent as no-filter via `Literal | None`).
+func TestGetListAllOmitsStatusQueryParam(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/connectors": func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("status"); got != "" {
+				t.Errorf("status=all should not send param; got %q", got)
+			}
+			writeJSON(t, w, 200, ListResponse{})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	if _, err := getList(context.Background(), srv.URL, "all"); err != nil {
+		t.Fatalf("getList all: %v", err)
+	}
+}
+
+// TestPatchGroupSendsBody — confirms the wire shape for edit-group.
+func TestPatchGroupSendsBody(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"PATCH /api/v1/connectors/vmware-rest-9.0/groups/cluster": func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			var got EditGroupBody
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Errorf("decode: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			if got.WhenToUse == nil || *got.WhenToUse != "use for cluster ops" {
+				t.Errorf("when_to_use missing; got %+v", got)
+			}
+			if got.Name != nil {
+				t.Errorf("Name should be unset; got %+v", got.Name)
+			}
+			writeJSON(t, w, 200, EditGroupResponse{
+				ConnectorID: "vmware-rest-9.0", GroupKey: "cluster",
+				Name: "Cluster", WhenToUse: "use for cluster ops",
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	whenToUse := "use for cluster ops"
+	got, err := patchGroup(context.Background(), srv.URL, "vmware-rest-9.0", "cluster", EditGroupBody{WhenToUse: &whenToUse})
+	if err != nil {
+		t.Fatalf("patchGroup: %v", err)
+	}
+	if got.WhenToUse != "use for cluster ops" {
+		t.Fatalf("unexpected response: %+v", got)
+	}
+}
+
+// TestPatchOpEscapesOpID — colons and slashes in op_id must
+// survive the URL path. The mock asserts the decoded segment.
+func TestPatchOpEscapesOpID(t *testing.T) {
+	called := false
+	srv := mockBackplane(t, map[string]mockHandler{
+		"": func(w http.ResponseWriter, r *http.Request) {
+			// Catch-all: confirm the escaped path segment carrying
+			// the op_id round-trips back to "GET:/api/vcenter/cluster".
+			// r.URL.RawPath holds the on-the-wire encoded form;
+			// r.URL.Path is the auto-decoded form FastAPI's
+			// `{op_id:path}` route ultimately sees.
+			called = true
+			if r.Method != "PATCH" {
+				t.Errorf("expected PATCH; got %s", r.Method)
+			}
+			raw := r.URL.RawPath
+			if raw == "" {
+				raw = r.URL.Path
+			}
+			parts := strings.Split(strings.TrimPrefix(raw, "/"), "/")
+			if len(parts) < 6 {
+				t.Errorf("path too short: %q", raw)
+				w.WriteHeader(404)
+				return
+			}
+			decodedOp, err := url.PathUnescape(parts[5])
+			if err != nil {
+				t.Errorf("PathUnescape: %v", err)
+			}
+			if decodedOp != "GET:/api/vcenter/cluster" {
+				t.Errorf("op_id round-trip: got %q (raw path %q)", decodedOp, raw)
+			}
+			writeJSON(t, w, 200, EditOpResponse{
+				ConnectorID: "vmware-rest-9.0",
+				OpID:        "GET:/api/vcenter/cluster",
+				SafetyLevel: "dangerous",
+				IsEnabled:   true,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	safety := "dangerous"
+	got, err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", EditOpBody{SafetyLevel: &safety})
+	if err != nil {
+		t.Fatalf("patchOp: %v", err)
+	}
+	if !called {
+		t.Fatalf("mock handler not invoked")
+	}
+	if got.SafetyLevel != "dangerous" {
+		t.Fatalf("unexpected op response: %+v", got)
+	}
+}
+
+// TestPostTransitionEnable — pins the enable/disable wire shape.
+func TestPostTransitionEnable(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/vmware-rest-9.0/enable": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(t, w, 200, TransitionResponse{
+				ConnectorID: "vmware-rest-9.0", ReviewStatus: "enabled",
+				GroupsUpdated: 9, OperationsUpdated: 961,
+			})
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	got, err := postTransition(context.Background(), srv.URL, "/api/v1/connectors/vmware-rest-9.0/enable")
+	if err != nil {
+		t.Fatalf("postTransition: %v", err)
+	}
+	if got.ReviewStatus != "enabled" {
+		t.Fatalf("unexpected transition: %+v", got)
+	}
+}
+
+// TestHTTPErrorClassification403 — backplane 403 propagates as a
+// *httpError with the right status code; renderRequestError maps
+// to insufficient_role.
+func TestHTTPErrorClassification403(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(403)
+			_, _ = w.Write([]byte("tenant_admin required"))
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	_, err := postIngest(context.Background(), srv.URL, IngestRequest{
+		Product: "x", Version: "y", ImplID: "z",
+		Specs: []SpecSource{{URI: "file:///a.yaml"}},
+	})
+	if err == nil {
+		t.Fatalf("expected 403 error; got nil")
+	}
+	var he *httpError
+	if !errors.As(err, &he) || he.StatusCode != 403 {
+		t.Fatalf("expected *httpError 403; got %T %v", err, err)
+	}
+}
+
+// ---------- httptest helpers ----------
+
+type mockHandler = http.HandlerFunc
+
+// mockBackplane stands up an httptest.Server that routes by
+// `<METHOD> <path>` keys. The empty key acts as a catch-all when
+// the test wants to validate URL escaping or other path-derived
+// behaviour. Tests are responsible for calling Close() via defer.
+func mockBackplane(t *testing.T, routes map[string]mockHandler) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		if h, ok := routes[key]; ok {
+			h(w, r)
+			return
+		}
+		if h, ok := routes[""]; ok {
+			h(w, r)
+			return
+		}
+		t.Errorf("mockBackplane: unhandled route %s", key)
+		w.WriteHeader(404)
+	}))
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Errorf("writeJSON marshal: %v", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if _, err := w.Write(raw); err != nil {
+		t.Errorf("writeJSON write: %v", err)
+	}
+}
+
+// primeToken installs an in-memory token store with a usable
+// bearer for the mocked backplane URL. Uses a test-only override
+// so the production keychain isn't touched.
+func primeToken(t *testing.T, backplaneURL string) {
+	t.Helper()
+	// The default auth.NewTokenStore + auth.LoadConfig path expects
+	// a real config file + keychain entry. Tests can short-circuit
+	// by setting XDG_CONFIG_HOME to a tempdir and writing both.
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	cfg := filepath.Join(dir, "meho", "config.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	cfgBlob, _ := json.Marshal(map[string]string{"backplane_url": backplaneURL})
+	if err := os.WriteFile(cfg, cfgBlob, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// Write a file-backed token (mirrors auth.fileTokenStore shape).
+	// auth.KeyForBackplane derives (service, user) from the URL.
+	service, user := auth.KeyForBackplane(backplaneURL)
+	store, err := auth.NewTokenStore()
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	if err := store.Save(service, user, auth.StoredToken{
+		AccessToken:  "test-bearer",
+		BackplaneURL: backplaneURL,
+	}); err != nil {
+		t.Fatalf("store.Save: %v", err)
+	}
+}

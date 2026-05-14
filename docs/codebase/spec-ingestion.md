@@ -39,6 +39,15 @@ The pipeline is broken into work items per Initiative #389:
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
 * **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline.
+  * **T5 (#405)** — `meho connector ingest/list/review/edit-group/
+    edit-op/enable/disable` cobra verb tree at
+    `cli/internal/cmd/connector/`. Thin client over T6's REST routes;
+    no service-layer access. Operator-facing role: tenant_admin for
+    write verbs, operator for `list` / `review`.
+  * **T6 (#406)** — 7 REST routes under `/api/v1/connectors*` that
+    the CLI and the UI consume.
+  * **T7 (#407)** — admin MCP tools (`meho.connector.*`) that wrap
+    the same service layer for MCP-only operators.
 * **T8 — vSphere canary** — ingest both vCenter specs end-to-end.
 * **T9 — Docs.**
 
@@ -87,8 +96,11 @@ Idempotency:
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
 `tests/fixtures/llm_groups/{small,medium}_corpus.py`. The chassis
-adapter (Anthropic Messages API) lands with T5 (#405) which will
-also surface the model id + retry policy as `Settings` knobs.
+adapter (Anthropic Messages API) ships with T3 itself (#404, commit
+864ef68f); the model id + retry policy live in `Settings`. T5
+(#405) is purely the operator-facing CLI verb tree
+(`cli/internal/cmd/connector/`) that drives the ingest → review →
+enable workflow over the T6 REST routes.
 
 ## Key types
 

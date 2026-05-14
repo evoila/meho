@@ -667,3 +667,92 @@ async def test_dispatch_returns_connector_error_when_reducer_raises(
     # Audit row + broadcast event still fired — the failure is observable.
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "error"
+
+
+# ---------------------------------------------------------------------------
+# ResultHandle nested immutability (M1)
+# ---------------------------------------------------------------------------
+
+
+def test_result_handle_schema_field_is_deeply_immutable() -> None:
+    """``ResultHandle.schema_`` is wrapped in :class:`MappingProxyType`.
+
+    Pydantic v2's ``frozen=True`` blocks field reassignment but not nested
+    mutation. The :meth:`_freeze_nested` model validator wraps the
+    ``schema_`` dict in a :class:`types.MappingProxyType` so callers can't
+    edit the schema after the reducer hands the handle back — matches the
+    sibling :attr:`FingerprintResult.extras` /
+    :attr:`OperationResult.extras` pattern in the same file.
+    """
+    handle = ResultHandle(
+        handle_id=uuid4(),
+        summary_md="x",
+        schema_={"type": "object", "properties": {"a": {"type": "integer"}}},
+        ttl_seconds=10,
+    )
+    with pytest.raises(TypeError):
+        handle.schema_["type"] = "array"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        del handle.schema_["type"]  # type: ignore[attr-defined]
+
+
+def test_result_handle_sample_rows_field_is_deeply_immutable() -> None:
+    """``sample_rows`` is stored as a tuple of :class:`MappingProxyType`.
+
+    Tuples block append/insert/remove at the container level; each row is
+    wrapped in :class:`MappingProxyType` so per-row mutation also raises.
+    """
+    handle = ResultHandle(
+        handle_id=uuid4(),
+        summary_md="x",
+        schema_={"type": "array"},
+        sample_rows=[{"k": 1}, {"k": 2}],
+        ttl_seconds=10,
+    )
+    # Container is a tuple — no append/remove.
+    assert isinstance(handle.sample_rows, tuple)
+    # Per-row mutation raises.
+    assert handle.sample_rows is not None  # narrow for type checker
+    with pytest.raises(TypeError):
+        handle.sample_rows[0]["k"] = 99  # type: ignore[index]
+
+
+def test_result_handle_input_dict_is_not_aliased() -> None:
+    """Mutating the caller's input dict after construction doesn't leak in.
+
+    The :meth:`_freeze_nested` validator copies via ``dict(self.schema_)``
+    before wrapping, so the wrapped mapping is independent of the caller's
+    original dict.
+    """
+    schema_input: dict[str, Any] = {"type": "object"}
+    handle = ResultHandle(
+        handle_id=uuid4(),
+        summary_md="x",
+        schema_=schema_input,
+        ttl_seconds=10,
+    )
+    schema_input["type"] = "array"
+    assert handle.schema_["type"] == "object"
+
+
+def test_result_handle_round_trips_after_freezing() -> None:
+    """``model_dump_json`` / ``model_validate_json`` still works after wrapping.
+
+    :class:`MappingProxyType` is not JSON-serialisable by default; the
+    paired ``@field_serializer`` mirrors the ``_serialize_extras`` pattern
+    and converts it back to a plain ``dict`` / ``list`` on the wire.
+    """
+    handle = ResultHandle(
+        handle_id=uuid4(),
+        summary_md="# 50 rows",
+        schema_={"type": "array", "items": {"type": "object"}},
+        total_rows=50,
+        sample_rows=[{"k": 1}, {"k": 2}],
+        ttl_seconds=7200,
+    )
+    payload = handle.model_dump_json()
+    revived = ResultHandle.model_validate_json(payload)
+    assert revived == handle
+    assert dict(revived.schema_) == {"type": "array", "items": {"type": "object"}}
+    assert revived.sample_rows is not None
+    assert [dict(r) for r in revived.sample_rows] == [{"k": 1}, {"k": 2}]

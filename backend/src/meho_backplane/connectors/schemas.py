@@ -4,8 +4,13 @@
 """Connector result models and the per-target identity-model enum.
 
 All models use ``ConfigDict(frozen=True)`` — field reassignment is blocked at
-runtime. The ``extras`` field is wrapped in :class:`types.MappingProxyType` on
-construction, so in-place mutation also raises :exc:`TypeError`. See v0.1-spec
+runtime. Every nested mutable field (``FingerprintResult.extras``,
+``OperationResult.extras``, ``ResultHandle.schema_``, ``ResultHandle.sample_rows``)
+is wrapped in :class:`types.MappingProxyType` (and tuple-of-MappingProxyType for
+``sample_rows``) on construction via a ``@model_validator(mode="after")``, so
+in-place mutation also raises :exc:`TypeError`. Pydantic v2's ``frozen=True`` is
+documented as "faux immutability" — it blocks field reassignment but not nested
+mutation, hence the wrapping. See v0.1-spec
 §"Versioned connectors + targets" L267-292 (fingerprint shape) and §"Per-target
 identity model" L447-454 (AuthModel) and §"JSONFlux / result handles"
 L294-311 (ResultHandle).
@@ -100,20 +105,54 @@ class ResultHandle(BaseModel):
     ``schema_`` (trailing underscore) is the JSON Schema of the underlying
     payload — the trailing underscore avoids collision with Pydantic's own
     deprecated ``BaseModel.schema()`` API and is serialised as ``schema_``
-    in the wire format. ``model_config = ConfigDict(frozen=True)`` so
-    callers can't mutate a handle after the reducer hands it back.
+    in the wire format. ``model_config = ConfigDict(frozen=True)`` plus the
+    :class:`types.MappingProxyType` wrapping in :meth:`_freeze_nested` so
+    callers can't mutate a handle after the reducer hands it back — neither
+    at the field level nor through the nested ``schema_`` dict or
+    ``sample_rows`` list (mirrors the sibling-models'
+    :attr:`FingerprintResult.extras` / :attr:`OperationResult.extras`
+    pattern).
     """
 
     model_config = ConfigDict(frozen=True)
 
     handle_id: UUID
     summary_md: str
-    schema_: dict[str, Any] = Field(
+    schema_: Mapping[str, Any] = Field(
         description="JSON Schema (Draft 2020-12) of the underlying payload shape.",
     )
     total_rows: int | None = None
-    sample_rows: list[dict[str, Any]] | None = None
+    sample_rows: tuple[Mapping[str, Any], ...] | None = None
     ttl_seconds: int
+
+    @model_validator(mode="after")
+    def _freeze_nested(self) -> "ResultHandle":
+        # Pydantic v2's ``frozen=True`` is "faux immutability" — it blocks
+        # field reassignment but not nested mutation. Wrap ``schema_`` in
+        # :class:`MappingProxyType` and convert ``sample_rows`` to a tuple
+        # of MappingProxyType-wrapped dicts so callers can't tamper with
+        # the handle post-construction, matching the sibling
+        # :class:`FingerprintResult` / :class:`OperationResult` pattern.
+        object.__setattr__(self, "schema_", MappingProxyType(dict(self.schema_)))
+        if self.sample_rows is not None:
+            object.__setattr__(
+                self,
+                "sample_rows",
+                tuple(MappingProxyType(dict(row)) for row in self.sample_rows),
+            )
+        return self
+
+    @field_serializer("schema_")
+    def _serialize_schema(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(value)
+
+    @field_serializer("sample_rows")
+    def _serialize_sample_rows(
+        self, value: tuple[Mapping[str, Any], ...] | None
+    ) -> list[dict[str, Any]] | None:
+        if value is None:
+            return None
+        return [dict(row) for row in value]
 
 
 class OperationResult(BaseModel):

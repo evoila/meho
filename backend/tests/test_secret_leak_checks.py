@@ -39,12 +39,14 @@ an unhandled exception.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
 
 import hvac.exceptions
 import pytest
@@ -55,7 +57,10 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.vault import VaultConnector, register_vault_typed_operations
 from meho_backplane.main import app
+from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 from tests.conftest import (
     DEFAULT_AUDIENCE,
@@ -93,6 +98,35 @@ def _isolated_jwks_cache() -> Iterator[None]:
     clear_jwks_cache()
     yield
     clear_jwks_cache()
+
+
+@pytest.fixture(autouse=True)
+def _registered_vault_substrate(_settings_env: None) -> Iterator[None]:
+    """Re-establish the v2 connector entry + the ``vault.kv.read`` descriptor row.
+
+    The ``TestClient(app)`` fixture in this file does not enter the
+    FastAPI lifespan (the log-capture configuration would be clobbered
+    by the lifespan's ``configure_logging`` step), so the lifespan's
+    ``run_typed_op_registrars`` step never fires. Replicate the v2
+    registry entry + typed-op descriptor upsert directly here so the
+    dispatcher's natural-key lookup finds the row at request time.
+    """
+    clear_registry()
+    register_connector_v2(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        cls=VaultConnector,
+    )
+    reset_dispatcher_caches()
+    stub_embedding_service = AsyncMock()
+    stub_embedding_service.encode_one.return_value = [0.1] * 384
+    stub_embedding_service.encode.return_value = [[0.1] * 384]
+    stub_embedding_service.dimension = 384
+    asyncio.run(register_vault_typed_operations(embedding_service=stub_embedding_service))
+    yield
+    reset_dispatcher_caches()
+    clear_registry()
 
 
 def _configure_capture(buf: io.StringIO) -> None:

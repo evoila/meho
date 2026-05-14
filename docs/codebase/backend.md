@@ -63,25 +63,38 @@ this stage it exposes:
   apply to write/admin handlers as they land — T4 only ships the
   primitive plus the verification surface.
 * Vault forward-auth — `VaultConnector` (`connectors/vault/connector.py`,
-  Task #244 G0.2-T5) is the canonical abstraction for the Vault
-  integration. It wraps `vault_client_for_operator` from `auth/vault.py`
-  and exposes `fingerprint`, `probe`, and `execute` per the `Connector`
-  ABC. The Vault readiness probe registered in lifespan delegates to
-  `VaultConnector.probe()` and flips `/ready` red when `/sys/health` is
-  unreachable, sealed, or uninitialized.
+  Task #244 G0.2-T5, refactored under G0.6-T-Refactor-Vault #390) is
+  the canonical abstraction for the Vault integration. It wraps
+  `vault_client_for_operator` from `auth/vault.py` and exposes
+  `fingerprint`, `probe`, and `execute` per the `Connector` ABC.
+  Post-G0.6 the connector registers via `register_connector_v2(...)`
+  under `(product="vault", version="1.x", impl_id="vault")` rather
+  than the v1 single-product entry point; per-op handlers
+  (`vault_kv_read` in `connectors/vault/ops.py`) land as
+  `endpoint_descriptor` rows via `register_vault_typed_operations()`
+  at lifespan startup. The Vault readiness probe registered in
+  lifespan delegates to `VaultConnector.probe()` and flips `/ready`
+  red when `/sys/health` is unreachable, sealed, or uninitialized.
 * Federation-proof endpoint — `GET /api/v1/health` (auth-required) is
   the load-bearing integration point where the entire JWT → Vault
-  chain runs on every call (Task #24). The route uses the
+  chain runs on every call (Task #24, refactored to dispatch under
+  G0.6-T-Refactor-Vault #390). The route uses the
   `verify_jwt_and_bind` dependency wrapper, which delegates to
   `verify_jwt` and — on success — binds `operator_sub` into structlog
   contextvars. The handler dispatches `vault.kv.read` via
-  `get_connector("vault").execute(target, "vault.kv.read", {"path": ...})`,
-  reads the test secret at
+  `dispatch(operator=..., connector_id="vault-1.x", op_id="vault.kv.read", ...)`
+  (G0.6-T5 #396), reads the test secret at
   `secret/meho/test/federation` (KV v2), and returns a structured
   JSON document with operator identity, Vault status, and a DB
-  migration placeholder (`db.migrated = null` until G2.3). All Vault
-  failure modes surface as structured fields on a 200 response — the
-  smoke test never sees a 5xx from this endpoint.
+  migration placeholder. The handler raises
+  `VaultClientError` subclasses on login-side failure and
+  read-side exceptions on read-side failure; the dispatcher's
+  `connector_error` branch records the exception class name in
+  `extras["exception_class"]`, and the route string-matches against
+  the known VaultClientError subclass set to render
+  `login_failed: <Cls>` vs `read_failed: <Cls>`. All Vault
+  failure modes surface as structured fields on a 200 response —
+  the smoke test never sees a 5xx from this endpoint.
 * Federation-chain failure-mode test suite (Task #25) — comprehensive
   pytest coverage that proves the chain *fails safely*: every JWT
   failure shape (expired / wrong-aud / wrong-iss / tampered signature /

@@ -195,16 +195,28 @@ def test_connector_subclass_overrides_read_back_at_instance_level() -> None:
     assert inst.priority == 10
 
 
-def test_shipped_v1_subclasses_still_import_unmodified() -> None:
-    # Backward-compat guard: the shipped VaultConnector (#244) and the
-    # KubernetesConnector skeleton (#321) only set `product`; they must
-    # remain importable and inherit the new defaults without code change.
+def test_shipped_subclasses_advertise_v2_metadata_per_their_initiative() -> None:
+    # The shipped connectors' v2-metadata posture differs per Initiative:
+    #
+    # * :class:`VaultConnector` (#244, refactored under G0.6-T-Refactor-Vault
+    #   #390) advertises ``version="1.x"`` / ``impl_id="vault"``; its
+    #   :class:`~meho_backplane.connectors.vault.__init__` calls
+    #   :func:`register_connector_v2` directly so the v2 resolver hits
+    #   the same row the typed-op upsert keys on.
+    # * :class:`KubernetesConnector` (skeleton from #321) stays on the v1
+    #   defaults (``version=""`` / ``impl_id=""``) until its own G0.6
+    #   refactor lands — the v1 ``register_connector`` call dual-writes
+    #   the v2 entry as ``("kubernetes", "", "")``.
+    #
+    # ``supported_version_range`` and ``priority`` keep their type-system
+    # defaults on both since neither connector has shipped versioned
+    # behaviour yet.
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.vault.connector import VaultConnector
 
     assert VaultConnector.product == "vault"
-    assert VaultConnector.version == ""
-    assert VaultConnector.impl_id == ""
+    assert VaultConnector.version == "1.x"
+    assert VaultConnector.impl_id == "vault"
     assert VaultConnector.supported_version_range is None
     assert VaultConnector.priority == 0
 

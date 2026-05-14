@@ -317,6 +317,9 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch(
                 "meho_backplane.main._eager_import_connectors", side_effect=lambda: called.append(1)
             ),
+            patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
+            patch("meho_backplane.main.eager_import_mcp_modules"),
+            patch("meho_backplane.main.get_embedding_service"),
         ):
             # Manually step through the lifespan async generator.
             gen = lifespan(None)  # type: ignore[arg-type]
@@ -356,6 +359,7 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 new=broadcast_disposed,
             ),
             patch("meho_backplane.main._eager_import_connectors"),
+            patch("meho_backplane.main.run_typed_op_registrars", new=AsyncMock()),
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main.get_embedding_service"),
         ):

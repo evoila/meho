@@ -113,12 +113,12 @@ Stored on every `Target` row (G0.3); read by the connector at `execute()` time.
 
 ## Adapter shapes (G0.2-T3 / T4)
 
-> **Status:** G0.2-T1 (ABC + result models), G0.2-T2 (registry), G0.2-T3 (HTTP adapter), and G0.2-T4 (SSH adapter) have landed. G0.2-T5 (`VaultConnector` reference refactor) is still open. The tree is the target hierarchy each vendor Initiative under [G3 (#214)](https://github.com/evoila/meho/issues/214) will register against.
+> **Status:** G0.2-T1 (ABC + result models), G0.2-T2 (registry), G0.2-T3 (HTTP adapter), G0.2-T4 (SSH adapter), and G0.2-T5 (`VaultConnector` reference impl, #244) have landed. The `VaultConnector` was subsequently refactored under [G0.6-T-Refactor-Vault (#390)](https://github.com/evoila/meho/issues/390) to register via `register_connector_v2` + `register_typed_operation()` and to route `execute()` through the G0.6 dispatcher. The tree is the target hierarchy each vendor Initiative under [G3 (#214)](https://github.com/evoila/meho/issues/214) will register against.
 
 ```text
 Connector (ABC)                                      ← G0.2-T1 (shipped)
 ├── HttpConnector       — httpx.AsyncClient pool, tenacity retry, SSL_CERT_FILE   ← G0.2-T3 (shipped)
-│   ├── VaultConnector  — refactor of auth/vault.py (G0.2-T5; reference impl)     ← G0.2-T5 (planned)
+│   ├── VaultConnector  — auth/vault.py wrapper (G0.2-T5; reference impl)         ← refactored under G0.6-T-Refactor-Vault #390
 │   ├── VSphereConnector — vSphere REST API (G3.1)
 │   ├── NSXConnector
 │   ├── HarborConnector

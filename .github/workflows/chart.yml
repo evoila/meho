@@ -478,14 +478,21 @@ jobs:
 
       - name: Run helm test (pgvector preflight Job)
         # G0.4-T6 acceptance: the Helm test Pod must pass.
-        # ``helm test --logs`` prints the Pod's stdout/stderr on
-        # failure so a CI failure points at the exact assertion that
-        # tripped (pgvector missing vs documents table missing).
+        #
+        # G6.1-T8 (#432) note on ``--logs``: the chart's test pod has
+        # ``helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded``,
+        # so on success Helm deletes the pod immediately. ``helm test
+        # --logs`` then tries to fetch logs from a now-missing pod and
+        # exits 1 with "pods ... not found", masking a successful
+        # test as a failure. On FAILED test the pod sticks (hook-succeeded
+        # only deletes successes), so logs are still reachable via the
+        # diagnostic step below. Dropping ``--logs`` lets the success
+        # path exit 0 cleanly and the failure path falls back to the
+        # diagnostics dump.
         run: |
           helm test meho-test \
             --namespace meho-test \
-            --timeout 2m \
-            --logs
+            --timeout 2m
 
       - name: Dump diagnostics on failure
         if: failure()

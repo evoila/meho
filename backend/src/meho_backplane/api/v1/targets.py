@@ -26,10 +26,13 @@ Callers can address a target by any of its aliases and get the same result.
 Audit enrichment
 ----------------
 
-Every route that successfully calls ``resolve_target`` (or creates a target)
-binds ``audit_target_id`` into structlog contextvars. G0.3-T4 (#255) will
-extend :class:`~meho_backplane.audit.AuditMiddleware` to read that contextvar
-and populate ``audit_log.target_id``.
+Routes that call ``resolve_target`` get the resolved target's id bound
+into structlog contextvars at the resolver's single exit point;
+:class:`~meho_backplane.audit.AuditMiddleware` reads ``target_id`` via
+:func:`~meho_backplane.audit._resolve_target_id` and writes it to
+``audit_log.target_id``. ``create_target`` does not call
+``resolve_target`` (it creates a row rather than looking one up), so
+it binds ``target_id`` directly after ``session.add(t)``.
 
 Probe route
 -----------
@@ -49,6 +52,7 @@ from datetime import UTC, datetime
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -183,17 +187,6 @@ async def create_target(
     ``tenant_id`` is always taken from the JWT — the body cannot override
     it.
     """
-    existing = await session.execute(
-        select(TargetORM).where(
-            TargetORM.tenant_id == operator.tenant_id,
-            TargetORM.name == body.name,
-        )
-    )
-    if existing.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"target {body.name!r} already exists in tenant",
-        )
     now = datetime.now(UTC)
     t = TargetORM(
         id=uuid.uuid4(),
@@ -203,7 +196,14 @@ async def create_target(
         **body.model_dump(),
     )
     session.add(t)
-    structlog.contextvars.bind_contextvars(audit_target_id=str(t.id))
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"target {body.name!r} already exists in tenant",
+        ) from exc
+    structlog.contextvars.bind_contextvars(target_id=str(t.id))
     _log.info(
         "target_created",
         target_id=str(t.id),

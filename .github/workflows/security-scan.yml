@@ -38,13 +38,72 @@ permissions:
   security-events: write  # required for SARIF upload to Code Scanning
 
 jobs:
+  # Gate job: reads the optional Docker Hub secrets and surfaces their
+  # presence as a JSON-encoded container spec on a job output. This
+  # indirection is required because the `secrets` context is NOT
+  # available at `jobs.<job_id>.container` (top-level) per
+  # https://docs.github.com/en/actions/learn-github-actions/contexts#context-availability
+  # — only `github, inputs, matrix, needs, strategy, vars` are allowed
+  # there. `needs.<job>.outputs.*` IS available, so the gate publishes
+  # the full container map (with or without `credentials:`) and the
+  # consumer job parses it via `fromJSON()`.
+  #
+  # A previous iteration attempted `container: ${{ ... secrets.X ... }}`
+  # directly; actionlint correctly rejected the `secrets` references at
+  # that scope, and the bare `credentials: { username: ${{ secrets.X }} }`
+  # before that failed GH Actions template validation at parse time
+  # with "Unexpected value ''" (run 25864725292, 'Set up job'). The
+  # gate-job pattern is the documented workaround.
+  check-secrets:
+    name: Check Docker Hub credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      container_spec: ${{ steps.compute.outputs.container_spec }}
+    steps:
+      - id: compute
+        # Build the container spec as a JSON string. When both secrets
+        # are set, include `credentials`; otherwise emit the bare image
+        # spec so the downstream pull is anonymous. The JSON is emitted
+        # via the secret-aware shell (where `secrets` IS available) and
+        # passed to the consumer job through `outputs:` (allowed in
+        # `needs` context).
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            spec=$(jq -c -n \
+              --arg user "$DOCKERHUB_USERNAME" \
+              --arg pass "$DOCKERHUB_TOKEN" \
+              '{image: "semgrep/semgrep:1.160.0", credentials: {username: $user, password: $pass}}')
+          else
+            spec='{"image":"semgrep/semgrep:1.160.0"}'
+          fi
+          echo "container_spec=$spec" >> "$GITHUB_OUTPUT"
+
   semgrep:
     name: Semgrep SAST
+    needs: check-secrets
     runs-on: meho-runners
     timeout-minutes: 15
-    container:
-      # Bump cadence: monthly review or on advisory.
-      image: semgrep/semgrep:1.160.0
+    # Authenticated Docker Hub pull. The ARC scale-set runs every job
+    # as an ephemeral pod sharing one cluster-egress NAT IP, which
+    # exhausts Docker Hub's anonymous 100-pulls-per-6h limit fast and
+    # has tripped this Semgrep job in production. Authenticated
+    # Personal-tier doubles the bucket to 200/6h
+    # (https://docs.docker.com/docker-hub/usage/pulls/) — enough
+    # short-term while G2.9-T1..T3 stand up the in-cluster
+    # pull-through cache that retires this block.
+    #
+    # `credentials:` is consumed by the runner BEFORE any step runs,
+    # so `docker/login-action` cannot substitute. Secrets are
+    # provisioned at the `evoila` org level so all sibling repos
+    # inherit them without per-repo duplication.
+    #
+    # `container` is materialised from `check-secrets`' output (see the
+    # comment on that job). Bump cadence: monthly review or on advisory.
+    container: ${{ fromJSON(needs.check-secrets.outputs.container_spec) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 

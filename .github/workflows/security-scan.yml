@@ -45,6 +45,22 @@ jobs:
     container:
       # Bump cadence: monthly review or on advisory.
       image: semgrep/semgrep:1.160.0
+      # Authenticated Docker Hub pull. The ARC scale-set runs every job
+      # as an ephemeral pod sharing one cluster-egress NAT IP, which
+      # exhausts Docker Hub's anonymous 100-pulls-per-6h limit fast and
+      # has tripped this Semgrep job in production. Authenticated
+      # Personal-tier doubles the bucket to 200/6h
+      # (https://docs.docker.com/docker-hub/usage/pulls/) — enough
+      # short-term while G2.9-T1..T3 stand up the in-cluster
+      # pull-through cache that retires this block.
+      #
+      # `credentials:` is consumed by the runner BEFORE any step runs,
+      # so `docker/login-action` cannot substitute. Secrets are
+      # provisioned at the `evoila` org level so all sibling repos
+      # inherit them without per-repo duplication.
+      credentials:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 

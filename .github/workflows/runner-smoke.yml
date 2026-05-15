@@ -1,15 +1,22 @@
 name: meho-runners smoke
-# Verifies the meho-runners self-hosted runner pool can pick up + run a job
-# end-to-end. Filed alongside the pool's first deploy (claude-rdc-hetzner-dc#262).
-# Triggered manually; no `push:` / `pull_request:` so it never runs accidentally
-# on regular CI traffic.
+# Verifies the meho-runners self-hosted runner pool can:
+#   1. Pick up + run a job (original scope, claude-rdc-hetzner-dc#262).
+#   2. Pull Docker Hub images through the Harbor pull-through cache at
+#      harbor.evba.lab/dockerhub-proxy (added in evoila-bosnia/meho-internal#75,
+#      wired via the hand-rolled template.spec in MEHO.HelmCharts).
+#
+# Runs on every push to main + workflow_dispatch. After a week of green runs,
+# the cleanup follow-up retires the tactical Docker Hub auth shims on
+# security-scan.yml + ci.yml (org-level container.credentials: + docker/login).
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   smoke:
     runs-on: meho-runners
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Identify the runner
         run: |
@@ -22,3 +29,62 @@ jobs:
           echo "RUNNER_NAME=$RUNNER_NAME"
           echo "RUNNER_OS=$RUNNER_OS"
           echo "RUNNER_ARCH=$RUNNER_ARCH"
+
+      - name: Assert Docker daemon is reachable
+        # The dind sidecar shares /var/run/docker.sock via emptyDir; runner
+        # container has DOCKER_HOST=unix:///var/run/docker.sock. If the
+        # template.spec hand-roll regressed, this prints docker daemon
+        # version OR fails loudly.
+        run: |
+          set -euo pipefail
+          echo "== docker version =="
+          docker version
+          echo "== docker info | grep ServerVersion =="
+          docker info --format '{{.ServerVersion}}'
+
+      - name: Assert Harbor pull-through cache is wired as a registry mirror
+        # AC #4 of meho-internal#75. The dind sidecar's /etc/docker/daemon.json
+        # carries `registry-mirrors: ["https://harbor.evba.lab/v2/dockerhub-proxy"]`,
+        # mounted from the `meho-runners-dind-daemon-config` ConfigMap by the
+        # hand-rolled template.spec. If the mount is missing or the daemon was
+        # restarted with a wrong daemon.json, this fails.
+        run: |
+          set -euo pipefail
+          echo "== docker info Registry Mirrors =="
+          MIRRORS_OUTPUT=$(docker info 2>/dev/null | grep -A1 'Registry Mirrors' || true)
+          echo "$MIRRORS_OUTPUT"
+          if ! echo "$MIRRORS_OUTPUT" | grep -q 'harbor.evba.lab/v2/dockerhub-proxy'; then
+            echo
+            echo "❌ FAIL: Harbor pull-through cache URL not found in docker info Registry Mirrors."
+            echo "   Expected substring: harbor.evba.lab/v2/dockerhub-proxy"
+            echo "   Actual: $MIRRORS_OUTPUT"
+            echo
+            echo "   Likely cause: the dind sidecar didn't mount the daemon.json ConfigMap,"
+            echo "   OR the ConfigMap content drifted from the expected registry-mirrors entry."
+            echo "   Check: kubectl exec -n arc-runners <pod> -c dind -- cat /etc/docker/daemon.json"
+            exit 1
+          fi
+          echo "✓ Harbor cache wired."
+
+      - name: Pull library/alpine:3.20 via the cache
+        # AC #4 of meho-internal#75. The image is pulled by referencing its
+        # canonical Docker Hub name (`library/alpine:3.20`); the docker daemon's
+        # registry-mirrors config transparently rewrites the registry to
+        # harbor.evba.lab/v2/dockerhub-proxy. First pull of the workflow's
+        # 6-hour-bucket window may be a cache MISS (~1-2s slower); subsequent
+        # pulls of the same digest are cache HITS.
+        run: |
+          set -euo pipefail
+          # Strip any prior local copy so this is a real pull, not a no-op.
+          docker rmi library/alpine:3.20 alpine:3.20 2>/dev/null || true
+          echo "== docker pull library/alpine:3.20 =="
+          time docker pull library/alpine:3.20
+          echo "== docker images =="
+          docker images alpine
+
+      - name: Run the pulled image
+        # End-to-end sanity: the pulled image actually runs (proves the layers
+        # were fetched correctly through the cache, not just the manifest).
+        run: |
+          set -euo pipefail
+          docker run --rm library/alpine:3.20 sh -c 'echo "alpine version:"; cat /etc/alpine-release'

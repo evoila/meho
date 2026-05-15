@@ -659,6 +659,92 @@ The fourth route `GET /api/v1/operations/{descriptor_id}` (tenant-
 admin diagnostic for `llm_instructions` inspection) is deferred — the
 G0.6-T13 DoD was "three CLI verbs", not four.
 
+## Targets registry (`meho targets`, G0.3-T5 #256)
+
+`cli/internal/cmd/targets/` registers the three operator-facing verbs
+that wrap the targets registry routes from G0.3-T3 (#254) and the
+G0.3-T1.5 (#477) probe-persistence remediation. The verbs are the
+operator-side surface for the per-tenant `targets` table — a
+fingerprinted catalog of vendor systems the operator manages (vCenter
+hosts, Vault instances, k8s clusters, …) that the G0.6 dispatcher
+resolves at `call` time. Write verbs (`create` / `update` / `delete`)
+are deferred; bulk import lands under G0.3-T6 (#257).
+
+### Subcommands
+
+- `meho targets list [--product P] [--limit N] [--cursor C]` — calls
+  `GET /api/v1/targets`. Renders the operator's tenant-scoped targets
+  as a `NAME / ALIASES / PRODUCT / HOST` table. Results are keyset-
+  paginated by name; `--cursor <last-name-seen>` walks pages. `--limit`
+  is capped at 500 by the API; the CLI fails fast at the boundary so
+  operators see the constraint without a 422 round-trip.
+- `meho targets describe <name-or-alias>` — calls
+  `GET /api/v1/targets/{name}`. Renders the full `Target` read shape
+  as a stable key-value summary including the post-#477 fields
+  `fingerprint` (cached `FingerprintResult` from the last successful
+  probe) and `preferred_impl_id` (operator override for the G0.6
+  resolver's tie-break ladder). Alias resolution happens server-side
+  via `resolve_target`; a 404 surfaces the resolver's near-miss list
+  so operators can correct a typo in one shot.
+- `meho targets probe <name-or-alias>` — calls
+  `POST /api/v1/targets/{name}/probe`. Backend invokes the registered
+  `Connector.fingerprint(target)`, persists the `FingerprintResult` to
+  `targets.fingerprint` (so the G0.6 resolver reads it without
+  re-probing), and returns the envelope. On 501 (no connector
+  registered for the target's product yet) the CLI appends a pointer
+  to Goal G3 (per-product connectors) so operators know where the
+  work tracks; the DB row is **not** touched and any previously-
+  cached fingerprint survives. A connector that raises propagates as
+  a 500; per the #477 accepted trade-off the CLI surfaces the
+  underlying detail rather than masking it as a graceful failure.
+
+### Reserved flags (same shape across all three verbs)
+
+- `--json` — emit the raw JSON envelope to stdout instead of the human
+  render. Stable schemas: `list` → `[]TargetSummary`; `describe` →
+  full `Target` (including `fingerprint` + `preferred_impl_id`);
+  `probe` → `FingerprintResult`.
+- `--backplane <url>` — override the backplane URL (defaults to the
+  URL recorded by `meho login`).
+
+### HTTP shape + error envelopes
+
+All three verbs route through `api.NewAuthedClient(...)` for bearer
+injection + one-shot 401-refresh-retry, mirroring the
+`meho operation` sibling. The shared `doAuthedRequest` helper in
+`targets.go` builds the request manually (rather than using the
+generated `ClientWithResponses`) because the target verbs need
+fine-grained 4xx classification: 404 carries the resolver's
+structured `{"error": "no_target", "query": "...", "matches": [...]}`
+envelope, 409 carries `ambiguous_target` with colliding names, and
+501 carries the "no connector registered" detail. The hand-written
+`renderHTTPError` ladder classifies each status into the right
+`output.StructuredError` category.
+
+### Exit codes
+
+- `0` — verb ran cleanly. `list` exits 0 on an empty tenant
+  (operationally meaningful, never 404).
+- `2` — `auth_expired` (no stored credentials, refresh exhausted, or
+  401 after the one-shot retry).
+- `3` — `unreachable` (network / transport failure before the
+  backplane responded).
+- `4` — `unexpected_response` (404 not-found, 409 ambiguous, 501
+  no-connector, 500 connector exception, malformed JSON, etc.).
+- `5` — `insufficient_role` (403 RBAC denial; backend's detail string
+  names the required role).
+
+### Out of scope (v0.2)
+
+- Write verbs (`create` / `update` / `delete`). The API supports them
+  (require `tenant_admin`); the CLI surfaces them in a follow-up
+  task when operators ask. Bulk import via T6 (#257) lands in a
+  sibling PR.
+- Auto-completion of target names. Operators type names; tab-completion
+  would need a separate `cobra-complete`-style design pass.
+- Client-side caching. Every CLI invocation hits the API fresh — the
+  source of truth is the backplane, not a stale local copy.
+
 ## Server-driven discovery (`internal/discovery/`)
 
 Goal #11 §5 mandates server-driven `--help`: adding an operation to

@@ -8,8 +8,12 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus the 5 hand-authored read
-composites that orchestrate cross-spec workflows (G3.1-T5 / #508).
+vSphere 8.5+ / ESXi 8.5+ targets, plus 13 hand-authored composites
+that orchestrate cross-spec workflows: 5 read composites
+(G3.1-T5 / `#508`) and 8 write composites (G3.1-T6 / `#509`). The
+write composites cover every state-mutating operator workflow named
+in [#214](https://github.com/evoila/meho/issues/214) as required for
+govc-wrapper retirement.
 
 Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 
@@ -29,10 +33,27 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `safety_level="safe"` + `requires_approval=False` — read-only
   overrides of `register_composite_operation()`'s `dangerous` / `True`
   defaults.
+- **Write composites** (`composites/_write.py`) — eight module-level
+  `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
+  `vm_snapshot_revert_composite`, `vm_migrate_composite`,
+  `vm_power_bulk_composite`, `host_evacuate_composite`,
+  `host_detach_from_vds_composite`, `cluster_patch_composite`). Same
+  `DispatchChild`-Protocol contract; each orchestrates 2-N sub-ops
+  with documented status enums on the response envelope
+  (`{"status": "created" | "rolled_back" | …}`). Registered with
+  T4's defaults `safety_level="dangerous"` + `requires_approval=True`
+  so the policy gate pops the approval queue on every dispatch.
+  `host_evacuate_composite` is the first production composite that
+  dispatches another composite (`vmware.composite.vm.migrate`) via
+  `dispatch_child` — the recursion-depth contextvar (default cap 8)
+  handles the depth-2 nesting cleanly.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Calls `register_composite_operation()` once per
-  composite; idempotent on re-run via the body-hash skip path.
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 13
+  `_CompositeSpec` rows (5 read + 8 write); each row carries its
+  own `safety_level` + `requires_approval` so the policy posture is
+  implied by the spec, not by global defaults. Idempotent on re-run
+  via the body-hash skip path.
 - **`VsphereTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
   `host`, `port`, `secret_ref`, `auth_model`. Replaced by the concrete
@@ -70,8 +91,10 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
    queued registrar -- including the composite one -- and upserts the
-   5 `vmware.composite.*` rows into `endpoint_descriptor` with
-   `source_kind="composite"`.
+   13 `vmware.composite.*` rows into `endpoint_descriptor` with
+   `source_kind="composite"` (5 reads with `safety_level="safe"` +
+   `requires_approval=False`; 8 writes with `safety_level="dangerous"`
+   + `requires_approval=True`).
 
 ### Per-target session
 
@@ -134,10 +157,10 @@ Legacy shim — synthesises a system-tenant `Operator` and calls
 construct a real `Operator` and call `dispatch()` directly; they don't
 reach this method.
 
-### Composite dispatch (read composites)
+### Composite dispatch
 
-The 5 read composites land as `source_kind="composite"` rows in
-`endpoint_descriptor`. At dispatch time:
+The 13 composites (5 reads + 8 writes) land as `source_kind="composite"`
+rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
    to the row, sees `source_kind="composite"`, builds a
@@ -145,10 +168,11 @@ The 5 read composites land as `source_kind="composite"` rows in
    `get_dispatch_child(dispatch=dispatch, parent_operator=...,
    parent_target=..., parent_audit_id=..., parent_op_id=...)`.
 2. Handler is resolved via `import_handler(descriptor.handler_ref)`
-   to one of the module-level functions in `composites/_read.py`.
+   to one of the module-level functions in `composites/_read.py` or
+   `composites/_write.py`.
 3. Dispatcher invokes
    `handler(operator=..., target=..., params=..., dispatch_child=...)`.
-4. Handler issues 1-3 `await dispatch_child(connector_id="vmware-rest-9.0",
+4. Handler issues N `await dispatch_child(connector_id="vmware-rest-9.0",
    op_id=..., params=...)` calls. Each child dispatch:
    - Inherits `parent_audit_id` via the contextvar so the child's
      audit row's `parent_audit_id` column is set automatically.
@@ -166,6 +190,51 @@ The composite handlers go through `dispatch_child` rather than
 calling `_request_json` directly so the audit-tree linkage,
 bounded-recursion guard, policy gate, broadcast publish, and
 parameter-schema validation all run on every sub-call.
+
+### Recursive composite dispatch (`host.evacuate` → `vm.migrate`)
+
+`host_evacuate_composite` is the first production composite that
+calls another composite via `dispatch_child`. Two-level nesting:
+
+```text
+host.evacuate                                            # depth 0 (top-level dispatch)
+  └─ vmware.composite.vm.migrate (× N)                  # depth 1 (dispatch_child of a composite)
+       ├─ GET:/vcenter/cluster/{c}/drs/recommendations  # depth 2 (typed sub-op)
+       └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 2 (typed sub-op)
+  └─ PATCH:/vcenter/host/{host}/maintenance?action=enter # depth 1 (typed sub-op)
+```
+
+`composite_depth_var` (default cap 8) handles this naturally. The
+audit log shows a 3-level tree per `host.evacuate` dispatch: one
+parent row, N `vm.migrate` child rows, each with two grandchild rows
+(DRS lookup + relocate). The substrate guard's coverage in
+`tests/test_operations_composite.py` proves the depth-cap behaviour
+holds; this connector's recursive composite is the first production
+caller.
+
+### Write-composite partial-failure conventions
+
+Write composites return a structured `{"status": ...}` envelope so
+callers can branch on `status` without parsing free-form prose. The
+status alphabets per composite (from each handler's `response_schema`
+enum) are:
+
+| Composite | Status values |
+| --- | --- |
+| `vm.create` | `created`, `rolled_back` |
+| `vm.clone` | `completed`, `pending`, `timeout` |
+| `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found` |
+| `vm.migrate` | `migrated`, `no_recommendation` |
+| `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
+| `host.evacuate` | `evacuated`, `partial`, `aborted` |
+| `host.detach_from_vds` | `detached`, `incomplete` |
+| `cluster.patch` | `completed`, `stopped` |
+
+`vm.create` is the only composite that issues a compensating
+mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
+write composites prefer "stop and report" semantics over silent
+rollback -- the operator decides whether to manually finish or
+revert.
 
 ## Dependencies
 
@@ -204,11 +273,25 @@ parameter-schema validation all run on every sub-call.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
-- **Read composites shipped** — T5 (#508) ships the 5 hand-authored
-  read composites. T6 (#509) ships the 8 write composites; same
-  `register_composite_operation()` helper, default `dangerous` /
-  `True` policy gate (read composites override to `safe` / `False`
-  at the call site).
+- **All 13 composites shipped** — T5 (#508) ships the 5 read
+  composites; T6 (#509) ships the 8 write composites. The "All ~13
+  hand-authored composites land as endpoint_descriptor rows with
+  source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
+  is fully ticked.
+- **`vm.clone` task polling is wall-clock bounded** — the composite
+  blocks up to `timeout_seconds` (default 600s) before returning
+  `status='timeout'`. The vSphere task may still complete in the
+  background; callers should poll `GET:/cis/tasks/{task}` if
+  long-running deploys are normal. An async-task-tracking substrate
+  is v0.2.next.
+- **Per-VM rollback for `vm.power.bulk` is by design absent** — bulk
+  power operations are intentionally non-transactional. Partial-
+  failure tolerance is the documented contract; a transactional
+  bulk-power would require vSphere-side support that doesn't exist.
+- **`cluster.patch` sequential, not concurrent** — concurrent host
+  patches would overwhelm DRS by forcing every VM in the cluster to
+  vMotion at once. The composite serialises hosts and lets DRS
+  rebalance between iterations.
 
 ## References
 
@@ -216,6 +299,8 @@ parameter-schema validation all run on every sub-call.
 - Parent Task: [#498 G3.1-T1 VmwareRestConnector](https://github.com/evoila/meho/issues/498)
 - Composite-helper Task: [#504 G3.1-T4 register_composite_operation()](https://github.com/evoila/meho/issues/504)
 - Read-composite Task: [#508 G3.1-T5 vmware-rest read composites](https://github.com/evoila/meho/issues/508)
+- Write-composite Task: [#509 G3.1-T6 vmware-rest write composites](https://github.com/evoila/meho/issues/509)
+- Composite recursion substrate: [#398 G0.6-T7 composite recursion infrastructure](https://github.com/evoila/meho/issues/398)
 - G0.7 canary that ingested the rows this connector dispatches:
   [#408 G0.7-T8 vSphere canary](https://github.com/evoila/meho/issues/408)
   (closed via PR #493 on 2026-05-15).

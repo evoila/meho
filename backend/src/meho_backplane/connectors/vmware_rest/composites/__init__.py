@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""meho_backplane.connectors.vmware_rest.composites -- vmware-rest read composites.
+"""meho_backplane.connectors.vmware_rest.composites -- vmware-rest composites.
 
 Side-effect import: this package's ``__init__`` queues
 :func:`register_vmware_composite_operations` onto the lifespan-driven
@@ -13,17 +13,26 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 5 read composites land before
+``endpoint_descriptor`` upserts for the 13 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
 ``__init__`` wires the registrar; ``_register.py`` carries the
-per-composite registration metadata; ``_read.py`` carries the handler
-implementations; ``schemas.py`` carries the JSON Schema 2020-12
-parameter contracts.
+per-composite registration metadata; ``_read.py`` and ``_write.py``
+carry the handler implementations; ``schemas.py`` carries the JSON
+Schema 2020-12 parameter + response contracts.
 
-Scope: 5 read composites (G3.1-T5 / #508). 8 write composites land
-under G3.1-T6 (#509).
+Scope:
+
+* 5 read composites (G3.1-T5 / #508) -- ``safety_level="safe"`` +
+  ``requires_approval=False`` overrides.
+* 8 write composites (G3.1-T6 / #509) -- inherit T4's
+  ``safety_level="dangerous"`` + ``requires_approval=True`` defaults.
+  The 8 cover every state-mutating workflow Goal #214 names as
+  required for govc-wrapper retirement: ``vm.create``, ``vm.clone``,
+  ``vm.snapshot.revert``, ``vm.migrate``, ``vm.power.bulk``,
+  ``host.evacuate`` (first recursive composite),
+  ``host.detach_from_vds``, ``cluster.patch``.
 """
 
 from meho_backplane.connectors.vmware_rest.composites._read import (
@@ -36,6 +45,16 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 from meho_backplane.connectors.vmware_rest.composites._register import (
     register_vmware_composite_operations,
 )
+from meho_backplane.connectors.vmware_rest.composites._write import (
+    cluster_patch_composite,
+    host_detach_from_vds_composite,
+    host_evacuate_composite,
+    vm_clone_composite,
+    vm_create_composite,
+    vm_migrate_composite,
+    vm_power_bulk_composite,
+    vm_snapshot_revert_composite,
+)
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 # Queue the composite-op upsert onto the lifespan-driven registrar list.
@@ -46,9 +65,17 @@ register_typed_op_registrar(register_vmware_composite_operations)
 
 __all__ = [
     "cluster_drs_recommendations_composite",
+    "cluster_patch_composite",
     "datastore_usage_composite",
     "event_tail_composite",
+    "host_detach_from_vds_composite",
+    "host_evacuate_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
     "register_vmware_composite_operations",
+    "vm_clone_composite",
+    "vm_create_composite",
+    "vm_migrate_composite",
+    "vm_power_bulk_composite",
+    "vm_snapshot_revert_composite",
 ]

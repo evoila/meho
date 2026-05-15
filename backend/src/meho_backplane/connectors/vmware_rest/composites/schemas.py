@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema 2020-12 parameter schemas for the 5 vmware-rest read composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 13 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -23,9 +23,13 @@ Conventions
   documentation lives on the schema's ``description`` keys; the meta-
   tools (:mod:`meho_backplane.operations.meta_tools`) surface the
   schema verbatim on ``describe_operation`` calls.
-* All five composites are read-only -- no schema mentions write
-  semantics; the registration call site pins ``safety_level="safe"``
-  and ``requires_approval=False`` on each.
+* The 5 read composites are read-only -- the registration call site
+  pins ``safety_level="safe"`` and ``requires_approval=False`` on
+  each. The 8 write composites inherit T4's
+  ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
+  (G3.1-T6 / #509). The schema text reflects which side of that line
+  each composite sits on; the registration call site enforces the
+  policy.
 """
 
 from __future__ import annotations
@@ -35,14 +39,30 @@ from typing import Any
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
+    "CLUSTER_PATCH_PARAMETER_SCHEMA",
+    "CLUSTER_PATCH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_PARAMETER_SCHEMA",
     "DATASTORE_USAGE_RESPONSE_SCHEMA",
     "EVENT_TAIL_PARAMETER_SCHEMA",
     "EVENT_TAIL_RESPONSE_SCHEMA",
+    "HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA",
+    "HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA",
+    "HOST_EVACUATE_PARAMETER_SCHEMA",
+    "HOST_EVACUATE_RESPONSE_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
+    "VM_CLONE_PARAMETER_SCHEMA",
+    "VM_CLONE_RESPONSE_SCHEMA",
+    "VM_CREATE_PARAMETER_SCHEMA",
+    "VM_CREATE_RESPONSE_SCHEMA",
+    "VM_MIGRATE_PARAMETER_SCHEMA",
+    "VM_MIGRATE_RESPONSE_SCHEMA",
+    "VM_POWER_BULK_PARAMETER_SCHEMA",
+    "VM_POWER_BULK_RESPONSE_SCHEMA",
+    "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
+    "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
 
 
@@ -471,4 +491,682 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["portgroups"],
+}
+
+
+# ===========================================================================
+# Write composites (G3.1-T6 / #509)
+# ===========================================================================
+#
+# The 8 write composites inherit T4's ``safety_level="dangerous"`` +
+# ``requires_approval=True`` defaults. The registrar passes those
+# explicitly anyway to keep the policy posture obvious at the call site
+# alongside the read overrides.
+
+
+#: ``vmware.composite.vm.create`` parameter schema.
+#:
+#: Orchestrates folder lookup -> ``POST:/vcenter/vm`` -> per-NIC attach
+#: -> optional power-on. Partial-failure rollback removes the half-
+#: created VM via ``DELETE:/vcenter/vm/{vm}``.
+VM_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "folder_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the target VM folder. Resolved via "
+                "``GET:/vcenter/folder?filter.names=...`` to the moid "
+                "passed to ``POST:/vcenter/vm``."
+            ),
+        },
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM display name. Required by ``POST:/vcenter/vm``.",
+        },
+        "guest_os": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Guest-OS identifier (e.g. ``UBUNTU_64``). Drives the "
+                "ConfigSpec.guestOS field on ``POST:/vcenter/vm``."
+            ),
+        },
+        "cpu_count": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "Number of virtual CPUs on the ConfigSpec.",
+        },
+        "memory_mib": {
+            "type": "integer",
+            "minimum": 64,
+            "default": 1024,
+            "description": "Memory size in MiB on the ConfigSpec.",
+        },
+        "nics": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "network": {
+                        "type": "string",
+                        "description": "Network moid the NIC attaches to.",
+                    },
+                },
+                "required": ["network"],
+            },
+            "default": [],
+            "description": (
+                "Per-NIC spec. Each entry drives a "
+                "``PATCH:/vcenter/vm/{vm}/network`` after the VM is "
+                "created. Empty list creates the VM with no NICs."
+            ),
+        },
+        "power_on_after_create": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, the handler issues "
+                "``POST:/vcenter/vm/{vm}/power?action=start`` after "
+                "NIC attach. Default false leaves the VM powered-off."
+            ),
+        },
+    },
+    "required": ["folder_name", "name", "guest_os"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.clone`` parameter schema.
+#:
+#: Orchestrates a content-library deploy. Long-running: blocks until
+#: the vSphere task completes or ``timeout_seconds`` elapses. The
+#: caller can opt into fire-and-forget via ``wait_for_completion=False``.
+VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "source_vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Source VM moid. Resolved via ``GET:/vcenter/vm/{vm}`` "
+                "to build the CloneSpec before deploy."
+            ),
+        },
+        "target_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Display name for the cloned VM.",
+        },
+        "library_item": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Content-library template item id. Passed to "
+                "``POST:/vcenter/vm-template/library-items?action=deploy``."
+            ),
+        },
+        "wait_for_completion": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "When true (default), block on the vSphere task until "
+                "``timeout_seconds`` elapses. When false, return "
+                "immediately with the task id for caller-side polling."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 600,
+            "description": (
+                "Upper bound on the task wait when "
+                "``wait_for_completion=True``. On timeout the composite "
+                "returns ``status='timeout'`` with the task id; the "
+                "task itself may still complete in the background."
+            ),
+        },
+    },
+    "required": ["source_vm", "target_name", "library_item"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.snapshot.revert`` parameter schema.
+#:
+#: Idempotent revert by snapshot name. Ambiguity (multiple snapshots
+#: share the name) returns ``status='ambiguous'`` rather than guessing.
+VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Target VM moid. Required for snapshot-tree lookup.",
+        },
+        "snapshot_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the snapshot to revert to. Multiple "
+                "snapshots with the same name return "
+                "``status='ambiguous'`` so the caller can pick by id."
+            ),
+        },
+    },
+    "required": ["vm", "snapshot_name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.migrate`` parameter schema.
+#:
+#: DRS-deferred relocation. No-recommendation path returns
+#: ``status='no_recommendation'``. ``target_host`` overrides the DRS
+#: lookup.
+VM_MIGRATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Source VM moid.",
+        },
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Cluster moid the source VM lives in. Required for the DRS recommendation lookup."
+            ),
+        },
+        "target_host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional explicit target-host moid. When supplied, "
+                "bypasses the DRS recommendation lookup."
+            ),
+        },
+    },
+    "required": ["vm", "cluster"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.power.bulk`` parameter schema.
+#:
+#: Resolve filter -> per-VM power action. Partial-failure tolerated
+#: by default; ``fail_fast=True`` aborts on the first failure.
+VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "filter": {
+            "type": "object",
+            "description": (
+                "Free-form filter dict forwarded to "
+                "``GET:/vcenter/vm`` as ``filter.*`` query params. The "
+                "handler does not introspect the keys; vSphere REST "
+                "validates them server-side."
+            ),
+            "default": {},
+        },
+        "action": {
+            "type": "string",
+            "enum": ["start", "stop", "suspend", "reset"],
+            "description": (
+                "Per-VM power action. Forwarded to ``POST:/vcenter/vm/{vm}/power?action=<action>``."
+            ),
+        },
+        "fail_fast": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, abort on the first per-VM failure. Default "
+                "false collects per-VM results and reports them in "
+                "aggregate."
+            ),
+        },
+    },
+    "required": ["action"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.host.evacuate`` parameter schema.
+#:
+#: Lists VMs on host, recursively dispatches ``vmware.composite.vm.migrate``
+#: per VM, then enters maintenance. ``tolerate_partial_failure=True``
+#: allows maintenance-enter with VMs left on host.
+HOST_EVACUATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host moid to evacuate.",
+        },
+        "tolerate_partial_failure": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, enter maintenance even if some VMs failed "
+                "to migrate (those VMs stay on the host). Default "
+                "false aborts before maintenance-enter on any failure."
+            ),
+        },
+    },
+    "required": ["host"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.host.detach_from_vds`` parameter schema.
+#:
+#: Per-VM NIC migration off the DVS, then DVS host-detach. Refuses to
+#: detach when any VM still has active NICs on the DVS.
+HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Host moid to detach from the DVS.",
+        },
+        "dvs": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "DVS moid the host is currently attached to. Required to scope the portgroup query."
+            ),
+        },
+        "fallback_network": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Standard-switch network moid the host's VM NICs are "
+                "migrated to before the DVS detach. Required because "
+                "the host loses DVS connectivity at step 4."
+            ),
+        },
+    },
+    "required": ["host", "dvs", "fallback_network"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.cluster.patch`` parameter schema.
+#:
+#: Sequential per-host maintenance + patch + exit. A per-host failure
+#: stops the loop; the cluster is left mixed-state for operator review.
+CLUSTER_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Cluster moid.",
+        },
+        "patch_method": {
+            "type": "string",
+            "minLength": 1,
+            "default": "default",
+            "description": (
+                "Patch backend selector. The handler forwards the "
+                "string verbatim to the per-host patch sub-op so vendor "
+                "patch flows can dispatch into ``vlcm`` / ``vum`` / "
+                "``firmware`` without changing the composite's contract."
+            ),
+        },
+    },
+    "required": ["cluster"],
+    "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# Write composites -- response schemas
+# ---------------------------------------------------------------------------
+#
+# Each composite's response shape encodes the documented status enum
+# (``"created"`` / ``"rolled_back"`` / ``"timeout"`` / ``"ambiguous"``
+# / ``"no_recommendation"`` / ``"ok"`` / ``"incomplete"`` /
+# ``"stopped"``) so callers can branch on ``status`` without parsing
+# free-form prose. Sub-payload shapes (vSphere REST payloads, task
+# ids) stay opaque -- Broadcom owns the inner schema.
+
+
+#: ``vmware.composite.vm.create`` response schema.
+VM_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "rolled_back"],
+            "description": (
+                "``'created'`` after every step succeeded; "
+                "``'rolled_back'`` when a post-create step failed and "
+                "the handler issued ``DELETE:/vcenter/vm/{vm}``."
+            ),
+        },
+        "vm_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Newly-created VM moid. ``null`` on rollback (the VM no longer exists)."
+            ),
+        },
+        "steps_succeeded": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Per-step success ledger: ``folder_lookup``, "
+                "``create``, ``nic_attach``, ``power_on``."
+            ),
+        },
+        "failed_step": {
+            "type": ["string", "null"],
+            "description": (
+                "Name of the first failing step on rollback; ``null`` when ``status='created'``."
+            ),
+        },
+        "rollback_reason": {
+            "type": ["string", "null"],
+            "description": (
+                "Human-readable explanation of the rollback trigger; "
+                "``null`` when ``status='created'``."
+            ),
+        },
+    },
+    "required": ["status", "steps_succeeded"],
+}
+
+
+#: ``vmware.composite.vm.clone`` response schema.
+VM_CLONE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["completed", "pending", "timeout"],
+            "description": (
+                "``'completed'`` when the deploy task finished and "
+                "wait_for_completion was true; ``'pending'`` when "
+                "wait_for_completion was false (caller-side polling); "
+                "``'timeout'`` when wait_for_completion expired."
+            ),
+        },
+        "task_id": {
+            "type": "string",
+            "description": (
+                "vSphere task id from the deploy. Always present so callers can poll independently."
+            ),
+        },
+        "vm_id": {
+            "type": ["string", "null"],
+            "description": (
+                "New VM moid surfaced when the task completed. ``null`` on pending/timeout."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on non-completed "
+                "statuses; ``null`` when ``status='completed'``."
+            ),
+        },
+    },
+    "required": ["status", "task_id"],
+}
+
+
+#: ``vmware.composite.vm.snapshot.revert`` response schema.
+VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["reverted", "ambiguous", "not_found"],
+            "description": (
+                "``'reverted'`` on a successful revert; "
+                "``'ambiguous'`` when multiple snapshots share the "
+                "name; ``'not_found'`` when no snapshot matches."
+            ),
+        },
+        "snapshot_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The moid of the snapshot the handler reverted to; ``null`` on ambiguous/not_found."
+            ),
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Ambiguity-resolution candidates -- present only when ``status='ambiguous'``."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": ("Operator hint on ambiguous/not_found; ``null`` on successful revert."),
+        },
+    },
+    "required": ["status"],
+}
+
+
+#: ``vmware.composite.vm.migrate`` response schema.
+VM_MIGRATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["migrated", "no_recommendation"],
+            "description": (
+                "``'migrated'`` after a successful relocate; "
+                "``'no_recommendation'`` when DRS returned nothing and "
+                "no ``target_host`` override was supplied."
+            ),
+        },
+        "target_host": {
+            "type": ["string", "null"],
+            "description": ("Host moid the relocate targeted; ``null`` on ``no_recommendation``."),
+        },
+        "source": {
+            "type": "string",
+            "enum": ["drs", "operator", "none"],
+            "description": (
+                "Whether the target came from a DRS recommendation, "
+                "the operator's explicit override, or neither."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": ("Operator hint on ``no_recommendation``; ``null`` otherwise."),
+        },
+    },
+    "required": ["status", "source"],
+}
+
+
+#: ``vmware.composite.vm.power.bulk`` response schema.
+VM_POWER_BULK_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "status": {"type": "string", "enum": ["ok", "error"]},
+                    "error": {"type": ["string", "null"]},
+                },
+                "required": ["vm", "status"],
+            },
+            "description": "One row per VM the filter matched.",
+        },
+        "summary": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "integer", "minimum": 0},
+                "error": {"type": "integer", "minimum": 0},
+            },
+            "required": ["ok", "error"],
+            "description": "Aggregate counts across ``results``.",
+        },
+        "aborted_on_failure": {
+            "type": "boolean",
+            "description": (
+                "True when ``fail_fast=True`` short-circuited the loop after the first failure."
+            ),
+        },
+    },
+    "required": ["results", "summary", "aborted_on_failure"],
+}
+
+
+#: ``vmware.composite.host.evacuate`` response schema.
+HOST_EVACUATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["evacuated", "partial", "aborted"],
+            "description": (
+                "``'evacuated'`` -- every VM migrated + host in "
+                "maintenance; ``'partial'`` -- some VMs left behind "
+                "(``tolerate_partial_failure=True``); ``'aborted'`` "
+                "-- migration failure stopped the loop before "
+                "maintenance-enter."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "description": "Host moid the operator targeted.",
+        },
+        "migrated_vms": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "VM moids that migrated successfully.",
+        },
+        "failed_vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "error": {"type": "string"},
+                },
+                "required": ["vm", "error"],
+            },
+            "description": "VM moids whose migration failed, with reason.",
+        },
+        "maintenance_entered": {
+            "type": "boolean",
+            "description": (
+                "Whether the host entered maintenance mode -- true on "
+                "``evacuated``/``partial``, false on ``aborted``."
+            ),
+        },
+    },
+    "required": [
+        "status",
+        "host",
+        "migrated_vms",
+        "failed_vms",
+        "maintenance_entered",
+    ],
+}
+
+
+#: ``vmware.composite.host.detach_from_vds`` response schema.
+HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["detached", "incomplete"],
+            "description": (
+                "``'detached'`` -- every NIC migrated and the host "
+                "removed from the DVS; ``'incomplete'`` -- one or more "
+                "NIC migrations failed, the DVS detach was skipped."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "description": "Host moid the operator targeted.",
+        },
+        "vm_migration_failures": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "error": {"type": "string"},
+                },
+                "required": ["vm", "error"],
+            },
+            "description": "Failed NIC migrations (empty on ``detached``).",
+        },
+        "vms_migrated": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "VM moids whose NICs migrated successfully.",
+        },
+    },
+    "required": [
+        "status",
+        "host",
+        "vm_migration_failures",
+        "vms_migrated",
+    ],
+}
+
+
+#: ``vmware.composite.cluster.patch`` response schema.
+CLUSTER_PATCH_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["completed", "stopped"],
+            "description": (
+                "``'completed'`` -- every host patched + maintenance "
+                "exit succeeded; ``'stopped'`` -- a per-host failure "
+                "halted the loop; cluster is left in mixed state."
+            ),
+        },
+        "cluster": {
+            "type": "string",
+            "description": "Cluster moid the operator targeted.",
+        },
+        "patched_hosts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": ("Host moids whose maintenance -> patch -> exit succeeded in order."),
+        },
+        "failed_host": {
+            "type": ["string", "null"],
+            "description": (
+                "Host moid that failed when ``status='stopped'``; ``null`` on ``completed``."
+            ),
+        },
+        "remaining_hosts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": ("Hosts the loop did not get to (empty on ``completed``)."),
+        },
+        "failure_reason": {
+            "type": ["string", "null"],
+            "description": ("Human-readable cause of the stop; ``null`` on ``completed``."),
+        },
+    },
+    "required": [
+        "status",
+        "cluster",
+        "patched_hosts",
+        "remaining_hosts",
+    ],
 }

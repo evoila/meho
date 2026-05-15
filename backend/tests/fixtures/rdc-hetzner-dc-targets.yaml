@@ -1,0 +1,788 @@
+# Targets registry for the RDC Hetzner Datacenter project.
+#
+# Each entry maps a logical target name to its hostname, Vault secret path,
+# and SSO realm. Wrappers under scripts/ resolve --target <name> against this
+# file (or one alias listed in `aliases:`).
+#
+# When users describe a target in natural language ("the VCF9 SDDC Manager",
+# "the host vCenter"), Claude matches their prose against `name`, `aliases`,
+# and `notes` fields to pick the right entry.
+#
+# Adding a new target: pick a stable `name`, list useful `aliases`, fill in
+# `host`, `secret_ref` (Vault KV-v2 path — the wrapper reads `username` and
+# `password` fields from it via scripts/_secret-read.sh), `sso_realm` if
+# applicable, and a one-line `notes` description.
+#
+# Auth model (post-#67): operator runs `vault login -method=userpass …` once
+# per session to populate $HOME/.vault-token; every wrapper reads that token
+# and calls Vault HTTP API to fetch the per-target secret_ref values. The
+# wrappers do NOT manage Vault auth themselves — same way they previously
+# assumed `op signin` had already happened.
+#
+# Project context: see CLAUDE.md and INVENTORY.md.
+
+targets:
+  - name: rdc-vcenter
+    aliases: [rdc, host-vcenter, hetzner-vcenter]
+    product: vcenter
+    host: vc-dc.evba.lab
+    secret_ref: secret/rdc-hetzner-dc/vsphere/rdc-vcenter
+    sso_realm: evba.lab
+    vpn_required: true
+    notes: "Host vCenter for the 4 physical Hetzner hosts (esx-dc1..4). Datacenter /FSN1-DC21-RACK1, cluster cluster1. vCenter 8.0.3."
+
+  - name: vcf9-vcenter
+    aliases: [vcf9, vcf9-vcsa, vcf9-lab-vcenter, nested-vcenter]
+    product: vcenter
+    host: vcf9-vcsa.evba.vcf.lab
+    secret_ref: secret/rdc-hetzner-dc/vsphere/vcf9-vcenter
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "Nested VCF 9 management-domain vCenter (datacenter m01-dc01, cluster m01-cl01). vCenter 9.0.2. Runs on the host cluster."
+
+  - name: vcf9-sddc
+    aliases: [vcf9-sddc-manager, sddc-vcf9, vcf9-mgmt]
+    product: sddc-manager
+    host: vcf9-sddc.evba.vcf.lab
+    secret_ref: secret/rdc-hetzner-dc/vsphere/vcf9-vcenter
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: "SDDC Manager for the nested VCF 9 lab. Same SSO user as vcf9-vcenter; user has ADMIN role granted 2026-04-27. SDDC Manager 9.0.2 build 25151285."
+
+  - name: pfsense-hetzner-dc
+    aliases: [pfsense-perimeter, pfsense-dc1, perimeter-firewall, pfsense]
+    product: pfsense
+    host: 10.5.1.254
+    secret_ref: secret/rdc-hetzner-dc/network/pfsense
+    vpn_required: true
+    notes: "Perimeter firewall, pfSense VM running on esx-dc1.evba.lab. Internet uplinks; WAN gateway for evba.lab. WebGUI is HTTP-only on http://10.5.1.254 (port 443 not listening). SSH on 22. Connector: scripts/pfsense.sh."
+
+  - name: vcf9-nsx
+    aliases: [vcf9-nsx-manager, nsx-vcf9, vcf9-mgr-nsx]
+    product: nsx
+    host: vcf9-nsx.evba.vcf.lab
+    secret_ref: secret/rdc-hetzner-dc/vsphere/vcf9-nsx-admin
+    sso_realm: ""                          # local NSX `admin` user; no realm
+    vpn_required: true
+    notes: |
+      VCF 9 NSX Manager (single-node). NSX 9.0.2 build 25150386, node UUID 87441e42-...
+
+      Resolution journey (2026-04-29):
+        - vcf9-nested-1 (vSphere SSO) rejected with HTTP 403 — no NSX RBAC role for that user.
+        - admin/API and audit/AUDIT passwords pulled from SDDC Manager /v1/credentials also rejected
+          with HTTP 403 against the FQDN `vcf9-nsx.evba.vcf.lab`.
+        - Path B (SDDC-driven rotation via PATCH /v1/credentials) ran cleanly (task SUCCESSFUL,
+          fresh password landed in /v1/credentials and was synced to NSX) — but a probe with the
+          rotated password against the FQDN STILL returned 403.
+        - Root cause: the envoy proxy fronting `vcf9-nsx.evba.vcf.lab` enforces session/cookie
+          auth and rejects HTTP Basic with the same generic "credentials incorrect or account
+          locked" message regardless of credentials. As a stop-gap the target ran on the raw IP
+          10.5.31.22 (envoy-bypass) with `curl -k` masking the SAN mismatch.
+        - Resolved 2026-04-29 (ticket #8): scripts/nsx.sh now uses NSX session-auth
+          (POST /api/session/create → JSESSIONID cookie + X-XSRF-TOKEN header). The wrapper
+          works against the canonical FQDN, so this target is back on `vcf9-nsx.evba.vcf.lab`.
+          See `kb/nsx-9.0-overview.md` (envoy gotcha section) for the full story.
+
+      During the investigation the previous admin password (`[REDACTED — see incident log]`) was leaked to the
+      conversation transcript via an over-broad `jq` query; it was rotated and replaced with a
+      fresh SDDC-Manager-generated value before the leak could be exploited. Treat the old value
+      as compromised but no longer in use.
+
+  - name: hetzner-robot
+    aliases: [robot, hetzner-robot-rdc, hetzner-account, hetzner]
+    product: hetzner-robot
+    host: robot-ws.your-server.de
+    secret_ref: secret/rdc-hetzner-dc/network/hetzner-robot-api
+    vpn_required: false
+    notes: |
+      The Hetzner Robot Webservice for the rdc-hetzner-dc account — the canonical
+      datacenter-plane view of the 4 dedicated servers (esx-dc1..4 / Hetzner servers
+      2714097, 2929565, 2938969, 2939345) and the vSwitches between them. Public
+      internet endpoint, no VPN required. Note: the Webservice user has account-wide
+      visibility into 12 servers — 4 in-scope (above) plus 5 Rackspot Reservations
+      (2939037–2939042 minus 2939038) and 3 out-of-scope esxNN.evba.lab servers
+      (esx02 in FSN1-DC13, esx03 in FSN1-DC1, esx05 in FSN1-DC12) per CLAUDE.md scope.
+
+      Auth: HTTP Basic against a dedicated **Webservice user** stored in 1P
+      `hetzner-robot-api` (created in Hetzner Robot UI under Settings → "Web service
+      and app settings"). NOT the Robot login user — Webservice rejects those.
+
+      v1 scope: read-only. The connector passes change-class methods through
+      mechanically (POST /reset, POST /vswitch, etc.) but those calls have serious
+      blast radius — see kb/hetzner-robot-2026-04-mutation-surface.md and confirm
+      with the operator before running any non-GET. Connector: scripts/hetzner-robot.sh.
+
+  - name: vcf9-fleet
+    aliases: [vcf9-fleet-manager, fleet-vcf9, vcf9-lcm, vcf9-vrslcm]
+    product: vcf-fleet
+    host: vcf9-fleet.evba.vcf.lab
+    secret_ref: secret/rdc-hetzner-dc/vsphere/vcf9-fleet-admin
+    sso_realm: ""                          # Fleet uses its own LCM-local user store, not vSphere SSO
+    vpn_required: true
+    notes: |
+      VCF Fleet Management Appliance (10.5.31.26). Built on vRealize Suite Lifecycle Manager
+      (vRSLCM) 8.x — every response carries `Lcm-API-Version: 8.0`. Internal config still says
+      "VMware vRealize Lifecycle Manager"; the VCF 9 marketing name is "Fleet Management".
+
+      Auth: HTTP Basic against Fleet's local LCM user store. Username `admin@local`. Fleet does
+      NOT federate with vCenter SSO — `claude-fleet-svc@vsphere.local` (created in vsphere.local
+      SSO during the discovery journey for ticket #22) was rejected with HTTP 401 "Bad
+      credentials"; the local user works.
+
+      Lifecycle ownership: VCF Operations governs Fleet's lifecycle in VCF 9 (per project owner,
+      2026-04-29). SDDC Manager retains a `/v1/vcf-services` LCM entry for transitional reasons
+      but does NOT own Fleet's identity, credentials, or upgrade flow.
+
+      Fleet's own diagnostic endpoints (`/lcm/lcops/api/v2/about`, `/health`, `/version`,
+      `/system-details`) return HTTP 500 in this build — known issue, not a credential problem.
+      The connector probes `/lcm/lcops/api/v2/datacenters` instead. Product version is sourced
+      from SDDC Manager's `/v1/vcf-services` (LCM service entry: 9.0.2.0.25151284 as of
+      2026-04-29). Connector: scripts/vcf-fleet.sh; details in kb/vcf-fleet-9.0-overview.md.
+
+  # === Holodeck holodeck-1 env (deployed 2026-05-05 on cluster holodeck-1 / esx-dc5) ===
+  # Full-stack VCF 9.0.2 deploy via the new single-host-cluster architecture (issue #44).
+  # **Live InstanceID is `claude`** (legacy from the initial-deploy session 2026-05-04/05 — the AI tool's
+  # name was used as the deploy identifier; baked into ~100+ Holodeck records and unrenameable without
+  # a 7h destroy+redeploy). Per the [naming rule](../CLAUDE.md#naming-rule--never-bake-the-ai-tools-name-into-operator-artifacts),
+  # the operator-visible refs (target names + 1P item names below) have been renamed to `holodeck-1-*`
+  # following the cluster-mirroring convention; future deploys use that convention from the start.
+  # ConfigID: 7kp5. Holodeck instance Status: Completed.
+  # Wall-clock from final hardened launch to success: ~7h 14min (config 7kp5 import → "HoloDeck deployment completed successfully").
+  #
+  # Operator reachability: implemented via the per-env DNAT + bind9 split-horizon architecture
+  # (issue #81) — see kb/holodeck-9.0-architecture-evoila-rdc.md § "VPN access architecture for
+  # parallel Holodeck instances" + rdc-hetzner-dc/holodeck-deploys/registry.yaml. The legacy
+  # single-static-route path (10.1.0.0/20 → vcf_router → HoloRouter) was used by the l2ey deploy
+  # on cluster1 (destroyed 2026-05-11 per #291); the pfSense static route was removed with it.
+
+  - name: holodeck-1-vcenter
+    aliases: [holo-1-vcenter, vc-mgmt-h1]
+    product: vcenter
+    host: 10.1.1.10
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-shared-sso     # 1P item TBD; default Holodeck creds 'administrator@vsphere.local' / 'VMware123!VMware123!'
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: |
+      holodeck-1 env management-domain vCenter (`vc-mgmt-a.site-a.vcf.lab` / 10.1.1.10).
+      Holodeck always allocates this FQDN/IP for the mgmt-domain vCenter — concurrent
+      deploys are isolated at the L2/vSwitch level and reached via per-env DNAT aliases on
+      their respective HoloRouters (see registry.yaml + kb § VPN access architecture).
+      vCenter version
+      9.0.2; healthy from HoloRouter probe 2026-05-05 (HTTPS 200). 1P credential item
+      `holodeck-1-shared-sso` not yet created — operator action: create LOGIN item
+      with `username=administrator@vsphere.local` + `password=VMware123!VMware123!` (or
+      rotated value, see § "Credentials decision" pattern in INVENTORY).
+
+  - name: holodeck-1-sddc
+    aliases: [holo-1-sddc, sddcmanager-h1]
+    product: sddc-manager
+    host: 10.1.1.5
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-shared-sso
+    sso_realm: vsphere.local
+    vpn_required: true
+    notes: |
+      holodeck-1 env SDDC Manager (`sddcmanager-a.site-a.vcf.lab` / 10.1.1.5). Shares vSphere
+      SSO with `holodeck-1-vcenter` (Holodeck default `-WorkloadDomainType: SharedSSO`).
+      Healthy from HoloRouter probe 2026-05-05 (HTTPS 301 to login UI).
+
+  - name: holodeck-1-nsx
+    aliases: [holo-1-nsx, nsx-mgmt-h1]
+    product: nsx
+    host: 10.1.1.20
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-nsx-admin    # 1P item TBD
+    sso_realm: ""
+    vpn_required: true
+    notes: |
+      holodeck-1 env NSX Manager VIP (3-node cluster — node IPs 10.1.1.21/22/23, VIP 10.1.1.20
+      / FQDN `nsx-mgmt-a.site-a.vcf.lab`). Local `admin` user; not SSO-federated by default.
+      Healthy from HoloRouter probe 2026-05-05 (HTTPS 302). 1P item TBD; default Holodeck
+      cred is `admin` / `VMware123!VMware123!` per kb. See `kb/nsx-9.0-overview.md` for the
+      session-auth gotcha behind envoy front-door.
+
+  - name: holodeck-1-ops
+    aliases: [holo-1-ops, ops-h1]
+    product: vcf-operations
+    host: 10.1.1.30
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-ops-admin    # 1P item TBD
+    sso_realm: ""
+    vpn_required: true
+    notes: |
+      holodeck-1 env VCF Operations VIP (2-node cluster + collector — node IPs 10.1.1.31/32,
+      VIP 10.1.1.30 / FQDN `ops-a.site-a.vcf.lab`). Operations Cloud Proxy at 10.1.1.41
+      (`opscollector-01a.site-a.vcf.lab`). Operations Fleet/LCM at 10.1.1.36 (separate
+      product = vcf-fleet). Local `admin@local` user. Healthy from HoloRouter probe
+      2026-05-05 (HTTPS 200).
+
+  - name: holodeck-1-fleet
+    aliases: [holo-1-fleet, opslcm-h1]
+    product: vcf-fleet
+    host: 10.1.1.36
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-fleet-admin    # 1P item TBD
+    sso_realm: ""
+    vpn_required: true
+    notes: |
+      holodeck-1 env VCF Operations Fleet Management (`opslcm-a.site-a.vcf.lab` / 10.1.1.36).
+      Built on vRSLCM 8.x lineage (see `kb/vcf-fleet-9.0-overview.md`). Local `admin@local`
+      user. Healthy from HoloRouter probe 2026-05-05 (HTTPS 200).
+
+  - name: holodeck-1-auto
+    aliases: [holo-1-auto, auto-h1]
+    product: vcf-automation
+    host: 10.1.1.70
+    fqdn: auto-a.site-a.vcf.lab            # vhost routing — required when host is an IP
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-auto-admin
+    sso_realm: ""
+    vpn_required: true
+    notes: |
+      holodeck-1 env VCF Automation user-facing endpoint (`auto-a.site-a.vcf.lab` / 10.1.1.70).
+      Internal control plane on `auto-platform-a.site-a.vcf.lab` / 10.1.1.69; operators
+      log into 10.1.1.70. Holodeck reuses the same site-a.vcf.lab FQDN convention across
+      deploys; operator-side reach is via the per-env DNAT + bind9 split-horizon scheme
+      (issue #81 / registry.yaml).
+      Note (2026-05-05, #94): the prior "404 on root — expected" framing has been
+      superseded — the 404 was actually a vhost mismatch, fixed by the `fqdn` field
+      and the wrapper's --resolve handling. See kb § Validation findings.
+
+  - name: holodeck-1-supervisor
+    aliases: [holo-1-supervisor, supervisor-mgmt-h1, holodeck-1-vks]
+    product: tanzu-supervisor
+    host: 10.1.1.85                         # CP-node-1 mgmt-side IP (cluster VIP 10.1.0.x is NSX-VPC-internal)
+    port: 443
+    secret_ref: secret/rdc-hetzner-dc/k8s/holodeck-1-supervisor-kubeconfig    # 1P item TBD; capture per kb/vks-9.0 recipe
+    kubeconfig_field: kubeconfig
+    vpn_required: true
+    notes: |
+      VKS / vSphere Kubernetes Service Supervisor cluster on the holodeck-1 env. Supervisor ID:
+      `6fba60f7-48e4-4e4e-a81f-ee97e5557ce9`. Cluster VIP is on the NSX-VPC-internal
+      address space and unreachable from outside the VPC; this entry points at CP-node-1
+      mgmt-side IP `10.1.1.85` (10.1.1.86 is CP-node-2 backup). Auth: vSphere SSO via
+      `kubectl vsphere login` against 10.1.1.85 — short-lived bearer tokens; for
+      automation use a long-lived ServiceAccount kubeconfig per the
+      `kb/vks-9.0-supervisor-list-endpoints.md` recipe. 1P item TBD.
+
+  # === Kubernetes clusters ===
+  # Discovered 2026-05-04. All four entries reference **placeholder Vault
+  # paths** that don't have a kubeconfig field populated yet — see INVENTORY
+  # § "Kubernetes footprint → Required Vault items to fill credential gaps"
+  # for the recipe to populate each one. The kubectl-vcf connector will exit
+  # with `failed to read kubeconfig from <secret_ref>/<kubeconfig_field>`
+  # until the corresponding Vault path exists with the field set.
+
+  - name: rke2-infra
+    aliases: [rke2-infra-cluster, infra-rke2, k8s-infra]
+    product: kubernetes
+    host: rke2-infra.evba.lab
+    port: 6443
+    secret_ref: secret/rdc-hetzner-dc/k8s/rke2-infra-kubeconfig
+    kubeconfig_field: kubeconfig
+    vpn_required: true
+    notes: |
+      3-node RKE2 cluster running shared internal infra workloads on the
+      host vSphere cluster (cluster1). Nodes: rke2-infra-{01,02,03}.evba.lab
+      at 10.5.50.{150,151,152}, on hosts esx-dc{4,3,2}. Cluster API DNS
+      `rke2-infra.evba.lab:6443` resolves from operator workstation
+      (verified 2026-05-04). All nodes expose 6443 (kube-apiserver) and
+      9345 (rke2 supervisor). Cert SANs include the cluster FQDN + per-node
+      FQDNs + per-node short names + 10.43.0.1 (default service-cluster CIDR).
+      VMs: Ubuntu 24.04.4 LTS / kernel 6.8.0-106-generic / 4 vCPU / 8 GB RAM.
+      Connectors: scripts/kubectl-vcf.sh + scripts/helm-vcf.sh (sibling
+      wrappers sharing this kubeconfig field). Kubeconfig populated in Vault
+      at the configured path; both connectors' `--probe` succeed against
+      this target as of 2026-05-06 (#103).
+
+  - name: rke2-meho
+    aliases: [rke2-meho-cluster, meho-rke2, k8s-meho, meho]
+    product: kubernetes
+    host: 10.5.50.153                       # node-01 — no VIP, no resolvable FQDN (see notes)
+    port: 6443
+    secret_ref: secret/rdc-hetzner-dc/k8s/rke2-meho-kubeconfig
+    kubeconfig_field: kubeconfig
+    vpn_required: true
+    notes: |
+      **PRODUCTION** — 3-node RKE2 v1.34.5+rke2r1 stacked-etcd HA control
+      plane (no dedicated workers) running the evoila-internal `meho`
+      product. Nodes: rke2-meho-{01,02,03}.evba.lab at 10.5.50.{153,154,155}
+      on hosts esx-dc{3,4,2}. CNI: Canal (Flannel + Calico). Each node has
+      a 2nd NIC on 10.5.61.0/24 (purpose TBD; flagged in INVENTORY).
+
+      Cluster API DNS `rke2-meho.evba.lab` is in the cert SAN but does
+      **not resolve** from operator workstation, pfSense, or vcf_router —
+      AND there is no cluster-level VIP (probed; no kube-vip/haproxy). The
+      kubeconfig stored in 1P pins `server: https://10.5.50.153:6443`
+      (node-01's primary IP, also a cert SAN). **If node-01 goes down, the
+      kubeconfig breaks** — recovery: SSH to surviving node, regrab
+      rke2.yaml, swap to that node's IP, update the 1P field. Long-term
+      fix: provision a VIP and/or DNS so the kubeconfig matches the
+      canonical FQDN.
+
+      Connector: scripts/kubectl-vcf.sh. Kubeconfig captured 2026-05-04 from
+      `/etc/rancher/rke2/rke2.yaml` on rke2-meho-01; migrated to Vault 2026-05-05
+      in #66 at `secret/rdc-hetzner-dc/k8s/rke2-meho-kubeconfig` field
+      `kubeconfig`. Probe returns populated 4-entry fingerprint array.
+
+      **Production caution:** the embedded user is the cluster-admin
+      `default` from `/etc/rancher/rke2/rke2.yaml`. Coordinate with the
+      meho project owner before any non-read action. For automation,
+      consider a least-privilege ServiceAccount kubeconfig instead.
+
+  # === Holodeck holodeck-1 / holodeck-1 env ===
+  # Deployed 2026-05-04. First Holodeck deploy under the new single-host-cluster
+  # architecture (issue #44). Slot 1 of cluster `holodeck-1` on `esx-dc5`.
+  # Mgmt vNIC is on the sibling vSS PG `holodeck-mgmt-vlan3000` (VM-attachable
+  # twin of `DPortGroup-MGMT-VLAN3000`, same VLAN 3000) — see kb on the name-
+  # collision workaround.
+
+  - name: holorouter-1
+    aliases: [holo-1, holorouter-1, holodeck-1-router]
+    product: holodeck
+    host: 10.5.50.202
+    secret_ref: secret/rdc-hetzner-dc/holodeck/1-root-password
+    vpn_required: true
+    notes: |
+      HoloRouter for the Holodeck deploy on cluster `holodeck-1`, slot 1
+      (uses `vss-1-trunk-A`/`vss-1-trunk-B`). VM
+      `/FSN1-DC21-RACK1/vm/VCF9/holorouter-claude` (UUID 420d4b50-8836-6d54-9e41-4dce45d2fc0e)
+      on `esx-dc5.evba.lab`. OVA build `9.0.2.0424` from content library
+      `/Holodeck/holorouter-9.0.2.0424`; module version `9.0.2.19` per probe.
+      Photon OS, 4 vCPU / 8 GB RAM. Deployed 2026-05-04 via
+      `govc library.deploy` from operator workstation.
+
+      **Live InstanceID is `claude`** (legacy from the initial-deploy session
+      2026-05-04/05; baked into Holodeck state, the deployed VM names
+      `claude-vcfinstaller-a` and `claude-esx-01a..07a`, SDDC Manager records,
+      and ~100+ other refs — unrenameable without a 7h destroy+redeploy).
+      The VM in vCenter still has the legacy name `holorouter-claude`; the
+      operator-visible refs (this target's name `holorouter-1`, the 1P item,
+      the service-target names below) use the cluster-mirroring convention
+      per the [naming rule](../CLAUDE.md#naming-rule--never-bake-the-ai-tools-name-into-operator-artifacts).
+      Future deploys on `holodeck-1` (when this one retires) start from
+      `-InstanceID holodeck-1`.
+
+      Mgmt vNIC attaches to `holodeck-mgmt-vlan3000` on `vSwitch10G` (VLAN 3000,
+      security all Reject) — a sibling vSS PG to `DPortGroup-MGMT-VLAN3000`
+      created because vCenter's inventory aliases the vDS-named PG to
+      `dvportgroup-44` on `DSwitch1` (esx-dc5 isn't a member of that vDS), so
+      OVF deploy / `vm.network.change` cannot resolve to the local vSS PG by
+      that name. The two PGs share L2 (same VLAN, same vSwitch), so vmk1
+      (`10.5.50.24`) and HoloRouter eth0 (`10.5.50.202`) talk directly.
+
+      Auth: SSH `root@10.5.50.202` with password set at OVA-deploy time, stored
+      in 1P `holodeck-1-root-password` (LOGIN: `username=root`). Connector:
+      `scripts/holodeck.sh`.
+
+  # === Holodeck holodeck-4 / hd4mgmt donor #2 env ===
+  # Deployed 2026-05-13 (wall-clock 2h 51min, 13:00:03 → 15:51:23 UTC) on cluster `holodeck-4` / `esx-dc4`.
+  # **Bare `-ManagementOnly` 9.0.2 deploy** — donor #2 in the two-donor strategy (#1 is the full-stack
+  # claude/holodeck-1 deploy on dc-5). Smaller variants are easier to add to than larger variants are
+  # to remove from; bare-mgmt-only complements the full-stack donor.
+  # **InstanceID = `hd4mgmt`** (Holodeck 8-char ceiling on InstanceID forced this 7-char abbreviation
+  # over the cluster-mirroring `holodeck-4`; mnemonic for "holodeck-4 management-only"). VM names:
+  # `hd4mgmt-vcfinstaller-a`, `hd4mgmt-esx-{01..04}a`. HoloRouter VM is `holodeck-4-holorouter`
+  # (operator-named, cluster-mirroring per the naming rule). Nested service IPs follow the Holodeck
+  # default Site A IP plan (master CIDR `10.1.0.0/20`): `vc-mgmt-a` 10.1.1.10, `sddcmanager-a` 10.1.1.5,
+  # `nsx-mgmt-a` 10.1.1.20, `ops-a` 10.1.1.30 (Holodeck deploys the Operations node even on
+  # `-ManagementOnly`; this is a 4-service surface, not 3).
+  #
+  # **Lab usage shape**: the lab is currently UP for smoke validation but designated as a donor — the
+  # workflow per operator decision 2026-05-13 is (1) clone the fresh untainted state, (2) attempt
+  # in-place 9.0.2 → 9.1 upgrade on the clone (#250), (3) clone the 9.1 result if upgrade succeeds,
+  # (4) hand a fresh 9.1 lab to a colleague who needs one ASAP. Per-clone live operator reach (alias-IP
+  # block in `10.5.50.0/24` + DNAT + bind9 view + pfSense rule) happens when a clone graduates to
+  # "live, bound" state; donor #2 itself stays unbound / unregistered in the VPN-access registry
+  # (`rdc-hetzner-dc/holodeck-deploys/registry.yaml`'s V1.1 schema requires 7 services + a bound user,
+  # which the bare-mgmt-only donor shape doesn't satisfy). Operator reach to the HoloRouter itself
+  # (`holorouter-4` target below) IS available via the existing 10.5.50.0/24 VPN route — no extra
+  # plumbing needed for HoloRouter SSH / pwsh / `Get-HoloDeckInstance`.
+
+  - name: holorouter-4
+    aliases: [holo-4, holorouter-hd4mgmt, holodeck-4-router]
+    product: holodeck
+    host: 10.5.50.205
+    secret_ref: secret/rdc-hetzner-dc/holodeck/4-root-password
+    vpn_required: true
+    notes: |
+      HoloRouter for the Holodeck deploy on cluster `holodeck-4`, slot 1 (uses `vss-1-trunk-A` /
+      `vss-1-trunk-B`). VM `/FSN1-DC21-RACK1/vm/holodeck-4/holodeck-4-holorouter`
+      (UUID `420df878-8ff0-da96-b64a-00f600aa7b61`) on `esx-dc4.evba.lab`. OVA build `9.0.2.0424`
+      from content library `/Holodeck/holorouter-9.0.2.0424`; Photon OS 6.1.10-11.ph5,
+      4 vCPU / 8 GB RAM. Deployed 2026-05-12 via `govc library.deploy` from operator workstation
+      with all OVA properties namespaced `network.<key>` / `extra.<key>` per the OVF spec (first
+      attempt with unprefixed keys silently dropped 9/10 properties).
+
+      Mgmt vNIC attaches to **`holodeck-mgmt-vlan3000`** on `vSwitch10G` (VLAN 3000, security all
+      Reject) — the sibling vSS PG to `DPortGroup-MGMT-VLAN3000`, pre-created on dc-4 2026-05-12
+      as part of the deploy prep per [`kb/holodeck-9.0-architecture-evoila-rdc.md` § 5a](../kb/holodeck-9.0-architecture-evoila-rdc.md).
+      Note: the cluster also has the `Holodeck-Mgmt-VLAN3010` SPG (created by #257 for future use),
+      but the HoloRouter itself uses VLAN 3000 — same pattern as holodeck-1. The ticket body's
+      "VLAN 3010" was a conflation with the lab-side service VLAN (used by `vcfdepot`).
+
+      **InstanceID `hd4mgmt` deployed 2026-05-13** with `Connect-VIServer` patched per the three
+      per-appliance Holodeck patches: `-eq 7 → -ge 7` (SddcMgmtDeployment.psm1),
+      `BroadcomBuildToken SecureString` (HoloDeck.psm1), and the new `Auth.psm1`
+      `PSCredential` patch (replacing the silently-failing `-User`/`-Password` shape). All three
+      now codified in the deploy skill + kb. Wall-clock 2h 51min (well within the kb's 3-4h
+      envelope for bare `-ManagementOnly`).
+
+      Auth: SSH `root@10.5.50.205` with password set at OVA-deploy time, stored in Vault at
+      `secret/rdc-hetzner-dc/holodeck/4-root-password` (LOGIN: `username=root`). 32-char alphanumeric,
+      generated via `openssl rand -base64 32 | tr -d '/+= ' | cut -c1-32`. Connector:
+      `scripts/holodeck.sh`.
+
+      **Nested service credentials NOT YET CAPTURED** — captured as a follow-up ticket (donor #2
+      operationalization). Until then, `holodeck-4-{vcenter,sddc-manager,nsx,ops}` targets cannot be
+      added (no alias IPs allocated either; donor lab is not VPN-reachable for nested services). For
+      now, run probes from inside the HoloRouter via `scripts/holodeck.sh --target holorouter-4`.
+
+  # === Holodeck Offline Depot Appliance (deployed 2026-05-12 on cluster1) ===
+  # Shared depot for all Holodeck deploys in this project. Consumed by
+  # `New-HoloDeckInstance -DepotType Offline` via $env:offline_depot_* vars
+  # (see secret/rdc-hetzner-dc/holodeck/offline-depot-connection for the
+  # exact ip/port/protocol/username; admin password at offline-depot-admin).
+  # Bundle population deferred to a follow-up ticket — depot currently empty
+  # (skip_dl=True at OVA deploy); future `vdt` runs populate /var/www/build.
+
+  - name: vcfdepot
+    aliases: [holodeck-offline-depot, oda, offline-depot, vcf-depot]
+    product: offline-depot
+    host: vcfdepot.evba.lab
+    secret_ref: secret/rdc-hetzner-dc/holodeck/offline-depot-admin
+    vpn_required: true
+    notes: |
+      VCF Offline Depot Appliance (ODA) v0.1.3 — Holodeck-shipped OVA serving
+      VCF bundles to `New-HoloDeckInstance -DepotType Offline`. Photon OS +
+      nginx 1.26.2 + VDT (`/root/vdt/bin/`) + Jupyter Lab on port 8888.
+      Deployed 2026-05-12 from content library `/Holodeck/vcf-offline-depot-appliance-0.1.3`
+      via `govc library.deploy` (ticket #308).
+
+      VM `/FSN1-DC21-RACK1/vm/vcfdepot` (UUID 420d1f0a-769a-53da-337c-e9bf376e66ff)
+      on `esx-dc2.evba.lab` (DRS placement, cluster `cluster1`). 2 vCPU /
+      2 GB RAM / thin-provisioned disk on `vsanDatastore`. NIC on
+      `DPortGroup-Holodeck-Mgmt-VLAN3010` (VLAN 3010, subnet 10.5.52.0/22,
+      gateway 10.5.52.1 on `vcf-router` `vlan.3010@ens37`).
+
+      Reachability: HTTP depot at `http://10.5.52.5/` (returns nginx
+      directory index — empty until bundles populate); Jupyter Lab at
+      `http://10.5.52.5:8888/` (login page, server up). DNS A record
+      `vcfdepot.evba.lab → 10.5.52.5` added 2026-05-12 to `vcf-router-bind9`.
+
+      Deploy config: VCF Version = 9.0; Skip Binary Download = True;
+      Enable SSH/Jupyter/Ping = True. Download token populated from
+      `secret/rdc-hetzner-dc/toolkit/broadcom-support-token` at deploy
+      (migrated to Vault as part of this ticket per #66 parked-delta).
+
+      Auth: SSH `admin@10.5.52.5` (or `vcfdepot.evba.lab`) with password
+      stored in Vault at this target's `secret_ref` (LOGIN: `username=admin`,
+      `password=<generated>`). Connection details (ip/port/protocol/username/
+      hostname/fqdn/netmask_cidr/gateway/dns) in
+      `secret/rdc-hetzner-dc/holodeck/offline-depot-connection`.
+
+      No dedicated connector wrapper — depot is an HTTP/SSH endpoint
+      consumable directly via `curl`/`ssh`. If/when a verb-shaped operation
+      grows around it (e.g. "list staged bundles", "trigger VDT pull"), a
+      thin wrapper at `scripts/offline-depot.sh` can be added then.
+
+  - name: vcf-router-bind9
+    aliases: [vcf-router-dns, lab-bind9, evba-bind9]
+    product: bind9-dns
+    host: 10.5.1.209
+    secret_ref: secret/rdc-hetzner-dc/network/vcf-router
+    vpn_required: true
+    notes: |
+      Bind9 9.18.x master on `vcf-router` (Ubuntu 24.04). Authoritative for
+      `evba.lab` (zone file `/etc/bind/db.evba.lab`), `evba.vcf.lab`
+      (`db.evba.vcf.lab`), and several reverse zones (`*.5.10.in-addr.arpa`).
+      Forwards `evba.tanzu.lab` and `vmware.com`. Operators query this server
+      for everything `evba.lab.` over VPN; pushed via OpenVPN config.
+
+      Connector: `scripts/bind9-dns.sh`. SSH preferred via public key (set up
+      `ssh-copy-id ubuntu@10.5.1.209` once); falls back to password from this
+      1P item via `sshpass`. Sudo password fed via the safe `read -s PASS`
+      pattern — never the broken heredoc-passes-password-as-stdin-line-1
+      shape that leaked the credential on 2026-05-04.
+
+      `secret_ref` shared with the `vcf-router` shell access pattern from
+      ticket #57 — same Ubuntu user. Rotate the credential per the backlog
+      item `PVTI_lAHOBVAQf84BWEgnzgrv_9I` before any further use of this target.
+
+  # === GCP (ed-consulting.at organization) ===
+  # Discovered 2026-05-04. The org has 4 projects total — 1 in-scope here
+  # (rdc-datacenter-and-lab, the infrastructure pillar) plus 3 sibling
+  # workload projects documented in INVENTORY.md but not yet wired as targets.
+  #
+  # Auth model is unusual relative to the other connectors: this entry has
+  # NO `secret_ref` because the org enforces the default
+  # `constraints/iam.disableServiceAccountKeyCreation` org policy, blocking
+  # SA-JSON key creation. The connector uses ADC (operator's own gcloud auth)
+  # plus `--impersonate-service-account` instead. See
+  # kb/gcp-iam-disable-sa-key-creation.md for the rationale and the
+  # alternative-auth options if this needs to grow into unattended automation.
+
+  - name: rdc-gcp
+    aliases: [rdc-infra, rdc-datacenter-and-lab, gcp-rdc, gcp-infra]
+    product: gcp
+    project_id: rdc-infra
+    account: gcp-admin@evoila.dev
+    # No impersonate_sa: under the Option-C identity model decided 2026-05-05,
+    # the operator drives evoila.dev work as gcp-admin@evoila.dev directly.
+    # Audit-log indirection via SA impersonation deferred until the
+    # (currently unreproducible) iam.serviceAccounts.getIamPolicy permission
+    # issue on rdc-infra is understood. The SA `claude-vcf-toolkit@rdc-infra…`
+    # exists in the project with roles/viewer if/when impersonation is revived.
+    vpn_required: false
+    notes: |
+      GCP infrastructure-pillar project for evoila Bosnia. **Recreated 2026-05-05**
+      under the new evoila-Bosnia GCP org `evoila.dev` (org ID 202191745121, see
+      INVENTORY § GCP § Target architecture). Replaces the original
+      `rdc-datacenter-and-lab` project (under ed-consulting.at), which was deleted
+      2026-05-05 because cross-org migration was blocked by the source org's
+      `ORG_MUST_INVITE_EXTERNAL_OWNERS` constraint and the destination's
+      `iam.allowedPolicyMemberDomains` constraint, neither of which an org-Admin
+      could resolve from within the constraint matrix. Recreate-fresh was lower
+      friction since rdc-datacenter-and-lab had no real resources (0 buckets,
+      0 compute, 1 viewer-only SA, no committed state).
+
+      Auth model: ADC, no impersonation. Operator authenticates as
+      `gcloud auth login gcp-admin@evoila.dev` for evoila.dev work — distinct
+      from `damir.topic@ed-consulting.at` which is the operator's identity for
+      everything ELSE the toolkit touches. gcloud config configurations can keep
+      them separate (`gcloud config configurations create evoila-bosnia` then
+      `set account gcp-admin@evoila.dev` inside it). The `iam.allowedPolicyMemberDomains`
+      org policy on evoila.dev prevents granting non-evoila.dev users on this
+      project — `damir.topic@ed-consulting.at` cannot be added to rdc-infra IAM
+      without first expanding the policy's allowlist to include
+      `ed-consulting.at`'s customer ID `C031j18a2`.
+
+      Current state (2026-05-05):
+        - Project: rdc-infra (project number 735324434736), parent org
+          `evoila.dev` (202191745121).
+        - Owners: gcp-admin@evoila.dev (auto via project creation).
+        - Billing: 01AC28-5F5C01-32C3B3 link **PENDING**. Linking is blocked
+          because the actor needs both `billing.user` on the account and project
+          permissions; the only Bosnia-side billing.admin who could grant
+          gcp-admin@evoila.dev `billing.user` cleanly via CLI is the colleague
+          who actually administers the account (damir.topic@ed-consulting.at
+          appears to have only billing.user, not billing.admin, despite operator
+          believing otherwise — gcloud's billing-account IAM commands return
+          INVALID_ARGUMENT for them). See backlog "GCP: Link rdc-infra to
+          unified billing".
+        - APIs enabled: 24 (GCP defaults + cloudresourcemanager + iam).
+        - Resources: 0 buckets, 0 compute, 1 SA (claude-vcf-toolkit @ rdc-infra,
+          roles/viewer, no key, available for future impersonation if/when
+          unblocked).
+
+      Connector: scripts/gcloud.sh. Probe returns the GCP fingerprint
+      (vendor=google, product=gcp, version=null, api_versioned=false).
+
+      VPN: not required — GCP is on the public Internet at *.googleapis.com.
+
+  # === Keycloak on rke2-infra ===
+  # Deployed 2026-05-10 via bitnami/keycloak chart 25.2.0 (Keycloak 26.3.3)
+  # under evoila-bosnia/claude-rdc-hetzner-dc#275 (commitment #3 of #261).
+  # Realms: `master` (chart default) + empty `evba` (created by
+  # keycloakConfigCli post-install hook). Connector wrapper to be built as
+  # a separate Backlog ticket.
+
+  - name: rdc-keycloak
+    aliases: [keycloak, sso, rdc-keycloak-rke2-infra]
+    product: keycloak
+    host: keycloak.evba.lab
+    port: 443
+    # No secret_ref yet — connector wrapper doesn't exist. Bootstrap admin
+    # credential lives in Vault at secret/rdc-hetzner-dc/keycloak/admin
+    # (fields: username, password). Future connector wrapper will reference
+    # this path or use OIDC client-credentials via Vault OIDC federation
+    # once commitment #5 of #261 lands.
+    vpn_required: true
+    notes: |
+      Keycloak 26.3.3 (Quarkus-based, single replica, no HA) on the `rke2-infra`
+      cluster, namespace `keycloak`. Embedded Postgres subchart (1 replica,
+      8 GiB PVC on `vsphere-csi`). External endpoint `https://keycloak.evba.lab`
+      (DNS A → 10.5.61.31, the cluster's MetalLB-assigned Traefik IP); TLS
+      terminates at Traefik with a `keycloak-tls` Secret issued from
+      ClusterIssuer `rdc-internal-ca` (#70). Keycloak listens HTTP-only inside
+      the cluster; production mode (`KEYCLOAK_PRODUCTION=true`) with
+      `KC_PROXY_HEADERS=xforwarded` so Keycloak trusts Traefik's X-Forwarded-*
+      headers and emits HTTPS URLs in tokens / OIDC discovery / redirects.
+
+      Image distribution: chart 25.2.0 defaults to `bitnami/*` Docker Hub
+      images which have been gated behind Bitnami Premium since August 2025
+      (free-tier images return 404 NotFound). Overrides in
+      `apps/rke2-infra/keycloak/values.yaml` (evoila-bosnia/rdc-gitops#19)
+      point at the legacy-frozen `bitnamilegacy/*` namespace for all three
+      images (`keycloak`, `postgresql`, `keycloak-config-cli`). Migration
+      target if this ever bites: `keycloak/keycloak` operator + chart, or
+      `codecentric/keycloakx` (same realm export imports trivially).
+
+      Realms (as of 2026-05-10):
+        - master: chart default; holds the bootstrap admin user.
+        - evba:   empty placeholder created by the `keycloakConfigCli`
+                  post-install Job from the realm JSON inlined in
+                  values.yaml. Realm contents (clients, groups, roles,
+                  IdP federation) land in subsequent commitments of #261
+                  (#4 is the `meho-backplane` realm client).
+
+      Bootstrap admin: `admin` / Vault `secret/rdc-hetzner-dc/keycloak/admin`
+      field `password` (32 chars, generated 2026-05-10 via openssl rand). The
+      password was synced manually into the k8s Secret
+      `keycloak-admin-credentials` (key `admin-password`) before first
+      ArgoCD sync. Migration target: ESO sync from Vault once ESO is
+      deployed on rke2-infra (Backlog ticket pending).
+
+      OIDC endpoints (used by downstream consumers):
+        - issuer:        https://keycloak.evba.lab/realms/evba
+        - JWKS:          https://keycloak.evba.lab/realms/evba/protocol/openid-connect/certs
+        - authorization: https://keycloak.evba.lab/realms/evba/protocol/openid-connect/auth
+        - token:         https://keycloak.evba.lab/realms/evba/protocol/openid-connect/token
+        - discovery:     https://keycloak.evba.lab/realms/evba/.well-known/openid-configuration
+
+      Source of truth: `evoila-bosnia/rdc-gitops` ::
+        `apps/rke2-infra/keycloak/` (values + 4-file extras directory) +
+        `bootstrap/rke2-infra/applications/keycloak.yaml`.
+      ArgoCD Application: `keycloak` in ns `argocd`, AppProject `rke2-infra`,
+      `prune+selfHeal: true`.
+
+      Connector wrapper: NOT YET BUILT. Future `scripts/keycloak.sh` (or
+      similar) would wrap the Keycloak Admin REST API + the `kcadm.sh` CLI
+      for read+change ops (realm CRUD, client CRUD, IdP federation config).
+      Filed as a Backlog ticket for the future, follows the same shape as
+      `scripts/vault.sh`.
+
+  # === MEHO backplane on rke2-infra ===
+  # Deployed 2026-05-12 via `helm upgrade --install meho oci://ghcr.io/evoila/meho-chart`
+  # (chart 0.1.20260511-f21d0fe+). Full operator-facing deploy entrypoint at
+  # rdc-hetzner-dc/manifests/meho/; live commitment #10 of #261 green-smoke
+  # walked in #338 (closes #333 + #331's last Done-When items).
+
+  - name: rdc-meho
+    aliases: [meho, meho-backplane, rdc-meho-rke2-infra]
+    product: meho
+    host: meho.evba.lab
+    port: 443
+    # No secret_ref yet — connector wrapper doesn't exist (the future `meho`
+    # CLI binary or `scripts/meho.sh` will own auth via the Keycloak
+    # device-code flow against client `meho-backplane`, storing the
+    # resulting refresh token at `op://rdc-hetzner-dc/meho-operator-token`
+    # / `secret/rdc-hetzner-dc/meho/operator-token`). For now the bootstrap
+    # path for any HTTP probe is a fresh Keycloak `client_credentials`
+    # grant against the realm at https://keycloak.evba.lab/realms/evba
+    # using the `meho-backplane` client_secret at
+    # `secret/rdc-hetzner-dc/keycloak/client-meho-backplane` (the same path
+    # smoke.sh consumes — see rdc-hetzner-dc/manifests/meho/smoke.sh step 4).
+    vpn_required: true
+    notes: |
+      MEHO v0.1 chassis backplane (governance backplane for AI agents acting
+      on infrastructure — policy-gated, audit-grade, MCP-native; Apache 2.0)
+      on the `rke2-infra` cluster, namespace `meho`. Single-replica Deployment
+      via the upstream chart at `oci://ghcr.io/evoila/meho-chart`, plus an
+      in-tree broadcast subchart (Valkey 9.x, single replica, ephemeral
+      streams per ADR 0005) and dedicated PostgreSQL backend (from #312).
+      External endpoint `https://meho.evba.lab` (DNS A → 10.5.61.31, the
+      cluster's MetalLB-assigned Traefik IP); TLS terminates at Traefik with
+      a `meho-tls` Secret issued from ClusterIssuer `rdc-internal-ca` (#296).
+
+      Source of truth: this repo's operator-facing deploy entrypoint at
+      `rdc-hetzner-dc/manifests/meho/`:
+        - install.sh      — idempotent pre-flight + helm upgrade --install --wait --atomic
+        - smoke.sh        — 6-step post-install verification (federation chain + audit row)
+        - values-rdc.yaml — concrete RDC values (SA reuse, trust-bundle, asyncpg DSN)
+        - README.md       — operator runbook + rollback + failure modes
+
+      Cluster-side GitOps (CoreDNS evba.lab forward + Keycloak realm + cert
+      + DNS A record + PG + namespace + RBAC) lives in `evoila-bosnia/rdc-gitops`
+      under `apps/rke2-infra/{coredns,keycloak,meho,meho-postgres}/` + the
+      bootstrap Applications. The Helm release itself is NOT GitOps-managed
+      in v0.1 — `install.sh` is the operator-laptop deploy path. ArgoCD
+      management lands in v0.2 once the chart is stable.
+
+      Sibling commitments of Initiative #261:
+        - #262 meho-runners ARC pool on rke2-meho (built MEHO's CI)
+        - #266 meho namespace + meho-backplane SA + impersonator ClusterRole
+        - #275 Keycloak (chart + DB + DNS + TLS + ArgoCD app + empty evba realm)
+        - #285 Keycloak realm client meho-backplane + roles/groups/mappers
+        - #293 Vault OIDC federation (auth/oidc/, role meho-mcp, policies, groups)
+        - #295 DNS A record meho.evba.lab → 10.5.61.31
+        - #296 cert-manager Certificate/meho-tls
+        - #297 GHCR egress smoke from rke2-infra
+        - #312 PostgreSQL DB meho on rke2-infra
+        - #327 manifests/meho/{install.sh,smoke.sh,values-rdc.yaml,README.md}
+        - #331 verify cold-deploy + smoke + rollback (closed via #338)
+        - #333 CoreDNS forward for evba.lab (closed via #338 + rdc-gitops#28+#29)
+
+      Federation endpoints (consumed at runtime, configured via chart values):
+        - Keycloak issuer:     https://keycloak.evba.lab/realms/evba
+        - Keycloak audience:   meho-backplane
+        - Vault address:       https://vault.evba.lab
+        - Vault OIDC role:     meho-mcp (mount path: oidc)
+        - Postgres DSN:        postgresql+asyncpg://meho:<vault-secret>@meho-postgres-postgresql.meho.svc.cluster.local:5432/meho
+        - REDIS_URL:           rendered against `<release>-broadcast.meho.svc` by the chart
+
+      Operator-facing HTTP surface:
+        - GET /healthz                — 200 unconditionally (k8s liveness, no DB/Vault checks)
+        - GET /ready                  — 200 only when keycloak (JWKS fetchable)
+                                         + vault (sealed=False) + db (migration revision 0001+)
+                                         all return ok; 503 otherwise
+        - GET /version                — {git_sha, build_date, chart_version}
+        - GET /metrics                — Prometheus format (scrape config deferred to v0.2)
+        - GET /api/v1/health          — Bearer-auth shape of /ready; returns operator identity
+        - (more endpoints land in v0.2 with the first connector ticket)
+
+      The MEHO CLI binary (`meho login`, `meho status`, etc.) is NOT YET
+      RELEASED — `gh release list --repo evoila/meho` returns empty as of
+      2026-05-12. The smoke.sh's step 4–5 exercises the same Keycloak JWT
+      + Bearer-auth code paths the CLI will hit, so federation is fully
+      validated; the interactive device-code UX itself awaits the upstream
+      release ticket.
+
+      Connector wrapper: NOT YET BUILT. Future `scripts/meho.sh` would wrap
+      the MEHO REST API (`/api/v1/health` for `--probe`, `/api/v1/policy/*`
+      and `/api/v1/audit/*` for future verbs) — OR the operator may just
+      invoke the `meho` CLI directly once it's released. Filed as a Backlog
+      ticket; follows the same shape as `scripts/vault.sh` (Bearer-auth +
+      token from Vault). Until then, `--probe` against this target is an
+      operator-manual `curl` against the endpoints above.
+
+  # === HashiCorp Vault on rke2-infra ===
+  # Deployed 2026-05-05 via manual `helm install hashicorp/vault` (chart 0.32.0,
+  # Vault 1.21.2). HA Raft 3-of-5 Shamir; full deploy/init/unseal runbook in
+  # INVENTORY § "Vault on rke2-infra" + manifests at rdc-hetzner-dc/manifests/vault/.
+  # Importing under ArgoCD management is tracked separately as #75.
+
+  - name: rdc-vault
+    aliases: [vault, rdc-vault-rke2-infra, hashicorp-vault]
+    product: vault
+    host: vault.evba.lab
+    port: 443
+    # No secret_ref: vault.sh reads $HOME/.vault-token directly (operator
+    # pre-runs `vault login`). Bootstrap creds for that login are the lone
+    # 1P carve-out — op://rdc-hetzner-dc/vault-userpass-damir-topic.
+    vpn_required: true
+    notes: |
+      HashiCorp Vault 1.21.2 (Community) on the `rke2-infra` cluster, namespace
+      `vault`. 3-replica HA with integrated Raft storage; default Shamir 3-of-5
+      seal. External endpoint `https://vault.evba.lab` (DNS A → 10.5.61.31, the
+      cluster's MetalLB-assigned Traefik IP); TLS terminates at Traefik with a
+      `vault-tls` Secret issued from ClusterIssuer `rdc-internal-ca` (#70).
+      Vault listens HTTP-only inside the cluster.
+
+      Auth (connector default, post-#67): vault.sh reads $HOME/.vault-token
+      directly — no embedded auth. Operator runs once per session:
+        `vault login -method=userpass username=damir-topic`
+      using bootstrap creds from 1P `op://rdc-hetzner-dc/vault-userpass-damir-topic`
+      (the lone surviving 1P item — Vault cannot hold its own auth root).
+      Resulting client token is written to $HOME/.vault-token by the vault CLI
+      and consumed by every connector wrapper for the duration of the session
+      (default TTL 24h / max 720h). Refined RBAC + secret hierarchy land in #74.
+
+      Unseal model: 5 Shamir shares + initial root token captured at
+      `vault operator init` time (2026-05-05). All 5 shares sit in
+      `op://rdc-hetzner-dc/vault-unseal-share-{1..5}` for now (operator
+      decision: distribution to per-operator + offsite envelopes deferred,
+      see ticket #73 acceptance criteria). The initial root token in
+      `op://rdc-hetzner-dc/vault-root-token-initial` was REVOKED + LEAKED
+      on 2026-05-05 — see INVENTORY audit log entry — and is no longer a
+      valid credential. Subsequent admin access is via the userpass user.
+
+      Connector: `scripts/vault.sh` (probe + REST pass-through). Probe
+      uses unauthenticated `/v1/sys/health` + `/v1/sys/seal-status`, so it
+      works against a sealed Vault for status checks. Pass-through calls
+      attach `X-Vault-Token` from `$HOME/.vault-token` to outbound requests.

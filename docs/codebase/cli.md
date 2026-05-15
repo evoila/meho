@@ -1213,6 +1213,108 @@ have to trust to run `meho login` against their secrets.
   the URL and lets the operator copy-paste, matching how
   `gh auth login` behaves without `--web`.
 
+## Targets registry (`meho targets`, G0.3 #224)
+
+`cli/internal/cmd/targets/` registers cobra verbs for the G0.3
+targets registry (Initiative #224). The v0.2 surface ships:
+
+- `meho targets import <file>` (G0.3-T6 #257) — bulk-import a
+  `targets.yaml` file. Sibling verbs (`list`, `describe`, `probe`)
+  land separately via G0.3-T5 #256.
+
+### Import verb
+
+`import.go` implements `meho targets import <file>` with the
+flags called out in the issue body: `--update` (PATCH existing
+targets instead of erroring), `--dry-run` (print the plan; no API
+calls), `--json` (structured plan output), `--backplane` (override
+the configured backplane URL).
+
+**Mapping rules.** The CLI parses the YAML as a generic
+`map[string]any` per entry and partitions every key:
+
+- **Known top-level columns** map 1:1 to the API's `TargetCreate` /
+  `TargetUpdate` body fields: `name`, `aliases`, `product`, `host`,
+  `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`,
+  `notes`, `preferred_impl_id`. The list in
+  `knownTopLevel` is the canonical reference; the
+  Python-side mirror lives in
+  `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL` and
+  keeps drift detectable in CI.
+- **`fingerprint`** is dropped silently with a warning log line.
+  Server-managed per the G0.3-T1.5 (#477) amendment — the probe
+  verb is the only legitimate writer, and the API rejects
+  caller-supplied values with 422 via
+  `model_config = ConfigDict(extra='forbid')`. Skipping at the CLI
+  is friendlier than letting the import abort on a 422 the operator
+  can't fix without editing the source YAML.
+- **`preferred_impl_id`** is a real top-level column post-#477.
+  Sent at the body root, not spilled into extras — the G0.6 #388
+  resolver's tie-break ladder reads it.
+- **Every other key** spills into the `extras` JSONB column.
+  Explicit `extras:` blocks in the YAML merge with spilled keys
+  rather than overwriting them.
+
+**Idempotency.** The plan-build phase fetches
+`GET /api/v1/targets` (paginated) and partitions every YAML entry
+into `CREATE` (no existing match) vs `UPDATE` (name already exists
+in tenant). Default mode aborts the whole import on the first
+duplicate — operators have to re-run with `--update` to opt into
+PATCH semantics. The plan is built before *any* write fires, so a
+partial-conflict YAML never leaves the tenant half-imported.
+
+**Sparse-PATCH contract.** The PATCH body for each updated entry
+is sparse: only keys present in the YAML appear, with `name` and
+`product` stripped (immutable post-create). This is load-bearing —
+without it the route handler's
+`updates = body.model_dump(exclude_unset=True); for k, v in updates: setattr(t, k, v)`
+loop combined with Pydantic v2's "explicit null counts as set"
+semantics is PUT-shaped, not PATCH-shaped, and would wipe every
+column the YAML omits on every `--update` run. PR #362's review on
+issue #257 (2026-05-14) surfaced this bug in an earlier draft; the
+`entryToUpdateBody` helper is the fix.
+
+### HTTP shape
+
+The verb routes through `api.NewAuthedClient` for bearer injection
++ 401-refresh-retry, same as `meho status` and `meho operation
+call`. The shared `doAuthedRequest` helper inside `import.go` is
+adapted to an `httpDoer` function-shape so unit tests can drive
+the plan / execute path against an in-process `fakeDoer` without
+the auth/token-store machinery (which is independently covered by
+`cli/internal/auth`'s own tests).
+
+The helper is duplicated from `cmd/operation/operation.go` because
+`cmd/operation` can't be imported from `cmd/targets` without an
+import cycle (both packages are grafted onto the same tree by
+`cmd/root.go`). If a third subcommand package grows, the duplicated
+helper should be extracted to a shared `cmd/_authed` package.
+
+### Tests
+
+- `import_test.go` — Go unit tests for the YAML parser, the
+  mapping rules (top-level / extras spill / fingerprint skip /
+  preferred_impl_id top-level), the sparse-PATCH body shape, the
+  plan partitioning logic, and the dry-run code path.
+- `backend/tests/test_api_v1_targets_import.py` — Python
+  integration tests against `/api/v1/targets` exercising the
+  CREATE / PATCH semantics the CLI relies on. The
+  real-`targets.yaml` round-trip test replays every conformant
+  entry from a pinned snapshot of
+  [`evoila-bosnia/claude-rdc-hetzner-dc/rdc-hetzner-dc/targets.yaml`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/targets.yaml)
+  (24 entries; SHA pinned in the test module).
+
+### Out-of-scope
+
+- Export (`meho targets export > file.yaml`) — v0.2.next polish.
+- Bulk delete via YAML — explicit out-of-scope on the issue.
+- Cross-tenant migration — operators import into their JWT's tenant.
+- Watching `targets.yaml` for changes — out-of-scope.
+- Schema validation against a Pydantic-equivalent on the CLI side —
+  CLI does minimal local validation (`name`, `product`, `host` are
+  required); the API does the strict validation and errors
+  propagate.
+
 ## References
 
 * Parent Goal: [#11](https://github.com/evoila-bosnia/meho-internal/issues/11)

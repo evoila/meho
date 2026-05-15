@@ -43,7 +43,7 @@ own conftest.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from sqlalchemy import text
@@ -54,6 +54,19 @@ from meho_backplane.db.engine import (
     dispose_engine,
     reset_engine_for_testing,
 )
+from tests.acceptance._canary_fixtures import (
+    CANARY_CONNECTOR_ID,
+    CANARY_OPERATOR_TENANT,
+    IngestedCanaryVcsim,
+    acceptance_operator,
+    ingested_canary_vcsim,
+)
+from tests.acceptance._vcsim import (
+    DEFAULT_VCSIM_TOPOLOGY,
+    VcsimEndpoint,
+    VcsimTopology,
+    resolve_vcsim_endpoint,
+)
 from tests.integration.conftest import (
     DOCKER_AVAILABLE,
     SKIP_REASON,
@@ -62,11 +75,20 @@ from tests.integration.conftest import (
 )
 
 __all__ = [
+    "CANARY_CONNECTOR_ID",
+    "CANARY_OPERATOR_TENANT",
+    "DEFAULT_VCSIM_TOPOLOGY",
     "DOCKER_AVAILABLE",
     "SKIP_REASON",
+    "IngestedCanaryVcsim",
+    "VcsimEndpoint",
+    "VcsimTopology",
+    "acceptance_operator",
     "async_pg_url",
+    "ingested_canary_vcsim",
     "integration_env",
     "pg_engine",
+    "vcsim_endpoint",
 ]
 
 
@@ -136,3 +158,28 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
     finally:
         await dispose_engine()
         reset_engine_for_testing()
+
+
+@pytest.fixture(scope="session")
+def vcsim_endpoint() -> Iterator[VcsimEndpoint]:
+    """Yield a session-scoped :class:`VcsimEndpoint` for vcsim-backed tests.
+
+    Boots ``vmware/vcsim`` once per pytest invocation (or returns a
+    cached endpoint when ``MEHO_VCSIM_URL`` overrides) and tears the
+    container down on session teardown. Session scope amortises the
+    ~3-second boot across every dispatch / handle / agent-flow test
+    in the acceptance suite; per-test isolation comes from the seed
+    topology being immutable (read-only ops only).
+
+    Mirrors the ``pg_engine`` skip pattern: missing Docker socket
+    plus missing env-override yields a clean ``pytest.skip`` from
+    inside :func:`resolve_vcsim_endpoint`, so the consuming test is
+    marked SKIPPED rather than failed.
+
+    The 50-VM / 3-host / 1-cluster / 2-datastore / 2-folder topology
+    in :data:`DEFAULT_VCSIM_TOPOLOGY` matches the issue body's
+    canary fixture; tests that need a different seed boot their own
+    container with :func:`resolve_vcsim_endpoint` directly.
+    """
+    with resolve_vcsim_endpoint(DEFAULT_VCSIM_TOPOLOGY) as endpoint:
+        yield endpoint

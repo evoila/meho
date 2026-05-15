@@ -109,7 +109,9 @@ jobs:
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
         # spinning up pgvector/pgvector:pg16 for test_db_engine.py /
-        # test_migration_rollback.py / tests/integration/*) share the
+        # test_migration_rollback.py / tests/integration/*, plus
+        # vmware/vcsim for the G3.1-T8 vmware-rest acceptance tests
+        # under tests/acceptance/test_vmware_rest_*.py) share the
         # ARC cluster's NAT egress IP, which exhausts Docker Hub's
         # 100/6h anonymous bucket. Authenticated Personal-tier doubles
         # it to 200/6h

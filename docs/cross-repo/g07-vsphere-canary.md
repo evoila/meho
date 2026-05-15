@@ -203,7 +203,7 @@ canonical operation for the workflow". The
 runs thirteen such queries (ten vcenter + three vi-json) and
 asserts the top-3 contract.
 
-### Step 7 — verify dispatch end-to-end (optional, needs vcsim or live vCenter)
+### Step 7 — verify dispatch end-to-end
 
 ```bash
 meho operation call vmware-rest-9.0 'GET:/vcenter/cluster' \
@@ -215,6 +215,19 @@ This step requires a Target row pointing at a reachable vCenter
 endpoint; ``vcsim`` (VMware's simulator) suffices for read
 operations and is what the Initiative #389 acceptance criteria
 imply for the canary's dispatch leg.
+
+CI now runs this step on every PR: G3.1-T8 (#515) shipped the
+[`vcsim_endpoint`](../../backend/tests/acceptance/_vcsim.py)
+session-scoped fixture and three acceptance modules
+([`test_vmware_rest_dispatch_smoke.py`](../../backend/tests/acceptance/test_vmware_rest_dispatch_smoke.py),
+[`test_vmware_rest_jsonflux_force_handle.py`](../../backend/tests/acceptance/test_vmware_rest_jsonflux_force_handle.py),
+[`test_vmware_rest_agent_flow_e2e.py`](../../backend/tests/acceptance/test_vmware_rest_agent_flow_e2e.py))
+that dispatch against the simulator on every PR, on the
+meho-runners pool where Docker is provisioned. The
+[`vcsim integration testing`](../architecture/vcsim-integration-testing.md)
+doc explains the fixture pattern and how future G3.x connectors
+can mirror it (Vault → testcontainers' `vault`, K8s → k3d,
+bind9 → real bind9 container).
 
 ## Test variant
 

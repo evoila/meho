@@ -717,7 +717,7 @@ async def test_tenant_boundary_holds_for_consumer_kb(
 
 
 # ---------------------------------------------------------------------------
-# Test 6 -- precision@5 ≥ 0.80 across the 10-query eval corpus
+# Test 6 -- retrieval quality gate (MRR + coverage@5) across the 10-query eval corpus
 # ---------------------------------------------------------------------------
 
 
@@ -797,6 +797,17 @@ async def test_eval_corpus_retrieval_quality_against_real_kb(
         f"retrieval is missing expected hits from the top-5, indicating "
         f"a wiring or tenant-scope failure. per-query coverage: "
         f"{[(q.query, q.coverage_at_5) for q in result.queries]}"
+    )
+
+    # Per-surface verdict gate -- the worst-of metric rollup the CLI's
+    # ``meho retrieval eval`` and CI's exit-1-on-red gate key off. A
+    # red kb surface must fail the canary even if the two hard metric
+    # gates above happen to clear (e.g. precision@5 collapse).
+    assert result.verdict != "red", (
+        f"kb surface verdict is red (mrr={result.mrr:.3f}, "
+        f"coverage@5={result.coverage:.3f}, "
+        f"precision@5={result.precision_at_5:.3f}); the retrieval gate "
+        f"considers the kb surface broken"
     )
 
 

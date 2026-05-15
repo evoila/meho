@@ -1,0 +1,166 @@
+# MEHO retrieval eval — operations seed corpus (G4.3-T3, #442).
+#
+# 10 govc-parity queries against the ingested vSphere REST surface
+# (vcenter.yaml, ~1275 operations). Each row is a natural-language
+# phrase an experienced vSphere operator might type; expected_op_ids
+# is the canonical match for that workflow in the parsed corpus.
+#
+# Schema: meho_backplane.retrieval.eval.corpus.OperationCorpusQuery.
+#
+# Source of truth for the 10 (query, op_id) pairs is the G0.7-T8
+# vSphere canary's `GOVC_PARITY_BENCHMARK` tuple
+# (backend/tests/acceptance/test_g07_vsphere_canary.py).
+# Acceptance criterion 4 in #442 specifies that the canary reads
+# this corpus for its govc-parity benchmark — keeping the two lists
+# 1:1 means a future refactor of the canary to load this YAML is
+# mechanical, and any divergence is a fail-loud signal.
+#
+# Editing rules:
+# * Every expected_op_ids entry must be a real op_id present in
+#   the ingested vcenter.yaml corpus. The op_id snapshot in
+#   `test_retrieval_eval_operation_corpus.py::VCENTER_OP_ID_SNAPSHOT_2026_05`
+#   guards drift.
+# * connector_id is always `vmware-rest-9.0` for this corpus
+#   (vmware product, 9.0 version, vmware-rest impl_id). The slug
+#   format is documented in
+#   `meho_backplane.operations.ingest.parser.parse_connector_id`.
+# * govc_equivalent is required on every row — the corpus's load-bearing
+#   "this is what the pre-MEHO operator would type" baseline. T2's
+#   eval runner can't infer the baseline; the corpus carries it.
+# * notes records the operator context: workflow frequency, the
+#   govc verb's role, anything informing human review on regression.
+#
+# Scope reductions (deliberate, disclosed):
+# * vi-json.yaml operations (~2195 Managed Object ops including
+#   snapshot revert, EventManager.QueryEvents, PerformanceManager
+#   queries, host atomic network mutations) are NOT included. The
+#   T1 OpenAPI parser rejects `$ref: '#/components/parameters/*'`
+#   used on every vi-json op (Finding 1 of canary PR #493); until a
+#   T1 parser extension lands, vi-json ops don't exist in the
+#   `endpoint_descriptor` table to expect against.
+# * Composite ops (e.g. `vmware.composite.vm.snapshot.revert`,
+#   `vmware.composite.vm.create`) are NOT included. G3.1 composite
+#   authoring is a separate Initiative; the corpus targets only
+#   operations the system currently ships.
+# * Three queries (list/power-on/power-off virtual machine) are known
+#   to under-rank against sub-paths in the canary's PG hybrid
+#   BM25+cosine RRF index — the canary marks them `xfail` for now.
+#   The corpus records the ground-truth ranking the system SHOULD
+#   produce; the eval runner's verdict math (T2 #441) flags the
+#   regression. When T3 per-op `llm_instructions` enhancement or
+#   improved upstream descriptions lift the ranking, the xfail
+#   markers in the canary become xpass and the corpus is unchanged.
+#
+# When vi-json ingestion lands, add snapshot/event/performance/host
+# queries here; the eval runner picks them up without code change.
+
+- query: list virtual machines
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - GET:/vcenter/vm
+  govc_equivalent: govc ls vm
+  notes: >-
+    The single most-common operator query — "what VMs are in this
+    inventory?". `govc ls vm` traverses VM folders; the vSphere REST
+    equivalent is the cardinal VM list endpoint. Currently under-ranks
+    in the canary (xfail) because the cardinal endpoint's description
+    is vendor-schema-heavy ("Vcenter.VM.FilterSpec") and loses to
+    short sub-paths in BM25 ranking.
+
+- query: list clusters
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - GET:/vcenter/cluster
+  govc_equivalent: govc ls -t ClusterComputeResource host
+  notes: >-
+    Operator inventory pull — "what clusters does this vCenter
+    manage?". Drives capacity-planning and placement decisions
+    before any VM lifecycle op. `govc` requires a managed-object-type
+    filter; the REST endpoint is dedicated.
+
+- query: list datacenters
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - GET:/vcenter/datacenter
+  govc_equivalent: govc datacenter.info
+  notes: >-
+    Top-of-inventory pull. Less frequent than cluster/host lists
+    (most ops are scoped to a single DC) but the first call in any
+    multi-DC operator workflow.
+
+- query: list datastores
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - GET:/vcenter/datastore
+  govc_equivalent: govc datastore.info
+  notes: >-
+    Storage-capacity audit — "where can I put a new VM disk?".
+    Returns capacity + free space per datastore in one call.
+
+- query: list networks
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - GET:/vcenter/network
+  govc_equivalent: govc ls network
+  notes: >-
+    Network inventory — port groups, VDS, NSX-managed segments. The
+    REST endpoint returns both standard and distributed networks in
+    one call; `govc` requires separate traversals.
+
+- query: list hosts
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - GET:/vcenter/host
+  govc_equivalent: govc host.info
+  notes: >-
+    ESXi host inventory across all clusters. Most operator
+    debugging starts here — "which host is the problem VM on?".
+
+- query: power on virtual machine
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - POST:/vcenter/vm/{vm}/power?action=start
+  govc_equivalent: govc vm.power -on <vm>
+  notes: >-
+    Cardinal VM lifecycle op. Currently under-ranks in the canary
+    (xfail) — same BM25-vs-sub-path issue as the VM list query.
+    The path-templated `{vm}` is the VM moRef the operator obtains
+    from a prior `GET:/vcenter/vm` call.
+
+- query: power off virtual machine
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - POST:/vcenter/vm/{vm}/power?action=stop
+  govc_equivalent: govc vm.power -off <vm>
+  notes: >-
+    Cardinal VM lifecycle op — hard power-off (no guest-OS
+    cooperation). For graceful shutdown operators use a different
+    REST op (`?action=shutdown`); the canary tracks the hard-stop
+    workflow because it's the unambiguous govc parity case. Also
+    under-ranks in the canary (xfail) for the same BM25 reason.
+
+- query: create login session
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - POST:/session
+  govc_equivalent: govc about
+  notes: >-
+    Authentication bootstrap — every REST client establishes a
+    session before any other call. `govc` does this transparently
+    via the GOVC_URL credentials. The benchmark includes it because
+    a regression in the authentication endpoint's surfacing
+    indicates a wider retrieval problem (it's a short, unambiguous
+    path with no competing cardinal ops).
+
+- query: get virtual machine info
+  expected_connector_id: vmware-rest-9.0
+  expected_op_ids:
+    - GET:/vcenter/vm/{vm}
+  govc_equivalent: govc vm.info <vm>
+  notes: >-
+    Per-VM detail lookup — power state, resource allocation,
+    network attachments, disk config. The `govc vm.info` equivalent
+    is one of the most-frequent operator commands; the REST endpoint
+    takes the moRef path parameter the operator gets from the prior
+    list call. Pairs with the `GET:/vcenter/vm` cardinal as the
+    natural "list, then drill" workflow.

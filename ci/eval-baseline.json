@@ -1,6 +1,6 @@
 {
   "overall_verdict": "green",
-  "ran_at": "2026-05-14T16:28:01.597525Z",
+  "ran_at": "2026-05-15T10:35:00.344611Z",
   "surfaces": [
     {
       "baseline_coverage": null,
@@ -208,11 +208,172 @@
       "baseline_mrr": null,
       "baseline_precision_at_5": null,
       "baseline_verdict": null,
-      "coverage": 0.0,
-      "mrr": 0.0,
-      "precision_at_5": 0.0,
-      "queries": [],
-      "query_count": 0,
+      "coverage": 1.0,
+      "mrr": 1.0,
+      "precision_at_5": 1.0,
+      "queries": [
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "GET:/vcenter/vm"
+          ],
+          "meho_hits": [
+            "GET:/vcenter/vm"
+          ],
+          "precision_at_5": 1.0,
+          "query": "list virtual machines",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "GET:/vcenter/cluster"
+          ],
+          "meho_hits": [
+            "GET:/vcenter/cluster"
+          ],
+          "precision_at_5": 1.0,
+          "query": "list clusters",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "GET:/vcenter/datacenter"
+          ],
+          "meho_hits": [
+            "GET:/vcenter/datacenter"
+          ],
+          "precision_at_5": 1.0,
+          "query": "list datacenters",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "GET:/vcenter/datastore"
+          ],
+          "meho_hits": [
+            "GET:/vcenter/datastore"
+          ],
+          "precision_at_5": 1.0,
+          "query": "list datastores",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "GET:/vcenter/network"
+          ],
+          "meho_hits": [
+            "GET:/vcenter/network"
+          ],
+          "precision_at_5": 1.0,
+          "query": "list networks",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "GET:/vcenter/host"
+          ],
+          "meho_hits": [
+            "GET:/vcenter/host"
+          ],
+          "precision_at_5": 1.0,
+          "query": "list hosts",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "POST:/vcenter/vm/{vm}/power?action=start"
+          ],
+          "meho_hits": [
+            "POST:/vcenter/vm/{vm}/power?action=start"
+          ],
+          "precision_at_5": 1.0,
+          "query": "power on virtual machine",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "POST:/vcenter/vm/{vm}/power?action=stop"
+          ],
+          "meho_hits": [
+            "POST:/vcenter/vm/{vm}/power?action=stop"
+          ],
+          "precision_at_5": 1.0,
+          "query": "power off virtual machine",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "POST:/session"
+          ],
+          "meho_hits": [
+            "POST:/session"
+          ],
+          "precision_at_5": 1.0,
+          "query": "create login session",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "GET:/vcenter/vm/{vm}"
+          ],
+          "meho_hits": [
+            "GET:/vcenter/vm/{vm}"
+          ],
+          "precision_at_5": 1.0,
+          "query": "get virtual machine info",
+          "reciprocal_rank": 1.0
+        }
+      ],
+      "query_count": 10,
       "surface": "operations",
       "verdict": "green"
     }

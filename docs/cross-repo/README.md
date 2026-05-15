@@ -61,6 +61,7 @@ implementation to track separately:
 
 | Doc | Purpose |
 | --- | --- |
+| [`audit-query.md`](./audit-query.md) | How to investigate "who did X to Y and when?" via the G8.1 audit query surface — the five `meho audit ...` CLI verbs, common forensic questions, filter semantics, cross-tenant boundary, and aggregate-only audit-on-audit broadcast posture. Companion architecture: [`docs/architecture/audit.md`](../architecture/audit.md). |
 | [`broadcast-onboarding.md`](./broadcast-onboarding.md) | How to subscribe to the per-tenant Valkey broadcast stream from `meho status --watch`, an MCP client, or a custom downstream subscriber. |
 | [`connector-ingestion.md`](./connector-ingestion.md) | How to add a new vendor surface to MEHO via the G0.7 spec-ingestion pipeline — `meho connector ingest/review/edit/enable/disable`. Companion architecture: [`docs/architecture/spec-ingestion.md`](../architecture/spec-ingestion.md). |
 | [`g07-vsphere-canary.md`](./g07-vsphere-canary.md) | The worked-example canary procedure: ingest the vCenter REST spec, drive the operator workflow, run the 10-query govc-parity benchmark. |

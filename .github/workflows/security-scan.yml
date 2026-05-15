@@ -42,28 +42,36 @@ jobs:
     name: Semgrep SAST
     runs-on: meho-runners
     timeout-minutes: 15
-    # Authenticated Docker Hub pull. The ARC scale-set runs every job
-    # as an ephemeral pod sharing one cluster-egress NAT IP, which
-    # exhausts Docker Hub's anonymous 100-pulls-per-6h limit fast and
-    # has tripped this Semgrep job in production. Authenticated
-    # Personal-tier doubles the bucket to 200/6h
-    # (https://docs.docker.com/docker-hub/usage/pulls/) — enough
-    # short-term while evoila-bosnia/claude-rdc-hetzner-dc#463 stands
-    # up the in-cluster pull-through cache that retires this block.
+    # Pulled through the in-cluster Harbor proxy cache
+    # (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` is public,
+    # anonymous consumer auth — no `credentials:` block needed).
+    # Harbor preserves Docker Hub's namespace, so the `semgrep/semgrep`
+    # path appears verbatim under the cache prefix. The cache itself
+    # authenticates upstream against Docker Hub via the credential
+    # provisioned by claude-rdc-hetzner-dc#472, so cache-miss fetches
+    # don't share MEHO's anonymous bucket either.
     #
-    # `credentials:` is consumed by the runner BEFORE any step runs,
-    # so `docker/login-action` cannot substitute. Secrets are
-    # provisioned at the `evoila` org level (visibility `all`) so all
-    # sibling repos inherit them without per-repo duplication. If
-    # either secret is missing the workflow fails template-validation
-    # at "Set up job" — that's the intended loud-failure signal that
-    # someone deleted the org secret. Bump cadence: monthly review or
-    # on advisory.
+    # The earlier iteration of this workflow (evoila/meho#447 + #507)
+    # used GHA `container.credentials:` with the `evoila` org-level
+    # `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` secrets to authenticate
+    # directly against Docker Hub. That mechanism cannot coexist with
+    # the cache prefix: GHA's runner interprets `credentials:` as
+    # "log into the registry hosting this image", which is now
+    # `harbor.evba.lab`, not `docker.io` — and Docker Hub creds don't
+    # authenticate to Harbor (which is anonymous anyway). The
+    # `credentials:` block is therefore removed in the same edit as
+    # the prefix swap; the org-level secrets stay provisioned
+    # (Harbor's upstream uses them via #472), and `ci.yml`'s pytest
+    # job still uses them via `docker/login-action`.
+    #
+    # If Harbor is ever unreachable (cluster outage, cert rotation,
+    # etc.), this job fails fast at "Initialize containers" with a
+    # clear connection error — that's the intended loud-failure
+    # signal, not a silent fall-back to docker.io.
+    #
+    # Bump cadence: monthly review or on advisory.
     container:
-      image: semgrep/semgrep:1.160.0
-      credentials:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+      image: harbor.evba.lab/dockerhub-proxy/semgrep/semgrep:1.160.0
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 

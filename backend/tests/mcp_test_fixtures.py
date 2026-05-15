@@ -127,17 +127,27 @@ def isolated_registry() -> Iterator[None]:
     reload list for the same reason — without it, this fixture's
     ``clear_registries()`` would leave the feed resource unregistered
     in any test file that imports the fixture after the first one
-    runs.
+    runs. The G4.1-T3 kb meta-tools (``mcp.tools.knowledge``) and the
+    matching ``meho://kb/{slug}`` resource (``mcp.resources.kb``) join
+    the list for the same reason.
     """
+    from meho_backplane.mcp.resources import kb as kb_resource
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
-    from meho_backplane.mcp.tools import connector_admin, meho_status, operations
+    from meho_backplane.mcp.tools import (
+        connector_admin,
+        knowledge,
+        meho_status,
+        operations,
+    )
 
     clear_registries()
     importlib.reload(meho_status)
     importlib.reload(operations)
     importlib.reload(connector_admin)
+    importlib.reload(knowledge)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
+    importlib.reload(kb_resource)
     yield
     clear_registries()
 

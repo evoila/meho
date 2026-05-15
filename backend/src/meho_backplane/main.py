@@ -48,6 +48,9 @@ from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
+from meho_backplane.api.v1.connectors_ingest import (
+    router as api_v1_connectors_ingest_router,
+)
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
@@ -270,6 +273,14 @@ app.include_router(api_v1_feed_router)
 # inspection endpoint. The same handlers back the MCP transport
 # (mcp/tools/operations.py).
 app.include_router(api_v1_operations_router)
+# G0.7-T6 (#406) -- spec-ingestion + review-queue REST surface at
+# /api/v1/connectors*. Seven routes (ingest / list / review / PATCH
+# group / PATCH op / enable / disable) that drive the T1+T2+T3 pipeline
+# and the T4 review state machine. Tenant-scoped to the JWT's tenant_id
+# claim; mutating routes are tenant_admin-gated, read routes are
+# operator-gated. The same service layer (IngestionPipelineService +
+# ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
+app.include_router(api_v1_connectors_ingest_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

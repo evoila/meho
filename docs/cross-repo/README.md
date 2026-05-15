@@ -66,6 +66,7 @@ implementation to track separately:
 | [`connector-ingestion.md`](./connector-ingestion.md) | How to add a new vendor surface to MEHO via the G0.7 spec-ingestion pipeline — `meho connector ingest/review/edit/enable/disable`. Companion architecture: [`docs/architecture/spec-ingestion.md`](../architecture/spec-ingestion.md). |
 | [`g07-vsphere-canary.md`](./g07-vsphere-canary.md) | The worked-example canary procedure: ingest the vCenter REST spec, drive the operator workflow, run the 10-query govc-parity benchmark. |
 | [`mcp-client-setup.md`](./mcp-client-setup.md) | How to wire an MCP client (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) to a running MEHO backplane, plus the Keycloak realm-side audience configuration. |
+| [`retrieval-retirement.md`](./retrieval-retirement.md) | How to retire the consumer's pre-MEHO retrieval workflows (kb / memory / operations surfaces) using `meho retrieval retire-checklist` — 5-criterion decision matrix, per-surface retire + rollback procedures, `retrieval-migration-blocker` label workflow. Companion automation: [`scripts/setup-retrieval-migration-blocker-label.sh`](../../scripts/setup-retrieval-migration-blocker-label.sh). |
 
 ## Related
 

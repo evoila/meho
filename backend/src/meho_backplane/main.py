@@ -54,6 +54,7 @@ from meho_backplane.api.v1.connectors_ingest import (
 )
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
+from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
@@ -295,6 +296,17 @@ app.include_router(api_v1_operations_router)
 # operator-gated. The same service layer (IngestionPipelineService +
 # ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
 app.include_router(api_v1_connectors_ingest_router)
+# G4.1-T2 (#416) -- knowledge-base REST surface at /api/v1/kb*.
+# Five routes (GET / GET /{slug} / POST / DELETE /{slug} / POST /ingest)
+# that expose the T1 :class:`KbService` to operators + agents. Tenant-
+# scoped via the JWT's tenant_id claim; cross-tenant reads return 404
+# (not 403) to prevent enumerating other tenants by status-code
+# differential. Read routes (list / show) require ``operator`` minimum;
+# write routes (create / delete / ingest) require ``tenant_admin``.
+# Audit + broadcast op_ids: ``kb.list`` / ``kb.show`` / ``kb.create`` /
+# ``kb.delete`` / ``kb.ingest`` -- bound via the ``audit_op_id`` /
+# ``audit_op_class`` contextvar overrides the chassis publisher honours.
+app.include_router(api_v1_kb_router)
 # G8.1-T2 (#466) -- audit-query REST surface. Four routes (POST /query,
 # GET who-touched / my-recent / show) all dispatching through the T1
 # substrate (`meho_backplane.audit_query.query_audit`). Operator role

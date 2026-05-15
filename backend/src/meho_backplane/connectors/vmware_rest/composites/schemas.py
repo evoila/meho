@@ -34,17 +34,23 @@ from typing import Any
 
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
+    "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_PARAMETER_SCHEMA",
+    "DATASTORE_USAGE_RESPONSE_SCHEMA",
     "EVENT_TAIL_PARAMETER_SCHEMA",
+    "EVENT_TAIL_RESPONSE_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA",
+    "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
+    "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
 ]
 
 
 #: ``vmware.composite.cluster.drs_recommendations`` parameter schema.
 #:
-#: Reads cluster DRS state + active recommendations. The composite
-#: dispatches one ``GET:/vcenter/cluster/{cluster}`` and one
+#: Reads cluster summary + DRS state (optionally surfacing
+#: ``recommendations_history`` from the DRS payload when present). The
+#: composite dispatches one ``GET:/vcenter/cluster/{cluster}`` and one
 #: ``GET:/vcenter/cluster/{cluster}/drs`` to a single target.
 CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -219,4 +225,250 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
     },
     "required": [],
     "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# Response schemas
+# ---------------------------------------------------------------------------
+#
+# Each response schema captures the aggregated dict the corresponding
+# handler in :mod:`_read` returns. Informational in v0.2 (the
+# dispatcher's :class:`PassThroughReducer` does not validate outbound
+# payloads); declared so the meta-tools
+# (:mod:`meho_backplane.operations.meta_tools`) can surface the shape on
+# ``describe_operation`` calls and so the
+# :class:`~meho_backplane.db.models.EndpointDescriptor` row persists a
+# non-null ``response_schema`` for parity with the connector_op surface
+# (precedent: ``vault.kv.read`` -- the only other typed-op with an
+# explicit response schema today).
+#
+# Sub-payload shapes (``cluster`` summary, ``drs`` config, datastore
+# detail, etc.) are intentionally typed as ``"object"`` with no
+# ``properties`` enumeration -- the upstream vSphere REST payload shape
+# is owned by Broadcom and out of this composite's contract.
+
+
+#: ``vmware.composite.cluster.drs_recommendations`` response schema.
+#:
+#: Captures the cluster summary + DRS config aggregation; the
+#: ``recommendations_history`` key is optional and appears only when
+#: the operator sets ``include_recommendations_history=True``.
+CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "object",
+            "description": (
+                "Cluster summary payload from "
+                "``GET:/vcenter/cluster/{cluster}`` (vSphere REST owns "
+                "the inner shape)."
+            ),
+        },
+        "drs": {
+            "type": "object",
+            "description": (
+                "DRS configuration payload from "
+                "``GET:/vcenter/cluster/{cluster}/drs`` (vSphere REST "
+                "owns the inner shape)."
+            ),
+        },
+        "recommendations_history": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Optional history slice surfaced from the DRS payload "
+                "when ``include_recommendations_history=True``. Always "
+                "a list when present; absent otherwise."
+            ),
+        },
+    },
+    "required": ["cluster", "drs"],
+}
+
+
+#: ``vmware.composite.event.tail`` response schema.
+EVENT_TAIL_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "events": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Capped list of event dicts from "
+                "``POST:/EventManager/{moId}/QueryEvents`` (vi-json). "
+                "Truncated client-side to ``max_events``."
+            ),
+        },
+        "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Post-cap length of ``events`` -- detects truncation.",
+        },
+        "moId": {
+            "type": "string",
+            "description": "EventManager managed-object ID the call targeted.",
+        },
+        "max_events_applied": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Effective ``max_events`` cap applied to the response.",
+        },
+    },
+    "required": ["events", "count", "moId", "max_events_applied"],
+}
+
+
+#: ``vmware.composite.performance.summary`` response schema.
+PERFORMANCE_SUMMARY_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "entity_moid": {
+            "type": "string",
+            "description": "Managed-object ID of the queried entity.",
+        },
+        "perf_manager_moid": {
+            "type": "string",
+            "description": "PerformanceManager singleton moid the call targeted.",
+        },
+        "available_counters": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Counters returned by ``QueryAvailablePerfMetric`` for the entity (vi-json)."
+            ),
+        },
+        "samples": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Capped sample list from ``QueryPerf`` (vi-json). "
+                "Truncated client-side to ``max_samples``."
+            ),
+        },
+        "interval_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Sample interval forwarded to QueryPerf.",
+        },
+        "max_samples_applied": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Effective ``max_samples`` cap applied to ``samples``.",
+        },
+    },
+    "required": [
+        "entity_moid",
+        "perf_manager_moid",
+        "available_counters",
+        "samples",
+        "interval_seconds",
+        "max_samples_applied",
+    ],
+}
+
+
+#: ``vmware.composite.datastore.usage`` response schema.
+DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "datastores": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Datastore managed-object ID.",
+                    },
+                    "name": {
+                        "type": ["string", "null"],
+                        "description": "Datastore name from the listing row.",
+                    },
+                    "type": {
+                        "type": ["string", "null"],
+                        "description": "Datastore type (e.g. ``VMFS``, ``NFS``).",
+                    },
+                    "capacity": {
+                        "type": ["integer", "null"],
+                        "description": (
+                            "Total capacity in bytes; ``null`` when the detail payload omits it."
+                        ),
+                    },
+                    "free_space": {
+                        "type": ["integer", "null"],
+                        "description": (
+                            "Free space in bytes; ``null`` when the detail payload omits it."
+                        ),
+                    },
+                    "vm_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Number of VMs placed on this datastore.",
+                    },
+                    "vm_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of VMs placed on this datastore.",
+                    },
+                },
+                "required": ["id", "vm_count", "vm_names"],
+            },
+            "description": "One row per datastore in scope.",
+        },
+    },
+    "required": ["datastores"],
+}
+
+
+#: ``vmware.composite.network.portgroup.audit`` response schema.
+NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "portgroups": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Portgroup managed-object ID.",
+                    },
+                    "name": {
+                        "type": ["string", "null"],
+                        "description": "Portgroup name from the listing row.",
+                    },
+                    "dvs": {
+                        "type": ["string", "null"],
+                        "description": "Parent DVS managed-object ID, if present.",
+                    },
+                    "dvs_name": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Parent DVS display name resolved via the "
+                            "DVS listing; ``null`` when the parent DVS "
+                            "is unknown or unnamed."
+                        ),
+                    },
+                    "type": {
+                        "type": ["string", "null"],
+                        "description": "Portgroup type from the listing row.",
+                    },
+                    "vm_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Number of VMs attached to this portgroup.",
+                    },
+                    "vm_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of VMs attached to this portgroup.",
+                    },
+                },
+                "required": ["id", "vm_count", "vm_names"],
+            },
+            "description": "One row per portgroup in scope.",
+        },
+    },
+    "required": ["portgroups"],
 }

@@ -26,6 +26,9 @@ operator-facing dispatch should not pop the approval queue for them.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from typing import Any, NamedTuple
+
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -35,10 +38,15 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
+    CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
+    DATASTORE_USAGE_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
+    EVENT_TAIL_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
+    NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
+    PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -54,6 +62,120 @@ __all__ = ["register_vmware_composite_operations"]
 _PRODUCT = "vmware"
 _VERSION = "9.0"
 _IMPL_ID = "vmware-rest"
+
+
+class _CompositeSpec(NamedTuple):
+    """Per-composite registration arguments.
+
+    Field-table form rather than five repeated kwargs blocks: keeps the
+    op_id / handler / schemas / group / tags adjacent per composite and
+    drops the outer registrar function below the 100-line block limit.
+    Common fields (``product`` / ``version`` / ``impl_id`` /
+    ``safety_level="safe"`` / ``requires_approval=False``) live on the
+    call site below, not in the spec.
+    """
+
+    op_id: str
+    handler: Callable[..., Awaitable[dict[str, Any]]]
+    summary: str
+    description: str
+    parameter_schema: dict[str, Any]
+    response_schema: dict[str, Any]
+    group_key: str
+    tags: list[str]
+
+
+_COMPOSITES: tuple[_CompositeSpec, ...] = (
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.drs_recommendations",
+        handler=cluster_drs_recommendations_composite,
+        summary="Read DRS state + active recommendations for a cluster.",
+        description=(
+            "Orchestrates a cluster summary read plus a DRS-config read, "
+            "returning a single aggregated payload. Equivalent of "
+            "'govc cluster.recommendations' for the operator-facing "
+            "workflow: one composite call replaces two raw vCenter REST "
+            "GETs while preserving the audit-tree linkage between the "
+            "parent composite row and each sub-op row. Read-only -- "
+            "never mutates cluster state."
+        ),
+        parameter_schema=CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "read-only", "cluster", "drs"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.event.tail",
+        handler=event_tail_composite,
+        summary="Tail recent vCenter events via EventManager.QueryEvents.",
+        description=(
+            "Calls EventManager.QueryEvents (vi-json) against the "
+            "EventManager singleton, optionally narrowed by a per-call "
+            "moId override, and caps the returned array client-side. "
+            "Equivalent of 'govc events' for the operator-facing "
+            "workflow. Read-only -- never mutates the event store."
+        ),
+        parameter_schema=EVENT_TAIL_PARAMETER_SCHEMA,
+        response_schema=EVENT_TAIL_RESPONSE_SCHEMA,
+        group_key="events",
+        tags=["composite", "read-only", "events", "vi-json"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.performance.summary",
+        handler=performance_summary_composite,
+        summary="Summarise performance metrics for one entity via PerformanceManager.",
+        description=(
+            "Discovers available counters for the target entity via "
+            "PerformanceManager.QueryAvailablePerfMetric, then fetches "
+            "sample values via PerformanceManager.QueryPerf (both "
+            "vi-json). Returns the available-counter list plus the "
+            "capped sample list; the caller can post-filter to whichever "
+            "metric they need. Read-only -- never mutates counter "
+            "configuration."
+        ),
+        parameter_schema=PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
+        response_schema=PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
+        group_key="performance",
+        tags=["composite", "read-only", "performance", "vi-json"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.datastore.usage",
+        handler=datastore_usage_composite,
+        summary="List datastores with capacity, free space, and VM placement.",
+        description=(
+            "Reads the datastore listing, then per-datastore detail "
+            "(capacity, free space, type) plus the VM-placement filter "
+            "via 'GET:/vcenter/vm?filter.datastores=...'. Aggregates "
+            "into one row per datastore including vm_count + vm_names. "
+            "Equivalent of an operator-facing 'storage usage report' "
+            "that would otherwise require 1 + N sub-calls. Read-only -- "
+            "never mutates storage state."
+        ),
+        parameter_schema=DATASTORE_USAGE_PARAMETER_SCHEMA,
+        response_schema=DATASTORE_USAGE_RESPONSE_SCHEMA,
+        group_key="storage",
+        tags=["composite", "read-only", "storage", "datastore"],
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.network.portgroup.audit",
+        handler=network_portgroup_audit_composite,
+        summary="Audit distributed portgroups with parent DVS + connected VMs.",
+        description=(
+            "Reads the distributed-switch listing (for parent-DVS name "
+            "enrichment) plus the distributed-portgroup listing, then "
+            "per-portgroup queries the VM list via "
+            "'GET:/vcenter/vm?filter.networks=...'. Aggregates one row "
+            "per portgroup with its parent DVS + connected VM names. "
+            "Equivalent of 'govc dvs.portgroup.info' rolled up across "
+            "every portgroup. Read-only -- never mutates network "
+            "configuration."
+        ),
+        parameter_schema=NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
+        response_schema=NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
+        group_key="networking",
+        tags=["composite", "read-only", "networking", "portgroup"],
+    ),
+)
 
 
 async def register_vmware_composite_operations(
@@ -78,121 +200,20 @@ async def register_vmware_composite_operations(
     it ``None`` and each registration resolves the process-wide
     singleton.
     """
-    await register_composite_operation(
-        product=_PRODUCT,
-        version=_VERSION,
-        impl_id=_IMPL_ID,
-        op_id="vmware.composite.cluster.drs_recommendations",
-        handler=cluster_drs_recommendations_composite,
-        summary="Read DRS state + active recommendations for a cluster.",
-        description=(
-            "Orchestrates a cluster summary read plus a DRS-config read, "
-            "returning a single aggregated payload. Equivalent of "
-            "'govc cluster.recommendations' for the operator-facing "
-            "workflow: one composite call replaces two raw vCenter REST "
-            "GETs while preserving the audit-tree linkage between the "
-            "parent composite row and each sub-op row. Read-only -- "
-            "never mutates cluster state."
-        ),
-        parameter_schema=CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
-        group_key="cluster",
-        tags=["composite", "read-only", "cluster", "drs"],
-        safety_level="safe",
-        requires_approval=False,
-        embedding_service=embedding_service,
-    )
-
-    await register_composite_operation(
-        product=_PRODUCT,
-        version=_VERSION,
-        impl_id=_IMPL_ID,
-        op_id="vmware.composite.event.tail",
-        handler=event_tail_composite,
-        summary="Tail recent vCenter events via EventManager.QueryEvents.",
-        description=(
-            "Calls EventManager.QueryEvents (vi-json) against the "
-            "EventManager singleton, optionally narrowed by a per-call "
-            "moId override, and caps the returned array client-side. "
-            "Equivalent of 'govc events' for the operator-facing "
-            "workflow. Read-only -- never mutates the event store."
-        ),
-        parameter_schema=EVENT_TAIL_PARAMETER_SCHEMA,
-        group_key="events",
-        tags=["composite", "read-only", "events", "vi-json"],
-        safety_level="safe",
-        requires_approval=False,
-        embedding_service=embedding_service,
-    )
-
-    await register_composite_operation(
-        product=_PRODUCT,
-        version=_VERSION,
-        impl_id=_IMPL_ID,
-        op_id="vmware.composite.performance.summary",
-        handler=performance_summary_composite,
-        summary="Summarise performance metrics for one entity via PerformanceManager.",
-        description=(
-            "Discovers available counters for the target entity via "
-            "PerformanceManager.QueryAvailablePerfMetric, then fetches "
-            "sample values via PerformanceManager.QueryPerf (both "
-            "vi-json). Returns the available-counter list plus the "
-            "capped sample list; the caller can post-filter to whichever "
-            "metric they need. Read-only -- never mutates counter "
-            "configuration."
-        ),
-        parameter_schema=PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
-        group_key="performance",
-        tags=["composite", "read-only", "performance", "vi-json"],
-        safety_level="safe",
-        requires_approval=False,
-        embedding_service=embedding_service,
-    )
-
-    await register_composite_operation(
-        product=_PRODUCT,
-        version=_VERSION,
-        impl_id=_IMPL_ID,
-        op_id="vmware.composite.datastore.usage",
-        handler=datastore_usage_composite,
-        summary="List datastores with capacity, free space, and VM placement.",
-        description=(
-            "Reads the datastore listing, then per-datastore detail "
-            "(capacity, free space, type) plus the VM-placement filter "
-            "via 'GET:/vcenter/vm?filter.datastores=...'. Aggregates "
-            "into one row per datastore including vm_count + vm_names. "
-            "Equivalent of an operator-facing 'storage usage report' "
-            "that would otherwise require 1 + N sub-calls. Read-only -- "
-            "never mutates storage state."
-        ),
-        parameter_schema=DATASTORE_USAGE_PARAMETER_SCHEMA,
-        group_key="storage",
-        tags=["composite", "read-only", "storage", "datastore"],
-        safety_level="safe",
-        requires_approval=False,
-        embedding_service=embedding_service,
-    )
-
-    await register_composite_operation(
-        product=_PRODUCT,
-        version=_VERSION,
-        impl_id=_IMPL_ID,
-        op_id="vmware.composite.network.portgroup.audit",
-        handler=network_portgroup_audit_composite,
-        summary="Audit distributed portgroups with parent DVS + connected VMs.",
-        description=(
-            "Reads the distributed-switch listing (for parent-DVS name "
-            "enrichment) plus the distributed-portgroup listing, then "
-            "per-portgroup queries the VM list via "
-            "'GET:/vcenter/vm?filter.networks=...'. Aggregates one row "
-            "per portgroup with its parent DVS + connected VM names. "
-            "Equivalent of 'govc dvs.portgroup.info' rolled up across "
-            "every portgroup. Read-only -- never mutates network "
-            "configuration."
-        ),
-        parameter_schema=NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
-        group_key="networking",
-        tags=["composite", "read-only", "networking", "portgroup"],
-        safety_level="safe",
-        requires_approval=False,
-        embedding_service=embedding_service,
-    )
+    for spec in _COMPOSITES:
+        await register_composite_operation(
+            product=_PRODUCT,
+            version=_VERSION,
+            impl_id=_IMPL_ID,
+            op_id=spec.op_id,
+            handler=spec.handler,
+            summary=spec.summary,
+            description=spec.description,
+            parameter_schema=spec.parameter_schema,
+            response_schema=spec.response_schema,
+            group_key=spec.group_key,
+            tags=spec.tags,
+            safety_level="safe",
+            requires_approval=False,
+            embedding_service=embedding_service,
+        )

@@ -301,9 +301,7 @@ async def test_parameter_schema_persists_with_required_fields(
     )
     assert perf_schema["required"] == ["entity_moid"]
     # event.tail has no required keys (everything has a default).
-    event_schema: dict[str, Any] = dict(
-        by_op["vmware.composite.event.tail"].parameter_schema
-    )
+    event_schema: dict[str, Any] = dict(by_op["vmware.composite.event.tail"].parameter_schema)
     assert event_schema["required"] == []
     # All schemas pin ``additionalProperties=False`` so typo'd keys
     # surface clearly at dispatcher-side validation.
@@ -312,6 +310,65 @@ async def test_parameter_schema_persists_with_required_fields(
         assert schema["additionalProperties"] is False, (
             f"{op_id}: parameter_schema missing additionalProperties:False"
         )
+
+
+@pytest.mark.asyncio
+async def test_response_schema_persists_for_every_composite(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Each row persists a non-null ``response_schema`` describing the handler's return shape.
+
+    Parity with the ``vault.kv.read`` precedent (the only other typed-op
+    surface that ships an explicit response schema). The meta-tools
+    surface this on ``describe_operation`` calls without needing a
+    schema-construction round-trip.
+    """
+    await register_vmware_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_EXPECTED_OP_IDS))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    by_op = {row.op_id: row for row in rows}
+    # Each row carries a response_schema dict (non-null, non-empty).
+    for op_id in _EXPECTED_OP_IDS:
+        schema = by_op[op_id].response_schema
+        assert isinstance(schema, dict), (
+            f"{op_id}: expected response_schema dict, got {type(schema).__name__}"
+        )
+        assert schema.get("type") == "object", (
+            f"{op_id}: response_schema must be a JSON-Schema object"
+        )
+        assert "properties" in schema, f"{op_id}: response_schema missing 'properties' key"
+    # Spot-check the load-bearing top-level keys per composite.
+    cluster_resp: dict[str, Any] = dict(
+        by_op["vmware.composite.cluster.drs_recommendations"].response_schema
+    )
+    cluster_props = dict(cluster_resp["properties"])
+    assert {"cluster", "drs", "recommendations_history"} <= set(cluster_props)
+    assert set(cluster_resp["required"]) == {"cluster", "drs"}
+
+    event_resp: dict[str, Any] = dict(by_op["vmware.composite.event.tail"].response_schema)
+    event_props = dict(event_resp["properties"])
+    assert {"events", "count", "moId", "max_events_applied"} <= set(event_props)
+
+    perf_resp: dict[str, Any] = dict(by_op["vmware.composite.performance.summary"].response_schema)
+    perf_props = dict(perf_resp["properties"])
+    assert {"entity_moid", "available_counters", "samples"} <= set(perf_props)
+
+    ds_resp: dict[str, Any] = dict(by_op["vmware.composite.datastore.usage"].response_schema)
+    assert "datastores" in dict(ds_resp["properties"])
+
+    net_resp: dict[str, Any] = dict(
+        by_op["vmware.composite.network.portgroup.audit"].response_schema
+    )
+    assert "portgroups" in dict(net_resp["properties"])
 
 
 @pytest.mark.asyncio

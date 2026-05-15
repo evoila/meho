@@ -205,7 +205,12 @@ async def cluster_drs_recommendations_composite(
         # None keeps the operator-visible shape stable.
         drs_payload = out["drs"]
         history = drs_payload.get("history", []) if isinstance(drs_payload, dict) else []
-        out["recommendations_history"] = list(history)
+        # Guard against non-list ``history`` values (e.g. a target that
+        # returns the field as a scalar / dict). ``list(history)`` would
+        # iterate keys on a dict or fail on a scalar; the contract is
+        # "always a list when surfaced", so coerce to an empty list when
+        # the payload disagrees.
+        out["recommendations_history"] = history if isinstance(history, list) else []
     return out
 
 

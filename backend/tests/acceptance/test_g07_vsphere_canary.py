@@ -1333,17 +1333,20 @@ async def test_canary_vi_json_op_dispatch_path_substitution(
         )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        # Pull any vi-json-tagged row; the moId-bearing path shape is
-        # uniform across the corpus (every vi-json op uses the shared
-        # parameter ref T11 resolved).
-        stmt = (
-            select(EndpointDescriptor)
-            .where(
-                EndpointDescriptor.product == _CANARY_PRODUCT,
-                EndpointDescriptor.version == _CANARY_VERSION,
-                EndpointDescriptor.impl_id == _CANARY_IMPL_ID,
-            )
-            .limit(500)
+        # Pull the full canary corpus; the moId-bearing path shape is
+        # uniform across vi-json (every op uses the shared parameter
+        # ref T11 resolved), so any vi-json-tagged row satisfies the
+        # smoke. A prior ``.limit(500)`` here was unsound: with vcenter
+        # ingesting first (~1,275 rows) and vi-json after (~2,195),
+        # the unordered LIMIT prefix landed entirely in vcenter rows
+        # in heap order and the Python filter then matched nothing.
+        # Iterating the full ~3,470-row corpus is cheap vs. the
+        # ingest cost the fixture already paid; the pattern matches
+        # ``test_canary_every_row_tagged_with_spec_source`` above.
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.product == _CANARY_PRODUCT,
+            EndpointDescriptor.version == _CANARY_VERSION,
+            EndpointDescriptor.impl_id == _CANARY_IMPL_ID,
         )
         candidates = (await session.execute(stmt)).scalars().all()
     vi_json_descriptors = [
@@ -1354,7 +1357,7 @@ async def test_canary_vi_json_op_dispatch_path_substitution(
         and "moId" in d.parameter_schema["properties"]
     ]
     assert vi_json_descriptors, (
-        "no vi-json-tagged descriptor with a moId property in the first 500 rows; "
+        "no vi-json-tagged descriptor with a moId property in the canary corpus; "
         "expected at least one (vi-json ops universally reference the shared moId param)"
     )
     descriptor = vi_json_descriptors[0]

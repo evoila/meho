@@ -5,7 +5,6 @@ package audit
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -124,8 +123,8 @@ func getMyRecent(ctx context.Context, backplaneURL string, opts myRecentOptions)
 		return nil, err
 	}
 	var out QueryResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode my-recent response: %w", err)
+	if err := decodeAuditResponse(raw, &out); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }

@@ -342,15 +342,40 @@ func doAuthedRequest(
 	}
 	defer resp.Body.Close()
 
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	// Read with a 1-MiB cap. The +1 byte over the cap is the
+	// truncation-detection trick: if ReadAll returns more than
+	// ``responseBodyCap`` bytes, the response was at least cap+1 bytes
+	// long and the decoder would otherwise consume a silently-truncated
+	// JSON payload. Fail loud instead — a truncated audit response
+	// surfaces as "decode error: unexpected end of JSON input" without
+	// this guard, which buries the real cause (response too large for
+	// the chassis CLI's safety cap).
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, responseBodyCap+1))
 	if readErr != nil {
 		return nil, fmt.Errorf("read response: %w", readErr)
+	}
+	if int64(len(raw)) > responseBodyCap {
+		return nil, fmt.Errorf(
+			"response body exceeds %d-byte cap; refusing to decode possibly-truncated JSON",
+			responseBodyCap,
+		)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
 	}
 	return raw, nil
 }
+
+// responseBodyCap is the hard upper bound on a backplane response
+// body the CLI is willing to read. Audit pages cap at 1000 rows
+// server-side; a typical row at ~500 B yields ~500 KiB, so 1 MiB
+// is comfortable headroom. The cap protects against an
+// adversarial / misconfigured backplane sending an unbounded
+// response — the alternative is OOM. The +1-byte read pattern in
+// “doAuthedRequest“ distinguishes "fits in the cap" from
+// "truncated at the cap" so the decoder doesn't silently consume
+// a half-JSON.
+const responseBodyCap int64 = 1 << 20
 
 // httpError carries a non-2xx response so per-verb runners can
 // render the right category.
@@ -416,4 +441,23 @@ func strDeref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// decodeAuditResponse JSON-decodes *raw* into *out* via a
+// “json.Decoder“ configured with “UseNumber()“ so payload numbers
+// survive as “json.Number“ rather than collapsing to “float64“.
+// Audit payloads carry integer-valued fields (“hit_count“,
+// “query_count“, timestamps stored as Unix seconds, etc.) that
+// silently lose precision when decoded as IEEE-754 doubles past
+// 2^53. The exact-integer-preserving path lets jq pipelines and the
+// human-readable summary render the value the backend actually wrote
+// instead of a rounded float. Used by every audit verb that decodes
+// an “Entry“ or “QueryResult“.
+func decodeAuditResponse(raw []byte, out any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(out); err != nil {
+		return fmt.Errorf("decode audit response: %w", err)
+	}
+	return nil
 }

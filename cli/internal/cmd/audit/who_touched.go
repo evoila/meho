@@ -5,7 +5,6 @@ package audit
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -139,8 +138,8 @@ func getWhoTouched(ctx context.Context, backplaneURL string, opts whoTouchedOpti
 		return nil, err
 	}
 	var out QueryResult
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode who-touched response: %w", err)
+	if err := decodeAuditResponse(raw, &out); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }

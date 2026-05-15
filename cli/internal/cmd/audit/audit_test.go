@@ -6,6 +6,8 @@ package audit
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -168,5 +170,120 @@ func TestStrDerefHandlesNil(t *testing.T) {
 	v := "hello"
 	if got := strDeref(&v); got != "hello" {
 		t.Errorf("strDeref(&\"hello\"): got %q", got)
+	}
+}
+
+// TestDoAuthedRequestRejectsOversizedResponse — the 1 MiB cap on
+// “io.LimitReader“ is paired with a +1-byte read so a response
+// that fills the cap surfaces as a clear error rather than feeding
+// a silently-truncated JSON body into the decoder. Without this
+// guard, an oversized audit page would surface as
+// "unexpected end of JSON input" — confusing to operators and
+// indistinguishable from a malformed backend response.
+func TestDoAuthedRequestRejectsOversizedResponse(t *testing.T) {
+	// Emit 1 MiB + 1 byte of payload — exactly at the threshold the
+	// truncation guard fires. Anything strictly above the cap must
+	// fail loud rather than silently decode.
+	oversized := strings.Repeat("a", int(responseBodyCap)+1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/audit/test", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(oversized))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := doAuthedRequest(ctx, srv.URL, "GET", "/api/v1/audit/test", nil)
+	if err == nil {
+		t.Fatalf("expected error on oversized response")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error message does not mention size cap: %v", err)
+	}
+}
+
+// TestDoAuthedRequestAcceptsResponseExactlyAtCap — the threshold
+// itself is allowed through. The +1-byte read distinguishes
+// "fits in the cap" from "spilled past the cap"; exactly-at-cap
+// must still decode.
+func TestDoAuthedRequestAcceptsResponseExactlyAtCap(t *testing.T) {
+	exact := strings.Repeat("a", int(responseBodyCap))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/audit/test", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(exact))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	raw, err := doAuthedRequest(ctx, srv.URL, "GET", "/api/v1/audit/test", nil)
+	if err != nil {
+		t.Fatalf("exact-cap response should not error: %v", err)
+	}
+	if int64(len(raw)) != responseBodyCap {
+		t.Errorf("expected %d bytes; got %d", responseBodyCap, len(raw))
+	}
+}
+
+// TestDecodeAuditResponsePreservesLargeIntegers — Unix-millis
+// timestamps and other 64-bit integers in audit payloads must
+// survive the JSON round-trip without losing precision. Without
+// “UseNumber()“ they collapse to “float64“ and any integer above
+// 2^53 rounds — silently mangling forensic data.
+func TestDecodeAuditResponsePreservesLargeIntegers(t *testing.T) {
+	// 1745923128091 is a real Unix-millis timestamp shape; well
+	// below 2^53 so the failure mode for ``float64`` would be a
+	// trailing-decimal render rather than a precision loss, but the
+	// principle covers the larger range too.
+	raw := []byte(`{
+		"id": "00000000-0000-0000-0000-000000000001",
+		"ts": "2026-05-13T00:00:00Z",
+		"tenant_id": null,
+		"principal_sub": "damir",
+		"principal_name": null,
+		"target_id": null,
+		"target_name": null,
+		"method": "GET",
+		"path": "/x",
+		"status_code": 200,
+		"request_id": null,
+		"duration_ms": null,
+		"payload": {"hit_count": 1745923128091, "ratio": 0.5},
+		"op_id": "x.y",
+		"op_class": "read",
+		"result_status": "ok",
+		"parent_audit_id": null,
+		"agent_session_id": null,
+		"broadcast_event_id": null
+	}`)
+	var entry Entry
+	if err := decodeAuditResponse(raw, &entry); err != nil {
+		t.Fatalf("decodeAuditResponse: %v", err)
+	}
+	// The payload's integer must render exactly — no scientific
+	// notation, no trailing ``.0``. With ``UseNumber()`` it lands
+	// as ``json.Number("1745923128091")`` and formatPayloadScalar
+	// emits the bare digits.
+	hit, ok := entry.Payload["hit_count"]
+	if !ok {
+		t.Fatalf("payload missing hit_count: %+v", entry.Payload)
+	}
+	got := formatPayloadScalar(hit)
+	if got != "1745923128091" {
+		t.Errorf("integer precision lost: got %q; want %q", got, "1745923128091")
+	}
+	// And the float case still renders compactly.
+	ratio, ok := entry.Payload["ratio"]
+	if !ok {
+		t.Fatalf("payload missing ratio: %+v", entry.Payload)
+	}
+	if got := formatPayloadScalar(ratio); got != "0.5" {
+		t.Errorf("float render: got %q; want %q", got, "0.5")
 	}
 }

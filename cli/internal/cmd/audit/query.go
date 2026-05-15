@@ -233,8 +233,8 @@ func postQuery(ctx context.Context, backplaneURL string, opts queryOptions) (*Qu
 		return nil, err
 	}
 	var out QueryResult
-	if err := json.Unmarshal(resp, &out); err != nil {
-		return nil, fmt.Errorf("decode audit query response: %w", err)
+	if err := decodeAuditResponse(resp, &out); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }

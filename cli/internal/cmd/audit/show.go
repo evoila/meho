@@ -109,8 +109,8 @@ func getEntry(ctx context.Context, backplaneURL, auditID string) (*Entry, error)
 		return nil, err
 	}
 	var out Entry
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("decode audit show response: %w", err)
+	if err := decodeAuditResponse(raw, &out); err != nil {
+		return nil, err
 	}
 	return &out, nil
 }
@@ -174,13 +174,24 @@ func formatPayload(payload map[string]any) string {
 // formatPayloadScalar renders one payload value compactly. Scalars
 // print directly; objects/lists round-trip through json.Marshal so
 // at least the JSON form is readable on a single line.
+//
+// “json.Number“ is the load-bearing case: the package's decoder
+// uses “UseNumber()“ (see “decodeAuditResponse“) so payload
+// numbers survive as their exact decimal string rather than rounding
+// through float64. A 64-bit “hit_count“ like “1745923128091“ (a
+// Unix-millis timestamp) prints back identical to what the backend
+// wrote, where “float64(1745923128091)“ would round-trip lossily.
 func formatPayloadScalar(v any) string {
 	switch v := v.(type) {
 	case string:
 		return v
 	case bool:
 		return fmt.Sprintf("%t", v)
+	case json.Number:
+		return v.String()
 	case float64:
+		// Defensive fallback for code paths that bypass the
+		// UseNumber decoder (e.g. payloads constructed by tests).
 		if v == float64(int64(v)) {
 			return fmt.Sprintf("%d", int64(v))
 		}

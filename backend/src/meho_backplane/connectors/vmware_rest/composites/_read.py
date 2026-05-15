@@ -1,0 +1,566 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Read-only ``vmware.composite.*`` handler functions (5 composites).
+
+Each handler is a module-level ``async def`` that takes the dispatcher's
+composite-branch keyword args ``(operator, target, params,
+dispatch_child)`` and returns a single aggregated dict via 2-3 calls to
+``dispatch_child`` (the
+:class:`~meho_backplane.operations.composite.DispatchChild` callable
+the dispatcher builds in
+:func:`~meho_backplane.operations.dispatcher._run_source_kind_branch`).
+
+Why module-level functions
+--------------------------
+
+:func:`~meho_backplane.operations.typed_register.derive_handler_ref`
+rejects closures, ``functools.partial``, and lambdas at registration
+time (``__qualname__`` containing ``<locals>``). Module-level
+``async def`` is the only shape the dispatcher can resolve via
+``importlib.import_module`` + chained ``getattr`` at first-dispatch
+time.
+
+Why ``dispatch_child`` not direct httpx
+---------------------------------------
+
+Composite handlers MUST route every sub-call through ``dispatch_child``
+rather than calling the connector's ``_request_json`` directly, for
+four load-bearing reasons (per #508's issue body + the
+:class:`DispatchChild` Protocol docstring):
+
+1. **Audit-tree linkage** -- ``dispatch_child`` binds
+   :data:`~meho_backplane.operations._audit.parent_audit_id_var` to the
+   composite parent's audit row, so every sub-op's audit row carries
+   ``parent_audit_id`` automatically. Direct httpx breaks the chain.
+2. **Bounded recursion** -- the
+   :data:`~meho_backplane.operations.composite.composite_depth_var`
+   contextvar enforces :attr:`Settings.composite_max_depth`. A
+   misbehaving handler that recursed into another composite would be
+   caught here, not at request-volume scale.
+3. **Policy + broadcast** -- the dispatcher's policy gate (G2.x) and
+   broadcast publish (G6.x) run on every dispatched sub-op. Direct
+   httpx evades both.
+4. **Param validation** -- each sub-op's ``parameter_schema`` validates
+   inbound params at dispatch time; direct httpx skips validation.
+
+Op_id contract for sub-ops
+--------------------------
+
+The sub-op ``op_id`` strings used below are the canonical
+``METHOD:/path`` keys that the ingest path (:func:`parse_openapi`)
+generates from ``vcenter.yaml`` + ``vi-json.yaml`` -- e.g.
+``"GET:/vcenter/datastore"``, ``"POST:/EventManager/{moId}/QueryEvents"``.
+These mirror the rows the G0.7 canary asserts on
+(``tests/acceptance/test_g07_vsphere_canary.py``'s
+``GOVC_PARITY_BENCHMARK`` tuple); the canary is the de-facto registry
+of canonical op_ids.
+
+Response envelope handling
+--------------------------
+
+The vSphere REST surface returns JSON shapes that vary by endpoint:
+
+* vSphere 7+ REST: bare arrays / objects (``[{"datastore": ...}, ...]``).
+* Pre-7 REST: ``{"value": [...]}`` envelopes.
+* vi-json: bare arrays / objects.
+
+The composite handlers tolerate both via :func:`_unwrap_value` so they
+work uniformly against modern vCenter and vcsim simulator targets. The
+helper is intentionally permissive -- composite tests stub responses
+in either shape; production sub-op responses pass through the
+``HttpConnector._request_json`` decoder which preserves the upstream
+shape verbatim.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors import OperationResult
+from meho_backplane.operations.composite import DispatchChild
+
+__all__ = [
+    "cluster_drs_recommendations_composite",
+    "datastore_usage_composite",
+    "event_tail_composite",
+    "network_portgroup_audit_composite",
+    "performance_summary_composite",
+]
+
+
+# Sub-op ids the handlers dispatch through. Centralised so the
+# registration tests can assert against the same constants without
+# re-spelling the paths.
+_CONNECTOR_ID = "vmware-rest-9.0"
+_OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
+_OP_GET_CLUSTER_DRS = "GET:/vcenter/cluster/{cluster}/drs"
+_OP_POST_QUERY_EVENTS = "POST:/EventManager/{moId}/QueryEvents"
+_OP_POST_QUERY_AVAILABLE_PERF_METRIC = "POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric"
+_OP_POST_QUERY_PERF = "POST:/PerformanceManager/{moId}/QueryPerf"
+_OP_LIST_DATASTORES = "GET:/vcenter/datastore"
+_OP_GET_DATASTORE = "GET:/vcenter/datastore/{datastore}"
+_OP_LIST_VMS = "GET:/vcenter/vm"
+_OP_LIST_DVS = "GET:/vcenter/network/distributed-switch"
+_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"
+
+
+def _unwrap_value(payload: Any) -> Any:
+    """Return the inner ``value`` field on a pre-7 envelope, else *payload*.
+
+    vSphere's REST API straddles two response shapes:
+
+    * Modern (7.0+): bare arrays / objects (``[{...}, {...}]``).
+    * Legacy (pre-7, plus some vcsim builds): wraps the body in
+      ``{"value": [...]}``.
+
+    Composite handlers don't care which shape they receive -- the
+    underlying typed sub-ops are the same. The unwrap is purely a
+    parser-side ergonomic.
+    """
+    if isinstance(payload, dict) and set(payload.keys()) == {"value"}:
+        return payload["value"]
+    return payload
+
+
+def _require_ok(result: OperationResult) -> Any:
+    """Return :attr:`OperationResult.result` or raise on a non-OK status.
+
+    The composite handlers prefer to fail loudly when a sub-op errors
+    -- a swallowed error would silently produce a malformed
+    aggregation. The dispatcher's outer exception branch wraps the
+    raised ``RuntimeError`` into a ``connector_error``
+    :class:`OperationResult` for the composite parent, surfacing the
+    underlying sub-op's failure on ``extras["exception_class"]``.
+    """
+    if result.status != "ok":
+        raise RuntimeError(
+            f"composite sub-op {result.op_id!r} returned status="
+            f"{result.status!r}: {result.error or '<no error message>'}"
+        )
+    return result.result
+
+
+async def cluster_drs_recommendations_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Read cluster summary + DRS state in one composite call.
+
+    Op-id: ``vmware.composite.cluster.drs_recommendations``.
+
+    Sub-ops dispatched (sequential):
+
+    1. ``GET:/vcenter/cluster/{cluster}`` -- cluster summary (name,
+       resource pool, default host, DRS-enabled flag).
+    2. ``GET:/vcenter/cluster/{cluster}/drs`` -- DRS configuration
+       (enabled, automation level, migration threshold).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"cluster": <summary dict>, "drs": <drs config dict>,
+        "recommendations_history": <optional list>}``. The
+        ``recommendations_history`` key appears only when the operator
+        sets ``include_recommendations_history=True``; otherwise it is
+        omitted.
+
+    The ``include_recommendations_history`` flag is a placeholder for
+    a future Task that adds a third sub-op (DRS recommendations list).
+    The vSphere REST surface does not expose a stable
+    "recommendations" endpoint in 9.0; the issue body's "DRS state read
+    + performance read + format" hint is satisfied by reading the
+    cluster summary plus the DRS config -- the format/aggregation is
+    what differentiates the composite from a raw GET.
+    """
+    cluster_moid = params["cluster"]
+    include_history = bool(params.get("include_recommendations_history", False))
+
+    cluster_result = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_GET_CLUSTER,
+            params={"cluster": cluster_moid},
+        )
+    )
+    drs_result = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_GET_CLUSTER_DRS,
+            params={"cluster": cluster_moid},
+        )
+    )
+    out: dict[str, Any] = {
+        "cluster": _unwrap_value(cluster_result),
+        "drs": _unwrap_value(drs_result),
+    }
+    if include_history:
+        # Surface the history slice from the DRS payload when present.
+        # vSphere 9.0 returns ``{"drs_config": ..., "history": [...]}``;
+        # the key is absent on legacy targets. Empty list rather than
+        # None keeps the operator-visible shape stable.
+        drs_payload = out["drs"]
+        history = drs_payload.get("history", []) if isinstance(drs_payload, dict) else []
+        # Guard against non-list ``history`` values (e.g. a target that
+        # returns the field as a scalar / dict). ``list(history)`` would
+        # iterate keys on a dict or fail on a scalar; the contract is
+        # "always a list when surfaced", so coerce to an empty list when
+        # the payload disagrees.
+        out["recommendations_history"] = history if isinstance(history, list) else []
+    return out
+
+
+async def event_tail_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Tail recent events via EventManager.QueryEvents (vi-json).
+
+    Op-id: ``vmware.composite.event.tail``.
+
+    Sub-ops dispatched (sequential, single call):
+
+    1. ``POST:/EventManager/{moId}/QueryEvents`` -- recent events. The
+       vi-json call returns an array of event dicts; the handler caps
+       the array client-side to ``max_events`` (default 100).
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"events": <list[event dict]>, "count": <int>,
+        "moId": <str>, "max_events_applied": <int>}``. ``count`` is
+        the post-cap length so operators can detect truncation.
+    """
+    mo_id = params.get("moId", "EventManager")
+    max_events = int(params.get("max_events", 100))
+    raw = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_POST_QUERY_EVENTS,
+            params={"moId": mo_id},
+        )
+    )
+    events = _unwrap_value(raw)
+    if not isinstance(events, list):
+        # vi-json QueryEvents always returns a list. A non-list payload
+        # is a connector-side bug -- surface it to the caller rather
+        # than guess at the shape.
+        raise RuntimeError(
+            f"event_tail: expected list from {_OP_POST_QUERY_EVENTS!r}, got {type(events).__name__}"
+        )
+    capped = events[:max_events]
+    return {
+        "events": capped,
+        "count": len(capped),
+        "moId": mo_id,
+        "max_events_applied": max_events,
+    }
+
+
+async def performance_summary_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Summarise performance metrics for one entity via PerformanceManager (vi-json).
+
+    Op-id: ``vmware.composite.performance.summary``.
+
+    Sub-ops dispatched (sequential):
+
+    1. ``POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric`` --
+       discover available counter IDs for the target entity.
+    2. ``POST:/PerformanceManager/{moId}/QueryPerf`` -- fetch sample
+       values for those counters.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"entity_moid": <str>, "perf_manager_moid": <str>,
+        "available_counters": <list>, "samples": <list>,
+        "interval_seconds": <int>, "max_samples_applied": <int>}``.
+
+    The handler does not pre-filter counters in v0.2; the entire
+    available-counter list is forwarded to QueryPerf so the operator
+    gets a complete snapshot. A counter-curation flag (e.g.
+    ``counter_ids``) is an explicit v0.2.next concern per the issue
+    body's *Out of scope* section.
+    """
+    entity_moid = params["entity_moid"]
+    perf_mgr_moid = params.get("perf_manager_moid", "PerfMgr")
+    interval_s = int(params.get("interval_seconds", 20))
+    max_samples = int(params.get("max_samples", 60))
+
+    available_raw = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_POST_QUERY_AVAILABLE_PERF_METRIC,
+            params={"moId": perf_mgr_moid, "entity": entity_moid},
+        )
+    )
+    available = _unwrap_value(available_raw)
+    if not isinstance(available, list):
+        raise RuntimeError(
+            "performance_summary: expected list from "
+            f"{_OP_POST_QUERY_AVAILABLE_PERF_METRIC!r}, "
+            f"got {type(available).__name__}"
+        )
+
+    samples_raw = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_POST_QUERY_PERF,
+            params={
+                "moId": perf_mgr_moid,
+                "entity": entity_moid,
+                "interval_seconds": interval_s,
+            },
+        )
+    )
+    samples = _unwrap_value(samples_raw)
+    if not isinstance(samples, list):
+        raise RuntimeError(
+            "performance_summary: expected list from "
+            f"{_OP_POST_QUERY_PERF!r}, got {type(samples).__name__}"
+        )
+    capped = samples[:max_samples]
+    return {
+        "entity_moid": entity_moid,
+        "perf_manager_moid": perf_mgr_moid,
+        "available_counters": available,
+        "samples": capped,
+        "interval_seconds": interval_s,
+        "max_samples_applied": max_samples,
+    }
+
+
+async def datastore_usage_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """List datastores with capacity + free + VM placement summary.
+
+    Op-id: ``vmware.composite.datastore.usage``.
+
+    Sub-ops dispatched (per-datastore, sequential):
+
+    1. ``GET:/vcenter/datastore`` -- list every datastore (optionally
+       narrowed via ``filter.names``).
+    2. For each datastore:
+       a. ``GET:/vcenter/datastore/{datastore}`` -- detailed capacity /
+          free / type / accessible flag.
+       b. ``GET:/vcenter/vm`` with ``filter.datastores`` -- VMs whose
+          working directory sits on this datastore. Drives the
+          ``vm_count`` + ``vm_names`` aggregation.
+
+    Sequential dispatch is intentional: each datastore's detail call
+    inherits the prior call's authentication state, and the audit
+    chain reads cleanly as ``listing -> detail(ds1) -> vms(ds1) ->
+    detail(ds2) -> vms(ds2) -> ...``. A future v0.2.next optimisation
+    could ``asyncio.gather`` the per-datastore detail + VM calls
+    pairwise, but the simpler shape is easier to audit-trace through
+    operator UIs.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"datastores": [{"id": ..., "name": ..., "type": ...,
+        "capacity": ..., "free_space": ..., "vm_count": ...,
+        "vm_names": [...]}, ...]}``. The ``capacity`` / ``free_space``
+        fields may be ``None`` if the upstream payload omits them
+        (e.g. a partially-mounted datastore).
+    """
+    filter_names: list[str] = list(params.get("filter_names") or [])
+
+    listing_params: dict[str, Any] = {}
+    if filter_names:
+        listing_params["filter.names"] = filter_names
+
+    listing = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_LIST_DATASTORES,
+            params=listing_params,
+        )
+    )
+    entries = _unwrap_value(listing)
+    if not isinstance(entries, list):
+        raise RuntimeError(
+            f"datastore_usage: expected list from {_OP_LIST_DATASTORES!r}, "
+            f"got {type(entries).__name__}"
+        )
+
+    aggregated: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        ds_id = entry.get("datastore")
+        if not isinstance(ds_id, str):
+            # vSphere REST always returns the moid under the key
+            # ``datastore``; absence is an upstream malformation. Skip
+            # silently rather than abort the aggregation.
+            continue
+        detail = _require_ok(
+            await dispatch_child(
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_GET_DATASTORE,
+                params={"datastore": ds_id},
+            )
+        )
+        detail_payload = _unwrap_value(detail)
+        vms = _require_ok(
+            await dispatch_child(
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_LIST_VMS,
+                params={"filter.datastores": [ds_id]},
+            )
+        )
+        vm_entries = _unwrap_value(vms)
+        if not isinstance(vm_entries, list):
+            vm_entries = []
+        vm_names = [
+            v["name"] for v in vm_entries if isinstance(v, dict) and isinstance(v.get("name"), str)
+        ]
+        capacity = detail_payload.get("capacity") if isinstance(detail_payload, dict) else None
+        free_space = detail_payload.get("free_space") if isinstance(detail_payload, dict) else None
+        aggregated.append(
+            {
+                "id": ds_id,
+                "name": entry.get("name"),
+                "type": entry.get("type"),
+                "capacity": capacity,
+                "free_space": free_space,
+                "vm_count": len(vm_names),
+                "vm_names": vm_names,
+            }
+        )
+    return {"datastores": aggregated}
+
+
+async def network_portgroup_audit_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    dispatch_child: DispatchChild,
+) -> dict[str, Any]:
+    """Audit distributed portgroups with parent DVS + connected-VM aggregation.
+
+    Op-id: ``vmware.composite.network.portgroup.audit``.
+
+    Sub-ops dispatched:
+
+    1. ``GET:/vcenter/network/distributed-switch`` -- list DVS entries
+       (filtered to ``filter_dvs`` when supplied). Drives the DVS
+       index used to enrich each portgroup.
+    2. ``GET:/vcenter/network/distributed-portgroup`` -- list
+       portgroups (filtered to ``filter_dvs`` when supplied).
+    3. Per portgroup: ``GET:/vcenter/vm`` with ``filter.networks`` --
+       VMs connected to the portgroup. Drives the ``vm_count`` +
+       ``vm_names`` aggregation.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"portgroups": [{"id": ..., "name": ..., "dvs": <id|None>,
+        "dvs_name": <str|None>, "type": ..., "vm_count": ...,
+        "vm_names": [...]}, ...]}``.
+    """
+    filter_dvs = params.get("filter_dvs")
+    include_disconnected = bool(params.get("include_disconnected_vms", False))
+
+    dvs_params: dict[str, Any] = {}
+    if isinstance(filter_dvs, str):
+        dvs_params["filter.vdses"] = [filter_dvs]
+
+    dvs_listing = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_LIST_DVS,
+            params=dvs_params,
+        )
+    )
+    dvs_entries = _unwrap_value(dvs_listing)
+    if not isinstance(dvs_entries, list):
+        dvs_entries = []
+    # Build a moid->name lookup so the per-portgroup row carries the
+    # DVS name in addition to its id.
+    dvs_index: dict[str, str | None] = {}
+    for entry in dvs_entries:
+        if not isinstance(entry, dict):
+            continue
+        dvs_id = entry.get("vds") or entry.get("distributed_switch")
+        if isinstance(dvs_id, str):
+            name = entry.get("name") if isinstance(entry.get("name"), str) else None
+            dvs_index[dvs_id] = name
+
+    pg_params: dict[str, Any] = {}
+    if isinstance(filter_dvs, str):
+        pg_params["filter.vdses"] = [filter_dvs]
+
+    pg_listing = _require_ok(
+        await dispatch_child(
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_LIST_PORTGROUPS,
+            params=pg_params,
+        )
+    )
+    pg_entries = _unwrap_value(pg_listing)
+    if not isinstance(pg_entries, list):
+        raise RuntimeError(
+            f"network_portgroup_audit: expected list from {_OP_LIST_PORTGROUPS!r}, "
+            f"got {type(pg_entries).__name__}"
+        )
+
+    aggregated: list[dict[str, Any]] = []
+    for entry in pg_entries:
+        if not isinstance(entry, dict):
+            continue
+        pg_id = entry.get("network") or entry.get("portgroup")
+        if not isinstance(pg_id, str):
+            continue
+        vm_params: dict[str, Any] = {"filter.networks": [pg_id]}
+        if not include_disconnected:
+            # vSphere REST accepts a power-state filter; the
+            # ``include_disconnected`` flag toggles it. Default is
+            # active VMs only.
+            vm_params["filter.power_states"] = ["POWERED_ON"]
+        vms = _require_ok(
+            await dispatch_child(
+                connector_id=_CONNECTOR_ID,
+                op_id=_OP_LIST_VMS,
+                params=vm_params,
+            )
+        )
+        vm_entries = _unwrap_value(vms)
+        if not isinstance(vm_entries, list):
+            vm_entries = []
+        vm_names = [
+            v["name"] for v in vm_entries if isinstance(v, dict) and isinstance(v.get("name"), str)
+        ]
+        dvs_ref = entry.get("vds") or entry.get("distributed_switch")
+        dvs_ref_str = dvs_ref if isinstance(dvs_ref, str) else None
+        aggregated.append(
+            {
+                "id": pg_id,
+                "name": entry.get("name"),
+                "dvs": dvs_ref_str,
+                "dvs_name": dvs_index.get(dvs_ref_str) if dvs_ref_str else None,
+                "type": entry.get("type"),
+                "vm_count": len(vm_names),
+                "vm_names": vm_names,
+            }
+        )
+    return {"portgroups": aggregated}

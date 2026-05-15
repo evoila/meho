@@ -54,11 +54,22 @@ register_connector_v2(
     cls=VmwareRestConnector,
 )
 
+# Side-effect import for the read-composites registrar wiring (G3.1-T5
+# #508). The package's __init__ appends
+# ``register_vmware_composite_operations`` onto the lifespan-driven
+# registrar list via
+# :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`,
+# so the 5 ``vmware.composite.*`` rows land in ``endpoint_descriptor``
+# during ``run_typed_op_registrars`` -- same lifecycle phase the typed
+# Vault ops use.
+from meho_backplane.connectors.vmware_rest import composites  # noqa: E402
+
 __all__ = [
     "SessionCredentials",
     "VmwareRestConnector",
     "VsphereSessionLoader",
     "VsphereTargetLike",
+    "composites",
     "load_session_credentials_from_vault",
     "product_from_line_id",
 ]

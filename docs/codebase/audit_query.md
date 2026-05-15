@@ -108,6 +108,35 @@ query_audit(filters, tenant_id, session)
                    if has_more else None
 ```
 
+## REST surface (G8.1-T2 #466)
+
+The four routes under `backend/src/meho_backplane/api/v1/audit.py` are the
+operator-facing entry into the substrate. All four dispatch through
+`query_audit` with `tenant_id=operator.tenant_id` (from the JWT) — the
+substrate's tenant-scoping invariant is enforced one layer up.
+
+| Route | Filter shape | Notes |
+|---|---|---|
+| `POST /api/v1/audit/query` | Body is `AuditQueryRequest`; `since` / `until` are strings parsed at the router via `parse_duration` (`"24h"` / `"7d"` / ISO-8601). Client-supplied `tenant_id` is silently dropped by Pydantic's default `extra="ignore"` — the route never reads tenant from the body. | Full-filter surface. |
+| `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
+| `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
+| `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
+
+Every route binds two audit-override contextvars **before** the substrate
+call — `audit_op_id="meho.audit.query"` and `audit_op_class="audit_query"`
+— so the audit row written by `AuditMiddleware` carries the canonical
+op_id and the broadcast event ships as aggregate-only (`{op_id,
+result_status, row_count}` only, never the request filter). The
+`audit_row_count` contextvar is bound after the substrate returns so the
+broadcast event's `row_count` field reflects the actual returned
+cardinality. The shape mirrors `api/v1/retrieve_usage.py`.
+
+RBAC: `operator` role minimum. `read_only` → 403; `tenant_admin` → 200.
+
+Error mapping at the router boundary: `DurationParseError` (router-side),
+`InvalidCursorError` (substrate-side), `UnsupportedFilterError`
+(substrate-side) all surface as 400 with the underlying message.
+
 ## Dependencies
 
 * `meho_backplane.db.models.AuditLog` — read schema; this package never writes.
@@ -116,7 +145,11 @@ query_audit(filters, tenant_id, session)
   shared with the broadcast publish path so audit-query and broadcast classify
   identically.
 
-No reverse dependencies in v0.2 — T2 / T3 / T4 add them later.
+Reverse dependencies:
+
+* `meho_backplane.api.v1.audit` (T2 #466) — REST router for the four
+  consumer-facing routes; dispatches every call through `query_audit`.
+* T3 #467 (CLI) and T4 #468 (MCP) follow.
 
 ## Known issues / v0.2 gaps
 
@@ -160,7 +193,9 @@ No reverse dependencies in v0.2 — T2 / T3 / T4 add them later.
 ## References
 
 * Initiative: [G8.1 #334](https://github.com/evoila/meho/issues/334).
-* Task: [G8.1-T1 #465](https://github.com/evoila/meho/issues/465).
+* Tasks: [G8.1-T1 #465](https://github.com/evoila/meho/issues/465) (substrate),
+  [G8.1-T2 #466](https://github.com/evoila/meho/issues/466) (REST routes +
+  duration parser).
 * Write paths: `backend/src/meho_backplane/audit.py`,
   `backend/src/meho_backplane/mcp/audit.py`.
 * Op-class classifier: `backend/src/meho_backplane/broadcast/events.py:172`

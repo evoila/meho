@@ -63,6 +63,36 @@ func TestNormaliseURLBasic(t *testing.T) {
 	}
 }
 
+// TestNormaliseURLRejectsNonHTTPScheme — fail-fast on schemes the
+// HTTP client can't dial (ftp://, ssh://, file:// for a backplane
+// URL, etc.). Without this gate the operator only sees an obscure
+// error later inside http.Client.Do.
+func TestNormaliseURLRejectsNonHTTPScheme(t *testing.T) {
+	cases := []string{
+		"ftp://meho.test",
+		"ssh://meho.test",
+		"file:///tmp/meho",
+	}
+	for _, in := range cases {
+		_, err := normaliseURL(in)
+		if err == nil || !strings.Contains(err.Error(), "must use http or https") {
+			t.Errorf("normaliseURL(%q): want http/https rejection; got %v", in, err)
+		}
+	}
+}
+
+// TestNormaliseURLAcceptsHTTP — plain http (no s) is accepted —
+// operators on bench / staging deploys sometimes run without TLS.
+func TestNormaliseURLAcceptsHTTP(t *testing.T) {
+	got, err := normaliseURL("http://localhost:8080/")
+	if err != nil {
+		t.Fatalf("normaliseURL: %v", err)
+	}
+	if got != "http://localhost:8080" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // TestClassifyBackplaneErrorRoutesByCause — ErrConfigNotFound (or
 // any wrapping error) maps to AuthExpired; everything else maps
 // to Unexpected. Same routing as the operation sibling.
@@ -100,7 +130,8 @@ func TestPathEscapeOpIDColonsAndSlashes(t *testing.T) {
 
 // ---------- resolveSpecURI ----------
 
-// TestResolveSpecURIFile — file:// passes through verbatim.
+// TestResolveSpecURIFile — file:// passes through verbatim once
+// validated (scheme=file, path absolute).
 func TestResolveSpecURIFile(t *testing.T) {
 	got, err := resolveSpecURI("file:///abs/path/spec.yaml")
 	if err != nil {
@@ -108,6 +139,36 @@ func TestResolveSpecURIFile(t *testing.T) {
 	}
 	if got != "file:///abs/path/spec.yaml" {
 		t.Fatalf("file scheme passthrough; got %q", got)
+	}
+}
+
+// TestResolveSpecURIFileRejectsRelative — a `file://relative/path`
+// URI (no leading slash, so url.Parse reads `relative` as a host)
+// or an empty path is rejected client-side so operators see a fast
+// hint rather than a backplane 4xx.
+func TestResolveSpecURIFileRejectsRelative(t *testing.T) {
+	cases := []string{
+		"file://relative/path/spec.yaml", // host=relative, not empty
+		"file://",                        // empty path
+		"file:///",                       // root only — no spec name
+	}
+	for _, in := range cases {
+		_, err := resolveSpecURI(in)
+		if err == nil || !strings.Contains(err.Error(), "file URI") {
+			t.Errorf("resolveSpecURI(%q): want rejection; got %v", in, err)
+		}
+	}
+}
+
+// TestResolveSpecURIFileAcceptsLocalhostHost — `file://localhost/abs`
+// is the RFC 8089 equivalent of `file:///abs` and must pass.
+func TestResolveSpecURIFileAcceptsLocalhostHost(t *testing.T) {
+	got, err := resolveSpecURI("file://localhost/abs/spec.yaml")
+	if err != nil {
+		t.Fatalf("file://localhost: %v", err)
+	}
+	if got != "file://localhost/abs/spec.yaml" {
+		t.Fatalf("file://localhost passthrough; got %q", got)
 	}
 }
 
@@ -227,6 +288,30 @@ func TestLoadTextFlagFileReference(t *testing.T) {
 	}
 }
 
+// TestLoadTextFlagFileReferenceCRLF — file with CRLF line endings
+// (`hello\r\n`) trims to "hello", not "hello\r". A stray `\r`
+// silently slips into the persisted when_to_use / name field on
+// every CRLF-saved override file otherwise.
+func TestLoadTextFlagFileReferenceCRLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blob.md")
+	if err := os.WriteFile(path, []byte("hello world\r\n"), 0o644); err != nil {
+		t.Fatalf("setup write: %v", err)
+	}
+	cmd := &cobra.Command{Use: "x"}
+	cmd.Flags().String("name", "", "")
+	if err := cmd.ParseFlags([]string{"--name", "@" + path}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	val, present, err := loadTextFlag(cmd, "name")
+	if err != nil {
+		t.Fatalf("loadTextFlag: %v", err)
+	}
+	if !present || val != "hello world" {
+		t.Fatalf("CRLF trim: got (%q, %v); want (\"hello world\", true)", val, present)
+	}
+}
+
 // TestLoadTextFlagMissingFile — `@nonexistent` surfaces a read
 // failure with the path name.
 func TestLoadTextFlagMissingFile(t *testing.T) {
@@ -323,12 +408,28 @@ func TestPrintListTableEmpty(t *testing.T) {
 }
 
 // TestPrintListTableHappyPath — happy-path render with two connectors;
-// built-in connectors (TenantID="") render as "(built-in)".
+// built-in connectors (TenantID=nil) render as "(built-in)". The
+// rollup label is derived per-row from the three *_group_count fields
+// (see deriveRollupLabel) — the canonical wire shape has no
+// connector-wide review_status field.
 func TestPrintListTableHappyPath(t *testing.T) {
+	tenantA := "tenant-a"
 	r := &ListResponse{
 		Connectors: []Summary{
-			{ConnectorID: "vault-1.x", ReviewStatus: "enabled", GroupCount: 2, OperationCount: 7, TenantID: ""},
-			{ConnectorID: "vmware-rest-9.0", ReviewStatus: "staged", GroupCount: 9, OperationCount: 961, TenantID: "tenant-a"},
+			{
+				ConnectorID:       "vault-1.x",
+				GroupCount:        2,
+				EnabledGroupCount: 2,
+				OperationCount:    7,
+				TenantID:          nil,
+			},
+			{
+				ConnectorID:      "vmware-rest-9.0",
+				GroupCount:       9,
+				StagedGroupCount: 9,
+				OperationCount:   961,
+				TenantID:         &tenantA,
+			},
 		},
 	}
 	var buf bytes.Buffer
@@ -341,8 +442,69 @@ func TestPrintListTableHappyPath(t *testing.T) {
 	}
 }
 
+// TestDeriveRollupLabelTable pins the per-status → rollup mapping.
+// Operators reading `meho connector list` see this label; getting it
+// right matters for the "is there review backlog?" question.
+func TestDeriveRollupLabelTable(t *testing.T) {
+	cases := []struct {
+		name                      string
+		staged, enabled, disabled int
+		want                      string
+	}{
+		{"empty connector", 0, 0, 0, "(empty)"},
+		{"all staged", 3, 0, 0, "staged"},
+		{"all enabled", 0, 5, 0, "enabled"},
+		{"all disabled", 0, 0, 2, "disabled"},
+		{"partial enable", 1, 2, 0, "mixed"},
+		{"staged plus disabled", 1, 0, 1, "mixed"},
+		{"every bucket non-zero", 1, 1, 1, "mixed"},
+	}
+	for _, tc := range cases {
+		got := deriveRollupLabel(tc.staged, tc.enabled, tc.disabled)
+		if got != tc.want {
+			t.Errorf("%s: deriveRollupLabel(%d,%d,%d) = %q; want %q",
+				tc.name, tc.staged, tc.enabled, tc.disabled, got, tc.want)
+		}
+	}
+}
+
+// TestSummaryDecodesCanonicalListItem pins the wire shape: the
+// canonical ConnectorListItem (PR #488 api_schemas.py) ships
+// per-status group counts and no top-level review_status. Decoding
+// drift here surfaces as a Major-class wire-contract failure on the
+// next ingest round-trip.
+func TestSummaryDecodesCanonicalListItem(t *testing.T) {
+	raw := []byte(`{
+		"connector_id": "vmware-rest-9.0",
+		"product": "vmware",
+		"version": "9.0",
+		"impl_id": "vmware-rest",
+		"tenant_id": null,
+		"group_count": 9,
+		"staged_group_count": 5,
+		"enabled_group_count": 3,
+		"disabled_group_count": 1,
+		"operation_count": 961
+	}`)
+	var got Summary
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode ConnectorListItem: %v", err)
+	}
+	if got.ConnectorID != "vmware-rest-9.0" {
+		t.Errorf("connector_id: got %q", got.ConnectorID)
+	}
+	if got.TenantID != nil {
+		t.Errorf("tenant_id should be nil for built-in; got %v", got.TenantID)
+	}
+	if got.StagedGroupCount != 5 || got.EnabledGroupCount != 3 || got.DisabledGroupCount != 1 {
+		t.Errorf("per-status counts: got %+v", got)
+	}
+}
+
 // TestPrintReviewTableHappyPath — review render shows groups + ops
-// + flags.
+// + per-group review_status flags. The connector-wide rollup label
+// is derived from the per-group review_status counts (same shape as
+// `meho connector list`).
 func TestPrintReviewTableHappyPath(t *testing.T) {
 	summary := "List vSphere clusters"
 	r := &ReviewPayload{
@@ -350,13 +512,15 @@ func TestPrintReviewTableHappyPath(t *testing.T) {
 		Product:      "vmware",
 		Version:      "9.0",
 		ImplID:       "vmware-rest",
-		ReviewStatus: "staged",
+		TotalOpCount: 2,
 		Groups: []ReviewGroup{
 			{
-				GroupKey:  "cluster",
-				Name:      "Cluster",
-				WhenToUse: "Use for vSphere cluster lifecycle ops.",
-				Operations: []ReviewOperation{
+				GroupKey:     "cluster",
+				Name:         "Cluster",
+				WhenToUse:    "Use for vSphere cluster lifecycle ops.",
+				ReviewStatus: "staged",
+				OpCount:      2,
+				Ops: []ReviewOperation{
 					{OpID: "GET:/api/vcenter/cluster", Summary: &summary, SafetyLevel: "safe", IsEnabled: false},
 					{OpID: "DELETE:/api/vcenter/cluster/{id}", SafetyLevel: "dangerous", RequiresApproval: true, IsEnabled: false},
 				},
@@ -374,13 +538,78 @@ func TestPrintReviewTableHappyPath(t *testing.T) {
 }
 
 // TestPrintReviewTableEmptyGroups — zero-group connector renders
-// the explanation line.
+// the explanation line and shows "(empty)" rollup.
 func TestPrintReviewTableEmptyGroups(t *testing.T) {
-	r := &ReviewPayload{ConnectorID: "k8s-1.x", ReviewStatus: "staged", Groups: nil}
+	r := &ReviewPayload{ConnectorID: "k8s-1.x", Groups: nil}
 	var buf bytes.Buffer
 	printReviewTable(&buf, r)
 	if !strings.Contains(buf.String(), "no groups") {
 		t.Errorf("empty review: missing explanation; got:\n%s", buf.String())
+	}
+}
+
+// TestReviewPayloadDecodesCanonical pins the wire shape: the
+// canonical ConnectorReviewGroup (PR #431 / PR #488) ships `ops`
+// (not `operations`) and a per-group `review_status`; the payload
+// has no top-level review_status. Decoding drift here surfaces as
+// a Major-class wire-contract failure on the next `meho connector
+// review` round-trip.
+func TestReviewPayloadDecodesCanonical(t *testing.T) {
+	raw := []byte(`{
+		"connector_id": "vmware-rest-9.0",
+		"product": "vmware",
+		"version": "9.0",
+		"impl_id": "vmware-rest",
+		"tenant_id": null,
+		"groups": [
+			{
+				"group_key": "cluster",
+				"name": "Cluster",
+				"when_to_use": "use for cluster lifecycle ops",
+				"review_status": "staged",
+				"op_count": 1,
+				"ops": [
+					{
+						"op_id": "GET:/api/vcenter/cluster",
+						"summary": "List clusters",
+						"description": null,
+						"custom_description": null,
+						"safety_level": "safe",
+						"requires_approval": false,
+						"is_enabled": false,
+						"tags": ["cluster", "list"]
+					}
+				]
+			}
+		],
+		"total_op_count": 1
+	}`)
+	var got ReviewPayload
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode ConnectorReviewPayload: %v", err)
+	}
+	if got.TotalOpCount != 1 {
+		t.Errorf("total_op_count: got %d", got.TotalOpCount)
+	}
+	if len(got.Groups) != 1 {
+		t.Fatalf("groups: got %d, want 1", len(got.Groups))
+	}
+	g := got.Groups[0]
+	if g.ReviewStatus != "staged" {
+		t.Errorf("group review_status: got %q", g.ReviewStatus)
+	}
+	if g.OpCount != 1 {
+		t.Errorf("group op_count: got %d", g.OpCount)
+	}
+	if len(g.Ops) != 1 {
+		t.Fatalf("group ops: got %d, want 1", len(g.Ops))
+	}
+	op := g.Ops[0]
+	if op.OpID != "GET:/api/vcenter/cluster" {
+		t.Errorf("op_id: got %q", op.OpID)
+	}
+	if len(op.Tags) != 2 || op.Tags[0] != "cluster" {
+		t.Errorf("op tags: got %v", op.Tags)
 	}
 }
 
@@ -565,7 +794,12 @@ func TestGetListWithMockServer(t *testing.T) {
 			}
 			writeJSON(t, w, 200, ListResponse{
 				Connectors: []Summary{
-					{ConnectorID: "vmware-rest-9.0", ReviewStatus: "staged", GroupCount: 9, OperationCount: 961},
+					{
+						ConnectorID:      "vmware-rest-9.0",
+						GroupCount:       9,
+						StagedGroupCount: 9,
+						OperationCount:   961,
+					},
 				},
 			})
 		},
@@ -712,6 +946,37 @@ func TestPostTransitionEnable(t *testing.T) {
 	}
 	if got.ReviewStatus != "enabled" {
 		t.Fatalf("unexpected transition: %+v", got)
+	}
+}
+
+// TestDecodeErrorClassifiedAsUnexpected — a 200 OK with garbage
+// JSON body must classify as `unexpected_response` (the request
+// reached the backplane and the backplane returned 200; the body
+// just didn't match the agreed contract). Without this branch, a
+// contract drift between T5 and T6 presents to the operator as
+// "your network is down", which is misleading.
+func TestDecodeErrorClassifiedAsUnexpected(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"GET /api/v1/connectors": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			// Malformed JSON — triggers json.SyntaxError on decode.
+			_, _ = w.Write([]byte(`{"connectors": [{"connector_id": "x"`))
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	_, err := getList(context.Background(), srv.URL, "all")
+	if err == nil {
+		t.Fatalf("expected decode error; got nil")
+	}
+	// The error should be classifiable as a JSON syntax error so
+	// renderRequestError routes it to Unexpected (not Unreachable).
+	var se *json.SyntaxError
+	var ute *json.UnmarshalTypeError
+	if !errors.As(err, &se) && !errors.As(err, &ute) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected JSON decode error; got %T %v", err, err)
 	}
 }
 

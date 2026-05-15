@@ -14,24 +14,38 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// Summary mirrors the backend ConnectorSummary Pydantic model: one
-// row per ingested connector with high-level review state + bulk op
-// count for the operator's overview table. The full per-op detail
-// comes from `meho connector review <id>`.
+// Summary mirrors the backend ConnectorListItem Pydantic model
+// (operations/ingest/api_schemas.py) verbatim: one row per ingested
+// connector with parsed coordinates + tenant scope + per-status group
+// counts + bulk op count for the operator's overview table. The full
+// per-op detail comes from `meho connector review <id>`.
 //
-// Named `Summary` (rather than `ConnectorSummary`) inside the
+// Named `Summary` (rather than `ConnectorListItem`) inside the
 // `connector` package to satisfy the revive/stutter rule —
-// `connector.ConnectorSummary` is the linter's least-favourite
+// `connector.ConnectorListItem` is the linter's least-favourite
 // double; `connector.Summary` reads naturally at the call site.
+//
+// Note: the canonical payload has no `review_status` field. The
+// review state is per-group (some groups can be staged while others
+// are enabled — common when an operator partially approves a
+// connector). The operator-facing rollup label rendered in the
+// human table is derived from the three per-status counts at render
+// time; see `deriveRollupLabel`.
+//
+// `tenant_id` is a UUID for tenant-curated connectors and JSON `null`
+// for built-in connectors. Pointer-to-string so we can distinguish
+// "field absent" from "empty string" in the rendered table.
 type Summary struct {
-	ConnectorID    string `json:"connector_id"`
-	Product        string `json:"product"`
-	Version        string `json:"version"`
-	ImplID         string `json:"impl_id"`
-	ReviewStatus   string `json:"review_status"`
-	GroupCount     int    `json:"group_count"`
-	OperationCount int    `json:"operation_count"`
-	TenantID       string `json:"tenant_id,omitempty"`
+	ConnectorID        string  `json:"connector_id"`
+	Product            string  `json:"product"`
+	Version            string  `json:"version"`
+	ImplID             string  `json:"impl_id"`
+	TenantID           *string `json:"tenant_id"`
+	GroupCount         int     `json:"group_count"`
+	StagedGroupCount   int     `json:"staged_group_count"`
+	EnabledGroupCount  int     `json:"enabled_group_count"`
+	DisabledGroupCount int     `json:"disabled_group_count"`
+	OperationCount     int     `json:"operation_count"`
 }
 
 // ListResponse is the envelope for GET /api/v1/connectors.
@@ -152,16 +166,60 @@ func printListTable(w io.Writer, status string, r *ListResponse) {
 		"connector_id", "status", "tenant", "grps", "ops",
 	)
 	for _, c := range r.Connectors {
-		tenant := c.TenantID
-		if tenant == "" {
-			tenant = "(built-in)"
+		tenant := "(built-in)"
+		if c.TenantID != nil && *c.TenantID != "" {
+			tenant = *c.TenantID
 		}
 		fmt.Fprintf(w, "%-32s %-10s %-10s %5d %5d\n",
 			truncate(c.ConnectorID, 32),
-			c.ReviewStatus,
+			deriveRollupLabel(c.StagedGroupCount, c.EnabledGroupCount, c.DisabledGroupCount),
 			truncate(tenant, 10),
 			c.GroupCount,
 			c.OperationCount,
 		)
 	}
+}
+
+// deriveRollupLabel computes a connector-wide status rollup from the
+// three per-group review_status counts the backend ships in
+// ConnectorListItem. The canonical payload has no top-level
+// review_status (a connector can hold a mix of staged / enabled /
+// disabled groups), so the operator-facing label is derived here.
+//
+// Rules (load-bearing; mirrored in the `review` verb's header):
+//
+//   - "(empty)"  — connector has zero groups (post-ingest before
+//     grouping, or every group was orphan-only and got pruned).
+//   - "staged"   — at least one group is still awaiting review and
+//     none have been enabled yet. The operator-facing question is
+//     "is there anything left to review" and the answer is yes.
+//   - "enabled"  — every group is enabled. The connector is fully
+//     live; all `is_enabled=true` operations are dispatchable.
+//   - "disabled" — every group is disabled. The connector was
+//     rolled back; no operations are dispatchable. Per-op overrides
+//     are preserved (a future re-enable picks them back up).
+//   - "mixed"    — partial enable / partial review state, or an
+//     unknown enum value the CLI doesn't recognise. The CLI bias
+//     here is conservative: surface the heterogeneity rather than
+//     hide it under a single label.
+func deriveRollupLabel(staged, enabled, disabled int) string {
+	total := staged + enabled + disabled
+	if total == 0 {
+		return "(empty)"
+	}
+	if staged == total {
+		return "staged"
+	}
+	if enabled == total {
+		return "enabled"
+	}
+	if disabled == total {
+		return "disabled"
+	}
+	// At least two of {staged, enabled, disabled} are non-zero, or
+	// the per-status counts don't sum to group_count (server shipped
+	// a status the CLI doesn't recognise). "mixed" is the right
+	// operator-facing answer in both cases — surface the
+	// heterogeneity rather than hide it under a single label.
+	return "mixed"
 }

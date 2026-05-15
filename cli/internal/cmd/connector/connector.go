@@ -46,6 +46,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -131,6 +132,13 @@ func normaliseURL(s string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		// Fail fast on schemes we can't dial (ftp://, ssh://, plain
+		// host names without a scheme parsed as opaque, etc.). Without
+		// this check the verb only fails much later inside the HTTP
+		// client with a less actionable error.
+		return "", fmt.Errorf("backplane URL %q must use http or https", s)
+	}
 	if u.Host == "" {
 		return "", fmt.Errorf("backplane URL %q has no host", s)
 	}
@@ -189,6 +197,26 @@ func renderRequestError(
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("call %s: HTTP %d: %s",
 				backplaneURL, he.StatusCode, he.Body)),
+			jsonOut,
+		)
+	}
+	// Distinguish response-shape failures (decode / contract drift)
+	// from genuine network failures. The former are *Unexpected*
+	// — the request reached the backplane, the backplane returned
+	// 200, but the body didn't match the agreed wire contract. The
+	// latter (default branch) remain *Unreachable*: connection
+	// reset, DNS failure, TLS handshake, etc. Without this split,
+	// a contract drift between T5 and T6 (different field names,
+	// changed status enum) presents to the operator as "your
+	// network is down", which is misleading.
+	var syntaxErr *json.SyntaxError
+	var unmarshalErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) ||
+		errors.As(err, &unmarshalErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf("call %s: invalid JSON response: %v",
+				backplaneURL, err)),
 			jsonOut,
 		)
 	}
@@ -319,10 +347,13 @@ func loadTextFlag(cmd *cobra.Command, name string) (value string, present bool, 
 			return "", false, fmt.Errorf("read --%s file %q: %w", name, path, rerr)
 		}
 		// Trim the trailing newline editors add by reflex. Embedded
-		// newlines inside the text are preserved; only the final \n
-		// is stripped so a 1-line file passed via @ doesn't carry a
-		// gratuitous trailing newline through the JSON body.
-		return strings.TrimRight(string(blob), "\n"), true, nil
+		// newlines inside the text are preserved; only the final
+		// CRLF / LF is stripped so a 1-line file passed via @ doesn't
+		// carry a gratuitous trailing newline through the JSON body.
+		// `\r\n` covers CRLF (Windows) and LF (Unix) line endings;
+		// trimming only `\n` leaves a stray `\r` on CRLF files which
+		// leaks into persisted field values.
+		return strings.TrimRight(string(blob), "\r\n"), true, nil
 	}
 	return raw, true, nil
 }
@@ -368,6 +399,34 @@ func resolveSpecURI(raw string) (string, error) {
 		return "", errors.New("--spec value is empty")
 	}
 	if strings.HasPrefix(raw, "file://") {
+		// Validate locally so operators see a fast CLI error rather
+		// than a backplane 4xx. The contract is `file://<absolute
+		// path>` — relative or scheme-less file URIs are rejected.
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "file" {
+			return "", fmt.Errorf("--spec %q: invalid file URI", raw)
+		}
+		// Per RFC 8089, file URIs have either an empty authority
+		// or `localhost`. A bare `file://relative/path` would
+		// parse `relative` as the host, which is what RFC 3986
+		// says but not what an operator typing the URL means. Reject
+		// any other host so the typo surfaces here instead of as
+		// a confused on-disk lookup.
+		if u.Host != "" && u.Host != "localhost" {
+			return "", fmt.Errorf("--spec %q: file URI host must be empty or \"localhost\"", raw)
+		}
+		// u.Path is the on-disk path with the `file://` (and optional
+		// host) prefix stripped. `path.IsAbs` covers POSIX absolute
+		// paths; the Windows drive-letter form (`/C:/...`) also
+		// satisfies path.IsAbs after url.Parse normalises the leading
+		// slash, so one check covers both.
+		//
+		// Root-only (`file:///`) is rejected too — there's no spec
+		// file name to ingest. `len(u.Path) <= 1` covers both the
+		// empty case and the bare-slash case.
+		if len(u.Path) <= 1 || !path.IsAbs(u.Path) {
+			return "", fmt.Errorf("--spec %q: file URI must be an absolute path to a spec", raw)
+		}
 		return raw, nil
 	}
 	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {

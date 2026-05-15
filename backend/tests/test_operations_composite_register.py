@@ -437,6 +437,183 @@ async def test_register_typed_rejects_composite_shaped_handler(
     assert "composite_module_level_handler" in str(excinfo.value)
 
 
+# ---------------------------------------------------------------------------
+# Cross-kind re-registration on an already-persisted natural key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_composite_rejects_cross_kind_over_existing_typed_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """An op already registered as ``typed`` cannot be re-registered as ``composite``.
+
+    Regression test for the natural-key lookup gap: the unique key
+    ``(tenant_id, product, version, impl_id, op_id)`` does not include
+    ``source_kind``, so without the guard in
+    :func:`_register_in_session` a stray composite registration on the
+    same key would silently UPDATE everything except ``source_kind``.
+    The dispatcher would then route through the typed branch (the
+    persisted value) while the registrant believed it had switched the
+    op to composite -- producing a :exc:`TypeError` at first dispatch
+    when the typed branch invoked the composite handler without the
+    ``dispatch_child`` kwarg.
+
+    The contract is: registration-time fail-fast, with the handler's
+    dotted path in the message so the operator can locate the
+    misroute in lifespan logs.
+    """
+    # Seed: register as typed via the production helper.
+    await register_typed_operation(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id="vmware.cross.kind.flip",
+        handler=typed_sub_op_handler,
+        summary="typed first",
+        description="initial typed registration",
+        parameter_schema={"type": "object"},
+        embedding_service=stub_embedding_service,
+    )
+
+    # Attempt: re-register the same natural key as composite.
+    with pytest.raises(HandlerSignatureError, match="cross-kind") as excinfo:
+        await register_composite_operation(
+            product="vmware",
+            version="9.0",
+            impl_id="vmware-rest",
+            op_id="vmware.cross.kind.flip",
+            handler=composite_module_level_handler,
+            summary="composite second",
+            description="attempted composite re-registration",
+            parameter_schema={"type": "object"},
+            embedding_service=stub_embedding_service,
+        )
+
+    # Error names both source_kinds + the op natural key.
+    message = str(excinfo.value)
+    assert "source_kind='typed'" in message
+    assert "source_kind='composite'" in message
+    assert "vmware.cross.kind.flip" in message
+
+    # And the persisted row remains typed -- the failed registration
+    # did not silently flip the row or leave it half-updated.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "vmware.cross.kind.flip"
+                )
+            )
+        ).scalar_one()
+    assert row.source_kind == "typed"
+    assert row.handler_ref == "tests.fixtures.composites.handlers.typed_sub_op_handler"
+
+
+@pytest.mark.asyncio
+async def test_register_typed_rejects_cross_kind_over_existing_composite_row(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Symmetric guard: composite-first then typed re-register also raises."""
+    # Seed: register as composite via the production helper.
+    await register_composite_operation(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id="vmware.cross.kind.flip.reverse",
+        handler=composite_module_level_handler,
+        summary="composite first",
+        description="initial composite registration",
+        parameter_schema={"type": "object"},
+        embedding_service=stub_embedding_service,
+    )
+
+    # Attempt: re-register the same natural key as typed.
+    with pytest.raises(HandlerSignatureError, match="cross-kind") as excinfo:
+        await register_typed_operation(
+            product="vmware",
+            version="9.0",
+            impl_id="vmware-rest",
+            op_id="vmware.cross.kind.flip.reverse",
+            handler=typed_sub_op_handler,
+            summary="typed second",
+            description="attempted typed re-registration",
+            parameter_schema={"type": "object"},
+            embedding_service=stub_embedding_service,
+        )
+
+    message = str(excinfo.value)
+    assert "source_kind='composite'" in message
+    assert "source_kind='typed'" in message
+    assert "vmware.cross.kind.flip.reverse" in message
+
+    # Persisted row remains composite.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "vmware.cross.kind.flip.reverse"
+                )
+            )
+        ).scalar_one()
+    assert row.source_kind == "composite"
+    assert row.handler_ref == "tests.fixtures.composites.handlers.composite_module_level_handler"
+
+
+@pytest.mark.asyncio
+async def test_register_composite_idempotent_same_kind_after_guard(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The cross-kind guard does not regress same-kind re-registration.
+
+    Re-registering the same op with the same ``source_kind`` must still
+    take the skip-re-embed / re-embed UPDATE path -- the guard fires
+    only on a mismatch.
+    """
+    await register_composite_operation(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id="vmware.same.kind.reregister",
+        handler=composite_module_level_handler,
+        summary="initial",
+        description="initial",
+        parameter_schema={"type": "object"},
+        embedding_service=stub_embedding_service,
+    )
+
+    # Same args twice -- no raise; the skip-re-embed UPDATE path runs.
+    await register_composite_operation(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id="vmware.same.kind.reregister",
+        handler=composite_module_level_handler,
+        summary="initial",
+        description="initial",
+        parameter_schema={"type": "object"},
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(
+                        EndpointDescriptor.op_id == "vmware.same.kind.reregister"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].source_kind == "composite"
+
+
 @pytest.mark.asyncio
 async def test_register_composite_signature_validation_runs_before_handler_ref(
     stub_embedding_service: AsyncMock,

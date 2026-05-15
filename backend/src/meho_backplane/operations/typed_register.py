@@ -658,6 +658,12 @@ async def register_typed_operation(
     HandlerRefError
         Handler is a closure, lambda, partial, or non-coroutine
         function. Subclass of :class:`ValueError`.
+    HandlerSignatureError
+        The natural key is already registered with
+        ``source_kind="composite"``. Cross-kind re-registration is
+        rejected at lookup time so a dispatch-time :exc:`TypeError`
+        cannot surface from an inconsistent persisted row. Subclass
+        of :class:`ValueError`.
 
     Behavioural contract
     --------------------
@@ -818,8 +824,12 @@ async def register_composite_operation(
         ``op_id`` empty / whitespace, or ``safety_level`` not in the
         bounded enum.
     HandlerSignatureError
-        Handler does not accept a ``dispatch_child`` parameter.
-        Subclass of :class:`ValueError`.
+        Handler does not accept a ``dispatch_child`` parameter, **or**
+        the natural key is already registered with
+        ``source_kind="typed"`` -- cross-kind re-registration is
+        rejected at lookup time so a dispatch-time :exc:`TypeError`
+        cannot surface from an inconsistent persisted row. Subclass
+        of :class:`ValueError`.
     HandlerRefError
         Handler is a closure, lambda, partial, or non-coroutine
         function (inherited from
@@ -981,6 +991,31 @@ async def _register_in_session(
     existing = result.scalar_one_or_none()
 
     if existing is not None:
+        # Cross-kind re-registration is a programmer error. The natural
+        # key ``(tenant_id, product, version, impl_id, op_id)`` does not
+        # include ``source_kind``, so without this guard a typed op
+        # could be silently re-registered as composite (or vice versa)
+        # by an unrelated connector init path -- the row would update
+        # everything except ``source_kind``, then at first dispatch
+        # the dispatcher would route to the wrong branch and the
+        # handler would crash with a :exc:`TypeError` (missing
+        # ``dispatch_child`` kwarg, or unexpected one). Fail fast at
+        # registration time with the handler's dotted path so the
+        # operator can locate the misroute in lifespan logs rather
+        # than under request load. Matches the fail-fast posture of
+        # :class:`HandlerSignatureError`'s existing cross-rejection
+        # checks (typed-handler-in-composite-helper and the inverse).
+        if existing.source_kind != source_kind:
+            raise HandlerSignatureError(
+                "cross-kind re-registration is not supported: "
+                f"op (product={product!r}, version={version!r}, "
+                f"impl_id={impl_id!r}, op_id={op_id!r}) is already "
+                f"registered with source_kind={existing.source_kind!r}; "
+                f"refusing to overwrite with source_kind={source_kind!r} "
+                f"(handler_ref={handler_ref!r}). If this is intentional, "
+                "delete the existing endpoint_descriptor row first."
+            )
+
         existing_text = build_embedding_text(
             summary=existing.summary or "",
             description=existing.description or "",

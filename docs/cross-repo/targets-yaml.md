@@ -349,14 +349,15 @@ v0.2.
 meho targets import rdc-hetzner-dc/targets.yaml --dry-run
 ```
 
-Prints the per-entry plan (CREATE / UPDATE / SKIP) without making
-any API calls. Add `--json` to format the plan as a structured
-object (`{create: [...], update: [...], skip: [...]}`) for piping
-into `jq` or capturing for diff against a follow-up dry-run.
-
-The dry-run code path is air-gap-safe: it does not contact the
-backplane, so an operator validating their YAML on a laptop with no
-network can still get the parse + mapping check.
+Prints the per-entry plan without making any API calls. The dry-run
+code path is strictly air-gap-safe — it does not contact the
+backplane — so existence is unknown and **every entry lists as
+CREATE** regardless of `--update`. For an existence-aware preview,
+run `meho targets list` first to see what's already in the tenant.
+Add `--json` to format the plan as a structured object
+(`{create: [...], update: [...], skip: [...]}`, with `update` and
+`skip` empty in dry-run) for piping into `jq` or capturing for diff
+against a follow-up dry-run.
 
 ### Step 2 — First import
 

@@ -65,12 +65,15 @@ from ._targets_helpers import (
 )
 
 # Pinned snapshot location and provenance. The fixture content
-# matches the upstream blob at
+# derives from the upstream blob at
 # ``evoila-bosnia/claude-rdc-hetzner-dc:rdc-hetzner-dc/targets.yaml``
-# at the SHA recorded below — regenerate together if the consumer
-# file evolves. The size and entry-count constants below are pinned
-# to that exact SHA; mismatches surface as a fixture-drift test
-# failure.
+# at the SHA recorded below; one historical-leaked-and-rotated
+# password string in a `notes:` field has been redacted to
+# ``[REDACTED — see incident log]`` for security-scanner hygiene,
+# so a byte-for-byte SHA match against upstream is intentionally
+# not asserted. Regenerate together if the consumer file evolves.
+# The entry-count constant below pins to the upstream SHA's
+# structure; mismatches surface as a fixture-drift test failure.
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "rdc-hetzner-dc-targets.yaml"
 _FIXTURE_UPSTREAM_SHA = "1e1e6885e1ef79d03001955205d9e44a0bc8e79d"
 _FIXTURE_EXPECTED_ENTRY_COUNT = 24

@@ -83,7 +83,7 @@ targets:
           works against the canonical FQDN, so this target is back on `vcf9-nsx.evba.vcf.lab`.
           See `kb/nsx-9.0-overview.md` (envoy gotcha section) for the full story.
 
-      During the investigation the previous admin password (`Evoila1!Evoila1!`) was leaked to the
+      During the investigation the previous admin password (`[REDACTED — see incident log]`) was leaked to the
       conversation transcript via an over-broad `jq` query; it was rotated and replaced with a
       fresh SDDC-Manager-generated value before the leak could be exploited. Treat the old value
       as compromised but no longer in use.

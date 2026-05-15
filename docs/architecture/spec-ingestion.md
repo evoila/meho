@@ -109,6 +109,8 @@ A single `IngestionPipelineService.ingest(...)` call processes a list of `SpecSo
 
 The same-`spec_source` re-ingest of an unchanged spec stays on the skip-re-embed path — the cross-call check only fires on a true mismatch. The operationally critical scenario this protects: an unchanged 3,000-op vCenter spec must not re-embed 3,000 operations on every re-ingest.
 
+The vSphere canary at [`tests/acceptance/test_g07_vsphere_canary.py`](../../backend/tests/acceptance/test_g07_vsphere_canary.py) is the operator-visible proof of the merge contract: it drives two sequential `ingest()` calls (vcenter.yaml then vi-json.yaml) under the same `(product, version, impl_id)` triple, asserts per-spec `inserted_count` floors (≥1,200 vcenter, ≥2,000 vi-json), asserts non-overlapping `op_id`s between the two spec sources, and asserts the per-call `connector_registered` flag flips `True → False` across the two calls (auto-shim idempotency). See [#503 G3.1-T3 vi-json.yaml full ingestion](https://github.com/evoila/meho/issues/503) for the acceptance-test extension that locked this contract.
+
 ## T3 — LLM-summarised grouping
 
 [`run_llm_grouping(session, *, product, version, impl_id, tenant_id, llm_client, config, embedding_service) -> GroupingResult`](../../backend/src/meho_backplane/operations/ingest/llm_groups.py) opens its own transaction and runs two passes.
@@ -262,15 +264,15 @@ These are **administrative** MCP tools per [CLAUDE.md](../../CLAUDE.md)'s "What 
 
 There is **no parallel admin service class**; each handler converts the JSON-Schema-validated `arguments` dict into the canonical Pydantic model from `api_schemas` and calls the service directly. Responses are `model_dump(mode="json")`-ed onto the wire.
 
-## The vSphere canary (T8)
+## The vSphere canary (T8 + G3.1-T3)
 
-End-to-end verification that the pipeline produces an agent-usable connector against a real ~1,275-operation spec corpus. Acceptance test at [`tests/acceptance/test_g07_vsphere_canary.py`](../../backend/tests/acceptance/test_g07_vsphere_canary.py); operator-facing runbook at [g07-vsphere-canary.md](../cross-repo/g07-vsphere-canary.md).
+End-to-end verification that the pipeline produces an agent-usable connector against the **full** v0.2 vSphere spec corpus (~3,470 operations across `vcenter.yaml` and `vi-json.yaml`). Acceptance test at [`tests/acceptance/test_g07_vsphere_canary.py`](../../backend/tests/acceptance/test_g07_vsphere_canary.py); operator-facing runbook at [g07-vsphere-canary.md](../cross-repo/g07-vsphere-canary.md). Two-spec ingestion landed via [#503](https://github.com/evoila/meho/issues/503) after [#501](https://github.com/evoila/meho/issues/501) extended the parser to resolve `$ref: '#/components/parameters/*'` (the shape every vi-json operation uses for the shared `moId` path parameter).
 
-### The 10-query govc-parity benchmark
+### The 13-query govc-parity benchmark
 
-The canary ingests `vcenter.yaml`, drives the operator workflow (review → edit one group → enable), then runs ten representative operator queries through `search_operations`. The acceptance bar is **"the canonical operation appears in the top-3 hits"** for at least 8 of the 10 queries.
+The canary ingests `vcenter.yaml` + `vi-json.yaml`, drives the operator workflow (review → edit one group → enable), then runs thirteen representative operator queries through `search_operations` (ten vcenter + three vi-json: `revert vsphere snapshot`, `tail vsphere events`, `get vm performance metrics`). The acceptance bar is **"the canonical operation appears in the top-3 hits"** for at least 10 of the 13 queries.
 
-The 10 (query, canonical-op) pairs are documented verbatim in the [canary runbook](../cross-repo/g07-vsphere-canary.md#test-variant). Three currently fail (`list virtual machines`, `power on virtual machine`, `power off virtual machine`) for the retrieval-quality reasons captured under [Future work](#future-work) — those three are marked `xfail` so the suite detects when description quality improves enough to flip them.
+The 13 (query, canonical-op) pairs are documented verbatim in the [canary runbook](../cross-repo/g07-vsphere-canary.md#test-variant). Three vcenter queries currently fail (`list virtual machines`, `power on virtual machine`, `power off virtual machine`) for the retrieval-quality reasons captured under [Future work](#future-work) — those three are marked `xfail` so the suite detects when description quality improves enough to flip them. The three vi-json queries are NOT marked `xfail`: their canonical ops carry descriptive method names (`RevertToSnapshot_Task`, `QueryEvents`, `QueryPerf`) that the BM25 arm matches cleanly. The vi-json queries skip individually in CI matrices that only configure `MEHO_VCENTER_OPENAPI_VCENTER` (single-spec fallback).
 
 ### Rollback when a canary regresses
 
@@ -302,7 +304,7 @@ The G0.7 pipeline is unblocked the moment G0.6 lands its T1 (tables) + T2 (regis
 
 ## Future work
 
-The vSphere canary surfaced two remaining gaps that are real but out of G0.7's v0.2 scope. Document inline; file as separate Tasks when they become blockers for a specific consumer. (A third gap — the parser's rejection of `$ref: "#/components/parameters/*"` — was closed by T11 #501; `vi-json.yaml` now parses end-to-end.)
+The vSphere canary surfaced two remaining gaps that are real but out of G0.7's v0.2 scope. Document inline; file as separate Tasks when they become blockers for a specific consumer. (Two earlier gaps were closed: the parser's rejection of `$ref: "#/components/parameters/*"` was closed by T11 [#501](https://github.com/evoila/meho/issues/501); the canary's vcenter-only ingest was closed by G3.1-T3 [#503](https://github.com/evoila/meho/issues/503) which drove the production multi-spec merge through `IngestionPipelineService` end-to-end against both specs.)
 
 ### Gap 1 — T3 `llm_instructions` per-op enhancement
 

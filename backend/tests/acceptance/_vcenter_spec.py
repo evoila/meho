@@ -84,14 +84,7 @@ def resolve_vcenter_yaml() -> Path | None:
 
 
 def resolve_vi_json_yaml() -> Path | None:
-    """Return the local path to ``vi-json.yaml``, or ``None`` if unconfigured.
-
-    Same resolver chain as :func:`resolve_vcenter_yaml` but for the
-    Managed-Object JSON spec shelf. The vi-json.yaml parser smoke test
-    in ``tests/integration/test_operations_ingest_vi_json.py``
-    consumes this resolver; full ingestion (storage + grouping +
-    operator review + retrieval) is tracked under #227 G3.1 T3.
-    """
+    """Return the local path to ``vi-json.yaml``, or ``None`` if unconfigured."""
     explicit = _expand_optional_path(os.getenv("MEHO_VCENTER_OPENAPI_VI_JSON"))
     if explicit is not None:
         return explicit

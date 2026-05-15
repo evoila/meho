@@ -107,9 +107,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors.registry import clear_registry
+from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup, Target
+from meho_backplane.operations import _audit as audit_module
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.ingest import (
     IngestionPipelineService,
@@ -118,6 +120,7 @@ from meho_backplane.operations.ingest import (
     list_ingested_connectors,
 )
 from meho_backplane.operations.meta_tools import (
+    call_operation,
     list_operation_groups,
     search_operations,
 )
@@ -1005,6 +1008,531 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Opt-in extensions (Task #494)
+# ---------------------------------------------------------------------------
+#
+# Two extensions to the default canary surface, both env-gated so the
+# default CI run keeps skipping them cleanly:
+#
+# 1. Real-LLM eyeball — runs the grouping pass against Claude Haiku via
+#    ``httpx`` (no SDK dep — the chassis does not vendor ``anthropic``).
+#    With LLM-curated ``when_to_use`` strings powering the keyword side,
+#    the strict-top-3 contract from the parent Initiative's acceptance
+#    criteria becomes reachable. Gated on ``G07_CANARY_REAL_LLM=1`` +
+#    ``ANTHROPIC_API_KEY``.
+# 2. vcsim dispatch — seeds a :class:`Target` row, monkey-patches
+#    :func:`publish_event` (via the dispatcher's already-bound import)
+#    + the auto-shim's no-op ``auth_headers`` (vcsim accepts any
+#    credential), then dispatches ``GET:/vcenter/cluster`` via
+#    :func:`call_operation` and asserts ``status=='ok'`` + an audit-log
+#    delta of +1 + at least one captured :class:`BroadcastEvent`. Gated
+#    on ``MEHO_VCSIM_TARGET=<base-url>``.
+#
+# Both ride existing substrate — no production code changes.
+#
+# The original op_id in the Task body referenced ``GET:/api/vcenter/cluster``;
+# the spec-corpus parses cluster as ``GET:/vcenter/cluster`` (see
+# :data:`GOVC_PARITY_BENCHMARK`), so the dispatch test uses the parsed
+# truth, not the body's typo.
+
+#: Opt-in env var that flips on the real-LLM eyeball check. Mirrors
+#: the existing canary's ``MEHO_*`` convention but follows the Task
+#: body's verbatim spelling so the operator command line matches the
+#: ticket text. ``ANTHROPIC_API_KEY`` is the second gate.
+_REAL_LLM_OPT_IN_ENV: str = "G07_CANARY_REAL_LLM"
+
+#: Anthropic Messages-API base URL. Pinned at class scope so test
+#: code reads cleanly + the value can be overridden in a future
+#: regional-endpoint follow-up without churn here.
+_ANTHROPIC_MESSAGES_URL: str = "https://api.anthropic.com/v1/messages"
+
+#: Stable Anthropic API version header. Per
+#: https://platform.claude.com/docs/en/api/versioning, ``2023-06-01``
+#: is the long-lived stable version; newer minor enums only ever add
+#: optional output values, never break input shape.
+_ANTHROPIC_API_VERSION: str = "2023-06-01"
+
+#: Model identifier for the eyeball check. Haiku is the fastest +
+#: cheapest tier on the Messages API; the canary's grouping pass is
+#: classification-shaped (no chain-of-thought needed) so Haiku is the
+#: right ergonomic / cost trade-off.
+_REAL_LLM_MODEL: str = "claude-haiku-4-5-20251001"
+
+#: Per-call request timeout for the Haiku client. The grouping pass
+#: issues ~27 sequential calls on the full vcenter.yaml corpus; a
+#: 60-second per-call cap bounds the worst-case wall-clock cost while
+#: tolerating regional latency variance.
+_REAL_LLM_REQUEST_TIMEOUT_S: float = 60.0
+
+
+class _HaikuLlmClient:
+    """Minimal :class:`LlmClient` against Anthropic Messages API via httpx.
+
+    The chassis does not vendor the ``anthropic`` SDK — keeping the
+    dependency surface narrow is a deployment decision, and the
+    canary's opt-in eyeball check should not bend that.
+    :class:`httpx.AsyncClient` is already a transitive backend
+    dependency; the Messages API is a single POST that fits comfortably
+    in a stand-alone shim.
+
+    Constructed with the operator's API key, an optional ``base_url`` /
+    ``model`` override for testing alternate Anthropic endpoints, and
+    a structlog-bound logger. Calls record their token usage on
+    :attr:`calls` for post-test inspection.
+
+    Errors surface as :class:`RuntimeError` with the upstream status
+    + truncated body — the canary's caller (the ingest pipeline)
+    converts them into per-batch failures, and the test reports them
+    verbatim so an operator opting in with a bad key sees the failure
+    mode the API actually returned (auth, quota, model-unavailable).
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = _REAL_LLM_MODEL,
+        base_url: str = _ANTHROPIC_MESSAGES_URL,
+        timeout_s: float = _REAL_LLM_REQUEST_TIMEOUT_S,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url
+        self._timeout_s = timeout_s
+        self.calls: list[dict[str, Any]] = []
+
+    async def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        """POST ``/v1/messages``; return the first text-block from the response.
+
+        The Messages API returns ``content`` as an array of blocks (text,
+        tool_use, ...). For a pure-JSON system prompt the canary issues,
+        the LLM responds with a single ``{"type": "text", "text": "..."}``
+        block; the helper extracts that text verbatim and hands it back
+        to the grouping pass. Non-text blocks → :class:`RuntimeError`
+        (the grouping pass cannot deserialise a tool_use block as JSON).
+        """
+        import httpx
+
+        body: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_output_tokens,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": _ANTHROPIC_API_VERSION,
+            "content-type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+            response = await client.post(self._base_url, headers=headers, json=body)
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Anthropic Messages API returned {response.status_code}: {response.text[:512]}",
+            )
+        payload = response.json()
+        content_blocks = payload.get("content") or []
+        text_blocks = [b for b in content_blocks if b.get("type") == "text"]
+        if not text_blocks:
+            raise RuntimeError(
+                f"Anthropic response missing text content blocks: {payload!r}",
+            )
+        text = text_blocks[0].get("text") or ""
+        # Models occasionally wrap JSON in ```json fences despite the
+        # system prompt forbidding fences. Strip a single leading + trailing
+        # fence pair so the grouping pass's validator does not reject the
+        # response on a benign formatting tic.
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            # Drop opening fence (with optional language tag) + trailing
+            # fence. ``\n`` after the fence is the conventional separator.
+            stripped = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", stripped)
+            stripped = re.sub(r"\n```\s*$", "", stripped)
+        usage = payload.get("usage") or {}
+        self.calls.append(
+            {
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "stop_reason": payload.get("stop_reason"),
+                "response_length": len(stripped),
+            },
+        )
+        return stripped
+
+
+def _real_llm_skip_reason() -> str | None:
+    """Return a string when the real-LLM opt-in is not satisfied; ``None`` when it is.
+
+    Layered so the skip message names exactly which gate failed —
+    operators reading CI output should not have to guess between "you
+    forgot the env var" and "your env var is set to the wrong value".
+    """
+    if os.environ.get(_REAL_LLM_OPT_IN_ENV) != "1":
+        return (
+            f"Real-LLM canary opt-in: set {_REAL_LLM_OPT_IN_ENV}=1 + ANTHROPIC_API_KEY "
+            "to exercise Claude Haiku against vcenter.yaml. Costs ~27 Messages-API "
+            "calls per run; not run in default CI."
+        )
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return (
+            f"{_REAL_LLM_OPT_IN_ENV}=1 set, but ANTHROPIC_API_KEY is unset; "
+            "the Haiku client has no credential to use."
+        )
+    return None
+
+
+@pytest.fixture
+async def real_llm_ingested_canary(
+    vcenter_spec_path: Path,
+    canary_operator: Operator,
+    stub_embedding_service: Any,
+    pg_engine: None,
+) -> AsyncIterator[_HaikuLlmClient]:
+    """Run the full ingest → review → enable pipeline driven by a Haiku LLM client.
+
+    Mirrors :func:`ingested_canary` but swaps the deterministic stub
+    for :class:`_HaikuLlmClient`. The grouping pass issues ~27
+    sequential Messages-API calls (1 Pass-1 propose + ~26 Pass-2
+    batch-assignments at the default batch size of 50). Wall-clock
+    cost is ~30-60 s end-to-end depending on regional latency; the
+    canary's per-test budget tolerates that for an opt-in eyeball.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    assert api_key, "real_llm_ingested_canary called without ANTHROPIC_API_KEY"
+    client = _HaikuLlmClient(api_key=api_key)
+    service = IngestionPipelineService(
+        canary_operator,
+        llm_client_factory=lambda: client,
+        embedding_service=stub_embedding_service,
+    )
+
+    await service.ingest(
+        product=_CANARY_PRODUCT,
+        version=_CANARY_VERSION,
+        impl_id=_CANARY_IMPL_ID,
+        specs=[SpecSource(uri=str(vcenter_spec_path))],
+        tenant_id=_CANARY_TENANT_ID,
+    )
+
+    review_service = ReviewService(canary_operator)
+    await review_service.enable_connector(
+        _CANARY_CONNECTOR_ID,
+        tenant_id=_CANARY_TENANT_ID,
+    )
+
+    yield client
+
+
+@pytest.mark.skipif(
+    _real_llm_skip_reason() is not None,
+    reason=_real_llm_skip_reason() or "",
+)
+async def test_g07_canary_real_llm_eyeball(
+    real_llm_ingested_canary: _HaikuLlmClient,
+    canary_operator: Operator,
+) -> None:
+    """Real Haiku-driven canary: every govc-parity query ranks the canonical op in top-3.
+
+    With LLM-curated ``when_to_use`` strings powering the keyword side
+    of hybrid search, the strict-top-3 contract becomes reachable on
+    the three queries the deterministic-stub canary marks
+    ``xfail(strict=True)``. This test asserts the full benchmark, not
+    a subset — failures name the missing queries so an operator opting
+    in sees actionable feedback rather than a single boolean pass / fail.
+
+    Crucially, this test runs alongside the strict-xfail benchmark on
+    the stub path; it does NOT replace those xfail markers. The stub
+    canary keeps documenting the spec-description-quality gap; the
+    real-LLM eyeball verifies the gap closes when an actual model
+    powers the group hints.
+    """
+    missing: list[tuple[str, str, list[str]]] = []
+    for query, expected_op_id in GOVC_PARITY_BENCHMARK:
+        response = await search_operations(
+            canary_operator,
+            {
+                "connector_id": _CANARY_CONNECTOR_ID,
+                "query": query,
+                "limit": 10,
+            },
+        )
+        hits = response["hits"]
+        top_three = [h["op_id"] for h in hits[:3]]
+        if expected_op_id not in top_three:
+            missing.append((query, expected_op_id, top_three))
+
+    if missing:
+        lines = ["real-LLM eyeball: queries missed the top-3 contract:"]
+        for query, expected, top_three in missing:
+            lines.append(f"  - query={query!r} expected={expected!r} top3={top_three}")
+        pytest.fail("\n".join(lines))
+
+    # Sanity-check the LLM client served at least one Pass-1 + one
+    # Pass-2 call. The exact ~27-call count is asserted on the stub
+    # path; here we only need to prove the real adapter actually
+    # round-tripped, not the exact batching shape.
+    assert len(real_llm_ingested_canary.calls) >= 2, (
+        f"expected the Haiku client to be invoked at least twice; "
+        f"saw {len(real_llm_ingested_canary.calls)} calls"
+    )
+
+
+# ---------------------------------------------------------------------------
+# vcsim dispatch opt-in (Task #494)
+# ---------------------------------------------------------------------------
+
+
+#: Opt-in env var pointing at a running vcsim instance's base URL.
+#: When set, the dispatch test seeds a :class:`Target` row, dispatches
+#: ``GET:/vcenter/cluster`` against it, and asserts the audit /
+#: broadcast contract. When unset, the test skips cleanly.
+_VCSIM_TARGET_ENV: str = "MEHO_VCSIM_TARGET"
+
+#: vcsim accepts any credential — the simulator is intentionally
+#: auth-permissive so test code can drive it without a real
+#: certificate. The auto-shim's ``auth_headers`` raises
+#: :class:`NotImplementedError` (it's a registration-only shim);
+#: a one-line monkey-patch to return ``{}`` is enough to dispatch
+#: read-only ops against vcsim.
+_VCSIM_NO_AUTH_HEADERS: dict[str, str] = {}
+
+#: The op the canary dispatches. ``GET:/vcenter/cluster`` lives in
+#: the parsed vcenter.yaml corpus (see ``GOVC_PARITY_BENCHMARK`` row
+#: 2) and exercises the GenericRestConnector's idempotent-GET path
+#: through :func:`dispatch_ingested`.
+_VCSIM_DISPATCH_OP_ID: str = "GET:/vcenter/cluster"
+
+
+#: vcsim's vCenter REST endpoint is mounted under ``/rest`` by
+#: default (govc / pyvmomi convention). The auto-shim's
+#: ``_base_url_override`` is concatenated with the descriptor's
+#: ``path`` verbatim, so the env value should be the full base
+#: including ``/rest`` — but for the canary contract we accept the
+#: bare URL too and append ``/rest`` only when the env value lacks
+#: a path component. Operators following the runbook commonly run
+#: ``vcsim -l :8989`` which serves both ``/api`` (new) and
+#: ``/rest`` (legacy) — the parsed op_id ``GET:/vcenter/cluster``
+#: prefixes with ``/rest`` on vcsim, ``/api`` on real vCenter.
+def _vcsim_base_url(raw: str) -> str:
+    """Normalise the vcsim base URL the env var carries.
+
+    Appends ``/rest`` when the raw env value has no path component
+    (e.g. operator set ``MEHO_VCSIM_TARGET=http://localhost:8989``);
+    otherwise trusts the operator's path verbatim. This keeps
+    ``http://localhost:8989/api`` (real-vCenter-style mount), bare
+    ``http://localhost:8989`` (vcsim default → ``/rest``), and any
+    custom mount workable from the same env var.
+    """
+    trimmed = raw.rstrip("/")
+    scheme_sep = trimmed.find("://")
+    after_authority = trimmed[scheme_sep + 3 :] if scheme_sep != -1 else trimmed
+    if "/" not in after_authority:
+        return trimmed + "/rest"
+    return trimmed
+
+
+def _vcsim_skip_reason() -> str | None:
+    """Return a string when the vcsim opt-in is not satisfied; ``None`` when it is."""
+    if not os.environ.get(_VCSIM_TARGET_ENV):
+        return (
+            f"vcsim dispatch canary opt-in: set {_VCSIM_TARGET_ENV} to a running "
+            "vcsim base URL (e.g. http://localhost:8989) to dispatch "
+            f"{_VCSIM_DISPATCH_OP_ID} and verify the audit + broadcast contract. "
+            "Not run in default CI."
+        )
+    return None
+
+
+@pytest.fixture
+async def vcsim_ingested_canary(
+    vcenter_spec_path: Path,
+    canary_operator: Operator,
+    stub_embedding_service: Any,
+    pg_engine: None,
+) -> AsyncIterator[tuple[_PathPrefixStubLlmClient, str]]:
+    """Ingest vcenter.yaml + register the auto-shim against a vcsim base URL.
+
+    Mirrors :func:`ingested_canary` but passes the vcsim URL as
+    ``base_url`` so the auto-shim's :attr:`_base_url_override`
+    points at the running simulator. The stub LLM is reused — the
+    dispatch path does not care about group quality.
+
+    Yields ``(stub_client, base_url)`` so the test can use both.
+    """
+    stub_client = _PathPrefixStubLlmClient()
+    base_url = _vcsim_base_url(os.environ[_VCSIM_TARGET_ENV])
+
+    service = IngestionPipelineService(
+        canary_operator,
+        llm_client_factory=lambda: stub_client,
+        embedding_service=stub_embedding_service,
+    )
+    await service.ingest(
+        product=_CANARY_PRODUCT,
+        version=_CANARY_VERSION,
+        impl_id=_CANARY_IMPL_ID,
+        specs=[SpecSource(uri=str(vcenter_spec_path))],
+        base_url=base_url,
+        tenant_id=_CANARY_TENANT_ID,
+    )
+    review_service = ReviewService(canary_operator)
+    await review_service.enable_connector(
+        _CANARY_CONNECTOR_ID,
+        tenant_id=_CANARY_TENANT_ID,
+    )
+    yield stub_client, base_url
+
+
+@pytest.mark.skipif(
+    _vcsim_skip_reason() is not None,
+    reason=_vcsim_skip_reason() or "",
+)
+async def test_g07_canary_vcsim_dispatch(
+    vcsim_ingested_canary: tuple[_PathPrefixStubLlmClient, str],
+    canary_operator: Operator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end dispatch against vcsim: status ok + +1 audit row + ≥1 broadcast event.
+
+    Seeds a :class:`Target` row matching the env value, patches the
+    dispatcher's already-bound :func:`publish_event` import (the
+    bind site is ``meho_backplane.operations._audit``, not the
+    broadcast package — patching the package would not catch the
+    audit helper's resolved reference), and patches the auto-shim's
+    ``auth_headers`` (a class-level :class:`NotImplementedError`
+    stub on :class:`GenericRestConnector`) to return ``{}`` so the
+    no-auth vcsim accepts the GET.
+
+    Asserts:
+
+    * :class:`OperationResult` ``status == 'ok'``.
+    * Exactly one new :class:`~meho_backplane.db.models.AuditLog`
+      row with ``method='DISPATCH'`` and ``path == _VCSIM_DISPATCH_OP_ID``.
+    * At least one captured :class:`BroadcastEvent` with the same
+      ``op_id``.
+    """
+    _stub_client, _base_url = vcsim_ingested_canary
+
+    # 1. Seed a Target row. ``call_operation`` resolves the target
+    #    via the operator's tenant_id; the canary operator's tenant
+    #    is ``_CANARY_OPERATOR_TENANT`` (the connector itself is
+    #    built-in / tenant=None, which dispatch lookup tolerates).
+    target_name = "g07-canary-vcsim"
+    sessionmaker = get_sessionmaker()
+
+    async with sessionmaker() as session:
+        target = Target(
+            tenant_id=_CANARY_OPERATOR_TENANT,
+            name=target_name,
+            aliases=[],
+            product=_CANARY_PRODUCT,
+            host="vcsim",  # nominal; the base_url override on the
+            # auto-shim is what actually routes the request, so
+            # ``host`` is a record-keeping field rather than
+            # load-bearing for this test.
+            port=None,
+            fqdn=None,
+            secret_ref=None,
+            auth_model="shared_service_account",
+            vpn_required=False,
+            extras={},
+            notes="seeded by test_g07_canary_vcsim_dispatch",
+        )
+        session.add(target)
+        await session.commit()
+
+    # 2. Patch publish_event on the audit module's already-bound
+    #    import. Per the existing pattern documented in
+    #    backend/tests/test_operations_dispatcher.py::captured_events,
+    #    patching the broadcast package is NOT sufficient — the
+    #    audit helper resolved the symbol at import time and reaches
+    #    it via the local module attribute.
+    captured: list[BroadcastEvent] = []
+
+    async def _capture(event: BroadcastEvent) -> None:
+        captured.append(event)
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+
+    # 3. Patch the auto-shim's auth_headers. The shim's class is
+    #    registered under (product, version, impl_id) in the v2
+    #    registry; look it up and override the method for the test.
+    registry_snapshot = all_connectors_v2()
+    shim_cls = registry_snapshot.get(
+        (_CANARY_PRODUCT, _CANARY_VERSION, _CANARY_IMPL_ID),
+    )
+    assert shim_cls is not None, (
+        f"auto-shim not registered for ({_CANARY_PRODUCT}, {_CANARY_VERSION}, "
+        f"{_CANARY_IMPL_ID}); registry snapshot keys = {sorted(registry_snapshot)}"
+    )
+
+    async def _no_auth(_self: Any, _target: Any, _raw_jwt: str) -> dict[str, str]:
+        return dict(_VCSIM_NO_AUTH_HEADERS)
+
+    monkeypatch.setattr(shim_cls, "auth_headers", _no_auth)
+
+    # 4. Snapshot the audit-log delta baseline. Filter on the
+    #    dispatch path so unrelated rows (e.g. the ingest's own
+    #    edit_group audits earlier in the fixture) don't pollute
+    #    the delta.
+    async def _count_dispatch_rows() -> int:
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(AuditLog).where(
+                    AuditLog.method == "DISPATCH",
+                    AuditLog.path == _VCSIM_DISPATCH_OP_ID,
+                ),
+            )
+            return len(list(result.scalars().all()))
+
+    baseline_rows = await _count_dispatch_rows()
+
+    # 5. Dispatch. ``call_operation`` is the agent-surface meta-tool
+    #    the issue body names; the dispatcher resolves the target,
+    #    descriptor, connector instance, and finally runs the
+    #    HTTP-shaped op_id through ``dispatch_ingested``.
+    result = await call_operation(
+        canary_operator,
+        {
+            "connector_id": _CANARY_CONNECTOR_ID,
+            "op_id": _VCSIM_DISPATCH_OP_ID,
+            "target": {"name": target_name},
+            "params": {},
+        },
+    )
+
+    assert result["status"] == "ok", (
+        f"dispatch did not succeed: status={result.get('status')!r} error={result.get('error')!r}"
+    )
+
+    # 6. Audit-row delta = exactly +1 with the right shape.
+    final_rows = await _count_dispatch_rows()
+    assert final_rows - baseline_rows == 1, (
+        f"expected exactly one new DISPATCH audit row for {_VCSIM_DISPATCH_OP_ID}; "
+        f"baseline={baseline_rows} final={final_rows}"
+    )
+
+    # 7. At least one captured BroadcastEvent for this op_id.
+    matching_events = [e for e in captured if e.op_id == _VCSIM_DISPATCH_OP_ID]
+    assert matching_events, (
+        f"no BroadcastEvent captured for op_id={_VCSIM_DISPATCH_OP_ID}; "
+        f"captured op_ids={[e.op_id for e in captured]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Module-level autouse fixtures (must remain at module-end so they apply
+# to every test defined above, including the Task-#494 additions).
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)

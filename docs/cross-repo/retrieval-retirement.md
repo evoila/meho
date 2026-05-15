@@ -104,7 +104,7 @@ retire-PR description). Never retire on `NOT YET`.
 
 1. **Capture the retire-checklist output** (`meho retrieval retire-checklist --surface kb --json > retire-kb.json`) as evidence in the retire-PR description; commit `retire-kb.json` to the PR as a checked-in audit artefact.
 2. **Open the retire-PR** in [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) deleting the `kb/` directory. Title: `chore(kb): retire pre-MEHO kb/ directory (post-#373 G4.3)`. Body cites this runbook + the retire-checklist JSON.
-3. **Update the consumer `CLAUDE.md`** in the same PR: drop the "grep `kb/`" guidance and point agents at `meho kb search` instead. The consumer-side runbook for migrating away from grep ships with [G4.1-T6 #420](https://github.com/evoila/meho/issues/420) (`docs/cross-repo/kb-migration.md`); link it from the consumer `CLAUDE.md`.
+3. **Update the consumer `CLAUDE.md`** in the same PR: drop the "grep `kb/`" guidance and point agents at `meho kb search` instead. The consumer-side runbook for migrating away from grep will ship with [G4.1-T6 #420](https://github.com/evoila/meho/issues/420) (`docs/cross-repo/kb-migration.md`); link it from the consumer `CLAUDE.md` once that runbook lands.
 4. **Archive the pre-retire SHA** by tagging it `kb-pre-retire-<YYYYMMDD>` and pushing the tag to the consumer repo. The tag is the rollback anchor (see below).
 5. **Merge the retire-PR.** The consumer-side ingestion already covers the deleted files; the delete has zero data loss because the documents already live in MEHO's `documents` table.
 
@@ -143,7 +143,7 @@ rollback issue, not the original retire-checklist output.
 
 2. **Update the consumer `CLAUDE.md`** to re-enable the "grep `kb/`"
    guidance until the blocker resolves.
-3. **File a `retrieval-migration-blocker`-labelled issue** on
+3. **File a `retrieval-migration-blocker`-labeled issue** on
    `evoila/meho` (Blocker workflow below). Add the `knowledge` area
    label so the retire-checklist's criterion 5 buckets it under kb.
 4. **Re-run `meho retrieval retire-checklist --surface kb`** — it
@@ -170,7 +170,7 @@ files were one-way archived per-operator.
    pre-retire local cache, not the server state).
 3. **Update the operator's local `CLAUDE.md`** to re-enable the
    laptop-local lookup until the blocker resolves.
-4. **File a `retrieval-migration-blocker`-labelled issue** with the
+4. **File a `retrieval-migration-blocker`-labeled issue** with the
    `memory` area label.
 
 ### operations rollback
@@ -184,7 +184,7 @@ files were one-way archived per-operator.
    for the affected vendor surface to refresh the `endpoint_descriptor`
    table. The `connector` area label on the resulting blocker issue
    tracks the regression.
-4. **File a `retrieval-migration-blocker`-labelled issue** with the
+4. **File a `retrieval-migration-blocker`-labeled issue** with the
    `connector` area label.
 
 ## Blocker workflow

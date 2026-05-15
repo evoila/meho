@@ -47,9 +47,10 @@ for arg in "$@"; do
       DRY_RUN=1
       ;;
     -h | --help)
-      # Print the header doc comment (lines 2-30) so `--help` mirrors
+      # Print the header doc comment (lines 2-31) so `--help` mirrors
       # this file's top-of-file documentation without duplicating it.
-      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+      # Line 31 is the "Documented in:" back-reference to the runbook.
+      sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)

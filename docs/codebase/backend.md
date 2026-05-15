@@ -195,6 +195,22 @@ this stage it exposes:
   deprecated and removed by G0.6-T11 (#412) once T8's substrate route
   shipped — two parallel dispatch surfaces violated CLAUDE.md
   postulate 5's narrow-waist contract.
+* Spec ingestion + connector review (G0.7-T6 #406) —
+  `src/meho_backplane/api/v1/connectors_ingest.py` exposes the seven
+  `/api/v1/connectors*` routes that drive the ingestion pipeline and
+  the review-queue state machine: `POST /ingest` (run parse → register
+  → group, tenant_admin), `GET /` (list visible connectors with status
+  filter, operator), `GET /{id}/review` (full review payload,
+  operator), `PATCH /{id}/groups/{key}` + `PATCH /{id}/operations/{op}`
+  (operator edit overrides, tenant_admin), `POST /{id}/enable` + `POST
+  /{id}/disable` (state transitions, tenant_admin). Tenant scoping
+  derives from the JWT — there is no body / query parameter that can
+  override the operator's tenant; cross-tenant probes surface as 404.
+  The same service layer (`IngestionPipelineService`,
+  `list_ingested_connectors`, `ReviewService`) backs the CLI verbs
+  (T5, #405) and the admin MCP tools (T7, #407) without HTTP-round-
+  trip-through-self. Detailed module guide:
+  [`docs/codebase/spec-ingestion.md`](spec-ingestion.md).
 * Persistence layer (Task #27) — `src/meho_backplane/db/` houses the
   SQLAlchemy 2.x async engine (`engine.py`), the per-request
   session-factory dependency (`get_session`), and the

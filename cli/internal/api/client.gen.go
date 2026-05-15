@@ -25,6 +25,72 @@ const (
 	SharedServiceAccount AuthModel = "shared_service_account"
 )
 
+// Defines values for DailyUsageBucketSurface.
+const (
+	DailyUsageBucketSurfaceKb         DailyUsageBucketSurface = "kb"
+	DailyUsageBucketSurfaceMemory     DailyUsageBucketSurface = "memory"
+	DailyUsageBucketSurfaceOperations DailyUsageBucketSurface = "operations"
+)
+
+// Defines values for EditOpBodySafetyLevel.
+const (
+	Caution   EditOpBodySafetyLevel = "caution"
+	Dangerous EditOpBodySafetyLevel = "dangerous"
+	Safe      EditOpBodySafetyLevel = "safe"
+)
+
+// Defines values for EvalRequestSurface.
+const (
+	EvalRequestSurfaceAll        EvalRequestSurface = "all"
+	EvalRequestSurfaceKb         EvalRequestSurface = "kb"
+	EvalRequestSurfaceMemory     EvalRequestSurface = "memory"
+	EvalRequestSurfaceOperations EvalRequestSurface = "operations"
+)
+
+// Defines values for EvalResultOverallVerdict.
+const (
+	EvalResultOverallVerdictGreen  EvalResultOverallVerdict = "green"
+	EvalResultOverallVerdictRed    EvalResultOverallVerdict = "red"
+	EvalResultOverallVerdictYellow EvalResultOverallVerdict = "yellow"
+)
+
+// Defines values for SurfaceResultBaselineVerdict.
+const (
+	SurfaceResultBaselineVerdictGreen  SurfaceResultBaselineVerdict = "green"
+	SurfaceResultBaselineVerdictRed    SurfaceResultBaselineVerdict = "red"
+	SurfaceResultBaselineVerdictYellow SurfaceResultBaselineVerdict = "yellow"
+)
+
+// Defines values for SurfaceResultSurface.
+const (
+	SurfaceResultSurfaceKb         SurfaceResultSurface = "kb"
+	SurfaceResultSurfaceMemory     SurfaceResultSurface = "memory"
+	SurfaceResultSurfaceOperations SurfaceResultSurface = "operations"
+)
+
+// Defines values for SurfaceResultVerdict.
+const (
+	Green  SurfaceResultVerdict = "green"
+	Red    SurfaceResultVerdict = "red"
+	Yellow SurfaceResultVerdict = "yellow"
+)
+
+// Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
+const (
+	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
+	Disabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
+	Enabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
+	Staged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
+)
+
+// Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
+const (
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceAll        UsageEndpointApiV1RetrieveUsageGetParamsSurface = "all"
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceKb         UsageEndpointApiV1RetrieveUsageGetParamsSurface = "kb"
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceMemory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
+)
+
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
 //
 // Field names match the CLI's expected JSON keys (“keycloak_issuer“
@@ -52,6 +118,85 @@ type CallOperationBody struct {
 	Target      *map[string]interface{} `json:"target"`
 }
 
+// ConnectorReviewGroup One group within the review payload.
+//
+// Carries the LLM-generated group metadata
+// (“group_key“, “name“, “when_to_use“), the current
+// “review_status“, and the full list of child operations. The
+// operator-facing review UI iterates this list to render the
+// review queue; “op_count“ is the cheap precomputed length for
+// the CLI's “meho connector review“ summary view (T5).
+type ConnectorReviewGroup struct {
+	GroupKey     string              `json:"group_key"`
+	Name         string              `json:"name"`
+	OpCount      int                 `json:"op_count"`
+	Ops          []ConnectorReviewOp `json:"ops"`
+	ReviewStatus string              `json:"review_status"`
+	WhenToUse    string              `json:"when_to_use"`
+}
+
+// ConnectorReviewOp One operation within a group, as rendered in the review payload.
+//
+// Carries the operator-relevant subset of
+// :class:`~meho_backplane.db.models.EndpointDescriptor`: the
+// identifiers (“op_id“), the descriptive fields (“summary“,
+// “description“, “custom_description“), the policy hooks
+// (“safety_level“, “requires_approval“), the dispatchability
+// flag (“is_enabled“), and the “tags“ array. Notably **omits**
+// “parameter_schema“ / “response_schema“ / “embedding“ —
+// those are dispatch-time concerns, not review-time concerns, and
+// sending 4 KB of schema per op would balloon the review payload
+// for connectors with thousands of operations (vCenter has 961
+// paths in v0.2).
+type ConnectorReviewOp struct {
+	CustomDescription *string  `json:"custom_description"`
+	Description       *string  `json:"description"`
+	IsEnabled         bool     `json:"is_enabled"`
+	OpId              string   `json:"op_id"`
+	RequiresApproval  bool     `json:"requires_approval"`
+	SafetyLevel       string   `json:"safety_level"`
+	Summary           *string  `json:"summary"`
+	Tags              []string `json:"tags"`
+}
+
+// ConnectorReviewPayload Top-level review payload returned by :meth:`ReviewService.get_review_payload`.
+//
+// “connector_id“ is the operator-facing string the request
+// targeted (echoed back verbatim for round-trip clarity).
+// “product“ / “version“ / “impl_id“ are the parsed triple
+// derived via
+// :func:`~meho_backplane.operations.ingest.parser.parse_connector_id`;
+// the CLI / API layers surface them in operator output so the
+// convention is self-documenting. “tenant_id“ is the scope the
+// payload was queried under (“None“ for built-in).
+type ConnectorReviewPayload struct {
+	ConnectorId  string                 `json:"connector_id"`
+	Groups       []ConnectorReviewGroup `json:"groups"`
+	ImplId       string                 `json:"impl_id"`
+	Product      string                 `json:"product"`
+	TenantId     *openapi_types.UUID    `json:"tenant_id"`
+	TotalOpCount int                    `json:"total_op_count"`
+	Version      string                 `json:"version"`
+}
+
+// DailyUsageBucket One “(date, surface)“ row of the usage report.
+//
+// Frozen so callers (CLI table renderer, “--json“ consumers,
+// Markdown report generators) can pass instances around without
+// accidental mutation. “action_conversion_pct“ is rounded to two
+// decimals at construction time so JSON serialisation is stable
+// across runs.
+type DailyUsageBucket struct {
+	ActionConversionPct float32                 `json:"action_conversion_pct"`
+	Date                openapi_types.Date      `json:"date"`
+	DistinctOperators   int                     `json:"distinct_operators"`
+	SearchCount         int                     `json:"search_count"`
+	Surface             DailyUsageBucketSurface `json:"surface"`
+}
+
+// DailyUsageBucketSurface defines model for DailyUsageBucket.Surface.
+type DailyUsageBucketSurface string
+
 // DbStatus Database migration status.
 //
 // “migrated“ is “True“ when the DB-migration-state probe reports
@@ -66,6 +211,125 @@ type CallOperationBody struct {
 // handler now always populates it from the probe.
 type DbStatus struct {
 	Migrated *bool `json:"migrated"`
+}
+
+// EditGroupBody PATCH body for “/api/v1/connectors/{id}/groups/{key}“.
+//
+// Both fields optional but at least one must be set; the route
+// layer translates "neither set" into a 400. “when_to_use“ is
+// the load-bearing operator-authored prose the LLM proposed at
+// grouping time; “name“ is the Title Case display name.
+//
+// Pydantic-side “max_length“ caps line up with the underlying
+// :class:`OperationGroup.when_to_use` /
+// :class:`OperationGroup.name` columns. Empty strings are
+// rejected — operators that want to "clear" the field should
+// re-run grouping rather than blank it.
+type EditGroupBody struct {
+	Name      *string `json:"name"`
+	WhenToUse *string `json:"when_to_use"`
+}
+
+// EditOpBody PATCH body for “/api/v1/connectors/{id}/operations/{op_id}“.
+//
+// Per-op operator overrides. At least one field must be set.
+//
+// “safety_level“ is the bounded enum from
+// :class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`
+// (“safe“ / “caution“ / “dangerous“); a value outside the set
+// is rejected by Pydantic before the service layer sees it.
+//
+// “is_enabled“ is the per-op override that wins over the group
+// cascade (see :meth:`ReviewService.edit_op` for the full
+// semantics). “requires_approval“ flips the per-op flag that
+// forces the dispatcher to write an audit row in
+// “status='pending'“ and wait for an operator decision before
+// executing.
+//
+// “custom_description“ is the operator's free-form override
+// that the agent surfaces in place of the upstream spec's
+// “description“ field; capped at 4096 chars to keep audit-log
+// payloads bounded.
+type EditOpBody struct {
+	CustomDescription *string                `json:"custom_description"`
+	IsEnabled         *bool                  `json:"is_enabled"`
+	RequiresApproval  *bool                  `json:"requires_approval"`
+	SafetyLevel       *EditOpBodySafetyLevel `json:"safety_level"`
+}
+
+// EditOpBodySafetyLevel defines model for EditOpBody.SafetyLevel.
+type EditOpBodySafetyLevel string
+
+// EvalRequest POST body for “/api/v1/retrieve/eval“.
+//
+// Frozen + extra=forbid so a typo (“surfaces“ instead of
+// “surface“) fails 422 at the framework boundary rather than
+// silently running the default surface and giving the caller a
+// confusing "I asked for memory, why did kb run?" response.
+type EvalRequest struct {
+	Baseline *string             `json:"baseline"`
+	Surface  *EvalRequestSurface `json:"surface,omitempty"`
+}
+
+// EvalRequestSurface defines model for EvalRequest.Surface.
+type EvalRequestSurface string
+
+// EvalResult Top-level eval result — the shape the API + CLI return.
+//
+// “overall_verdict“ is the worst-of every surface (a red surface
+// flips the whole result red); the CLI's exit-1-on-red CI-gate
+// semantics key off this field. “ran_at“ is the UTC timestamp
+// the runner started; consumers comparing two saved baselines see
+// when each was captured.
+type EvalResult struct {
+	OverallVerdict EvalResultOverallVerdict `json:"overall_verdict"`
+	RanAt          time.Time                `json:"ran_at"`
+	Surfaces       []SurfaceResult          `json:"surfaces"`
+
+	// Thresholds Per-metric green-band thresholds for a verdict computation.
+	//
+	// Frozen so the threshold object passed into :func:`verdict` cannot
+	// be mutated mid-run (a stale or rewritten threshold mid-eval would
+	// invalidate every subsequent verdict and silently shift the CI
+	// gate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,
+	// not stored — keeping it derived means the contract "yellow is 70%
+	// of green" can't drift between green-threshold customisation and
+	// the yellow boundary.
+	//
+	// Defaults match the Initiative #373 / Task #441 contract; tests and
+	// future re-tunings construct ``Thresholds(...)`` with explicit
+	// values.
+	Thresholds *Thresholds `json:"thresholds,omitempty"`
+}
+
+// EvalResultOverallVerdict defines model for EvalResult.OverallVerdict.
+type EvalResultOverallVerdict string
+
+// FingerprintResult Connector fingerprint per consumer-needs L95.
+type FingerprintResult struct {
+	Build       *string                 `json:"build"`
+	Edition     *string                 `json:"edition"`
+	Extras      *map[string]interface{} `json:"extras,omitempty"`
+	ProbeMethod string                  `json:"probe_method"`
+	ProbedAt    time.Time               `json:"probed_at"`
+	Product     string                  `json:"product"`
+	Reachable   bool                    `json:"reachable"`
+	Vendor      string                  `json:"vendor"`
+	Version     *string                 `json:"version"`
+}
+
+// GroupingResultModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
+//
+// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
+// in the ingest response so the operator sees both counts.
+type GroupingResultModel struct {
+	ConnectorId          string  `json:"connector_id"`
+	GroupsCreated        int     `json:"groups_created"`
+	LlmCallCount         int     `json:"llm_call_count"`
+	LlmDurationMs        float32 `json:"llm_duration_ms"`
+	OperationsAssigned   int     `json:"operations_assigned"`
+	OperationsUnassigned int     `json:"operations_unassigned"`
 }
 
 // HTTPValidationError defines model for HTTPValidationError.
@@ -106,6 +370,80 @@ type HealthResponse struct {
 	Vault VaultStatus `json:"vault"`
 }
 
+// IngestRequest POST body for “/api/v1/connectors/ingest“.
+//
+// Drives a full pipeline run: parse every spec in *specs*, call
+// :func:`register_ingested_operations` once per spec under the same
+// “(product, version, impl_id)“ connector triple, then run
+// :func:`run_llm_grouping` once for the whole connector. Multi-spec
+// ingestion (vCenter's “vcenter.yaml“ + “vi-json.yaml“) lands as
+// multiple “SpecSource“ entries in one request.
+//
+// “dry_run=True“ skips both the DB writes and the grouping pass:
+// only :func:`parse_openapi` runs, and the response carries
+// :class:`IngestionResultModel` counts derived from the parse output
+// plus “grouping=None“. Operators use the dry-run path to validate
+// a spec before committing.
+//
+// “base_url“ is the optional default base URL for the auto-
+// registered :class:`GenericRestConnector` shim; “None“ leaves
+// the shim unconfigured (the connector's eventual hand-coded
+// subclass at G3.x will set its own base URL).
+type IngestRequest struct {
+	BaseUrl *string      `json:"base_url"`
+	DryRun  *bool        `json:"dry_run,omitempty"`
+	ImplId  string       `json:"impl_id"`
+	Product string       `json:"product"`
+	Specs   []SpecSource `json:"specs"`
+	Version string       `json:"version"`
+}
+
+// IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
+//
+// “ingestion“ is always present. “grouping“ is “None“ for the
+// dry-run path (no DB writes, no LLM call) and for the no-op
+// re-run path (every op already grouped from a prior pass).
+//
+// The response carries no audit_log id explicitly — the chassis
+// audit middleware writes one row per HTTP request with the route
+// path bound, and the service-level helpers
+// (:func:`register_ingested_operations`, :func:`run_llm_grouping`)
+// write their own per-call rows under
+// “meho.connector.llm_grouping“ etc.
+type IngestResponse struct {
+	// Grouping Pydantic projection of
+	// :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
+	//
+	// Mirrors the dataclass; rendered alongside :class:`IngestionResultModel`
+	// in the ingest response so the operator sees both counts.
+	Grouping *GroupingResultModel `json:"grouping,omitempty"`
+
+	// Ingestion Pydantic projection of
+	// :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
+	//
+	// The dataclass lives in :mod:`register_ingested` so the helper
+	// can stay framework-agnostic; this model is the wire-format twin
+	// the routes return. Fields mirror the dataclass one-for-one with
+	// an extra ``connector_id`` echo for round-trip clarity.
+	Ingestion IngestionResultModel `json:"ingestion"`
+}
+
+// IngestionResultModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
+//
+// The dataclass lives in :mod:`register_ingested` so the helper
+// can stay framework-agnostic; this model is the wire-format twin
+// the routes return. Fields mirror the dataclass one-for-one with
+// an extra “connector_id“ echo for round-trip clarity.
+type IngestionResultModel struct {
+	ConnectorId         string `json:"connector_id"`
+	ConnectorRegistered bool   `json:"connector_registered"`
+	InsertedCount       int    `json:"inserted_count"`
+	OperationsGrouped   bool   `json:"operations_grouped"`
+	SkippedCount        int    `json:"skipped_count"`
+	UpdatedCount        int    `json:"updated_count"`
+}
+
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
 //
 // Returned by :func:`describe_descriptor` (and the
@@ -141,27 +479,6 @@ type OperationDescriptor struct {
 	Version           string                  `json:"version"`
 }
 
-// OperationResult Connector op execution result.
-type OperationResult struct {
-	DurationMs float32                 `json:"duration_ms"`
-	Error      *string                 `json:"error"`
-	Extras     *map[string]interface{} `json:"extras,omitempty"`
-	OpId       string                  `json:"op_id"`
-	Result     *OperationResult_Result `json:"result"`
-	Status     string                  `json:"status"`
-}
-
-// OperationResultResult0 defines model for .
-type OperationResultResult0 map[string]interface{}
-
-// OperationResultResult1 defines model for .
-type OperationResultResult1 = []interface{}
-
-// OperationResult_Result defines model for OperationResult.Result.
-type OperationResult_Result struct {
-	union json.RawMessage
-}
-
 // OperatorIdentity Operator identity surface exposed to the CLI.
 //
 // Excludes “raw_jwt“ deliberately — the bearer token must never
@@ -173,12 +490,26 @@ type OperatorIdentity struct {
 	Sub   string  `json:"sub"`
 }
 
-// ProbeResult Lightweight reachability + auth-challenge result.
-type ProbeResult struct {
-	LatencyMs *float32  `json:"latency_ms"`
-	Ok        bool      `json:"ok"`
-	ProbedAt  time.Time `json:"probed_at"`
-	Reason    *string   `json:"reason"`
+// QueryResult Per-query eval row — what the runner produces for each corpus entry.
+//
+// “meho_hits“ is the surface-formatted top-“k“ slug list from
+// MEHO retrieval; “baseline_hits“ mirrors it for the baseline
+// when configured. The per-query metrics (precision_at_5 / mrr /
+// coverage) are computed against “meho_hits“ + the corpus's
+// expected ground truth; “baseline_*“ mirrors are populated when
+// the baseline ran. Frozen so the runner can't accidentally mutate
+// a row while folding the surface aggregate.
+type QueryResult struct {
+	BaselineCoverageAt5    *float32  `json:"baseline_coverage_at_5"`
+	BaselineHits           *[]string `json:"baseline_hits"`
+	BaselinePrecisionAt5   *float32  `json:"baseline_precision_at_5"`
+	BaselineReciprocalRank *float32  `json:"baseline_reciprocal_rank"`
+	CoverageAt5            float32   `json:"coverage_at_5"`
+	ExpectedHits           []string  `json:"expected_hits"`
+	MehoHits               []string  `json:"meho_hits"`
+	PrecisionAt5           float32   `json:"precision_at_5"`
+	Query                  string    `json:"query"`
+	ReciprocalRank         float32   `json:"reciprocal_rank"`
 }
 
 // RetrievalHit One document in a ranked retrieval response.
@@ -240,6 +571,60 @@ type RetrieveResponse struct {
 	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
+// SpecSource One spec to ingest under a connector triple.
+//
+// “uri“ carries the operator's spec identifier. Three forms are
+// accepted by the underlying :func:`parse_openapi` resolver:
+//
+//   - Absolute local path — “/abs/path/to/spec.yaml“.
+//   - HTTP(S) URL — “https://api.example.com/openapi.yaml“.
+//   - “docs:<connector-id>/<file>“ shorthand — resolves against the
+//     consumer's checked-in docs/ directory; CLI / API layers expand
+//     this before calling the parser.
+//
+// Wrapped in its own model so future per-spec knobs (auth headers,
+// dialect pinning, content-type override) can land without
+// reshaping :class:`IngestRequest`.
+type SpecSource struct {
+	Uri string `json:"uri"`
+}
+
+// SurfaceResult Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.
+//
+// The verdict band is computed from the macro-mean metrics against
+// the configured :class:`Thresholds` (default
+// :data:`~meho_backplane.retrieval.eval.metrics.GREEN_DEFAULTS`). A
+// surface with “query_count == 0“ (corpus YAML hasn't shipped
+// yet) returns “verdict="green"“ deliberately — see runner.py
+// docstring.
+//
+// “baseline_verdict“ is computed only when the baseline ran;
+// “None“ otherwise. The MEHO-≥-baseline overlay applies in the
+// aggregate verdict (see runner._apply_baseline_check).
+type SurfaceResult struct {
+	BaselineCoverage     *float32                      `json:"baseline_coverage"`
+	BaselineKind         *string                       `json:"baseline_kind"`
+	BaselineMrr          *float32                      `json:"baseline_mrr"`
+	BaselinePrecisionAt5 *float32                      `json:"baseline_precision_at_5"`
+	BaselineVerdict      *SurfaceResultBaselineVerdict `json:"baseline_verdict"`
+	Coverage             float32                       `json:"coverage"`
+	Mrr                  float32                       `json:"mrr"`
+	PrecisionAt5         float32                       `json:"precision_at_5"`
+	Queries              *[]QueryResult                `json:"queries,omitempty"`
+	QueryCount           int                           `json:"query_count"`
+	Surface              SurfaceResultSurface          `json:"surface"`
+	Verdict              SurfaceResultVerdict          `json:"verdict"`
+}
+
+// SurfaceResultBaselineVerdict defines model for SurfaceResult.BaselineVerdict.
+type SurfaceResultBaselineVerdict string
+
+// SurfaceResultSurface defines model for SurfaceResult.Surface.
+type SurfaceResultSurface string
+
+// SurfaceResultVerdict defines model for SurfaceResult.Verdict.
+type SurfaceResultVerdict string
+
 // Target Full read shape — returned by GET /targets/{name} and the resolver.
 //
 // Maps 1:1 to the “targets“ table columns. Frozen so callers
@@ -250,24 +635,32 @@ type RetrieveResponse struct {
 // “Mapping[str, Any]“ so frozen instances cannot be mutated in-place
 // via list.append / dict.__setitem__ — matching the immutability contract
 // the docstring documents.
+//
+// “fingerprint“ mirrors the persisted
+// :class:`~meho_backplane.connectors.schemas.FingerprintResult` shape
+// (JSON-safe dict from “model_dump(mode='json')“) or “None“ until
+// the first successful probe. “preferred_impl_id“ is the operator's
+// optional override for the G0.6 connector-impl resolver.
 type Target struct {
 	Aliases []string `json:"aliases"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel   AuthModel              `json:"auth_model"`
-	CreatedAt   time.Time              `json:"created_at"`
-	Extras      map[string]interface{} `json:"extras"`
-	Fqdn        *string                `json:"fqdn"`
-	Host        string                 `json:"host"`
-	Id          openapi_types.UUID     `json:"id"`
-	Name        string                 `json:"name"`
-	Notes       *string                `json:"notes"`
-	Port        *int                   `json:"port"`
-	Product     string                 `json:"product"`
-	SecretRef   *string                `json:"secret_ref"`
-	TenantId    openapi_types.UUID     `json:"tenant_id"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	VpnRequired bool                   `json:"vpn_required"`
+	AuthModel       AuthModel               `json:"auth_model"`
+	CreatedAt       time.Time               `json:"created_at"`
+	Extras          map[string]interface{}  `json:"extras"`
+	Fingerprint     *map[string]interface{} `json:"fingerprint"`
+	Fqdn            *string                 `json:"fqdn"`
+	Host            string                  `json:"host"`
+	Id              openapi_types.UUID      `json:"id"`
+	Name            string                  `json:"name"`
+	Notes           *string                 `json:"notes"`
+	Port            *int                    `json:"port"`
+	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         string                  `json:"product"`
+	SecretRef       *string                 `json:"secret_ref"`
+	TenantId        openapi_types.UUID      `json:"tenant_id"`
+	UpdatedAt       time.Time               `json:"updated_at"`
+	VpnRequired     bool                    `json:"vpn_required"`
 }
 
 // TargetCreate POST /api/v1/targets body.
@@ -275,20 +668,28 @@ type Target struct {
 // “name“ and “product“ are immutable after creation; to rename a
 // target, delete + re-create. “auth_model“ defaults to
 // “shared_service_account“ matching the DB column default.
+//
+// “fingerprint“ is **not** accepted — it is server-managed and only
+// written by the probe handler from the connector's response. Sending
+// “fingerprint“ in the create body raises 422 via “extra='forbid'“
+// so clients cannot seed the G0.6 resolver's tie-break input with
+// fabricated values. “preferred_impl_id“ is accepted as an optional
+// operator override.
 type TargetCreate struct {
 	Aliases *[]string `json:"aliases,omitempty"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel   *AuthModel              `json:"auth_model,omitempty"`
-	Extras      *map[string]interface{} `json:"extras,omitempty"`
-	Fqdn        *string                 `json:"fqdn"`
-	Host        string                  `json:"host"`
-	Name        string                  `json:"name"`
-	Notes       *string                 `json:"notes"`
-	Port        *int                    `json:"port"`
-	Product     string                  `json:"product"`
-	SecretRef   *string                 `json:"secret_ref"`
-	VpnRequired *bool                   `json:"vpn_required,omitempty"`
+	AuthModel       *AuthModel              `json:"auth_model,omitempty"`
+	Extras          *map[string]interface{} `json:"extras,omitempty"`
+	Fqdn            *string                 `json:"fqdn"`
+	Host            string                  `json:"host"`
+	Name            string                  `json:"name"`
+	Notes           *string                 `json:"notes"`
+	Port            *int                    `json:"port"`
+	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         string                  `json:"product"`
+	SecretRef       *string                 `json:"secret_ref"`
+	VpnRequired     *bool                   `json:"vpn_required,omitempty"`
 }
 
 // TargetSummary Short shape for list endpoints.
@@ -312,20 +713,67 @@ type TargetSummary struct {
 // value to clear a nullable column (“fqdn“, “secret_ref“,
 // “notes“). “name“ and “product“ are absent — rename = delete
 // + create.
+//
+// “fingerprint“ is **not** accepted via PATCH — it is server-managed
+// and rewritten by every successful probe. Sending “fingerprint“
+// raises 422 via “extra='forbid'“ for the same reason
+// :class:`TargetCreate` rejects it. “preferred_impl_id“ is patchable.
 type TargetUpdate struct {
 	Aliases *[]string `json:"aliases"`
 
 	// AuthModel Per-target identity model per v0.1-spec L447-454.
-	AuthModel   *AuthModel              `json:"auth_model,omitempty"`
-	Extras      *map[string]interface{} `json:"extras"`
-	Fqdn        *string                 `json:"fqdn"`
-	Host        *string                 `json:"host"`
-	Notes       *string                 `json:"notes"`
-	Port        *int                    `json:"port"`
-	SecretRef   *string                 `json:"secret_ref"`
-	VpnRequired *bool                   `json:"vpn_required"`
+	AuthModel       *AuthModel              `json:"auth_model,omitempty"`
+	Extras          *map[string]interface{} `json:"extras"`
+	Fqdn            *string                 `json:"fqdn"`
+	Host            *string                 `json:"host"`
+	Notes           *string                 `json:"notes"`
+	Port            *int                    `json:"port"`
+	PreferredImplId *string                 `json:"preferred_impl_id"`
+	SecretRef       *string                 `json:"secret_ref"`
+	VpnRequired     *bool                   `json:"vpn_required"`
 }
 
+// Thresholds Per-metric green-band thresholds for a verdict computation.
+//
+// Frozen so the threshold object passed into :func:`verdict` cannot
+// be mutated mid-run (a stale or rewritten threshold mid-eval would
+// invalidate every subsequent verdict and silently shift the CI
+// gate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,
+// not stored — keeping it derived means the contract "yellow is 70%
+// of green" can't drift between green-threshold customisation and
+// the yellow boundary.
+//
+// Defaults match the Initiative #373 / Task #441 contract; tests and
+// future re-tunings construct “Thresholds(...)“ with explicit
+// values.
+type Thresholds struct {
+	Coverage     *float32 `json:"coverage,omitempty"`
+	Mrr          *float32 `json:"mrr,omitempty"`
+	PrecisionAt5 *float32 `json:"precision_at_5,omitempty"`
+}
+
+// UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
+//
+// “buckets“ is sorted by “(date, surface)“ ascending — the text
+// table renderer relies on this for its grouping behaviour, and
+// “--json“ consumers (T6's retire-checklist, future dashboards)
+// benefit from deterministic ordering even when nothing else
+// pins it.
+//
+// “tenant_id“ is the tenant the report is scoped to (the
+// operator's own tenant by default, or the
+// “tenant_admin“-supplied filter). “None“ is reserved for the
+// cross-tenant case; v0.2 has one production tenant so this is
+// effectively a v0.2.next placeholder, but the shape is locked
+// today so consumers don't break when the cross-tenant verb lands.
+type UsageReport struct {
+	Buckets       []DailyUsageBucket  `json:"buckets"`
+	Since         time.Time           `json:"since"`
+	Surfaces      []string            `json:"surfaces"`
+	TenantId      *openapi_types.UUID `json:"tenant_id"`
+	TotalSearches int                 `json:"total_searches"`
+	Until         time.Time           `json:"until"`
+}
 
 // ValidationError defines model for ValidationError.
 type ValidationError struct {
@@ -358,6 +806,45 @@ type VaultStatus struct {
 	Detail    *string `json:"detail"`
 	Reachable bool    `json:"reachable"`
 	ReadOk    bool    `json:"read_ok"`
+}
+
+// ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
+type ListEndpointApiV1ConnectorsGetParams struct {
+	Status        *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	Authorization *string                                     `json:"authorization,omitempty"`
+}
+
+// ListEndpointApiV1ConnectorsGetParamsStatus defines parameters for ListEndpointApiV1ConnectorsGet.
+type ListEndpointApiV1ConnectorsGetParamsStatus string
+
+// IngestEndpointApiV1ConnectorsIngestPostParams defines parameters for IngestEndpointApiV1ConnectorsIngestPost.
+type IngestEndpointApiV1ConnectorsIngestPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams defines parameters for DisableEndpointApiV1ConnectorsConnectorIdDisablePost.
+type DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams defines parameters for EnableEndpointApiV1ConnectorsConnectorIdEnablePost.
+type EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams defines parameters for EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch.
+type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams defines parameters for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch.
+type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams defines parameters for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet.
+type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // FeedEndpointApiV1FeedGetParams defines parameters for FeedEndpointApiV1FeedGet.
@@ -411,6 +898,22 @@ type RetrieveEndpointApiV1RetrievePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// EvalEndpointApiV1RetrieveEvalPostParams defines parameters for EvalEndpointApiV1RetrieveEvalPost.
+type EvalEndpointApiV1RetrieveEvalPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UsageEndpointApiV1RetrieveUsageGetParams defines parameters for UsageEndpointApiV1RetrieveUsageGet.
+type UsageEndpointApiV1RetrieveUsageGetParams struct {
+	Since         *string                                          `form:"since,omitempty" json:"since,omitempty"`
+	Surface       *UsageEndpointApiV1RetrieveUsageGetParamsSurface `form:"surface,omitempty" json:"surface,omitempty"`
+	TenantFilter  *openapi_types.UUID                              `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string                                          `json:"authorization,omitempty"`
+}
+
+// UsageEndpointApiV1RetrieveUsageGetParamsSurface defines parameters for UsageEndpointApiV1RetrieveUsageGet.
+type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
+
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
 	Product       *string `form:"product,omitempty" json:"product,omitempty"`
@@ -444,79 +947,29 @@ type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody defines body for IngestEndpointApiV1ConnectorsIngestPost for application/json ContentType.
+type IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody = IngestRequest
+
+// EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody defines body for EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch for application/json ContentType.
+type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody = EditGroupBody
+
+// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody defines body for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch for application/json ContentType.
+type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody = EditOpBody
+
 // PostCallApiV1OperationsCallPostJSONRequestBody defines body for PostCallApiV1OperationsCallPost for application/json ContentType.
 type PostCallApiV1OperationsCallPostJSONRequestBody = CallOperationBody
 
 // RetrieveEndpointApiV1RetrievePostJSONRequestBody defines body for RetrieveEndpointApiV1RetrievePost for application/json ContentType.
 type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
 
+// EvalEndpointApiV1RetrieveEvalPostJSONRequestBody defines body for EvalEndpointApiV1RetrieveEvalPost for application/json ContentType.
+type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
+
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
 
 // UpdateTargetApiV1TargetsNamePatchJSONRequestBody defines body for UpdateTargetApiV1TargetsNamePatch for application/json ContentType.
 type UpdateTargetApiV1TargetsNamePatchJSONRequestBody = TargetUpdate
-
-// AsOperationResultResult0 returns the union data inside the OperationResult_Result as a OperationResultResult0
-func (t OperationResult_Result) AsOperationResultResult0() (OperationResultResult0, error) {
-	var body OperationResultResult0
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromOperationResultResult0 overwrites any union data inside the OperationResult_Result as the provided OperationResultResult0
-func (t *OperationResult_Result) FromOperationResultResult0(v OperationResultResult0) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeOperationResultResult0 performs a merge with any union data inside the OperationResult_Result, using the provided OperationResultResult0
-func (t *OperationResult_Result) MergeOperationResultResult0(v OperationResultResult0) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-// AsOperationResultResult1 returns the union data inside the OperationResult_Result as a OperationResultResult1
-func (t OperationResult_Result) AsOperationResultResult1() (OperationResultResult1, error) {
-	var body OperationResultResult1
-	err := json.Unmarshal(t.union, &body)
-	return body, err
-}
-
-// FromOperationResultResult1 overwrites any union data inside the OperationResult_Result as the provided OperationResultResult1
-func (t *OperationResult_Result) FromOperationResultResult1(v OperationResultResult1) error {
-	b, err := json.Marshal(v)
-	t.union = b
-	return err
-}
-
-// MergeOperationResultResult1 performs a merge with any union data inside the OperationResult_Result, using the provided OperationResultResult1
-func (t *OperationResult_Result) MergeOperationResultResult1(v OperationResultResult1) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-
-	merged, err := runtime.JSONMerge(t.union, b)
-	t.union = merged
-	return err
-}
-
-func (t OperationResult_Result) MarshalJSON() ([]byte, error) {
-	b, err := t.union.MarshalJSON()
-	return b, err
-}
-
-func (t *OperationResult_Result) UnmarshalJSON(b []byte) error {
-	err := t.union.UnmarshalJSON(b)
-	return err
-}
 
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
@@ -662,6 +1115,33 @@ type ClientInterface interface {
 	// AuthConfigApiV1AuthConfigGet request
 	AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListEndpointApiV1ConnectorsGet request
+	ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IngestEndpointApiV1ConnectorsIngestPostWithBody request with any body
+	IngestEndpointApiV1ConnectorsIngestPostWithBody(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	IngestEndpointApiV1ConnectorsIngestPost(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DisableEndpointApiV1ConnectorsConnectorIdDisablePost request
+	DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EnableEndpointApiV1ConnectorsConnectorIdEnablePost request
+	EnableEndpointApiV1ConnectorsConnectorIdEnablePost(ctx context.Context, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody request with any body
+	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody request with any body
+	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, body EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet request
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -686,6 +1166,14 @@ type ClientInterface interface {
 	RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EvalEndpointApiV1RetrieveEvalPostWithBody request with any body
+	EvalEndpointApiV1RetrieveEvalPostWithBody(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EvalEndpointApiV1RetrieveEvalPost(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UsageEndpointApiV1RetrieveUsageGet request
+	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -748,6 +1236,126 @@ func (c *Client) ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx
 
 func (c *Client) AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAuthConfigApiV1AuthConfigGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListEndpointApiV1ConnectorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IngestEndpointApiV1ConnectorsIngestPostWithBody(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestEndpointApiV1ConnectorsIngestPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IngestEndpointApiV1ConnectorsIngestPost(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestEndpointApiV1ConnectorsIngestPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDisableEndpointApiV1ConnectorsConnectorIdDisablePostRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EnableEndpointApiV1ConnectorsConnectorIdEnablePost(ctx context.Context, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnableEndpointApiV1ConnectorsConnectorIdEnablePostRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequestWithBody(c.Server, connectorId, groupKey, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequest(c.Server, connectorId, groupKey, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequestWithBody(c.Server, connectorId, opId, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, body EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequest(c.Server, connectorId, opId, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(c.Server, connectorId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -856,6 +1464,42 @@ func (c *Client) RetrieveEndpointApiV1RetrievePostWithBody(ctx context.Context, 
 
 func (c *Client) RetrieveEndpointApiV1RetrievePost(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRetrieveEndpointApiV1RetrievePostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EvalEndpointApiV1RetrieveEvalPostWithBody(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EvalEndpointApiV1RetrieveEvalPost(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEvalEndpointApiV1RetrieveEvalPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUsageEndpointApiV1RetrieveUsageGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -1086,6 +1730,410 @@ func NewAuthConfigApiV1AuthConfigGetRequest(server string) (*http.Request, error
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListEndpointApiV1ConnectorsGetRequest generates requests for ListEndpointApiV1ConnectorsGet
+func NewListEndpointApiV1ConnectorsGetRequest(server string, params *ListEndpointApiV1ConnectorsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewIngestEndpointApiV1ConnectorsIngestPostRequest calls the generic IngestEndpointApiV1ConnectorsIngestPost builder with application/json body
+func NewIngestEndpointApiV1ConnectorsIngestPostRequest(server string, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewIngestEndpointApiV1ConnectorsIngestPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewIngestEndpointApiV1ConnectorsIngestPostRequestWithBody generates requests for IngestEndpointApiV1ConnectorsIngestPost with any type of body
+func NewIngestEndpointApiV1ConnectorsIngestPostRequestWithBody(server string, params *IngestEndpointApiV1ConnectorsIngestPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/ingest")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDisableEndpointApiV1ConnectorsConnectorIdDisablePostRequest generates requests for DisableEndpointApiV1ConnectorsConnectorIdDisablePost
+func NewDisableEndpointApiV1ConnectorsConnectorIdDisablePostRequest(server string, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/disable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEnableEndpointApiV1ConnectorsConnectorIdEnablePostRequest generates requests for EnableEndpointApiV1ConnectorsConnectorIdEnablePost
+func NewEnableEndpointApiV1ConnectorsConnectorIdEnablePostRequest(server string, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/enable", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequest calls the generic EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch builder with application/json body
+func NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequest(server string, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequestWithBody(server, connectorId, groupKey, params, "application/json", bodyReader)
+}
+
+// NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequestWithBody generates requests for EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch with any type of body
+func NewEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchRequestWithBody(server string, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "group_key", runtime.ParamLocationPath, groupKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/groups/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequest calls the generic EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch builder with application/json body
+func NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequest(server string, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, body EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequestWithBody(server, connectorId, opId, params, "application/json", bodyReader)
+}
+
+// NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequestWithBody generates requests for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch with any type of body
+func NewEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchRequestWithBody(server string, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "op_id", runtime.ParamLocationPath, opId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/operations/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest generates requests for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet
+func NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(server string, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "connector_id", runtime.ParamLocationPath, connectorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/%s/review", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -1549,6 +2597,157 @@ func NewRetrieveEndpointApiV1RetrievePostRequestWithBody(server string, params *
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEvalEndpointApiV1RetrieveEvalPostRequest calls the generic EvalEndpointApiV1RetrieveEvalPost builder with application/json body
+func NewEvalEndpointApiV1RetrieveEvalPostRequest(server string, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody generates requests for EvalEndpointApiV1RetrieveEvalPost with any type of body
+func NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody(server string, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/retrieve/eval")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUsageEndpointApiV1RetrieveUsageGetRequest generates requests for UsageEndpointApiV1RetrieveUsageGet
+func NewUsageEndpointApiV1RetrieveUsageGetRequest(server string, params *UsageEndpointApiV1RetrieveUsageGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/retrieve/usage")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Surface != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "surface", runtime.ParamLocationQuery, *params.Surface); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -2081,6 +3280,33 @@ type ClientWithResponsesInterface interface {
 	// AuthConfigApiV1AuthConfigGetWithResponse request
 	AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error)
 
+	// ListEndpointApiV1ConnectorsGetWithResponse request
+	ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error)
+
+	// IngestEndpointApiV1ConnectorsIngestPostWithBodyWithResponse request with any body
+	IngestEndpointApiV1ConnectorsIngestPostWithBodyWithResponse(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestEndpointApiV1ConnectorsIngestPostResponse, error)
+
+	IngestEndpointApiV1ConnectorsIngestPostWithResponse(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestEndpointApiV1ConnectorsIngestPostResponse, error)
+
+	// DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request
+	DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error)
+
+	// EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse request
+	EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse(ctx context.Context, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams, reqEditors ...RequestEditorFn) (*EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse, error)
+
+	// EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse request with any body
+	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error)
+
+	EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error)
+
+	// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with any body
+	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error)
+
+	EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, body EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error)
+
+	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse request
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error)
+
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
@@ -2105,6 +3331,14 @@ type ClientWithResponsesInterface interface {
 	RetrieveEndpointApiV1RetrievePostWithBodyWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
 
 	RetrieveEndpointApiV1RetrievePostWithResponse(ctx context.Context, params *RetrieveEndpointApiV1RetrievePostParams, body RetrieveEndpointApiV1RetrievePostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetrieveEndpointApiV1RetrievePostResponse, error)
+
+	// EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse request with any body
+	EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error)
+
+	EvalEndpointApiV1RetrieveEvalPostWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error)
+
+	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
+	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
@@ -2201,6 +3435,163 @@ func (r AuthConfigApiV1AuthConfigGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListEndpointApiV1ConnectorsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *map[string][]map[string]interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListEndpointApiV1ConnectorsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListEndpointApiV1ConnectorsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type IngestEndpointApiV1ConnectorsIngestPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *IngestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r IngestEndpointApiV1ConnectorsIngestPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IngestEndpointApiV1ConnectorsIngestPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ConnectorReviewPayload
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -2368,6 +3759,52 @@ func (r RetrieveEndpointApiV1RetrievePostResponse) StatusCode() int {
 	return 0
 }
 
+type EvalEndpointApiV1RetrieveEvalPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *EvalResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EvalEndpointApiV1RetrieveEvalPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EvalEndpointApiV1RetrieveEvalPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UsageEndpointApiV1RetrieveUsageGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *UsageReport
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UsageEndpointApiV1RetrieveUsageGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UsageEndpointApiV1RetrieveUsageGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListTargetsApiV1TargetsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -2463,7 +3900,7 @@ func (r UpdateTargetApiV1TargetsNamePatchResponse) StatusCode() int {
 type ProbeTargetApiV1TargetsNameProbePostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *ProbeResult
+	JSON200      *FingerprintResult
 	JSON422      *HTTPValidationError
 }
 
@@ -2621,6 +4058,93 @@ func (c *ClientWithResponses) AuthConfigApiV1AuthConfigGetWithResponse(ctx conte
 	return ParseAuthConfigApiV1AuthConfigGetResponse(rsp)
 }
 
+// ListEndpointApiV1ConnectorsGetWithResponse request returning *ListEndpointApiV1ConnectorsGetResponse
+func (c *ClientWithResponses) ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error) {
+	rsp, err := c.ListEndpointApiV1ConnectorsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListEndpointApiV1ConnectorsGetResponse(rsp)
+}
+
+// IngestEndpointApiV1ConnectorsIngestPostWithBodyWithResponse request with arbitrary body returning *IngestEndpointApiV1ConnectorsIngestPostResponse
+func (c *ClientWithResponses) IngestEndpointApiV1ConnectorsIngestPostWithBodyWithResponse(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestEndpointApiV1ConnectorsIngestPostResponse, error) {
+	rsp, err := c.IngestEndpointApiV1ConnectorsIngestPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestEndpointApiV1ConnectorsIngestPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) IngestEndpointApiV1ConnectorsIngestPostWithResponse(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, body IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestEndpointApiV1ConnectorsIngestPostResponse, error) {
+	rsp, err := c.IngestEndpointApiV1ConnectorsIngestPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestEndpointApiV1ConnectorsIngestPostResponse(rsp)
+}
+
+// DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse request returning *DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse
+func (c *ClientWithResponses) DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse(ctx context.Context, connectorId string, params *DisableEndpointApiV1ConnectorsConnectorIdDisablePostParams, reqEditors ...RequestEditorFn) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
+	rsp, err := c.DisableEndpointApiV1ConnectorsConnectorIdDisablePost(ctx, connectorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse(rsp)
+}
+
+// EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse request returning *EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse
+func (c *ClientWithResponses) EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse(ctx context.Context, connectorId string, params *EnableEndpointApiV1ConnectorsConnectorIdEnablePostParams, reqEditors ...RequestEditorFn) (*EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse, error) {
+	rsp, err := c.EnableEndpointApiV1ConnectorsConnectorIdEnablePost(ctx, connectorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse(rsp)
+}
+
+// EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse request with arbitrary body returning *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse
+func (c *ClientWithResponses) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBodyWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error) {
+	rsp, err := c.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithBody(ctx, connectorId, groupKey, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithResponse(ctx context.Context, connectorId string, groupKey string, params *EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchParams, body EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error) {
+	rsp, err := c.EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatch(ctx, connectorId, groupKey, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse(rsp)
+}
+
+// EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse request with arbitrary body returning *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse
+func (c *ClientWithResponses) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBodyWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
+	rsp, err := c.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithBody(ctx, connectorId, opId, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithResponse(ctx context.Context, connectorId string, opId string, params *EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchParams, body EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
+	rsp, err := c.EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch(ctx, connectorId, opId, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse(rsp)
+}
+
+// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse request returning *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse
+func (c *ClientWithResponses) GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error) {
+	rsp, err := c.GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx, connectorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp)
+}
+
 // FeedEndpointApiV1FeedGetWithResponse request returning *FeedEndpointApiV1FeedGetResponse
 func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error) {
 	rsp, err := c.FeedEndpointApiV1FeedGet(ctx, params, reqEditors...)
@@ -2698,6 +4222,32 @@ func (c *ClientWithResponses) RetrieveEndpointApiV1RetrievePostWithResponse(ctx 
 		return nil, err
 	}
 	return ParseRetrieveEndpointApiV1RetrievePostResponse(rsp)
+}
+
+// EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse request with arbitrary body returning *EvalEndpointApiV1RetrieveEvalPostResponse
+func (c *ClientWithResponses) EvalEndpointApiV1RetrieveEvalPostWithBodyWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error) {
+	rsp, err := c.EvalEndpointApiV1RetrieveEvalPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) EvalEndpointApiV1RetrieveEvalPostWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error) {
+	rsp, err := c.EvalEndpointApiV1RetrieveEvalPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp)
+}
+
+// UsageEndpointApiV1RetrieveUsageGetWithResponse request returning *UsageEndpointApiV1RetrieveUsageGetResponse
+func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error) {
+	rsp, err := c.UsageEndpointApiV1RetrieveUsageGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -2878,6 +4428,209 @@ func ParseAuthConfigApiV1AuthConfigGetResponse(rsp *http.Response) (*AuthConfigA
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListEndpointApiV1ConnectorsGetResponse parses an HTTP response from a ListEndpointApiV1ConnectorsGetWithResponse call
+func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpointApiV1ConnectorsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListEndpointApiV1ConnectorsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest map[string][]map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIngestEndpointApiV1ConnectorsIngestPostResponse parses an HTTP response from a IngestEndpointApiV1ConnectorsIngestPostWithResponse call
+func ParseIngestEndpointApiV1ConnectorsIngestPostResponse(rsp *http.Response) (*IngestEndpointApiV1ConnectorsIngestPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IngestEndpointApiV1ConnectorsIngestPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest IngestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse parses an HTTP response from a DisableEndpointApiV1ConnectorsConnectorIdDisablePostWithResponse call
+func ParseDisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse(rsp *http.Response) (*DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DisableEndpointApiV1ConnectorsConnectorIdDisablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse parses an HTTP response from a EnableEndpointApiV1ConnectorsConnectorIdEnablePostWithResponse call
+func ParseEnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse(rsp *http.Response) (*EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EnableEndpointApiV1ConnectorsConnectorIdEnablePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse parses an HTTP response from a EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchWithResponse call
+func ParseEditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse(rsp *http.Response) (*EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse parses an HTTP response from a EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchWithResponse call
+func ParseEditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse(rsp *http.Response) (*EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse parses an HTTP response from a GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse call
+func ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp *http.Response) (*GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConnectorReviewPayload
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
 
 	}
 
@@ -3115,6 +4868,72 @@ func ParseRetrieveEndpointApiV1RetrievePostResponse(rsp *http.Response) (*Retrie
 	return response, nil
 }
 
+// ParseEvalEndpointApiV1RetrieveEvalPostResponse parses an HTTP response from a EvalEndpointApiV1RetrieveEvalPostWithResponse call
+func ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp *http.Response) (*EvalEndpointApiV1RetrieveEvalPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EvalEndpointApiV1RetrieveEvalPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest EvalResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUsageEndpointApiV1RetrieveUsageGetResponse parses an HTTP response from a UsageEndpointApiV1RetrieveUsageGetWithResponse call
+func ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp *http.Response) (*UsageEndpointApiV1RetrieveUsageGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UsageEndpointApiV1RetrieveUsageGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UsageReport
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListTargetsApiV1TargetsGetResponse parses an HTTP response from a ListTargetsApiV1TargetsGetWithResponse call
 func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsApiV1TargetsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -3262,7 +5081,7 @@ func ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp *http.Response) (*Pro
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest ProbeResult
+		var dest FingerprintResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

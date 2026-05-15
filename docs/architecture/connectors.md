@@ -6,7 +6,7 @@
 >
 > - **[operations-substrate.md](operations-substrate.md)** — canonical reference for the G0.6 substrate as-shipped: `endpoint_descriptor` + `operation_group` tables, the v2 connector registry, the dispatcher's eight-phase pipeline, composite recursion + audit-tree linkage, the JSONFlux reducer Protocol, and the three operation meta-tools. Read this first; the content below remains as historical baseline.
 > - **[connector-resolution.md](connector-resolution.md)** — the resolver's tie-break ladder with three worked examples.
-> - **[#389 G0.7 Spec ingestion pipeline](https://github.com/evoila/meho/issues/389)** — OpenAPI 3.0/3.1 parser + vi-json multi-spec merge + LLM-summarised operation groups + operator review queue. Architecture doc lands separately.
+> - **[spec-ingestion.md](spec-ingestion.md)** — canonical reference for the G0.7 spec-ingestion pipeline as-shipped: OpenAPI 3.0/3.1 parser, `register_ingested_operations()` upsert + multi-spec merge + body-hash skip, two-pass LLM-summarised operation groups (`1 + ceil(N/50)` call budget), operator review-queue state machine (`staged → enabled → disabled`), the seven `meho connector ...` CLI verbs, `/api/v1/connectors*` REST routes, and the `meho.connector.*` admin MCP tools. Companion operator runbook: [`docs/cross-repo/connector-ingestion.md`](../cross-repo/connector-ingestion.md).
 >
 > Connector kinds (three, all first-class, all versioned, multi-impl per product):
 > - **Generic (ingested) connectors** — operations auto-derived from a vendor OpenAPI spec by G0.7 into `endpoint_descriptor` rows (`source_kind='ingested'`). Examples planned: `vmware-rest-9.0`, `nsx-4.2`, `harbor-2.x`, `hetzner-robot-2026-04`.

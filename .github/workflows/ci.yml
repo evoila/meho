@@ -88,7 +88,15 @@ jobs:
     # so no step ever starts on a fork PR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners
-    timeout-minutes: 10
+    # 20-min cap: the pytest suite now actually completes (the
+    # integration TRUNCATE fix one commit earlier unblocked the
+    # tests/integration/* subtree that previously failed fast at
+    # setup), so the budget is wall-clock for the full unit-plus-
+    # integration sweep + uv sync + coverage emit, not for a
+    # short-circuit-on-first-failure run. Run 25910787068 cancelled
+    # at 49% through unit tests under the old 10-min cap; doubling
+    # gives headroom for moderate suite growth.
+    timeout-minutes: 20
     defaults:
       run:
         # backend/ is the only Python project today; pyproject.toml

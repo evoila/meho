@@ -99,6 +99,7 @@ __all__ = [
     "IngestionPipelineService",
     "LlmClientFactory",
     "LlmClientUnavailable",
+    "default_llm_client_factory",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -125,8 +126,14 @@ class LlmClientUnavailable(RuntimeError):  # noqa: N818 -- "Unavailable" reads b
 LlmClientFactory = Callable[[], LlmClient]
 
 
-def _default_llm_client_factory() -> LlmClient:
-    """Fail-closed default — no production LLM adapter is wired yet."""
+def default_llm_client_factory() -> LlmClient:
+    """Fail-closed default — no production LLM adapter is wired yet.
+
+    Public so that sibling consumers (REST routes at T6, CLI verbs at
+    T5, admin MCP tools at T7) can import the same fallback factory
+    from :mod:`meho_backplane.operations.ingest` without reaching
+    across the underscore boundary.
+    """
     raise LlmClientUnavailable(
         "no LLM client configured for spec-ingestion grouping; "
         "the production Anthropic adapter lands with G0.7-T5 (#405). "
@@ -219,7 +226,7 @@ class IngestionPipelineService:
         operator: Operator,
         *,
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
-        llm_client_factory: LlmClientFactory = _default_llm_client_factory,
+        llm_client_factory: LlmClientFactory = default_llm_client_factory,
         embedding_service: EmbeddingService | None = None,
     ) -> None:
         self._operator = operator

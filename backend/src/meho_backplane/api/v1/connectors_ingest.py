@@ -127,10 +127,10 @@ from meho_backplane.operations.ingest import (
     OpIdCollision,
     ReviewService,
     UnsupportedSpecError,
+    default_llm_client_factory,
     list_ingested_connectors,
 )
 from meho_backplane.operations.ingest.api_schemas import ConnectorStatusFilter
-from meho_backplane.operations.ingest.pipeline import _default_llm_client_factory
 
 __all__ = [
     "router",
@@ -156,7 +156,7 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 #: factory must be reachable from any test that boots the app via
 #: :class:`TestClient` without the test having to know the override
 #: surface.
-_llm_client_factory: LlmClientFactory = _default_llm_client_factory
+_llm_client_factory: LlmClientFactory = default_llm_client_factory
 
 
 def set_llm_client_factory(factory: LlmClientFactory) -> LlmClientFactory:
@@ -195,7 +195,7 @@ async def ingest_endpoint(
     llm_client_factory: Annotated[
         LlmClientFactory,
         Depends(_get_llm_client_factory),
-    ] = _default_llm_client_factory,
+    ] = default_llm_client_factory,
 ) -> IngestResponse:
     """Run the full ingestion pipeline (T1 → T2 → T3) for one connector.
 
@@ -289,12 +289,14 @@ async def list_endpoint(
     review status; ``all`` (or omission) returns everything.
 
     The response is wrapped in ``{"connectors": [...]}`` so future
-    paging / cursor fields can land non-breakingly. The route
-    serialises through :meth:`ConnectorListResponse.model_dump`
-    rather than annotating ``response_model=ConnectorListResponse``
-    because the per-item ``tenant_id`` UUID needs to render as a
-    string in the JSON (the default Pydantic-v2 serialiser
-    handles this).
+    paging / cursor fields can land non-breakingly. The route builds
+    the payload by calling :meth:`ConnectorListItem.model_dump`
+    (with ``mode="json"``) on each item returned by
+    :func:`list_ingested_connectors` rather than annotating
+    ``response_model=ConnectorListResponse`` — per-item ``tenant_id``
+    UUIDs need to render as strings in JSON, and the per-item
+    ``mode="json"`` dump is the simplest way to get that without
+    introducing a custom serializer.
     """
     items = await list_ingested_connectors(
         operator=operator,

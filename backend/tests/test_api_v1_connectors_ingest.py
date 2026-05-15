@@ -65,9 +65,7 @@ from meho_backplane.operations.ingest import (
     GroupingResult,
     IngestionResult,
     LlmClient,
-)
-from meho_backplane.operations.ingest.pipeline import (
-    _default_llm_client_factory,
+    default_llm_client_factory,
 )
 from meho_backplane.settings import get_settings
 
@@ -118,7 +116,7 @@ def _reset_llm_client_factory() -> Iterator[None]:
     reset doesn't leak across the file.
     """
     yield
-    set_llm_client_factory(_default_llm_client_factory)
+    set_llm_client_factory(default_llm_client_factory)
 
 
 @pytest.fixture
@@ -747,6 +745,37 @@ async def test_disable_transitions_and_writes_audit_row(
 
 
 @pytest.mark.asyncio
+async def test_disable_is_idempotent(client: TestClient) -> None:
+    """Second POST /disable writes no additional audit row.
+
+    Mirrors :func:`test_enable_is_idempotent` so both transitions
+    carry the same documented contract: replaying the call after
+    every group is already in the target state is a no-op at the
+    service-level audit row.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_a, review_status="enabled", op_is_enabled=True)
+    key, token = _admin_token(tenant_id=tenant_a)
+    headers = _authed(token)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        first = client.post(
+            "/api/v1/connectors/vmware-rest-9.0/disable",
+            headers=headers,
+        )
+        assert first.status_code == 204
+        second = client.post(
+            "/api/v1/connectors/vmware-rest-9.0/disable",
+            headers=headers,
+        )
+    assert second.status_code == 204
+    statuses = await _group_statuses(tenant_id=tenant_a)
+    assert set(statuses.values()) == {"disabled"}
+    audit_count = await _audit_row_count(op_id="meho.connector.disable")
+    assert audit_count == 1
+
+
+@pytest.mark.asyncio
 async def test_enable_cross_tenant_returns_404(client: TestClient) -> None:
     """Cross-tenant enable → 404 (and no state changes leak to the other tenant)."""
     tenant_a = uuid.uuid4()
@@ -991,7 +1020,7 @@ def test_set_llm_client_factory_returns_previous_and_restores(
         ...  # never called in this test
 
     previous = set_llm_client_factory(custom_factory)
-    assert previous is _default_llm_client_factory
+    assert previous is default_llm_client_factory
     restored = set_llm_client_factory(previous)
     assert restored is custom_factory
 

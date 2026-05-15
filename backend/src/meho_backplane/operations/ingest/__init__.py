@@ -66,6 +66,7 @@ from meho_backplane.operations.ingest.pipeline import (
     IngestionPipelineService,
     LlmClientFactory,
     LlmClientUnavailable,
+    default_llm_client_factory,
 )
 from meho_backplane.operations.ingest.register_ingested import (
     IngestionResult,
@@ -111,6 +112,7 @@ __all__ = [
     "SafetyLevel",
     "SpecSource",
     "UnsupportedSpecError",
+    "default_llm_client_factory",
     "detect_spec_format",
     "ensure_connector_class_registered",
     "list_ingested_connectors",

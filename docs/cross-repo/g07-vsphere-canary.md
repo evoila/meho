@@ -266,9 +266,12 @@ Two drivers:
   Both would lift retrieval quality for cardinal ops with weak
   upstream descriptions.
 
-The acceptance test marks these three queries
-``xfail(strict=True)``; the canary's other 7 queries plus the
-non-benchmark assertions verify the substrate is healthy.
+The acceptance test marks these three queries ``xfail``
+(non-strict, because pgvector's IVFFlat approximation makes the
+failure non-deterministic — the same query against the same data
+can pass or fail depending on the index's probed lists). The
+canary's other 7 queries plus the non-benchmark assertions verify
+the substrate is healthy.
 
 ### 3. `tests/integration/conftest.py` TRUNCATE statement is stale
 

@@ -26,13 +26,14 @@ asserts:
   operator queries return the canonical operation in the top-3 hits
   via :func:`search_operations` (T8, #438) over the PG hybrid
   BM25+cosine RRF ranking. The remaining 3 queries are marked
-  ``xfail(strict=True)`` — they target cardinal operations whose
-  spec descriptions are vendor-schema-heavy and lose to short
-  sub-path descriptions in BM25 ranking. The xfail-strict shape
-  makes the canary detect when upstream description quality
-  improves or when T3 starts producing per-op
-  ``llm_instructions`` — both fix the gap and would flip these
-  cases green. See *Known gaps* in
+  ``xfail`` (non-strict, because pgvector's IVFFlat approximation
+  makes the failure non-deterministic between runs) — they target
+  cardinal operations whose spec descriptions are
+  vendor-schema-heavy and lose to short sub-path descriptions in
+  BM25 ranking. The xfail markers + follow-up tickets (T3 per-op
+  ``llm_instructions``, T1 parameter-ref support, spec
+  description-quality polish) make the gap visible and tracked
+  rather than silently absorbed. See *Known gaps* in
   ``docs/cross-repo/g07-vsphere-canary.md``.
 
 The benchmark is parametrised so every (query, expected_op_id) pair
@@ -790,21 +791,30 @@ async def test_canary_list_ingested_connectors_surfaces_vmware_rest(
 
 
 def _benchmark_params() -> list[Any]:
-    """Build the parametrize list, attaching ``xfail(strict=True)`` where measured.
+    """Build the parametrize list, attaching ``xfail`` markers where measured.
 
-    Pytest's strict-xfail surface fails the test if a query we
-    expect to fail starts passing — a load-bearing tripwire when
-    follow-up work fixes upstream description quality or adds
-    per-op LLM instructions. The canary's intent is to **detect**
-    when retrieval quality improves, not to suppress the gap
-    silently.
+    Non-strict ``xfail`` (not ``strict=True``) because pgvector's
+    IVFFlat index returns approximate-nearest-neighbour orderings
+    whose results vary slightly between runs (the index's
+    ``probes`` parameter trades recall for latency by checking
+    only a subset of inverted-file lists). Two of the three flaky
+    queries swap "currently fails" / "currently passes" between
+    runs in the same build of the canary; ``strict=True`` would
+    convert any of those passes into a hard failure, gating CI on
+    index-state variance the substrate is allowed to have.
+
+    Plain ``xfail`` keeps the canary stable while still flagging
+    in the suite report that these three cardinal-op queries are
+    expected to under-rank. The follow-up tickets (filed from the
+    PR body) covering T3 per-op ``llm_instructions`` + T1
+    parameter-ref support + spec description quality are what
+    actually fix the gap; flipping the markers off is the
+    operator-side signal once those land.
 
     Return type annotated as ``list[Any]`` because
     :class:`pytest.ParameterSet` is the runtime type but pytest does
     not export it on its public ``pytest`` module surface (it's at
     ``_pytest.mark.structures.ParameterSet``, intentionally private).
-    The list flows into ``pytest.mark.parametrize`` verbatim so a
-    looser annotation here is harmless.
     """
     params: list[Any] = []
     for query, op_id in GOVC_PARITY_BENCHMARK:
@@ -815,10 +825,11 @@ def _benchmark_params() -> list[Any]:
                     reason=(
                         "vCenter spec's cardinal-op description (or T3 lack "
                         "of per-op llm_instructions) loses to short sub-path "
-                        "descriptions in BM25+cosine RRF; tracked as a "
-                        "follow-up from this PR's body."
+                        "descriptions in BM25+cosine RRF; pgvector IVFFlat "
+                        "approximation makes the failure non-deterministic "
+                        "between runs. Tracked as a follow-up from this "
+                        "PR's body."
                     ),
-                    strict=True,
                 ),
             )
         params.append(

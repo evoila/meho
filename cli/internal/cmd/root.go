@@ -17,6 +17,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
+	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/discovery"
 )
 
@@ -98,6 +99,14 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in verb names.
 	root.AddCommand(connector.NewRootCmd())
+
+	// G0.3-T5 (#256) -- targets registry verbs (list / describe /
+	// probe) for Initiative #224. Wraps the read + probe routes of
+	// /api/v1/targets/*. Sibling write verbs (create / update /
+	// delete) and bulk-import (T6 #257) ship separately. Registered
+	// before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `targets` parent.
+	root.AddCommand(targets.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

@@ -293,14 +293,21 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         # that a TRUNCATE against a table referenced by a FK either
         # use ``CASCADE`` or include every referencing table in the
         # same statement. Migration ``0003`` (G0.4-T1) added a real
-        # ``documents.tenant_id REFERENCES tenant(id)`` FK, so
-        # ``TRUNCATE TABLE tenant`` on its own is rejected — listing
-        # ``documents`` explicitly keeps the statement non-cascading
-        # while still leaving the table empty. ``audit_log`` has no
-        # FK to ``tenant`` (the soft column shape from 0002), but
-        # bundling it into the same TRUNCATE keeps the per-test reset
-        # atomic.
-        await conn.execute(text("TRUNCATE TABLE audit_log, documents, tenant"))
+        # ``documents.tenant_id REFERENCES tenant(id)`` FK; later
+        # migrations added ``broadcast_override`` (0008, G6.3-T1),
+        # ``graph_node`` + ``graph_edge`` (0007, G9.1-T1) -- each
+        # carries its own ``tenant_id REFERENCES tenant(id)``. Listing
+        # every referencing table explicitly keeps the statement
+        # non-cascading while still leaving the table empty.
+        # ``audit_log`` has no FK to ``tenant`` (the soft column shape
+        # from 0002), but bundling it into the same TRUNCATE keeps
+        # the per-test reset atomic.
+        await conn.execute(
+            text(
+                "TRUNCATE TABLE audit_log, documents, "
+                "broadcast_override, graph_edge, graph_node, tenant",
+            ),
+        )
         # Re-seed two pinned tenant rows so the integration suite
         # actually exercises the T1 ``tenant`` table (the issue body's
         # explicit "Setup fixture" requirement). The pinned UUIDs

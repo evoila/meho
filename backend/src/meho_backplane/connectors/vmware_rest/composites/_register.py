@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 5 read composites.
+"""``register_vmware_composite_operations`` -- registrar for the 13 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -11,23 +11,30 @@ after the registrar list is populated by the
 :func:`register_typed_op_registrar`).
 
 Per-composite arguments (summary / description / group_key / tags /
-``parameter_schema``) live here so a future shape change (e.g.
-``llm_instructions`` polish) only touches one file. The
+``parameter_schema`` / ``safety_level`` / ``requires_approval``) live
+here so a future shape change (e.g. ``llm_instructions`` polish) only
+touches one file. The
 :func:`~meho_backplane.operations.typed_register.register_composite_operation`
 helper handles the upsert, body-hash dedupe, embedding pipeline, and
 the source_kind="composite" persistence.
 
-Every composite passes ``safety_level="safe"`` +
-``requires_approval=False`` -- overrides of T4's
-``dangerous`` / ``True`` defaults (which target the typical write
-composite). All 5 composites in this Task are inherently read-only;
-operator-facing dispatch should not pop the approval queue for them.
+Mixed safety posture
+--------------------
+
+The 5 read composites (T5 / #508) pass ``safety_level="safe"`` +
+``requires_approval=False`` -- overrides of T4's ``dangerous`` /
+``True`` defaults. The 8 write composites (T6 / #509) inherit the T4
+defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
+the call site; the helper would default to those values anyway).
+Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
+``requires_approval`` so the policy posture is implied by the row,
+not by global state.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
@@ -36,17 +43,43 @@ from meho_backplane.connectors.vmware_rest.composites._read import (
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
+from meho_backplane.connectors.vmware_rest.composites._write import (
+    cluster_patch_composite,
+    host_detach_from_vds_composite,
+    host_evacuate_composite,
+    vm_clone_composite,
+    vm_create_composite,
+    vm_migrate_composite,
+    vm_power_bulk_composite,
+    vm_snapshot_revert_composite,
+)
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
     CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA,
     CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
+    CLUSTER_PATCH_PARAMETER_SCHEMA,
+    CLUSTER_PATCH_RESPONSE_SCHEMA,
     DATASTORE_USAGE_PARAMETER_SCHEMA,
     DATASTORE_USAGE_RESPONSE_SCHEMA,
     EVENT_TAIL_PARAMETER_SCHEMA,
     EVENT_TAIL_RESPONSE_SCHEMA,
+    HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
+    HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
+    HOST_EVACUATE_PARAMETER_SCHEMA,
+    HOST_EVACUATE_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
+    VM_CLONE_PARAMETER_SCHEMA,
+    VM_CLONE_RESPONSE_SCHEMA,
+    VM_CREATE_PARAMETER_SCHEMA,
+    VM_CREATE_RESPONSE_SCHEMA,
+    VM_MIGRATE_PARAMETER_SCHEMA,
+    VM_MIGRATE_RESPONSE_SCHEMA,
+    VM_POWER_BULK_PARAMETER_SCHEMA,
+    VM_POWER_BULK_RESPONSE_SCHEMA,
+    VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
+    VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -67,12 +100,17 @@ _IMPL_ID = "vmware-rest"
 class _CompositeSpec(NamedTuple):
     """Per-composite registration arguments.
 
-    Field-table form rather than five repeated kwargs blocks: keeps the
-    op_id / handler / schemas / group / tags adjacent per composite and
-    drops the outer registrar function below the 100-line block limit.
-    Common fields (``product`` / ``version`` / ``impl_id`` /
-    ``safety_level="safe"`` / ``requires_approval=False``) live on the
-    call site below, not in the spec.
+    Field-table form rather than thirteen repeated kwargs blocks:
+    keeps the op_id / handler / schemas / group / tags / policy
+    posture adjacent per composite and drops the outer registrar
+    function below the 100-line block limit. Common fields
+    (``product`` / ``version`` / ``impl_id``) live on the call site
+    below, not in the spec.
+
+    Each row carries its own ``safety_level`` + ``requires_approval``
+    so the policy posture is implied by the spec, not by global
+    defaults: reads ship ``"safe"`` / ``False``; writes ship
+    ``"dangerous"`` / ``True``.
     """
 
     op_id: str
@@ -83,9 +121,14 @@ class _CompositeSpec(NamedTuple):
     response_schema: dict[str, Any]
     group_key: str
     tags: list[str]
+    safety_level: Literal["safe", "caution", "dangerous"]
+    requires_approval: bool
 
 
 _COMPOSITES: tuple[_CompositeSpec, ...] = (
+    # ----------------------------------------------------------------
+    # Read composites (T5 / #508) -- safe / no approval
+    # ----------------------------------------------------------------
     _CompositeSpec(
         op_id="vmware.composite.cluster.drs_recommendations",
         handler=cluster_drs_recommendations_composite,
@@ -103,6 +146,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA,
         group_key="cluster",
         tags=["composite", "read-only", "cluster", "drs"],
+        safety_level="safe",
+        requires_approval=False,
     ),
     _CompositeSpec(
         op_id="vmware.composite.event.tail",
@@ -119,6 +164,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=EVENT_TAIL_RESPONSE_SCHEMA,
         group_key="events",
         tags=["composite", "read-only", "events", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
     ),
     _CompositeSpec(
         op_id="vmware.composite.performance.summary",
@@ -137,6 +184,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
         group_key="performance",
         tags=["composite", "read-only", "performance", "vi-json"],
+        safety_level="safe",
+        requires_approval=False,
     ),
     _CompositeSpec(
         op_id="vmware.composite.datastore.usage",
@@ -155,6 +204,8 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=DATASTORE_USAGE_RESPONSE_SCHEMA,
         group_key="storage",
         tags=["composite", "read-only", "storage", "datastore"],
+        safety_level="safe",
+        requires_approval=False,
     ),
     _CompositeSpec(
         op_id="vmware.composite.network.portgroup.audit",
@@ -174,6 +225,189 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
         group_key="networking",
         tags=["composite", "read-only", "networking", "portgroup"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    # ----------------------------------------------------------------
+    # Write composites (T6 / #509) -- dangerous / requires approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.vm.create",
+        handler=vm_create_composite,
+        summary="Create a VM with NIC attach + optional power-on; rollback on failure.",
+        description=(
+            "Orchestrates folder lookup, POST:/vcenter/vm create, per-NIC "
+            "attach via PATCH:/vcenter/vm/{vm}/network, and optional "
+            "POST:/vcenter/vm/{vm}/power start. Partial-failure rollback: "
+            "if any step after the create succeeds fails, the half-"
+            "created VM is removed via DELETE:/vcenter/vm/{vm} so the "
+            "caller knows the VM did not persist. Equivalent of 'govc "
+            "vm.create' for operator-facing dispatch."
+        ),
+        parameter_schema=VM_CREATE_PARAMETER_SCHEMA,
+        response_schema=VM_CREATE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "lifecycle"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.clone",
+        handler=vm_clone_composite,
+        summary="Clone a VM from a content-library template; poll the deploy task.",
+        description=(
+            "Reads source VM config, dispatches "
+            "POST:/vcenter/vm-template/library-items?action=deploy, then "
+            "polls GET:/cis/tasks/{task} until completion or timeout. "
+            "Long-running -- blocks for up to timeout_seconds when "
+            "wait_for_completion=True (default). Setting "
+            "wait_for_completion=False returns the task id for caller "
+            "polling. Equivalent of 'govc vm.clone' for operator-facing "
+            "dispatch."
+        ),
+        parameter_schema=VM_CLONE_PARAMETER_SCHEMA,
+        response_schema=VM_CLONE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "lifecycle", "long-running"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.snapshot.revert",
+        handler=vm_snapshot_revert_composite,
+        summary="Revert a VM to a named snapshot; reject on name ambiguity.",
+        description=(
+            "Lists the VM's snapshot tree via "
+            "GET:/vcenter/vm/{vm}/snapshot, matches by snapshot name, "
+            "and dispatches "
+            "POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert when "
+            "exactly one match is found. Multiple-match cases return "
+            "status='ambiguous' with candidates listed so the operator "
+            "can re-dispatch by snapshot moid. Idempotent within a "
+            "snapshot tree -- reverting twice to the same snapshot is "
+            "a no-op vs. vSphere state. Marked dangerous: the revert "
+            "destroys in-flight VM state since the snapshot. Equivalent "
+            "of 'govc snapshot.revert'."
+        ),
+        parameter_schema=VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
+        response_schema=VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "snapshot"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.migrate",
+        handler=vm_migrate_composite,
+        summary="Migrate a VM via DRS recommendation or explicit target host.",
+        description=(
+            "Consults "
+            "GET:/vcenter/cluster/{cluster}/drs/recommendations for the "
+            "VM, then dispatches POST:/vcenter/vm/{vm}?action=relocate "
+            "with the recommended host. If DRS returns no recommendation "
+            "and no target_host override is supplied, the composite "
+            "returns status='no_recommendation' rather than picking a "
+            "host arbitrarily. The operator can bypass DRS by passing "
+            "target_host explicitly. Equivalent of 'govc vm.migrate' "
+            "for operator-facing dispatch."
+        ),
+        parameter_schema=VM_MIGRATE_PARAMETER_SCHEMA,
+        response_schema=VM_MIGRATE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "drs"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.power.bulk",
+        handler=vm_power_bulk_composite,
+        summary="Apply a power action to every VM matching a filter; aggregate results.",
+        description=(
+            "Resolves a free-form filter to a VM list via "
+            "GET:/vcenter/vm, then dispatches "
+            "POST:/vcenter/vm/{vm}/power?action=<action> per matched VM. "
+            "Partial-failure tolerated: each VM's outcome is captured "
+            "independently; failures do not abort the composite unless "
+            "fail_fast=True. Returns per-VM results plus aggregate "
+            "counts. Equivalent of 'govc vm.power' over a --vm glob."
+        ),
+        parameter_schema=VM_POWER_BULK_PARAMETER_SCHEMA,
+        response_schema=VM_POWER_BULK_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "bulk"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.evacuate",
+        handler=host_evacuate_composite,
+        summary="Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.",
+        description=(
+            "Lists VMs on the host via "
+            "GET:/vcenter/vm?filter.hosts=..., then dispatches "
+            "vmware.composite.vm.migrate per VM (recursive composite "
+            "call -- first production composite that calls another "
+            "composite). On full migration success, the host enters "
+            "maintenance via "
+            "PATCH:/vcenter/host/{host}/maintenance?action=enter. "
+            "tolerate_partial_failure=True lets maintenance-enter fire "
+            "even with VMs left behind. Equivalent of 'govc host.evacuate' "
+            "operator workflow."
+        ),
+        parameter_schema=HOST_EVACUATE_PARAMETER_SCHEMA,
+        response_schema=HOST_EVACUATE_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "maintenance", "recursive"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.host.detach_from_vds",
+        handler=host_detach_from_vds_composite,
+        summary="Migrate host VM NICs off a DVS to a fallback network, then remove host from DVS.",
+        description=(
+            "Lists DVS portgroups on the host and VMs on the host, "
+            "migrates each VM's NICs off the DVS to the supplied "
+            "fallback_network via PATCH:/vcenter/vm/{vm}/network, and "
+            "then dispatches "
+            "POST:/vcenter/network/dvs/{dvs}?action=remove_host. "
+            "vSphere refuses the host detach when any VM still has "
+            "active NICs on the DVS -- the composite verifies every NIC "
+            "migrated before attempting the detach; on partial NIC "
+            "migration the composite returns status='incomplete' and "
+            "skips the DVS detach. Replaces "
+            "scripts/host-detach-from-vds.py."
+        ),
+        parameter_schema=HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
+        response_schema=HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
+        group_key="host",
+        tags=["composite", "write", "host", "networking"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.cluster.patch",
+        handler=cluster_patch_composite,
+        summary="Sequentially patch every host in a cluster: maintenance + patch + exit.",
+        description=(
+            "Lists cluster hosts via GET:/vcenter/cluster/{cluster}/host, "
+            "then iterates each host sequentially: "
+            "PATCH:/vcenter/host/{host}/maintenance?action=enter -> "
+            "POST:/vcenter/host/{host}?action=patch -> "
+            "PATCH:/vcenter/host/{host}/maintenance?action=exit. "
+            "Sequential by design -- concurrent host patches would "
+            "force every VM in the cluster to vMotion at once, "
+            "overwhelming DRS. Per-host failure stops the loop; the "
+            "composite returns status='stopped' with patched_hosts + "
+            "remaining_hosts so the operator can manually finish or "
+            "roll back the partial patch."
+        ),
+        parameter_schema=CLUSTER_PATCH_PARAMETER_SCHEMA,
+        response_schema=CLUSTER_PATCH_RESPONSE_SCHEMA,
+        group_key="cluster",
+        tags=["composite", "write", "cluster", "patch", "long-running"],
+        safety_level="dangerous",
+        requires_approval=True,
     ),
 )
 
@@ -182,7 +416,7 @@ async def register_vmware_composite_operations(
     *,
     embedding_service: EmbeddingService | None = None,
 ) -> None:
-    """Upsert every vmware-rest read composite into ``endpoint_descriptor``.
+    """Upsert every vmware-rest composite into ``endpoint_descriptor``.
 
     Idempotent: a second invocation against unchanged descriptions is a
     no-op for the embedding pipeline (the body-hash skip path in
@@ -191,9 +425,11 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 5 read composites (cluster.drs_recommendations + event.tail
-    + performance.summary + datastore.usage + network.portgroup.audit).
-    The 8 write composites are scope of #509 (G3.1-T6).
+    Scope: 13 composites total -- 5 read (T5 / #508) +
+    8 write (T6 / #509). Each composite's ``safety_level`` +
+    ``requires_approval`` come from its :class:`_CompositeSpec` row:
+    reads pass ``"safe"`` / ``False``; writes pass ``"dangerous"`` /
+    ``True`` (T4's defaults).
 
     Test seam: ``embedding_service`` lets test fixtures inject a stub
     so unit tests don't load the ONNX model. Production callers leave
@@ -213,7 +449,7 @@ async def register_vmware_composite_operations(
             response_schema=spec.response_schema,
             group_key=spec.group_key,
             tags=spec.tags,
-            safety_level="safe",
-            requires_approval=False,
+            safety_level=spec.safety_level,
+            requires_approval=spec.requires_approval,
             embedding_service=embedding_service,
         )

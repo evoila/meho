@@ -356,11 +356,19 @@ jobs:
         #
         # Auth: cross-repo dispatches need a PAT (fine-grained, single-repo
         # on claude-rdc-hetzner-dc, scoped to `metadata: read` +
-        # `actions: write`). The default GITHUB_TOKEN is scoped to this
-        # repo only and the API returns 404 if used cross-repo.
+        # `contents: write`). `contents: write` is the permission the
+        # create-a-repository-dispatch-event endpoint requires for a
+        # fine-grained token — NOT `actions: write` (that covers
+        # workflow_dispatch / re-running runs, a different endpoint). A
+        # token minted with the wrong scope authenticates fine but the
+        # dispatch POST returns 403 "Resource not accessible by personal
+        # access token" (see the May 2026 incident on this step). The
+        # default GITHUB_TOKEN is scoped to this repo only and the API
+        # returns 404 if used cross-repo.
         #
         # Failure mode: fail-loud on PAT-present but dispatch fails. A 401
-        # (revoked/wrong token) or 422 (bad payload shape) means the
+        # (revoked/expired token), 403 (token present but under-scoped —
+        # missing `contents: write`), or 422 (bad payload shape) means the
         # consumer never learns about the new image; silent swallow would
         # leave the lab on a stale revision indefinitely. No
         # `continue-on-error`.

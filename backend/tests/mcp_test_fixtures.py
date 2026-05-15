@@ -134,6 +134,7 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.resources import kb as kb_resource
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
+        audit,
         connector_admin,
         knowledge,
         meho_status,
@@ -144,6 +145,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(meho_status)
     importlib.reload(operations)
     importlib.reload(connector_admin)
+    importlib.reload(audit)
     importlib.reload(knowledge)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)

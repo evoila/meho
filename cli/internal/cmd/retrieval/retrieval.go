@@ -36,5 +36,6 @@ func NewRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newEvalCmd())
+	cmd.AddCommand(newRetireChecklistCmd())
 	return cmd
 }

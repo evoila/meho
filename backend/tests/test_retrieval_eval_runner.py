@@ -9,9 +9,11 @@ Coverage matrix (G4.3-T2 / Task #441 acceptance criteria):
   green/yellow; none-correct → red. Uses a stub retrieve_fn keyed on
   the corpus's expected_hits so the test is deterministic without
   PG / fastembed.
-* :func:`eval_surface` for ``memory`` / ``operations`` — empty
-  corpus returns ``query_count=0`` + ``verdict="green"`` per the
-  module's "absent corpus is not a failure" rule.
+* :func:`eval_surface` for ``memory`` — empty corpus returns
+  ``query_count=0`` + ``verdict="green"`` per the module's
+  "absent corpus is not a failure" rule. (Operations corpus shipped
+  in G4.3-T3 #442; ``test_retrieval_eval_operation_corpus.py`` owns
+  its corpus-content coverage.)
 * :func:`eval_all` — overall verdict is the worst of the per-surface
   verdicts; one red surface flips the whole result.
 * Baseline integration — when *baseline_corpus_root* is set, the kb
@@ -72,14 +74,17 @@ def _make_hit(slug: str, source: str = "kb") -> RetrievalHit:
 def _make_perfect_retrieve_fn() -> Any:
     """Stub that returns the corpus's first expected hit as the top-1.
 
-    Models a retrieval system that always nails the ground truth.
-    The kb corpus's first expected_hit per row → returned as the
-    single hit.
+    Models a retrieval system that always nails the ground truth
+    across every shipped surface — the kb corpus's first
+    expected_hit and the operations corpus's first expected_op_id
+    are both returned as the single hit for their respective
+    surfaces. The ``source`` argument the runner threads through
+    picks the right answer map at call time.
     """
     from meho_backplane.retrieval.eval.corpus import load_corpus
 
-    corpus = load_corpus("kb")
-    answer_map = {row.query: row.expected_hits[0] for row in corpus}
+    kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
+    ops_answers = {row.query: row.expected_op_ids[0] for row in load_corpus("operations")}
 
     async def perfect(
         *,
@@ -89,7 +94,16 @@ def _make_perfect_retrieve_fn() -> Any:
         kind: str | None = None,
         limit: int = 10,
     ) -> list[RetrievalHit]:
-        slug = answer_map.get(query)
+        # Operations branch — the runner passes ``source="operations"``;
+        # RetrievalHit.source_id is the op_id (per
+        # ``runner._operations_hits_to_op_ids``).
+        if source == "operations":
+            op_id = ops_answers.get(query)
+            if op_id is None:
+                return []
+            return [_make_hit(op_id, source="operations")]
+        # kb branch (default) — RetrievalHit.source_id is the slug.
+        slug = kb_answers.get(query)
         if slug is None:
             return []
         return [_make_hit(slug, source=source or "kb")]
@@ -230,7 +244,7 @@ async def test_eval_surface_kb_per_query_results_carry_expected_and_meho_hits() 
 
 
 # ---------------------------------------------------------------------------
-# eval_surface — memory + operations (empty corpus → no-op green)
+# eval_surface — memory (empty corpus → no-op green)
 # ---------------------------------------------------------------------------
 
 
@@ -249,28 +263,19 @@ async def test_eval_surface_memory_empty_corpus_is_green() -> None:
     assert result.queries == []
 
 
-@pytest.mark.asyncio
-async def test_eval_surface_operations_empty_corpus_is_green() -> None:
-    """Operations corpus YAML hasn't shipped → query_count=0 + verdict='green'."""
-    result = await eval_surface(
-        "operations",
-        tenant_id=uuid.uuid4(),
-        retrieve_fn=_make_terrible_retrieve_fn(),
-    )
-
-    assert result.surface == "operations"
-    assert result.query_count == 0
-    assert result.verdict == "green"
-
-
 # ---------------------------------------------------------------------------
 # eval_all — surface roll-up
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_eval_all_perfect_kb_and_empty_others_returns_green() -> None:
-    """Green kb + no-data memory/operations → overall green."""
+async def test_eval_all_perfect_kb_and_ops_with_empty_memory_returns_green() -> None:
+    """Green kb + green ops + no-data memory → overall green.
+
+    Memory corpus stays empty until T4 #443 ships; the runner's
+    absent-corpus-is-green rule keeps the overall verdict green when
+    every shipped surface is green.
+    """
     result = await eval_all(
         tenant_id=uuid.uuid4(),
         retrieve_fn=_make_perfect_retrieve_fn(),

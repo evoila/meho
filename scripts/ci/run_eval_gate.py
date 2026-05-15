@@ -90,12 +90,44 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
 
     Same shape the unit tests use — see
     ``tests/test_retrieval_eval_runner.py::_make_perfect_retrieve_fn``.
-    Models the "production retrieval is working perfectly" baseline;
-    ensures the gate's reference run is always green so any drop is
-    a regression in the runner / metrics / verdict layer.
+    Models the "production retrieval is working perfectly" baseline
+    across every shipped surface; ensures the gate's reference run is
+    always green so any drop is a regression in the runner / metrics /
+    verdict layer.
+
+    Surface-by-surface answer source:
+
+    * kb — corpus row's first ``expected_hits`` slug; RetrievalHit
+      ``source_id`` is the slug.
+    * operations — corpus row's first ``expected_op_ids`` value;
+      RetrievalHit ``source_id`` is the op_id (per
+      ``runner._operations_hits_to_op_ids``). The G4.3-T3 operations
+      corpus shipped 10 govc-parity queries; without this branch the
+      gate would flip red the moment the YAML lands.
+    * memory — no shipped corpus yet (T4 #443); falls through to the
+      empty-result path which the runner's empty-corpus-is-green rule
+      handles.
     """
-    corpus = load_corpus("kb")
-    answer_map = {row.query: row.expected_hits[0] for row in corpus}
+    kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
+    ops_answers = {
+        row.query: row.expected_op_ids[0] for row in load_corpus("operations")
+    }
+
+    def _hit(slug: str, source: str, tenant_id: uuid.UUID) -> RetrievalHit:
+        return RetrievalHit(
+            document_id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            source=source,
+            source_id=slug,
+            kind=f"{source}-entry",
+            body=f"body for {slug}",
+            doc_metadata={},
+            fused_score=0.5,
+            bm25_score=0.5,
+            cosine_score=0.5,
+            bm25_rank=1,
+            cosine_rank=1,
+        )
 
     async def perfect(
         *,
@@ -105,25 +137,11 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
         kind: str | None = None,
         limit: int = 10,
     ) -> list[RetrievalHit]:
-        slug = answer_map.get(query)
-        if slug is None:
-            return []
-        return [
-            RetrievalHit(
-                document_id=uuid.uuid4(),
-                tenant_id=tenant_id,
-                source=source or "kb",
-                source_id=slug,
-                kind=f"{source or 'kb'}-entry",
-                body=f"body for {slug}",
-                doc_metadata={},
-                fused_score=0.5,
-                bm25_score=0.5,
-                cosine_score=0.5,
-                bm25_rank=1,
-                cosine_rank=1,
-            )
-        ]
+        if source == "operations":
+            op_id = ops_answers.get(query)
+            return [_hit(op_id, "operations", tenant_id)] if op_id else []
+        slug = kb_answers.get(query)
+        return [_hit(slug, source or "kb", tenant_id)] if slug else []
 
     return perfect  # type: ignore[return-value]
 

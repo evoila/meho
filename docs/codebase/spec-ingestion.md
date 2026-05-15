@@ -62,8 +62,27 @@ The pipeline is broken into work items per Initiative #389:
     `meho.connector.*` namespace and only `tenant_admin` operators
     (plus the two read tools at `operator` role) see them in
     `tools/list`.
-* **T8 — vSphere canary** — ingest both vCenter specs end-to-end.
-* **T9 — Docs.**
+* **T8 — vSphere canary** (`tests/acceptance/test_g07_vsphere_canary.py`).
+  Acceptance test that drives the full pipeline against the consumer's
+  vCenter REST spec (~1,275 ops): parse → register → group → review →
+  enable → 10-query govc-parity benchmark over `search_operations`.
+  Ships with `vcenter.yaml` only; `vi-json.yaml` ingestion is blocked
+  on a T1 parser extension for `#/components/parameters/*` (~40 LoC).
+  Three of 10 queries currently `xfail` pending a T3 per-op
+  `llm_instructions` enhancement. See the [vSphere canary
+  runbook](../cross-repo/g07-vsphere-canary.md) for the operator
+  procedure.
+* **T9 — Docs** (#409). Two new docs:
+  [docs/architecture/spec-ingestion.md](../architecture/spec-ingestion.md)
+  (canonical architecture reference) and
+  [docs/cross-repo/connector-ingestion.md](../cross-repo/connector-ingestion.md)
+  (operator runbook for adding a new vendor surface). Cross-link
+  updates to `connectors.md` correction header and this codebase
+  doc.
+
+All T1–T8 substrate work merged to `main` before T9 (#409); the
+pipeline is shipped and ready for per-G3.x consumer Initiatives
+to drive ingestion against their target vendor surfaces.
 
 T1 produces the proto shape every other stage consumes; T2 is the
 single write path into `endpoint_descriptor` for ingested rows; T3
@@ -467,8 +486,16 @@ operations go live.
 * Issue #405 — T5 task (CLI verbs).
 * Issue #406 — T6 task (REST routes; this module's HTTP surface).
 * Issue #407 — T7 task (admin MCP tools).
+* Issue #408 — T8 task (vSphere canary).
+* Issue #409 — T9 task (this doc + the architecture / operator-runbook pair).
 * Initiative #389 — G0.7 spec-ingestion pipeline.
 * Goal #221 — G0 foundational substrate.
+* [docs/architecture/spec-ingestion.md](../architecture/spec-ingestion.md) —
+  canonical architecture doc; companion to this codebase map.
+* [docs/cross-repo/connector-ingestion.md](../cross-repo/connector-ingestion.md) —
+  operator runbook for adding a new vendor surface end-to-end.
+* [docs/cross-repo/g07-vsphere-canary.md](../cross-repo/g07-vsphere-canary.md) —
+  the worked-example canary procedure operators reproduce locally.
 * `meho_backplane/db/models.py::EndpointDescriptor` — the ORM target.
 * `meho_backplane/operations/typed_register.py` — typed-connector
   parallel pathway; same body-hash skip-re-embed contract.

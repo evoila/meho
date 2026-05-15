@@ -51,10 +51,28 @@ If the cross-repo edge is a single comment in code or a single field in
 a values file, put the note next to the code instead. This directory is
 for the contracts substantial enough to need their own page.
 
+## Operator-facing runbooks (not handshakes — recipes)
+
+`docs/cross-repo/` also hosts the operator runbooks that span the
+consumer-MEHO boundary even when there's no protocol contract to spec
+— same audience (the operator deploying MEHO), same one-stop landing
+shape (prerequisites + step-by-step + rollback), no consumer-side
+implementation to track separately:
+
+| Doc | Purpose |
+| --- | --- |
+| [`broadcast-onboarding.md`](./broadcast-onboarding.md) | How to subscribe to the per-tenant Valkey broadcast stream from `meho status --watch`, an MCP client, or a custom downstream subscriber. |
+| [`connector-ingestion.md`](./connector-ingestion.md) | How to add a new vendor surface to MEHO via the G0.7 spec-ingestion pipeline — `meho connector ingest/review/edit/enable/disable`. Companion architecture: [`docs/architecture/spec-ingestion.md`](../architecture/spec-ingestion.md). |
+| [`g07-vsphere-canary.md`](./g07-vsphere-canary.md) | The worked-example canary procedure: ingest the vCenter REST spec, drive the operator workflow, run the 10-query govc-parity benchmark. |
+| [`mcp-client-setup.md`](./mcp-client-setup.md) | How to wire an MCP client (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) to a running MEHO backplane, plus the Keycloak realm-side audience configuration. |
+
 ## Related
 
 - `docs/codebase/` — durable internal architecture docs (per area:
   backend, cli, devops). These describe what's inside `evoila/meho`;
   `cross-repo/` describes what crosses out of it.
+- `docs/architecture/` — canonical architecture references for shipped
+  substrates. The cross-repo runbooks above link to their architecture
+  companion when one exists.
 - Each handshake doc carries a status table that this README does not
   duplicate — drift between the two would be a bug.

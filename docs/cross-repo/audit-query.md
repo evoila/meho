@@ -87,7 +87,9 @@ The cross-tenant probe semantic: if the audit id exists but belongs to another t
 
 ### "Trace one agent session"
 
-The `agent_session_id` column does not exist on `audit_log` in v0.2. The CLI flag is reserved on the substrate but the substrate returns `-32602 / UnsupportedFilterError` if you supply it; the column lands with a future schema migration. For now the closest approximation is `--json` plus `jq` over a wider time window:
+The `agent_session_id` column does not exist on `audit_log` in v0.2 and there is no `--agent-session-id` CLI flag. The substrate's filter type carries the field as a forward-compatibility hook — the REST `POST /api/v1/audit/query` body and the MCP `query_audit` tool both accept it on the wire, but the substrate raises `UnsupportedFilterError` (rendered as HTTP 400 by the REST router; `-32602` by the MCP dispatcher) until the column lands with a future schema migration.
+
+For now the closest approximation from the CLI is `--json` plus `jq` over a wider window keyed on `request_id` (the chassis-bound `X-Request-Id` propagates into the audit row):
 
 ```bash
 meho audit query --since 24h --json | jq '.rows[] | select(.request_id=="<request-uuid>")'

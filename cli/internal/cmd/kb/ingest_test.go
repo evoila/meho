@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 evoila Group
+
+package kb
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// TestRunIngestRejectsEmptyDirectory — empty arg is caught.
+func TestRunIngestRejectsEmptyDirectory(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	if err := runIngest(cmd, ingestOptions{Directory: ""}); err == nil {
+		t.Fatalf("expected error for empty directory")
+	} else if !strings.Contains(stderr.String(), "non-empty <directory>") {
+		t.Errorf("expected hint; got %q", stderr.String())
+	}
+}
+
+// TestRunIngestHappyPath — POSTs the right body and renders the
+// four-bucket summary.
+func TestRunIngestHappyPath(t *testing.T) {
+	var bodyJSON map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST; got %s", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &bodyJSON)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(KbIngestionResult{
+			InsertedCount: 5,
+			UpdatedCount:  2,
+			SkippedCount:  37,
+			ErrorCount:    0,
+			Errors:        []string{},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newRunCmd(t)
+	if err := runIngest(cmd, ingestOptions{Directory: "/srv/kb", BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runIngest: %v; stderr=%s", err, stderr.String())
+	}
+	if bodyJSON["directory"] != "/srv/kb" {
+		t.Errorf("expected directory in request; got %+v", bodyJSON)
+	}
+	if v, ok := bodyJSON["dry_run"].(bool); ok && v {
+		t.Errorf("dry_run should be omitted when false; got %+v", bodyJSON)
+	}
+	for _, want := range []string{"inserted:", "updated:", "skipped:", "errored:", "total:", "5", "2", "37", "44"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q in %q", want, stdout.String())
+		}
+	}
+}
+
+// TestRunIngestDryRunBindsBody — --dry-run sets dry_run=true in
+// the body.
+func TestRunIngestDryRunBindsBody(t *testing.T) {
+	var bodyJSON map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &bodyJSON)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(KbIngestionResult{Errors: []string{}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, _ := newRunCmd(t)
+	if err := runIngest(cmd, ingestOptions{Directory: "/srv/kb", DryRun: true, BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runIngest --dry-run: %v", err)
+	}
+	if v, _ := bodyJSON["dry_run"].(bool); !v {
+		t.Errorf("expected dry_run=true; got %+v", bodyJSON)
+	}
+	if !strings.Contains(stdout.String(), "dry-run:") {
+		t.Errorf("expected dry-run banner; got %q", stdout.String())
+	}
+}
+
+// TestRunIngestJSONHappyPath — --json emits the raw result.
+func TestRunIngestJSONHappyPath(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(KbIngestionResult{
+			InsertedCount: 1, UpdatedCount: 2, SkippedCount: 3, ErrorCount: 0, Errors: []string{},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, _ := newRunCmd(t)
+	if err := runIngest(cmd, ingestOptions{Directory: "/x", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runIngest --json: %v", err)
+	}
+	var decoded KbIngestionResult
+	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
+	}
+	if decoded.InsertedCount != 1 || decoded.UpdatedCount != 2 {
+		t.Errorf("decode produced %+v", decoded)
+	}
+}
+
+// TestRunIngest400SurfacesDirectoryNotFound — 400 from
+// directory_not_found / not_a_directory surfaces the substrate's
+// detail verbatim.
+func TestRunIngest400SurfacesDirectoryNotFound(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"detail":"directory_not_found: /no/such/path"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runIngest(cmd, ingestOptions{Directory: "/no/such/path", BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(stderr.String(), "directory_not_found") {
+		t.Errorf("expected substrate detail; got %q", stderr.String())
+	}
+}
+
+// TestRunIngest403SurfacesInsufficientRole — operator-role JWT
+// surfaces with the role hint.
+func TestRunIngest403SurfacesInsufficientRole(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"detail":"Insufficient role: tenant_admin required"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runIngest(cmd, ingestOptions{Directory: "/srv/kb", BackplaneOverride: srv.URL})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(stderr.String(), "tenant_admin required") {
+		t.Errorf("expected role hint; got %q", stderr.String())
+	}
+}
+
+// TestPrintIngestSummaryWithErrors — errors are appended one per
+// line so partial-failure runs are visible without --json.
+func TestPrintIngestSummaryWithErrors(t *testing.T) {
+	var buf bytes.Buffer
+	printIngestSummary(&buf, &KbIngestionResult{
+		InsertedCount: 1, UpdatedCount: 0, SkippedCount: 0, ErrorCount: 2,
+		Errors: []string{"foo.md: bad slug", "bar.md: unreadable"},
+	}, false)
+	out := buf.String()
+	for _, want := range []string{"errors:", "foo.md: bad slug", "bar.md: unreadable", "total:", "3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+}
+
+// TestPrintIngestSummaryDryRunBanner — --dry-run emits a banner.
+func TestPrintIngestSummaryDryRunBanner(t *testing.T) {
+	var buf bytes.Buffer
+	printIngestSummary(&buf, &KbIngestionResult{}, true)
+	if !strings.Contains(buf.String(), "dry-run") {
+		t.Errorf("expected dry-run banner; got %q", buf.String())
+	}
+}

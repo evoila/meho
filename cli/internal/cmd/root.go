@@ -16,6 +16,7 @@ import (
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
+	"github.com/evoila/meho/cli/internal/cmd/kb"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
@@ -114,6 +115,14 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest
 	// cannot shadow the built-in `audit` parent.
 	root.AddCommand(audit.NewRootCmd())
+
+	// G4.1-T4 (#418) -- kb verbs (ingest / search / list / show /
+	// add / delete) for Initiative #331. Wraps the five /api/v1/kb*
+	// routes shipped by G4.1-T2 (#416) plus the /api/v1/retrieve
+	// route for the search verb. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `kb` parent.
+	root.AddCommand(kb.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

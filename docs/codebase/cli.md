@@ -21,10 +21,10 @@ ADR 0006 identity-claim format. Server-driven subcommand discovery
 runs at every startup (empty manifest in v0.1; populated by
 post-Goal-2 backplanes without a CLI binary release).
 
-The v0.2 substrate adds three statically-registered subcommand
-trees alongside the discovery surface. All three follow the same
-pattern: a per-package `NewRootCmd()` returns a cobra parent that
-holds per-verb subcommands; the parents register before the dynamic
+The v0.2 substrate adds several statically-registered subcommand
+trees alongside the discovery surface. All follow the same pattern:
+a per-package `NewRootCmd()` returns a cobra parent that holds
+per-verb subcommands; the parents register before the dynamic
 discovery hook so backplane manifests cannot shadow built-in verb
 names.
 
@@ -38,6 +38,11 @@ names.
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
   the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466).
+- `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
+  (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
+  the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
+  `/api/v1/retrieve` route (G0.4-T5 #262, `source="kb"` scoped)
+  for the search verb.
 
 ## Module layout
 
@@ -90,6 +95,21 @@ cli/
     │   │   ├── who_touched_test.go # query-param emit + table render tests.
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.
+    │   ├── kb/               # G4.1-T4 #418 — `meho kb …` verb tree.
+    │   │   ├── kb.go             # NewRootCmd + shared HTTP/auth helpers + body/metadata/confirm helpers.
+    │   │   ├── ingest.go         # `meho kb ingest <directory> [--dry-run]` (POST /api/v1/kb/ingest).
+    │   │   ├── search.go         # `meho kb search <query>` (POST /api/v1/retrieve, source="kb").
+    │   │   ├── list.go           # `meho kb list [--filter --limit --offset]` (GET /api/v1/kb).
+    │   │   ├── show.go           # `meho kb show <slug>` (GET /api/v1/kb/{slug}); body to stdout.
+    │   │   ├── add.go            # `meho kb add <slug> --body @file|@-|text` (POST /api/v1/kb).
+    │   │   ├── delete.go         # `meho kb delete <slug> [--confirm]` (DELETE /api/v1/kb/{slug}).
+    │   │   ├── kb_test.go        # helpers + register-all-verbs + body/metadata/confirm contract tests.
+    │   │   ├── ingest_test.go    # POST body + four-bucket render + 400 directory_not_found tests.
+    │   │   ├── search_test.go    # POST body (source pinned) + table render + nil-score safety tests.
+    │   │   ├── list_test.go      # query-param emit + table render + limit-range gate tests.
+    │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.
+    │   │   ├── add_test.go       # body-from-file / @- / inline + metadata parse + 422 surface tests.
+    │   │   └── delete_test.go    # confirm-prompt + idempotent-204 + --json envelope tests.
     │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree.
     │   │   ├── connector.go      # NewRootCmd + shared HTTP/auth helpers.
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest).

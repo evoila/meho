@@ -65,6 +65,7 @@ implementation to track separately:
 | [`broadcast-onboarding.md`](./broadcast-onboarding.md) | How to subscribe to the per-tenant Valkey broadcast stream from `meho status --watch`, an MCP client, or a custom downstream subscriber. |
 | [`connector-ingestion.md`](./connector-ingestion.md) | How to add a new vendor surface to MEHO via the G0.7 spec-ingestion pipeline — `meho connector ingest/review/edit/enable/disable`. Companion architecture: [`docs/architecture/spec-ingestion.md`](../architecture/spec-ingestion.md). |
 | [`g07-vsphere-canary.md`](./g07-vsphere-canary.md) | The worked-example canary procedure: ingest the vCenter REST spec, drive the operator workflow, run the 10-query govc-parity benchmark. |
+| [`kb-migration.md`](./kb-migration.md) | How to migrate the consumer's `kb/` knowledge corpus into MEHO via the G4.1 surface — `meho kb ingest/search/list/show/add/delete`, the ≥1-month overlap, the G4.3 eval, and the operator-driven retire decision. Companion architecture: [`docs/architecture/kb.md`](../architecture/kb.md). |
 | [`mcp-client-setup.md`](./mcp-client-setup.md) | How to wire an MCP client (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) to a running MEHO backplane, plus the Keycloak realm-side audience configuration. |
 
 ## Related

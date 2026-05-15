@@ -346,14 +346,32 @@ def test_ingest_operator_role_returns_403(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_returns_slug_sorted_previews(client: TestClient) -> None:
-    """Operator role + happy path returns the substrate's entries as previews."""
+def test_list_preserves_substrate_order_through_response_shape(
+    client: TestClient,
+) -> None:
+    """Route preserves the substrate's row order verbatim through the response.
+
+    The substrate (:meth:`KbService.list_entries`) is the contract owner
+    for ordering -- it issues ``.order_by(Document.source_id)`` so the
+    rows arrive slug-sorted from PG. The route does *not* re-sort; it
+    forwards. To verify the property at the route boundary we feed the
+    substrate stub an **unsorted** list (``vault-policies`` first,
+    ``k8s-ingress`` second) and assert the response carries that same
+    order back. A route that secretly re-sorted would flip the two
+    slugs and fail this test; a route that secretly reordered in any
+    other way (e.g. by ``created_at``) would also surface.
+    """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
 
+    # Substrate stub returns entries in non-alphabetical order so we
+    # can prove the route preserves whatever the substrate hands it
+    # rather than imposing its own sort. The PG-integration test
+    # ``test_kb_routes_pg.py::test_full_route_smoke`` covers the
+    # other half of the contract: that the substrate *does* sort.
     fake_entries = [
-        _make_entry("k8s-ingress", "k8s ingress body"),
         _make_entry("vault-policies", "vault policy primer"),
+        _make_entry("k8s-ingress", "k8s ingress body"),
     ]
     fake_list = AsyncMock(return_value=fake_entries)
     with (
@@ -370,8 +388,8 @@ def test_list_returns_slug_sorted_previews(client: TestClient) -> None:
     body = response.json()
     assert len(body["entries"]) == 2
     slugs = [e["slug"] for e in body["entries"]]
-    assert slugs == ["k8s-ingress", "vault-policies"]
-    assert body["entries"][0]["preview"] == "k8s ingress body"
+    assert slugs == ["vault-policies", "k8s-ingress"]
+    assert body["entries"][0]["preview"] == "vault policy primer"
     # The service was called with operator's tenant_id (tenant scoping).
     fake_list.assert_awaited_once()
     call_kwargs = fake_list.await_args.kwargs
@@ -713,6 +731,46 @@ def test_ingest_tarball_url_returns_501_not_implemented(client: TestClient) -> N
     assert "tarball_url" in response.json()["detail"]
 
 
+def test_ingest_directory_with_empty_tarball_url_succeeds(
+    client: TestClient,
+) -> None:
+    """``tarball_url=""`` is unset (per validator); route honors that and dispatches to directory.
+
+    Regression for the divergence between
+    :meth:`IngestKbRequest._exactly_one_source` (treats ``""`` as unset
+    via ``bool("")`` truthiness) and the route handler. Before the
+    fix, the validator accepted ``{"directory": "/tmp/kb",
+    "tarball_url": ""}`` but the route's ``if body.tarball_url is not
+    None:`` branch fired anyway and returned 501. After the fix the
+    route uses ``if body.tarball_url:`` (truthiness) so the two layers
+    agree -- the request reaches the substrate's directory branch as
+    intended.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    fake_result = KbIngestionResult(
+        inserted_count=3,
+        updated_count=0,
+        skipped_count=0,
+        error_count=0,
+        errors=[],
+    )
+    fake_ingest = AsyncMock(return_value=fake_result)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.ingest_directory", fake_ingest),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/kb/ingest",
+            json={"directory": "/tmp/kb", "tarball_url": ""},
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    assert response.json()["inserted_count"] == 3
+    fake_ingest.assert_awaited_once()
+
+
 def test_ingest_missing_directory_returns_400(client: TestClient) -> None:
     """Substrate raising FileNotFoundError → 400 from the route."""
     tenant_a = uuid.uuid4()
@@ -841,6 +899,67 @@ async def test_delete_writes_audit_row_with_existed_flag(
     assert payload["op_class"] == "write"
     assert payload["slug"] == "k8s-ingress"
     assert payload["existed"] is True
+
+
+@pytest.mark.asyncio
+async def test_delete_substrate_exception_still_writes_kb_delete_audit_row() -> None:
+    """Substrate raising during delete still produces ``op_id="kb.delete"`` audit row.
+
+    Regression for the bind-ordering bug: before the fix the
+    ``structlog.contextvars.bind_contextvars`` call sat *after* the
+    ``service.delete_entry(...)`` await, so an exception on the
+    substrate would skip the bind entirely. The audit middleware
+    would then fall back to its pre-handler default (``op_id=
+    "http.delete:/api/v1/kb/<slug>"``) and the broadcast classifier
+    would bucket the row under ``op_class="other"`` -- defeating
+    decision #3's broadcast-redaction contract for write ops.
+
+    The fix binds ``op_id`` / ``op_class`` / ``slug`` *before* the
+    substrate call; ``audit_existed`` is rebound after. On the
+    exception path ``audit_existed`` stays unbound (we don't know
+    whether the row existed because the query failed), which is the
+    truthful signal.
+
+    Uses a TestClient constructed with
+    ``raise_server_exceptions=False`` so the re-raised handler
+    exception surfaces as the 500 an operator would actually see
+    in production, rather than failing the test with the
+    propagated exception. Same posture as
+    :mod:`tests.test_audit_middleware`'s 500-classification tests.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    # Substrate raises RuntimeError mid-delete -- mimics a PG
+    # connection drop or a deadlock that fails the statement.
+    fake_delete = AsyncMock(side_effect=RuntimeError("simulated substrate failure"))
+    raising_client = TestClient(_build_app(), raise_server_exceptions=False)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.kb.KbService.delete_entry", fake_delete),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = raising_client.delete("/api/v1/kb/k8s-ingress", headers=_authed(token))
+
+    # The outer ServerErrorMiddleware converts the re-raised handler
+    # exception into a 500 -- the audit row still commits with the
+    # correct ``op_id`` binding because the bind happened *before* the
+    # substrate call.
+    assert response.status_code == 500
+
+    rows = await _audit_rows_for_path("/api/v1/kb/k8s-ingress")
+    delete_rows = [r for r in rows if r.method == "DELETE"]
+    assert len(delete_rows) == 1, "expected exactly one audit row for the failed DELETE"
+    payload = delete_rows[0].payload
+    assert payload["op_id"] == "kb.delete", (
+        "audit row must classify under kb.delete even when the substrate "
+        "raises; falling through to http.delete:/api/v1/kb/<slug> would "
+        "defeat decision #3's broadcast-redaction contract"
+    )
+    assert payload["op_class"] == "write"
+    assert payload["slug"] == "k8s-ingress"
+    # ``existed`` is unbound on the exception path -- we don't know
+    # whether the row existed because the query failed.
+    assert "existed" not in payload
 
 
 @pytest.mark.asyncio

@@ -409,20 +409,32 @@ async def delete_kb(
     properties.
 
     Binds ``audit_op_id="kb.delete"`` + ``audit_op_class="write"``
-    + ``audit_slug=<slug>`` + ``audit_existed=<bool>`` before
-    returning. The ``audit_existed`` boolean tells G8 dashboards
-    whether the call was a real deletion or a no-op; the audit
-    row is written either way (every authenticated request gets
-    one row, per the audit middleware contract).
+    + ``audit_slug=<slug>`` **before** the substrate call so an
+    exception on the substrate's ``delete_entry`` still produces an
+    audit row classified under ``kb.delete``. The ``audit_existed``
+    boolean (real deletion vs no-op) is bound *after* the substrate
+    returns -- on the exception path it stays unbound, which is the
+    truthful signal (we don't know whether the row existed because
+    the query failed). The audit row is written either way; every
+    authenticated request gets one row, per the audit middleware
+    contract.
+
+    Bind ordering matters: if the bind landed *after* the substrate
+    call, an exception during ``delete_entry`` would skip the bind
+    entirely. The audit middleware would then fall back to its
+    pre-handler default ``op_id`` (``http.delete:/api/v1/kb/<slug>``)
+    and :func:`~meho_backplane.broadcast.events.classify_op` would
+    bucket the row as ``op_class="other"`` -- defeating the
+    broadcast-redaction contract from decision #3.
     """
-    service = KbService()
-    existed = await service.delete_entry(tenant_id=operator.tenant_id, slug=slug)
     structlog.contextvars.bind_contextvars(
         audit_op_id=_KB_OP_IDS["delete"],
         audit_op_class="write",
         audit_slug=slug,
-        audit_existed=existed,
     )
+    service = KbService()
+    existed = await service.delete_entry(tenant_id=operator.tenant_id, slug=slug)
+    structlog.contextvars.bind_contextvars(audit_existed=existed)
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
 
 
@@ -463,13 +475,22 @@ async def ingest_kb(
         audit_op_class="write",
         audit_dry_run=body.dry_run,
     )
-    if body.tarball_url is not None:
+    if body.tarball_url:
         # Forward-compat: the request schema accepts the field, but
         # the substrate does not yet implement tarball ingest. Return
         # 501 so the API surface is honest about its limits; same
         # pattern :mod:`retrieve_eval` uses for its server-side
         # baseline field. v0.2.next can wire up
         # ``KbService.ingest_tarball`` and flip this branch.
+        #
+        # Truthiness check (not ``is not None``) matches
+        # :meth:`IngestKbRequest._exactly_one_source`, which treats an
+        # empty string as unset so a curl payload like
+        # ``{"directory": "/tmp/kb", "tarball_url": ""}`` reaches this
+        # handler with ``tarball_url=""`` instead of being rejected at
+        # the validator. ``is not None`` here would surface as a 501
+        # for that payload while the validator already accepted it --
+        # divergent semantics between the two layers.
         raise HTTPException(
             status_code=http_status.HTTP_501_NOT_IMPLEMENTED,
             detail=(

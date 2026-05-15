@@ -8,7 +8,7 @@
 //   - `meho retrieval eval` — corpus-driven precision@5 / MRR /
 //     coverage report against /api/v1/retrieve/eval (T2 #441).
 //   - `meho retrieval usage` — audit-log-backed daily-use telemetry
-//     (T5b #464; lands separately).
+//     (T5b #464) against /api/v1/retrieve/usage (T5 #444).
 //   - `meho retrieval retire-checklist` — combined retire-decision
 //     verb (T6 #445).
 //
@@ -36,6 +36,7 @@ func NewRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newEvalCmd())
+	cmd.AddCommand(newUsageCmd())
 	cmd.AddCommand(newRetireChecklistCmd())
 	return cmd
 }

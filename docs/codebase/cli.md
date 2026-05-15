@@ -29,7 +29,8 @@ discovery hook so backplane manifests cannot shadow built-in verb
 names.
 
 - `meho retrieval ...` (G4.3 #373) — retrieval-quality + migration-
-  decision tooling. v0.2 ships `eval` and `retire-checklist`.
+  decision tooling. v0.2 ships `eval`, `usage`, and
+  `retire-checklist`.
 - `meho operation ...` (G0.6-T13 #481) — dispatcher meta-tools
   (`groups`, `search`, `call`).
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
@@ -130,6 +131,8 @@ cli/
     │       ├── retrieval.go            # NewRootCmd.
     │       ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval).
     │       ├── eval_test.go            # output-contract + URL-resolution tests.
+    │       ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464.
+    │       ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
     │       ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │       └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
     ├── discovery/

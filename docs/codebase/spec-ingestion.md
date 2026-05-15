@@ -66,10 +66,16 @@ The pipeline is broken into work items per Initiative #389:
   Acceptance test that drives the full pipeline against the consumer's
   vCenter REST spec (~1,275 ops): parse → register → group → review →
   enable → 10-query govc-parity benchmark over `search_operations`.
-  Ships with `vcenter.yaml` only; `vi-json.yaml` ingestion is blocked
-  on a T1 parser extension for `#/components/parameters/*` (~40 LoC).
-  Three of 10 queries currently `xfail` pending a T3 per-op
-  `llm_instructions` enhancement. See the [vSphere canary
+  Ships with `vcenter.yaml` only; `vi-json.yaml` parses end-to-end
+  after T11 (#501) extended the parser to resolve
+  `$ref: "#/components/parameters/*"` (the load-bearing rejection
+  in `refs.py` is gone), and the parser smoke test at
+  `tests/integration/test_operations_ingest_vi_json.py` proves it.
+  Full vi-json ingestion (~2,195 rows persisted + LLM grouping +
+  operator review + benchmark expansion) is tracked under #227 G3.1
+  T3 — out of scope for the canary itself. Three of 10 queries
+  currently `xfail` pending a T3 per-op `llm_instructions`
+  enhancement. See the [vSphere canary
   runbook](../cross-repo/g07-vsphere-canary.md) for the operator
   procedure.
 * **T9 — Docs** (#409). Two new docs:

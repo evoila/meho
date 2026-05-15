@@ -31,10 +31,9 @@ asserts:
   cardinal operations whose spec descriptions are
   vendor-schema-heavy and lose to short sub-path descriptions in
   BM25 ranking. The xfail markers + follow-up tickets (T3 per-op
-  ``llm_instructions``, T1 parameter-ref support, spec
-  description-quality polish) make the gap visible and tracked
-  rather than silently absorbed. See *Known gaps* in
-  ``docs/cross-repo/g07-vsphere-canary.md``.
+  ``llm_instructions``, spec description-quality polish) make the
+  gap visible and tracked rather than silently absorbed. See *Known
+  gaps* in ``docs/cross-repo/g07-vsphere-canary.md``.
 
 The benchmark is parametrised so every (query, expected_op_id) pair
 runs as its own test case in CI's report.
@@ -62,19 +61,22 @@ index 661. The govc-parity benchmark therefore requires the PG path,
 which means the test fixture is the testcontainers-backed
 ``pg_engine`` (re-exported here from ``tests/integration/conftest.py``).
 
-Why ``vi-json.yaml`` is currently not ingested
-==============================================
+Why this canary stays ``vcenter.yaml``-only after T11
+=====================================================
 
-The second vSphere spec corpus, ``vi-json.yaml`` (~2195 operations),
-uses ``$ref: '#/components/parameters/moId'`` on every operation. The
-T1 OpenAPI parser (#429) explicitly rejects non-schema component refs
-(:func:`refs.resolve_shallow_ref` raises
-:class:`UnsupportedSpecError`); extending it to resolve
-``#/components/parameters/*`` is small but lives in T1's scope, not
-T8's acceptance work. Filed as a follow-up ticket from the PR body;
-the canary still proves end-to-end for the vcenter.yaml corpus
-(~1275 operations). See
-:data:`~tests.acceptance._vcenter_spec.VI_JSON_PARAMETER_REF_LIMITATION`.
+T11 (#501) extended the T1 parser to resolve
+``$ref: '#/components/parameters/*'`` so the second vSphere spec
+corpus, ``vi-json.yaml`` (~2,195 Managed Object operations), now
+parses end-to-end. The parser smoke test lives at
+``tests/integration/test_operations_ingest_vi_json.py``. Full
+ingestion (~2,195 rows persisted under
+``connector_id="vmware-rest-9.0"``, LLM-grouping pass on
+PerformanceManager / EventManager / managed-object families, operator
+review + enable cascade, benchmark expansion with vi-json queries) is
+the consumer work tracked under #227 G3.1 T3, not this canary. The
+canary deliberately stays focused on the REST-automation surface
+(``vcenter.yaml``, ~1,275 operations) so the acceptance gate's
+~5 s ingest budget and 10-query benchmark stay fast.
 
 Why the LLM client is stubbed by default
 ========================================

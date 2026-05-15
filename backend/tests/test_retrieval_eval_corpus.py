@@ -136,11 +136,19 @@ def test_load_corpus_memory_returns_empty_in_t1() -> None:
     assert rows == []
 
 
-def test_load_corpus_operations_returns_empty_in_t1() -> None:
-    """Acceptance #4 (mirror): operations corpus YAML lands in T3; returns ``[]``."""
+def test_load_corpus_operations_now_ships_after_t3() -> None:
+    """T3 #442 shipped ``operation_queries.yaml``; ``load_corpus("operations")`` is non-empty.
+
+    The deeper assertions (10 rows, govc_equivalent populated, op_ids
+    align with the vcenter snapshot) live in
+    ``test_retrieval_eval_operation_corpus.py``; this test guards the
+    loader-level contract that the operations branch of the dispatch
+    now returns ``OperationCorpusQuery`` instances rather than ``[]``.
+    """
     rows = load_corpus("operations")
 
-    assert rows == []
+    assert rows, "operations corpus is empty — did operation_queries.yaml ship?"
+    assert all(isinstance(row, OperationCorpusQuery) for row in rows)
 
 
 def test_kb_corpus_slugs_align_with_consumer_kb_snapshot() -> None:

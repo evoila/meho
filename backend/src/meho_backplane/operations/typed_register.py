@@ -1,14 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_typed_operation()`` -- the async upsert helper typed connectors call.
+"""``register_typed_operation()`` / ``register_composite_operation()`` -- async upsert helpers.
 
-G0.6-T4 (#395) of Initiative #388. Every typed connector
-(VaultConnector, KubernetesConnector, future bind9 / pfSense /
-Holodeck) calls this helper at init time -- once per operation it
-exposes -- to upsert the row into ``endpoint_descriptor`` that the
-dispatcher (T5, #396) and the ``search_operations`` meta-tool (T8,
-#399) read.
+G0.6-T4 (#395) of Initiative #388 shipped :func:`register_typed_operation`,
+the helper typed connectors (VaultConnector, KubernetesConnector,
+future bind9 / pfSense / Holodeck) call at init time -- once per
+operation it exposes -- to upsert the row into ``endpoint_descriptor``
+that the dispatcher (T5, #396) and the ``search_operations`` meta-tool
+(T8, #399) read. G3.1-T4 (#504) added the sibling
+:func:`register_composite_operation`, which writes the same table with
+``source_kind="composite"`` for hand-authored composites that orchestrate
+sub-ops via the :class:`~meho_backplane.operations.composite.DispatchChild`
+contract. Both helpers share one private upsert path
+(:func:`_register_in_session`) so the body-hash skip, group resolution,
+and embedding logic stay in lock-step.
+
+The registrar mechanism (:func:`register_typed_op_registrar` /
+:func:`run_typed_op_registrars`) carries its v0.2 name for historical
+reasons -- it's generic over any async registrar callable and accepts
+composite registrants without modification. The rename to a
+kind-neutral identifier is a documentation-only cleanup deferred to
+v0.2.next; composite connector packages register against the existing
+names today.
 
 Algorithm
 ---------
@@ -122,13 +136,17 @@ from meho_backplane.operations.embed import (
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "CompositeOpHandler",
     "HandlerRefError",
+    "HandlerSignatureError",
     "TypedOpHandler",
     "clear_typed_op_registrars",
     "derive_handler_ref",
+    "register_composite_operation",
     "register_typed_op_registrar",
     "register_typed_operation",
     "run_typed_op_registrars",
+    "validate_composite_handler_signature",
 ]
 
 
@@ -237,6 +255,22 @@ async def run_typed_op_registrars(
 type TypedOpHandler = Callable[..., Awaitable[dict[str, Any]]]
 
 
+#: Type alias for composite-op handlers. The dispatcher's composite
+#: branch (:func:`~meho_backplane.operations._branches.dispatch_composite`)
+#: invokes the handler with keyword args ``operator``, ``target``,
+#: ``params``, and ``dispatch_child`` -- the last is a
+#: :class:`~meho_backplane.operations.composite.DispatchChild` callable
+#: the handler uses to recurse into sub-ops. The alias is permissive
+#: (``Callable[..., Awaitable[dict]]``) for the same reason
+#: :data:`TypedOpHandler` is: connector-bound methods carry a leading
+#: ``self`` that disappears at bind time. The shape contract is
+#: enforced at registration time by
+#: :func:`validate_composite_handler_signature`, which asserts the
+#: handler exposes a ``dispatch_child`` parameter -- the only positional
+#: distinction from typed handlers.
+type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any]]]
+
+
 # Bounded enum for ``safety_level`` -- mirrors the DB CHECK constraint
 # on :attr:`EndpointDescriptor.safety_level` so the helper rejects
 # invalid values at the Python boundary rather than at commit time
@@ -254,6 +288,30 @@ class HandlerRefError(ValueError):
     so tests can assert on the precise shape, and so operators reading
     a startup traceback see the class name that explains the failure
     mode immediately.
+    """
+
+
+class HandlerSignatureError(ValueError):
+    """Raised when a typed/composite handler's parameter shape contradicts its registration.
+
+    Symmetric cross-rejection: typed handlers (no ``dispatch_child``)
+    registered via :func:`register_composite_operation` raise this with
+    a "must accept 'dispatch_child' parameter" message; composite handlers
+    (with ``dispatch_child``) registered via :func:`register_typed_operation`
+    raise this with a "register via register_composite_operation instead"
+    message. Both cases name the handler's dotted path so the operator
+    can locate the misroute without grepping for the signature.
+
+    The check runs at registration time -- not first dispatch -- so the
+    failure surfaces during connector init (lifespan crash, operator
+    sees the dotted path immediately) rather than as a
+    :class:`TypeError` raised by the dispatcher branch when a handler
+    is missing the expected keyword. The fail-fast deployment shape
+    matches :class:`HandlerRefError`.
+
+    Subclass of :class:`ValueError` so existing ``except ValueError``
+    blocks in connector init paths catch it without a targeted
+    ``except HandlerSignatureError``.
     """
 
 
@@ -316,6 +374,81 @@ def derive_handler_ref(handler: TypedOpHandler) -> str:
             "resolved callable"
         )
     return f"{module}.{qualname}"
+
+
+def _handler_parameter_names(handler: Any) -> list[str]:
+    """Return the handler's parameter names with a leading ``self`` dropped.
+
+    Mirrors the introspection
+    :func:`~meho_backplane.operations._branches.dispatch_typed` runs at
+    dispatch time -- ``inspect.signature(handler).parameters`` then drop
+    a leading ``self`` so unbound-method handlers and bound methods that
+    weren't rebound report the same shape. The bound-method case (the
+    typical typed-connector ``self.kv_read`` pattern) has ``__self__``
+    already absorbed before this helper sees the callable, so ``self``
+    is only present on unbound methods.
+    """
+    sig = inspect.signature(handler)
+    names = list(sig.parameters.keys())
+    if names and names[0] == "self":
+        names = names[1:]
+    return names
+
+
+def validate_composite_handler_signature(handler: Any) -> None:
+    """Assert *handler* accepts a ``dispatch_child`` parameter.
+
+    Composite handlers receive
+    ``dispatch_child: DispatchChild`` from the dispatcher at invocation
+    time
+    (:func:`~meho_backplane.operations._branches.dispatch_composite`).
+    Registering a handler without it would surface the failure as a
+    :exc:`TypeError` at first dispatch -- late, with poor signal.
+    Checking the signature at registration time fails fast with an
+    operator-readable message and the handler's dotted path.
+
+    Raises
+    ------
+    HandlerSignatureError
+        Handler's parameters do not include ``dispatch_child``.
+    """
+    param_names = _handler_parameter_names(handler)
+    if "dispatch_child" not in param_names:
+        module = getattr(handler, "__module__", "<unknown>")
+        qualname = getattr(handler, "__qualname__", repr(handler))
+        raise HandlerSignatureError(
+            f"composite handler {module}.{qualname} "
+            f"must accept a 'dispatch_child' parameter "
+            f"(per meho_backplane.operations.composite.DispatchChild); "
+            f"signature is ({', '.join(param_names)})"
+        )
+
+
+def _reject_composite_handler(handler: Any) -> None:
+    """Symmetric: typed registrations reject composite-shaped handlers.
+
+    Run from :func:`register_typed_operation` so a misrouted composite
+    surfaces at registration time. Inverse of
+    :func:`validate_composite_handler_signature`. A handler with a
+    ``dispatch_child`` parameter is a composite by signature; the typed
+    branch would never pass that arg in, so the handler would crash on
+    first dispatch with a confusing :exc:`TypeError`. Rejecting at
+    registration produces a precise error pointing at the right helper.
+
+    Raises
+    ------
+    HandlerSignatureError
+        Handler exposes a ``dispatch_child`` parameter (composite shape).
+    """
+    param_names = _handler_parameter_names(handler)
+    if "dispatch_child" in param_names:
+        module = getattr(handler, "__module__", "<unknown>")
+        qualname = getattr(handler, "__qualname__", repr(handler))
+        raise HandlerSignatureError(
+            f"typed registration of {module}.{qualname} rejected: "
+            f"handler accepts 'dispatch_child' -- "
+            f"register via register_composite_operation() instead"
+        )
 
 
 def _validate_op_id(op_id: str) -> str:
@@ -549,6 +682,7 @@ async def register_typed_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
+    _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
 
     tags_list = list(tags) if tags is not None else []
@@ -560,6 +694,7 @@ async def register_typed_operation(
             version=version,
             impl_id=impl_id,
             op_id=op_id,
+            source_kind="typed",
             handler_ref=handler_ref,
             summary=summary,
             description=description,
@@ -584,6 +719,175 @@ async def register_typed_operation(
             version=version,
             impl_id=impl_id,
             op_id=op_id,
+            source_kind="typed",
+            handler_ref=handler_ref,
+            summary=summary,
+            description=description,
+            parameter_schema=parameter_schema,
+            response_schema=response_schema,
+            group_key=group_key,
+            tags_list=tags_list,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            llm_instructions=llm_instructions,
+            custom_description=custom_description,
+            embedding_service=embedding_service,
+            commit=True,
+        )
+
+
+async def register_composite_operation(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    op_id: str,
+    handler: CompositeOpHandler,
+    summary: str,
+    description: str,
+    parameter_schema: dict[str, Any],
+    response_schema: dict[str, Any] | None = None,
+    group_key: str | None = None,
+    tags: list[str] | None = None,
+    safety_level: Literal["safe", "caution", "dangerous"] = "dangerous",
+    requires_approval: bool = True,
+    llm_instructions: dict[str, Any] | None = None,
+    custom_description: str | None = None,
+    session: AsyncSession | None = None,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Upsert a composite operation into ``endpoint_descriptor``.
+
+    Sibling of :func:`register_typed_operation`. The two helpers share
+    one private upsert path (:func:`_register_in_session`) -- they
+    differ in (a) the column they write to ``source_kind`` (this one
+    writes ``"composite"``), (b) the handler-signature contract they
+    enforce (this one rejects handlers without ``dispatch_child``),
+    and (c) the policy defaults (this one defaults
+    ``safety_level="dangerous"`` and ``requires_approval=True``).
+
+    Parameters
+    ----------
+    product, version, impl_id, op_id
+        Natural-key coordinates. Same shape as
+        :func:`register_typed_operation`. ``op_id`` is the dotted
+        identifier composites are surfaced under -- by convention
+        ``"<product>.composite.<verb>.<noun>"`` (e.g.
+        ``"vmware.composite.vm.create"``); the dispatcher treats it
+        as opaque.
+    handler
+        The async callable the dispatcher routes the composite to.
+        Must be a module-level function or bound method (closure /
+        lambda / :class:`functools.partial` rejected via
+        :func:`derive_handler_ref`'s contract -- shared with the typed
+        helper). The handler MUST accept a ``dispatch_child``
+        parameter; the dispatcher's composite branch
+        (:func:`~meho_backplane.operations._branches.dispatch_composite`)
+        passes a :class:`~meho_backplane.operations.composite.DispatchChild`
+        callable in by keyword. Handlers missing the parameter raise
+        :class:`HandlerSignatureError` at registration time -- not
+        first dispatch -- so the failure surfaces in lifespan.
+    summary, description, parameter_schema, response_schema, group_key, tags
+        Identical to :func:`register_typed_operation`.
+    safety_level
+        Defaults to ``"dangerous"`` (vs. typed's ``"safe"`` default).
+        Composites typically orchestrate write ops -- VM lifecycle,
+        cluster patching, host evacuation -- and the safe-by-default
+        for the operator is the assume-dangerous posture. Per-op
+        overrides at the call site for read-only composites
+        (``vmware.composite.vm.info``,
+        ``vmware.composite.performance.summary``).
+    requires_approval
+        Defaults to ``True`` (vs. typed's ``False`` default). Same
+        rationale: composites' blast radius is larger by construction
+        (one composite call ⇒ N sub-ops dispatched), so the policy
+        gate's approval-queue path is the right default. Read-only
+        composites override at the call site.
+    llm_instructions, custom_description, session, embedding_service
+        Identical to :func:`register_typed_operation`.
+
+    Returns
+    -------
+    None
+        Fire-and-forget at the call site. The dispatcher reads the
+        table directly.
+
+    Raises
+    ------
+    ValueError
+        ``op_id`` empty / whitespace, or ``safety_level`` not in the
+        bounded enum.
+    HandlerSignatureError
+        Handler does not accept a ``dispatch_child`` parameter.
+        Subclass of :class:`ValueError`.
+    HandlerRefError
+        Handler is a closure, lambda, partial, or non-coroutine
+        function (inherited from
+        :func:`derive_handler_ref`'s contract). Subclass of
+        :class:`ValueError`.
+
+    Behavioural contract
+    --------------------
+
+    Identical to :func:`register_typed_operation`'s contract -- the
+    private upsert path is the same code -- with two differences:
+
+    * The persisted row carries ``source_kind="composite"``, which
+      routes the dispatcher to its composite branch at dispatch time
+      (the branch that builds a :class:`DispatchChild` callable and
+      passes it as ``dispatch_child=`` to the handler).
+    * The signature-validation step runs
+      :func:`validate_composite_handler_signature` instead of
+      :func:`_reject_composite_handler`, so the cross-rejection is
+      symmetric.
+
+    The composite handler's ``dispatch_child`` calls land in the
+    audit table as recursive child rows linked to the parent
+    composite's audit row via ``audit_log.parent_audit_id`` (the
+    G0.6-T7 #398 contract); the per-task ``composite_depth_var``
+    contextvar enforces the recursion cap
+    (:attr:`Settings.composite_max_depth`, default 8).
+    """
+    _validate_op_id(op_id)
+    _validate_safety_level(safety_level)
+    validate_composite_handler_signature(handler)
+    handler_ref = derive_handler_ref(handler)
+
+    tags_list = list(tags) if tags is not None else []
+
+    if session is not None:
+        await _register_in_session(
+            session,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=op_id,
+            source_kind="composite",
+            handler_ref=handler_ref,
+            summary=summary,
+            description=description,
+            parameter_schema=parameter_schema,
+            response_schema=response_schema,
+            group_key=group_key,
+            tags_list=tags_list,
+            safety_level=safety_level,
+            requires_approval=requires_approval,
+            llm_instructions=llm_instructions,
+            custom_description=custom_description,
+            embedding_service=embedding_service,
+            commit=False,
+        )
+        return
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as owned_session:
+        await _register_in_session(
+            owned_session,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            op_id=op_id,
+            source_kind="composite",
             handler_ref=handler_ref,
             summary=summary,
             description=description,
@@ -607,6 +911,7 @@ async def _register_in_session(
     version: str,
     impl_id: str,
     op_id: str,
+    source_kind: Literal["typed", "composite"],
     handler_ref: str,
     summary: str,
     description: str,
@@ -623,12 +928,15 @@ async def _register_in_session(
 ) -> None:
     """Inner implementation -- run the upsert logic against *session*.
 
-    Split out so the public :func:`register_typed_operation` can
-    branch on caller-owned-vs-helper-owned session without
-    duplicating the upsert path. The ``commit`` flag controls whether
-    to issue the final commit; flush always runs so ORM-side defaults
-    (``id``, ``created_at``, ``updated_at``) are populated even when
-    the caller defers the commit.
+    Split out so the public :func:`register_typed_operation` and
+    :func:`register_composite_operation` share the upsert path
+    without duplicating it; ``source_kind`` is the only column whose
+    value depends on which entry point the caller used (the helpers'
+    public surfaces differ in what they validate, not in what they
+    write -- the shared upsert is the right factoring). The ``commit``
+    flag controls whether to issue the final commit; flush always runs
+    so ORM-side defaults (``id``, ``created_at``, ``updated_at``) are
+    populated even when the caller defers the commit.
     """
     log = structlog.get_logger()
     now = datetime.now(UTC)
@@ -702,7 +1010,8 @@ async def _register_in_session(
             if commit:
                 await session.commit()
             log.info(
-                "typed_operation_registered",
+                "operation_registered",
+                source_kind=source_kind,
                 action="skip_reembed",
                 product=product,
                 version=version,
@@ -733,7 +1042,8 @@ async def _register_in_session(
         if commit:
             await session.commit()
         log.info(
-            "typed_operation_registered",
+            "operation_registered",
+            source_kind=source_kind,
             action="reembed",
             product=product,
             version=version,
@@ -754,7 +1064,7 @@ async def _register_in_session(
         version=version,
         impl_id=impl_id,
         op_id=op_id,
-        source_kind="typed",
+        source_kind=source_kind,
         method=None,
         path=None,
         handler_ref=handler_ref,
@@ -779,7 +1089,8 @@ async def _register_in_session(
     if commit:
         await session.commit()
     log.info(
-        "typed_operation_registered",
+        "operation_registered",
+        source_kind=source_kind,
         action="insert",
         product=product,
         version=version,

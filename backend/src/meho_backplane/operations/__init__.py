@@ -38,8 +38,11 @@ Sub-modules:
   invokes the reducer slot so today's pass-through gets swapped in
   cleanly later.
 * :mod:`.typed_register` — :func:`register_typed_operation` and its
-  :class:`HandlerRefError` for typed-connector init-time
-  registration (re-exported at the package level for convenience).
+  G3.1-T4 (#504) sibling :func:`register_composite_operation` for
+  typed/composite connector init-time registration, plus
+  :class:`HandlerRefError` (closure/lambda/partial rejection) and
+  :class:`HandlerSignatureError` (composite-handler signature
+  validation). Re-exported at the package level for convenience.
 * :mod:`.ingest` — G0.7 spec-ingestion pipeline. Today:
   :func:`~meho_backplane.operations.ingest.parse_openapi` (T1 #401)
   + the :class:`~meho_backplane.operations.ingest.ReviewService`
@@ -71,19 +74,24 @@ from meho_backplane.operations.reducer import (
     ResultHandle,
 )
 from meho_backplane.operations.typed_register import (
+    CompositeOpHandler,
     HandlerRefError,
+    HandlerSignatureError,
     TypedOpHandler,
     clear_typed_op_registrars,
+    register_composite_operation,
     register_typed_op_registrar,
     register_typed_operation,
     run_typed_op_registrars,
 )
 
 __all__ = [
+    "CompositeOpHandler",
     "CompositeRecursionLimitExceeded",
     "DispatchChild",
     "Dispatcher",
     "HandlerRefError",
+    "HandlerSignatureError",
     "PassThroughReducer",
     "Reducer",
     "ResultHandle",
@@ -93,6 +101,7 @@ __all__ = [
     "dispatch",
     "import_handler",
     "parent_audit_id_var",
+    "register_composite_operation",
     "register_typed_op_registrar",
     "register_typed_operation",
     "reset_dispatcher_caches",

@@ -22,7 +22,7 @@ procedure for CI lives at
 | Side | What it produces | What it verifies |
 | --- | --- | --- |
 | **Consumer** ([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)) | OpenAPI shelves at `docs/vcenter-9.0/vcenter.yaml` (961 paths; modern REST) and `docs/vcenter-9.0/vi-json.yaml` (2,195 paths; JSON-over-HTTP VIM SOAP rendering). | Both files are valid OpenAPI 3.0/3.1 and reflect a real vCenter 9.0 surface. |
-| **MEHO** (this repo) | The full G0.6 + G0.7 substrate (parser, register helper, LLM grouping, review state machine, meta-tools, CLI/REST/MCP surfaces). | Ingest produces ≥3,000 endpoint rows; LLM grouping yields 8-15 groups with <5% unassigned; `search_operations` finds each of 10 representative `govc` workflows in the top-3 hits. |
+| **MEHO** (this repo) | The full G0.6 + G0.7 substrate (parser, register helper, LLM grouping, review state machine, meta-tools, CLI/REST/MCP surfaces). | Ingest produces ≥3,000 endpoint rows; LLM grouping yields 8-15 groups with <5% unassigned; `search_operations` finds each of 10 representative `govc` workflows in the **top-3** hits (canonical contract). The acceptance test enforces this strictly on the real-LLM opt-in path (`G07_CANARY_REAL_LLM=1`); the deterministic stub path softens to **top-15** because constant embeddings + SQLite-fallback BM25 are fuzzier than the production hybrid. Both paths assert the same metric — only the evaluation rigour differs. |
 
 ## When to run the canary
 
@@ -75,6 +75,20 @@ Expected `IngestResponse`:
 The `docs:` URI prefix resolves against the operator's consumer-side
 checkout via the chassis settings. Operators ingesting against an
 HTTP(S)-served spec substitute the absolute URL.
+
+> **Known substrate gap (T1 / Initiative #389 work item 2):** at the
+> time of this writing `parse_openapi` does not yet inline
+> `#/components/parameters/*` refs (only `#/components/schemas/*`).
+> `vi-json.yaml` relies heavily on parameter refs, so attempting to
+> ingest it raises `UnsupportedSpecError` and the multi-spec leg of
+> the canary cannot complete end-to-end. The acceptance test at
+> `backend/tests/acceptance/test_g07_vsphere_canary.py` catches this
+> with a named `pytest.skip` rather than silently passing. Operators
+> running the canary today against the live corpus will see
+> `vcenter.yaml` alone produce ~1,275 endpoint rows and the
+> connector ingest stop short of the 3,000 floor. The full assertion
+> lights up once the parser grows parameter-ref support; track the
+> follow-up under Initiative #389.
 
 ### Step 2 — Review the produced groups
 
@@ -219,8 +233,12 @@ cannot prove:
   because constant embeddings + SQLite-fallback BM25 are fuzzier
   than the production hybrid.
 - `MEHO_VCSIM_TARGET=<target-name>` opts into a live dispatch against
-  a running vcsim. Asserts `call_operation` returns
-  `status='ok'`. Out of scope without explicit opt-in because vcsim
+  a running vcsim. Seeds a `Target` row matching the name, monkey-
+  patches the broadcast publisher's `publish_event`, then asserts
+  `call_operation` returns `status='ok'`, exactly one
+  `audit_log` row landed with `path=<op_id>` and `method='DISPATCH'`,
+  and at least one `BroadcastEvent` was captured referencing the
+  same `op_id`. Out of scope without explicit opt-in because vcsim
   is a separate Go binary the test cannot stand up on its own.
 
 ## Out of scope

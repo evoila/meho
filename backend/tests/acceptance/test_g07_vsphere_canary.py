@@ -189,6 +189,29 @@ def _matches_path(needle: str, *, method: str | None = None) -> Any:
     return _check
 
 
+def _matches_any(*needles: str, method: str | None = None) -> Any:
+    """Return a predicate matching ops whose op_id contains any of *needles*.
+
+    Use when a govc workflow legitimately ships in both the modern REST
+    surface (``vcenter.yaml``) and the legacy JSON-over-SOAP surface
+    (``vi-json.yaml``) under different vocabulary. The two needles are
+    OR-ed; ``method`` filters across both. Substring matching is
+    case-sensitive — the caller picks needles that anchor to specific
+    path tokens so the predicate cannot fire on unrelated families
+    that happen to share three-letter substrings (``"ost"`` ->
+    ``/post``, ``/cost``, etc.).
+    """
+
+    def _check(op_id: str) -> bool:
+        if not any(needle in op_id for needle in needles):
+            return False
+        if method is None:
+            return True
+        return op_id.startswith(f"{method}:")
+
+    return _check
+
+
 _GOVC_BENCHMARK: Final[tuple[_GovcQuery, ...]] = (
     _GovcQuery(
         "govc about",
@@ -210,9 +233,31 @@ _GOVC_BENCHMARK: Final[tuple[_GovcQuery, ...]] = (
         "power on virtual machine",
         _matches_path("/api/vcenter/vm", method="POST"),
     ),
-    _GovcQuery("govc snapshot.revert", "revert snapshot", _matches_path("napshot")),
-    _GovcQuery("govc host.evac", "host maintenance evacuate", _matches_path("ost")),
-    _GovcQuery("govc events", "list events", _matches_path("vent")),
+    _GovcQuery(
+        "govc snapshot.revert",
+        "revert snapshot",
+        # vcenter.yaml renders snapshot ops under .../vm/{vm}/snapshot;
+        # vi-json carries them as ``RevertToSnapshot_Task`` on a
+        # ``VirtualMachine`` moRef. Anchor on path-segment tokens that
+        # don't collide with unrelated families.
+        _matches_any("/snapshot", "Snapshot"),
+    ),
+    _GovcQuery(
+        "govc host.evac",
+        "host maintenance evacuate",
+        # REST: /api/vcenter/host*. vi-json: HostSystem moRef paths and
+        # EnterMaintenanceMode_Task. Two anchored needles avoid
+        # ``"ost"`` -> /cost, /post, etc.
+        _matches_any("/host", "HostSystem"),
+    ),
+    _GovcQuery(
+        "govc events",
+        "list events",
+        # REST event surface (if any) lives under /api/vcenter/event*;
+        # vi-json carries EventManager moRef ops. Avoid bare ``"vent"``
+        # which BM25-matches /event in unrelated workflows.
+        _matches_any("/event", "EventManager"),
+    ),
     _GovcQuery(
         "govc cluster.info",
         "cluster details",
@@ -582,6 +627,43 @@ async def _ingest_one_spec(
     return int(result.inserted_count)
 
 
+async def _ingest_both_specs_or_skip(
+    *,
+    vcenter_path: str,
+    vi_json_path: str,
+    embedding_service: AsyncMock,
+) -> tuple[int, int]:
+    """Ingest both specs; ``pytest.skip`` on the known T1 parser gap.
+
+    Shared by the main canary and the two opt-in tests so all three
+    paths react identically to the substrate gap. Returns
+    ``(vcenter_inserted, vi_json_inserted)`` on success. Removing the
+    skip is the right move once T1's parser handles
+    ``#/components/parameters/*`` refs — at that point the bare two
+    ``_ingest_one_spec`` calls cover the AC unconditionally.
+    """
+    vcenter_inserted = await _ingest_one_spec(
+        spec_path=vcenter_path,
+        spec_basename=_SPEC_VCENTER_BASENAME,
+        embedding_service=embedding_service,
+    )
+    try:
+        vi_json_inserted = await _ingest_one_spec(
+            spec_path=vi_json_path,
+            spec_basename=_SPEC_VI_JSON_BASENAME,
+            embedding_service=embedding_service,
+        )
+    except UnsupportedSpecError as exc:
+        pytest.skip(
+            "vi-json.yaml hit a parser limitation (T1 / Initiative #389 "
+            f"work item 2): {exc}. vcenter.yaml ingested "
+            f"{vcenter_inserted} rows ok; re-enable the multi-spec canary "
+            "once parse_openapi handles #/components/parameters/* refs. "
+            "Tracking issue: file a follow-up under Initiative #389.",
+        )
+    return vcenter_inserted, vi_json_inserted
+
+
 async def _count_audit_rows(op_id: str) -> int:
     """Return the number of audit rows for *op_id* in the test DB."""
     sessionmaker = get_sessionmaker()
@@ -649,32 +731,11 @@ async def test_g07_vsphere_canary_end_to_end(
     operator = _make_tenant_admin()
 
     # ---- Step 1: ingest both specs --------------------------------------
-    vcenter_inserted = await _ingest_one_spec(
-        spec_path=vcenter_path,
-        spec_basename=_SPEC_VCENTER_BASENAME,
+    vcenter_inserted, vi_json_inserted = await _ingest_both_specs_or_skip(
+        vcenter_path=vcenter_path,
+        vi_json_path=vi_json_path,
         embedding_service=stub_embedding_service,
     )
-    # vi-json may hit a known parser limitation (#/components/parameters/* refs
-    # are not yet inlined by T1's parser at the time this canary was written).
-    # When that happens we skip the rest of the canary with a reason that names
-    # the gap -- the partial pipeline exercise is captured by the parser-only
-    # integration test at tests/integration/test_operations_ingest_vcenter.py.
-    # Removing the try/except is the right move once T1 grows parameter-ref
-    # support; the bare ``_ingest_one_spec`` call below covers the AC then.
-    try:
-        vi_json_inserted = await _ingest_one_spec(
-            spec_path=vi_json_path,
-            spec_basename=_SPEC_VI_JSON_BASENAME,
-            embedding_service=stub_embedding_service,
-        )
-    except UnsupportedSpecError as exc:
-        pytest.skip(
-            "vi-json.yaml hit a parser limitation (T1 / Initiative #389 work "
-            f"item 2): {exc}. vcenter.yaml ingested {vcenter_inserted} rows "
-            "ok; re-enable the multi-spec canary once parse_openapi handles "
-            "#/components/parameters/* refs. Tracking issue: file a follow-up "
-            "under Initiative #389.",
-        )
     total_inserted = vcenter_inserted + vi_json_inserted
     assert total_inserted >= _MIN_INSERTED, (
         f"got {total_inserted} rows; AC floor is {_MIN_INSERTED} "
@@ -862,14 +923,9 @@ async def test_g07_canary_real_llm_eyeball(
     assert vcenter_path is not None and vi_json_path is not None
 
     operator = _make_tenant_admin()
-    await _ingest_one_spec(
-        spec_path=vcenter_path,
-        spec_basename=_SPEC_VCENTER_BASENAME,
-        embedding_service=stub_embedding_service,
-    )
-    await _ingest_one_spec(
-        spec_path=vi_json_path,
-        spec_basename=_SPEC_VI_JSON_BASENAME,
+    await _ingest_both_specs_or_skip(
+        vcenter_path=vcenter_path,
+        vi_json_path=vi_json_path,
         embedding_service=stub_embedding_service,
     )
 
@@ -981,37 +1037,44 @@ _SKIP_REASON_VCSIM: Final[str] = (
 @pytest.mark.asyncio
 async def test_g07_canary_vcsim_dispatch(
     stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Optional: dispatch ``GET /api/vcenter/cluster`` against running vcsim.
 
     The acceptance criterion calls for a live-target dispatch through
-    the canary connector. vcsim covers the read-only GET surface
+    the canary connector plus an explicit audit + broadcast assertion
+    on every canary CLI call. vcsim covers the read-only GET surface
     without needing a real vCenter. The test only runs when an
     operator has explicitly pointed ``MEHO_VCSIM_TARGET`` at a
     reachable vcsim instance -- there is no in-process vcsim
     fixture (vcsim is a separate Go binary).
 
-    Asserts ``call_operation`` returns ``status='ok'`` with a list
-    payload; richer shape assertions are left for the G3.1 vSphere
-    initiative which authors the typed cluster handler.
+    Seeds a :class:`Target` row matching ``MEHO_VCSIM_TARGET`` (the
+    dispatcher's ``resolve_target`` walks the operator's tenancy to
+    find the row by name), then monkey-patches the broadcast
+    publisher's ``publish_event`` so a successful dispatch is
+    asserted to have produced both an ``audit_log`` row (path =
+    op_id, method = ``DISPATCH``) and at least one
+    :class:`BroadcastEvent` capture.
     """
-    # Deferred import: the dispatcher module pulls in connector
-    # registry side-effects we don't want at module import time.
+    # Deferred imports: the dispatcher pulls in connector-registry
+    # side-effects we don't want at module-import time, and the
+    # broadcast publisher module is the same.
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import Target as TargetORM
+    from meho_backplane.operations import _audit as operations_audit
     from meho_backplane.operations.meta_tools import call_operation
 
     vcenter_path = _resolve_spec(_ENV_VCENTER_SPEC, _SPEC_VCENTER_BASENAME)
     vi_json_path = _resolve_spec(_ENV_VI_JSON_SPEC, _SPEC_VI_JSON_BASENAME)
     assert vcenter_path is not None and vi_json_path is not None
+    target_name = os.environ[_ENV_VCSIM_TARGET]
 
     operator = _make_tenant_admin()
-    await _ingest_one_spec(
-        spec_path=vcenter_path,
-        spec_basename=_SPEC_VCENTER_BASENAME,
-        embedding_service=stub_embedding_service,
-    )
-    await _ingest_one_spec(
-        spec_path=vi_json_path,
-        spec_basename=_SPEC_VI_JSON_BASENAME,
+    await _ingest_both_specs_or_skip(
+        vcenter_path=vcenter_path,
+        vi_json_path=vi_json_path,
         embedding_service=stub_embedding_service,
     )
     stub_llm = _StubLlmClient()
@@ -1027,15 +1090,85 @@ async def test_g07_canary_vcsim_dispatch(
     review_svc = ReviewService(operator)
     await review_svc.enable_connector(_CONNECTOR_ID, tenant_id=None)
 
+    # Seed a Target row the dispatcher's resolve_target() can find by
+    # name. Pinning host to a sentinel hostname is fine -- vcsim is
+    # reached by the operator's deploy-side config, not by this row's
+    # host field. The dispatcher only needs the row to exist so
+    # tenant-scoping passes.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(
+            TargetORM(
+                tenant_id=_OPERATOR_TENANT,
+                name=target_name,
+                aliases=[],
+                product=_PRODUCT,
+                host=target_name,
+                port=443,
+                fqdn=None,
+                secret_ref=None,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            ),
+        )
+
+    # Capture broadcast emissions. publish_event is imported into
+    # ``meho_backplane.operations._audit`` at module load (a name-
+    # bound import, not a deferred attribute lookup), so patching it
+    # on the broadcast package would no-op -- patch at the call site.
+    captured_events: list[Any] = []
+
+    async def _capture_publish(event: Any) -> None:
+        captured_events.append(event)
+
+    monkeypatch.setattr(operations_audit, "publish_event", _capture_publish)
+
+    pre_audit_count = await _count_dispatch_audit_rows("GET:/api/vcenter/cluster")
     result = await call_operation(
         operator,
         {
             "connector_id": _CONNECTOR_ID,
             "op_id": "GET:/api/vcenter/cluster",
-            "target": {"name": os.environ[_ENV_VCSIM_TARGET]},
+            "target": {"name": target_name},
             "params": {},
         },
     )
     assert result["status"] == "ok", (
         f"vcsim dispatch failed: status={result.get('status')!r} error={result.get('error')!r}"
     )
+
+    # AC: every canary CLI call emits the right audit + broadcast.
+    post_audit_count = await _count_dispatch_audit_rows("GET:/api/vcenter/cluster")
+    assert post_audit_count == pre_audit_count + 1, (
+        "dispatcher must write exactly one audit_log row per call_operation"
+    )
+    assert captured_events, "dispatcher must publish a broadcast event per dispatch"
+    assert any(
+        getattr(event, "op_id", None) == "GET:/api/vcenter/cluster" for event in captured_events
+    ), "captured broadcast event(s) do not reference the dispatched op_id"
+
+
+async def _count_dispatch_audit_rows(op_id: str) -> int:
+    """Count dispatcher-emitted audit rows for *op_id*.
+
+    The dispatcher's ``write_audit_row`` writes the op_id into
+    ``audit_log.path`` and pins ``method='DISPATCH'`` (see
+    ``backend/src/meho_backplane/operations/_audit.py``). The
+    ingestion-pipeline state-transition audit rows use a different
+    ``method``/``op_id`` shape -- this helper isolates the dispatch
+    surface so the vcsim assertion doesn't pick up stray rows from
+    enable/disable/edit-op writes earlier in the test.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = (
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.method == "DISPATCH")
+            .where(AuditLog.path == op_id)
+        )
+        return int((await session.execute(stmt)).scalar_one())

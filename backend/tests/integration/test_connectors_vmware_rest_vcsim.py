@@ -109,14 +109,19 @@ def vcsim_target() -> Any:
     # for registry-mirror swaps or version pinning per the same convention
     # the K3s integration test uses (MEHO_TEST_K3S_IMAGE).
     image = os.environ.get("MEHO_TEST_VCSIM_IMAGE", "vmware/vcsim:latest")
-    container = (
-        DockerContainer(image)
-        .with_exposed_ports(8989)
-        # vcsim's default flags: listen on :8989 with HTTPS self-signed
-        # cert. ``-trace`` is loud but useful when the integration test
-        # fails — leave default in CI to keep logs slim.
-        .with_command("/vcsim -l :8989")
-    )
+    # The official ``vmware/vcsim`` Dockerfile sets
+    # ``ENTRYPOINT ["/vcsim"]`` + ``CMD ["-l", "0.0.0.0:8989"]`` so the
+    # default listener already binds on all interfaces — exactly what
+    # testcontainers' host-port mapping needs to reach the simulator.
+    # Overriding ``CMD`` with a string here would re-prepend ``/vcsim``
+    # to the entrypoint and Go's ``flag.Parse()`` would stop at that
+    # positional argument, silently falling back to the simulator's
+    # internal default of ``-l 127.0.0.1:8989`` — bound to container-
+    # local loopback only, so the host's mapped port would refuse the
+    # TCP connect with an empty ``ConnectError`` (the failure mode that
+    # took down PR #518's first CI green attempt). Leave the default
+    # CMD alone.
+    container = DockerContainer(image).with_exposed_ports(8989)
     import contextlib
 
     try:

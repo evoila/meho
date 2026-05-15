@@ -6,9 +6,10 @@ The `vmware-rest` connector is the hand-rolled `HttpConnector` subclass
 that dispatches ingested vCenter REST operations under the
 `(product="vmware", version="9.0", impl_id="vmware-rest")` registry
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
-makes ~1,275 `endpoint_descriptor` rows resolvable but not dispatchable)
-to deliver real session-authenticated calls against vSphere 8.5+ /
-ESXi 8.5+ targets.
+makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
+dispatchable) to deliver real session-authenticated calls against
+vSphere 8.5+ / ESXi 8.5+ targets, plus the 5 hand-authored read
+composites that orchestrate cross-spec workflows (G3.1-T5 / #508).
 
 Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 
@@ -18,6 +19,20 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   Class attributes: `product="vmware"`, `version="9.0"`,
   `impl_id="vmware-rest"`, `supported_version_range=">=8.5,<10.0"`,
   `priority=1`.
+- **Read composites** (`composites/_read.py`) — five module-level
+  `async def` handlers (`cluster_drs_recommendations_composite`,
+  `event_tail_composite`, `performance_summary_composite`,
+  `datastore_usage_composite`, `network_portgroup_audit_composite`).
+  Each accepts `(operator, target, params, dispatch_child)` per the
+  `DispatchChild` Protocol and orchestrates 1-3 sub-op dispatches
+  back into the same `vmware-rest-9.0` connector. Registered with
+  `safety_level="safe"` + `requires_approval=False` — read-only
+  overrides of `register_composite_operation()`'s `dangerous` / `True`
+  defaults.
+- **`register_vmware_composite_operations`** (`composites/_register.py`)
+  — async registrar function called from `run_typed_op_registrars` at
+  lifespan startup. Calls `register_composite_operation()` once per
+  composite; idempotent on re-run via the body-hash skip path.
 - **`VsphereTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
   `host`, `port`, `secret_ref`, `auth_model`. Replaced by the concrete
@@ -43,10 +58,20 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 2. Importing `meho_backplane.connectors.vmware_rest` triggers the
    module-level `register_connector_v2(product="vmware", version="9.0",
    impl_id="vmware-rest", cls=VmwareRestConnector)` call.
-3. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
+3. The same import triggers the side-effect import of
+   `meho_backplane.connectors.vmware_rest.composites`, whose
+   `__init__` calls
+   `register_typed_op_registrar(register_vmware_composite_operations)`
+   to queue the composite-row upsert onto the lifespan's registrar
+   list.
+4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
+5. Lifespan calls `run_typed_op_registrars()`, which iterates every
+   queued registrar -- including the composite one -- and upserts the
+   5 `vmware.composite.*` rows into `endpoint_descriptor` with
+   `source_kind="composite"`.
 
 ### Per-target session
 
@@ -109,6 +134,39 @@ Legacy shim — synthesises a system-tenant `Operator` and calls
 construct a real `Operator` and call `dispatch()` directly; they don't
 reach this method.
 
+### Composite dispatch (read composites)
+
+The 5 read composites land as `source_kind="composite"` rows in
+`endpoint_descriptor`. At dispatch time:
+
+1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
+   to the row, sees `source_kind="composite"`, builds a
+   `DispatchChild` callable via
+   `get_dispatch_child(dispatch=dispatch, parent_operator=...,
+   parent_target=..., parent_audit_id=..., parent_op_id=...)`.
+2. Handler is resolved via `import_handler(descriptor.handler_ref)`
+   to one of the module-level functions in `composites/_read.py`.
+3. Dispatcher invokes
+   `handler(operator=..., target=..., params=..., dispatch_child=...)`.
+4. Handler issues 1-3 `await dispatch_child(connector_id="vmware-rest-9.0",
+   op_id=..., params=...)` calls. Each child dispatch:
+   - Inherits `parent_audit_id` via the contextvar so the child's
+     audit row's `parent_audit_id` column is set automatically.
+   - Increments `composite_depth_var` (bounded at
+     `Settings.composite_max_depth=8`; over-depth raises
+     `CompositeRecursionLimitExceeded` pre-recursion).
+   - Re-enters the dispatcher's same code path -- the child sub-op
+     hits the `source_kind="ingested"` branch which routes through
+     `VmwareRestConnector.execute()` for the actual HTTP call.
+5. Handler aggregates the sub-op responses into a single dict and
+   returns; the dispatcher wraps it as an `OperationResult` with
+   `status="ok"` and `result=<aggregated dict>`.
+
+The composite handlers go through `dispatch_child` rather than
+calling `_request_json` directly so the audit-tree linkage,
+bounded-recursion guard, policy gate, broadcast publish, and
+parameter-schema validation all run on every sub-call.
+
 ## Dependencies
 
 - `meho_backplane.connectors.adapters.http.HttpConnector` (G0.2-T3
@@ -139,19 +197,25 @@ reach this method.
   a long-idle connection may see a 401 on the next dispatch. The
   caller-side retry logic in `_request_json` does not retry 401 by
   policy; an explicit refresh loop is v0.2.next polish.
-- **`vi-json.yaml` ingestion not yet exercised** — T2 (#501) ships the
-  parser extension for `$ref: #/components/parameters/*`. Once T3
-  (#503) lands, the same connector dispatches the ~2,195 vi-json ops
-  (vi-json shares the `vmware-api-session-id` header per
-  `docs/vcenter-9.0/MANIFEST.md`).
-- **Composites under separate Tasks** — T5 (#508) ships the 5 read
-  composites; T6 (#509) ships the 8 write composites. Both depend on
-  T4 (#504) for the `register_composite_operation()` helper.
+- **`vi-json.yaml` ingestion live** — T3 (#503) shipped the ingestion
+  pipeline (depends on T2 / #501's `$ref` resolver). The same
+  connector dispatches the ~2,195 vi-json ops alongside the ~1,275
+  vCenter REST ops; both share the `vmware-api-session-id` session
+  header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
+  composites (`event.tail`, `performance.summary`) call vi-json
+  sub-ops; the other three call vCenter REST sub-ops only.
+- **Read composites shipped** — T5 (#508) ships the 5 hand-authored
+  read composites. T6 (#509) ships the 8 write composites; same
+  `register_composite_operation()` helper, default `dangerous` /
+  `True` policy gate (read composites override to `safe` / `False`
+  at the call site).
 
 ## References
 
 - Parent Initiative: [#227 G3.1 vmware-rest-9.0](https://github.com/evoila/meho/issues/227)
 - Parent Task: [#498 G3.1-T1 VmwareRestConnector](https://github.com/evoila/meho/issues/498)
+- Composite-helper Task: [#504 G3.1-T4 register_composite_operation()](https://github.com/evoila/meho/issues/504)
+- Read-composite Task: [#508 G3.1-T5 vmware-rest read composites](https://github.com/evoila/meho/issues/508)
 - G0.7 canary that ingested the rows this connector dispatches:
   [#408 G0.7-T8 vSphere canary](https://github.com/evoila/meho/issues/408)
   (closed via PR #493 on 2026-05-15).

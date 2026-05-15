@@ -36,7 +36,7 @@ func TestRunIngestHappyPath(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &bodyJSON)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(KbIngestionResult{
+		_ = json.NewEncoder(w).Encode(IngestionResult{
 			InsertedCount: 5,
 			UpdatedCount:  2,
 			SkippedCount:  37,
@@ -74,7 +74,7 @@ func TestRunIngestDryRunBindsBody(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &bodyJSON)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(KbIngestionResult{Errors: []string{}})
+		_ = json.NewEncoder(w).Encode(IngestionResult{Errors: []string{}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -97,7 +97,7 @@ func TestRunIngestJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb/ingest", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(KbIngestionResult{
+		_ = json.NewEncoder(w).Encode(IngestionResult{
 			InsertedCount: 1, UpdatedCount: 2, SkippedCount: 3, ErrorCount: 0, Errors: []string{},
 		})
 	})
@@ -109,7 +109,7 @@ func TestRunIngestJSONHappyPath(t *testing.T) {
 	if err := runIngest(cmd, ingestOptions{Directory: "/x", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runIngest --json: %v", err)
 	}
-	var decoded KbIngestionResult
+	var decoded IngestionResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
@@ -167,7 +167,7 @@ func TestRunIngest403SurfacesInsufficientRole(t *testing.T) {
 // line so partial-failure runs are visible without --json.
 func TestPrintIngestSummaryWithErrors(t *testing.T) {
 	var buf bytes.Buffer
-	printIngestSummary(&buf, &KbIngestionResult{
+	printIngestSummary(&buf, &IngestionResult{
 		InsertedCount: 1, UpdatedCount: 0, SkippedCount: 0, ErrorCount: 2,
 		Errors: []string{"foo.md: bad slug", "bar.md: unreadable"},
 	}, false)
@@ -182,7 +182,7 @@ func TestPrintIngestSummaryWithErrors(t *testing.T) {
 // TestPrintIngestSummaryDryRunBanner — --dry-run emits a banner.
 func TestPrintIngestSummaryDryRunBanner(t *testing.T) {
 	var buf bytes.Buffer
-	printIngestSummary(&buf, &KbIngestionResult{}, true)
+	printIngestSummary(&buf, &IngestionResult{}, true)
 	if !strings.Contains(buf.String(), "dry-run") {
 		t.Errorf("expected dry-run banner; got %q", buf.String())
 	}

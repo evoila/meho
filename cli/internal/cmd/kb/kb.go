@@ -89,12 +89,15 @@ func NewRootCmd() *cobra.Command {
 	return cmd
 }
 
-// KbEntryPreview mirrors the backend KbEntryPreview pydantic model
+// EntryPreview mirrors the backend KbEntryPreview pydantic model
 // (`backend/src/meho_backplane/api/v1/kb.py`). Hand-written rather
 // than aliased to the generated client type so the kb package stays
 // decoupled from oapi-codegen churn — the targets / retrieval /
 // audit / connector / operation packages take the same stance.
-type KbEntryPreview struct {
+// Unprefixed name follows the sibling-package convention
+// (`audit.Entry`, `connector.IngestionResult`, etc.) and avoids the
+// `revive` stutter rule (`kb.KbEntryPreview` → `kb.EntryPreview`).
+type EntryPreview struct {
 	Slug      string         `json:"slug"`
 	Preview   string         `json:"preview"`
 	Metadata  map[string]any `json:"metadata"`
@@ -102,20 +105,20 @@ type KbEntryPreview struct {
 	UpdatedAt string         `json:"updated_at"`
 }
 
-// KbListResponse mirrors the backend KbListResponse envelope.
-// Wrapped in `{"entries": [...]}` for forward-compat with future
-// paging fields — same shape connectors_ingest adopted for its
-// list response.
-type KbListResponse struct {
-	Entries []KbEntryPreview `json:"entries"`
+// ListResponse mirrors the backend KbListResponse envelope. Wrapped
+// in `{"entries": [...]}` for forward-compat with future paging
+// fields — same shape connectors_ingest adopted for its list
+// response.
+type ListResponse struct {
+	Entries []EntryPreview `json:"entries"`
 }
 
-// KbEntry mirrors the backend KbEntry pydantic model — the full
-// entry shape returned by GET /api/v1/kb/{slug} and POST /api/v1/kb.
+// Entry mirrors the backend KbEntry pydantic model — the full entry
+// shape returned by GET /api/v1/kb/{slug} and POST /api/v1/kb.
 // `Metadata` decodes as `map[string]any` so the CLI can re-emit it
-// in --json mode without re-typing every Markdown front-matter
-// shape the operator might store.
-type KbEntry struct {
+// in --json mode without re-typing every Markdown front-matter shape
+// the operator might store.
+type Entry struct {
 	ID        string         `json:"id"`
 	TenantID  string         `json:"tenant_id"`
 	Slug      string         `json:"slug"`
@@ -125,12 +128,12 @@ type KbEntry struct {
 	UpdatedAt string         `json:"updated_at"`
 }
 
-// KbIngestionResult mirrors the backend KbIngestionResult shape.
+// IngestionResult mirrors the backend KbIngestionResult shape.
 // Counters partition every discovered .md file into exactly one of
 // four buckets (inserted / updated / skipped / error); the substrate
 // invariant is `inserted + updated + skipped + error == total .md
 // files`. `Errors` carries per-file error strings (path + reason).
-type KbIngestionResult struct {
+type IngestionResult struct {
 	InsertedCount int      `json:"inserted_count"`
 	UpdatedCount  int      `json:"updated_count"`
 	SkippedCount  int      `json:"skipped_count"`
@@ -178,6 +181,16 @@ func (e *errNoBackplaneConfigured) Error() string {
 	return "no backplane URL configured; run `meho login <url>` first or pass --backplane <url>"
 }
 func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
+
+// errMissingAccessToken is the sentinel doAuthedRequest returns
+// when the stored token row exists but its `access_token` field is
+// empty. It's a credential-state failure rather than a transport
+// failure, so renderRequestError maps it to auth_expired (exit 2)
+// with a `meho login` hint — not unreachable (exit 3). Pre-existing
+// sibling packages (audit/, targets/, etc.) emit a generic error
+// here that falls through to unreachable; the local fix here is
+// scoped to the kb package (m3 in the review punch list).
+var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 
 // resolveBackplane resolves the backplane URL from either the
 // `--backplane` override or the `meho login` config file. Same shape
@@ -232,6 +245,9 @@ func normaliseURL(s string) (string, error) {
 // Same classification ladder as the audit / targets siblings with
 // kb-specific 4xx handling:
 //
+//   - empty stored bearer → auth_expired (the row exists but its
+//     access_token is empty, so the right fix is `meho login` even
+//     though there's no transport-level 401 yet).
 //   - 401 (refresh failed) → auth_expired with a `meho login` hint.
 //   - 403 (RBAC denial) → insufficient_role; the backend's 403 detail
 //     names the required role.
@@ -255,6 +271,15 @@ func renderRequestError(
 	err error,
 	jsonOut bool,
 ) error {
+	if errors.Is(err, errMissingAccessToken) {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.AuthExpired(fmt.Sprintf(
+				"stored credentials for %s are incomplete; run `meho login %s`",
+				backplaneURL, backplaneURL,
+			)),
+			jsonOut,
+		)
+	}
 	if api.IsTokenNotFound(err) {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.AuthExpired(fmt.Sprintf(
@@ -391,7 +416,7 @@ func doAuthedRequest(
 	httpClient := authed.HTTPClient()
 	bearer := authed.AccessToken()
 	if bearer == "" {
-		return nil, errors.New("meho: stored token has no access_token")
+		return nil, errMissingAccessToken
 	}
 
 	resp, err := sendRequest(ctx, httpClient, backplaneURL, method, path, bearer, body)

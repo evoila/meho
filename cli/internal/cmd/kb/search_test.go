@@ -37,6 +37,52 @@ func TestRunSearchRejectsOutOfRangeLimit(t *testing.T) {
 	}
 }
 
+// TestRunSearchRejectsExplicitZeroLimit — `--limit 0` is outside
+// the documented 1..50 range and must be rejected. The cobra-default
+// zero (no flag passed) is still permitted; the distinction is made
+// via `cmd.Flags().Changed("limit")`.
+func TestRunSearchRejectsExplicitZeroLimit(t *testing.T) {
+	// Build a real cobra command so Changed("limit") returns true
+	// after the flag is set by name — the runSearch-only helper used
+	// by other tests doesn't go through flag parsing.
+	cmd := newSearchCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"x", "--limit", "0"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("expected error for explicit --limit=0")
+	}
+	if !strings.Contains(stderr.String(), "between 1 and 50") {
+		t.Errorf("expected range hint; got %q", stderr.String())
+	}
+}
+
+// TestRunSearchAllowsDefaultZeroLimit — without `--limit`, opts.Limit
+// is cobra's default zero and must be treated as "unset" (server-side
+// default applies). Range gate must not fire.
+func TestRunSearchAllowsDefaultZeroLimit(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/retrieve", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RetrieveResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	// Drive through the cobra command so Changed("limit") is false.
+	cmd := newSearchCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"x", "--backplane", srv.URL})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("default zero limit should pass; got err=%v stderr=%q", err, stderr.String())
+	}
+}
+
 // TestRunSearchHappyPath — POSTs the right body (source pinned to
 // "kb") and renders the ranked-hits table.
 func TestRunSearchHappyPath(t *testing.T) {

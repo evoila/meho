@@ -47,7 +47,7 @@ func TestRunShowRejectsEmptySlug(t *testing.T) {
 // TestRunShowHappyPath — body goes to stdout verbatim; --json
 // wraps the full entry.
 func TestRunShowHappyPath(t *testing.T) {
-	entry := KbEntry{
+	entry := Entry{
 		ID:        "00000000-0000-0000-0000-000000000001",
 		TenantID:  "00000000-0000-0000-0000-000000000002",
 		Slug:      "vcenter-9.0",
@@ -82,9 +82,9 @@ func TestRunShowHappyPath(t *testing.T) {
 	}
 }
 
-// TestRunShowJSONHappyPath — --json wraps the full KbEntry shape.
+// TestRunShowJSONHappyPath — --json wraps the full Entry shape.
 func TestRunShowJSONHappyPath(t *testing.T) {
-	entry := KbEntry{
+	entry := Entry{
 		ID:   "00000000-0000-0000-0000-000000000001",
 		Slug: "x", Body: "b",
 		Metadata: map[string]any{"k": "v"},
@@ -103,7 +103,7 @@ func TestRunShowJSONHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runShow --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded KbEntry
+	var decoded Entry
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
 	}
@@ -137,11 +137,27 @@ func TestRunShow404SurfacesSlugNotFound(t *testing.T) {
 }
 
 // TestPrintEntryBodyEmitsBodyAndNewline — non-JSON render writes
-// the body then a single trailing newline.
+// the body then a single trailing newline. Bodies with no trailing
+// newline get exactly one appended; bodies that already end in
+// `\n` or `\r\n` get normalised down to exactly one trailing `\n`
+// rather than doubling up.
 func TestPrintEntryBodyEmitsBodyAndNewline(t *testing.T) {
-	var buf bytes.Buffer
-	printEntryBody(&buf, &KbEntry{Body: "hello"})
-	if buf.String() != "hello\n" {
-		t.Errorf("unexpected render: %q", buf.String())
+	cases := []struct {
+		name, body, want string
+	}{
+		{"no trailing newline", "hello", "hello\n"},
+		{"already ends in LF", "hello\n", "hello\n"},
+		{"already ends in CRLF", "hello\r\n", "hello\n"},
+		{"multiple trailing newlines", "hello\n\n\n", "hello\n"},
+		{"empty body", "", "\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printEntryBody(&buf, &Entry{Body: c.body})
+			if buf.String() != c.want {
+				t.Errorf("unexpected render: got %q; want %q", buf.String(), c.want)
+			}
+		})
 	}
 }

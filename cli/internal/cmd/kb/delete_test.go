@@ -34,6 +34,33 @@ func TestRunDeleteRejectsEmptySlug(t *testing.T) {
 	}
 }
 
+// TestRunDeleteDeclinedWithoutLoginConfig — the docstring's "ask
+// before doing destructive things" promise must hold even when the
+// operator has not yet run `meho login`. Without a backplane URL
+// configured, resolveBackplane would surface auth_expired; the
+// runner must reach the prompt first so a decline exits 0 with
+// status=declined and no backplane call is made.
+func TestRunDeleteDeclinedWithoutLoginConfig(t *testing.T) {
+	// Per-test XDG dir without seeding any config / token. This
+	// mirrors a fresh workstation where no `meho login` has run yet.
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("MEHO_KEYRING_DISABLE", "1")
+
+	cmd, stdout, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString("n\n"))
+	err := runDelete(cmd, deleteOptions{Slug: "x"})
+	if err != nil {
+		t.Fatalf("decline without login should exit 0; got err=%v stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "declined") {
+		t.Errorf("expected declined line; got %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "auth_expired") {
+		t.Errorf("decline should not surface auth_expired; got stderr=%q", stderr.String())
+	}
+}
+
 // TestRunDeletePromptDeclined — when --confirm is not set and the
 // operator answers "n", the runner must NOT call the backplane.
 func TestRunDeletePromptDeclined(t *testing.T) {

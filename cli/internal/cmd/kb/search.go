@@ -101,10 +101,15 @@ func runSearch(cmd *cobra.Command, opts searchOptions) error {
 	// Fail fast on out-of-range --limit. The backend clamps with
 	// Field(ge=1, le=50); the CLI mirrors the bound so operators
 	// see the constraint string locally instead of a 422 round-trip.
-	if opts.Limit < 0 || opts.Limit > 50 {
+	// Zero is cobra's default for an unset IntVar — preserve that as
+	// the "no flag" sentinel (`postSearch` omits the field on zero),
+	// but reject an *explicit* `--limit=0` (loud failure for a value
+	// outside the documented 1..50 range).
+	limitProvided := cmd.Flags().Changed("limit")
+	if opts.Limit < 0 || opts.Limit > 50 || (limitProvided && opts.Limit == 0) {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			output.Unexpected(fmt.Sprintf("--limit must be between 1 and 50; got %d", opts.Limit)),
+			output.Unexpected(fmt.Sprintf("--limit must be between 1 and 50 when provided; got %d", opts.Limit)),
 			opts.JSONOut,
 		)
 	}

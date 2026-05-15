@@ -101,7 +101,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&metadata, "metadata", "",
 		"comma-separated key=value pairs to attach as entry metadata (e.g. owner=ops,source=runbook)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw KbEntry JSON instead of the human summary")
+		"emit raw Entry JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -152,7 +152,7 @@ func postAdd(
 	ctx context.Context,
 	backplaneURL, slug, body string,
 	metadata map[string]any,
-) (*KbEntry, error) {
+) (*Entry, error) {
 	req := kbEntryCreateRequest{Slug: slug, Body: body, Metadata: metadata}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -162,7 +162,7 @@ func postAdd(
 	if err != nil {
 		return nil, err
 	}
-	var out KbEntry
+	var out Entry
 	if err := json.Unmarshal(resp, &out); err != nil {
 		return nil, fmt.Errorf("decode kb add response: %w", err)
 	}
@@ -172,7 +172,7 @@ func postAdd(
 // printAddSummary renders the created entry as a compact one-line
 // confirmation plus the round-tripped slug / timestamps. Operators
 // who want the full body should chase with `meho kb show <slug>`.
-func printAddSummary(w io.Writer, e *KbEntry) {
+func printAddSummary(w io.Writer, e *Entry) {
 	if e == nil {
 		return
 	}

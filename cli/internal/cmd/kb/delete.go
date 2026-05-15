@@ -99,10 +99,14 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 			opts.JSONOut,
 		)
 	}
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
-	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
-	}
+	// Confirm BEFORE resolving the backplane so that an operator who
+	// declines (or hits ^D / EOF on a piped /dev/null) exits 0 with
+	// the declined-status envelope regardless of whether `meho login`
+	// has been run. Resolving first would surface an auth_expired
+	// error on a no-config workstation even when the operator was
+	// about to type `n` — the prompt would never appear, and the
+	// "ask before doing destructive things" promise in the docstring
+	// would be violated.
 	if !opts.Confirm {
 		prompt := fmt.Sprintf(
 			"Delete kb entry %q — idempotent (no-op if already absent). Continue?",
@@ -116,6 +120,10 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "declined: kb entry %q not deleted\n", opts.Slug)
 			return nil
 		}
+	}
+	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	if err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
 	if err := callDelete(cmd.Context(), backplaneURL, opts.Slug); err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)

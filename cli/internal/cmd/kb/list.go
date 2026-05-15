@@ -24,7 +24,7 @@ import (
 //	  [--filter PATTERN]   # SQL LIKE pattern forwarded to the substrate
 //	  [--limit N]          # 1..500, default 100 (server-side)
 //	  [--offset N]         # offset-based pagination, default 0
-//	  [--json]             # raw KbListResponse JSON instead of the table
+//	  [--json]             # raw ListResponse JSON instead of the table
 //	  [--backplane <url>]  # override the configured backplane URL
 //
 // Exit codes:
@@ -50,7 +50,7 @@ func newListCmd() *cobra.Command {
 			"operator is the trust boundary for pattern shape). " +
 			"--limit caps the page size (1..500, server default 100). " +
 			"--offset advances the page window (default 0). --json " +
-			"emits the raw KbListResponse envelope for jq pipelines.",
+			"emits the raw ListResponse envelope for jq pipelines.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -71,7 +71,7 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&offset, "offset", 0,
 		"offset into the slug-sorted result set (default 0)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw KbListResponse JSON instead of the human table")
+		"emit raw ListResponse JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -140,12 +140,12 @@ func buildListPath(opts listOptions) string {
 	return path
 }
 
-func getList(ctx context.Context, backplaneURL string, opts listOptions) (*KbListResponse, error) {
+func getList(ctx context.Context, backplaneURL string, opts listOptions) (*ListResponse, error) {
 	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildListPath(opts), nil)
 	if err != nil {
 		return nil, err
 	}
-	var out KbListResponse
+	var out ListResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode kb list response: %w", err)
 	}
@@ -154,20 +154,22 @@ func getList(ctx context.Context, backplaneURL string, opts listOptions) (*KbLis
 
 // printListTable renders the list as a compact, scannable table.
 // Columns: SLUG, UPDATED, PREVIEW. The full ISO-8601 timestamp is
-// kept (not truncated) because operators correlating with audit-log
-// rows want the precise updated_at; the preview column carries a
-// 80-char excerpt of the 200-char backend preview so a default
-// terminal width doesn't wrap.
-func printListTable(w io.Writer, r *KbListResponse) {
+// kept verbatim (not truncated) because operators correlating with
+// audit-log rows want the precise updated_at; the column width is
+// 32 chars, sized for the worst-case Python `datetime.isoformat()`
+// shape `YYYY-MM-DDTHH:MM:SS.ffffff+HH:MM`. The preview column
+// carries an 80-char excerpt of the 200-char backend preview so a
+// default terminal width doesn't wrap.
+func printListTable(w io.Writer, r *ListResponse) {
 	if r == nil || len(r.Entries) == 0 {
 		fmt.Fprintln(w, "no kb entries registered in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-40s %-26s %s\n", "SLUG", "UPDATED", "PREVIEW")
+	fmt.Fprintf(w, "%-40s %-32s %s\n", "SLUG", "UPDATED", "PREVIEW")
 	for _, e := range r.Entries {
-		fmt.Fprintf(w, "%-40s %-26s %s\n",
+		fmt.Fprintf(w, "%-40s %-32s %s\n",
 			truncate(e.Slug, 40),
-			truncate(e.UpdatedAt, 26),
+			e.UpdatedAt,
 			truncate(e.Preview, 80),
 		)
 	}

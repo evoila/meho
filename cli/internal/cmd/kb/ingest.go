@@ -43,7 +43,7 @@ type ingestKbRequest struct {
 // returns 501 when `tarball_url` is set).
 //
 // `--dry-run` short-circuits the substrate's write path; the
-// counters in the returned `KbIngestionResult` reflect what _would_
+// counters in the returned `IngestionResult` reflect what _would_
 // have been inserted / updated / skipped / errored.
 //
 // Exit codes:
@@ -71,7 +71,7 @@ func newIngestCmd() *cobra.Command {
 			"their kb/ tree on the backplane host (or run the CLI on " +
 			"the backplane host itself).\n\n" +
 			"--dry-run short-circuits the substrate's write path; the " +
-			"counters in the returned KbIngestionResult reflect what " +
+			"counters in the returned IngestionResult reflect what " +
 			"would have been inserted / updated / skipped / errored " +
 			"without actually writing.\n\n" +
 			"The substrate's body-hash short-circuit means re-ingesting " +
@@ -92,7 +92,7 @@ func newIngestCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"resolve the plan without writing to the substrate (counters reflect intent only)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw KbIngestionResult JSON instead of the human summary")
+		"emit raw IngestionResult JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -128,7 +128,7 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 	return nil
 }
 
-func postIngest(ctx context.Context, backplaneURL string, opts ingestOptions) (*KbIngestionResult, error) {
+func postIngest(ctx context.Context, backplaneURL string, opts ingestOptions) (*IngestionResult, error) {
 	body := ingestKbRequest{Directory: opts.Directory, DryRun: opts.DryRun}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -138,7 +138,7 @@ func postIngest(ctx context.Context, backplaneURL string, opts ingestOptions) (*
 	if err != nil {
 		return nil, err
 	}
-	var out KbIngestionResult
+	var out IngestionResult
 	if err := json.Unmarshal(resp, &out); err != nil {
 		return nil, fmt.Errorf("decode kb ingest response: %w", err)
 	}
@@ -149,7 +149,7 @@ func postIngest(ctx context.Context, backplaneURL string, opts ingestOptions) (*
 // stable key-value summary. Errors (if any) are appended one per
 // line so an operator triaging a partial-failure run sees every
 // file path that failed without needing --json.
-func printIngestSummary(w io.Writer, r *KbIngestionResult, dryRun bool) {
+func printIngestSummary(w io.Writer, r *IngestionResult, dryRun bool) {
 	if r == nil {
 		return
 	}

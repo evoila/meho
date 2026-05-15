@@ -69,7 +69,7 @@ func TestRunAddHappyPath(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(KbEntry{
+		_ = json.NewEncoder(w).Encode(Entry{
 			ID:        "00000000-0000-0000-0000-000000000001",
 			TenantID:  "00000000-0000-0000-0000-000000000002",
 			Slug:      "new-slug",
@@ -124,7 +124,7 @@ func TestRunAddOmitsMetadataWhenAbsent(t *testing.T) {
 			t.Fatalf("decode: %v", err)
 		}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(KbEntry{Slug: "x"})
+		_ = json.NewEncoder(w).Encode(Entry{Slug: "x"})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -145,7 +145,7 @@ func TestRunAddJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(KbEntry{Slug: "x", Body: "y"})
+		_ = json.NewEncoder(w).Encode(Entry{Slug: "x", Body: "y"})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -156,7 +156,7 @@ func TestRunAddJSONHappyPath(t *testing.T) {
 	if err := runAdd(cmd, addOptions{Slug: "x", BodyArg: "y", JSONOut: true, BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runAdd --json: %v", err)
 	}
-	var decoded KbEntry
+	var decoded Entry
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
@@ -213,6 +213,15 @@ func TestRunAdd422SurfacesValidationDetail(t *testing.T) {
 	if !strings.Contains(stderr.String(), "invalid request") {
 		t.Errorf("expected invalid request hint; got %q", stderr.String())
 	}
+	// Tighten the assertion: the CLI's value-add over a raw curl is
+	// surfacing the backend's `detail` payload so operators see *what*
+	// was wrong (which field, which pattern). A regression that
+	// swallows the detail would still pass the "invalid request"
+	// check alone — assert the substrate's pattern-mismatch string
+	// survives the round-trip into stderr.
+	if !strings.Contains(stderr.String(), "SLUG_PATTERN") {
+		t.Errorf("expected backend detail to survive into stderr; got %q", stderr.String())
+	}
 }
 
 // TestRunAddReadsBodyFromStdin — --body @- pipes content through
@@ -224,7 +233,7 @@ func TestRunAddReadsBodyFromStdin(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &bodyJSON)
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(KbEntry{Slug: "x", Body: "from stdin"})
+		_ = json.NewEncoder(w).Encode(Entry{Slug: "x", Body: "from stdin"})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

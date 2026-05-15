@@ -47,7 +47,7 @@ func TestBuildListPathOmitsZeroOffsetAndLimit(t *testing.T) {
 // line without the header row.
 func TestPrintListTableEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	printListTable(&buf, &KbListResponse{Entries: nil})
+	printListTable(&buf, &ListResponse{Entries: nil})
 	out := buf.String()
 	if !strings.Contains(out, "no kb entries") {
 		t.Errorf("empty render missing hint; got %q", out)
@@ -59,8 +59,8 @@ func TestPrintListTableEmpty(t *testing.T) {
 
 // TestPrintListTableRendersColumns — header + every column appears.
 func TestPrintListTableRendersColumns(t *testing.T) {
-	resp := &KbListResponse{
-		Entries: []KbEntryPreview{
+	resp := &ListResponse{
+		Entries: []EntryPreview{
 			{
 				Slug:      "vcenter-9.0-overview",
 				Preview:   "vCenter 9.0 has new APIs for…",
@@ -77,6 +77,34 @@ func TestPrintListTableRendersColumns(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("printListTable missing %q in %q", want, out)
 		}
+	}
+}
+
+// TestPrintListTablePreservesFullTimestamp — the docstring on
+// printListTable promises operators correlating with audit-log
+// rows that the full ISO-8601 `updated_at` is rendered intact.
+// Python's `datetime.isoformat()` with microseconds + offset
+// produces a 32-char string (`YYYY-MM-DDTHH:MM:SS.ffffff+HH:MM`),
+// and the UPDATED column must accommodate it without truncation.
+func TestPrintListTablePreservesFullTimestamp(t *testing.T) {
+	const fullTimestamp = "2026-05-12T10:11:12.123456+00:00" // 32 chars
+	if got := len(fullTimestamp); got != 32 {
+		t.Fatalf("fixture length: got %d; want 32 (test setup error)", got)
+	}
+	resp := &ListResponse{
+		Entries: []EntryPreview{
+			{
+				Slug:      "vcenter-9.0-overview",
+				Preview:   "preview",
+				UpdatedAt: fullTimestamp,
+				Metadata:  map[string]any{},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printListTable(&buf, resp)
+	if !strings.Contains(buf.String(), fullTimestamp) {
+		t.Errorf("expected full 32-char timestamp intact in render; got %q", buf.String())
 	}
 }
 
@@ -123,8 +151,8 @@ func TestRunListHappyPath(t *testing.T) {
 			t.Errorf("missing Authorization header")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(KbListResponse{
-			Entries: []KbEntryPreview{
+		_ = json.NewEncoder(w).Encode(ListResponse{
+			Entries: []EntryPreview{
 				{
 					Slug:      "vcenter-9.0-overview",
 					Preview:   "vCenter 9.0 has…",
@@ -158,8 +186,8 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/kb", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(KbListResponse{
-			Entries: []KbEntryPreview{
+		_ = json.NewEncoder(w).Encode(ListResponse{
+			Entries: []EntryPreview{
 				{Slug: "a", Preview: "p", CreatedAt: "t", UpdatedAt: "u", Metadata: map[string]any{}},
 			},
 		})
@@ -173,7 +201,7 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runList --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded KbListResponse
+	var decoded ListResponse
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout.String())
 	}

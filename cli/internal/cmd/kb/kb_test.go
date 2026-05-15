@@ -405,6 +405,30 @@ func TestDoAuthedRequestRejectsOversizedResponse(t *testing.T) {
 	}
 }
 
+// TestRenderRequestErrorEmptyBearerMapsToAuthExpired — an empty
+// stored bearer is a credential-state failure (the token row
+// exists but its `access_token` is empty); renderRequestError must
+// map it to auth_expired (exit 2) with a `meho login` hint rather
+// than letting it fall through to unreachable (exit 3) the generic
+// error string would land on.
+func TestRenderRequestErrorEmptyBearerMapsToAuthExpired(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := renderRequestError(cmd, "https://meho.test", errMissingAccessToken, false)
+	if err == nil {
+		t.Fatalf("expected non-nil error from renderRequestError")
+	}
+	if !strings.Contains(stderr.String(), "auth_expired") {
+		t.Errorf("expected auth_expired classification; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "meho login") {
+		t.Errorf("expected `meho login` hint; got %q", stderr.String())
+	}
+	type ec interface{ ExitCode() int }
+	if x, ok := err.(ec); !ok || x.ExitCode() != 2 {
+		t.Errorf("expected ExitCode 2 (auth_expired); got %v", err)
+	}
+}
+
 // TestDoAuthedRequestHandles204NoContent — the kb.delete route
 // returns 204 with an empty body whether or not the row existed;
 // doAuthedRequest must treat that as success (returning nil bytes)

@@ -106,6 +106,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
+      - name: Docker Hub login (for testcontainers pulls)
+        # Pulls inside the DinD daemon (testcontainers PostgresContainer
+        # spinning up pgvector/pgvector:pg16 for test_db_engine.py /
+        # test_migration_rollback.py / tests/integration/*) share the
+        # ARC cluster's NAT egress IP, which exhausts Docker Hub's
+        # 100/6h anonymous bucket. Authenticated Personal-tier doubles
+        # it to 200/6h
+        # (https://docs.docker.com/docker-hub/usage/pulls/). Same
+        # org-level secrets security-scan.yml uses, provisioned at
+        # the evoila org level (visibility `all`) with 1Password
+        # vault custody — see meho-internal#74 for the regression
+        # context this addresses. Long-term, the in-cluster proxy
+        # cache from claude-rdc-hetzner-dc#463 retires this step.
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Install uv
         # uv is the project's canonical Python toolchain (pyproject.toml
         # locks a uv.lock, not a requirements.txt). enable-cache: true

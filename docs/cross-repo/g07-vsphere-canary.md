@@ -284,6 +284,84 @@ the BM25 arm picks up cleanly. A consistent first-run failure would
 indicate a vi-json description-quality issue worth filing a
 follow-up for — not silently absorbing via xfail.
 
+## Opt-in extensions
+
+Two extensions to the default canary surface, both env-gated so the
+default CI run keeps skipping them cleanly. They ride existing
+substrate — no production code changes shipped with these.
+
+### Real-LLM eyeball check (`G07_CANARY_REAL_LLM=1` + `ANTHROPIC_API_KEY`)
+
+The default canary uses a deterministic stub that classifies operations
+by URL path prefix; the three queries marked `xfail` in the stub
+benchmark (`list virtual machines`, `power on virtual machine`,
+`power off virtual machine`) reflect the stub's inability to enrich
+`when_to_use` strings beyond what the spec source carries.
+
+The opt-in `test_g07_canary_real_llm_eyeball` test drives the same
+ingestion pipeline against Claude Haiku
+(`claude-haiku-4-5-20251001`) over `httpx` — no `anthropic` SDK
+dependency, the chassis stays narrow. The test then asserts the
+**strict top-3** govc-parity contract on all 10 queries, naming any
+that miss. This is the parallel signal the parent Initiative's
+acceptance criteria call for; the stub-path xfail markers remain
+unchanged.
+
+Operator command:
+
+```bash
+export G07_CANARY_REAL_LLM=1
+export ANTHROPIC_API_KEY=sk-ant-...
+export MEHO_VCENTER_OPENAPI_VCENTER=/path/to/vcenter.yaml
+cd backend && uv run pytest -x \
+  tests/acceptance/test_g07_vsphere_canary.py::test_g07_canary_real_llm_eyeball
+```
+
+Cost note: the grouping pass issues ~27 sequential Messages-API
+calls per run (1 Pass-1 propose + ~26 Pass-2 batch-assignments at
+batch size 50). At Haiku 4.5 pricing this is well under USD 0.10
+per run; not gated in CI by cost, gated only because the canary's
+default contract is a sandbox-safe skip.
+
+### vcsim dispatch + audit/broadcast assertion (`MEHO_VCSIM_TARGET=<base-url>`)
+
+The default canary documents Step 7 (dispatch verification) as a
+**manual** step — its acceptance suite has no `Target` row. The
+opt-in `test_g07_canary_vcsim_dispatch` test automates that step:
+it seeds a `Target` row matching the env value, patches the
+dispatcher's already-bound `publish_event` import (the bind site
+is `meho_backplane.operations._audit`, not the broadcast package
+— patching the package alone is insufficient because the audit
+helper resolved the symbol at import time), patches the auto-shim's
+`auth_headers` to return `{}` (vcsim is no-auth), then dispatches
+`GET:/vcenter/cluster` via `call_operation` and asserts:
+
+- `result['status'] == 'ok'`
+- Exactly **+1** `audit_log` row with `method='DISPATCH'` and
+  `path='GET:/vcenter/cluster'`
+- At least one captured `BroadcastEvent` referencing the same `op_id`
+
+The `audit_and_broadcast_safe` codepath at
+[`backend/src/meho_backplane/operations/_audit.py`](../../backend/src/meho_backplane/operations/_audit.py#L189)
+thus gains an explicit canary-level assertion rather than relying
+only on the per-unit tests it ships with.
+
+Operator command:
+
+```bash
+# In one shell: start vcsim
+vcsim -l :8989 &
+# In another:
+export MEHO_VCSIM_TARGET=http://localhost:8989
+export MEHO_VCENTER_OPENAPI_VCENTER=/path/to/vcenter.yaml
+cd backend && uv run pytest -x \
+  tests/acceptance/test_g07_vsphere_canary.py::test_g07_canary_vcsim_dispatch
+```
+
+The `MEHO_VCSIM_TARGET` value's path component is honoured verbatim
+when present; a bare host:port URL gets `/rest` appended (vcsim's
+default vCenter REST mount).
+
 ## Known gaps (filed as PR-body follow-ups)
 
 ### 1. `vi-json.yaml` ingestion landed; vcenter cardinal-op gap remains

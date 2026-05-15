@@ -56,7 +56,12 @@ The pipeline is broken into work items per Initiative #389:
     routes return HTTP 204 No Content — the CLI skips JSON decode
     on 204 and prints a success line.
   * **T7 (#407)** — admin MCP tools (`meho.connector.*`) that wrap
-    the same service layer for MCP-only operators.
+    the same canonical service layer — no parallel service class, no
+    parallel Pydantic models. The agent's daily tool list stays
+    unchanged; the seven admin tools live under the
+    `meho.connector.*` namespace and only `tenant_admin` operators
+    (plus the two read tools at `operator` role) see them in
+    `tools/list`.
 * **T8 — vSphere canary** — ingest both vCenter specs end-to-end.
 * **T9 — Docs.**
 
@@ -111,6 +116,46 @@ adapter (Anthropic Messages API) ships with T3 itself (#404, commit
 (#405) is purely the operator-facing CLI verb tree
 (`cli/internal/cmd/connector/`) that drives the ingest → review →
 enable workflow over the T6 REST routes.
+
+### T7 (admin MCP tools) at a glance
+
+`backend/src/meho_backplane/mcp/tools/connector_admin.py` registers
+seven MCP tools at module import:
+
+| Tool | Required role | Wraps |
+|------|---------------|-------|
+| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` |
+| `meho.connector.list` | `operator` | `list_ingested_connectors()` |
+| `meho.connector.review` | `operator` | `ReviewService.get_review_payload()` |
+| `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
+| `meho.connector.edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
+| `meho.connector.enable` | `tenant_admin` | `ReviewService.enable_connector()` |
+| `meho.connector.disable` | `tenant_admin` | `ReviewService.disable_connector()` |
+
+These are administrative tools per CLAUDE.md's "What MEHO is NOT"
+note — distinct from the agent-surface meta-tools (`search_connectors`,
+`call_operation`, etc.). The registry's
+`all_tools_for(operator)` filter hides them from `tools/list` for
+operators whose role doesn't meet the `required_role` rank, and the
+`handle_tools_call` dispatcher re-checks the rank at invocation time
+so a client that guesses a hidden name is still rejected.
+
+Each tool's handler is a thin shim that wraps the canonical service
+layer the REST routes (T6) and CLI verbs (T5) also consume:
+`IngestionPipelineService` for `ingest`, `list_ingested_connectors`
+for `list`, and `ReviewService` for the five review / edit / enable /
+disable verbs. There is **no parallel admin service class**; the
+handler converts the JSON-Schema-validated `arguments` dict into the
+canonical `IngestRequest` Pydantic model (from `api_schemas`) and
+calls the service directly. Responses are `model_dump(mode="json")`-
+ed onto the wire.
+
+PATCH handlers (`edit_group`, `edit_op`) preserve PATCH-semantic
+intent: the handler builds the kwargs dict from `if "field" in
+arguments` key-presence checks so omitted fields never reach
+`ReviewService` (an explicit `null` would otherwise be
+indistinguishable from an omission with `arguments.get(...)`). Only
+fields the operator explicitly named are forwarded.
 
 ## Key types
 

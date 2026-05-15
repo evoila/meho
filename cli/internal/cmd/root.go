@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
@@ -106,6 +107,13 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `targets` parent.
 	root.AddCommand(targets.NewRootCmd())
+
+	// G8.1-T3 (#467) -- audit-query verbs (query / recent / show /
+	// who-touched / my-recent) for Initiative #334. Wraps the four
+	// /api/v1/audit/* routes shipped by G8.1-T2 (#466). Registered
+	// before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `audit` parent.
+	root.AddCommand(audit.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

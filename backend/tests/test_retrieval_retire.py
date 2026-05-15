@@ -189,9 +189,25 @@ async def _seed_audit_row(
 
 
 async def _read_audit_rows_for_path(path: str) -> list[AuditLog]:
+    """Read every ``audit_log`` row for *path*, ordered oldest → newest.
+
+    The explicit ``ORDER BY occurred_at, id`` is load-bearing: tests
+    that pick ``rows[-1]`` to mean "the latest row" are otherwise at
+    the mercy of the backend's execution plan. SQLite happens to
+    return rows in insertion order without an ORDER BY clause, but
+    PostgreSQL does not — production CI on PG would flake on whichever
+    test happened to land first in the unspecified order. The
+    secondary sort on ``id`` disambiguates same-instant rows
+    (audit_log writes can collide on ``occurred_at`` when two
+    requests land in the same microsecond).
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        result = await session.execute(select(AuditLog).where(AuditLog.path == path))
+        result = await session.execute(
+            select(AuditLog)
+            .where(AuditLog.path == path)
+            .order_by(AuditLog.occurred_at.asc(), AuditLog.id.asc())
+        )
         return list(result.scalars().all())
 
 

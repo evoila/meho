@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -34,13 +35,27 @@ var retireSurfaces = []string{"kb", "memory", "operations"}
 // "no blockers filed" (green for criterion 5).
 const blockerLabel = "retrieval-migration-blocker"
 
-// surfaceLabelPrefix is the per-issue surface marker. An issue labeled
-// `retrieval-migration-blocker` + `surface:kb` is bucketed against kb.
-// An issue labeled `retrieval-migration-blocker` with no surface
-// marker is treated as a general blocker and counted against every
-// surface — the conservative interpretation that a generic blocker
-// holds every retire candidate until resolved.
-const surfaceLabelPrefix = "surface:"
+// surfaceLabelToBucket maps the existing per-issue surface labels
+// to the three retrieval surfaces the retire-checklist verdicts
+// against. The naming matches the scheme T7 (#446) ships in
+// `docs/cross-repo/retrieval-retirement.md`: a single repo-wide
+// `retrieval-migration-blocker` label plus the existing surface-
+// adjacent labels operators already use (`knowledge` on kb issues,
+// `memory` on memory issues, `connector` on operation-substrate
+// issues). T7's body explicitly chose this scheme over a per-surface
+// `surface:*` namespace ("no per-surface labels in v0.2; simpler.
+// Per-surface filtering done by the issue's existing labels
+// (`knowledge`, `connector`, etc.) cross-referenced via `gh issue
+// list --label retrieval-migration-blocker --label knowledge` etc.").
+// An issue labeled `retrieval-migration-blocker` without any of
+// these surface markers is treated as a general blocker and counted
+// against every surface — the conservative interpretation that a
+// generic blocker holds every retire candidate until resolved.
+var surfaceLabelToBucket = map[string]string{
+	"knowledge": "kb",
+	"memory":    "memory",
+	"connector": "operations",
+}
 
 // defaultGHRepo is the repository the lookup defaults to. Overridable
 // via `--gh-repo` so operators with a fork or with the migration-
@@ -52,18 +67,18 @@ const defaultGHRepo = "evoila/meho"
 // can't block the retire-checklist verb indefinitely.
 const ghLookupTimeout = 30 * time.Second
 
-// RetireCriterionResult mirrors the backend `CriterionResult` shape.
-// Hand-written (rather than oapi-codegen-generated) because the Go
-// regen pass for the new endpoint runs in a follow-up PR; the shape
-// is small and pinned by the matching backend test.
 // RetireCriterionResult mirrors the backend CriterionResult one-for-
-// one. ``Notes`` is a ``*string`` (rather than ``string``) so the
-// JSON round-trip preserves the explicit-null shape the backend
-// schema pins: the Python ``str | None = None`` field always emits
-// the key as ``null`` when unset, and the schema-stability test in
-// ``test_retrieval_retire.py::test_report_json_shape_is_stable``
+// one. Hand-written (rather than oapi-codegen-generated) because the
+// Go regen pass for the new endpoint runs in a follow-up PR; the
+// shape is small and pinned by the matching backend test.
+//
+// `Notes` is a `*string` (rather than `string`) so the JSON
+// round-trip preserves the explicit-null shape the backend schema
+// pins: the Python `str | None = None` field always emits the key as
+// `null` when unset, and the schema-stability test in
+// `test_retrieval_retire.py::test_report_json_shape_is_stable`
 // asserts the full key set on every criterion. Omitempty would drop
-// the field on ``--json`` output for null-notes criteria, breaking
+// the field on --json output for null-notes criteria, breaking
 // jq-style consumers that key off the stable shape.
 type RetireCriterionResult struct {
 	Name             string  `json:"name"`
@@ -81,24 +96,42 @@ type RetireSurfaceChecklist struct {
 }
 
 // RetireChecklistReport mirrors the backend `RetireChecklistReport`.
+// `TenantID` deliberately omits `omitempty`: the backend always emits
+// the key (Pydantic v2 `UUID | None`), and dropping the key on the
+// Go re-marshal would break --json schema-stability consumers the
+// same way `Notes,omitempty` did before #497's fixup.
 type RetireChecklistReport struct {
-	RanAt           string                   `json:"ran_at"`
-	TenantID        *string                  `json:"tenant_id,omitempty"`
-	Since           string                   `json:"since"`
-	Until           string                   `json:"until"`
-	Surfaces        []RetireSurfaceChecklist `json:"surfaces"`
-	OverallVerdict  string                   `json:"overall_verdict"`
+	RanAt          string                   `json:"ran_at"`
+	TenantID       *string                  `json:"tenant_id"`
+	Since          string                   `json:"since"`
+	Until          string                   `json:"until"`
+	Surfaces       []RetireSurfaceChecklist `json:"surfaces"`
+	OverallVerdict string                   `json:"overall_verdict"`
+}
+
+// baselineMetricsOverride mirrors the backend
+// `BaselineMetricsOverride` model. Caller-supplied baseline numbers
+// the CLI obtains from a prior local `meho retrieval eval --baseline
+// grep --json` run: the v0.2 backplane has no server-side corpus
+// snapshot, so criterion 4 (MEHO ≥ baseline) only reaches green when
+// the operator passes baseline metrics via this override.
+type baselineMetricsOverride struct {
+	PrecisionAt5 float64 `json:"precision_at_5"`
+	MRR          float64 `json:"mrr"`
+	Coverage     float64 `json:"coverage"`
+	Kind         string  `json:"kind,omitempty"`
 }
 
 // retireRequest is the POST body shape; mirrors the backend
-// `RetireChecklistRequest`. `BlockerCounts` is a pointer so Go's
+// `RetireChecklistRequest`. Each map field is a pointer so Go's
 // `omitempty` only suppresses the field when no map is supplied —
 // an empty map would otherwise be serialised as `{}` which the
-// backend treats as "every surface has zero blockers" (green) rather
-// than the intended "unknown" (yellow).
+// backend treats as "every surface has zero blockers / overrides"
+// (potentially green) rather than the intended "unknown" (yellow).
 type retireRequest struct {
-	Surface       string          `json:"surface"`
-	BlockerCounts *map[string]int `json:"blocker_counts,omitempty"`
+	Surface           string                              `json:"surface"`
+	BlockerCounts     *map[string]int                     `json:"blocker_counts,omitempty"`
+	BaselineOverrides *map[string]baselineMetricsOverride `json:"baseline_overrides,omitempty"`
 }
 
 // ghIssueLabel is one element of the labels array returned by
@@ -125,11 +158,12 @@ type ghIssue struct {
 //	  [--backplane <url>]                     # override the configured backplane
 //	  [--gh-repo <owner/name>]                # repo to query for blocker issues
 //	  [--no-blockers]                         # skip gh lookup; send blocker_counts=null
+//	  [--baseline-file <path>]                # JSON file with per-surface baseline metrics
 //
 // Exit codes:
 //   - 0   request succeeded (any verdict — this verb is informational,
-//         not a CI gate; the operator + team-of-4 read the verdict and
-//         decide).
+//     not a CI gate; the operator + team-of-4 read the verdict and
+//     decide).
 //   - 2   auth_expired
 //   - 3   unreachable
 //   - 4   unexpected response shape
@@ -145,6 +179,7 @@ func newRetireChecklistCmd() *cobra.Command {
 		backplaneOverride string
 		ghRepo            string
 		noBlockers        bool
+		baselineFile      string
 	)
 
 	cmd := &cobra.Command{
@@ -157,11 +192,17 @@ func newRetireChecklistCmd() *cobra.Command {
 			"Criterion 5 (zero open `retrieval-migration-blocker` issues) is " +
 			"computed locally: the verb runs `gh issue list --label " +
 			"retrieval-migration-blocker --state open --json number,labels` " +
-			"against --gh-repo (default: evoila/meho), buckets results by the " +
-			"`surface:<name>` marker label, and passes the per-surface count " +
-			"to the backplane. Pass --no-blockers to skip the lookup; the " +
-			"backplane reports criterion 5 as `REVIEW MANUALLY` when the count " +
-			"is unknown.\n\n" +
+			"against --gh-repo (default: evoila/meho) and buckets results by " +
+			"the existing per-surface labels documented in T7's runbook " +
+			"(`knowledge` → kb, `memory` → memory, `connector` → operations). " +
+			"Pass --no-blockers to skip the lookup; the backplane reports " +
+			"criterion 5 as `REVIEW MANUALLY` when the count is unknown.\n\n" +
+			"Criterion 4 (MEHO ≥ baseline) needs side-by-side baseline numbers " +
+			"the v0.2 backplane cannot produce on its own (no server-side " +
+			"corpus snapshot). Pass --baseline-file <path> pointing at a JSON " +
+			"file produced by `meho retrieval eval --baseline grep --save-baseline " +
+			"<path>` to supply the per-surface baseline metrics; without it, " +
+			"criterion 4 stays yellow (REVIEW MANUALLY).\n\n" +
 			"The verb exits 0 on any verdict — it is decision support, not a " +
 			"CI gate. Operators + the team-of-4 read the output and make the " +
 			"retire call manually (the actual retire commit is operator-driven " +
@@ -176,6 +217,7 @@ func newRetireChecklistCmd() *cobra.Command {
 				BackplaneOverride: backplaneOverride,
 				GHRepo:            ghRepo,
 				NoBlockers:        noBlockers,
+				BaselineFile:      baselineFile,
 			})
 		},
 	}
@@ -190,6 +232,10 @@ func newRetireChecklistCmd() *cobra.Command {
 		"GitHub repo to query for `retrieval-migration-blocker` issues")
 	cmd.Flags().BoolVar(&noBlockers, "no-blockers", false,
 		"skip the gh lookup; the backplane reports criterion 5 as REVIEW MANUALLY")
+	cmd.Flags().StringVar(&baselineFile, "baseline-file", "",
+		"JSON file containing per-surface baseline metrics (output of "+
+			"`meho retrieval eval --baseline grep --save-baseline ...`); "+
+			"without it, criterion 4 stays yellow")
 
 	return cmd
 }
@@ -200,6 +246,7 @@ type retireOptions struct {
 	BackplaneOverride string
 	GHRepo            string
 	NoBlockers        bool
+	BaselineFile      string
 }
 
 // runRetireChecklist orchestrates the retire-checklist request: resolve
@@ -234,7 +281,29 @@ func runRetireChecklist(cmd *cobra.Command, opts retireOptions) error {
 		}
 	}
 
-	report, err := postRetireChecklist(cmd.Context(), backplaneURL, opts, blockerCounts)
+	// Resolve baseline overrides from --baseline-file if provided.
+	// Same best-effort posture as blocker counts: an unreadable /
+	// malformed baseline file warns and falls back to criterion 4
+	// yellow rather than failing the whole verb. The fail-soft shape
+	// matches operator expectations — the baseline data is auxiliary,
+	// the request should still produce a usable verdict on the other
+	// four criteria.
+	var baselineOverrides *map[string]baselineMetricsOverride
+	if opts.BaselineFile != "" {
+		overrides, baselineErr := loadBaselineOverrides(opts.BaselineFile)
+		if baselineErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"warning: baseline-file load failed (criterion 4 will be REVIEW MANUALLY): %v\n",
+				baselineErr,
+			)
+		} else {
+			baselineOverrides = &overrides
+		}
+	}
+
+	report, err := postRetireChecklist(
+		cmd.Context(), backplaneURL, opts, blockerCounts, baselineOverrides,
+	)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
@@ -246,14 +315,16 @@ func runRetireChecklist(cmd *cobra.Command, opts retireOptions) error {
 	return nil
 }
 
-// postRetireChecklist calls POST /api/v1/retrieve/retire-checklist with
-// the surface + blocker_counts body. Mirrors `postEval`'s 401-retry
-// shape: one transparent refresh + retry on auth failure.
+// postRetireChecklist calls POST /api/v1/retrieve/retire-checklist
+// with the surface + blocker_counts + baseline_overrides body.
+// Mirrors `postEval`'s 401-retry shape: one transparent refresh +
+// retry on auth failure.
 func postRetireChecklist(
 	ctx context.Context,
 	backplaneURL string,
 	opts retireOptions,
 	blockerCounts *map[string]int,
+	baselineOverrides *map[string]baselineMetricsOverride,
 ) (*RetireChecklistReport, error) {
 	authed, err := api.NewAuthedClient(ctx, backplaneURL, api.AuthedClientOptions{})
 	if err != nil {
@@ -266,8 +337,9 @@ func postRetireChecklist(
 	}
 
 	body, err := json.Marshal(retireRequest{
-		Surface:       opts.Surface,
-		BlockerCounts: blockerCounts,
+		Surface:           opts.Surface,
+		BlockerCounts:     blockerCounts,
+		BaselineOverrides: baselineOverrides,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal retire request: %w", err)
@@ -396,24 +468,71 @@ func lookupBlockerCounts(ctx context.Context, repo string) (map[string]int, erro
 }
 
 // surfacesFromLabels returns the surface bucket(s) the issue belongs
-// to, derived from `surface:<name>` marker labels. An issue with
-// multiple surface markers is bucketed against every named surface
-// (the multi-surface blocker case).
+// to, derived from the existing per-surface labels T7 (#446) lists
+// in the operator runbook (`knowledge` → kb, `memory` → memory,
+// `connector` → operations). An issue with multiple surface markers
+// is bucketed against every named surface (the multi-surface
+// blocker case). Unknown labels are ignored — operators may add
+// extra labels for triage that don't bear on retire-decision
+// bucketing.
 func surfacesFromLabels(labels []ghIssueLabel) []string {
 	var out []string
+	seen := make(map[string]bool, len(retireSurfaces))
 	for _, label := range labels {
-		if !strings.HasPrefix(label.Name, surfaceLabelPrefix) {
+		bucket, ok := surfaceLabelToBucket[label.Name]
+		if !ok || seen[bucket] {
 			continue
 		}
-		name := strings.TrimPrefix(label.Name, surfaceLabelPrefix)
-		for _, surface := range retireSurfaces {
-			if name == surface {
-				out = append(out, surface)
-				break
-			}
-		}
+		seen[bucket] = true
+		out = append(out, bucket)
 	}
 	return out
+}
+
+// loadBaselineOverrides reads a JSON file produced by
+// `meho retrieval eval --baseline grep --save-baseline <path>` and
+// extracts the per-surface baseline metrics into the wire shape the
+// backend's `BaselineMetricsOverride` expects. Returns one entry per
+// surface that has a non-nil baseline triple in the source file;
+// surfaces without baseline data (the v0.2 memory + operations
+// surfaces) are simply omitted from the returned map and the backend
+// leaves criterion 4 yellow for those surfaces.
+//
+// The shape this function reads matches `EvalResult` from
+// `eval.go` — same package, so we re-use that type rather than
+// duplicating a parallel struct that could drift.
+func loadBaselineOverrides(path string) (map[string]baselineMetricsOverride, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read baseline file %q: %w", path, err)
+	}
+	var parsed EvalResult
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("parse baseline file %q: %w", path, err)
+	}
+	out := make(map[string]baselineMetricsOverride, len(parsed.Surfaces))
+	for _, s := range parsed.Surfaces {
+		// Skip surfaces whose baseline didn't run — the eval runner
+		// reports `baseline_kind=null` (decoded as `nil` here) for
+		// memory + operations in v0.2 and for kb when the operator
+		// didn't pass `--baseline grep`. Without a baseline triple
+		// criterion 4 cannot go green; emitting an empty / zero-
+		// metric override would silently flip the criterion red
+		// instead of yellow, which is the wrong default.
+		if s.BaselineKind == nil ||
+			s.BaselinePrecisionAt5 == nil ||
+			s.BaselineMRR == nil ||
+			s.BaselineCoverage == nil {
+			continue
+		}
+		out[s.Surface] = baselineMetricsOverride{
+			PrecisionAt5: *s.BaselinePrecisionAt5,
+			MRR:          *s.BaselineMRR,
+			Coverage:     *s.BaselineCoverage,
+			Kind:         *s.BaselineKind,
+		}
+	}
+	return out, nil
 }
 
 // printRetireTable renders the report as a human-readable table per

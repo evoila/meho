@@ -27,10 +27,13 @@ pieces:
   across the five tests in :mod:`tests.integration.test_tenant_isolation`
   so the suite still finishes well inside the issue's "< 10s wall clock"
   acceptance criterion. Migrations land once, not five times; the
-  per-test ``TRUNCATE TABLE audit_log, documents, tenant`` in
-  ``pg_engine`` keeps test isolation honest even though the DB is shared
-  (non-cascading multi-table TRUNCATE is required because of the
-  ``documents.tenant_id REFERENCES tenant(id)`` FK from migration 0003).
+  per-test ``TRUNCATE TABLE audit_log, documents, graph_edge, graph_node,
+  broadcast_override, tenant`` in ``pg_engine`` keeps test isolation
+  honest even though the DB is shared (non-cascading multi-table
+  TRUNCATE is required because every table with a ``REFERENCES
+  tenant(id)`` FK must be listed in the same statement, otherwise PG
+  rejects with ``cannot truncate a table referenced in a foreign key
+  constraint``).
 * ``integration_env`` — autouse fixture that pins every Settings env
   var the chassis needs at construction time, then yields. The
   conftest in ``tests/conftest.py`` already pins ``DATABASE_URL`` to a
@@ -292,20 +295,28 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         # Truncate every chassis table in one statement: PG requires
         # that a TRUNCATE against a table referenced by a FK either
         # use ``CASCADE`` or include every referencing table in the
-        # same statement. Migration ``0003`` (G0.4-T1) added a real
-        # ``documents.tenant_id REFERENCES tenant(id)`` FK; later
-        # migrations added ``broadcast_override`` (0008, G6.3-T1),
-        # ``graph_node`` + ``graph_edge`` (0007, G9.1-T1) -- each
-        # carries its own ``tenant_id REFERENCES tenant(id)``. Listing
-        # every referencing table explicitly keeps the statement
-        # non-cascading while still leaving the table empty.
+        # same statement. The set of real ``REFERENCES tenant(id)`` FKs
+        # has grown across migrations and every one must appear in this
+        # list or PG rejects with ``cannot truncate a table referenced
+        # in a foreign key constraint``:
+        #
+        # * ``documents.tenant_id`` — migration 0003 (G0.4-T1).
+        # * ``graph_node.tenant_id`` — migration 0007 (G7 topology).
+        # * ``graph_edge.tenant_id`` — migration 0007 (G7 topology).
+        # * ``broadcast_override.tenant_id`` — migration 0008 (G6.3
+        #   PII opt-in/opt-out controls).
+        #
         # ``audit_log`` has no FK to ``tenant`` (the soft column shape
-        # from 0002), but bundling it into the same TRUNCATE keeps
-        # the per-test reset atomic.
+        # from 0002) but stays in the list so the per-test reset is
+        # atomic. Tables whose ``tenant_id`` is a soft column with no
+        # FK (``targets``, ``endpoint_descriptor``, ``operation_group``)
+        # don't need to be here. ``graph_edge`` also has a FK to
+        # ``graph_node`` but listing both lets the statement stay
+        # non-cascading regardless of FK order.
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, documents, "
-                "broadcast_override, graph_edge, graph_node, tenant",
+                "TRUNCATE TABLE audit_log, documents, graph_edge, "
+                "graph_node, broadcast_override, tenant",
             ),
         )
         # Re-seed two pinned tenant rows so the integration suite

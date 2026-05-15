@@ -47,6 +47,7 @@ import structlog
 from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
+from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
@@ -57,6 +58,7 @@ from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
+from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -258,6 +260,18 @@ app.include_router(api_v1_retrieve_usage_router)
 # operator-sensitive so the broadcast event ships in aggregate-only
 # mode.
 app.include_router(api_v1_retrieve_eval_router)
+# G4.3-T6 (#445) -- retire-decision checklist verb at
+# `POST /api/v1/retrieve/retire-checklist`. Combines T2 eval results +
+# T5 usage telemetry + a CLI-supplied open-blocker count into the
+# five-criterion per-surface green/yellow/red checklist Goal #215
+# decision #2 locked. Operator role minimum; tenant_admin gates the
+# cross-tenant `tenant_filter` field. Broadcast publishes under the
+# canonical op_id `meho.retrieval.retire_checklist` + aggregate-only
+# `audit_query` class via the same `audit_op_id` / `audit_op_class`
+# contextvar overrides T2 + T5 adopted -- surface filters + blocker
+# counts can leak retire-decision intent so the broadcast event ships
+# in aggregate-only mode.
+app.include_router(api_v1_retrieve_retire_router)
 # G0.3-T3 (#254) — targets CRUD surface. All 5 routes are tenant-scoped
 # via the JWT's tenant_id claim; cross-tenant reads are impossible.
 app.include_router(api_v1_targets_router)
@@ -293,6 +307,14 @@ app.include_router(api_v1_connectors_ingest_router)
 # ``kb.delete`` / ``kb.ingest`` -- bound via the ``audit_op_id`` /
 # ``audit_op_class`` contextvar overrides the chassis publisher honours.
 app.include_router(api_v1_kb_router)
+# G8.1-T2 (#466) -- audit-query REST surface. Four routes (POST /query,
+# GET who-touched / my-recent / show) all dispatching through the T1
+# substrate (`meho_backplane.audit_query.query_audit`). Operator role
+# minimum; tenant-scoped via the JWT's tenant_id claim. Binds the
+# `audit_op_id` / `audit_op_class` contextvar overrides so every audit
+# row this surface writes carries the canonical `meho.audit.query`
+# identity and broadcasts as aggregate-only per decision #3.
+app.include_router(api_v1_audit_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

@@ -97,6 +97,21 @@ jobs:
     # at 49% through unit tests under the old 10-min cap; doubling
     # gives headroom for moderate suite growth.
     timeout-minutes: 20
+    env:
+      # Route testcontainers pulls through the in-cluster Harbor proxy
+      # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
+      # anonymous consumer auth, wired into runner DinD via
+      # meho-internal#75). The test code reads these env vars with a
+      # docker.io short-name default — see backend/tests/test_db_engine.py
+      # `MEHO_TEST_PGVECTOR_IMAGE`, backend/tests/test_broadcast_client.py
+      # `MEHO_TEST_VALKEY_IMAGE`, backend/tests/integration/
+      # test_connectors_vmware_rest_vcsim.py `MEHO_TEST_VCSIM_IMAGE` —
+      # so the env-only swap requires no source-code changes.
+      # `docker/login-action` below stays load-bearing until #78's Half
+      # B sees a green cache-hit week and retires it.
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
     defaults:
       run:
         # backend/ is the only Python project today; pyproject.toml

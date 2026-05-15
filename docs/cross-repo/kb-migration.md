@@ -65,8 +65,8 @@ meho kb show vcenter-9.0-snapshot-revert   # full Markdown body of one entry
 ### 5. Re-ingest after consumer-side updates
 
 ```bash
-git -C claude-rdc-hetzner-dc pull
-meho kb ingest ./claude-rdc-hetzner-dc/kb --json
+git pull
+meho kb ingest ./kb --json
 ```
 
 Idempotent. The body-hash short-circuit from the G0.4 substrate means an unchanged corpus produces `skipped_count == <total>` and zero embedding compute; a single edited entry produces `updated_count == 1, skipped_count == <total - 1>`. Re-run as often as the consumer's `kb/` changes — it is cheap.
@@ -108,9 +108,9 @@ Do not retire on a calendar alone. A GREEN checklist over a sustained window is 
 
 If a retrieval-quality regression surfaces after retiring the in-repo copy:
 
-1. Restore the deleted directory from git history in the consumer repo:
+1. From the consumer repo checkout (the same `claude-rdc-hetzner-dc` working directory established in step 1), restore the deleted directory from git history:
    ```bash
-   git -C claude-rdc-hetzner-dc checkout <pre-retire-sha> -- kb/
+   git checkout <pre-retire-sha> -- kb/
    ```
    (`<pre-retire-sha>` is the commit immediately before the retire PR merged — the parent of the deletion commit.)
 2. Open an issue in the consumer repo labelled `retrieval-migration-blocker` so the next `meho retrieval retire-checklist` run flips the kb surface off GREEN until the regression is resolved.

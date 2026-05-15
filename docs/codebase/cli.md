@@ -21,6 +21,21 @@ ADR 0006 identity-claim format. Server-driven subcommand discovery
 runs at every startup (empty manifest in v0.1; populated by
 post-Goal-2 backplanes without a CLI binary release).
 
+The v0.2 substrate adds three statically-registered subcommand
+trees alongside the discovery surface. All three follow the same
+pattern: a per-package `NewRootCmd()` returns a cobra parent that
+holds per-verb subcommands; the parents register before the dynamic
+discovery hook so backplane manifests cannot shadow built-in verb
+names.
+
+- `meho retrieval ...` (G4.3 #373) — retrieval-quality + migration-
+  decision tooling. v0.2 ships `eval`.
+- `meho operation ...` (G0.6-T13 #481) — dispatcher meta-tools
+  (`groups`, `search`, `call`).
+- `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
+  workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
+  `enable`, `disable`).
+
 ## Module layout
 
 ```text
@@ -58,7 +73,27 @@ cli/
     │   ├── login.go           # `meho login` subcommand + auth-config discovery + config persistence.
     │   ├── login_test.go      # override-resolution + help-flag tests.
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
-    │   └── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
+    │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
+    │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree.
+    │   │   ├── connector.go      # NewRootCmd + shared HTTP/auth helpers.
+    │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest).
+    │   │   ├── list.go           # `meho connector list` (GET  /api/v1/connectors).
+    │   │   ├── review.go         # `meho connector review <id>` (GET  /api/v1/connectors/{id}/review).
+    │   │   ├── edit_group.go     # `meho connector edit-group <id> <key>` (PATCH groups/{key}).
+    │   │   ├── edit_op.go        # `meho connector edit-op <id> <op>` (PATCH operations/{op}).
+    │   │   ├── enable.go         # `meho connector enable <id>`  + shared transition factory + `disable`.
+    │   │   ├── disable.go        # `meho connector disable <id>` (constructor only; logic in enable.go).
+    │   │   └── connector_test.go # pure-function + httptest-mocked HTTP contract tests.
+    │   ├── operation/         # G0.6-T13 #481 — `meho operation …` meta-tool surface.
+    │   │   ├── operation.go      # NewRootCmd + shared HTTP/auth helpers.
+    │   │   ├── groups.go         # `meho operation groups` (GET /api/v1/operations/groups).
+    │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search).
+    │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call).
+    │   │   └── operation_test.go # render + helper + sentinel tests.
+    │   └── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling.
+    │       ├── retrieval.go      # NewRootCmd.
+    │       ├── eval.go           # `meho retrieval eval` (POST /api/v1/retrieve/eval).
+    │       └── eval_test.go      # output-contract + URL-resolution tests.
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.

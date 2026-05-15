@@ -47,12 +47,21 @@ The pipeline is broken into work items per Initiative #389:
   (`IngestionPipelineService`, `list_ingested_connectors`,
   `api_schemas.*` Pydantic models) into the package so the CLI and
   admin MCP tools consume the same Python surface without hitting
-  the network round-trip. T7 (admin MCP tools) wraps the same
-  canonical service layer — no parallel service class, no parallel
-  Pydantic models. The agent's daily tool list stays unchanged; the
-  seven admin tools live under the `meho.connector.*` namespace and
-  only `tenant_admin` operators (plus the two read tools at
-  `operator` role) see them in `tools/list`.
+  the network round-trip.
+  * **T5 (#405)** — `meho connector ingest/list/review/edit-group/
+    edit-op/enable/disable` cobra verb tree at
+    `cli/internal/cmd/connector/`. Thin client over T6's REST routes;
+    no service-layer access. Operator-facing role: tenant_admin for
+    write verbs, operator for `list` / `review`. Enable/disable
+    routes return HTTP 204 No Content — the CLI skips JSON decode
+    on 204 and prints a success line.
+  * **T7 (#407)** — admin MCP tools (`meho.connector.*`) that wrap
+    the same canonical service layer — no parallel service class, no
+    parallel Pydantic models. The agent's daily tool list stays
+    unchanged; the seven admin tools live under the
+    `meho.connector.*` namespace and only `tenant_admin` operators
+    (plus the two read tools at `operator` role) see them in
+    `tools/list`.
 * **T8 — vSphere canary** — ingest both vCenter specs end-to-end.
 * **T9 — Docs.**
 
@@ -102,8 +111,11 @@ Idempotency:
 The LLM client is injected as a `LlmClient` `Protocol` (one async
 method, `generate_json`). Tests pass a deterministic stub from
 `tests/fixtures/llm_groups/{small,medium}_corpus.py`. The chassis
-adapter (Anthropic Messages API) lands with T5 (#405) which will
-also surface the model id + retry policy as `Settings` knobs.
+adapter (Anthropic Messages API) ships with T3 itself (#404, commit
+864ef68f); the model id + retry policy live in `Settings`. T5
+(#405) is purely the operator-facing CLI verb tree
+(`cli/internal/cmd/connector/`) that drives the ingest → review →
+enable workflow over the T6 REST routes.
 
 ### T7 (admin MCP tools) at a glance
 

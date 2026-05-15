@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/discovery"
@@ -89,6 +90,14 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in verb names.
 	root.AddCommand(operation.NewRootCmd())
+
+	// G0.7-T5 (#405) -- spec-ingestion + review workflow surface for
+	// the G0.7 pipeline (Initiative #389). `meho connector
+	// ingest/list/review/edit-group/edit-op/enable/disable` wrap the
+	// seven /api/v1/connectors* routes shipped by G0.7-T6 (#406).
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in verb names.
+	root.AddCommand(connector.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

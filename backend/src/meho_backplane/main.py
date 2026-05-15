@@ -47,6 +47,7 @@ import structlog
 from fastapi import FastAPI, Response
 
 from meho_backplane import __version__
+from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
@@ -294,6 +295,14 @@ app.include_router(api_v1_operations_router)
 # operator-gated. The same service layer (IngestionPipelineService +
 # ReviewService) backs T5 (CLI verbs) and T7 (admin MCP tools).
 app.include_router(api_v1_connectors_ingest_router)
+# G8.1-T2 (#466) -- audit-query REST surface. Four routes (POST /query,
+# GET who-touched / my-recent / show) all dispatching through the T1
+# substrate (`meho_backplane.audit_query.query_audit`). Operator role
+# minimum; tenant-scoped via the JWT's tenant_id claim. Binds the
+# `audit_op_id` / `audit_op_class` contextvar overrides so every audit
+# row this surface writes carries the canonical `meho.audit.query`
+# identity and broadcasts as aggregate-only per decision #3.
+app.include_router(api_v1_audit_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

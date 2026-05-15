@@ -34,17 +34,6 @@ type EditOpBody struct {
 	IsEnabled         *bool   `json:"is_enabled,omitempty"`
 }
 
-// EditOpResponse mirrors the backend response — the updated op row
-// echoed back so the CLI can confirm without re-running review.
-type EditOpResponse struct {
-	ConnectorID       string  `json:"connector_id"`
-	OpID              string  `json:"op_id"`
-	CustomDescription *string `json:"custom_description"`
-	SafetyLevel       string  `json:"safety_level"`
-	RequiresApproval  bool    `json:"requires_approval"`
-	IsEnabled         bool    `json:"is_enabled"`
-}
-
 // newEditOpCmd returns the `meho connector edit-op` command.
 //
 // CLI shape:
@@ -194,14 +183,20 @@ func runEditOp(cmd *cobra.Command, opts editOpOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	result, err := patchOp(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, body)
-	if err != nil {
+	if err := patchOp(cmd.Context(), backplaneURL, opts.ConnectorID, opts.OpID, body); err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), result)
+		// Echo the operator's PATCH body — the route returns 204
+		// No Content, so the only structured artifact is the
+		// payload itself. Same shape as edit-group's --json output.
+		return output.PrintJSON(cmd.OutOrStdout(), editOpResult{
+			ConnectorID: opts.ConnectorID,
+			OpID:        opts.OpID,
+			Patched:     body,
+		})
 	}
-	printEditOpResult(cmd.OutOrStdout(), result)
+	printEditOpResult(cmd.OutOrStdout(), opts.ConnectorID, opts.OpID, body)
 	return nil
 }
 
@@ -216,35 +211,49 @@ func isEmptyEditOpBody(b EditOpBody) bool {
 		b.IsEnabled == nil
 }
 
+// patchOp issues the PATCH against T6's per-op route. The route
+// returns HTTP 204 No Content — no JSON body, so we deliberately
+// don't decode anything. A non-2xx surfaces as *httpError via
+// doAuthedRequest's status check.
 func patchOp(
 	ctx context.Context,
 	backplaneURL, connectorID, opID string,
 	body EditOpBody,
-) (*EditOpResponse, error) {
+) error {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("marshal edit-op request: %w", err)
+		return fmt.Errorf("marshal edit-op request: %w", err)
 	}
 	path := fmt.Sprintf("/api/v1/connectors/%s/operations/%s",
 		pathEscapeOpID(connectorID), pathEscapeOpID(opID),
 	)
-	respBody, err := doAuthedRequest(ctx, backplaneURL, "PATCH", path, raw)
-	if err != nil {
-		return nil, err
+	if _, err := doAuthedRequest(ctx, backplaneURL, "PATCH", path, raw); err != nil {
+		return err
 	}
-	var out EditOpResponse
-	if err := decodeJSON(respBody, "edit-op", &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return nil
 }
 
-func printEditOpResult(w io.Writer, r *EditOpResponse) {
-	fmt.Fprintf(w, "%s/%s — updated\n", r.ConnectorID, r.OpID)
-	fmt.Fprintf(w, "  safety: %s\n", r.SafetyLevel)
-	fmt.Fprintf(w, "  requires_approval: %t\n", r.RequiresApproval)
-	fmt.Fprintf(w, "  is_enabled: %t\n", r.IsEnabled)
-	if r.CustomDescription != nil && *r.CustomDescription != "" {
-		fmt.Fprintf(w, "  custom_description: %s\n", *r.CustomDescription)
+// editOpResult is the synthetic envelope rendered to JSON for --json
+// operators. The PATCH route returns 204 No Content; the only
+// structured record of the operator's edit is the body they sent.
+type editOpResult struct {
+	ConnectorID string     `json:"connector_id"`
+	OpID        string     `json:"op_id"`
+	Patched     EditOpBody `json:"patched"`
+}
+
+func printEditOpResult(w io.Writer, connectorID, opID string, body EditOpBody) {
+	fmt.Fprintf(w, "%s/%s — updated (204 No Content)\n", connectorID, opID)
+	if body.SafetyLevel != nil {
+		fmt.Fprintf(w, "  safety: %s\n", *body.SafetyLevel)
+	}
+	if body.RequiresApproval != nil {
+		fmt.Fprintf(w, "  requires_approval: %t\n", *body.RequiresApproval)
+	}
+	if body.IsEnabled != nil {
+		fmt.Fprintf(w, "  is_enabled: %t\n", *body.IsEnabled)
+	}
+	if body.CustomDescription != nil && *body.CustomDescription != "" {
+		fmt.Fprintf(w, "  custom_description: %s\n", *body.CustomDescription)
 	}
 }

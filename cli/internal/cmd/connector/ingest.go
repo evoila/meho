@@ -40,30 +40,49 @@ type IngestRequest struct {
 	DryRun  bool         `json:"dry_run"`
 }
 
-// IngestionResult mirrors the backend IngestionResult Pydantic
-// model (G0.7-T2 #403 register_ingested_operations() result shape).
-// Counts cover the bulk-upsert outcome per spec; ConnectorID is the
-// derived identifier the dispatcher uses for subsequent calls
-// (`<product>-<impl>-<version>`, e.g. `vmware-rest-9.0`).
+// IngestionResult mirrors the canonical backend IngestionResultModel
+// Pydantic model (operations/ingest/api_schemas.py) that lands with T6
+// (#488). Counts cover the bulk-upsert outcome aggregated across every
+// spec in the request; ConnectorID is the derived identifier the
+// dispatcher uses for subsequent calls (`<impl_id>-<version>`, e.g.
+// `vmware-rest-9.0`).
+//
+// connector_registered flips to true when this ingest call was the
+// first to land the (product, version, impl_id) triple — the T2
+// auto-registration of the GenericRestConnector shim ran. Subsequent
+// ingests against the same triple return connector_registered=false.
+//
+// operations_grouped flips to true when the T3 LLM-grouping pass
+// actually ran (every newly-ingested op got assigned to an
+// OperationGroup row). False on the dry-run path and on the
+// already-grouped-no-op path. The CLI renders it so the operator
+// knows whether `meho connector review <id>` will have any groups
+// to show.
 type IngestionResult struct {
-	ConnectorID        string         `json:"connector_id"`
-	Inserted           int            `json:"inserted"`
-	Updated            int            `json:"updated"`
-	Skipped            int            `json:"skipped"`
-	TotalOperations    int            `json:"total_operations"`
-	PerSpecCounts      map[string]int `json:"per_spec_counts,omitempty"`
-	EmbeddingsComputed int            `json:"embeddings_computed,omitempty"`
-	EmbeddingsSkipped  int            `json:"embeddings_skipped,omitempty"`
+	ConnectorID         string `json:"connector_id"`
+	InsertedCount       int    `json:"inserted_count"`
+	UpdatedCount        int    `json:"updated_count"`
+	SkippedCount        int    `json:"skipped_count"`
+	ConnectorRegistered bool   `json:"connector_registered"`
+	OperationsGrouped   bool   `json:"operations_grouped"`
 }
 
-// GroupingResult mirrors the backend GroupingResult Pydantic model
-// (G0.7-T3 #404). Counts cover the LLM-summarised grouping pass.
-// Null on dry-run (no LLM call).
+// GroupingResult mirrors the canonical backend GroupingResultModel
+// Pydantic model (operations/ingest/api_schemas.py). Counts cover the
+// LLM-summarised grouping pass; the field is null on dry_run=true
+// (no LLM call) and on the no-op re-run path (every op already
+// grouped from a prior pass).
+//
+// LlmDurationMs is float (the Python field uses float seconds*1000)
+// so the Go side mirrors it as float64 — an int truncation would
+// silently drop sub-millisecond timings on fast LLM stub paths.
 type GroupingResult struct {
-	GroupsProposed     int    `json:"groups_proposed"`
-	OperationsAssigned int    `json:"operations_assigned"`
-	OperationsOrphan   int    `json:"operations_orphan"`
-	Model              string `json:"model,omitempty"`
+	ConnectorID          string  `json:"connector_id"`
+	GroupsCreated        int     `json:"groups_created"`
+	OperationsAssigned   int     `json:"operations_assigned"`
+	OperationsUnassigned int     `json:"operations_unassigned"`
+	LLMCallCount         int     `json:"llm_call_count"`
+	LLMDurationMs        float64 `json:"llm_duration_ms"`
 }
 
 // IngestResponse mirrors T6's IngestResponse Pydantic model. The
@@ -226,7 +245,15 @@ func postIngest(ctx context.Context, backplaneURL string, body IngestRequest) (*
 // copy it into the subsequent `review` / `enable` commands), then
 // the bulk-upsert counts, then the LLM grouping outcome (or "dry
 // run — skipped" on dry-run).
+//
+// The canonical IngestionResultModel ships only the aggregate
+// inserted/updated/skipped counts plus the two boolean flags
+// (connector_registered, operations_grouped). The per-spec
+// breakdown and the embeddings split that the original PR-body
+// contract carried are not in the wire shape — operators see the
+// aggregate via this rollup and the per-spec story via the audit log.
 func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
+	totalOps := r.Ingestion.InsertedCount + r.Ingestion.UpdatedCount + r.Ingestion.SkippedCount
 	if opts.DryRun {
 		fmt.Fprintf(w, "ingest %s/%s/%s — DRY RUN (no DB writes)\n",
 			opts.Product, opts.Version, opts.ImplID,
@@ -237,31 +264,27 @@ func printIngestSummary(w io.Writer, opts ingestOptions, r *IngestResponse) {
 		)
 	}
 	fmt.Fprintf(w, "  operations: %d total (%d inserted / %d updated / %d skipped)\n",
-		r.Ingestion.TotalOperations,
-		r.Ingestion.Inserted,
-		r.Ingestion.Updated,
-		r.Ingestion.Skipped,
+		totalOps,
+		r.Ingestion.InsertedCount,
+		r.Ingestion.UpdatedCount,
+		r.Ingestion.SkippedCount,
 	)
-	if r.Ingestion.EmbeddingsComputed > 0 || r.Ingestion.EmbeddingsSkipped > 0 {
-		fmt.Fprintf(w, "  embeddings: %d computed / %d skipped\n",
-			r.Ingestion.EmbeddingsComputed,
-			r.Ingestion.EmbeddingsSkipped,
+	if !opts.DryRun {
+		fmt.Fprintf(w, "  connector_registered: %t (first ingest of this triple flips it to true)\n",
+			r.Ingestion.ConnectorRegistered,
 		)
-	}
-	if len(r.Ingestion.PerSpecCounts) > 0 {
-		fmt.Fprintln(w, "  per-spec breakdown:")
-		for spec, n := range r.Ingestion.PerSpecCounts {
-			fmt.Fprintf(w, "    %s: %d ops\n", spec, n)
-		}
+		fmt.Fprintf(w, "  operations_grouped: %t\n", r.Ingestion.OperationsGrouped)
 	}
 	if r.Grouping != nil {
-		fmt.Fprintf(w, "  grouping: %d groups, %d ops assigned, %d orphan",
-			r.Grouping.GroupsProposed,
+		fmt.Fprintf(w, "  grouping: %d groups, %d ops assigned, %d unassigned",
+			r.Grouping.GroupsCreated,
 			r.Grouping.OperationsAssigned,
-			r.Grouping.OperationsOrphan,
+			r.Grouping.OperationsUnassigned,
 		)
-		if r.Grouping.Model != "" {
-			fmt.Fprintf(w, " (model=%s)", r.Grouping.Model)
+		if r.Grouping.LLMCallCount > 0 {
+			fmt.Fprintf(w, " (%d LLM call(s), %.0fms)",
+				r.Grouping.LLMCallCount, r.Grouping.LLMDurationMs,
+			)
 		}
 		fmt.Fprintln(w)
 	} else if !opts.DryRun {

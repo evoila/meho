@@ -25,16 +25,6 @@ type EditGroupBody struct {
 	Name      *string `json:"name,omitempty"`
 }
 
-// EditGroupResponse mirrors the backend response — the updated
-// group payload echoed back so the CLI can confirm the change
-// landed without a second GET.
-type EditGroupResponse struct {
-	ConnectorID string `json:"connector_id"`
-	GroupKey    string `json:"group_key"`
-	Name        string `json:"name"`
-	WhenToUse   string `json:"when_to_use"`
-}
-
 // newEditGroupCmd returns the `meho connector edit-group` command.
 //
 // CLI shape:
@@ -128,44 +118,64 @@ func runEditGroup(cmd *cobra.Command, opts editGroupOptions) error {
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
-	result, err := patchGroup(cmd.Context(), backplaneURL, opts.ConnectorID, opts.GroupKey, body)
-	if err != nil {
+	if err := patchGroup(cmd.Context(), backplaneURL, opts.ConnectorID, opts.GroupKey, body); err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
 	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), result)
+		// Echo the body the operator sent — the route returns 204
+		// No Content, so the only authoritative record of what
+		// changed is the PATCH payload itself. Operators piping
+		// to jq get a structured artifact rather than a synthetic
+		// "ok: true" envelope.
+		return output.PrintJSON(cmd.OutOrStdout(), editGroupResult{
+			ConnectorID: opts.ConnectorID,
+			GroupKey:    opts.GroupKey,
+			Patched:     body,
+		})
 	}
-	printEditGroupResult(cmd.OutOrStdout(), result)
+	printEditGroupResult(cmd.OutOrStdout(), opts.ConnectorID, opts.GroupKey, body)
 	return nil
 }
 
+// patchGroup issues the PATCH against T6's route. The route returns
+// HTTP 204 No Content — no JSON body, so we deliberately don't
+// decode anything. A non-2xx surfaces as *httpError via
+// doAuthedRequest's status check.
 func patchGroup(
 	ctx context.Context,
 	backplaneURL, connectorID, groupKey string,
 	body EditGroupBody,
-) (*EditGroupResponse, error) {
+) error {
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("marshal edit-group request: %w", err)
+		return fmt.Errorf("marshal edit-group request: %w", err)
 	}
 	path := fmt.Sprintf("/api/v1/connectors/%s/groups/%s",
 		pathEscapeOpID(connectorID), pathEscapeOpID(groupKey),
 	)
-	respBody, err := doAuthedRequest(ctx, backplaneURL, "PATCH", path, raw)
-	if err != nil {
-		return nil, err
+	if _, err := doAuthedRequest(ctx, backplaneURL, "PATCH", path, raw); err != nil {
+		return err
 	}
-	var out EditGroupResponse
-	if err := decodeJSON(respBody, "edit-group", &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return nil
 }
 
-func printEditGroupResult(w io.Writer, r *EditGroupResponse) {
-	fmt.Fprintf(w, "%s/%s — updated\n", r.ConnectorID, r.GroupKey)
-	fmt.Fprintf(w, "  name: %s\n", r.Name)
-	if r.WhenToUse != "" {
-		fmt.Fprintf(w, "  when_to_use: %s\n", r.WhenToUse)
+// editGroupResult is the synthetic envelope rendered to JSON for
+// --json operators. The PATCH route returns 204 No Content; the only
+// structured record of the operator's edit is the body they sent,
+// which this envelope echoes back together with the path coordinates
+// for downstream tooling.
+type editGroupResult struct {
+	ConnectorID string        `json:"connector_id"`
+	GroupKey    string        `json:"group_key"`
+	Patched     EditGroupBody `json:"patched"`
+}
+
+func printEditGroupResult(w io.Writer, connectorID, groupKey string, body EditGroupBody) {
+	fmt.Fprintf(w, "%s/%s — updated (204 No Content)\n", connectorID, groupKey)
+	if body.Name != nil {
+		fmt.Fprintf(w, "  name: %s\n", *body.Name)
+	}
+	if body.WhenToUse != nil {
+		fmt.Fprintf(w, "  when_to_use: %s\n", *body.WhenToUse)
 	}
 }

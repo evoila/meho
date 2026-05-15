@@ -347,21 +347,22 @@ func TestLoadTextFlagPresentEmpty(t *testing.T) {
 
 // TestPrintIngestSummaryDryRun — dry-run header + counts; no
 // "Connector is in review_status=staged" trailer because that
-// only applies after a real ingest.
+// only applies after a real ingest. The canonical
+// IngestionResultModel ships only the aggregate inserted/updated/
+// skipped counts plus the two boolean flags — no per-spec
+// breakdown, no embeddings split. Total is derived client-side.
 func TestPrintIngestSummaryDryRun(t *testing.T) {
 	r := &IngestResponse{
 		Ingestion: IngestionResult{
-			ConnectorID:     "vmware-rest-9.0",
-			TotalOperations: 12,
-			Inserted:        12,
-			PerSpecCounts:   map[string]int{"vcenter.yaml": 9, "vi-json.yaml": 3},
+			ConnectorID:   "vmware-rest-9.0",
+			InsertedCount: 12,
 		},
 	}
 	opts := ingestOptions{Product: "vmware", Version: "9.0", ImplID: "vmware-rest", DryRun: true}
 	var buf bytes.Buffer
 	printIngestSummary(&buf, opts, r)
 	out := buf.String()
-	for _, want := range []string{"DRY RUN", "12 total", "vcenter.yaml: 9 ops", "vi-json.yaml: 3 ops"} {
+	for _, want := range []string{"DRY RUN", "12 total"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run render missing %q in:\n%s", want, out)
 		}
@@ -369,32 +370,137 @@ func TestPrintIngestSummaryDryRun(t *testing.T) {
 	if strings.Contains(out, "review_status=staged") {
 		t.Errorf("dry-run render should not announce review_status=staged; got:\n%s", out)
 	}
+	// The dry-run path deliberately omits connector_registered /
+	// operations_grouped because the route returns False for both
+	// when dry_run=True, which is uninteresting noise.
+	if strings.Contains(out, "connector_registered") {
+		t.Errorf("dry-run should not print connector_registered; got:\n%s", out)
+	}
 }
 
 // TestPrintIngestSummaryNonDryRun — happy-path render includes
-// connector_id + next-steps hint.
+// connector_id + next-steps hint + canonical IngestionResult fields
+// (connector_registered, operations_grouped) and the canonical
+// GroupingResult fields (groups_created, llm_call_count).
 func TestPrintIngestSummaryNonDryRun(t *testing.T) {
 	r := &IngestResponse{
 		Ingestion: IngestionResult{
-			ConnectorID:        "vmware-rest-9.0",
-			TotalOperations:    961,
-			Inserted:           961,
-			EmbeddingsComputed: 961,
+			ConnectorID:         "vmware-rest-9.0",
+			InsertedCount:       961,
+			ConnectorRegistered: true,
+			OperationsGrouped:   true,
 		},
 		Grouping: &GroupingResult{
-			GroupsProposed:     9,
+			ConnectorID:        "vmware-rest-9.0",
+			GroupsCreated:      9,
 			OperationsAssigned: 961,
-			Model:              "claude-3-5-sonnet-20241022",
+			LLMCallCount:       20,
+			LLMDurationMs:      4321,
 		},
 	}
 	opts := ingestOptions{Product: "vmware", Version: "9.0", ImplID: "vmware-rest", DryRun: false}
 	var buf bytes.Buffer
 	printIngestSummary(&buf, opts, r)
 	out := buf.String()
-	for _, want := range []string{"connector_id=vmware-rest-9.0", "961 total", "embeddings: 961 computed", "9 groups", "claude-3-5-sonnet", "review_status=staged", "meho connector review vmware-rest-9.0", "meho connector enable vmware-rest-9.0"} {
+	for _, want := range []string{
+		"connector_id=vmware-rest-9.0",
+		"961 total",
+		"connector_registered: true",
+		"operations_grouped: true",
+		"9 groups",
+		"961 ops assigned",
+		"20 LLM call(s)",
+		"4321ms",
+		"review_status=staged",
+		"meho connector review vmware-rest-9.0",
+		"meho connector enable vmware-rest-9.0",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("non-dry-run render missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+// TestIngestResponseDecodesCanonical pins the wire shape: the
+// canonical IngestionResultModel + GroupingResultModel (PR #488
+// api_schemas.py) ship snake_case field names that mirror the
+// Pydantic projections verbatim. Decoding drift here surfaces as
+// a Blocker-class wire-contract failure on the next `meho
+// connector ingest` round-trip.
+func TestIngestResponseDecodesCanonical(t *testing.T) {
+	raw := []byte(`{
+		"ingestion": {
+			"connector_id": "vmware-rest-9.0",
+			"inserted_count": 961,
+			"updated_count": 0,
+			"skipped_count": 0,
+			"connector_registered": true,
+			"operations_grouped": true
+		},
+		"grouping": {
+			"connector_id": "vmware-rest-9.0",
+			"groups_created": 9,
+			"operations_assigned": 961,
+			"operations_unassigned": 0,
+			"llm_call_count": 20,
+			"llm_duration_ms": 4321.5
+		}
+	}`)
+	var got IngestResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode IngestResponse: %v", err)
+	}
+	if got.Ingestion.ConnectorID != "vmware-rest-9.0" {
+		t.Errorf("ingestion.connector_id: got %q", got.Ingestion.ConnectorID)
+	}
+	if got.Ingestion.InsertedCount != 961 ||
+		got.Ingestion.UpdatedCount != 0 ||
+		got.Ingestion.SkippedCount != 0 {
+		t.Errorf("ingestion counts: got %+v", got.Ingestion)
+	}
+	if !got.Ingestion.ConnectorRegistered || !got.Ingestion.OperationsGrouped {
+		t.Errorf("ingestion flags: got %+v", got.Ingestion)
+	}
+	if got.Grouping == nil {
+		t.Fatalf("grouping should not be nil")
+	}
+	if got.Grouping.GroupsCreated != 9 || got.Grouping.OperationsAssigned != 961 {
+		t.Errorf("grouping counts: got %+v", got.Grouping)
+	}
+	if got.Grouping.LLMCallCount != 20 {
+		t.Errorf("llm_call_count: got %d, want 20", got.Grouping.LLMCallCount)
+	}
+	// Float decode preserves sub-ms timing — int would truncate.
+	if got.Grouping.LLMDurationMs != 4321.5 {
+		t.Errorf("llm_duration_ms: got %v, want 4321.5", got.Grouping.LLMDurationMs)
+	}
+}
+
+// TestIngestResponseDecodesDryRun pins the canonical dry-run shape:
+// the route returns IngestionResult with all-zero counts and
+// grouping=null when dry_run=true. The Go decoder must accept
+// JSON `null` for the nullable grouping field.
+func TestIngestResponseDecodesDryRun(t *testing.T) {
+	raw := []byte(`{
+		"ingestion": {
+			"connector_id": "vmware-rest-9.0",
+			"inserted_count": 0,
+			"updated_count": 0,
+			"skipped_count": 0,
+			"connector_registered": false,
+			"operations_grouped": false
+		},
+		"grouping": null
+	}`)
+	var got IngestResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode dry-run IngestResponse: %v", err)
+	}
+	if got.Grouping != nil {
+		t.Errorf("grouping should decode to nil for dry-run; got %+v", got.Grouping)
+	}
+	if got.Ingestion.ConnectorRegistered || got.Ingestion.OperationsGrouped {
+		t.Errorf("dry-run flags should both be false; got %+v", got.Ingestion)
 	}
 }
 
@@ -702,18 +808,19 @@ func TestConfirmEOF(t *testing.T) {
 	}
 }
 
-// TestPrintTransitionResult — happy-path render.
+// TestPrintTransitionResult — happy-path render. T6's enable /
+// disable routes return HTTP 204 No Content, so the renderer's
+// only input is the synthetic transitionResult envelope the verb
+// constructs locally (connector_id + action).
 func TestPrintTransitionResult(t *testing.T) {
-	r := &TransitionResponse{
-		ConnectorID:       "vmware-rest-9.0",
-		ReviewStatus:      "enabled",
-		GroupsUpdated:     9,
-		OperationsUpdated: 961,
+	r := transitionResult{
+		ConnectorID: "vmware-rest-9.0",
+		Action:      "enabled",
 	}
 	var buf bytes.Buffer
 	printTransitionResult(&buf, "enable", r)
 	out := buf.String()
-	for _, want := range []string{"enable vmware-rest-9.0", "review_status=enabled", "9 groups", "961 ops"} {
+	for _, want := range []string{"enable vmware-rest-9.0", "enabled", "204 No Content"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("transition render missing %q in:\n%s", want, out)
 		}
@@ -734,11 +841,12 @@ func TestHTTPErrorString(t *testing.T) {
 // ---------- HTTP wire shape (mocked) ----------
 
 // TestPostIngestRoundTripWithMockServer — pins the wire contract
-// between T5 and T6 (#406). The CLI POSTs the IngestRequest, the
+// between T5 and T6 (#488). The CLI POSTs the IngestRequest, the
 // (mocked) T6 endpoint validates the shape and returns an
-// IngestResponse; the CLI decodes it back. Used for the JSON
-// contract sanity check that doesn't require a live backplane —
-// true end-to-end coverage lives in the T8 canary (#408).
+// IngestResponse with canonical IngestionResultModel /
+// GroupingResultModel fields (inserted_count / groups_created etc).
+// Used for the JSON contract sanity check that doesn't require a
+// live backplane — true end-to-end coverage lives in the T8 canary.
 func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/connectors/ingest": func(w http.ResponseWriter, r *http.Request) {
@@ -757,11 +865,16 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 			}
 			resp := IngestResponse{
 				Ingestion: IngestionResult{
-					ConnectorID:     "vmware-rest-9.0",
-					Inserted:        961,
-					TotalOperations: 961,
+					ConnectorID:         "vmware-rest-9.0",
+					InsertedCount:       961,
+					ConnectorRegistered: true,
+					OperationsGrouped:   true,
 				},
-				Grouping: &GroupingResult{GroupsProposed: 9, OperationsAssigned: 961},
+				Grouping: &GroupingResult{
+					ConnectorID:        "vmware-rest-9.0",
+					GroupsCreated:      9,
+					OperationsAssigned: 961,
+				},
 			}
 			writeJSON(t, w, 200, resp)
 		},
@@ -776,10 +889,10 @@ func TestPostIngestRoundTripWithMockServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("postIngest: %v", err)
 	}
-	if got.Ingestion.ConnectorID != "vmware-rest-9.0" || got.Ingestion.TotalOperations != 961 {
+	if got.Ingestion.ConnectorID != "vmware-rest-9.0" || got.Ingestion.InsertedCount != 961 {
 		t.Fatalf("unexpected ingest result: %+v", got)
 	}
-	if got.Grouping == nil || got.Grouping.GroupsProposed != 9 {
+	if got.Grouping == nil || got.Grouping.GroupsCreated != 9 {
 		t.Fatalf("unexpected grouping: %+v", got.Grouping)
 	}
 }
@@ -836,6 +949,9 @@ func TestGetListAllOmitsStatusQueryParam(t *testing.T) {
 }
 
 // TestPatchGroupSendsBody — confirms the wire shape for edit-group.
+// T6's PATCH route returns HTTP 204 No Content; the test asserts the
+// PATCH body shape and that the 204 path returns no error (no decode
+// of a non-existent JSON body).
 func TestPatchGroupSendsBody(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"PATCH /api/v1/connectors/vmware-rest-9.0/groups/cluster": func(w http.ResponseWriter, r *http.Request) {
@@ -852,27 +968,46 @@ func TestPatchGroupSendsBody(t *testing.T) {
 			if got.Name != nil {
 				t.Errorf("Name should be unset; got %+v", got.Name)
 			}
-			writeJSON(t, w, 200, EditGroupResponse{
-				ConnectorID: "vmware-rest-9.0", GroupKey: "cluster",
-				Name: "Cluster", WhenToUse: "use for cluster ops",
-			})
+			// Canonical T6 response: 204 No Content with no body.
+			w.WriteHeader(http.StatusNoContent)
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
 	whenToUse := "use for cluster ops"
-	got, err := patchGroup(context.Background(), srv.URL, "vmware-rest-9.0", "cluster", EditGroupBody{WhenToUse: &whenToUse})
-	if err != nil {
+	if err := patchGroup(context.Background(), srv.URL, "vmware-rest-9.0", "cluster", EditGroupBody{WhenToUse: &whenToUse}); err != nil {
 		t.Fatalf("patchGroup: %v", err)
 	}
-	if got.WhenToUse != "use for cluster ops" {
-		t.Fatalf("unexpected response: %+v", got)
+}
+
+// TestPrintEditGroupResultRendersBody — the renderer outputs the
+// connector_id/group_key coordinates + the operator's PATCH body
+// fields (the 204 No Content response carries no body to mirror).
+func TestPrintEditGroupResultRendersBody(t *testing.T) {
+	whenToUse := "use for cluster lifecycle ops"
+	name := "Cluster"
+	var buf bytes.Buffer
+	printEditGroupResult(&buf, "vmware-rest-9.0", "cluster", EditGroupBody{
+		WhenToUse: &whenToUse,
+		Name:      &name,
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"vmware-rest-9.0/cluster",
+		"204 No Content",
+		"name: Cluster",
+		"when_to_use: use for cluster lifecycle ops",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("edit-group render missing %q in:\n%s", want, out)
+		}
 	}
 }
 
 // TestPatchOpEscapesOpID — colons and slashes in op_id must
-// survive the URL path. The mock asserts the decoded segment.
+// survive the URL path. The mock asserts the decoded segment and
+// returns the canonical T6 204 No Content response.
 func TestPatchOpEscapesOpID(t *testing.T) {
 	called := false
 	srv := mockBackplane(t, map[string]mockHandler{
@@ -903,49 +1038,63 @@ func TestPatchOpEscapesOpID(t *testing.T) {
 			if decodedOp != "GET:/api/vcenter/cluster" {
 				t.Errorf("op_id round-trip: got %q (raw path %q)", decodedOp, raw)
 			}
-			writeJSON(t, w, 200, EditOpResponse{
-				ConnectorID: "vmware-rest-9.0",
-				OpID:        "GET:/api/vcenter/cluster",
-				SafetyLevel: "dangerous",
-				IsEnabled:   true,
-			})
+			// Canonical T6 response: 204 No Content with no body.
+			w.WriteHeader(http.StatusNoContent)
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
 	safety := "dangerous"
-	got, err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", EditOpBody{SafetyLevel: &safety})
-	if err != nil {
+	if err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", EditOpBody{SafetyLevel: &safety}); err != nil {
 		t.Fatalf("patchOp: %v", err)
 	}
 	if !called {
 		t.Fatalf("mock handler not invoked")
 	}
-	if got.SafetyLevel != "dangerous" {
-		t.Fatalf("unexpected op response: %+v", got)
-	}
 }
 
-// TestPostTransitionEnable — pins the enable/disable wire shape.
-func TestPostTransitionEnable(t *testing.T) {
+// TestPostTransitionEnable204 — pins the canonical enable / disable
+// wire shape. T6 returns HTTP 204 No Content with no body; the CLI
+// must accept the 204 as success without trying to decode a JSON
+// envelope. A regression to the old 200+JSON contract would either
+// fail decode (empty body) or 500-classify (200 with malformed body).
+func TestPostTransitionEnable204(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/connectors/vmware-rest-9.0/enable": func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(t, w, 200, TransitionResponse{
-				ConnectorID: "vmware-rest-9.0", ReviewStatus: "enabled",
-				GroupsUpdated: 9, OperationsUpdated: 961,
-			})
+			// Canonical T6 response: 204 No Content with no body.
+			w.WriteHeader(http.StatusNoContent)
 		},
 	})
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	got, err := postTransition(context.Background(), srv.URL, "/api/v1/connectors/vmware-rest-9.0/enable")
-	if err != nil {
+	if err := postTransition(context.Background(), srv.URL, "/api/v1/connectors/vmware-rest-9.0/enable"); err != nil {
 		t.Fatalf("postTransition: %v", err)
 	}
-	if got.ReviewStatus != "enabled" {
-		t.Fatalf("unexpected transition: %+v", got)
+}
+
+// TestDoAuthedRequest204AcceptsEmptyBody — pins the load-bearing
+// behaviour of the shared HTTP helper: a 204 No Content response
+// must surface as a nil error with an empty byte slice, NOT as an
+// *httpError. Three of the seven T6 routes return 204 (enable,
+// disable, PATCH edit-group, PATCH edit-op), so this property gates
+// the entire mutating-verb surface.
+func TestDoAuthedRequest204AcceptsEmptyBody(t *testing.T) {
+	srv := mockBackplane(t, map[string]mockHandler{
+		"POST /api/v1/test": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		},
+	})
+	defer srv.Close()
+	primeToken(t, srv.URL)
+
+	body, err := doAuthedRequest(context.Background(), srv.URL, "POST", "/api/v1/test", []byte("{}"))
+	if err != nil {
+		t.Fatalf("204 should be a success; got err %v", err)
+	}
+	if len(body) != 0 {
+		t.Fatalf("204 should yield empty body; got %q", body)
 	}
 }
 

@@ -275,7 +275,14 @@ func doAuthedRequest(
 	if readErr != nil {
 		return nil, fmt.Errorf("read response: %w", readErr)
 	}
-	if resp.StatusCode != http.StatusOK {
+	// Accept any 2xx as success. T6 routes return 200 OK for read /
+	// ingest endpoints that ship a JSON body, and 204 No Content for
+	// the four state-mutating routes (PATCH edit-group / edit-op,
+	// POST enable / disable). Callers expecting a JSON body must
+	// inspect the returned slice length before decoding; callers
+	// that expect 204 should pass through the empty slice as a
+	// success signal.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
 	}
 	return raw, nil

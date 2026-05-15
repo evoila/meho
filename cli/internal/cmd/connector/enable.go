@@ -13,15 +13,16 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// TransitionResponse mirrors the backend response from POST
-// /api/v1/connectors/{id}/{enable,disable}. The route is idempotent
-// — calling enable on an already-enabled connector returns
-// review_status=enabled + 0/0 counts.
-type TransitionResponse struct {
-	ConnectorID       string `json:"connector_id"`
-	ReviewStatus      string `json:"review_status"`
-	GroupsUpdated     int    `json:"groups_updated"`
-	OperationsUpdated int    `json:"operations_updated"`
+// transitionResult is the synthetic --json envelope the enable /
+// disable verbs render to operators. The underlying T6 route
+// returns HTTP 204 No Content (see api/v1/connectors_ingest.py), so
+// there is no canonical wire response to mirror. The envelope
+// captures the connector_id the operator targeted plus the verb's
+// post-condition (action="enabled"|"disabled") so downstream tooling
+// piping to jq sees a structured artifact.
+type transitionResult struct {
+	ConnectorID string `json:"connector_id"`
+	Action      string `json:"action"`
 }
 
 // newEnableCmd returns the `meho connector enable` command.
@@ -125,10 +126,10 @@ func runTransition(cmd *cobra.Command, p transitionParams, opts transitionOption
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
 	path := fmt.Sprintf(p.Path, pathEscapeOpID(opts.ConnectorID))
-	result, err := postTransition(cmd.Context(), backplaneURL, path)
-	if err != nil {
+	if err := postTransition(cmd.Context(), backplaneURL, path); err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
+	result := transitionResult{ConnectorID: opts.ConnectorID, Action: p.Action}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
@@ -136,16 +137,15 @@ func runTransition(cmd *cobra.Command, p transitionParams, opts transitionOption
 	return nil
 }
 
-func postTransition(ctx context.Context, backplaneURL, path string) (*TransitionResponse, error) {
-	respBody, err := doAuthedRequest(ctx, backplaneURL, "POST", path, []byte("{}"))
-	if err != nil {
-		return nil, err
+// postTransition fires the POST against the enable / disable route.
+// The route returns HTTP 204 No Content; doAuthedRequest treats 204
+// as success and returns an empty body which we deliberately ignore.
+// Non-2xx surfaces as *httpError via doAuthedRequest's status check.
+func postTransition(ctx context.Context, backplaneURL, path string) error {
+	if _, err := doAuthedRequest(ctx, backplaneURL, "POST", path, []byte("{}")); err != nil {
+		return err
 	}
-	var out TransitionResponse
-	if err := decodeJSON(respBody, "transition", &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return nil
 }
 
 // errTransitionAborted is the sentinel returned when the operator
@@ -159,9 +159,6 @@ type silentTransitionError struct{}
 func (silentTransitionError) Error() string    { return "" }
 func (s *silentTransitionError) ExitCode() int { return 1 }
 
-func printTransitionResult(w io.Writer, verb string, r *TransitionResponse) {
-	fmt.Fprintf(w, "%s %s — review_status=%s (%d groups, %d ops updated)\n",
-		verb, r.ConnectorID, r.ReviewStatus,
-		r.GroupsUpdated, r.OperationsUpdated,
-	)
+func printTransitionResult(w io.Writer, verb string, r transitionResult) {
+	fmt.Fprintf(w, "%s %s — %s (204 No Content)\n", verb, r.ConnectorID, r.Action)
 }

@@ -129,11 +129,19 @@ def test_load_corpus_kb_returns_ten_typed_rows() -> None:
         assert row.expected_hits, f"empty expected_hits: {row.query}"
 
 
-def test_load_corpus_memory_returns_empty_in_t1() -> None:
-    """Acceptance #4: memory corpus YAML doesn't ship in T1; returns ``[]``."""
+def test_load_corpus_memory_now_ships_after_t4() -> None:
+    """T4 #443 shipped ``memory_queries.yaml``; ``load_corpus("memory")`` is non-empty.
+
+    The deeper assertions (10 rows, ~2 queries per scope, slug regex
+    alignment with the live ``SLUG_PATTERN``) live in
+    ``test_retrieval_eval_memory_corpus.py``; this test guards the
+    loader-level contract that the memory branch of the dispatch now
+    returns ``MemoryCorpusQuery`` instances rather than ``[]``.
+    """
     rows = load_corpus("memory")
 
-    assert rows == []
+    assert rows, "memory corpus is empty — did memory_queries.yaml ship?"
+    assert all(isinstance(row, MemoryCorpusQuery) for row in rows)
 
 
 def test_load_corpus_operations_now_ships_after_t3() -> None:

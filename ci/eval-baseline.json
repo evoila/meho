@@ -1,6 +1,6 @@
 {
   "overall_verdict": "green",
-  "ran_at": "2026-05-15T10:35:00.344611Z",
+  "ran_at": "2026-05-15T22:40:26.881922Z",
   "surfaces": [
     {
       "baseline_coverage": null,
@@ -194,11 +194,178 @@
       "baseline_mrr": null,
       "baseline_precision_at_5": null,
       "baseline_verdict": null,
-      "coverage": 0.0,
-      "mrr": 0.0,
-      "precision_at_5": 0.0,
-      "queries": [],
-      "query_count": 0,
+      "coverage": 1.0,
+      "mrr": 1.0,
+      "precision_at_5": 1.0,
+      "queries": [
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user/kubectl-preferences"
+          ],
+          "meho_hits": [
+            "user/kubectl-preferences"
+          ],
+          "precision_at_5": 1.0,
+          "query": "what kubectl flags do I prefer",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user/yq-vcenter-spec-patterns"
+          ],
+          "meho_hits": [
+            "user/yq-vcenter-spec-patterns"
+          ],
+          "precision_at_5": 1.0,
+          "query": "my preferred yq query patterns for vCenter specs",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-tenant/rdc-internal-runbook-quirks",
+            "tenant/rdc-internal-runbook"
+          ],
+          "meho_hits": [
+            "user-tenant/rdc-internal-runbook-quirks"
+          ],
+          "precision_at_5": 1.0,
+          "query": "my notes on the rdc-internal tenant runbook quirks",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-tenant/standup-template-rdc-internal"
+          ],
+          "meho_hits": [
+            "user-tenant/standup-template-rdc-internal"
+          ],
+          "precision_at_5": 1.0,
+          "query": "how I structure my Slack standup for rdc-internal",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-target/rdc-vcenter-vpn-steps",
+            "target/rdc-vcenter-vpn-setup"
+          ],
+          "meho_hits": [
+            "user-target/rdc-vcenter-vpn-steps"
+          ],
+          "precision_at_5": 1.0,
+          "query": "VPN steps I use for rdc-vcenter",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-target/holodeck-lab-personal-gotchas",
+            "target/holodeck-lab-known-issues"
+          ],
+          "meho_hits": [
+            "user-target/holodeck-lab-personal-gotchas"
+          ],
+          "precision_at_5": 1.0,
+          "query": "gotchas I hit deploying to holodeck-lab",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "tenant/k8s-namespace-naming"
+          ],
+          "meho_hits": [
+            "tenant/k8s-namespace-naming"
+          ],
+          "precision_at_5": 1.0,
+          "query": "rdc-internal tenant naming convention for K8s namespaces",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "tenant/kubectl-team-conventions",
+            "user/kubectl-preferences"
+          ],
+          "meho_hits": [
+            "tenant/kubectl-team-conventions"
+          ],
+          "precision_at_5": 1.0,
+          "query": "kubectl conventions our team uses",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "target/rdc-vcenter-vpn-setup",
+            "user-target/rdc-vcenter-vpn-steps"
+          ],
+          "meho_hits": [
+            "target/rdc-vcenter-vpn-setup"
+          ],
+          "precision_at_5": 1.0,
+          "query": "VPN setup for rdc-vcenter",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "target/holodeck-lab-known-issues",
+            "target/holodeck-lab-overview"
+          ],
+          "meho_hits": [
+            "target/holodeck-lab-known-issues"
+          ],
+          "precision_at_5": 1.0,
+          "query": "known issues with holodeck-lab",
+          "reciprocal_rank": 1.0
+        }
+      ],
+      "query_count": 10,
       "surface": "memory",
       "verdict": "green"
     },

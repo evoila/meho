@@ -30,10 +30,10 @@ where a bare ``yes`` or unquoted slug becomes a ``bool``.
 from __future__ import annotations
 
 from importlib import resources
-from typing import Literal, overload
+from typing import Annotated, Any, Literal, overload
 
 import yaml
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, TypeAdapter, ValidationError
 
 __all__ = [
     "CorpusValidationError",
@@ -81,6 +81,36 @@ class KbCorpusQuery(BaseModel):
     notes: str | None = None
 
 
+def _coerce_scope_slug_pair(value: Any) -> Any:
+    """Convert a 2-element YAML sequence to a ``(scope, slug)`` tuple.
+
+    YAML has no native tuple type — ``yaml.safe_load`` always produces
+    ``list`` for sequence values — but the :class:`MemoryCorpusQuery`
+    schema is strict-mode and declares ``expected_hits`` as
+    ``list[tuple[str, str]]``. Strict Pydantic v2 rejects
+    ``list`` → ``tuple`` coercion, so a YAML row like
+    ``["user", "kubectl-preferences"]`` fails validation despite being
+    the wire shape the task body specifies.
+
+    This ``BeforeValidator`` runs ahead of the tuple-type check and
+    converts only the exact shape we accept (2-element sequence of
+    strings) to a tuple. Any other shape — wrong length, non-string
+    member, plain string, dict — falls through unchanged so the
+    downstream tuple validator surfaces the original error message
+    naming the offending field path.
+    """
+    if isinstance(value, list) and len(value) == 2:
+        return tuple(value)
+    return value
+
+
+#: Type alias for one ``(scope, slug)`` expected-hit pair. The
+#: :func:`_coerce_scope_slug_pair` ``BeforeValidator`` runs first, so
+#: YAML-native ``[scope, slug]`` sequences are accepted as well as
+#: Python-native ``(scope, slug)`` tuples from direct construction.
+_ScopeSlugPair = Annotated[tuple[str, str], BeforeValidator(_coerce_scope_slug_pair)]
+
+
 class MemoryCorpusQuery(BaseModel):
     """One ground-truth eval row for the ``memory`` retrieval surface.
 
@@ -88,13 +118,15 @@ class MemoryCorpusQuery(BaseModel):
     expected hit is a ``(scope, slug)`` pair because the same slug can
     legitimately exist under different scopes (``user`` vs
     ``user-tenant`` vs ``tenant`` etc.) and the eval cares which one
-    surfaced. The corpus YAML lands in T4 (#443).
+    surfaced. The corpus YAML ships in T4 (#443); the pair is exposed
+    on the Python side as a ``tuple`` so callers can use it as a dict
+    key without intermediate normalisation.
     """
 
     model_config = _CORPUS_MODEL_CONFIG
 
     query: str
-    expected_hits: list[tuple[str, str]]
+    expected_hits: list[_ScopeSlugPair]
     notes: str | None = None
 
 

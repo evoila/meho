@@ -9,11 +9,15 @@ Coverage matrix (G4.3-T2 / Task #441 acceptance criteria):
   green/yellow; none-correct → red. Uses a stub retrieve_fn keyed on
   the corpus's expected_hits so the test is deterministic without
   PG / fastembed.
-* :func:`eval_surface` for ``memory`` — empty corpus returns
-  ``query_count=0`` + ``verdict="green"`` per the module's
-  "absent corpus is not a failure" rule. (Operations corpus shipped
-  in G4.3-T3 #442; ``test_retrieval_eval_operation_corpus.py`` owns
-  its corpus-content coverage.)
+* :func:`eval_surface` for ``memory`` — perfect retrieval against
+  the shipped 10-query corpus returns green; zero-correct returns
+  red. Mirrors the kb verdict-band coverage. The
+  "absent corpus is not a failure" rule is now exercised by
+  ``test_retrieval_eval_corpus.py`` via the monkeypatched empty-file
+  test; the runner-level tests assume the YAML is present (T1 kb /
+  T3 ops / T4 memory — all shipped). Corpus-content coverage lives
+  in ``test_retrieval_eval_operation_corpus.py`` and
+  ``test_retrieval_eval_memory_corpus.py``.
 * :func:`eval_all` — overall verdict is the worst of the per-surface
   verdicts; one red surface flips the whole result.
 * Baseline integration — when *baseline_corpus_root* is set, the kb
@@ -76,15 +80,17 @@ def _make_perfect_retrieve_fn() -> Any:
 
     Models a retrieval system that always nails the ground truth
     across every shipped surface — the kb corpus's first
-    expected_hit and the operations corpus's first expected_op_id
-    are both returned as the single hit for their respective
-    surfaces. The ``source`` argument the runner threads through
-    picks the right answer map at call time.
+    expected_hit, the operations corpus's first expected_op_id, and
+    the memory corpus's first ``(scope, slug)`` pair are returned as
+    the single hit for their respective surfaces. The ``source``
+    argument the runner threads through picks the right answer map
+    at call time.
     """
     from meho_backplane.retrieval.eval.corpus import load_corpus
 
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
     ops_answers = {row.query: row.expected_op_ids[0] for row in load_corpus("operations")}
+    memory_answers = {row.query: row.expected_hits[0] for row in load_corpus("memory")}
 
     async def perfect(
         *,
@@ -102,6 +108,16 @@ def _make_perfect_retrieve_fn() -> Any:
             if op_id is None:
                 return []
             return [_make_hit(op_id, source="operations")]
+        # Memory branch — the runner passes ``source="memory"``;
+        # RetrievalHit.source_id encodes ``"<scope>:<slug>"`` so the
+        # runner's ``_memory_hits_to_pairs`` recovers ``"<scope>/<slug>"``
+        # via first/last on a colon-split.
+        if source == "memory":
+            pair = memory_answers.get(query)
+            if pair is None:
+                return []
+            scope, slug = pair
+            return [_make_hit(f"{scope}:{slug}", source="memory")]
         # kb branch (default) — RetrievalHit.source_id is the slug.
         slug = kb_answers.get(query)
         if slug is None:
@@ -244,23 +260,52 @@ async def test_eval_surface_kb_per_query_results_carry_expected_and_meho_hits() 
 
 
 # ---------------------------------------------------------------------------
-# eval_surface — memory (empty corpus → no-op green)
+# eval_surface — memory
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_eval_surface_memory_empty_corpus_is_green() -> None:
-    """Memory corpus YAML hasn't shipped → query_count=0 + verdict='green'."""
+async def test_eval_surface_memory_perfect_retrieve_returns_green() -> None:
+    """Perfect retrieval against the shipped memory corpus → green.
+
+    T4 #443 shipped ``memory_queries.yaml`` (10 queries across the
+    five ``MemoryScope`` shapes); the perfect-retrieval stub now
+    returns the corpus's first ``(scope, slug)`` pair per query.
+    """
     result = await eval_surface(
         "memory",
         tenant_id=uuid.uuid4(),
-        retrieve_fn=_make_terrible_retrieve_fn(),  # Doesn't matter — never called.
+        retrieve_fn=_make_perfect_retrieve_fn(),
     )
 
     assert result.surface == "memory"
-    assert result.query_count == 0
+    assert result.query_count == 10
+    assert result.precision_at_5 == pytest.approx(1.0)
+    assert result.mrr == pytest.approx(1.0)
+    assert result.coverage == pytest.approx(1.0)
     assert result.verdict == "green"
-    assert result.queries == []
+    assert len(result.queries) == 10
+
+
+@pytest.mark.asyncio
+async def test_eval_surface_memory_terrible_retrieve_returns_red() -> None:
+    """Zero-correct retrieval against the memory corpus → red.
+
+    Mirrors the kb/operations terrible-retrieve test so a regression
+    in the memory verdict-band wiring surfaces.
+    """
+    result = await eval_surface(
+        "memory",
+        tenant_id=uuid.uuid4(),
+        retrieve_fn=_make_terrible_retrieve_fn(),
+    )
+
+    assert result.surface == "memory"
+    assert result.query_count == 10
+    assert result.precision_at_5 == pytest.approx(0.0)
+    assert result.mrr == pytest.approx(0.0)
+    assert result.coverage == pytest.approx(0.0)
+    assert result.verdict == "red"
 
 
 # ---------------------------------------------------------------------------
@@ -269,12 +314,12 @@ async def test_eval_surface_memory_empty_corpus_is_green() -> None:
 
 
 @pytest.mark.asyncio
-async def test_eval_all_perfect_kb_and_ops_with_empty_memory_returns_green() -> None:
-    """Green kb + green ops + no-data memory → overall green.
+async def test_eval_all_perfect_across_all_three_surfaces_returns_green() -> None:
+    """Green kb + green ops + green memory → overall green.
 
-    Memory corpus stays empty until T4 #443 ships; the runner's
-    absent-corpus-is-green rule keeps the overall verdict green when
-    every shipped surface is green.
+    All three corpora are shipped (T1 #440 / T3 #442 / T4 #443) so
+    the perfect-retrieval stub produces 10 queries per surface;
+    overall verdict is the min of the three surface verdicts.
     """
     result = await eval_all(
         tenant_id=uuid.uuid4(),

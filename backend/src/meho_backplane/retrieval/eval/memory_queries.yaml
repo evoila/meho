@@ -1,0 +1,154 @@
+# MEHO retrieval eval — Memory seed corpus (G4.3-T4, #443).
+#
+# 10 queries covering the 5 memory scope shapes proportionally
+# (~2 per scope: user / user-tenant / user-target / tenant / target).
+# Memory entries are operator notes the consumer-agent would have
+# written via `remember_*` MCP tools over a normal RDC operator
+# workflow; queries are the phrasings an operator (or the agent on
+# their behalf) would type to `search_memory` to find them again.
+# Per-entry `notes` records the originating context — keep when
+# editing so human review on regression has the why.
+#
+# Schema: meho_backplane.retrieval.eval.corpus.MemoryCorpusQuery.
+# Each expected hit is a `(scope, slug)` pair — same slug can
+# legitimately exist under different scopes (e.g. `<operator>` may
+# have user-target notes about `rdc-vcenter` while the tenant has
+# target-scope notes about the same target).
+#
+# Editing rules:
+# * `scope` must be one of the 5 values from
+#   `meho_backplane.memory.schemas.MemoryScope`: user, user-tenant,
+#   user-target, tenant, target. The schema-validation test
+#   (`test_memory_corpus_scopes_are_valid_enum_members`) guards
+#   typos against the live enum at HEAD.
+# * `slug` must match `meho_backplane.memory.schemas.SLUG_PATTERN`
+#   (`^[A-Za-z0-9_\-\.]+$`) — same alphabet the service accepts at
+#   write boundaries. The matching test
+#   (`test_memory_corpus_slugs_match_slug_pattern`) guards drift
+#   against the live regex.
+# * Order matters: first pair is the ideal top-1 (drives MRR scoring
+#   in T2), subsequent pairs are acceptable top-N (drives precision
+#   credit in T2).
+# * Scope mix: each of the 5 scopes appears at least twice across
+#   the 10 queries so a regression in any one scope's RBAC filter or
+#   ranking surfaces because at least one query targets it. The
+#   `test_memory_corpus_covers_all_five_scopes` test enforces this
+#   structurally.
+# * Slugs are illustrative ground truth — when G5.1's memory module
+#   ships its eval seeding (T2 #441 integration fixtures), the
+#   fixtures must populate these exact `(scope, slug)` pairs so
+#   precision@5 and MRR are meaningful. The corpus pins the contract;
+#   the fixtures fulfil it.
+
+# --- user-scope queries (2) ---
+
+- query: what kubectl flags do I prefer
+  expected_hits:
+    - ["user", "kubectl-preferences"]
+  notes: >-
+    user-scope basic personal-preference recall. The operator wrote
+    `remember_user --slug kubectl-preferences` capturing their `-o yaml`
+    + `--context` defaults; the recall flows through `search_memory`
+    filtered to user-scope only. Single ground-truth pair — no broader
+    fallback because tenant-wide kubectl conventions live separately
+    (see `kubectl-team-conventions` below).
+
+- query: my preferred yq query patterns for vCenter specs
+  expected_hits:
+    - ["user", "yq-vcenter-spec-patterns"]
+  notes: >-
+    user-scope personal-tooling recall — operator-authored cheat-sheet
+    of `yq` filters they hit while spelunking the vCenter OpenAPI
+    spec pre-G0.7. Single ground-truth pair because the patterns are
+    idiosyncratic to how this operator structures their searches.
+
+# --- user-tenant queries (2) ---
+
+- query: my notes on the rdc-internal tenant runbook quirks
+  expected_hits:
+    - ["user-tenant", "rdc-internal-runbook-quirks"]
+    - ["tenant", "rdc-internal-runbook"]
+  notes: >-
+    user-tenant scope — the operator's private overlay on the shared
+    tenant runbook (which steps they always forget, who they Slack
+    when a step fails). The tenant-wide runbook is the acceptable
+    fallback when the operator hasn't written their own overlay yet;
+    surfaces "the team has the answer even if I don't".
+
+- query: how I structure my Slack standup for rdc-internal
+  expected_hits:
+    - ["user-tenant", "standup-template-rdc-internal"]
+  notes: >-
+    user-tenant scope — operator's personal standup template scoped to
+    one tenant (different tenants have different reporting cadences).
+    Single ground-truth pair; no tenant-wide fallback because the
+    standup format is per-operator by team convention.
+
+# --- user-target queries (2) ---
+
+- query: VPN steps I use for rdc-vcenter
+  expected_hits:
+    - ["user-target", "rdc-vcenter-vpn-steps"]
+    - ["target", "rdc-vcenter-vpn-setup"]
+  notes: >-
+    user-target first — the operator's private VPN steps (their
+    1Password item refs, their preferred client). Target-scope is the
+    acceptable fallback (the team-wide VPN setup runbook from when
+    the target was first onboarded); surfaces when the operator
+    hasn't yet captured their own overlay on the team-wide procedure.
+
+- query: gotchas I hit deploying to holodeck-lab
+  expected_hits:
+    - ["user-target", "holodeck-lab-personal-gotchas"]
+    - ["target", "holodeck-lab-known-issues"]
+  notes: >-
+    user-target scope — the "I personally hit this once and lost an
+    hour" notes the operator captures over time. Target-scope
+    `holodeck-lab-known-issues` is the acceptable fallback because
+    the personal gotchas are an overlay on the team-wide
+    known-issues list.
+
+# --- tenant queries (2) ---
+
+- query: rdc-internal tenant naming convention for K8s namespaces
+  expected_hits:
+    - ["tenant", "k8s-namespace-naming"]
+  notes: >-
+    tenant scope — shared convention every operator on rdc-internal
+    follows. Single ground-truth pair because the convention is the
+    canonical answer; an operator's user-scope override would be a
+    bug (deviating from team convention silently).
+
+- query: kubectl conventions our team uses
+  expected_hits:
+    - ["tenant", "kubectl-team-conventions"]
+    - ["user", "kubectl-preferences"]
+  notes: >-
+    tenant scope first — the team-wide `kubectl` style guide (alias
+    discipline, context-switching pattern). User-scope
+    `kubectl-preferences` is the acceptable adjacent because it's
+    the operator's personal layer on the same surface; both are
+    legitimate recalls for "kubectl conventions".
+
+# --- target queries (2) ---
+
+- query: VPN setup for rdc-vcenter
+  expected_hits:
+    - ["target", "rdc-vcenter-vpn-setup"]
+    - ["user-target", "rdc-vcenter-vpn-steps"]
+  notes: >-
+    target scope first — the team-wide VPN-onboarding runbook for the
+    rdc-vcenter target (captured when the target was first
+    onboarded). User-target is the acceptable fallback / adjacent:
+    when the operator has their own overlay, the eval still credits
+    surfacing the broader team runbook.
+
+- query: known issues with holodeck-lab
+  expected_hits:
+    - ["target", "holodeck-lab-known-issues"]
+    - ["target", "holodeck-lab-overview"]
+  notes: >-
+    target scope — the team-wide known-issues + overview for the
+    holodeck-lab target. Two target-scope pairs because both are
+    legitimate top-N hits for "known issues" (the overview links to
+    the issues list).

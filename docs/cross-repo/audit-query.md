@@ -43,7 +43,7 @@ Every verb accepts `--json` to print the raw `AuditQueryResult` envelope (rows +
 meho audit query --target rdc-nsx --since 7d --op-class write
 ```
 
-`--op-class write` narrows to the destructive verbs (POST / PUT / PATCH / DELETE and the typed-connector write ops). Drop it to see reads too.
+`--op-class write` narrows to typed-connector write operations (those registered with `op_class="write"` on the `ToolDefinition` / `EndpointDescriptor`) plus any HTTP route that explicitly binds `audit_op_class="write"` via the contextvar override. Chassis HTTP POST / PUT / PATCH / DELETE rows whose op_id is the synthetic `http.{method}:{path}` get `op_class="other"` (the synthetic op_id has no write-verb suffix that `classify_op` recognises), so they don't match this filter. Drop `--op-class write` to see them.
 
 ### "What did Damir do across all targets in the last 24 hours?"
 

@@ -471,17 +471,20 @@ operations go live.
   Real vendor specs in v0.2 scope (vCenter / NSX / SDDC Manager)
   never use this combination. T2 will log a warning if it spots a
   collision after upsert.
-* **Non-schema `$ref` rejected.** `$ref: "#/components/parameters/X"`,
-  `$ref: "#/components/requestBodies/X"`, etc. raise
-  `UnsupportedSpecError`. vCenter doesn't use these; future specs
-  that do will need either a pre-process pass or a v0.2.next
-  extension of the resolver.
+* **Other-bucket `$ref` rejected.** `$ref:
+  "#/components/requestBodies/X"`, `$ref:
+  "#/components/responses/X"`, `$ref: "#/components/headers/X"`
+  raise `UnsupportedSpecError`. Not used by any currently-targeted
+  vendor spec (vcenter.yaml, vi-json.yaml, NSX, SDDC Manager);
+  defer until a real spec needs them. (T11 / #501 landed the
+  `#/components/parameters/*` resolver — see the T8 paragraph
+  above and `docs/architecture/spec-ingestion.md` §T1.)
 * **Cross-document `$ref` rejected.** External files
   (`other.yaml#/...`) raise `UnsupportedSpecError`. Same v0.2.next
   note.
 * **`$ref` drill-down rejected.** Refs that walk into a component's
-  sub-tree (`#/components/schemas/X/properties/y`) raise
-  `InvalidSchemaError`.
+  sub-tree (`#/components/schemas/X/properties/y`,
+  `#/components/parameters/X/schema`) raise `InvalidSchemaError`.
 
 ## References
 

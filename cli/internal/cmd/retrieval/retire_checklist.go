@@ -56,12 +56,21 @@ const ghLookupTimeout = 30 * time.Second
 // Hand-written (rather than oapi-codegen-generated) because the Go
 // regen pass for the new endpoint runs in a follow-up PR; the shape
 // is small and pinned by the matching backend test.
+// RetireCriterionResult mirrors the backend CriterionResult one-for-
+// one. ``Notes`` is a ``*string`` (rather than ``string``) so the
+// JSON round-trip preserves the explicit-null shape the backend
+// schema pins: the Python ``str | None = None`` field always emits
+// the key as ``null`` when unset, and the schema-stability test in
+// ``test_retrieval_retire.py::test_report_json_shape_is_stable``
+// asserts the full key set on every criterion. Omitempty would drop
+// the field on ``--json`` output for null-notes criteria, breaking
+// jq-style consumers that key off the stable shape.
 type RetireCriterionResult struct {
 	Name             string  `json:"name"`
 	Verdict          string  `json:"verdict"`
 	ObservedValue    string  `json:"observed_value"`
 	ThresholdSummary string  `json:"threshold_summary"`
-	Notes            *string `json:"notes,omitempty"`
+	Notes            *string `json:"notes"`
 }
 
 // RetireSurfaceChecklist mirrors the backend `SurfaceChecklist` model.

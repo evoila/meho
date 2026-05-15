@@ -62,6 +62,7 @@ from meho_backplane.retrieval.retire import (
     EVAL_PRECISION_GREEN,
     MIN_DAYS_SINCE_FIRST_USE,
     MIN_OPERATOR_STREAK_WEEKS,
+    BaselineMetricsOverride,
     CriterionResult,
     RetireChecklistReport,
     SurfaceChecklist,
@@ -643,6 +644,118 @@ async def test_compute_retire_per_surface_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compute_retire_narrows_eval_to_requested_surfaces() -> None:
+    """Single-surface request must not run eval over every supported surface.
+
+    Locks the optimisation that ``eval_all`` receives only the
+    ``surfaces`` the caller requested — kb-only requests skip the
+    eval cost on memory + operations.
+    """
+    fake_eval = AsyncMock(return_value=_stub_eval_result())
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        with patch("meho_backplane.retrieval.retire.eval_all", new=fake_eval):
+            await compute_retire_checklist(
+                session=session,
+                surfaces=["kb"],
+                tenant_id=_FIXED_TENANT,
+                blocker_counts={"kb": 0},
+                now=_NOW,
+            )
+    fake_eval.assert_awaited_once()
+    assert fake_eval.await_args.kwargs["surfaces"] == ["kb"]
+
+
+@pytest.mark.asyncio
+async def test_compute_retire_baseline_override_promotes_criterion4_to_green() -> None:
+    """Caller-supplied baseline triple turns criterion 4 green via override.
+
+    Without the override, criterion 4 stays yellow for v0.2 production
+    callers because the eval runner is invoked without a baseline corpus
+    root. With the override, the service uses the supplied
+    (precision, mrr, coverage) triple as the baseline numbers for the
+    MEHO-vs-baseline check.
+    """
+    base = _NOW - timedelta(days=40)
+    for op in ("op-A", "op-B", "op-C"):
+        for week_offset in range(MIN_OPERATOR_STREAK_WEEKS + 1):
+            await _seed_audit_row(
+                operator_sub=op,
+                tenant_id=_FIXED_TENANT,
+                path=f"{MCP_TOOL_PATH_PREFIX}search_knowledge",
+                occurred_at=base + timedelta(days=7 * week_offset),
+            )
+
+    # Stub eval runner returns kb with MEHO numbers + NO baseline (the
+    # v0.2 API path). Without the override, criterion 4 would be
+    # yellow; with the override, it becomes green.
+    fake_eval = AsyncMock(
+        return_value=_stub_eval_result(kb_precision=0.90, kb_baseline=None),
+    )
+    override = BaselineMetricsOverride(
+        precision_at_5=0.60,
+        mrr=0.40,
+        coverage=0.80,
+        kind="grep",
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        with patch("meho_backplane.retrieval.retire.eval_all", new=fake_eval):
+            report = await compute_retire_checklist(
+                session=session,
+                surfaces=["kb"],
+                tenant_id=_FIXED_TENANT,
+                blocker_counts={"kb": 0},
+                baseline_overrides={"kb": override},
+                now=_NOW,
+            )
+    c4 = next(c for c in report.surfaces[0].criteria if c.name == "meho_vs_baseline")
+    assert c4.verdict == "green"
+    assert report.overall_verdict == "READY TO RETIRE"
+
+
+@pytest.mark.asyncio
+async def test_compute_retire_baseline_override_red_when_meho_loses() -> None:
+    """An override where MEHO < baseline on any metric → red criterion 4."""
+    base = _NOW - timedelta(days=40)
+    for op in ("op-A", "op-B", "op-C"):
+        for week_offset in range(MIN_OPERATOR_STREAK_WEEKS + 1):
+            await _seed_audit_row(
+                operator_sub=op,
+                tenant_id=_FIXED_TENANT,
+                path=f"{MCP_TOOL_PATH_PREFIX}search_knowledge",
+                occurred_at=base + timedelta(days=7 * week_offset),
+            )
+
+    # MEHO precision=0.85 (passes criterion 3 green) but the override
+    # claims baseline=0.95, so MEHO < baseline → criterion 4 red →
+    # overall NOT YET solely because of the baseline comparison.
+    fake_eval = AsyncMock(
+        return_value=_stub_eval_result(kb_precision=0.85, kb_baseline=None),
+    )
+    override = BaselineMetricsOverride(
+        precision_at_5=0.95,  # MEHO precision (0.85) < baseline → red
+        mrr=0.40,
+        coverage=0.80,
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        with patch("meho_backplane.retrieval.retire.eval_all", new=fake_eval):
+            report = await compute_retire_checklist(
+                session=session,
+                surfaces=["kb"],
+                tenant_id=_FIXED_TENANT,
+                blocker_counts={"kb": 0},
+                baseline_overrides={"kb": override},
+                now=_NOW,
+            )
+    c4 = next(c for c in report.surfaces[0].criteria if c.name == "meho_vs_baseline")
+    assert c4.verdict == "red"
+    assert "precision@5" in c4.observed_value
+    assert report.overall_verdict == "NOT YET"
+
+
+@pytest.mark.asyncio
 async def test_compute_retire_tenant_scoping() -> None:
     """Other-tenant search rows must not leak into the requested tenant's report."""
     base = _NOW - timedelta(days=40)
@@ -745,7 +858,11 @@ def test_route_read_only_returns_403(retire_client: TestClient) -> None:
 def test_route_operator_with_tenant_filter_returns_403(
     retire_client: TestClient,
 ) -> None:
-    """``operator`` role + non-null ``tenant_filter`` → 403."""
+    """``operator`` role + non-null ``tenant_filter`` query param → 403.
+
+    ``tenant_filter`` lives on the query string (not in the JSON body)
+    to mirror the sibling ``GET /api/v1/retrieve/usage`` shape.
+    """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key, sub="op-cross", tenant_role=TenantRole.OPERATOR.value)
     fake_eval = AsyncMock(return_value=_stub_eval_result())
@@ -755,8 +872,8 @@ def test_route_operator_with_tenant_filter_returns_403(
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = retire_client.post(
-            "/api/v1/retrieve/retire-checklist",
-            json={"surface": "kb", "tenant_filter": str(_OTHER_TENANT)},
+            f"/api/v1/retrieve/retire-checklist?tenant_filter={_OTHER_TENANT}",
+            json={"surface": "kb"},
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 403
@@ -775,13 +892,46 @@ def test_route_tenant_admin_with_tenant_filter_returns_200(
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = retire_client.post(
-            "/api/v1/retrieve/retire-checklist",
-            json={"surface": "kb", "tenant_filter": str(_OTHER_TENANT)},
+            f"/api/v1/retrieve/retire-checklist?tenant_filter={_OTHER_TENANT}",
+            json={"surface": "kb"},
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 200
     body = response.json()
     assert body["tenant_id"] == str(_OTHER_TENANT)
+
+
+@pytest.mark.asyncio
+async def test_route_audit_row_written_even_on_tenant_filter_403(
+    retire_client: TestClient,
+) -> None:
+    """The 403-denied path still writes the canonical audit row.
+
+    Mirrors the audit-row-per-call contract from the issue body:
+    even when the route raises 403 because an ``operator`` passed a
+    ``tenant_filter`` they aren't entitled to, the audit metadata
+    (``op_id``, ``op_class``, ``tenant_scope="other"``) must land on
+    the row so the audit-trail surface still captures the denied
+    cross-tenant attempt.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-denied", tenant_role=TenantRole.OPERATOR.value)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = retire_client.post(
+            f"/api/v1/retrieve/retire-checklist?tenant_filter={_OTHER_TENANT}",
+            json={"surface": "kb"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 403
+
+    rows = await _read_audit_rows_for_path("/api/v1/retrieve/retire-checklist")
+    denied_rows = [r for r in rows if r.operator_sub == "op-denied"]
+    assert denied_rows
+    payload: dict[str, Any] = denied_rows[-1].payload
+    assert payload["op_id"] == "meho.retrieval.retire_checklist"
+    assert payload["op_class"] == "audit_query"
+    assert payload["tenant_scope"] == "other"
 
 
 def test_route_operator_default_returns_200(retire_client: TestClient) -> None:
@@ -886,8 +1036,8 @@ async def test_route_audit_tenant_scope_other_for_cross_tenant_admin(
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = retire_client.post(
-            "/api/v1/retrieve/retire-checklist",
-            json={"surface": "kb", "tenant_filter": str(_OTHER_TENANT)},
+            f"/api/v1/retrieve/retire-checklist?tenant_filter={_OTHER_TENANT}",
+            json={"surface": "kb"},
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 200

@@ -106,6 +106,7 @@ __all__ = [
     "RETIRE_LOOKBACK",
     "SURFACE_VERDICT_ORDER",
     "YELLOW_FLOOR_RATIO",
+    "BaselineMetricsOverride",
     "ChecklistSurface",
     "ChecklistVerdict",
     "CriterionName",
@@ -185,6 +186,35 @@ class CriterionResult(BaseModel):
     observed_value: str = Field(max_length=64)
     threshold_summary: str = Field(max_length=64)
     notes: str | None = Field(default=None, max_length=256)
+
+
+class BaselineMetricsOverride(BaseModel):
+    """Per-surface baseline metrics supplied by the caller.
+
+    Criterion 4 (MEHO ≥ baseline) needs side-by-side numbers from a
+    baseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +
+    yq`` for operations). The v0.2 backplane has no checked-in
+    corpus snapshot to evaluate the baseline against (see
+    :mod:`meho_backplane.api.v1.retrieve_eval` — explicit
+    ``baseline=grep`` on that route is rejected with 501); the CLI
+    runs the baseline locally against the operator's kb/ checkout and
+    can pass the resulting numbers here so the retire-checklist
+    verdict honestly reflects criterion 4 instead of always reporting
+    yellow ("baseline did not run") on the API path.
+
+    Without an override, criterion 4 stays yellow for v0.2 production
+    callers — the documented "READY TO RETIRE" path is unreachable
+    via the bare API alone, which is the honest v0.2 posture. T7
+    (#446) / v0.2.next is expected to wire a server-side corpus
+    snapshot and remove the need for this override.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    precision_at_5: float = Field(ge=0.0, le=1.0)
+    mrr: float = Field(ge=0.0, le=1.0)
+    coverage: float = Field(ge=0.0, le=1.0)
+    kind: str = Field(min_length=1, max_length=16, default="grep")
 
 
 class SurfaceChecklist(BaseModel):
@@ -717,6 +747,7 @@ async def compute_retire_checklist(
     tenant_id: uuid.UUID | None,
     retrieve_fn: RetrieveCallable | None = None,
     blocker_counts: Mapping[ChecklistSurface, int] | None = None,
+    baseline_overrides: Mapping[ChecklistSurface, BaselineMetricsOverride] | None = None,
     now: datetime | None = None,
     k: int = DEFAULT_K,
 ) -> RetireChecklistReport:
@@ -727,7 +758,8 @@ async def compute_retire_checklist(
     1. Run the audit-log scan once over the lookback window to derive
        per-surface first-use date + per-operator ISO-week sets.
     2. Run :func:`meho_backplane.retrieval.eval.runner.eval_all` once
-       to populate criteria 3 + 4.
+       (narrowed to the *requested* surfaces, not every supported
+       surface) to populate criteria 3 + 4.
     3. For each requested surface, compose the five criteria into a
        :class:`SurfaceChecklist`.
     4. Fold every surface into a :class:`RetireChecklistReport` with
@@ -737,9 +769,15 @@ async def compute_retire_checklist(
     a stub without standing up fastembed + PG. *blocker_counts* is
     the surface→count mapping the CLI provides from
     ``gh issue list``; ``None`` (or surface absence) maps to
-    criterion 5 = yellow per :func:`_evaluate_open_blockers`. *now*
-    defaults to ``datetime.now(UTC)`` and is exposed so tests can pin
-    a frozen clock for the first-use-date math.
+    criterion 5 = yellow per :func:`_evaluate_open_blockers`.
+    *baseline_overrides* is the optional per-surface baseline-metrics
+    mapping the caller (CLI) supplies after running the grep baseline
+    locally; without it, criterion 4 stays yellow for v0.2 production
+    callers because the backplane has no server-side corpus snapshot
+    to compute the baseline against (see
+    :class:`BaselineMetricsOverride`). *now* defaults to
+    ``datetime.now(UTC)`` and is exposed so tests can pin a frozen
+    clock for the first-use-date math.
     """
     moment = now or datetime.now(UTC)
     since = moment - RETIRE_LOOKBACK
@@ -758,12 +796,14 @@ async def compute_retire_checklist(
     # operator-intuitive shape: "is tenant_X ready to retire kb/?"
     # asks about tenant_X's eval numbers).
     eval_tenant = tenant_id if tenant_id is not None else uuid.UUID(int=0)
-    # ``SUPPORTED_SURFACES`` is typed as ``tuple[str, ...]`` in
-    # ``retrieval.usage``; the eval runner expects the narrower literal
-    # surface tokens. Cast at this single call boundary.
+    # ``surfaces`` is typed as ``Iterable[ChecklistSurface]``; the eval
+    # runner's ``surfaces`` parameter expects the matching narrow
+    # literal. Cast at this single call boundary so single-surface
+    # requests (``surfaces=["kb"]``) skip the eval cost on the other
+    # two surfaces instead of always paying it.
     eval_surfaces = cast(
         "list[Literal['kb', 'memory', 'operations']]",
-        list(SUPPORTED_SURFACES),
+        list(surfaces_list),
     )
     eval_result = await eval_all(
         tenant_id=eval_tenant,
@@ -785,25 +825,48 @@ async def compute_retire_checklist(
             operator_weeks=operator_weeks.get(surface, {}),
         )
         # Criteria 3 + 4 — eval-driven.
+        # The override resolution lives at this single point: a
+        # caller-supplied ``BaselineMetricsOverride`` supersedes
+        # whatever the in-process eval runner produced for the
+        # surface's baseline triple. Without an override criterion 4
+        # falls through to the eval runner's own ``baseline_kind`` /
+        # ``baseline_metrics`` (which are ``None`` on the v0.2 API
+        # path — no server-side corpus snapshot).
+        override = baseline_overrides.get(surface) if baseline_overrides is not None else None
         eval_entry = eval_lookup.get(surface)
         if eval_entry is None:
             c3 = _evaluate_eval_precision(precision_at_5=None, query_count=0)
-            c4 = _evaluate_meho_vs_baseline(
-                baseline_kind=None,
-                meho_metrics=None,
-                baseline_metrics=None,
-            )
+            meho_metrics_for_c4: tuple[float, float, float] | None = None
+            baseline_kind_for_c4: str | None = None
+            baseline_metrics_for_c4: tuple[float, float, float] | None = None
         else:
             (precision, query_count, baseline_kind, meho_metrics, baseline_metrics) = eval_entry
             c3 = _evaluate_eval_precision(
                 precision_at_5=precision if query_count > 0 else None,
                 query_count=query_count,
             )
-            c4 = _evaluate_meho_vs_baseline(
-                baseline_kind=baseline_kind,
-                meho_metrics=meho_metrics,
-                baseline_metrics=baseline_metrics,
+            meho_metrics_for_c4 = meho_metrics
+            baseline_kind_for_c4 = baseline_kind
+            baseline_metrics_for_c4 = baseline_metrics
+
+        if override is not None and meho_metrics_for_c4 is not None:
+            # Caller supplied baseline metrics — use them to evaluate
+            # criterion 4 against the MEHO numbers from the in-process
+            # eval. This is the v0.2 path for reaching "green" on
+            # criterion 4 (the API has no server-side corpus snapshot
+            # to compute the baseline itself).
+            baseline_kind_for_c4 = override.kind
+            baseline_metrics_for_c4 = (
+                override.precision_at_5,
+                override.mrr,
+                override.coverage,
             )
+
+        c4 = _evaluate_meho_vs_baseline(
+            baseline_kind=baseline_kind_for_c4,
+            meho_metrics=meho_metrics_for_c4,
+            baseline_metrics=baseline_metrics_for_c4,
+        )
         # Criterion 5 — open blockers from the CLI-supplied count.
         blocker_count = blocker_counts.get(surface) if blocker_counts is not None else None
         c5 = _evaluate_open_blockers(blocker_count=blocker_count)

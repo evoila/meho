@@ -22,9 +22,13 @@ RBAC
 ``operator`` role minimum (mirrors
 :mod:`~meho_backplane.api.v1.retrieve_usage`). ``operator`` callers
 are scoped to their own ``operator.tenant_id``; passing a non-null
-``tenant_filter`` returns 403. Only ``tenant_admin`` may cross
-tenants — the retire decision spans a tenant's corpus + audit-log
-history, so cross-tenant inspection is a tenant_admin concern.
+``tenant_filter`` *query parameter* returns 403. Only ``tenant_admin``
+may cross tenants — the retire decision spans a tenant's corpus +
+audit-log history, so cross-tenant inspection is a tenant_admin
+concern. The tenant filter lives on the query string (not in the JSON
+body) to mirror the sibling ``GET /api/v1/retrieve/usage`` surface so
+operator tooling has one consistent shape for cross-tenant inspection
+across every retrieval-audit verb.
 
 Audit + broadcast contract
 --------------------------
@@ -64,7 +68,7 @@ from typing import Literal
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -72,6 +76,7 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.retrieval.retire import (
     SURFACE_VERDICT_ORDER,
+    BaselineMetricsOverride,
     ChecklistSurface,
     RetireChecklistReport,
     compute_retire_checklist,
@@ -107,13 +112,20 @@ class RetireChecklistRequest(BaseModel):
     valid — the service reports criterion 5 as yellow (unknown). Every
     key must be one of the three supported surfaces; the
     ``dict[Literal, int]`` shape pins that at the Pydantic boundary.
+
+    ``baseline_overrides`` is the surface→baseline-metrics mapping the
+    CLI can fill in from a local ``meho retrieval eval --baseline grep``
+    run. Without it, criterion 4 stays yellow for v0.2 production
+    callers because the backplane has no server-side corpus snapshot.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     surface: _RetireRequestSurface = Field(default="all")
     blocker_counts: dict[ChecklistSurface, int] | None = Field(default=None)
-    tenant_filter: UUID | None = Field(default=None)
+    baseline_overrides: dict[ChecklistSurface, BaselineMetricsOverride] | None = Field(
+        default=None,
+    )
 
 
 def _resolve_surfaces(
@@ -163,38 +175,49 @@ def _bind_request_audit_context(
 )
 async def retire_checklist_endpoint(
     body: RetireChecklistRequest,
+    tenant_filter: UUID | None = Query(default=None),
     operator: Operator = _require_operator,
 ) -> RetireChecklistReport:
     """Return the five-criterion retire-decision checklist per surface.
 
     Tenant scoping mirrors the sibling usage route:
     ``operator`` / ``read_only`` callers are scoped to
-    ``operator.tenant_id``; passing a non-null ``tenant_filter``
-    returns 403. Only ``tenant_admin`` may cross tenants. The request
-    body's ``surface=all`` (default) walks every supported surface in
-    the order :data:`SURFACE_VERDICT_ORDER` pins.
+    ``operator.tenant_id``; passing a non-null ``tenant_filter`` query
+    parameter returns 403. Only ``tenant_admin`` may cross tenants.
+    The request body's ``surface=all`` (default) walks every supported
+    surface in the order :data:`SURFACE_VERDICT_ORDER` pins.
 
-    Audit overrides + enrichment contextvars are bound before the
-    service kicks off so a handler exception still produces an audit
-    row with partial payload (incident postmortem hook).
+    Audit overrides + enrichment contextvars are bound **before** the
+    tenant-filter 403 path so the denied request still produces an
+    audit row with the canonical ``op_id`` /
+    ``op_class`` / ``tenant_scope`` payload (the "audit row per call"
+    contract from the issue body holds on every status code). The
+    same overrides also protect the happy-path handler-exception case:
+    a partial payload is itself a useful incident-postmortem signal.
     ``audit_row_count`` is bound after the service returns so the
     broadcast event's ``row_count`` field reflects the number of
     surfaces evaluated, not the underlying audit_log scan size.
     """
-    if body.tenant_filter is not None and operator.tenant_role != TenantRole.TENANT_ADMIN:
+    surfaces = _resolve_surfaces(body.surface)
+
+    # Bind audit overrides **before** any branch that could raise
+    # (the cross-tenant 403, the unknown-surface 422, or the service
+    # call). Reading from the *query* parameter (not the request body)
+    # mirrors the sibling :mod:`~meho_backplane.api.v1.retrieve_usage`
+    # surface so cross-tenant callers use a consistent shape.
+    _bind_request_audit_context(
+        surfaces=surfaces,
+        tenant_filter=tenant_filter,
+        operator_tenant_id=operator.tenant_id,
+    )
+
+    if tenant_filter is not None and operator.tenant_role != TenantRole.TENANT_ADMIN:
         raise HTTPException(
             status_code=403,
             detail="tenant_filter_requires_tenant_admin",
         )
 
-    surfaces = _resolve_surfaces(body.surface)
-    target_tenant = body.tenant_filter if body.tenant_filter is not None else operator.tenant_id
-
-    _bind_request_audit_context(
-        surfaces=surfaces,
-        tenant_filter=body.tenant_filter,
-        operator_tenant_id=operator.tenant_id,
-    )
+    target_tenant = tenant_filter if tenant_filter is not None else operator.tenant_id
 
     # ``blocker_counts`` may carry keys that aren't part of the
     # currently-requested surface scope; Pydantic has already pinned
@@ -223,6 +246,7 @@ async def retire_checklist_endpoint(
             surfaces=surfaces,
             tenant_id=target_tenant,
             blocker_counts=blocker_counts,
+            baseline_overrides=body.baseline_overrides,
         )
 
     structlog.contextvars.bind_contextvars(audit_row_count=len(report.surfaces))

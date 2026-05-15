@@ -492,4 +492,3 @@ func TestRunImportNonexistentFileSurfacesUnexpected(t *testing.T) {
 	// is that the call doesn't panic. Assert on stderr instead.
 	_ = err
 }
-

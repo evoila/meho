@@ -4,36 +4,50 @@
 """G0.7 vSphere canary — end-to-end acceptance for the spec-ingestion pipeline.
 
 This module is the load-bearing acceptance gate for G0.7 (Initiative
-#389, Task #408). It drives the full ingestion pipeline against the
-consumer's real ``vcenter.yaml`` OpenAPI spec (~1275 operations) and
-asserts:
+#389, Task #408) and the two-spec extension (Task #503 under #227 G3.1).
+It drives the full ingestion pipeline against the consumer's real
+vSphere OpenAPI specs -- ``vcenter.yaml`` (~1,275 REST operations) and,
+when configured, ``vi-json.yaml`` (~2,195 Managed-Object operations) --
+both under one connector triple, and asserts:
 
 * The :class:`IngestionPipelineService` (T6, #488) produces
-  ``inserted_count >= 950`` ``endpoint_descriptor`` rows under the
-  ``vmware-rest-9.0`` connector triple ``(product="vmware",
-  version="9.0", impl_id="vmware-rest")``.
-* Every persisted row carries the ``spec:vcenter.yaml`` tag so an
-  operator can later distinguish multi-spec ingest rows.
+  per-spec ``inserted_count`` rows under the ``vmware-rest-9.0``
+  connector triple ``(product="vmware", version="9.0",
+  impl_id="vmware-rest")``: ``>= 1,200`` from ``vcenter.yaml`` and
+  (in two-spec mode) ``>= 2,000`` from ``vi-json.yaml``.
+* Every persisted row carries exactly one ``spec:<source>`` tag so
+  an operator can distinguish per-spec coverage via
+  ``meho connector review``; the two spec sources never share an
+  ``op_id`` (no collision).
+* ``IngestionResult.connector_registered`` is ``True`` on the first
+  ingest call and ``False`` on the second (auto-shim idempotency).
 * The :func:`run_llm_grouping` pass (T3, #485, driven via a
   deterministic stub) produces 8-15 :class:`OperationGroup` rows in
+  single-spec mode and 12-18 in two-spec mode, each in
   ``review_status='staged'`` with non-empty ``when_to_use``.
 * The :class:`ReviewService` (T4, #431) ``edit_group`` flow updates a
   group's ``when_to_use`` and writes one audit row.
 * :meth:`ReviewService.enable_connector` (T4) cascades every staged
   group to ``review_status='enabled'``, every staged op to
   ``is_enabled=True``, and writes one connector-level audit row.
-* The govc-parity benchmark: 7 of 10 representative vSphere
-  operator queries return the canonical operation in the top-3 hits
-  via :func:`search_operations` (T8, #438) over the PG hybrid
-  BM25+cosine RRF ranking. The remaining 3 queries are marked
-  ``xfail`` (non-strict, because pgvector's IVFFlat approximation
-  makes the failure non-deterministic between runs) — they target
-  cardinal operations whose spec descriptions are
-  vendor-schema-heavy and lose to short sub-path descriptions in
-  BM25 ranking. The xfail markers + follow-up tickets (T3 per-op
-  ``llm_instructions``, spec description-quality polish) make the
-  gap visible and tracked rather than silently absorbed. See *Known
-  gaps* in ``docs/cross-repo/g07-vsphere-canary.md``.
+* The govc-parity benchmark: 10 of 13 representative vSphere
+  operator queries (10 ``vcenter.yaml`` + 3 ``vi-json.yaml``) return
+  the canonical operation in the top-3 hits via
+  :func:`search_operations` (T8, #438) over the PG hybrid
+  BM25+cosine RRF ranking. The three failing queries (all vcenter
+  cardinal ops) are marked ``xfail`` (non-strict, because pgvector's
+  IVFFlat approximation makes the failure non-deterministic between
+  runs) — they target cardinal operations whose spec descriptions
+  are vendor-schema-heavy and lose to short sub-path descriptions in
+  BM25 ranking. The three vi-json queries skip in single-spec mode
+  and are NOT marked xfail in two-spec mode (their target ops carry
+  descriptive method names like ``RevertToSnapshot_Task`` that BM25
+  picks up cleanly). See *Known gaps* in
+  ``docs/cross-repo/g07-vsphere-canary.md``.
+* A vi-json ``{moId}`` path substitutes cleanly through the
+  production dispatcher helper
+  :func:`meho_backplane.operations._branches._substitute_path` without
+  special-casing.
 
 The benchmark is parametrised so every (query, expected_op_id) pair
 runs as its own test case in CI's report.
@@ -61,22 +75,37 @@ index 661. The govc-parity benchmark therefore requires the PG path,
 which means the test fixture is the testcontainers-backed
 ``pg_engine`` (re-exported here from ``tests/integration/conftest.py``).
 
-Why this canary stays ``vcenter.yaml``-only after T11
-=====================================================
+Two-spec ingest (vcenter.yaml + vi-json.yaml)
+=============================================
 
-T11 (#501) extended the T1 parser to resolve
-``$ref: '#/components/parameters/*'`` so the second vSphere spec
-corpus, ``vi-json.yaml`` (~2,195 Managed Object operations), now
-parses end-to-end. The parser smoke test lives at
-``tests/integration/test_operations_ingest_vi_json.py``. Full
-ingestion (~2,195 rows persisted under
-``connector_id="vmware-rest-9.0"``, LLM-grouping pass on
-PerformanceManager / EventManager / managed-object families, operator
-review + enable cascade, benchmark expansion with vi-json queries) is
-the consumer work tracked under #227 G3.1 T3, not this canary. The
-canary deliberately stays focused on the REST-automation surface
-(``vcenter.yaml``, ~1,275 operations) so the acceptance gate's
-~5 s ingest budget and 10-query benchmark stay fast.
+After T11 (#501) extended the T1 parser to resolve
+``$ref: '#/components/parameters/*'``, the canary drives the **full**
+v0.2 vSphere ingest under one connector triple: ``vcenter.yaml``
+(~1,275 REST automation operations) AND ``vi-json.yaml`` (~2,195
+Managed-Object operations), both under
+``connector_id="vmware-rest-9.0"``. The two-spec ingest is the
+operator-visible v0.2 milestone for connector parity per [#227]'s
+"Definition of done" and the standing acceptance proof that the
+multi-spec path through :class:`IngestionPipelineService` is safe
+to run in production.
+
+Per-spec assertions distinguish "this op came from vcenter.yaml" vs
+"this op came from vi-json.yaml" via the ``spec:<source>`` tag the
+parser stamps onto every row; the same tag is what
+``meho connector review`` shows the operator. ``connector_registered``
+is ``True`` on the first :meth:`IngestionPipelineService.ingest` call
+(the auto-shim registration fires) and ``False`` on the second
+(idempotent re-call against the same triple) — the per-call
+ingestion result is captured separately so the canary can prove
+both branches of the auto-shim contract.
+
+Backwards-compat with single-spec CI matrix: when only the
+``MEHO_VCENTER_OPENAPI_VCENTER`` env var resolves (and not
+``MEHO_VCENTER_OPENAPI_VI_JSON``), the second-spec ingest call is
+skipped + the two-spec-only assertions skip while the single-spec
+assertions still run. The CI matrix where both env vars are set
+exercises the production two-spec ingest; the single-spec matrix
+keeps the existing acceptance gate green during the rollout.
 
 Why the LLM client is stubbed by default
 ========================================
@@ -113,6 +142,7 @@ from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations._branches import _substitute_path
 from meho_backplane.operations.ingest import (
     IngestionPipelineService,
     ReviewService,
@@ -128,6 +158,7 @@ from meho_backplane.settings import get_settings
 from tests.acceptance._vcenter_spec import (
     VCENTER_SPEC_REASON,
     resolve_vcenter_yaml,
+    resolve_vi_json_yaml,
 )
 
 # ---------------------------------------------------------------------------
@@ -154,33 +185,46 @@ _CANARY_IMPL_ID: str = "vmware-rest"
 _CANARY_CONNECTOR_ID: str = f"{_CANARY_IMPL_ID}-{_CANARY_VERSION}"
 
 #: Minimum number of operations the parser must emit from ``vcenter.yaml``.
-#: The full-spec count is ~1275 on the consumer's current shelf; the
-#: floor mirrors the unit-suite integration test's "at least 950"
-#: contract (``tests/integration/test_operations_ingest_vcenter.py``)
-#: so a vendor renaming a handful of paths between releases doesn't
-#: regress the acceptance signal.
-_MIN_OPERATION_COUNT: int = 950
+#: The full-spec count is ~1,275 on the consumer's current shelf;
+#: tightened from the original 950 (set conservatively for the single-spec
+#: ship) now that the canary is stable.
+_MIN_VCENTER_OPERATION_COUNT: int = 1200
+
+#: Minimum number of operations the parser must emit from ``vi-json.yaml``.
+#: The full-spec count is ~2,195 Managed-Object operations on the
+#: consumer's current shelf.
+_MIN_VI_JSON_OPERATION_COUNT: int = 2000
+
+#: Backwards-compat alias for the combined / single-spec floor used by
+#: assertions that don't care whether the rows came from vcenter or
+#: vi-json. When only ``MEHO_VCENTER_OPENAPI_VCENTER`` is set, the
+#: aggregate count is the vcenter floor; when both env vars are set,
+#: the aggregate count is at least the sum.
+_MIN_OPERATION_COUNT: int = _MIN_VCENTER_OPERATION_COUNT
 
 #: Hard cap on the number of LLM-grouping batches the stub will serve.
-#: ``1 + ceil(1275 / 50) = 27`` for the full corpus; the cap is a
-#: defence against an unbounded loop if the grouping pass is ever
-#: refactored to re-call after partial completion.
-_MAX_STUB_LLM_CALLS: int = 64
+#: With both specs configured the worst case is
+#: ``1 + ceil(1275 / 50) + ceil(2195 / 50) = 1 + 26 + 44 = 71`` calls
+#: across the two-pass / two-ingest sequence; the cap is a defence
+#: against an unbounded loop if the grouping pass is ever refactored
+#: to re-call after partial completion.
+_MAX_STUB_LLM_CALLS: int = 128
 
-#: Govc-parity benchmark — the 10 (query, expected_op_id) pairs the
+#: Govc-parity benchmark — the (query, expected_op_id) pairs the
 #: canary asserts. Each query is a natural-language phrase an
 #: experienced vSphere operator might type; the expected ``op_id`` is
-#: the canonical match for that workflow in the parsed
-#: ``vcenter.yaml`` corpus. Top-3 ranking is asserted via
-#: :func:`search_operations` over the PG hybrid BM25 + cosine RRF
-#: index.
+#: the canonical match for that workflow in the parsed corpus. Top-3
+#: ranking is asserted via :func:`search_operations` over the PG
+#: hybrid BM25 + cosine RRF index.
 #:
-#: Two queries that the task body originally specified against
-#: ``vi-json.yaml`` (``govc snapshot.revert`` -> RevertToSnapshot_Task,
-#: ``govc events`` -> EventManager.QueryEvents) are not included
-#: until vi-json ingestion lands (see module docstring); their
-#: replacements ("list datacenters", "list hosts") still exercise
-#: the same retrieval shape.
+#: The first 10 entries target ``vcenter.yaml``; the last 3 target
+#: ``vi-json.yaml`` Managed-Object operations (snapshot revert, event
+#: tail, performance metrics). The vi-json entries skip in
+#: parametrised test cases when only the vcenter env var resolves —
+#: see :data:`_VI_JSON_BENCHMARK_QUERIES`.
+#:
+#: Three queries are marked ``xfail`` (non-strict) — see
+#: :data:`_XFAIL_BENCHMARK_QUERIES`.
 GOVC_PARITY_BENCHMARK: tuple[tuple[str, str], ...] = (
     ("list virtual machines", "GET:/vcenter/vm"),
     ("list clusters", "GET:/vcenter/cluster"),
@@ -192,6 +236,32 @@ GOVC_PARITY_BENCHMARK: tuple[tuple[str, str], ...] = (
     ("power off virtual machine", "POST:/vcenter/vm/{vm}/power?action=stop"),
     ("create login session", "POST:/session"),
     ("get virtual machine info", "GET:/vcenter/vm/{vm}"),
+    # vi-json Managed-Object operations. The path shape comes from the
+    # parsed vi-json.yaml corpus (``/<ManagedObjectType>/{moId}/<Method>``
+    # with no server-prefix). These queries target ops with descriptive
+    # method names — ``RevertToSnapshot_Task`` literally contains
+    # "revert" and "snapshot"; ``QueryEvents`` contains "events";
+    # ``QueryPerf`` contains "perf"/"performance". They should rank
+    # top-3 cleanly without xfail discipline. If the first run finds
+    # any of them under-ranking, the canary surfaces the failure
+    # rather than silently absorbing it via xfail (see the
+    # *Acceptance criteria* in #503).
+    ("revert vsphere snapshot", "POST:/VirtualMachine/{moId}/RevertToSnapshot_Task"),
+    ("tail vsphere events", "POST:/EventManager/{moId}/QueryEvents"),
+    ("get vm performance metrics", "POST:/PerformanceManager/{moId}/QueryPerf"),
+)
+
+#: Subset of :data:`GOVC_PARITY_BENCHMARK` queries that target the
+#: ``vi-json.yaml`` corpus. Parametrised tests for these queries skip
+#: when only the ``MEHO_VCENTER_OPENAPI_VCENTER`` env var resolves
+#: (single-spec CI matrix); the corresponding ops only exist in the
+#: descriptor table after the two-spec ingest path runs.
+_VI_JSON_BENCHMARK_QUERIES: frozenset[str] = frozenset(
+    {
+        "revert vsphere snapshot",
+        "tail vsphere events",
+        "get vm performance metrics",
+    },
 )
 
 #: Queries the canary has measured fail against the current
@@ -251,10 +321,16 @@ class _PathPrefixStubLlmClient:
     ``1 + ceil(op_count / batch_size)``.
     """
 
-    # Static Pass-1 group taxonomy. Eight groups, snake_case keys,
-    # paragraph-length when_to_use descriptions — same shape as the
-    # T3 unit-test fixture but tuned to the families that actually
-    # appear in the parsed vcenter.yaml corpus.
+    # Static Pass-1 group taxonomy. The first eight entries are the
+    # vcenter.yaml families the single-spec canary shipped with; the
+    # last six cover vi-json.yaml's Managed-Object surface (per-MO
+    # method calls accessed via ``/<ManagedObjectType>/{moId}/<Method>``
+    # paths). Pass-1 runs exactly once during the two-spec ingest --
+    # against the first ``ingest()`` call's unassigned-op set, which
+    # carries only vcenter ops -- so the static taxonomy must declare
+    # the vi-json groups up front. The second ``ingest()`` call's
+    # partial-regrouping path picks up these same keys verbatim when
+    # Pass-2 classifies vi-json ops.
     _PROPOSE_RESPONSE: str = json.dumps(
         [
             {
@@ -331,13 +407,82 @@ class _PathPrefixStubLlmClient:
                     "system update, support bundles."
                 ),
             },
+            # vi-json (Managed-Object) families. Each one covers a
+            # canonical ManagedObjectType from the vi-json.yaml corpus.
+            {
+                "group_key": "performance",
+                "name": "Performance Manager",
+                "when_to_use": (
+                    "Use these operations when the operator is querying "
+                    "PerformanceManager -- counter discovery, per-entity "
+                    "metric samples, available perf metric IDs. Covers the "
+                    "performance-monitoring surface vi-json exposes that "
+                    "the modern REST automation API does not."
+                ),
+            },
+            {
+                "group_key": "events",
+                "name": "Event Manager",
+                "when_to_use": (
+                    "Use when the operator is reading or filtering vCenter "
+                    "events via EventManager -- recent events, historical "
+                    "tail, event filters. The govc events surface lives "
+                    "here."
+                ),
+            },
+            {
+                "group_key": "vm-managed-objects",
+                "name": "Virtual Machine (Managed Object)",
+                "when_to_use": (
+                    "Use for per-VM Managed-Object method calls -- "
+                    "snapshot revert, reconfigure, power state mutation, "
+                    "guest-OS operations that the vi-json surface exposes "
+                    "alongside the REST automation API."
+                ),
+            },
+            {
+                "group_key": "host-managed-objects",
+                "name": "Host System (Managed Object)",
+                "when_to_use": (
+                    "Use for per-host Managed-Object method calls -- "
+                    "network configuration atomic mutations, maintenance "
+                    "mode transitions, host-system reconfiguration that "
+                    "vi-json exposes."
+                ),
+            },
+            {
+                "group_key": "cluster-managed-objects",
+                "name": "Cluster Compute Resource (Managed Object)",
+                "when_to_use": (
+                    "Use for per-cluster Managed-Object method calls -- "
+                    "DRS recommendation queries, vMotion topology, "
+                    "cluster-level reconfiguration via the VIM surface."
+                ),
+            },
+            {
+                "group_key": "datastore-managed-objects",
+                "name": "Datastore (Managed Object)",
+                "when_to_use": (
+                    "Use for per-datastore Managed-Object method calls -- "
+                    "datastore browse, file-level operations, datastore "
+                    "host-mount reconfiguration via vi-json."
+                ),
+            },
         ],
     )
 
     # Path-prefix to group-key rules. Each entry's prefix is matched
     # against an op's path; the first match wins. Order matters --
     # specific prefixes first so `/vcenter/vm/...` doesn't trigger
-    # the broader `/vcenter/` fallback if such a rule were added.
+    # the broader `/vcenter/` fallback if such a rule were added. The
+    # first eight rules cover vcenter.yaml's families; the rest cover
+    # the high-traffic ManagedObjectType prefixes in vi-json.yaml.
+    # vi-json paths start at the ManagedObject root (no
+    # ``/vcenter/`` prefix), so there's no namespace overlap with the
+    # vcenter rules. Unmatched ManagedObjects fall through to ``none``
+    # -- the canary's ``operations_unassigned < 50%`` bar tolerates
+    # this; the eight named MO families capture the operationally
+    # important methods.
     _PATH_RULES: tuple[tuple[str, str], ...] = (
         ("/vcenter/vm", "vm"),
         ("/vcenter/cluster", "cluster"),
@@ -347,6 +492,12 @@ class _PathPrefixStubLlmClient:
         ("/vcenter/host", "host"),
         ("/session", "session"),
         ("/appliance/", "appliance"),
+        ("/PerformanceManager", "performance"),
+        ("/EventManager", "events"),
+        ("/VirtualMachine", "vm-managed-objects"),
+        ("/HostSystem", "host-managed-objects"),
+        ("/ClusterComputeResource", "cluster-managed-objects"),
+        ("/Datastore", "datastore-managed-objects"),
     )
 
     # Regex to recover op_ids from the rendered Pass-2 prompt. The
@@ -382,8 +533,8 @@ class _PathPrefixStubLlmClient:
         if len(self.calls) >= _MAX_STUB_LLM_CALLS:
             raise AssertionError(
                 f"stub LLM client served {len(self.calls)} calls; cap is "
-                f"{_MAX_STUB_LLM_CALLS} (the canary should never need more "
-                "than 1 + ceil(1275/50) = 27)",
+                f"{_MAX_STUB_LLM_CALLS} (worst-case for two-spec mode is "
+                "1 + ceil(1275/50) + ceil(2195/50) = 71)",
             )
         self.calls.append(
             {
@@ -542,23 +693,74 @@ def vcenter_spec_path() -> Path:
 
 
 @pytest.fixture
+def vi_json_spec_path() -> Path | None:
+    """Return the local path to vi-json.yaml, or ``None`` if unconfigured.
+
+    Does NOT skip the suite when unconfigured -- the canary's two-spec
+    assertions skip individually while the single-spec assertions
+    continue to run (preserving the existing CI matrix behaviour where
+    only ``MEHO_VCENTER_OPENAPI_VCENTER`` was set).
+    """
+    return resolve_vi_json_yaml()
+
+
+class _CanaryIngestState:
+    """Bundle of per-spec :class:`IngestionPipelineResult`s + the stub LLM client.
+
+    Returned by the :func:`ingested_canary` fixture so tests can
+    distinguish "this row came from vcenter.yaml" vs "from vi-json.yaml"
+    via the :attr:`vcenter_result` / :attr:`vi_json_result` pair, while
+    keeping :attr:`stub_client` available for the LLM-call-count
+    assertions. ``vi_json_result`` is ``None`` in single-spec mode
+    (``MEHO_VCENTER_OPENAPI_VI_JSON`` unset) so dependent tests can
+    skip rather than fail.
+    """
+
+    __slots__ = ("stub_client", "two_spec_mode", "vcenter_result", "vi_json_result")
+
+    def __init__(
+        self,
+        *,
+        stub_client: _PathPrefixStubLlmClient,
+        vcenter_result: Any,
+        vi_json_result: Any | None,
+    ) -> None:
+        self.stub_client = stub_client
+        self.vcenter_result = vcenter_result
+        self.vi_json_result = vi_json_result
+        self.two_spec_mode = vi_json_result is not None
+
+
+@pytest.fixture
 async def ingested_canary(
     vcenter_spec_path: Path,
+    vi_json_spec_path: Path | None,
     canary_operator: Operator,
     stub_embedding_service: Any,
     pg_engine: None,
-) -> AsyncIterator[_PathPrefixStubLlmClient]:
-    """Drive the full ingest -> review -> enable pipeline once per test session.
+) -> AsyncIterator[_CanaryIngestState]:
+    """Drive the full two-spec ingest -> review -> enable pipeline per test.
 
-    Module-scoped state could amortise the ~5-second ingest across
-    every parametrised benchmark case, but module-scope fixtures fight
-    with the function-scoped ``pg_engine`` (which truncates tables
-    between tests). The pragmatic choice is to re-run the ingest per
-    test: 5 seconds * 11 tests = ~55 s wall clock, well inside CI's
-    per-suite budget.
+    Runs :meth:`IngestionPipelineService.ingest` once with
+    ``vcenter.yaml`` and -- when configured -- a second time with
+    ``vi-json.yaml`` under the same connector triple. The second call
+    exercises the auto-shim idempotency branch
+    (``connector_registered=False``) plus the LLM-grouping pass's
+    partial-regrouping path (Pass 1 skipped, Pass 2 assigns the new
+    ops to the existing taxonomy).
 
-    Returns the stub LLM client so the parametrised tests can assert
-    on its :attr:`calls` list.
+    Module-scoped state could amortise the ingest across every
+    parametrised benchmark case, but module-scope fixtures fight with
+    the function-scoped ``pg_engine`` (which truncates tables between
+    tests). The pragmatic choice is to re-run the ingest per test;
+    even with the larger two-spec corpus the wall-clock budget stays
+    inside CI's per-suite envelope.
+
+    Single-spec fall-back: if ``MEHO_VCENTER_OPENAPI_VI_JSON`` is
+    unset, only the vcenter ingest runs. The state's
+    :attr:`_CanaryIngestState.two_spec_mode` flag is ``False`` and
+    two-spec-only tests skip individually -- existing single-spec
+    assertions continue to run.
     """
     stub_client = _PathPrefixStubLlmClient()
     # Wire the production embedding service in: the canary's
@@ -572,13 +774,30 @@ async def ingested_canary(
         embedding_service=stub_embedding_service,
     )
 
-    await service.ingest(
+    vcenter_result = await service.ingest(
         product=_CANARY_PRODUCT,
         version=_CANARY_VERSION,
         impl_id=_CANARY_IMPL_ID,
         specs=[SpecSource(uri=str(vcenter_spec_path))],
         tenant_id=_CANARY_TENANT_ID,
     )
+
+    vi_json_result: Any | None = None
+    if vi_json_spec_path is not None:
+        # Two separate ``ingest()`` calls (rather than one call with
+        # ``specs=[a, b]``) so each spec's per-call
+        # ``connector_registered`` flag is observable: the first
+        # registers the shim (``True``); the second sees the existing
+        # shim (``False``). The same connector triple is preserved
+        # so the LLM-grouping pass's partial-regrouping branch runs
+        # against the vi-json ops the second time.
+        vi_json_result = await service.ingest(
+            product=_CANARY_PRODUCT,
+            version=_CANARY_VERSION,
+            impl_id=_CANARY_IMPL_ID,
+            specs=[SpecSource(uri=str(vi_json_spec_path))],
+            tenant_id=_CANARY_TENANT_ID,
+        )
 
     # Operator review: edit one group's when_to_use to prove the
     # T4 edit_group flow works against an ingested connector.
@@ -604,7 +823,11 @@ async def ingested_canary(
         tenant_id=_CANARY_TENANT_ID,
     )
 
-    yield stub_client
+    yield _CanaryIngestState(
+        stub_client=stub_client,
+        vcenter_result=vcenter_result,
+        vi_json_result=vi_json_result,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -613,64 +836,134 @@ async def ingested_canary(
 
 
 async def test_canary_ingest_meets_operation_count(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
 ) -> None:
-    """≥950 ``endpoint_descriptor`` rows persisted under the canary connector.
+    """Ingest meets the per-spec floors under the canary connector.
 
-    Replaces the issue body's nominal "≥3000 rows (961 + 2195)"
-    contract with the realistic floor for the vcenter.yaml-only
-    canary (vi-json ingestion is blocked on T1's parameter-ref gap;
-    see module docstring). The floor matches the existing
-    ``tests/integration/test_operations_ingest_vcenter.py`` contract
-    so a vendor renaming a handful of paths between releases doesn't
-    regress this acceptance signal.
+    Single-spec mode: ``inserted_count >= 1200`` against ``vcenter.yaml``
+    (tightened from the original 950 set conservatively for the first
+    ship of #408 -- the canary is stable enough for the realistic
+    floor now). Two-spec mode: vcenter floor still holds and an
+    additional ``vi-json.yaml`` floor of ``>= 2000`` is asserted; the
+    aggregate row count is ``>= ~3,200``.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         row_count = await _count_endpoint_rows(session)
-    assert row_count >= _MIN_OPERATION_COUNT, (
-        f"ingest produced {row_count} rows; acceptance floor is {_MIN_OPERATION_COUNT}"
+
+    if ingested_canary.two_spec_mode:
+        expected_floor = _MIN_VCENTER_OPERATION_COUNT + _MIN_VI_JSON_OPERATION_COUNT
+    else:
+        expected_floor = _MIN_VCENTER_OPERATION_COUNT
+    assert row_count >= expected_floor, (
+        f"ingest produced {row_count} rows; acceptance floor is {expected_floor}"
     )
+
+    # Per-spec inserted_count assertions: the vcenter ingest result
+    # is always available; the vi-json result is only checked in
+    # two-spec mode.
+    assert (
+        ingested_canary.vcenter_result.ingestion.inserted_count >= _MIN_VCENTER_OPERATION_COUNT
+    ), (
+        f"vcenter ingest produced "
+        f"{ingested_canary.vcenter_result.ingestion.inserted_count} rows; "
+        f"floor is {_MIN_VCENTER_OPERATION_COUNT}"
+    )
+    if ingested_canary.two_spec_mode:
+        assert ingested_canary.vi_json_result is not None  # narrow for mypy
+        assert (
+            ingested_canary.vi_json_result.ingestion.inserted_count >= _MIN_VI_JSON_OPERATION_COUNT
+        ), (
+            f"vi-json ingest produced "
+            f"{ingested_canary.vi_json_result.ingestion.inserted_count} rows; "
+            f"floor is {_MIN_VI_JSON_OPERATION_COUNT}"
+        )
 
 
 async def test_canary_every_row_tagged_with_spec_source(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
 ) -> None:
-    """Every persisted row carries the ``spec:<uri>`` tag injected by T2."""
+    """Every persisted row carries the ``spec:<uri>`` tag injected by T2.
+
+    Single-spec mode: every row carries a ``spec:<...>vcenter.yaml``
+    tag. Two-spec mode: vcenter-sourced rows carry the vcenter tag,
+    vi-json-sourced rows carry the vi-json tag, every row carries
+    exactly one ``spec:`` tag, and the two spec sources never share
+    an ``op_id`` (asserted explicitly to catch collision regressions).
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        stmt = select(EndpointDescriptor.tags).where(
+        stmt = select(EndpointDescriptor.op_id, EndpointDescriptor.tags).where(
             EndpointDescriptor.product == _CANARY_PRODUCT,
             EndpointDescriptor.version == _CANARY_VERSION,
             EndpointDescriptor.impl_id == _CANARY_IMPL_ID,
         )
         result = await session.execute(stmt)
-        # Each row's tags are a list[str]; the spec_source the
-        # pipeline passes (``str(spec_path)``) is the absolute path
-        # to vcenter.yaml. Asserting on its presence requires
-        # matching the actual URI rather than a literal string.
-        row_tags = list(result.scalars().all())
-    assert row_tags, "no rows returned from canary connector"
-    # Pull the spec uri from any one row -- they all carry the same
-    # spec_source by construction (single-spec ingest).
-    sample_tags = row_tags[0]
-    spec_uri_tags = [t for t in sample_tags if t.endswith("vcenter.yaml")]
-    assert spec_uri_tags, (
-        f"sample row's tags {sample_tags} missing the vcenter.yaml spec_source tag"
+        rows = list(result.all())
+    assert rows, "no rows returned from canary connector"
+
+    # The pipeline tags each row with ``spec:<absolute path>``; the
+    # path's basename is the load-bearing identifier the operator and
+    # this test key off.
+    vcenter_op_ids: set[str] = set()
+    vi_json_op_ids: set[str] = set()
+    for op_id, tags in rows:
+        spec_tags = [t for t in tags if t.startswith("spec:")]
+        # Exactly one ``spec:`` tag per row -- the multi-spec merge
+        # never duplicates the tag, even on partial-regrouping recall.
+        assert len(spec_tags) == 1, (
+            f"row {op_id!r}: expected exactly one spec: tag, got {spec_tags}"
+        )
+        spec_tag = spec_tags[0]
+        if spec_tag.endswith("vcenter.yaml"):
+            vcenter_op_ids.add(op_id)
+        elif spec_tag.endswith("vi-json.yaml"):
+            vi_json_op_ids.add(op_id)
+        else:  # pragma: no cover -- defensive
+            raise AssertionError(
+                f"row {op_id!r}: spec tag {spec_tag!r} matches neither "
+                "vcenter.yaml nor vi-json.yaml"
+            )
+
+    assert vcenter_op_ids, "no rows tagged spec:<...>vcenter.yaml"
+    assert len(vcenter_op_ids) >= _MIN_VCENTER_OPERATION_COUNT, (
+        f"vcenter-tagged row count {len(vcenter_op_ids)} below floor {_MIN_VCENTER_OPERATION_COUNT}"
     )
-    # And every row carries the same tag set member.
-    expected_spec_tag = spec_uri_tags[0]
-    for tags in row_tags[:50]:  # bounded for cost; tagging is uniform.
-        assert expected_spec_tag in tags, (
-            f"row tags {tags} missing spec source tag {expected_spec_tag!r}"
+
+    if ingested_canary.two_spec_mode:
+        assert vi_json_op_ids, "two-spec mode but no rows tagged spec:<...>vi-json.yaml"
+        assert len(vi_json_op_ids) >= _MIN_VI_JSON_OPERATION_COUNT, (
+            f"vi-json-tagged row count {len(vi_json_op_ids)} below floor "
+            f"{_MIN_VI_JSON_OPERATION_COUNT}"
+        )
+        # No op_id collision between the two spec sources. The cross-call
+        # collision check in register_ingested_operations() would have
+        # raised OpIdCollision at ingest time; this guards against a
+        # silent UPDATE branch slipping in.
+        overlap = vcenter_op_ids & vi_json_op_ids
+        assert not overlap, (
+            f"op_id collision between vcenter.yaml and vi-json.yaml: {sorted(overlap)[:5]}..."
+        )
+    else:
+        assert not vi_json_op_ids, (
+            "single-spec mode but found vi-json-tagged rows -- did a previous "
+            "test session bleed state across the truncate?"
         )
 
 
-async def test_canary_grouping_produces_eight_to_fifteen_groups(
-    ingested_canary: _PathPrefixStubLlmClient,
+async def test_canary_grouping_produces_expected_group_count(
+    ingested_canary: _CanaryIngestState,
 ) -> None:
-    """Grouping pass produces 8-15 groups, each with non-empty ``when_to_use``."""
+    """Grouping pass produces the expected number of groups for the mode.
+
+    Single-spec mode: 8-15 vcenter-family groups. Two-spec mode:
+    12-18 groups, covering both the vcenter families and the
+    vi-json Managed-Object families. Each group must have a non-empty
+    ``name`` and ``when_to_use``. The static stub's taxonomy declares
+    all 14 groups up front (see :attr:`_PathPrefixStubLlmClient._PROPOSE_RESPONSE`)
+    so vi-json's partial-regrouping path finds the keys it needs.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         stmt = select(OperationGroup).where(
@@ -680,8 +973,15 @@ async def test_canary_grouping_produces_eight_to_fifteen_groups(
         )
         result = await session.execute(stmt)
         groups = list(result.scalars().all())
-    assert 8 <= len(groups) <= 15, (
-        f"grouping produced {len(groups)} groups; acceptance window is [8, 15]"
+
+    if ingested_canary.two_spec_mode:
+        lower, upper = 12, 18
+    else:
+        lower, upper = 8, 15
+    assert lower <= len(groups) <= upper, (
+        f"grouping produced {len(groups)} groups; acceptance window for "
+        f"{'two-spec' if ingested_canary.two_spec_mode else 'single-spec'} "
+        f"mode is [{lower}, {upper}]"
     )
     for group in groups:
         assert group.name and group.name.strip(), f"group {group.group_key!r} has empty name"
@@ -691,7 +991,7 @@ async def test_canary_grouping_produces_eight_to_fifteen_groups(
 
 
 async def test_canary_connector_is_enabled_after_review(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
 ) -> None:
     """After ``enable_connector``, every group is ``review_status='enabled'``."""
     sessionmaker = get_sessionmaker()
@@ -710,7 +1010,7 @@ async def test_canary_connector_is_enabled_after_review(
 
 
 async def test_canary_edit_group_writes_audit_row(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
 ) -> None:
     """The ``edit_group`` call during ingest emits one ``meho.connector.edit_group`` audit row."""
     sessionmaker = get_sessionmaker()
@@ -735,7 +1035,7 @@ async def test_canary_edit_group_writes_audit_row(
 
 
 async def test_canary_list_operation_groups_returns_enabled_groups(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
 ) -> None:
     """``list_operation_groups`` surfaces every enabled group with a non-empty hint."""
@@ -745,16 +1045,41 @@ async def test_canary_list_operation_groups_returns_enabled_groups(
     )
     assert response["connector_id"] == _CANARY_CONNECTOR_ID
     groups = response["groups"]
-    assert 8 <= len(groups) <= 15, f"got {len(groups)} groups"
+    if ingested_canary.two_spec_mode:
+        lower, upper = 12, 18
+    else:
+        lower, upper = 8, 15
+    assert lower <= len(groups) <= upper, f"got {len(groups)} groups"
+    total_ops_via_groups = 0
+    populated_groups = 0
     for entry in groups:
         assert entry["group_key"], entry
         assert entry["when_to_use"], entry
-        # Every enabled group has > 0 enabled ops after the cascade.
-        assert entry["operation_count"] > 0, entry
+        # Operation count must be non-negative; in two-spec mode the
+        # static 14-group stub taxonomy covers both surfaces so every
+        # group has at least one op. In single-spec mode the six
+        # vi-json families are declared but unpopulated -- the stub's
+        # Pass-1 response is static so the proposal is the same in
+        # both modes.
+        assert entry["operation_count"] >= 0, entry
+        total_ops_via_groups += entry["operation_count"]
+        if entry["operation_count"] > 0:
+            populated_groups += 1
+    # At least 8 groups must carry ops (the vcenter family floor); the
+    # aggregate must clear the per-mode operation-count floor.
+    assert populated_groups >= 8, (
+        f"only {populated_groups} groups have any enabled ops; expected at least 8"
+    )
+    if ingested_canary.two_spec_mode:
+        # vi-json adds at least the six MO families on top of the
+        # eight vcenter families -- expect every group populated.
+        assert populated_groups == len(groups), (
+            f"two-spec mode but {len(groups) - populated_groups} group(s) have zero ops"
+        )
 
 
 async def test_canary_list_ingested_connectors_surfaces_vmware_rest(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
 ) -> None:
     """``meho connector list`` (via :func:`list_ingested_connectors`) shows the canary connector.
@@ -789,7 +1114,12 @@ async def test_canary_list_ingested_connectors_surfaces_vmware_rest(
     )
     assert canary.staged_group_count == 0
     assert canary.disabled_group_count == 0
-    assert canary.operation_count >= _MIN_OPERATION_COUNT
+    expected_op_floor = (
+        _MIN_VCENTER_OPERATION_COUNT + _MIN_VI_JSON_OPERATION_COUNT
+        if ingested_canary.two_spec_mode
+        else _MIN_VCENTER_OPERATION_COUNT
+    )
+    assert canary.operation_count >= expected_op_floor
 
 
 def _benchmark_params() -> list[Any]:
@@ -850,12 +1180,12 @@ def _benchmark_params() -> list[Any]:
     _benchmark_params(),
 )
 async def test_canary_govc_parity_benchmark(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
     query: str,
     expected_op_id: str,
 ) -> None:
-    """For each of the 10 representative vSphere workflows, the canonical op ranks top-3.
+    """For each representative vSphere workflow, the canonical op ranks top-3.
 
     Drives :func:`search_operations` over the PG hybrid BM25 +
     pgvector cosine RRF index built by migration ``0005``. The
@@ -865,7 +1195,16 @@ async def test_canary_govc_parity_benchmark(
     The agent's flow is "narrow to a group, then call_operation on
     the top hit" — top-3 visibility on the canonical op is what
     makes that flow correct in practice.
+
+    vi-json benchmark queries skip in single-spec mode -- their
+    expected op_ids only exist in the descriptor table after the
+    two-spec ingest runs.
     """
+    if query in _VI_JSON_BENCHMARK_QUERIES and not ingested_canary.two_spec_mode:
+        pytest.skip(
+            f"vi-json benchmark query {query!r} requires both vcenter.yaml and "
+            "vi-json.yaml to be configured (MEHO_VCENTER_OPENAPI_VI_JSON unset)"
+        )
     response = await search_operations(
         canary_operator,
         {
@@ -883,7 +1222,7 @@ async def test_canary_govc_parity_benchmark(
 
 
 async def test_canary_search_operations_respects_connector_scope(
-    ingested_canary: _PathPrefixStubLlmClient,
+    ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
 ) -> None:
     """Searching an unknown connector returns an empty hit list, not an error."""
@@ -897,27 +1236,192 @@ async def test_canary_search_operations_respects_connector_scope(
     assert response["hits"] == [], response
 
 
-async def test_canary_llm_call_count_matches_documented_contract(
-    ingested_canary: _PathPrefixStubLlmClient,
-) -> None:
-    """LLM call count = ``1 + ceil(op_count / batch_size)``.
+# ---------------------------------------------------------------------------
+# Two-spec acceptance assertions (skip when only vcenter.yaml is configured)
+# ---------------------------------------------------------------------------
 
-    With ~1275 ops + the default batch size of 50, the grouping pass
-    issues 1 Pass-1 call + 26 Pass-2 batches = 27 calls. The exact
-    number depends on the parsed op count for the consumer's current
-    vcenter.yaml; the assertion is bounded to a sensible range to
-    survive minor spec churn.
+
+async def test_canary_two_spec_connector_registered_flag(
+    ingested_canary: _CanaryIngestState,
+) -> None:
+    """Auto-shim idempotency: ``connector_registered=True`` then ``False``.
+
+    The first :meth:`IngestionPipelineService.ingest` call against the
+    ``(product, version, impl_id)`` triple registers a
+    ``GenericRestConnector`` shim in the v2 connector registry; the
+    second call (same triple, different spec) sees the existing shim
+    and returns ``connector_registered=False``. The per-call
+    ``IngestionResult`` makes this branch observable -- the
+    aggregate-OR rolling in the response model would lose the signal.
     """
-    call_count = len(ingested_canary.calls)
-    # Pass-1 is exactly one call by construction.
-    propose_calls = [c for c in ingested_canary.calls if c["phase"] == "propose"]
+    if not ingested_canary.two_spec_mode:
+        pytest.skip(
+            "vi-json.yaml not configured; the connector_registered idempotency "
+            "branch only fires on the second ingest call (MEHO_VCENTER_OPENAPI_VI_JSON unset)"
+        )
+    assert ingested_canary.vcenter_result.ingestion.connector_registered is True, (
+        "first ingest (vcenter.yaml) did not register the GenericRestConnector shim"
+    )
+    assert ingested_canary.vi_json_result is not None  # narrowing
+    assert ingested_canary.vi_json_result.ingestion.connector_registered is False, (
+        "second ingest (vi-json.yaml) re-registered the shim -- the auto-shim "
+        "should detect the existing registration and short-circuit"
+    )
+
+
+async def test_canary_two_spec_grouping_unassigned_ratio(
+    ingested_canary: _CanaryIngestState,
+) -> None:
+    """``operations_unassigned / inserted_count < 50%`` for the combined ingest.
+
+    The static 14-group taxonomy covers both vcenter and vi-json
+    families; the path-prefix classifier in
+    :class:`_PathPrefixStubLlmClient._classify` matches every vcenter
+    family explicitly and the six largest vi-json ManagedObjectTypes.
+    Remaining vi-json ops (smaller MO families: AlarmManager,
+    HostNetworkSystem, etc.) fall through to ``"none"`` and stay
+    ungrouped; the contract is that those ungrouped ops are bounded
+    well below half the total corpus.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        total_stmt = select(EndpointDescriptor.id).where(
+            EndpointDescriptor.product == _CANARY_PRODUCT,
+            EndpointDescriptor.version == _CANARY_VERSION,
+            EndpointDescriptor.impl_id == _CANARY_IMPL_ID,
+        )
+        total_rows = (await session.execute(total_stmt)).all()
+        ungrouped_stmt = select(EndpointDescriptor.id).where(
+            EndpointDescriptor.product == _CANARY_PRODUCT,
+            EndpointDescriptor.version == _CANARY_VERSION,
+            EndpointDescriptor.impl_id == _CANARY_IMPL_ID,
+            EndpointDescriptor.group_id.is_(None),
+        )
+        ungrouped_rows = (await session.execute(ungrouped_stmt)).all()
+
+    total = len(total_rows)
+    ungrouped = len(ungrouped_rows)
+    assert total > 0, "no rows under canary connector triple"
+    ratio = ungrouped / total
+    assert ratio < 0.5, (
+        f"{ungrouped}/{total} ops unassigned ({ratio:.1%}); canary's acceptance bar is < 50%"
+    )
+
+
+async def test_canary_vi_json_op_dispatch_path_substitution(
+    ingested_canary: _CanaryIngestState,
+) -> None:
+    """A vi-json ``{moId}`` path substitutes cleanly via the production dispatcher helper.
+
+    Loads one vi-json-tagged :class:`EndpointDescriptor`, verifies its
+    ``parameter_schema.properties.moId`` carries
+    ``x-meho-param-loc='path'`` (T11's parameter-ref resolver output),
+    then calls :func:`meho_backplane.operations._branches._substitute_path`
+    against the descriptor's ``path`` with a representative ``moId``
+    value. The substituted URL must contain the ``moId`` value
+    (URL-encoded as needed) and must NOT contain the literal
+    ``{moId}`` placeholder.
+
+    This is the canary's smoke proof that vi-json's
+    ``/<ManagedObjectType>/{moId}/<Method>`` shape dispatches without
+    special-casing in :mod:`meho_backplane.operations._branches`.
+    """
+    if not ingested_canary.two_spec_mode:
+        pytest.skip(
+            "vi-json.yaml not configured; cannot exercise the moId path "
+            "substitution without a vi-json operation in the descriptor table"
+        )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        # Pull the full canary corpus; the moId-bearing path shape is
+        # uniform across vi-json (every op uses the shared parameter
+        # ref T11 resolved), so any vi-json-tagged row satisfies the
+        # smoke. A prior ``.limit(500)`` here was unsound: with vcenter
+        # ingesting first (~1,275 rows) and vi-json after (~2,195),
+        # the unordered LIMIT prefix landed entirely in vcenter rows
+        # in heap order and the Python filter then matched nothing.
+        # Iterating the full ~3,470-row corpus is cheap vs. the
+        # ingest cost the fixture already paid; the pattern matches
+        # ``test_canary_every_row_tagged_with_spec_source`` above.
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.product == _CANARY_PRODUCT,
+            EndpointDescriptor.version == _CANARY_VERSION,
+            EndpointDescriptor.impl_id == _CANARY_IMPL_ID,
+        )
+        candidates = (await session.execute(stmt)).scalars().all()
+    vi_json_descriptors = [
+        d
+        for d in candidates
+        if any(t.endswith("vi-json.yaml") for t in d.tags)
+        and isinstance(d.parameter_schema.get("properties"), dict)
+        and "moId" in d.parameter_schema["properties"]
+    ]
+    assert vi_json_descriptors, (
+        "no vi-json-tagged descriptor with a moId property in the canary corpus; "
+        "expected at least one (vi-json ops universally reference the shared moId param)"
+    )
+    descriptor = vi_json_descriptors[0]
+    mo_id_property = descriptor.parameter_schema["properties"]["moId"]
+    assert mo_id_property.get("x-meho-param-loc") == "path", (
+        f"vi-json op {descriptor.op_id!r}: moId x-meho-param-loc is "
+        f"{mo_id_property.get('x-meho-param-loc')!r}; expected 'path'"
+    )
+
+    # The descriptor's path carries the {moId} template; substitute
+    # a representative MO reference and assert the placeholder is
+    # gone + the value appears verbatim (no path reserved chars in
+    # this sample, so urllib.parse.quote leaves it untouched).
+    substituted = _substitute_path(descriptor.path, {"moId": "vm-42"})
+    assert "{moId}" not in substituted, (
+        f"path {descriptor.path!r} still contains {{moId}} after substitution: {substituted!r}"
+    )
+    assert "vm-42" in substituted, (
+        f"path {descriptor.path!r} substituted to {substituted!r}; expected "
+        "'vm-42' to appear in the result"
+    )
+
+
+# ---------------------------------------------------------------------------
+# LLM call-count contract
+# ---------------------------------------------------------------------------
+
+
+async def test_canary_llm_call_count_matches_documented_contract(
+    ingested_canary: _CanaryIngestState,
+) -> None:
+    """LLM call count matches the documented two-pass / multi-ingest contract.
+
+    Single-spec mode: ``1 + ceil(vcenter_ops / batch_size)`` =
+    ``1 + 26 = 27`` calls (1 Pass-1, 26 Pass-2 batches over ~1,275 ops
+    at ``batch_size=50``).
+
+    Two-spec mode: the vcenter ingest issues Pass-1 (exactly once)
+    plus ~26 Pass-2 batches; the vi-json ingest sees existing groups
+    so Pass-1 is skipped (partial-regrouping path) and only ~44
+    Pass-2 batches run (~2,195 ops at ``batch_size=50``). Aggregate
+    ``1 + ~26 + ~44 = ~71`` calls.
+
+    Bounds are wide enough to survive vendor spec churn.
+    """
+    stub_client = ingested_canary.stub_client
+    call_count = len(stub_client.calls)
+    # Pass-1 is exactly one call by construction -- it runs in the
+    # first ingest call's grouping phase; the vi-json ingest's
+    # grouping phase takes the partial-regrouping branch (Pass-1
+    # skipped because vcenter groups already exist).
+    propose_calls = [c for c in stub_client.calls if c["phase"] == "propose"]
     assert len(propose_calls) == 1, f"expected exactly 1 Pass-1 call; got {len(propose_calls)}"
-    # Pass-2 batch count: bounded by ceil(950 / 50) = 19 at the
-    # minimum and ceil(1500 / 50) = 30 at the upper bound the
-    # acceptance test allows for vendor spec growth.
-    assign_calls = [c for c in ingested_canary.calls if c["phase"] == "assign"]
-    assert 19 <= len(assign_calls) <= 30, (
-        f"expected 19-30 Pass-2 batches; got {len(assign_calls)} (total LLM calls = {call_count})"
+    assign_calls = [c for c in stub_client.calls if c["phase"] == "assign"]
+    if ingested_canary.two_spec_mode:
+        # Pass-2 across both specs: ceil(1275/50)=26 + ceil(2195/50)=44 = 70
+        # Bounded conservatively for vendor spec growth.
+        lower, upper = 60, 90
+    else:
+        lower, upper = 19, 30
+    assert lower <= len(assign_calls) <= upper, (
+        f"expected {lower}-{upper} Pass-2 batches; got {len(assign_calls)} "
+        f"(total LLM calls = {call_count}, "
+        f"mode={'two-spec' if ingested_canary.two_spec_mode else 'single-spec'})"
     )
 
 

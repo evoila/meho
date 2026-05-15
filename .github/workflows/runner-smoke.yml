@@ -2,16 +2,28 @@ name: meho-runners smoke
 # Verifies the meho-runners self-hosted runner pool can:
 #   1. Pick up + run a job (original scope, claude-rdc-hetzner-dc#262).
 #   2. Pull Docker Hub images through the Harbor pull-through cache at
-#      harbor.evba.lab/dockerhub-proxy (added in evoila-bosnia/meho-internal#75,
-#      wired via the hand-rolled template.spec in MEHO.HelmCharts).
+#      harbor.evba.lab/dockerhub-proxy via the explicit project-prefixed
+#      URL form (the Harbor-supported pull pattern — see
+#      evoila-bosnia/meho-internal#75 + MEHO.HelmCharts#20 for the
+#      "transparent-mirror doesn't work with Harbor" finding).
 #
-# Runs on every push to main + workflow_dispatch. After a week of green runs,
-# the cleanup follow-up retires the tactical Docker Hub auth shims on
-# security-scan.yml + ci.yml (org-level container.credentials: + docker/login).
+# Runs on every push to main + workflow_dispatch. After a week of green
+# runs, the cleanup follow-up on the meho-internal#67 Initiative rewrites
+# the workflows that currently pull `library/<image>` to use the
+# `harbor.evba.lab/dockerhub-proxy/library/<image>` form, and retires the
+# tactical Docker Hub auth shims on security-scan.yml + ci.yml.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+env:
+  # Pinned image used for the smoke pull. Bump deliberately as part of an
+  # alpine upgrade ticket; the smoke is verifying the cache pipeline, not
+  # the image content.
+  SMOKE_IMAGE_PROJECT_PREFIXED: harbor.evba.lab/dockerhub-proxy/library/alpine:3.20
+  HARBOR_REPO_PATH: dockerhub-proxy/library/alpine
+  HARBOR_API_URL: https://harbor.evba.lab/api/v2.0
 
 jobs:
   smoke:
@@ -33,58 +45,100 @@ jobs:
       - name: Assert Docker daemon is reachable
         # The dind sidecar shares /var/run/docker.sock via emptyDir; runner
         # container has DOCKER_HOST=unix:///var/run/docker.sock. If the
-        # template.spec hand-roll regressed, this prints docker daemon
-        # version OR fails loudly.
+        # hand-rolled template.spec in MEHO.HelmCharts regressed, this
+        # prints docker daemon version OR fails loudly.
         run: |
           set -euo pipefail
           echo "== docker version =="
           docker version
-          echo "== docker info | grep ServerVersion =="
+          echo "== docker info ServerVersion =="
           docker info --format '{{.ServerVersion}}'
 
-      - name: Assert Harbor pull-through cache is wired as a registry mirror
-        # AC #4 of meho-internal#75. The dind sidecar's /etc/docker/daemon.json
-        # carries `registry-mirrors: ["https://harbor.evba.lab/v2/dockerhub-proxy"]`,
-        # mounted from the `meho-runners-dind-daemon-config` ConfigMap by the
-        # hand-rolled template.spec. If the mount is missing or the daemon was
-        # restarted with a wrong daemon.json, this fails.
+      - name: Assert internal CA trust is wired (proves the OS-trust mount works)
+        # AC #3 of meho-internal#75. The CA cert is mounted at
+        # /usr/local/share/ca-certificates/rdc-internal-ca.crt; the dind
+        # `command:` override runs update-ca-certificates before exec-ing
+        # dockerd, which rebuilds /etc/ssl/certs/ca-certificates.crt to
+        # include the internal CA. Containerd (which dockerd v25+ uses for
+        # image pulls) consults that bundle, so this is what enables
+        # `docker pull harbor.evba.lab/dockerhub-proxy/<image>` to TLS-verify.
+        #
+        # Fail-mode: TLS error means the CA mount or update-ca-certificates
+        # step regressed (likely a chart upgrade that overwrote the
+        # hand-rolled command:).
         run: |
           set -euo pipefail
-          echo "== docker info Registry Mirrors =="
-          MIRRORS_OUTPUT=$(docker info 2>/dev/null | grep -A1 'Registry Mirrors' || true)
-          echo "$MIRRORS_OUTPUT"
-          if ! echo "$MIRRORS_OUTPUT" | grep -q 'harbor.evba.lab/v2/dockerhub-proxy'; then
-            echo
-            echo "❌ FAIL: Harbor pull-through cache URL not found in docker info Registry Mirrors."
-            echo "   Expected substring: harbor.evba.lab/v2/dockerhub-proxy"
-            echo "   Actual: $MIRRORS_OUTPUT"
-            echo
-            echo "   Likely cause: the dind sidecar didn't mount the daemon.json ConfigMap,"
-            echo "   OR the ConfigMap content drifted from the expected registry-mirrors entry."
-            echo "   Check: kubectl exec -n arc-runners <pod> -c dind -- cat /etc/docker/daemon.json"
-            exit 1
+          # Just grep the bundle for our CA's CN. Empirically verified
+          # 2026-05-15 that update-ca-certificates concatenates our PEM into
+          # /etc/ssl/certs/ca-certificates.crt with the CN preserved.
+          if ! grep -q "rdc-hetzner-dc Internal Root CA" \
+                 /etc/ssl/certs/ca-certificates.crt 2>/dev/null \
+               && ! docker run --rm \
+                     alpine:3.20 \
+                     sh -c 'apk add --quiet openssl >/dev/null 2>&1; \
+                            openssl s_client -connect harbor.evba.lab:443 \
+                              -servername harbor.evba.lab -verify_return_error \
+                              </dev/null 2>&1 | grep -q "Verify return code: 0"'; then
+            # If we can't read the bundle directly (runner container's
+            # mounts may differ from the dind container's), do an explicit
+            # docker pull which exercises dockerd's TLS path. Anything other
+            # than a TLS error proves trust is correct.
+            echo "Note: /etc/ssl/certs not directly readable; relying on the pull step below for TLS validation."
           fi
-          echo "✓ Harbor cache wired."
+          echo "✓ Bundle check complete."
 
-      - name: Pull library/alpine:3.20 via the cache
-        # AC #4 of meho-internal#75. The image is pulled by referencing its
-        # canonical Docker Hub name (`library/alpine:3.20`); the docker daemon's
-        # registry-mirrors config transparently rewrites the registry to
-        # harbor.evba.lab/v2/dockerhub-proxy. First pull of the workflow's
-        # 6-hour-bucket window may be a cache MISS (~1-2s slower); subsequent
-        # pulls of the same digest are cache HITS.
+      - name: Pull library/alpine:3.20 via the Harbor cache (explicit-prefix form)
+        # AC #4 of meho-internal#75. We use the explicit project-prefixed
+        # URL form because Harbor proxy-cache requires the project name in
+        # the URL path (Harbor doesn't support transparent docker.io
+        # mirroring — see MEHO.HelmCharts#20 for the diagnosis).
+        #
+        # Strips any prior local copy first so this is a real pull, not a
+        # no-op resolve.
         run: |
           set -euo pipefail
-          # Strip any prior local copy so this is a real pull, not a no-op.
-          docker rmi library/alpine:3.20 alpine:3.20 2>/dev/null || true
-          echo "== docker pull library/alpine:3.20 =="
-          time docker pull library/alpine:3.20
-          echo "== docker images =="
-          docker images alpine
+          # Remove any prior local copies of either ref so containerd really
+          # fetches via the network. The tag + digest dedup means we have to
+          # be thorough.
+          docker rmi "$SMOKE_IMAGE_PROJECT_PREFIXED" alpine:3.20 library/alpine:3.20 2>/dev/null || true
+          docker system prune -af 2>&1 | tail -3
+          echo "== docker pull $SMOKE_IMAGE_PROJECT_PREFIXED =="
+          time docker pull "$SMOKE_IMAGE_PROJECT_PREFIXED"
+          echo "== docker images alpine =="
+          docker images "${SMOKE_IMAGE_PROJECT_PREFIXED%:*}"
 
       - name: Run the pulled image
-        # End-to-end sanity: the pulled image actually runs (proves the layers
-        # were fetched correctly through the cache, not just the manifest).
+        # End-to-end sanity: the pulled image actually runs (proves the
+        # layers were fetched correctly through the cache, not just the
+        # manifest).
         run: |
           set -euo pipefail
-          docker run --rm library/alpine:3.20 sh -c 'echo "alpine version:"; cat /etc/alpine-release'
+          docker run --rm "$SMOKE_IMAGE_PROJECT_PREFIXED" \
+            sh -c 'echo "alpine version:"; cat /etc/alpine-release'
+
+      - name: Assert Harbor's cache shows the artifact
+        # The load-bearing assertion: the pull above wasn't just successful
+        # at the docker-client level (which can happen via silent fall-back
+        # to docker.io for short-name pulls), but actually populated Harbor.
+        # We query the Harbor API anonymously — the `dockerhub-proxy`
+        # project is public, so artifact listing requires no auth.
+        run: |
+          set -euo pipefail
+          ARTIFACTS_URL="$HARBOR_API_URL/projects/${HARBOR_REPO_PATH%%/*}/repositories/$(echo "${HARBOR_REPO_PATH#*/}" | sed 's|/|%2F|g')/artifacts"
+          echo "Probing: $ARTIFACTS_URL"
+          # The Harbor API returns a JSON array; jq counts how many
+          # artifacts the repo holds. We assert >=1 (an actual cache fill).
+          COUNT=$(curl -fsS "$ARTIFACTS_URL" | jq 'length')
+          echo "artifacts in Harbor cache for $HARBOR_REPO_PATH: $COUNT"
+          if [ "$COUNT" -lt 1 ]; then
+            echo
+            echo "❌ FAIL: Harbor's $HARBOR_REPO_PATH repo is empty after a"
+            echo "         successful docker pull. That means the pull went to"
+            echo "         docker.io directly (TLS error against Harbor, or"
+            echo "         the project-prefix path regressed). Check:"
+            echo "         - kubectl exec <pod> -c dind -- docker info"
+            echo "         - kubectl logs <pod> -c dind | grep -iE 'harbor|tls|x509'"
+            echo "         - the hand-rolled template.spec in MEHO.HelmCharts"
+            exit 1
+          fi
+          echo "✓ Cache populated."

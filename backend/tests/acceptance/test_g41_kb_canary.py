@@ -218,7 +218,7 @@ def corpus_size(consumer_kb_dir: Path) -> int:
 
 @pytest.fixture
 def canary_operator_a() -> Operator:
-    """Tenant-A ``tenant_admin`` operator (every write path needs admin)."""
+    """Tenant-A ``tenant_admin`` operator (every REST write path needs admin)."""
     return Operator(
         sub="canary-g41-tenant-a",
         name="G4.1 Canary Tenant A",
@@ -226,6 +226,28 @@ def canary_operator_a() -> Operator:
         raw_jwt="<canary-raw-jwt>",
         tenant_id=uuid.UUID(TENANT_A_ID),
         tenant_role=TenantRole.TENANT_ADMIN,
+    )
+
+
+@pytest.fixture
+def canary_operator_a_operator() -> Operator:
+    """Tenant-A ``operator`` (the MCP write surface's required role).
+
+    Distinct from :func:`canary_operator_a` because T3's deliberate
+    design choice is ``required_role=TenantRole.OPERATOR`` on the
+    ``add_to_knowledge`` / ``search_knowledge`` MCP meta-tools (see
+    ``mcp/tools/knowledge.py``). Exercising those handlers with a
+    ``tenant_admin`` principal would silently pass a regression that
+    tightens the contract above ``operator`` -- the canary's job is to
+    catch exactly that drift.
+    """
+    return Operator(
+        sub="canary-g41-tenant-a-op",
+        name="G4.1 Canary Tenant A Operator",
+        email=None,
+        raw_jwt="<canary-raw-jwt-a-op>",
+        tenant_id=uuid.UUID(TENANT_A_ID),
+        tenant_role=TenantRole.OPERATOR,
     )
 
 
@@ -595,7 +617,7 @@ async def test_agent_flow_search_then_resource_read(
 @_skip_no_docker
 async def test_add_to_knowledge_then_search_finds_it(
     ingested_canary: KbService,
-    canary_operator_a: Operator,
+    canary_operator_a_operator: Operator,
 ) -> None:
     """AC #5 (MCP variant): ``add_to_knowledge`` then ``search_knowledge`` finds it.
 
@@ -603,6 +625,10 @@ async def test_add_to_knowledge_then_search_finds_it(
     meta-tools instead. Proves the agent surface can extend the kb
     corpus on the fly without an out-of-band approval round-trip
     (the deliberate ``operator``-not-``tenant_admin`` choice in T3).
+    Uses :func:`canary_operator_a_operator` -- the principal whose
+    role matches T3's ``required_role=TenantRole.OPERATOR`` contract
+    -- so a future regression that tightens either handler above
+    ``operator`` surfaces here as a permission failure.
     """
     from meho_backplane.mcp.tools.knowledge import (
         _add_to_knowledge_handler,
@@ -614,7 +640,7 @@ async def test_add_to_knowledge_then_search_finds_it(
 
     # add_to_knowledge -- write through the MCP surface.
     add_result = await _add_to_knowledge_handler(
-        canary_operator_a,
+        canary_operator_a_operator,
         {
             "slug": distinctive_slug,
             "body": f"MCP canary write. {distinctive_phrase} is the search anchor.",
@@ -626,7 +652,7 @@ async def test_add_to_knowledge_then_search_finds_it(
     # search_knowledge for the distinctive phrase -- the round-trip
     # must surface the just-written entry.
     search_result = await _search_knowledge_handler(
-        canary_operator_a,
+        canary_operator_a_operator,
         {"query": distinctive_phrase, "limit": 5},
     )
     hits = search_result["hits"]
@@ -847,19 +873,24 @@ async def test_audit_rows_written_for_kb_writes_via_rest(
             .all()
         )
 
-    op_ids_seen = {row.payload.get("op_id") for row in rows}
+    # Postulate 7 (CLAUDE.md): audit is synchronous and append-only with
+    # one row per write. The canary asserts exact cardinality -- a set
+    # membership check would pass silently if a future regression wrote
+    # two audit rows for a single kb.create call.
     expected_op_ids = {"kb.ingest", "kb.create", "kb.delete"}
-    missing = expected_op_ids - op_ids_seen
-    assert not missing, (
-        f"audit rows missing for ops {sorted(missing)}; "
-        f"got op_ids {sorted(o for o in op_ids_seen if o)}"
+    kb_write_rows = [r for r in rows if r.payload.get("op_id") in expected_op_ids]
+    counts = {
+        op_id: sum(1 for r in kb_write_rows if r.payload.get("op_id") == op_id)
+        for op_id in expected_op_ids
+    }
+    assert counts == {"kb.ingest": 1, "kb.create": 1, "kb.delete": 1}, (
+        f"expected exactly one audit row per write op; got {counts}"
     )
 
     # Every kb write row carries ``op_class="write"`` -- the explicit
     # contextvar binding in the routes is load-bearing because the
     # broadcast classifier would otherwise default ``kb.ingest`` /
     # ``kb.show`` to ``op_class="other"`` and emit the full payload.
-    kb_write_rows = [r for r in rows if r.payload.get("op_id") in expected_op_ids]
     for row in kb_write_rows:
         assert row.payload.get("op_class") == "write", (
             f"audit row for op_id={row.payload.get('op_id')!r} did not carry "

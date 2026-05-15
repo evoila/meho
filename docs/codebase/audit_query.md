@@ -137,6 +137,66 @@ Error mapping at the router boundary: `DurationParseError` (router-side),
 `InvalidCursorError` (substrate-side), `UnsupportedFilterError`
 (substrate-side) all surface as 400 with the underlying message.
 
+## MCP tool surface (G8.1-T4 #468)
+
+The agent-facing entry is a single tool — `query_audit` — registered in
+`backend/src/meho_backplane/mcp/tools/audit.py` against the G0.5 tool
+registry. The CLAUDE.md narrow-waist postulate (#5) says the agent
+sees exactly one audit tool; the REST per-shape shortcuts
+(`who-touched` / `my-recent` / `show`) collapse into filter
+combinations on `query_audit`.
+
+The handler:
+
+1. Receives the jsonschema-validated arguments dict.
+2. Parses `since` / `until` via the same
+   `meho_backplane.audit_query.parse_duration` the REST surface uses, so
+   the agent can pass either ISO-8601 or duration shorthand.
+3. Builds `AuditQueryFilters` via `model_validate` (Pydantic coerces
+   UUID strings; `additionalProperties: false` on the schema already
+   rejected unknown keys at the dispatcher).
+4. Calls `await query_audit(filters, tenant_id=operator.tenant_id,
+   session=session)`.
+5. Returns `result.model_dump(mode="json")` — the dispatcher wraps it
+   in the MCP `content` array.
+
+Tenant scoping mirrors the REST surface: `operator.tenant_id` comes
+from the validated JWT (resolved by `verify_mcp_jwt_and_bind`); the
+arguments dict never carries `tenant_id` (rejected by the schema).
+Cross-tenant probes are structurally impossible.
+
+Audit + broadcast contract:
+
+* The MCP dispatcher (`mcp/handlers.py`) writes one `audit_log` row
+  per `tools/call`. For this tool the row's `op_id` is the tool name
+  verbatim — `"query_audit"` — not the REST surface's
+  `"meho.audit.query"`. The asymmetry is the dispatcher's convention
+  (HTTP middleware reads a contextvar override; MCP dispatcher uses
+  the tool name). Unifying the two op_ids is a v0.2.next surface.
+* `op_class="audit_query"` on the `ToolDefinition` is the declarative
+  contract for the broadcast classifier's aggregate-only redaction
+  per `broadcast/events.py::redact_payload`. T5 (#469) is the
+  end-to-end acceptance gate for the wiring; T4 ships the declarative
+  registration only.
+
+Error mapping at the tool boundary:
+
+* `DurationParseError` (`since` / `until` shorthand) — caught in the
+  handler, raised as `McpInvalidParamsError` → JSON-RPC `-32602`.
+* `pydantic.ValidationError` (post-jsonschema, e.g. malformed UUID
+  slipping past `format: uuid`) — same mapping.
+* `InvalidCursorError` (substrate, tampered cursor) — same mapping.
+* `UnsupportedFilterError` (substrate, `parent_audit_id` /
+  `agent_session_id` in v0.2) — same mapping with the column-name
+  message.
+* Anything else propagates; the dispatcher's outer try/except turns
+  it into JSON-RPC `-32603` Internal Error.
+
+RBAC: `operator` role minimum. `read_only` callers find the tool
+absent from `tools/list` and get `-32602` on a direct `tools/call`
+attempt (the dispatcher's per-call RBAC re-check, not a transport
+401 — JSON-RPC has no 403 analogue).
+
 ## Dependencies
 
 * `meho_backplane.db.models.AuditLog` — read schema; this package never writes.
@@ -149,7 +209,10 @@ Reverse dependencies:
 
 * `meho_backplane.api.v1.audit` (T2 #466) — REST router for the four
   consumer-facing routes; dispatches every call through `query_audit`.
-* T3 #467 (CLI) and T4 #468 (MCP) follow.
+* `meho_backplane.mcp.tools.audit` (T4 #468) — single MCP meta-tool
+  registered against the G0.5 registry; dispatches every call through
+  `query_audit`.
+* T3 #467 (CLI) follows.
 
 ## Known issues / v0.2 gaps
 
@@ -195,7 +258,9 @@ Reverse dependencies:
 * Initiative: [G8.1 #334](https://github.com/evoila/meho/issues/334).
 * Tasks: [G8.1-T1 #465](https://github.com/evoila/meho/issues/465) (substrate),
   [G8.1-T2 #466](https://github.com/evoila/meho/issues/466) (REST routes +
-  duration parser).
+  duration parser),
+  [G8.1-T4 #468](https://github.com/evoila/meho/issues/468) (MCP
+  meta-tool).
 * Write paths: `backend/src/meho_backplane/audit.py`,
   `backend/src/meho_backplane/mcp/audit.py`.
 * Op-class classifier: `backend/src/meho_backplane/broadcast/events.py:172`

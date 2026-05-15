@@ -194,11 +194,17 @@ def parse_openapi(
         raise InvalidSpecError(
             f"'components.schemas' must be a mapping, got {type(component_schemas).__name__}"
         )
+    component_parameters = components.get("parameters") or {}
+    if not isinstance(component_parameters, dict):
+        raise InvalidSpecError(
+            f"'components.parameters' must be a mapping, got {type(component_parameters).__name__}"
+        )
 
     return list(
         _iter_operations(
             paths=paths,
             component_schemas=cast(dict[str, Any], component_schemas),
+            component_parameters=cast(dict[str, Any], component_parameters),
             spec_source=spec_source,
         )
     )
@@ -288,6 +294,7 @@ def _iter_operations(
     *,
     paths: dict[str, Any],
     component_schemas: dict[str, Any],
+    component_parameters: dict[str, Any],
     spec_source: str | None,
 ) -> Iterable[EndpointDescriptorProto]:
     """Yield one :class:`EndpointDescriptorProto` per (method, path)."""
@@ -314,6 +321,7 @@ def _iter_operations(
                 operation=operation,
                 path_level_params=path_level_params,
                 component_schemas=component_schemas,
+                component_parameters=component_parameters,
                 spec_source=spec_source,
             )
 
@@ -325,6 +333,7 @@ def _build_proto(
     operation: dict[str, Any],
     path_level_params: list[Any],
     component_schemas: dict[str, Any],
+    component_parameters: dict[str, Any],
     spec_source: str | None,
 ) -> EndpointDescriptorProto:
     """Assemble a single :class:`EndpointDescriptorProto`."""
@@ -342,6 +351,7 @@ def _build_proto(
         op_level_params=op_params,
         request_body=operation.get("requestBody"),
         component_schemas=component_schemas,
+        component_parameters=component_parameters,
     )
     response_schema = _extract_response_schema(
         responses=operation.get("responses") or {},
@@ -404,6 +414,7 @@ def _build_parameter_schema(
     op_level_params: list[Any],
     request_body: Any,
     component_schemas: dict[str, Any],
+    component_parameters: dict[str, Any],
 ) -> dict[str, object]:
     """Flatten path + operation parameters + request body into one JSON Schema object.
 
@@ -412,6 +423,15 @@ def _build_parameter_schema(
     both ``name`` and ``in`` match. Each surviving parameter becomes
     a top-level property on the returned object with the
     ``x-meho-param-loc`` extension carrying its OpenAPI ``in`` value.
+
+    Parameters may be inlined (``{"name": ..., "in": ..., "schema": ...}``)
+    or referenced via ``{"$ref": "#/components/parameters/<name>"}`` —
+    the second form is what ``vi-json.yaml`` uses on every operation
+    (the shared ``moId`` path parameter). Refs are resolved against
+    ``component_parameters`` here, before the resolved-param ``schema``
+    field is itself ref-resolved against ``component_schemas`` (the
+    parameter object's ``schema`` field can independently carry its
+    own ``$ref`` into ``#/components/schemas/*``).
 
     The request body (when present) is inlined as a single ``body``
     property whose schema is the resolved ``application/json`` (or
@@ -426,7 +446,7 @@ def _build_parameter_schema(
 
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     for raw_param in [*path_level_params, *op_level_params]:
-        resolved = _resolve_shallow_ref(raw_param, component_schemas)
+        resolved = _resolve_shallow_ref(raw_param, component_schemas, component_parameters)
         if not isinstance(resolved, dict):
             raise InvalidSchemaError(
                 f"paths.{path}.{method.lower()}: parameter must be a mapping, "

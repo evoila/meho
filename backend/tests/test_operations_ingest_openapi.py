@@ -32,6 +32,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
 PETSTORE_30 = FIXTURES / "petstore_30.yaml"
 PETSTORE_31_YAML = FIXTURES / "petstore_31.yaml"
 PETSTORE_31_JSON = FIXTURES / "petstore_31.json"
+PARAMETER_REFS_30 = FIXTURES / "parameter_refs_30.yaml"
 
 
 def _by_op_id(rows: list[EndpointDescriptorProto]) -> dict[str, EndpointDescriptorProto]:
@@ -270,7 +271,14 @@ paths:
         parse_openapi(str(spec))
 
 
-def test_non_schema_local_ref_raises(tmp_path: Path) -> None:
+def test_component_parameter_ref_resolves(tmp_path: Path) -> None:
+    """``$ref: '#/components/parameters/<name>'`` resolves to the shared parameter.
+
+    The pre-T11 contract rejected this with ``UnsupportedSpecError`` —
+    every vi-json.yaml operation uses this shape so the rejection
+    blocked the entire ~2,195-op spec. The new contract inlines the
+    referenced parameter the same way it inlines schema refs.
+    """
     spec = tmp_path / "param_ref.yaml"
     spec.write_text(
         """
@@ -289,12 +297,165 @@ components:
     Shared:
       name: shared
       in: query
+      required: true
       schema:
         type: string
         """.lstrip()
     )
-    with pytest.raises(UnsupportedSpecError, match="non-schema component"):
+    rows = parse_openapi(str(spec))
+    assert len(rows) == 1
+    properties = rows[0].parameter_schema["properties"]
+    assert isinstance(properties, dict)
+    assert "shared" in properties
+    assert properties["shared"]["x-meho-param-loc"] == "query"
+    assert properties["shared"]["type"] == "string"
+    assert rows[0].parameter_schema["required"] == ["shared"]
+
+
+def test_component_parameter_ref_missing_name_raises(tmp_path: Path) -> None:
+    """A ref to an unknown parameter component raises ``InvalidSchemaError``.
+
+    Mirrors the existing schema-bucket missing-component behaviour;
+    the symmetry keeps the parser failure mode predictable across
+    both component kinds.
+    """
+    spec = tmp_path / "param_ref_dangling.yaml"
+    spec.write_text(
+        """
+openapi: '3.0.3'
+info: {title: x, version: '1'}
+paths:
+  /x:
+    get:
+      parameters:
+        - $ref: '#/components/parameters/Missing'
+      responses:
+        "200":
+          description: ok
+components:
+  parameters:
+    Other:
+      name: other
+      in: query
+      schema:
+        type: string
+        """.lstrip()
+    )
+    with pytest.raises(InvalidSchemaError, match="missing component"):
         parse_openapi(str(spec))
+
+
+def test_component_parameter_ref_drilldown_raises(tmp_path: Path) -> None:
+    """A ref into a parameter component's subpath raises ``InvalidSchemaError``.
+
+    Symmetric with the schema-bucket drill-down rejection. The
+    OpenAPI spec only declares fragment refs to *named* components.
+    """
+    spec = tmp_path / "param_ref_drilldown.yaml"
+    spec.write_text(
+        """
+openapi: '3.0.3'
+info: {title: x, version: '1'}
+paths:
+  /x:
+    get:
+      parameters:
+        - $ref: '#/components/parameters/Shared/schema'
+      responses:
+        "200":
+          description: ok
+components:
+  parameters:
+    Shared:
+      name: shared
+      in: query
+      schema:
+        type: string
+        """.lstrip()
+    )
+    with pytest.raises(InvalidSchemaError, match="drill-down"):
+        parse_openapi(str(spec))
+
+
+def test_non_parameter_local_ref_raises(tmp_path: Path) -> None:
+    """Refs to component buckets we don't support (e.g. ``requestBodies``) stay rejected."""
+    spec = tmp_path / "request_body_ref.yaml"
+    spec.write_text(
+        """
+openapi: '3.0.3'
+info: {title: x, version: '1'}
+paths:
+  /x:
+    post:
+      requestBody:
+        $ref: '#/components/requestBodies/SharedBody'
+      responses:
+        "200":
+          description: ok
+components:
+  requestBodies:
+    SharedBody:
+      content:
+        application/json:
+          schema:
+            type: object
+        """.lstrip()
+    )
+    with pytest.raises(UnsupportedSpecError, match="non-schema/non-parameter component"):
+        parse_openapi(str(spec))
+
+
+def test_resolve_shallow_ref_parameter_ref_opt_in() -> None:
+    """Direct-call contract: parameter refs require ``component_parameters`` to opt in.
+
+    ``parse_openapi`` always passes the dict (even when empty), so the
+    full pipeline never trips this branch. The function is exported
+    so T2 / future multi-spec merge can call it directly; this test
+    locks the opt-in semantics for those callers.
+    """
+    from meho_backplane.operations.ingest.refs import resolve_shallow_ref
+
+    ref = {"$ref": "#/components/parameters/X"}
+    parameters = {"X": {"name": "x", "in": "query", "schema": {"type": "string"}}}
+
+    # Opt-in: resolves cleanly.
+    resolved = resolve_shallow_ref(ref, {}, parameters)
+    assert resolved == parameters["X"]
+
+    # Opt-out (None): legacy behaviour, rejected.
+    with pytest.raises(UnsupportedSpecError, match="component_parameters"):
+        resolve_shallow_ref(ref, {}, None)
+
+
+def test_parse_parameter_refs_30_fixture() -> None:
+    """End-to-end: a vi-json-shaped fixture parses cleanly.
+
+    Locks the cross-op resolution path: one shared ``moId`` parameter
+    is referenced by three operations and reassembled identically each
+    time, including ``x-meho-param-loc="path"`` and required-by-default
+    path-parameter semantics.
+    """
+    rows = parse_openapi(str(PARAMETER_REFS_30))
+    op_ids = {row.op_id for row in rows}
+    assert op_ids == {
+        "POST:/vm/{moId}/PowerOn_Task",
+        "POST:/vm/{moId}/PowerOff_Task",
+        "POST:/host/{moId}/EnterMaintenanceMode_Task",
+    }
+    for row in rows:
+        properties = row.parameter_schema["properties"]
+        assert isinstance(properties, dict)
+        assert "moId" in properties, f"{row.op_id}: missing moId after ref resolution"
+        assert properties["moId"]["x-meho-param-loc"] == "path"
+        assert properties["moId"]["type"] == "string"
+        assert "moId" in row.parameter_schema["required"]
+    # The host op carries an inlined ``timeout`` query param alongside
+    # the resolved ``moId`` — the ref doesn't clobber the inlined param.
+    host_op = next(r for r in rows if r.op_id == "POST:/host/{moId}/EnterMaintenanceMode_Task")
+    properties = host_op.parameter_schema["properties"]
+    assert isinstance(properties, dict)
+    assert "timeout" in properties
+    assert properties["timeout"]["x-meho-param-loc"] == "query"
 
 
 def test_missing_schema_ref_raises(tmp_path: Path) -> None:

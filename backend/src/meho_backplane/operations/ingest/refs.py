@@ -68,15 +68,32 @@ PREFERRED_MEDIA_TYPES = ("application/json", "*/*")
 def resolve_shallow_ref(
     obj: Any,
     component_schemas: dict[str, Any],
+    component_parameters: dict[str, Any] | None = None,
 ) -> Any:
     """Inline one level of ``$ref``; preserve any nested refs unchanged.
 
-    ``$ref: "#/components/schemas/X"`` returns the resolved schema X
-    verbatim (a copy is NOT taken — callers that mutate must copy
-    first). Component-path drill-down refs
-    (``"#/components/schemas/X/properties/Y"``) raise
-    :exc:`InvalidSchemaError`. Cross-document refs raise
-    :exc:`UnsupportedSpecError`.
+    Supports refs to two OpenAPI 3.x component buckets:
+
+    * ``$ref: "#/components/schemas/X"`` — JSON Schema components.
+      The resolved schema is returned verbatim (a copy is NOT taken —
+      callers that mutate must copy first).
+    * ``$ref: "#/components/parameters/X"`` — Parameter Object
+      components (OpenAPI 3.0 §4.7.12 / 3.1 §4.8.7). Same return
+      semantics. ``vi-json.yaml`` uses this on every operation via the
+      shared ``moId`` path parameter.
+
+    ``component_parameters`` defaults to ``None`` so existing callers
+    that only need schema-ref resolution don't have to thread the
+    extra arg. Passing ``None`` keeps the legacy behaviour
+    (parameter refs raise :exc:`UnsupportedSpecError`); passing a
+    dict — even an empty one — opts in to the parameter-bucket branch.
+
+    Component-path drill-down refs into either bucket
+    (``"#/components/schemas/X/properties/Y"`` or
+    ``"#/components/parameters/X/schema"``) raise
+    :exc:`InvalidSchemaError` — the OpenAPI spec only declares fragment
+    refs to *named* components, not to subpaths within them.
+    Cross-document refs raise :exc:`UnsupportedSpecError`.
 
     Non-dict input or dicts without ``$ref`` pass through unchanged.
     """
@@ -85,24 +102,59 @@ def resolve_shallow_ref(
     ref = obj["$ref"]
     if not isinstance(ref, str):
         raise InvalidSchemaError(f"$ref value must be a string, got {type(ref).__name__}")
-    if not ref.startswith("#/components/schemas/"):
-        # Anything else — external file refs, parameter refs, response refs,
-        # or fragment-walk refs into other component buckets — is out of
-        # scope for v0.2. The dispatcher will not validate against them.
-        if not ref.startswith("#/"):
-            raise UnsupportedSpecError(f"cross-document $ref is not supported (got {ref!r})")
-        raise UnsupportedSpecError(
-            f"$ref to non-schema component is not supported (got {ref!r}); "
-            f"v0.2 only inlines #/components/schemas/* refs"
+    if ref.startswith("#/components/schemas/"):
+        return _resolve_named_component(
+            ref=ref,
+            bucket=component_schemas,
+            prefix="#/components/schemas/",
         )
-    name = ref[len("#/components/schemas/") :]
+    if ref.startswith("#/components/parameters/"):
+        if component_parameters is None:
+            # Caller did not opt in to parameter-ref resolution.
+            # Legacy behaviour: reject. Threading
+            # ``component_parameters`` from ``parse_openapi`` flips
+            # this branch off for the full pipeline.
+            raise UnsupportedSpecError(
+                f"$ref to #/components/parameters/* requires the caller to pass "
+                f"component_parameters (got {ref!r})"
+            )
+        return _resolve_named_component(
+            ref=ref,
+            bucket=component_parameters,
+            prefix="#/components/parameters/",
+        )
+    # Anything else — external file refs, response refs, requestBody
+    # refs, or fragment-walk refs into other component buckets — is
+    # out of scope for v0.2. The dispatcher will not validate against
+    # them.
+    if not ref.startswith("#/"):
+        raise UnsupportedSpecError(f"cross-document $ref is not supported (got {ref!r})")
+    raise UnsupportedSpecError(
+        f"$ref to non-schema/non-parameter component is not supported (got {ref!r}); "
+        f"v0.2 only inlines #/components/schemas/* and #/components/parameters/* refs"
+    )
+
+
+def _resolve_named_component(
+    *,
+    ref: str,
+    bucket: dict[str, Any],
+    prefix: str,
+) -> Any:
+    """Resolve a ``#/components/<kind>/<name>`` ref against ``bucket``.
+
+    Shared between the schema-ref branch and the parameter-ref branch
+    of :func:`resolve_shallow_ref` so drill-down and missing-component
+    handling stay symmetric across both buckets.
+    """
+    name = ref[len(prefix) :]
     if "/" in name:
         raise InvalidSchemaError(
             f"$ref drill-down into component subpaths is not supported (got {ref!r})"
         )
-    if name not in component_schemas:
+    if name not in bucket:
         raise InvalidSchemaError(f"$ref points at missing component (got {ref!r})")
-    return component_schemas[name]
+    return bucket[name]
 
 
 def select_media_type_schema(

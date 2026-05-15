@@ -1,0 +1,64 @@
+openapi: 3.0.3
+info:
+  title: Parameter-ref fixture
+  version: 1.0.0
+# Models the vi-json.yaml shape: a shared path parameter (``moId``)
+# defined once under ``components.parameters`` and referenced by every
+# operation. T11 (#501) flips this shape from rejected to accepted.
+paths:
+  /vm/{moId}/PowerOn_Task:
+    post:
+      summary: Power on the virtual machine
+      tags:
+        - vm
+      parameters:
+        - $ref: "#/components/parameters/moId"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: string
+  /vm/{moId}/PowerOff_Task:
+    post:
+      summary: Power off the virtual machine
+      tags:
+        - vm
+      parameters:
+        - $ref: "#/components/parameters/moId"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: string
+  /host/{moId}/EnterMaintenanceMode_Task:
+    post:
+      summary: Move the host into maintenance mode
+      tags:
+        - host
+      parameters:
+        - $ref: "#/components/parameters/moId"
+        - name: timeout
+          in: query
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: string
+components:
+  parameters:
+    moId:
+      name: moId
+      in: path
+      required: true
+      description: Managed object identifier
+      schema:
+        type: string

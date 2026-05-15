@@ -232,20 +232,29 @@ The 10 (query, expected_op_id) govc-parity pairs are:
 
 ## Known gaps (filed as PR-body follow-ups)
 
-### 1. `vi-json.yaml` is not yet ingested
+### 1. `vi-json.yaml` parses but the canary stays vcenter-only
 
-The second vSphere spec corpus (~2195 Managed Object operations)
-uses ``$ref: '#/components/parameters/moId'`` on every operation. The
-T1 parser explicitly rejects non-schema component refs
-(``refs.py::resolve_shallow_ref`` raises
-``UnsupportedSpecError``). Extending the parser to resolve
-``#/components/parameters/*`` is small (~40 LoC + tests) but
-lives in T1's scope, not T8's acceptance work.
+T11 (#501) extended the parser to resolve
+``$ref: '#/components/parameters/*'`` — every vi-json.yaml operation
+references the shared ``moId`` path parameter via that shape, and the
+T1 parser's earlier rejection has been replaced with the
+:func:`refs.resolve_shallow_ref` parameter-bucket branch. The parser
+smoke test at
+``tests/integration/test_operations_ingest_vi_json.py`` asserts the
+spec parses end-to-end and yields >= 2,000 EndpointDescriptorProto
+rows.
 
-Until that lands, govc workflows that fundamentally need vi-json
-ops (``govc snapshot.revert``,
-``govc events``, ``govc host.evac``) are not part of the canary's
-benchmark.
+Full ingestion (~2,195 rows persisted under
+``connector_id="vmware-rest-9.0"``, LLM-grouping pass on
+PerformanceManager / EventManager / managed-object families, operator
+review + enable cascade, benchmark expansion with vi-json queries)
+is the consumer work tracked under [#227 G3.1
+T3](https://github.com/evoila/meho/issues/227); the canary itself
+deliberately stays focused on the REST-automation surface so the
+acceptance gate's ~5 s ingest budget and 10-query benchmark stay
+fast. Until #227 T3 lands, govc workflows that fundamentally need
+vi-json ops (``govc snapshot.revert``, ``govc events``,
+``govc host.evac``) are not part of the canary's benchmark.
 
 ### 2. Cardinal-op descriptions under-rank against sub-paths
 

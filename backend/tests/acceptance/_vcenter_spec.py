@@ -35,7 +35,6 @@ from pathlib import Path
 
 __all__ = [
     "VCENTER_SPEC_REASON",
-    "VI_JSON_PARAMETER_REF_LIMITATION",
     "resolve_vcenter_yaml",
     "resolve_vi_json_yaml",
 ]
@@ -48,21 +47,6 @@ VCENTER_SPEC_REASON = (
     "MEHO_VCENTER_OPENAPI_VI_JSON to absolute paths, or set MEHO_CONSUMER_DOCS_ROOT "
     "to a directory containing vcenter-9.0/{vcenter.yaml,vi-json.yaml}. "
     "See tests/acceptance/_vcenter_spec.py for the resolver contract."
-)
-
-#: Reason ``vi-json.yaml`` is currently not ingested by the canary.
-#: Surfaced in the test docstring + canary doc so operators following
-#: the procedure understand why the second spec is gated on a
-#: follow-up parser extension. Filed as a follow-up ticket from the
-#: PR body for issue #408 — `vi-json.yaml` uses
-#: `$ref: '#/components/parameters/moId'` on every operation, which
-#: the T1 parser explicitly rejects (`refs.py` line ~93). The fix is
-#: small but lives in T1's scope, not T8's acceptance work.
-VI_JSON_PARAMETER_REF_LIMITATION = (
-    "vi-json.yaml ingest is blocked on T1 parameter-ref resolver support "
-    "(uses $ref to #/components/parameters/moId on every operation). "
-    "Tracked as a follow-up ticket; the canary still proves end-to-end "
-    "for the vcenter.yaml spec corpus (~1275 operations)."
 )
 
 
@@ -103,10 +87,10 @@ def resolve_vi_json_yaml() -> Path | None:
     """Return the local path to ``vi-json.yaml``, or ``None`` if unconfigured.
 
     Same resolver chain as :func:`resolve_vcenter_yaml` but for the
-    Managed-Object JSON spec shelf. Currently unused by the canary
-    (see :data:`VI_JSON_PARAMETER_REF_LIMITATION`); kept here so the
-    follow-up parser-extension ticket can flip the test on with one
-    code change.
+    Managed-Object JSON spec shelf. The vi-json.yaml parser smoke test
+    in ``tests/integration/test_operations_ingest_vi_json.py``
+    consumes this resolver; full ingestion (storage + grouping +
+    operator review + retrieval) is tracked under #227 G3.1 T3.
     """
     explicit = _expand_optional_path(os.getenv("MEHO_VCENTER_OPENAPI_VI_JSON"))
     if explicit is not None:

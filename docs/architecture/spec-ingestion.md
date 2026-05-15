@@ -72,13 +72,18 @@ One `EndpointDescriptorProto` per `(method, path)` entry under `paths`:
 
 ### `$ref` resolution — intentionally shallow
 
-[`refs.py::_resolve_shallow_ref`](../../backend/src/meho_backplane/operations/ingest/refs.py) inlines exactly one level of `$ref` into each parameter / response / body schema and leaves nested `$ref` strings verbatim. The parameter_schema is self-contained enough for the dispatcher's `jsonschema.Draft202012Validator` to validate the immediate parameter shape; deeper schema dereferencing (chasing nested `$ref`s through `components.schemas`) is the dispatcher's concern.
+[`refs.py::resolve_shallow_ref`](../../backend/src/meho_backplane/operations/ingest/refs.py) inlines exactly one level of `$ref` into each parameter / response / body schema and leaves nested `$ref` strings verbatim. The parameter_schema is self-contained enough for the dispatcher's `jsonschema.Draft202012Validator` to validate the immediate parameter shape; deeper schema dereferencing (chasing nested `$ref`s through `components.schemas`) is the dispatcher's concern.
+
+Two component buckets resolve:
+
+- **`#/components/schemas/<name>`** — JSON Schema components. The dominant shape, used by every vendor spec the canary covers.
+- **`#/components/parameters/<name>`** — Parameter Object components (OpenAPI 3.0 §4.7.12 / 3.1 §4.8.7). Used by every operation in vSphere's `vi-json.yaml` via the shared `moId` path parameter. T11 (#501) landed the resolver extension; T1's earlier rejection of this shape is gone.
 
 Three classes of `$ref` are explicitly rejected with `UnsupportedSpecError` so the operator sees the problem at ingest time rather than at dispatch time:
 
-- **Non-schema component refs.** `$ref: "#/components/parameters/..."`, `$ref: "#/components/requestBodies/..."`, etc. vCenter's `vcenter.yaml` doesn't use these; **`vi-json.yaml` does** (every op references `#/components/parameters/moId`). See [Future work](#future-work) below — this is the load-bearing extension that unblocks vi-json ingestion.
+- **Other-bucket component refs.** `$ref: "#/components/requestBodies/..."`, `$ref: "#/components/responses/..."`, `$ref: "#/components/headers/..."`. Not used by any currently-targeted vendor spec (vcenter.yaml, vi-json.yaml, NSX, SDDC Manager); defer until a real spec needs them.
 - **Cross-document refs.** `$ref: "other.yaml#/..."`. External files require either a pre-process pass or a v0.2.next resolver extension.
-- **`$ref` drill-down.** Refs that walk into a component's sub-tree (`#/components/schemas/X/properties/y`) raise `InvalidSchemaError`.
+- **`$ref` drill-down.** Refs that walk into a component's sub-tree (`#/components/schemas/X/properties/y`, `#/components/parameters/X/schema`) raise `InvalidSchemaError`.
 
 ## T2 — register_ingested_operations
 
@@ -297,13 +302,9 @@ The G0.7 pipeline is unblocked the moment G0.6 lands its T1 (tables) + T2 (regis
 
 ## Future work
 
-The vSphere canary surfaced three gaps that are real but out of G0.7's v0.2 scope. Document inline; file as separate Tasks when they become blockers for a specific consumer.
+The vSphere canary surfaced two remaining gaps that are real but out of G0.7's v0.2 scope. Document inline; file as separate Tasks when they become blockers for a specific consumer. (A third gap — the parser's rejection of `$ref: "#/components/parameters/*"` — was closed by T11 #501; `vi-json.yaml` now parses end-to-end.)
 
-### Gap 1 — T1 `$ref` extension for `vi-json.yaml`
-
-Every operation in `vi-json.yaml` references `$ref: "#/components/parameters/moId"`. The current T1 parser explicitly rejects non-schema component refs (`refs.py::resolve_shallow_ref` raises `UnsupportedSpecError`). Extending the resolver to inline `#/components/parameters/*` is ~40 LoC plus tests but lives in T1's scope, not T9's docs work. **Block on G0.7 quality if vi-json coverage is required for an early operator**; the canary covers `vcenter.yaml` alone today.
-
-### Gap 2 — T3 `llm_instructions` per-op enhancement
+### Gap 1 — T3 `llm_instructions` per-op enhancement
 
 Three of the 10 canary queries (`list virtual machines`, `power on virtual machine`, `power off virtual machine`) `xfail`. The drivers:
 
@@ -312,7 +313,7 @@ Three of the 10 canary queries (`list virtual machines`, `power on virtual machi
 
 Resolution path: add a T3 enhancement pass that generates per-op `llm_instructions` from the spec body (one LLM call per op, batched), then re-bench. The `endpoint_descriptor.llm_instructions` column already exists ([G0.6-T1 #392](https://github.com/evoila/meho/issues/392)) so the storage shape is settled.
 
-### Gap 3 — live-LLM canary validation
+### Gap 2 — live-LLM canary validation
 
 The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deterministic path-prefix classifier so the suite stays reproducible and fast (~5 s ingest + ~1–2 s per benchmark query). A live-LLM variant gated on `MEHO_G07_CANARY_LIVE_LLM=1` is reserved for the day [Task #467](https://github.com/evoila/meho/issues/467) (Anthropic chassis adapter) lands. Once #467 ships, re-run the canary against harder queries (snapshot revert, performance-metrics query, host-network atomic mutation) that the path-prefix stub cannot trivially classify.
 

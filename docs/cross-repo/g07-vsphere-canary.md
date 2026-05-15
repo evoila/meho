@@ -150,8 +150,9 @@ asserted by the acceptance test against the per-call
 meho connector review vmware-rest-9.0
 ```
 
-Expected: a rendered table of 8-15 groups with their
-``when_to_use`` hints and per-group operation counts.
+Expected: a rendered table of 12-18 groups in two-spec mode
+(8-15 single-spec fallback) with their ``when_to_use`` hints
+and per-group operation counts.
 Inspect each group's ``when_to_use`` for clarity — the agent reads
 this verbatim to pick which group to search within.
 
@@ -194,11 +195,13 @@ meho operation groups vmware-rest-9.0
 meho operation search vmware-rest-9.0 "list virtual machines" --limit 10
 ```
 
-The first command should return 8-15 enabled groups. The second
-should return ranked hits — the load-bearing acceptance bar is
-"top-3 contains the canonical operation for the workflow". The
+The first command should return 12-18 enabled groups in two-spec
+mode (8-15 single-spec fallback). The second should return ranked
+hits — the load-bearing acceptance bar is "top-3 contains the
+canonical operation for the workflow". The
 [`acceptance test`](../../backend/tests/acceptance/test_g07_vsphere_canary.py)
-runs ten such queries and asserts the top-3 contract.
+runs thirteen such queries (ten vcenter + three vi-json) and
+asserts the top-3 contract.
 
 ### Step 7 — verify dispatch end-to-end (optional, needs vcsim or live vCenter)
 

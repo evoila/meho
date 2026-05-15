@@ -38,7 +38,7 @@ ARG PYTHON_BASE_DIGEST=sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa
 # `docs/codebase/backend.md`). `BUILDPLATFORM` and `TARGETPLATFORM` are
 # auto-populated by BuildKit and surfaced in the build log so CI runs
 # show which arch each layer compiled on.
-FROM python@${PYTHON_BASE_DIGEST} AS builder
+FROM harbor.evba.lab/dockerhub-proxy/library/python@${PYTHON_BASE_DIGEST} AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -83,7 +83,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
 # ---------- Runtime ----------------------------------------------------------
-FROM python@${PYTHON_BASE_DIGEST} AS runtime
+FROM harbor.evba.lab/dockerhub-proxy/library/python@${PYTHON_BASE_DIGEST} AS runtime
 
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).
 RUN useradd --system --uid 1001 --gid 0 --no-create-home --shell /usr/sbin/nologin meho

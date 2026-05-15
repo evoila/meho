@@ -1,0 +1,138 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""pytest fixtures for the acceptance suite.
+
+The acceptance tests verify shipped substrates against the consumer's
+real input (e.g. the G0.7 vSphere canary feeds the actual vCenter
+OpenAPI specs through the ingestion pipeline). Most of the chassis
+plumbing they need — a real PostgreSQL container with pgvector + FTS,
+the production audit middleware, the JWKS / Keycloak mock — already
+exists in :mod:`tests.integration.conftest`.
+
+Three pieces are re-exported verbatim:
+
+* ``async_pg_url`` — module-scoped Postgres container with the
+  migration tree applied.
+* ``integration_env`` — function-scoped env pinning that overrides
+  ``DATABASE_URL`` at the testcontainer URL.
+
+One piece is parallel rather than re-exported:
+
+* ``pg_engine`` — the integration suite's per-test TRUNCATE statement
+  hard-codes ``TRUNCATE TABLE audit_log, documents, tenant`` (lifted
+  pre-G6.3 / G7.1 / G9.1, all of which added ``tenant_id REFERENCES
+  tenant(id)`` foreign keys via migrations 0007 and 0008). Running it
+  against the head schema fails with ``Table "graph_node" references
+  "tenant"`` because PG demands the multi-table TRUNCATE list every
+  referring table or use CASCADE.
+
+  The pragmatic fix is the acceptance-local fixture below, which
+  TRUNCATES every chassis table that holds a tenant-scoped row (FK
+  or soft) — superset of the integration list, future-proof against
+  the next migration. The integration suite's bug is filed as a
+  separate follow-up; this conftest works around it for the canary
+  without modifying the integration conftest.
+
+Why not just re-export everything: the rename / re-export pattern is
+fine for pure data fixtures (URLs, env), but stateful resource
+fixtures (engine binding + table truncation) benefit from being
+parallel so the acceptance suite's lifecycle is auditable from its
+own conftest.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+
+import pytest
+from sqlalchemy import text
+
+from meho_backplane.db import engine as engine_module
+from meho_backplane.db.engine import (
+    create_engine_for_url,
+    dispose_engine,
+    reset_engine_for_testing,
+)
+from tests.integration.conftest import (
+    DOCKER_AVAILABLE,
+    SKIP_REASON,
+    async_pg_url,
+    integration_env,
+)
+
+__all__ = [
+    "DOCKER_AVAILABLE",
+    "SKIP_REASON",
+    "async_pg_url",
+    "integration_env",
+    "pg_engine",
+]
+
+
+#: Tables that hold tenant-scoped rows (FK to ``tenant(id)`` or a soft
+#: ``tenant_id`` column). The TRUNCATE statement lists every entry so
+#: PG's FK-referenced-by-X check passes for each tenant row removed.
+#:
+#: Maintenance: when a future migration adds another tenant-scoped
+#: table, list it here. The acceptance fixture's behaviour is "wipe
+#: every chassis-managed table that could carry per-test residue
+#: between runs"; a missing entry yields cross-test pollution rather
+#: than the FK-truncate error the integration conftest hits today.
+#:
+#: Order does not matter for ``TRUNCATE TABLE a, b, c`` — PG resolves
+#: all the FK checks together. Keeping the list alphabetical so a
+#: diff reads cleanly.
+_TRUNCATE_TABLES: tuple[str, ...] = (
+    "audit_log",
+    "broadcast_override",
+    "documents",
+    "endpoint_descriptor",
+    "graph_edge",
+    "graph_node",
+    "operation_group",
+    "targets",
+    "tenant",
+)
+
+
+@pytest.fixture
+async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[None]:
+    """Inject the testcontainer engine + truncate every chassis table per test.
+
+    Differs from :func:`tests.integration.conftest.pg_engine` in one
+    bounded way: the TRUNCATE statement lists every tenant-scoped
+    table the production schema knows about (see
+    :data:`_TRUNCATE_TABLES`) rather than just the three the
+    integration suite listed before G6.3 / G9.1 landed their FK
+    columns. This is the workaround the canary needs to run locally;
+    the integration conftest itself stays untouched (the bug there
+    is filed as a follow-up).
+
+    Other behaviour matches the integration conftest verbatim:
+    truncate before yield, re-seed the two pinned tenant rows
+    (``TENANT_A_ID`` / ``TENANT_B_ID``) so any consumer test
+    expecting them as table state still passes, dispose the engine
+    on teardown to release the pool.
+    """
+    reset_engine_for_testing()
+    eng = create_engine_for_url(async_pg_url, pool_size=5, pool_timeout=10.0)
+    engine_module._engine = eng
+
+    async with eng.connect() as conn:
+        truncate_sql = "TRUNCATE TABLE " + ", ".join(_TRUNCATE_TABLES)
+        await conn.execute(text(truncate_sql))
+        await conn.execute(
+            text(
+                "INSERT INTO tenant (id, slug, name) VALUES "
+                "('11111111-1111-1111-1111-111111111111', 'tenant-a', 'Tenant A'), "
+                "('22222222-2222-2222-2222-222222222222', 'tenant-b', 'Tenant B')"
+            )
+        )
+        await conn.commit()
+
+    try:
+        yield
+    finally:
+        await dispose_engine()
+        reset_engine_for_testing()

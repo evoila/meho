@@ -9,10 +9,11 @@ triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
 vSphere 8.5+ / ESXi 8.5+ targets, plus 13 hand-authored composites
-that orchestrate cross-spec workflows: 5 read composites (G3.1-T5 /
-#508) and 8 write composites (G3.1-T6 / #509). The write composites
-cover every state-mutating operator workflow named in [#214](https://github.com/evoila/meho/issues/214)
-as required for govc-wrapper retirement.
+that orchestrate cross-spec workflows: 5 read composites
+(G3.1-T5 / `#508`) and 8 write composites (G3.1-T6 / `#509`). The
+write composites cover every state-mutating operator workflow named
+in [#214](https://github.com/evoila/meho/issues/214) as required for
+govc-wrapper retirement.
 
 Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 
@@ -195,12 +196,12 @@ parameter-schema validation all run on every sub-call.
 `host_evacuate_composite` is the first production composite that
 calls another composite via `dispatch_child`. Two-level nesting:
 
-```
-host.evacuate                           # depth 0 (top-level dispatch)
-  └─ vmware.composite.vm.migrate (× N) # depth 1 (dispatch_child of a composite)
+```text
+host.evacuate                                            # depth 0 (top-level dispatch)
+  └─ vmware.composite.vm.migrate (× N)                  # depth 1 (dispatch_child of a composite)
        ├─ GET:/vcenter/cluster/{c}/drs/recommendations  # depth 2 (typed sub-op)
-       └─ POST:/vcenter/vm/{vm}                         # depth 2 (typed sub-op)
-  └─ PATCH:/vcenter/host/{host}/maintenance             # depth 1 (typed sub-op)
+       └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 2 (typed sub-op)
+  └─ PATCH:/vcenter/host/{host}/maintenance?action=enter # depth 1 (typed sub-op)
 ```
 
 `composite_depth_var` (default cap 8) handles this naturally. The

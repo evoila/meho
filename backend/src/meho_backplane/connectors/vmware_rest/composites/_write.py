@@ -80,24 +80,54 @@ __all__ = [
 _CONNECTOR_ID = "vmware-rest-9.0"
 
 # vCenter REST op_ids (canonical METHOD:/path keys from vcenter.yaml).
+#
+# Action-bearing endpoints. vCenter's OpenAPI spec models POST-with-side-effect
+# endpoints as ``/<path>?action=<verb>`` — i.e. the action verb is part of the
+# path key, not a body parameter. The ingestion pipeline preserves the query
+# verbatim, so the canonical ``op_id`` for "power on a VM" is
+# ``POST:/vcenter/vm/{vm}/power?action=start`` (not ``POST:/vcenter/vm/{vm}/power``
+# with ``action=start`` in body params — that op_id is not a descriptor row).
+# These constants therefore embed the action verb. Endpoints whose action verb
+# is operator-chosen (power start/stop, maintenance enter/exit) build the op_id
+# per-call via :func:`_power_vm_op_id` / :func:`_host_maintenance_op_id`.
 _OP_LIST_FOLDERS = "GET:/vcenter/folder"
 _OP_LIST_VMS = "GET:/vcenter/vm"
 _OP_GET_VM = "GET:/vcenter/vm/{vm}"
 _OP_CREATE_VM = "POST:/vcenter/vm"
 _OP_DELETE_VM = "DELETE:/vcenter/vm/{vm}"
 _OP_ATTACH_VM_NIC = "PATCH:/vcenter/vm/{vm}/network"
-_OP_POWER_VM = "POST:/vcenter/vm/{vm}/power"
-_OP_RELOCATE_VM = "POST:/vcenter/vm/{vm}"  # action=relocate query param
+_OP_RELOCATE_VM = "POST:/vcenter/vm/{vm}?action=relocate"
 _OP_LIST_VM_SNAPSHOTS = "GET:/vcenter/vm/{vm}/snapshot"
-_OP_REVERT_VM_SNAPSHOT = "POST:/vcenter/vm/{vm}/snapshot/{snap}"
+_OP_REVERT_VM_SNAPSHOT = "POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert"
 _OP_LIST_CLUSTER_HOSTS = "GET:/vcenter/cluster/{cluster}/host"
 _OP_GET_DRS_RECOMMENDATIONS = "GET:/vcenter/cluster/{cluster}/drs/recommendations"
-_OP_DEPLOY_LIBRARY_VM = "POST:/vcenter/vm-template/library-items"
+_OP_DEPLOY_LIBRARY_VM = "POST:/vcenter/vm-template/library-items?action=deploy"
 _OP_GET_TASK = "GET:/cis/tasks/{task}"
-_OP_HOST_MAINTENANCE = "PATCH:/vcenter/host/{host}/maintenance"
-_OP_HOST_PATCH = "POST:/vcenter/host/{host}"
+_OP_HOST_PATCH = "POST:/vcenter/host/{host}?action=patch"
 _OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"
-_OP_REMOVE_DVS_HOST = "POST:/vcenter/network/dvs/{dvs}"
+_OP_REMOVE_DVS_HOST = "POST:/vcenter/network/dvs/{dvs}?action=remove_host"
+
+
+def _power_vm_op_id(action: str) -> str:
+    """Build the per-action canonical op_id for ``POST:/vcenter/vm/{vm}/power``.
+
+    vCenter exposes ``start`` / ``stop`` / ``suspend`` / ``reset`` as four
+    distinct descriptor rows under the ``?action=<verb>`` discriminator. The
+    composite picks the row at call time so each action lands on its own
+    audit row + policy evaluation, not as a free-form ``action`` parameter
+    on a single shared op_id (which wouldn't resolve against an ingested row).
+    """
+    return f"POST:/vcenter/vm/{{vm}}/power?action={action}"
+
+
+def _host_maintenance_op_id(action: str) -> str:
+    """Build the per-action canonical op_id for ``PATCH:/vcenter/host/{host}/maintenance``.
+
+    Maintenance enter / exit are two descriptor rows under ``?action=enter`` /
+    ``?action=exit``; same reasoning as :func:`_power_vm_op_id`.
+    """
+    return f"PATCH:/vcenter/host/{{host}}/maintenance?action={action}"
+
 
 # Recursive composite sub-op_id (host.evacuate -> vm.migrate).
 _OP_COMPOSITE_VM_MIGRATE = "vmware.composite.vm.migrate"
@@ -290,8 +320,8 @@ async def vm_create_composite(
     if power_on:
         power_result = await dispatch_child(
             connector_id=_CONNECTOR_ID,
-            op_id=_OP_POWER_VM,
-            params={"vm": vm_id, "action": "start"},
+            op_id=_power_vm_op_id("start"),
+            params={"vm": vm_id},
         )
         if power_result.status != "ok":
             await _rollback_created_vm(dispatch_child=dispatch_child, vm_id=vm_id)
@@ -423,7 +453,6 @@ async def vm_clone_composite(
             connector_id=_CONNECTOR_ID,
             op_id=_OP_DEPLOY_LIBRARY_VM,
             params={
-                "action": "deploy",
                 "library_item": library_item,
                 "spec": {"name": target_name},
             },
@@ -512,7 +541,7 @@ async def vm_snapshot_revert_composite(
         await dispatch_child(
             connector_id=_CONNECTOR_ID,
             op_id=_OP_REVERT_VM_SNAPSHOT,
-            params={"vm": vm_moid, "snap": snapshot_moid, "action": "revert"},
+            params={"vm": vm_moid, "snap": snapshot_moid},
         )
     )
     return {
@@ -594,7 +623,6 @@ async def vm_migrate_composite(
             op_id=_OP_RELOCATE_VM,
             params={
                 "vm": vm_moid,
-                "action": "relocate",
                 "spec": {"placement": {"host": target_host}},
             },
         )
@@ -627,6 +655,10 @@ async def vm_power_bulk_composite(
     filter_dict: dict[str, Any] = dict(params.get("filter") or {})
     action = params["action"]
     fail_fast = bool(params.get("fail_fast", False))
+    # Resolve the action verb to a concrete descriptor op_id once before the
+    # fan-out loop. Each ``?action=<verb>`` is a distinct descriptor row, so
+    # every per-VM dispatch must target the matching one.
+    power_op_id = _power_vm_op_id(action)
 
     listing = _require_ok(
         await dispatch_child(
@@ -653,8 +685,8 @@ async def vm_power_bulk_composite(
             continue
         power_result = await dispatch_child(
             connector_id=_CONNECTOR_ID,
-            op_id=_OP_POWER_VM,
-            params={"vm": vm_moid, "action": action},
+            op_id=power_op_id,
+            params={"vm": vm_moid},
         )
         if power_result.status == "ok":
             results.append({"vm": vm_moid, "status": "ok", "error": None})
@@ -724,9 +756,6 @@ async def host_evacuate_composite(
             f"host.evacuate: expected list from {_OP_LIST_VMS!r}, got {type(vms).__name__}"
         )
 
-    cluster_raw = vms[0].get("cluster") if vms and isinstance(vms[0], dict) else None
-    cluster_moid = cluster_raw if isinstance(cluster_raw, str) else ""
-
     migrated: list[str] = []
     failed: list[dict[str, str]] = []
     for vm_entry in vms:
@@ -735,10 +764,30 @@ async def host_evacuate_composite(
         vm_moid = vm_entry.get("vm")
         if not isinstance(vm_moid, str):
             continue
+        # Resolve the cluster per-VM rather than once from ``vms[0]``. The
+        # vCenter listing row reports each VM's containing cluster; VMs on
+        # the same host can belong to different clusters when the host
+        # straddles a federation (and the listing payload may simply omit
+        # the field for a row mid-flight). Treat a missing cluster as a
+        # per-VM failure so the recursive migrate doesn't fire against an
+        # empty target — that would short-circuit to ``no_recommendation``
+        # without surfacing the underlying data gap.
+        vm_cluster = vm_entry.get("cluster")
+        if not isinstance(vm_cluster, str) or not vm_cluster:
+            failed.append({"vm": vm_moid, "error": "missing_cluster"})
+            if not tolerate_partial:
+                return {
+                    "status": "aborted",
+                    "host": host_moid,
+                    "migrated_vms": migrated,
+                    "failed_vms": failed,
+                    "maintenance_entered": False,
+                }
+            continue
         migrate_result = await dispatch_child(
             connector_id=_CONNECTOR_ID,
             op_id=_OP_COMPOSITE_VM_MIGRATE,
-            params={"vm": vm_moid, "cluster": cluster_moid},
+            params={"vm": vm_moid, "cluster": vm_cluster},
         )
         succeeded, err_text = _classify_vm_migrate_outcome(migrate_result)
         if succeeded:
@@ -757,8 +806,8 @@ async def host_evacuate_composite(
     _require_ok(
         await dispatch_child(
             connector_id=_CONNECTOR_ID,
-            op_id=_OP_HOST_MAINTENANCE,
-            params={"host": host_moid, "action": "enter"},
+            op_id=_host_maintenance_op_id("enter"),
+            params={"host": host_moid},
         )
     )
     return {
@@ -844,7 +893,7 @@ async def host_detach_from_vds_composite(
         await dispatch_child(
             connector_id=_CONNECTOR_ID,
             op_id=_OP_REMOVE_DVS_HOST,
-            params={"dvs": dvs_moid, "action": "remove_host", "host": host_moid},
+            params={"dvs": dvs_moid, "host": host_moid},
         )
     )
     return {
@@ -860,10 +909,15 @@ async def host_detach_from_vds_composite(
 # ===========================================================================
 
 
+# Per-step (step-name, op_id_builder, extra-params-builder) tuples. The op_id
+# builder yields the concrete ``?action=<verb>`` descriptor key per step;
+# extra-params adds the ``method`` body field that ``POST:/vcenter/host/{host}
+# ?action=patch`` consumes (the patch verb has a non-trivial body schema; the
+# maintenance verbs do not).
 _CLUSTER_PATCH_STEPS: tuple[tuple[str, str], ...] = (
-    ("maintenance_enter", _OP_HOST_MAINTENANCE),
+    ("maintenance_enter", _host_maintenance_op_id("enter")),
     ("patch", _OP_HOST_PATCH),
-    ("maintenance_exit", _OP_HOST_MAINTENANCE),
+    ("maintenance_exit", _host_maintenance_op_id("exit")),
 )
 
 
@@ -873,12 +927,14 @@ def _cluster_patch_step_params(
     host_moid: str,
     patch_method: str,
 ) -> dict[str, Any]:
-    """Build the per-step params dict for a cluster.patch sub-op."""
-    if step == "maintenance_enter":
-        return {"host": host_moid, "action": "enter"}
-    if step == "maintenance_exit":
-        return {"host": host_moid, "action": "exit"}
-    return {"host": host_moid, "action": "patch", "method": patch_method}
+    """Build the per-step params dict for a cluster.patch sub-op.
+
+    Action verbs live on the op_id (``?action=enter`` / ``?action=patch`` /
+    ``?action=exit``); only the patch step adds a body-shaped ``method``.
+    """
+    if step == "patch":
+        return {"host": host_moid, "method": patch_method}
+    return {"host": host_moid}
 
 
 async def _patch_one_host(

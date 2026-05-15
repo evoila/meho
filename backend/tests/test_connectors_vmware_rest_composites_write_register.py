@@ -227,6 +227,9 @@ async def test_every_write_composite_row_uses_dangerous_requires_approval(
             .scalars()
             .all()
         )
+    # Prove the query actually returned all 8 write rows before iterating —
+    # otherwise the loop is vacuous when the set is empty / partial.
+    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
     for row in rows:
         assert row.safety_level == "dangerous", (
             f"{row.op_id}: expected dangerous, got {row.safety_level!r}"
@@ -253,6 +256,7 @@ async def test_every_write_composite_row_carries_composite_source_kind(
             .scalars()
             .all()
         )
+    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
     for row in rows:
         assert row.source_kind == "composite"
         assert row.tenant_id is None
@@ -278,6 +282,7 @@ async def test_write_handler_ref_round_trips_to_module_level_dotted_path(
             .scalars()
             .all()
         )
+    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
     by_op = {row.op_id: row for row in rows}
     for op_id, expected_ref in _EXPECTED_HANDLER_REF_BY_OP.items():
         assert by_op[op_id].handler_ref == expected_ref
@@ -435,6 +440,7 @@ async def test_write_composite_tags_include_composite_and_write(
             .scalars()
             .all()
         )
+    assert {row.op_id for row in rows} == set(_WRITE_OP_IDS)
     for row in rows:
         assert "composite" in row.tags, f"{row.op_id}: missing composite tag"
         assert "write" in row.tags, f"{row.op_id}: missing write tag"

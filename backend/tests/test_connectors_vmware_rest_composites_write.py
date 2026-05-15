@@ -126,7 +126,7 @@ async def test_vm_create_happy_path_dispatches_all_steps_in_order() -> None:
             _ok("GET:/vcenter/folder", [{"folder": "folder-7", "name": "Prod"}]),
             _ok("POST:/vcenter/vm", {"value": "vm-99"}),
             _ok("PATCH:/vcenter/vm/{vm}/network", {}),
-            _ok("POST:/vcenter/vm/{vm}/power", {}),
+            _ok("POST:/vcenter/vm/{vm}/power?action=start", {}),
         ]
     )
 
@@ -149,12 +149,12 @@ async def test_vm_create_happy_path_dispatches_all_steps_in_order() -> None:
         "GET:/vcenter/folder",
         "POST:/vcenter/vm",
         "PATCH:/vcenter/vm/{vm}/network",
-        "POST:/vcenter/vm/{vm}/power",
+        "POST:/vcenter/vm/{vm}/power?action=start",
     ]
     assert dispatch.calls[0]["params"] == {"filter.names": ["Prod"]}
     assert dispatch.calls[1]["params"]["spec"]["placement"]["folder"] == "folder-7"
     assert dispatch.calls[2]["params"] == {"vm": "vm-99", "spec": {"network": "net-3"}}
-    assert dispatch.calls[3]["params"] == {"vm": "vm-99", "action": "start"}
+    assert dispatch.calls[3]["params"] == {"vm": "vm-99"}
     assert out["status"] == "created"
     assert out["vm_id"] == "vm-99"
     assert out["steps_succeeded"] == ["folder_lookup", "create", "nic_attach", "power_on"]
@@ -219,7 +219,10 @@ async def test_vm_clone_happy_path_polls_task_to_completion() -> None:
     dispatch = _RecordingDispatchChild(
         [
             _ok("GET:/vcenter/vm/{vm}", {"name": "src"}),
-            _ok("POST:/vcenter/vm-template/library-items", {"task": "task-42"}),
+            _ok(
+                "POST:/vcenter/vm-template/library-items?action=deploy",
+                {"task": "task-42"},
+            ),
             _ok("GET:/cis/tasks/{task}", {"status": "SUCCEEDED", "result": {"vm": "vm-clone-1"}}),
         ]
     )
@@ -239,9 +242,11 @@ async def test_vm_clone_happy_path_polls_task_to_completion() -> None:
     assert out["vm_id"] == "vm-clone-1"
     assert [c["op_id"] for c in dispatch.calls] == [
         "GET:/vcenter/vm/{vm}",
-        "POST:/vcenter/vm-template/library-items",
+        "POST:/vcenter/vm-template/library-items?action=deploy",
         "GET:/cis/tasks/{task}",
     ]
+    # ``action=deploy`` lives on the op_id, not body params.
+    assert "action" not in dispatch.calls[1]["params"]
 
 
 @pytest.mark.asyncio
@@ -250,7 +255,10 @@ async def test_vm_clone_wait_false_returns_pending_with_task_id() -> None:
     dispatch = _RecordingDispatchChild(
         [
             _ok("GET:/vcenter/vm/{vm}", {"name": "src"}),
-            _ok("POST:/vcenter/vm-template/library-items", {"task": "task-99"}),
+            _ok(
+                "POST:/vcenter/vm-template/library-items?action=deploy",
+                {"task": "task-99"},
+            ),
         ]
     )
     out = await vm_clone_composite(
@@ -277,7 +285,10 @@ async def test_vm_clone_task_failed_raises_runtime_error() -> None:
     dispatch = _RecordingDispatchChild(
         [
             _ok("GET:/vcenter/vm/{vm}", {}),
-            _ok("POST:/vcenter/vm-template/library-items", {"task": "task-bad"}),
+            _ok(
+                "POST:/vcenter/vm-template/library-items?action=deploy",
+                {"task": "task-bad"},
+            ),
             _ok("GET:/cis/tasks/{task}", {"status": "FAILED", "error": "deploy failed"}),
         ]
     )
@@ -309,7 +320,7 @@ async def test_vm_snapshot_revert_happy_path_dispatches_revert() -> None:
                 "GET:/vcenter/vm/{vm}/snapshot",
                 [{"snapshot": "snap-1", "name": "before-patch"}],
             ),
-            _ok("POST:/vcenter/vm/{vm}/snapshot/{snap}", {}),
+            _ok("POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert", {}),
         ]
     )
     out = await vm_snapshot_revert_composite(
@@ -320,11 +331,9 @@ async def test_vm_snapshot_revert_happy_path_dispatches_revert() -> None:
     )
     assert out["status"] == "reverted"
     assert out["snapshot_id"] == "snap-1"
-    assert dispatch.calls[1]["params"] == {
-        "vm": "vm-1",
-        "snap": "snap-1",
-        "action": "revert",
-    }
+    assert dispatch.calls[1]["op_id"] == "POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert"
+    # ``action=revert`` lives on the op_id, not body params.
+    assert dispatch.calls[1]["params"] == {"vm": "vm-1", "snap": "snap-1"}
 
 
 @pytest.mark.asyncio
@@ -384,7 +393,7 @@ async def test_vm_migrate_drs_recommendation_dispatches_relocate() -> None:
                 "GET:/vcenter/cluster/{cluster}/drs/recommendations",
                 [{"vm": "vm-1", "target_host": "host-A"}],
             ),
-            _ok("POST:/vcenter/vm/{vm}", {}),
+            _ok("POST:/vcenter/vm/{vm}?action=relocate", {}),
         ]
     )
     out = await vm_migrate_composite(
@@ -396,14 +405,16 @@ async def test_vm_migrate_drs_recommendation_dispatches_relocate() -> None:
     assert out["status"] == "migrated"
     assert out["target_host"] == "host-A"
     assert out["source"] == "drs"
+    assert dispatch.calls[1]["op_id"] == "POST:/vcenter/vm/{vm}?action=relocate"
     assert dispatch.calls[1]["params"]["vm"] == "vm-1"
-    assert dispatch.calls[1]["params"]["action"] == "relocate"
+    # ``action=relocate`` lives on the op_id, not body params.
+    assert "action" not in dispatch.calls[1]["params"]
 
 
 @pytest.mark.asyncio
 async def test_vm_migrate_explicit_target_bypasses_drs_lookup() -> None:
     """``target_host`` override skips the DRS sub-op; relocate dispatches directly."""
-    dispatch = _RecordingDispatchChild([_ok("POST:/vcenter/vm/{vm}", {})])
+    dispatch = _RecordingDispatchChild([_ok("POST:/vcenter/vm/{vm}?action=relocate", {})])
     out = await vm_migrate_composite(
         operator=_make_operator(),
         target=object(),
@@ -413,6 +424,7 @@ async def test_vm_migrate_explicit_target_bypasses_drs_lookup() -> None:
     assert out["status"] == "migrated"
     assert out["target_host"] == "host-Z"
     assert out["source"] == "operator"
+    assert dispatch.calls[0]["op_id"] == "POST:/vcenter/vm/{vm}?action=relocate"
     assert len(dispatch.calls) == 1
 
 
@@ -446,9 +458,9 @@ async def test_vm_power_bulk_happy_path_aggregates_per_vm_results() -> None:
     dispatch = _RecordingDispatchChild(
         [
             _ok("GET:/vcenter/vm", [{"vm": "vm-1"}, {"vm": "vm-2"}, {"vm": "vm-3"}]),
-            _ok("POST:/vcenter/vm/{vm}/power", {}),
-            _ok("POST:/vcenter/vm/{vm}/power", {}),
-            _ok("POST:/vcenter/vm/{vm}/power", {}),
+            _ok("POST:/vcenter/vm/{vm}/power?action=start", {}),
+            _ok("POST:/vcenter/vm/{vm}/power?action=start", {}),
+            _ok("POST:/vcenter/vm/{vm}/power?action=start", {}),
         ]
     )
     out = await vm_power_bulk_composite(
@@ -463,6 +475,11 @@ async def test_vm_power_bulk_happy_path_aggregates_per_vm_results() -> None:
     assert out["aborted_on_failure"] is False
     # Filter forwarded as filter.power_states.
     assert dispatch.calls[0]["params"] == {"filter.power_states": ["POWERED_OFF"]}
+    # Every per-VM call targets the ``?action=start`` descriptor row; action
+    # verb lives on the op_id, not body params.
+    for call in dispatch.calls[1:]:
+        assert call["op_id"] == "POST:/vcenter/vm/{vm}/power?action=start"
+        assert "action" not in call["params"]
 
 
 @pytest.mark.asyncio
@@ -471,8 +488,8 @@ async def test_vm_power_bulk_partial_failure_continues_by_default() -> None:
     dispatch = _RecordingDispatchChild(
         [
             _ok("GET:/vcenter/vm", [{"vm": "vm-1"}, {"vm": "vm-2"}]),
-            _err("POST:/vcenter/vm/{vm}/power", "boom"),
-            _ok("POST:/vcenter/vm/{vm}/power", {}),
+            _err("POST:/vcenter/vm/{vm}/power?action=stop", "boom"),
+            _ok("POST:/vcenter/vm/{vm}/power?action=stop", {}),
         ]
     )
     out = await vm_power_bulk_composite(
@@ -485,6 +502,9 @@ async def test_vm_power_bulk_partial_failure_continues_by_default() -> None:
     assert out["aborted_on_failure"] is False
     # Both VMs were attempted.
     assert len(dispatch.calls) == 3
+    # ``stop`` lives on the op_id.
+    for call in dispatch.calls[1:]:
+        assert call["op_id"] == "POST:/vcenter/vm/{vm}/power?action=stop"
 
 
 @pytest.mark.asyncio
@@ -493,7 +513,7 @@ async def test_vm_power_bulk_fail_fast_aborts_on_first_failure() -> None:
     dispatch = _RecordingDispatchChild(
         [
             _ok("GET:/vcenter/vm", [{"vm": "vm-1"}, {"vm": "vm-2"}, {"vm": "vm-3"}]),
-            _err("POST:/vcenter/vm/{vm}/power", "denied"),
+            _err("POST:/vcenter/vm/{vm}/power?action=stop", "denied"),
         ]
     )
     out = await vm_power_bulk_composite(
@@ -528,11 +548,13 @@ async def test_host_evacuate_dispatches_vm_migrate_per_vm_then_maintenance() -> 
         [
             _ok(
                 "GET:/vcenter/vm",
-                [{"vm": "vm-a", "cluster": "c-1"}, {"vm": "vm-b", "cluster": "c-1"}],
+                # Per-VM cluster moids differ so the per-row resolution
+                # gets exercised end to end (vm-a/c-1, vm-b/c-2).
+                [{"vm": "vm-a", "cluster": "c-1"}, {"vm": "vm-b", "cluster": "c-2"}],
             ),
             migrate_result,
             migrate_result,
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
         ]
     )
     out = await host_evacuate_composite(
@@ -546,13 +568,15 @@ async def test_host_evacuate_dispatches_vm_migrate_per_vm_then_maintenance() -> 
         "GET:/vcenter/vm",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.migrate",
-        "PATCH:/vcenter/host/{host}/maintenance",
+        "PATCH:/vcenter/host/{host}/maintenance?action=enter",
     ]
-    # Both recursive calls carry the cluster moid pulled from the
-    # listing row.
+    # Each recursive call carries that row's cluster moid — proves per-row
+    # resolution (M1 fix from PR #529 iter-2).
     assert dispatch.calls[1]["params"] == {"vm": "vm-a", "cluster": "c-1"}
-    assert dispatch.calls[2]["params"] == {"vm": "vm-b", "cluster": "c-1"}
-    assert dispatch.calls[3]["params"] == {"host": "host-1", "action": "enter"}
+    assert dispatch.calls[2]["params"] == {"vm": "vm-b", "cluster": "c-2"}
+    # Maintenance enter dispatches against the action-bearing descriptor row;
+    # ``action`` is NOT a body param.
+    assert dispatch.calls[3]["params"] == {"host": "host-1"}
     assert out["status"] == "evacuated"
     assert out["maintenance_entered"] is True
     assert out["migrated_vms"] == ["vm-a", "vm-b"]
@@ -586,7 +610,7 @@ async def test_host_evacuate_default_aborts_on_vm_migrate_failure() -> None:
     assert len(out["failed_vms"]) == 1
     # Maintenance-enter never dispatched.
     op_ids = [c["op_id"] for c in dispatch.calls]
-    assert "PATCH:/vcenter/host/{host}/maintenance" not in op_ids
+    assert "PATCH:/vcenter/host/{host}/maintenance?action=enter" not in op_ids
 
 
 @pytest.mark.asyncio
@@ -612,7 +636,7 @@ async def test_host_evacuate_tolerate_partial_failure_still_enters_maintenance()
             ),
             ok_migrate,
             err_migrate,
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
         ]
     )
     out = await host_evacuate_composite(
@@ -641,7 +665,7 @@ async def test_host_detach_from_vds_happy_path_removes_host_after_nic_migration(
             _ok("GET:/vcenter/vm", [{"vm": "vm-1"}, {"vm": "vm-2"}]),
             _ok("PATCH:/vcenter/vm/{vm}/network", {}),
             _ok("PATCH:/vcenter/vm/{vm}/network", {}),
-            _ok("POST:/vcenter/network/dvs/{dvs}", {}),
+            _ok("POST:/vcenter/network/dvs/{dvs}?action=remove_host", {}),
         ]
     )
     out = await host_detach_from_vds_composite(
@@ -653,10 +677,11 @@ async def test_host_detach_from_vds_happy_path_removes_host_after_nic_migration(
     assert out["status"] == "detached"
     assert out["vms_migrated"] == ["vm-1", "vm-2"]
     assert out["vm_migration_failures"] == []
-    # DVS remove fired.
+    # DVS remove fired against the action-bearing descriptor row.
     last_call = dispatch.calls[-1]
-    assert last_call["op_id"] == "POST:/vcenter/network/dvs/{dvs}"
-    assert last_call["params"] == {"dvs": "dvs-1", "action": "remove_host", "host": "host-9"}
+    assert last_call["op_id"] == "POST:/vcenter/network/dvs/{dvs}?action=remove_host"
+    # ``action=remove_host`` lives on the op_id, not body params.
+    assert last_call["params"] == {"dvs": "dvs-1", "host": "host-9"}
 
 
 @pytest.mark.asyncio
@@ -681,7 +706,7 @@ async def test_host_detach_from_vds_incomplete_when_nic_migration_fails() -> Non
     assert len(out["vm_migration_failures"]) == 1
     # No DVS remove call.
     op_ids = [c["op_id"] for c in dispatch.calls]
-    assert "POST:/vcenter/network/dvs/{dvs}" not in op_ids
+    assert "POST:/vcenter/network/dvs/{dvs}?action=remove_host" not in op_ids
 
 
 # ===========================================================================
@@ -695,14 +720,14 @@ async def test_cluster_patch_happy_path_dispatches_sequential_maintenance_patch_
     dispatch = _RecordingDispatchChild(
         [
             _ok("GET:/vcenter/cluster/{cluster}/host", [{"host": "h1"}, {"host": "h2"}]),
-            # h1
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
-            _ok("POST:/vcenter/host/{host}", {}),
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
+            # h1: enter -> patch -> exit, action verbs on the op_id.
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
+            _ok("POST:/vcenter/host/{host}?action=patch", {}),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=exit", {}),
             # h2
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
-            _ok("POST:/vcenter/host/{host}", {}),
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
+            _ok("POST:/vcenter/host/{host}?action=patch", {}),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=exit", {}),
         ]
     )
     out = await cluster_patch_composite(
@@ -714,11 +739,15 @@ async def test_cluster_patch_happy_path_dispatches_sequential_maintenance_patch_
     assert out["status"] == "completed"
     assert out["patched_hosts"] == ["h1", "h2"]
     assert out["remaining_hosts"] == []
-    # Action sequence per host: enter -> patch -> exit.
+    # Action sequence per host lives on the op_id (one descriptor row per verb).
     host_calls = list(dispatch.calls[1:])
-    assert host_calls[0]["params"]["action"] == "enter"
-    assert host_calls[1]["params"]["action"] == "patch"
-    assert host_calls[2]["params"]["action"] == "exit"
+    assert host_calls[0]["op_id"] == "PATCH:/vcenter/host/{host}/maintenance?action=enter"
+    assert host_calls[1]["op_id"] == "POST:/vcenter/host/{host}?action=patch"
+    assert host_calls[2]["op_id"] == "PATCH:/vcenter/host/{host}/maintenance?action=exit"
+    # Body params drop the ``action`` field; patch carries a ``method`` body.
+    assert host_calls[0]["params"] == {"host": "h1"}
+    assert host_calls[1]["params"] == {"host": "h1", "method": "default"}
+    assert host_calls[2]["params"] == {"host": "h1"}
 
 
 @pytest.mark.asyncio
@@ -731,12 +760,12 @@ async def test_cluster_patch_per_host_failure_stops_loop() -> None:
                 [{"host": "h1"}, {"host": "h2"}, {"host": "h3"}],
             ),
             # h1 completes cleanly.
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
-            _ok("POST:/vcenter/host/{host}", {}),
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
+            _ok("POST:/vcenter/host/{host}?action=patch", {}),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=exit", {}),
             # h2 fails on patch.
-            _ok("PATCH:/vcenter/host/{host}/maintenance", {}),
-            _err("POST:/vcenter/host/{host}", "vendor patch failed"),
+            _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
+            _err("POST:/vcenter/host/{host}?action=patch", "vendor patch failed"),
         ]
     )
     out = await cluster_patch_composite(
@@ -765,11 +794,27 @@ async def test_every_write_composite_uses_vmware_rest_9_0_connector_id() -> None
     contract -- the connector_id is what routes recursive dispatch
     back to :class:`VmwareRestConnector` for sub-call authentication.
     """
+    # Every case drives the composite through ALL of its sub-op_ids so the
+    # connector_id contract is asserted on the full dispatch chain — empty
+    # listings would short-circuit before the action-bearing typed ops fire
+    # (M4 from PR #529 iter-2: vm_create_composite was exiting on an empty
+    # folder match before its create / nic / power / rollback sub-ops ran).
     cases: tuple[tuple[Any, dict[str, Any], list[Any]], ...] = (
         (
             vm_create_composite,
-            {"folder_name": "f", "name": "n", "guest_os": "g"},
-            [_ok("GET:/vcenter/folder", []), _ok("POST:/vcenter/vm", {"value": ""})],
+            {
+                "folder_name": "f",
+                "name": "n",
+                "guest_os": "g",
+                "nics": [{"network": "net-a"}],
+                "power_on_after_create": True,
+            },
+            [
+                _ok("GET:/vcenter/folder", [{"folder": "folder-x", "name": "f"}]),
+                _ok("POST:/vcenter/vm", {"value": "vm-x"}),
+                _ok("PATCH:/vcenter/vm/{vm}/network", {}),
+                _ok("POST:/vcenter/vm/{vm}/power?action=start", {}),
+            ],
         ),
         (
             vm_clone_composite,
@@ -781,28 +826,37 @@ async def test_every_write_composite_uses_vmware_rest_9_0_connector_id() -> None
             },
             [
                 _ok("GET:/vcenter/vm/{vm}", {}),
-                _ok("POST:/vcenter/vm-template/library-items", {"task": "t"}),
+                _ok("POST:/vcenter/vm-template/library-items?action=deploy", {"task": "t"}),
             ],
         ),
         (
             vm_snapshot_revert_composite,
             {"vm": "v", "snapshot_name": "n"},
-            [_ok("GET:/vcenter/vm/{vm}/snapshot", [])],
+            [
+                _ok("GET:/vcenter/vm/{vm}/snapshot", [{"snapshot": "snap-1", "name": "n"}]),
+                _ok("POST:/vcenter/vm/{vm}/snapshot/{snap}?action=revert", {}),
+            ],
         ),
         (
             vm_migrate_composite,
             {"vm": "v", "cluster": "c", "target_host": "h"},
-            [_ok("POST:/vcenter/vm/{vm}", {})],
+            [_ok("POST:/vcenter/vm/{vm}?action=relocate", {})],
         ),
         (
             vm_power_bulk_composite,
             {"action": "start"},
-            [_ok("GET:/vcenter/vm", [])],
+            [
+                _ok("GET:/vcenter/vm", [{"vm": "vm-x"}]),
+                _ok("POST:/vcenter/vm/{vm}/power?action=start", {}),
+            ],
         ),
         (
             host_evacuate_composite,
             {"host": "h"},
-            [_ok("GET:/vcenter/vm", []), _ok("PATCH:/vcenter/host/{host}/maintenance", {})],
+            [
+                _ok("GET:/vcenter/vm", []),
+                _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
+            ],
         ),
         (
             host_detach_from_vds_composite,
@@ -810,13 +864,18 @@ async def test_every_write_composite_uses_vmware_rest_9_0_connector_id() -> None
             [
                 _ok("GET:/vcenter/network/distributed-portgroup", []),
                 _ok("GET:/vcenter/vm", []),
-                _ok("POST:/vcenter/network/dvs/{dvs}", {}),
+                _ok("POST:/vcenter/network/dvs/{dvs}?action=remove_host", {}),
             ],
         ),
         (
             cluster_patch_composite,
             {"cluster": "c"},
-            [_ok("GET:/vcenter/cluster/{cluster}/host", [])],
+            [
+                _ok("GET:/vcenter/cluster/{cluster}/host", [{"host": "h1"}]),
+                _ok("PATCH:/vcenter/host/{host}/maintenance?action=enter", {}),
+                _ok("POST:/vcenter/host/{host}?action=patch", {}),
+                _ok("PATCH:/vcenter/host/{host}/maintenance?action=exit", {}),
+            ],
         ),
     )
     for handler, params, responses in cases:

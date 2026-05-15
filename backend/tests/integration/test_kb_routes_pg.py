@@ -187,9 +187,7 @@ async def test_full_lifecycle_through_all_five_routes(
     _write_corpus(tmp_path)
     fake_embed = _make_stub_embedding_service()
     admin_key, admin_token = _admin_token(tenant_id=TENANT_A_ID, sub="op-admin-1")
-    operator_key, operator_token = _operator_token(
-        tenant_id=TENANT_A_ID, sub="op-operator-1"
-    )
+    operator_key, operator_token = _operator_token(tenant_id=TENANT_A_ID, sub="op-operator-1")
 
     with (
         respx.mock as mock_router,
@@ -308,12 +306,8 @@ async def test_tenant_boundary_holds_via_http_routes(
 
     a_admin_key, a_admin_token = _admin_token(tenant_id=TENANT_A_ID, sub="op-a-admin")
     b_admin_key, b_admin_token = _admin_token(tenant_id=TENANT_B_ID, sub="op-b-admin")
-    b_operator_key, b_operator_token = _operator_token(
-        tenant_id=TENANT_B_ID, sub="op-b-op"
-    )
-    a_operator_key, a_operator_token = _operator_token(
-        tenant_id=TENANT_A_ID, sub="op-a-op"
-    )
+    b_operator_key, b_operator_token = _operator_token(tenant_id=TENANT_B_ID, sub="op-b-op")
+    a_operator_key, a_operator_token = _operator_token(tenant_id=TENANT_A_ID, sub="op-a-op")
 
     with (
         respx.mock as mock_router,
@@ -407,9 +401,7 @@ async def test_ingest_dry_run_does_not_write(
     _write_corpus(tmp_path)
     fake_embed = _make_stub_embedding_service()
     admin_key, admin_token = _admin_token(tenant_id=TENANT_A_ID, sub="op-dry")
-    operator_key, operator_token = _operator_token(
-        tenant_id=TENANT_A_ID, sub="op-dry-op"
-    )
+    operator_key, operator_token = _operator_token(tenant_id=TENANT_A_ID, sub="op-dry-op")
 
     with (
         respx.mock as mock_router,

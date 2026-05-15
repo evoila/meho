@@ -18,13 +18,15 @@ The same dispatch path drives all three retrieval surfaces — the
 per-surface differences (slug vs ``(scope, slug)`` vs
 ``(connector_id, op_id)`` ground truth) are absorbed by per-surface
 ``_eval_<surface>`` private dispatchers that produce a uniform
-``QueryResult`` shape. Surfaces whose corpus YAML hasn't shipped yet
-(memory in T4 #443, operations in T3 #442) return an empty
-``SurfaceResult`` with ``verdict="green"`` + ``query_count=0`` —
-the "no data" green is intentional: an absent corpus must not flip
-the CI gate red. The retire-checklist verb (T6 #445) is responsible
-for asserting that an evaluable corpus actually shipped before
-trusting the green.
+``QueryResult`` shape. A surface whose corpus YAML hasn't shipped
+yet returns an empty ``SurfaceResult`` with ``verdict="green"`` +
+``query_count=0`` — the "no data" green is intentional: an absent
+corpus must not flip the CI gate red. The retire-checklist verb
+(T6 #445) is responsible for asserting that an evaluable corpus
+actually shipped before trusting the green. The kb (T1 #440),
+operations (T3 #442) and memory (T4 #443) corpora are all shipped
+as of 2026-05; the "absent corpus" branch persists only as a guard
+against an accidentally-deleted YAML.
 
 Baseline integration
 --------------------
@@ -378,7 +380,7 @@ async def _eval_memory(
     thresholds: Thresholds,
     k: int,
 ) -> SurfaceResult:
-    """Eval the memory surface — empty corpus until T4 #443 ships."""
+    """Eval the memory surface against the shipped memory corpus (T4 #443)."""
     rows = load_corpus("memory")
     queries = [
         await _eval_query(

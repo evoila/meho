@@ -104,14 +104,19 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
       ``runner._operations_hits_to_op_ids``). The G4.3-T3 operations
       corpus shipped 10 govc-parity queries; without this branch the
       gate would flip red the moment the YAML lands.
-    * memory — no shipped corpus yet (T4 #443); falls through to the
-      empty-result path which the runner's empty-corpus-is-green rule
-      handles.
+    * memory — corpus row's first ``expected_hits`` ``(scope, slug)``
+      pair, encoded into ``source_id`` as ``"<scope>:<slug>"``. The
+      runner's ``_memory_hits_to_pairs`` splits on ``:`` and joins
+      ``first/last`` to recover the ``"<scope>/<slug>"`` shape the
+      corpus's expected list uses (T4 #443). Without this branch the
+      gate would flip red the moment ``memory_queries.yaml`` lands —
+      the runner would dispatch 10 memory queries against the stub,
+      get ``[]`` back per query, and post a red verdict for the
+      surface.
     """
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
-    ops_answers = {
-        row.query: row.expected_op_ids[0] for row in load_corpus("operations")
-    }
+    ops_answers = {row.query: row.expected_op_ids[0] for row in load_corpus("operations")}
+    memory_answers = {row.query: row.expected_hits[0] for row in load_corpus("memory")}
 
     def _hit(slug: str, source: str, tenant_id: uuid.UUID) -> RetrievalHit:
         return RetrievalHit(
@@ -140,6 +145,15 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
         if source == "operations":
             op_id = ops_answers.get(query)
             return [_hit(op_id, "operations", tenant_id)] if op_id else []
+        if source == "memory":
+            pair = memory_answers.get(query)
+            if pair is None:
+                return []
+            scope, slug = pair
+            # Encode as the G5.1 memory-layer source_id shape the
+            # runner's ``_memory_hits_to_pairs`` parses: split on
+            # ``:`` + join first/last → ``"<scope>/<slug>"``.
+            return [_hit(f"{scope}:{slug}", "memory", tenant_id)]
         slug = kb_answers.get(query)
         return [_hit(slug, source or "kb", tenant_id)] if slug else []
 

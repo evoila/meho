@@ -60,7 +60,14 @@ jobs:
     # someone deleted the org secret. Bump cadence: monthly review or
     # on advisory.
     container:
-      image: semgrep/semgrep:1.160.0
+      # Pulled through the in-cluster Harbor proxy cache
+      # (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public, anonymous
+      # consumer auth). Harbor preserves Docker Hub's namespace, so the
+      # `semgrep/semgrep` path appears verbatim under the cache prefix.
+      # `credentials:` stays load-bearing until #78's Half B confirms one
+      # week of green smoke + sees the cache servicing this image in Harbor
+      # — then it's removed in a follow-up PR.
+      image: harbor.evba.lab/dockerhub-proxy/semgrep/semgrep:1.160.0
       credentials:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}

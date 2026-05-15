@@ -1,0 +1,475 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""VmwareRestConnector — hand-rolled HttpConnector subclass for vSphere REST.
+
+Replaces the future :class:`GenericRestConnector` auto-shim that G0.7's
+ingestion pipeline synthesises on first ingest of ``vcenter.yaml``. The
+auto-shim makes the connector resolvable so ingestion can land the
+``endpoint_descriptor`` rows; this class makes those ops dispatchable.
+
+Registered against the v2 registry at module-import time via
+:func:`~meho_backplane.connectors.registry.register_connector_v2` in
+:mod:`meho_backplane.connectors.vmware_rest.__init__`. The auto-shim's
+idempotency check (in
+:func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
+once #408's pipeline lands in main) then no-ops on subsequent ingests
+against the same ``(product="vmware", version="9.0",
+impl_id="vmware-rest")`` triple.
+
+Per-target sessions
+-------------------
+
+The class caches one ``vmware-api-session-id`` token per ``target.name``.
+First call to :meth:`auth_headers` against a given target invokes the
+:class:`VsphereSessionLoader` (default
+:func:`load_session_credentials_from_vault`) for the service-account
+credentials, then issues ``POST /api/session`` with HTTP basic auth. The
+JSON-string-body response is the session token; subsequent calls reuse
+the cached value. Per-target isolation is the load-bearing invariant:
+two targets must never share a session token even if their names collide
+across tenants — the cache is keyed on ``target.name`` because that's
+the operator-supplied identifier the connector receives at the boundary.
+
+The session-establish flow runs under an :class:`asyncio.Lock` so two
+concurrent first-use callers against the same target don't both POST to
+``/api/session``. The lock is held only across the cache check + token
+fetch + cache write; subsequent reads after the cache is populated take
+the fast path under the same lock and exit immediately.
+
+Session lifecycle
+-----------------
+
+vSphere's default idle timeout is ~5 minutes; the connector does not
+proactively refresh tokens. The dispatcher's tenacity decorator on
+:meth:`HttpConnector._request_json` retries connection errors and 5xx
+responses but not 401 — a 401 from a subsequent call would surface to
+the caller. Explicit 401-driven session refresh is intentionally
+deferred to v0.2.next (per the task body's *Out of scope* section);
+operator-facing dispatch sees re-authentication as a clean retry
+through the dispatcher's caller-side retry path rather than a hidden
+retry inside the connector.
+
+:meth:`aclose` revokes every cached session via ``DELETE /api/session``
+before closing the per-target httpx clients. A revoke failure is logged
+and proceeds — the operator-facing concern at shutdown is "tear down
+the httpx pool"; an in-flight 5xx during DELETE doesn't block that.
+
+Auth model gating
+-----------------
+
+The task body's *Session lifecycle* section locks v0.2 to
+:attr:`AuthModel.SHARED_SERVICE_ACCOUNT`. :meth:`auth_headers` rejects
+any other ``target.auth_model`` value with a clear :exc:`NotImplementedError`
+that names both the target and the requested mode. ``None`` is accepted
+because targets that predate G0.3's ``auth_model`` column legitimately
+have no value — the column defaults to the shared-service-account model
+once G0.3 ships, but until then ``None`` is the "no model declared,
+fall back to v0.2 default" sentinel.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from typing import Any
+
+import httpx
+import structlog
+
+from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.schemas import (
+    AuthModel,
+    FingerprintResult,
+    OperationResult,
+    ProbeResult,
+)
+from meho_backplane.connectors.vmware_rest.session import (
+    VsphereSessionLoader,
+    VsphereTargetLike,
+    load_session_credentials_from_vault,
+)
+
+__all__ = ["VmwareRestConnector", "product_from_line_id"]
+
+_log = structlog.get_logger(__name__)
+
+# vmware-api-session-id header name per Broadcom's vSphere Automation
+# API security schema (Basic / API-key / Bearer). The same header
+# carries the session token across both vCenter REST (vcenter.yaml-
+# sourced ops) and vi-json (vi-json.yaml-sourced ops once #503 lands),
+# per docs/vcenter-9.0/MANIFEST.md. Lifted to a module constant so the
+# revoke path in aclose() and the auth path in _session_token can't
+# drift apart.
+_SESSION_HEADER = "vmware-api-session-id"
+
+# vSphere 8.0+'s /api/session POST returns the session token as a JSON
+# string body (e.g. ``"abc123def456"``). Older 6.7/7.0 vCenter via the
+# deprecated /rest/com/vmware/cis/session path returned
+# ``{"value": "abc123def456"}``. The class's supported_version_range
+# is ``">=8.5,<10.0"`` so the JSON-string shape is the load-bearing
+# one, but :meth:`_extract_session_token` handles both defensively —
+# vcsim has been known to swap between shapes between minor releases,
+# and a defensive read here costs nothing.
+_SESSION_TOKEN_OBJECT_KEY = "value"
+
+# Verbs that go through HttpConnector._request_json's tenacity retry
+# decorator. Non-idempotent verbs (POST / PUT / PATCH / DELETE) route
+# through _post_json instead — see HttpConnector for the policy.
+# Lifted here so :meth:`auth_headers`-level callers can introspect.
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def product_from_line_id(line_id: str) -> str:
+    """Map vCenter's ``product_line_id`` to the canonical product slug.
+
+    ``GET /api/about`` returns a ``product_line_id`` like ``"vpx"`` for
+    vCenter, ``"embeddedEsx"`` / ``"esx"`` for ESXi. The canonical
+    fingerprint shape demands ``product="vcenter"`` / ``"esxi"`` per
+    the consumer's wrapper contract. Unknown values fall through to
+    the raw line_id so an ESXi-on-Arm or a future vCenter rebrand is
+    still recorded faithfully rather than misclassified as
+    ``"unknown"``.
+    """
+    if line_id == "vpx":
+        return "vcenter"
+    if line_id in ("embeddedEsx", "esx"):
+        return "esxi"
+    return line_id or "unknown"
+
+
+def _extract_session_token(payload: Any, target_name: str) -> str:
+    """Coerce a ``POST /api/session`` JSON response to the session token string.
+
+    Handles the two shapes vSphere has shipped across recent releases:
+
+    * **JSON string body** — vSphere 7.0+ modern ``/api/session`` returns
+      the token as a JSON-quoted string. ``response.json()`` returns
+      :class:`str`.
+    * **JSON object body** — pre-7.0 ``/rest/com/vmware/cis/session``
+      returned ``{"value": "<token>"}``. Some vcsim builds straddle the
+      two shapes; supporting the legacy shape defensively keeps the
+      integration test green across simulator versions.
+
+    Anything else raises :exc:`RuntimeError` with the target name in
+    the message so the operator can identify the misbehaving endpoint.
+    """
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        value = payload.get(_SESSION_TOKEN_OBJECT_KEY)
+        if isinstance(value, str):
+            return value
+    raise RuntimeError(
+        f"unexpected /api/session response shape for target {target_name!r}: "
+        f"got {type(payload).__name__} (expected str or "
+        f"{{'{_SESSION_TOKEN_OBJECT_KEY}': str}})"
+    )
+
+
+def _is_acceptable_auth_model(value: Any) -> bool:
+    """Return ``True`` iff *value* is the SHARED_SERVICE_ACCOUNT mode or unset.
+
+    Accepts the enum member, the equivalent string, and ``None`` (the
+    "auth_model column not yet populated" sentinel for pre-G0.3
+    targets). Any other value (``"per_user"``, ``"impersonation"``,
+    a typo, an int) is rejected by the caller.
+    """
+    if value is None:
+        return True
+    if value is AuthModel.SHARED_SERVICE_ACCOUNT:
+        return True
+    return bool(value == AuthModel.SHARED_SERVICE_ACCOUNT.value)
+
+
+class VmwareRestConnector(HttpConnector):
+    """vSphere REST connector for vCenter 8.5+ / ESXi 8.5+ targets.
+
+    Per-target session cached in ``self._session_tokens``; token
+    established on first call to :meth:`auth_headers` via
+    ``POST /api/session`` with HTTP basic (service-account creds from
+    the injectable :class:`VsphereSessionLoader`); revoked on
+    :meth:`aclose` via ``DELETE /api/session``.
+
+    The :attr:`priority` is set to ``1`` so a future :class:`GenericRestConnector`
+    auto-shim that somehow registers for the same triple (e.g. a stale
+    ingest before this class's module imports) loses the registry's
+    tie-break ladder. The auto-shim's idempotency check should prevent
+    that case in practice; the priority is defence in depth.
+    """
+
+    # G0.6 v2 registry metadata. The (product, version, impl_id) triple
+    # matches the dispatcher's parse_connector_id contract:
+    # ``"vmware-rest-9.0"`` -> (``"vmware"``, ``"9.0"``, ``"vmware-rest"``).
+    product = "vmware"
+    version = "9.0"
+    impl_id = "vmware-rest"
+    supported_version_range = ">=8.5,<10.0"
+    # Outranks the GenericRestConnector auto-shim's priority=0 if both
+    # somehow register for the same triple; the idempotency check in
+    # ensure_connector_class_registered should make this unreachable
+    # in production, but a defence-in-depth tie-break keeps the
+    # resolver behaviour deterministic if the check is ever bypassed.
+    priority = 1
+
+    def __init__(
+        self,
+        *,
+        session_loader: VsphereSessionLoader | None = None,
+    ) -> None:
+        super().__init__()
+        self._session_tokens: dict[str, str] = {}
+        self._session_lock = asyncio.Lock()
+        self._session_loader: VsphereSessionLoader = (
+            session_loader if session_loader is not None else load_session_credentials_from_vault
+        )
+
+    async def auth_headers(self, target: VsphereTargetLike, raw_jwt: str) -> dict[str, str]:
+        """Return ``{"vmware-api-session-id": <token>}`` for the request.
+
+        Lazily establishes the session on first call against *target*;
+        subsequent calls reuse the cached token. ``raw_jwt`` is accepted
+        for ABC-signature compatibility but unused — the
+        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` mode authenticates with
+        a Vault-sourced service account, not the operator's OIDC token.
+
+        Raises :exc:`NotImplementedError` (with ``target.name`` and the
+        requested mode in the message) if ``target.auth_model`` is
+        anything other than ``shared_service_account`` or ``None``.
+        Per-user and impersonation modes are deferred to v0.2.next.
+        """
+        del raw_jwt  # SHARED_SERVICE_ACCOUNT mode doesn't forward the operator JWT
+        auth_model = getattr(target, "auth_model", None)
+        if not _is_acceptable_auth_model(auth_model):
+            raise NotImplementedError(
+                f"VmwareRestConnector only supports auth_model="
+                f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
+                f"{target.name!r} requested auth_model={auth_model!r}"
+            )
+        token = await self._session_token(target)
+        return {_SESSION_HEADER: token}
+
+    async def _session_token(self, target: VsphereTargetLike) -> str:
+        """Return the cached session token for *target*, establishing one on first use.
+
+        The lock serialises concurrent first-use for one target; the
+        cache fast-path means subsequent callers are bounded only by
+        the lock acquisition itself. The slow ``POST /api/session`` call
+        runs under the lock so two concurrent first-use callers against
+        the same target don't both pay the round-trip cost.
+        """
+        async with self._session_lock:
+            cached = self._session_tokens.get(target.name)
+            if cached is not None:
+                return cached
+            creds = await self._session_loader(target)
+            client = await self._http_client(target)
+            try:
+                resp = await client.post(
+                    "/api/session",
+                    auth=(creds["username"], creds["password"]),
+                )
+            except KeyError as exc:
+                # Surface a clear error if the loader returned a dict
+                # missing one of the two required keys — a typo in a
+                # production loader implementation otherwise surfaces
+                # as a confusing TypeError deep inside httpx's auth
+                # builder.
+                raise RuntimeError(
+                    f"vsphere session loader for target {target.name!r} returned "
+                    f"a dict missing required key {exc.args[0]!r}; need "
+                    "{'username': str, 'password': str}"
+                ) from exc
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                # Wrap so the operator-facing message names the target;
+                # httpx's default str() shows only the URL/status, which
+                # loses the per-target identification the dispatcher's
+                # audit row needs.
+                raise RuntimeError(
+                    f"vsphere session establish failed for target {target.name!r}: "
+                    f"POST /api/session returned HTTP {exc.response.status_code}"
+                ) from exc
+            token = _extract_session_token(resp.json(), target.name)
+            self._session_tokens[target.name] = token
+            _log.info(
+                "vsphere_session_established",
+                target=target.name,
+                host=target.host,
+            )
+            return token
+
+    async def fingerprint(self, target: VsphereTargetLike) -> FingerprintResult:
+        """Canonical fingerprint built from ``GET /api/about``.
+
+        The session token is fetched lazily by :meth:`auth_headers`
+        (called transitively through :meth:`HttpConnector._request_json`).
+        On transport or status failure, returns a non-reachable
+        ``FingerprintResult`` whose ``extras["error"]`` carries the
+        exception class + message — same pattern the K8s connector
+        established for ``probe()`` failures, plumbed here through
+        ``fingerprint()`` so the operator's first ``meho connector
+        fingerprint`` call against an unreachable vCenter gets a
+        structured response rather than a stack trace.
+        """
+        probed_at = datetime.now(UTC)
+        try:
+            payload = await self._get_json(target, "/api/about", raw_jwt="")
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            # RuntimeError catches the session-establish failures from
+            # :meth:`_session_token` so an unauthenticatable target
+            # surfaces as a clean ``reachable=False`` fingerprint
+            # rather than propagating the wrapped exception.
+            return FingerprintResult(
+                vendor="vmware",
+                product="vcenter",
+                reachable=False,
+                probed_at=probed_at,
+                probe_method="GET /api/about",
+                extras={"error": f"{type(exc).__name__}: {exc}"},
+            )
+        return FingerprintResult(
+            vendor="vmware",
+            product=product_from_line_id(payload.get("product_line_id", "")),
+            version=payload.get("version"),
+            build=payload.get("build"),
+            edition=payload.get("license_product_name"),
+            reachable=True,
+            probed_at=probed_at,
+            probe_method="GET /api/about",
+            extras={
+                "uuid": payload.get("instance_uuid"),
+                "full_name": payload.get("full_name"),
+                "product_line_id": payload.get("product_line_id"),
+                "api_type": payload.get("api_type"),
+                "os_type": payload.get("os_type"),
+            },
+        )
+
+    async def probe(self, target: VsphereTargetLike) -> ProbeResult:
+        """Lightweight reachability + auth-challenge check.
+
+        Delegates to :meth:`fingerprint` rather than running a separate
+        probe path. The chassis registry's readiness probe and the
+        operator-facing ``meho connector probe`` both want a single
+        boolean ``ok`` + a reason string; ``fingerprint`` already produces
+        the right shape and the extra latency from the ``/api/about``
+        payload parsing is negligible compared to the auth round-trip
+        ``fingerprint`` already incurs.
+        """
+        fp = await self.fingerprint(target)
+        if fp.reachable:
+            return ProbeResult(ok=True, probed_at=fp.probed_at)
+        return ProbeResult(
+            ok=False,
+            reason=str(fp.extras.get("error", "unreachable")),
+            probed_at=fp.probed_at,
+        )
+
+    async def execute(
+        self,
+        target: VsphereTargetLike,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        """Legacy shim — delegates to the G0.6 dispatcher.
+
+        Mirrors :meth:`VaultConnector.execute`'s shape: the connector's
+        ABC :meth:`Connector.execute` predates the G0.6 operator-aware
+        dispatch path, so this shim exists for pre-G0.6 callers (the
+        chassis ``/api/v1/connectors/{product}/{op_id}`` route, any
+        :func:`meho_backplane.connectors.resolver.resolve_connector`
+        consumer that doesn't already construct an :class:`Operator`).
+
+        Post-G0.6 callers (``/api/v1/operations/call``, MCP
+        ``call_operation``, the CLI verbs from #511) construct a real
+        :class:`Operator` and call :func:`meho_backplane.operations.dispatch`
+        directly — they don't reach this method.
+
+        The shim synthesises a minimal :class:`Operator` carrying a
+        nil-UUID tenant_id + a fixed system sentinel ``sub``; typed-
+        registrations are always ``tenant_id IS NULL`` in
+        ``endpoint_descriptor`` so the dispatcher's tenant-scoped lookup
+        falls through to the global row regardless of the synthesised
+        value. The dispatcher's audit row records the synthesised
+        identity; the real operator identity (when present) lands on
+        the audit row written by :class:`AuditMiddleware` upstream of
+        this call.
+        """
+        # Lazy import — meho_backplane.operations.dispatch transitively
+        # imports the connector registry which imports this module at
+        # package import time; deferring keeps that initialisation
+        # order stable.
+        from uuid import UUID
+
+        from meho_backplane.auth.operator import Operator, TenantRole
+        from meho_backplane.operations import dispatch
+
+        operator = Operator(
+            sub="system:vmware-rest-connector-shim",
+            name=None,
+            email=None,
+            raw_jwt="",
+            tenant_id=UUID(int=0),
+            tenant_role=TenantRole.OPERATOR,
+        )
+        # Encode the connector's natural key as the dispatcher's
+        # connector_id string per parse_connector_id's contract:
+        # ``"vmware-rest-9.0"`` -> (product=``"vmware"``, version=``"9.0"``,
+        # impl_id=``"vmware-rest"``).
+        connector_id = f"{self.impl_id}-{self.version}"
+        return await dispatch(
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params=params,
+        )
+
+    async def aclose(self) -> None:
+        """Revoke every cached session before closing the httpx pool.
+
+        Issues ``DELETE /api/session`` against each per-target client
+        before delegating to :meth:`HttpConnector.aclose`. A revoke
+        failure (5xx, transport error, target unreachable at shutdown)
+        is logged and proceeds — the operator-facing concern at
+        shutdown is "tear down the httpx pool", and a hung DELETE
+        on an unreachable target would otherwise block lifespan exit
+        long enough to trip Kubernetes' 30-second terminationGracePeriod.
+
+        The DELETE is issued before :meth:`super().aclose` so the
+        cached client is still pooled when we need it. After the
+        revoke loop, the parent close runs unchanged.
+        """
+        async with self._session_lock:
+            tokens = dict(self._session_tokens)
+            self._session_tokens.clear()
+        for target_name, token in tokens.items():
+            client = self._clients.get(target_name)
+            if client is None:
+                # Theoretically unreachable — every cached token was
+                # established against a per-target client that was
+                # created during _session_token. Defensive: skip
+                # cleanly if the invariant ever drifts.
+                continue
+            try:
+                resp = await client.request(
+                    "DELETE",
+                    "/api/session",
+                    headers={_SESSION_HEADER: token},
+                )
+                # Log non-2xx but don't raise — shutdown proceeds.
+                if resp.status_code >= 400:
+                    _log.warning(
+                        "vsphere_session_revoke_non_2xx",
+                        target=target_name,
+                        status_code=resp.status_code,
+                    )
+            except (httpx.HTTPError, OSError) as exc:
+                _log.warning(
+                    "vsphere_session_revoke_failed",
+                    target=target_name,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+        await super().aclose()

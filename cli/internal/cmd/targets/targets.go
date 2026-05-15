@@ -9,10 +9,12 @@
 //   - `meho targets list [--product P] [--json]` —
 //     GET /api/v1/targets, keyset-paginated, optionally narrowed by
 //     product slug.
+//
 //   - `meho targets describe <name|alias> [--json]` —
 //     GET /api/v1/targets/{name}, alias-aware via the backend's
 //     resolve_target. Renders the full Target read shape including
 //     `fingerprint` + `preferred_impl_id` (added by G0.3-T1.5).
+//
 //   - `meho targets probe <name|alias> [--json]` —
 //     POST /api/v1/targets/{name}/probe. The backend calls
 //     Connector.fingerprint(), persists the FingerprintResult to

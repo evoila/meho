@@ -35,6 +35,9 @@ names.
 - `meho connector ...` (G0.7-T5 #405) — spec-ingestion + review
   workflow (`ingest`, `list`, `review`, `edit-group`, `edit-op`,
   `enable`, `disable`).
+- `meho audit ...` (G8.1-T3 #467) — audit-log query surface
+  (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
+  the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466).
 
 ## Module layout
 
@@ -74,6 +77,19 @@ cli/
     │   ├── login_test.go      # override-resolution + help-flag tests.
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
+    │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
+    │   │   ├── audit.go          # NewRootCmd + shared HTTP/auth helpers.
+    │   │   ├── query.go          # `meho audit query` (POST /api/v1/audit/query).
+    │   │   ├── recent.go         # `meho audit recent` — shortcut for `query --since 24h`.
+    │   │   ├── show.go           # `meho audit show <audit-id>` (GET /api/v1/audit/show/{id}).
+    │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
+    │   │   ├── my_recent.go      # `meho audit my-recent` (GET /api/v1/audit/my-recent).
+    │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
+    │   │   ├── query_test.go     # body-marshal + render + 400-passthrough tests.
+    │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
+    │   │   ├── who_touched_test.go # query-param emit + table render tests.
+    │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
+    │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.
     │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree.
     │   │   ├── connector.go      # NewRootCmd + shared HTTP/auth helpers.
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest).

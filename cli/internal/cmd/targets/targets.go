@@ -2,8 +2,9 @@
 // Copyright (c) 2026 evoila Group
 
 // Package targets hosts the cobra commands under `meho targets ...`
-// for Initiative #224's targets registry (G0.3-T5 / Task #256). v0.2
-// ships three operator-facing read verbs:
+// for Initiative #224's targets registry (G0.3-T5 / Task #256 +
+// G0.3-T6 / Task #257). v0.2 ships three operator-facing read verbs
+// plus a bulk-import migration tool:
 //
 //   - `meho targets list [--product P] [--json]` —
 //     GET /api/v1/targets, keyset-paginated, optionally narrowed by
@@ -19,14 +20,22 @@
 //     re-probing), and returns the same envelope to the caller. 501
 //     when no connector is registered yet for the target's product.
 //
-// Each verb wraps one backplane route and renders the response in
-// either a human-readable table / key-value summary or `--json` mode.
+//   - `meho targets import <file> [--update] [--dry-run] [--json]` —
+//     bulk-import a `targets.yaml` file into the backplane via
+//     POST/PATCH /api/v1/targets (Task #257, G0.3-T6). YAML key
+//     `preferred_impl_id` maps to the top-level field; `fingerprint`
+//     is skipped (server-managed; the backplane returns 422 on any
+//     `fingerprint` value in TargetCreate / TargetUpdate bodies
+//     via `model_config = ConfigDict(extra='forbid')`).
+//
+// Each verb wraps one or more backplane routes and renders the
+// response in either a human-readable form or `--json` mode.
 // Authentication piggybacks on the token meho login wrote — same
 // pattern as `meho operation` and `meho retrieval eval`.
 //
 // Write verbs (`create` / `update` / `delete`) are out of scope for
-// v0.2 per the issue body. Bulk-import lives in a sibling task
-// (G0.3-T6 / Task #257).
+// v0.2 per the issue body — operators use `import --update` for
+// bulk reconciliation.
 package targets
 
 import (
@@ -55,13 +64,14 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "targets",
-		Short:        "Operate the MEHO targets registry (list / describe / probe)",
-		Long:         "List, describe, and probe targets registered in the operator's tenant.",
+		Short:        "Operate the MEHO targets registry (list / describe / probe / import)",
+		Long:         "List, describe, probe, and bulk-import targets registered in the operator's tenant.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newDescribeCmd())
 	cmd.AddCommand(newProbeCmd())
+	cmd.AddCommand(newImportCmd())
 	return cmd
 }
 

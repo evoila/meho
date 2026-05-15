@@ -319,6 +319,127 @@ yq '
 # Should return health-payload + status success.
 ```
 
+## Migration recipe — bulk-importing a `targets.yaml` into MEHO
+
+> Added 2026-05-15 as part of G0.3-T6 (#257). Companion to
+> [docs/codebase/cli.md § Targets registry](../codebase/cli.md#targets-registry-meho-targets-g03-224).
+
+This section is the operator-side recipe for moving an existing
+consumer-shape `targets.yaml` (the file documented above) into the
+MEHO governance backplane via `meho targets import`. It's the
+"dual-read overlap" path Initiative #224 §7 calls out: the
+backplane becomes the authoritative target registry while the
+consumer's existing `targets.yaml` keeps working unchanged.
+
+### Step 0 — Authenticate
+
+```bash
+meho login https://meho.evba.lab
+```
+
+Stores a bearer token in the OS keyring (or
+`$XDG_CONFIG_HOME/meho/credentials.json` on headless hosts). The
+tenant is bound to the JWT's `tenant_id` claim — `meho targets
+import` writes into that tenant; there is no `--tenant` flag in
+v0.2.
+
+### Step 1 — Dry-run the import
+
+```bash
+meho targets import rdc-hetzner-dc/targets.yaml --dry-run
+```
+
+Prints the per-entry plan (CREATE / UPDATE / SKIP) without making
+any API calls. Add `--json` to format the plan as a structured
+object (`{create: [...], update: [...], skip: [...]}`) for piping
+into `jq` or capturing for diff against a follow-up dry-run.
+
+The dry-run code path is air-gap-safe: it does not contact the
+backplane, so an operator validating their YAML on a laptop with no
+network can still get the parse + mapping check.
+
+### Step 2 — First import
+
+```bash
+meho targets import rdc-hetzner-dc/targets.yaml
+```
+
+Default mode aborts on the first duplicate `name` in the tenant —
+the plan is built before any write fires, so a partial-conflict
+YAML never leaves the tenant half-imported. The 25-target consumer
+file applies in ~5 seconds (sequential POSTs; concurrency is
+v0.2.next polish).
+
+### Step 3 — Iterate with `--update`
+
+```bash
+meho targets import rdc-hetzner-dc/targets.yaml --update
+```
+
+`--update` PATCHes existing targets and POSTs new ones,
+mixed-mode-safe. The PATCH body is **sparse** — only YAML-present
+fields are sent on the wire, so re-running `--update` against a
+YAML that omits some fields does not wipe those columns. This is
+the load-bearing contract; see the codebase note linked at the top
+of this section for the bug history (PR #362's review on issue
+#257, 2026-05-14).
+
+### Mapping rules at a glance
+
+| YAML key | Lands at | Notes |
+| --- | --- | --- |
+| `name`, `aliases`, `product`, `host`, `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`, `notes` | top-level column | required: `name`, `product`, `host` |
+| `preferred_impl_id` | top-level column | G0.3-T1.5 (#477) amendment — G0.6 resolver tie-break override |
+| `extras` (explicit block) | `extras` JSONB | merges with the spilled-extras map from unknown keys |
+| `fingerprint` | dropped with warning | server-managed; only the probe verb writes it |
+| any other key | spilled into `extras` JSONB | the consumer's `sso_realm`, `kubeconfig_field`, `account`, `project_id` land here |
+
+Required fields (`name`, `product`, `host`) are checked locally
+before any HTTP request — a malformed YAML fails fast.
+Cloud-provider targets that legitimately omit `host` (e.g. GCP
+projects accessed by `project_id` + `account`) are rejected by the
+CLI parser today; operators with that shape need to either add a
+synthetic `host: cloud-provider` line or split cloud-provider
+targets into a separate file until the schema grows a
+host-optional variant.
+
+### Dual-read overlap
+
+While the consumer migrates, the same `targets.yaml` file can
+serve **both** chassis sides:
+
+- The chassis wrappers under `scripts/` keep reading the local
+  `targets.yaml` directly for credential resolution.
+- The MEHO backplane reads the imported state on every
+  `meho targets list` / `meho targets describe` invocation.
+
+Drift detection: re-running `meho targets import --update --dry-run`
+prints a plan showing which entries the backplane would PATCH —
+empty plan = backplane is in sync with the YAML. The consumer-side
+chassis can wire this dry-run into a periodic check (cron / CI job
+on the chassis repo) once the backplane URL is reachable from the
+chassis runner.
+
+### Verification
+
+```bash
+# After import, list every target the backplane sees:
+meho targets list
+
+# Spot-check a single entry against the YAML:
+meho targets describe rdc-vcenter --json | jq '.notes'
+
+# Re-run --update --dry-run; an empty plan means the backplane is
+# in sync with the YAML.
+meho targets import rdc-hetzner-dc/targets.yaml --update --dry-run
+```
+
+The Python integration test
+[`backend/tests/test_api_v1_targets_import.py`](../../backend/tests/test_api_v1_targets_import.py)
+pins this round-trip against a SHA-pinned snapshot of the
+consumer's real `targets.yaml`; the snapshot lives at
+`backend/tests/fixtures/rdc-hetzner-dc-targets.yaml`.
+
 ## Status
 
 | Item | Side | State |

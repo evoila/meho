@@ -259,8 +259,17 @@ Reverse dependencies:
 * Tasks: [G8.1-T1 #465](https://github.com/evoila/meho/issues/465) (substrate),
   [G8.1-T2 #466](https://github.com/evoila/meho/issues/466) (REST routes +
   duration parser),
+  [G8.1-T3 #467](https://github.com/evoila/meho/issues/467) (CLI verbs),
   [G8.1-T4 #468](https://github.com/evoila/meho/issues/468) (MCP
-  meta-tool).
+  meta-tool),
+  [G8.1-T6 #470](https://github.com/evoila/meho/issues/470)
+  (architecture + operator runbook docs).
+* Companion docs:
+  [`docs/architecture/audit.md`](../architecture/audit.md) (canonical
+  architecture reference for the substrate + decision-#3 alignment),
+  [`docs/cross-repo/audit-query.md`](../cross-repo/audit-query.md)
+  (operator-facing runbook with the five CLI verbs and forensic
+  example queries).
 * Write paths: `backend/src/meho_backplane/audit.py`,
   `backend/src/meho_backplane/mcp/audit.py`.
 * Op-class classifier: `backend/src/meho_backplane/broadcast/events.py:172`

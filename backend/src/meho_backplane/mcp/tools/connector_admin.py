@@ -41,19 +41,33 @@ guesses its name.
 Tool wiring discipline
 ======================
 
-Each tool's handler is a thin shim that:
+Each tool's handler is a thin shim that wraps the canonical
+service layer T5 (CLI) and T6 (REST routes) also consume — there
+is no parallel "admin service" class here:
 
-1. Constructs a per-call service instance (:class:`ConnectorAdminService`
-   for ingest/list, :class:`ReviewService` for everything else) bound
-   to the calling :class:`Operator`.
-2. Translates the validated ``arguments`` dict into the service
-   layer's keyword arguments.
-3. ``model_dump(mode="json")``\\ s the typed response so the dispatcher
-   can wrap it in the MCP ``content`` array.
+1. ``meho.connector.ingest`` constructs a per-call
+   :class:`IngestionPipelineService` bound to the calling
+   :class:`Operator` and calls :meth:`IngestionPipelineService.ingest`.
+2. ``meho.connector.list`` calls the
+   :func:`list_ingested_connectors` query helper directly.
+3. Every other tool constructs :class:`ReviewService` and
+   delegates to its existing read / edit / state-machine methods.
 
-No business logic in this module — that lives in the service layer
-T6 (REST routes) consumes too. Keeping the dispatch logic single-
-source is the contract called out in #407's task body.
+PATCH-style handlers (``edit_group`` / ``edit_op``) build the
+service-layer kwargs dict from ``if "field" in arguments``
+key-presence checks so that an omitted field never reaches
+:class:`ReviewService`; otherwise ``arguments.get(...)`` would make
+"omitted" and "explicit ``null``" indistinguishable and the
+PATCH semantics would blur. Only fields the operator explicitly
+named are forwarded.
+
+Responses are ``model_dump(mode="json")``-ed so the dispatcher
+can wrap them in the MCP ``content`` array. Keeping the dispatch
+logic single-source — same service classes the REST router calls —
+is the contract called out in #407's task body and the T6 merge
+(#488) that promoted ``IngestionPipelineService`` /
+``list_ingested_connectors`` / ``api_schemas.IngestRequest`` to the
+shared public surface.
 
 Per-tool ``inputSchema`` notes
 ==============================
@@ -81,10 +95,13 @@ import structlog
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.operations.ingest import (
-    ConnectorAdminService,
+    ConnectorStatusFilter,
+    IngestionPipelineService,
     IngestRequest,
-    IngestSpecRef,
     ReviewService,
+    SpecSource,
+    default_llm_client_factory,
+    list_ingested_connectors,
 )
 
 __all__: list[str] = []
@@ -157,46 +174,75 @@ async def _ingest_handler(
 ) -> dict[str, Any]:
     """Run the full T1 + T2 + T3 ingest pipeline.
 
-    Translates the MCP arguments to an :class:`IngestRequest` and
-    delegates to :meth:`ConnectorAdminService.ingest`. The handler
-    leaves the LLM client at ``None`` for now — the T8 vSphere canary
-    is what wires the production chassis adapter into this code path
-    via dependency injection at the FastAPI lifespan layer. Until
-    then, ``run_grouping=True`` with a missing client gracefully
-    skips grouping (see :meth:`ConnectorAdminService._maybe_run_grouping`).
+    Translates the MCP arguments into the canonical
+    :class:`IngestRequest` (from :mod:`api_schemas`) and delegates to
+    :meth:`IngestionPipelineService.ingest`. The handler installs
+    :func:`default_llm_client_factory` so a misconfigured chassis
+    surfaces :class:`LlmClientUnavailable` rather than crashing
+    mid-grouping — the production Anthropic adapter wires its own
+    factory at the FastAPI lifespan layer once T5 (#405) lands.
+
+    The response is the canonical :class:`IngestResponse` shape the
+    REST route at ``POST /api/v1/connectors/ingest`` also returns.
     """
-    raw_specs = arguments["specs"]
-    specs = [
-        IngestSpecRef(
-            uri=spec["uri"],
-            source_label=spec.get("source_label"),
-        )
-        for spec in raw_specs
-    ]
     request = IngestRequest(
         product=arguments["product"],
         version=arguments["version"],
         impl_id=arguments["impl_id"],
-        specs=specs,
+        specs=[SpecSource(uri=spec["uri"]) for spec in arguments["specs"]],
         base_url=arguments.get("base_url"),
         dry_run=bool(arguments.get("dry_run", False)),
-        run_grouping=bool(arguments.get("run_grouping", True)),
-        tenant_id=_coerce_tenant_id(arguments.get("tenant_id")),
     )
-    service = ConnectorAdminService(operator)
-    response = await service.ingest(request)
-    return _model_dump_json_safe(response)
+    tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
+    service = IngestionPipelineService(
+        operator,
+        llm_client_factory=default_llm_client_factory,
+    )
+    result = await service.ingest(
+        product=request.product,
+        version=request.version,
+        impl_id=request.impl_id,
+        specs=request.specs,
+        base_url=request.base_url,
+        tenant_id=tenant_id,
+        dry_run=request.dry_run,
+    )
+    ingestion_model, grouping_model = result.to_api_models()
+    # Build the canonical IngestResponse manually rather than
+    # constructing a new instance and round-tripping the inner
+    # models — Pydantic's frozen=True forbids mutation on the way
+    # back out anyway, and the explicit shape here is the same wire
+    # contract the REST router emits.
+    return {
+        "ingestion": ingestion_model.model_dump(mode="json"),
+        "grouping": (
+            grouping_model.model_dump(mode="json") if grouping_model is not None else None
+        ),
+    }
 
 
 async def _list_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return connectors visible to the operator's tenant + built-in."""
-    status = arguments.get("status", "all")
-    service = ConnectorAdminService(operator)
-    response = await service.list_connectors(status=status)
-    return _model_dump_json_safe(response)
+    """Return connectors visible to the operator's tenant + built-in.
+
+    Delegates to :func:`list_ingested_connectors` — the same query
+    helper the REST route at ``GET /api/v1/connectors`` uses. The
+    ``status`` argument is the canonical
+    :data:`ConnectorStatusFilter` literal; the JSON-Schema validator
+    has already restricted it to one of the four legal values before
+    this handler runs.
+    """
+    raw_status = arguments.get("status", "all")
+    # Normalise the JSON-Schema-validated string into the canonical
+    # Literal type the query helper takes. ``"all"`` is the explicit
+    # no-filter sentinel; the function itself also accepts ``None``.
+    status: ConnectorStatusFilter = raw_status
+    connectors = await list_ingested_connectors(operator=operator, status=status)
+    return {
+        "connectors": [item.model_dump(mode="json") for item in connectors],
+    }
 
 
 async def _review_handler(
@@ -215,17 +261,29 @@ async def _edit_group_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update one group's ``when_to_use`` and/or display ``name``."""
+    """Update one group's ``when_to_use`` and/or display ``name``.
+
+    PATCH semantics: only fields the operator explicitly named are
+    forwarded to :meth:`ReviewService.edit_group`. ``arguments.get(...)``
+    would conflate "field omitted" with "field=null" — the service
+    layer's empty-body rejection then can't distinguish "operator
+    cleared the field" from "operator left the field alone".
+    Key-presence checks preserve the intent.
+    """
     connector_id: str = arguments["connector_id"]
     group_key: str = arguments["group_key"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
+    patch: dict[str, Any] = {}
+    if "when_to_use" in arguments:
+        patch["when_to_use"] = arguments["when_to_use"]
+    if "name" in arguments:
+        patch["name"] = arguments["name"]
     service = ReviewService(operator)
     await service.edit_group(
         connector_id,
         group_key,
         tenant_id=tenant_id,
-        when_to_use=arguments.get("when_to_use"),
-        name=arguments.get("name"),
+        **patch,
     )
     return {"connector_id": connector_id, "group_key": group_key, "ok": True}
 
@@ -234,19 +292,29 @@ async def _edit_op_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update one per-op override (any of four fields)."""
+    """Update one per-op override (any of four fields).
+
+    Same PATCH-semantic discipline as :func:`_edit_group_handler`:
+    fields not present in ``arguments`` are never forwarded.
+    """
     connector_id: str = arguments["connector_id"]
     op_id: str = arguments["op_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
+    patch: dict[str, Any] = {}
+    if "custom_description" in arguments:
+        patch["custom_description"] = arguments["custom_description"]
+    if "safety_level" in arguments:
+        patch["safety_level"] = arguments["safety_level"]
+    if "requires_approval" in arguments:
+        patch["requires_approval"] = arguments["requires_approval"]
+    if "is_enabled" in arguments:
+        patch["is_enabled"] = arguments["is_enabled"]
     service = ReviewService(operator)
     await service.edit_op(
         connector_id,
         op_id,
         tenant_id=tenant_id,
-        custom_description=arguments.get("custom_description"),
-        safety_level=arguments.get("safety_level"),
-        requires_approval=arguments.get("requires_approval"),
-        is_enabled=arguments.get("is_enabled"),
+        **patch,
     )
     return {"connector_id": connector_id, "op_id": op_id, "ok": True}
 
@@ -329,25 +397,24 @@ register_mcp_tool(
         inputSchema={
             "type": "object",
             "properties": {
-                "product": {"type": "string", "minLength": 1},
-                "version": {"type": "string", "minLength": 1},
-                "impl_id": {"type": "string", "minLength": 1},
+                "product": {"type": "string", "minLength": 1, "maxLength": 64},
+                "version": {"type": "string", "minLength": 1, "maxLength": 64},
+                "impl_id": {"type": "string", "minLength": 1, "maxLength": 128},
                 "specs": {
                     "type": "array",
                     "minItems": 1,
+                    "maxItems": 16,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "uri": {"type": "string", "minLength": 1},
-                            "source_label": {"type": ["string", "null"]},
+                            "uri": {"type": "string", "minLength": 1, "maxLength": 2048},
                         },
                         "required": ["uri"],
                         "additionalProperties": False,
                     },
                 },
-                "base_url": {"type": ["string", "null"]},
+                "base_url": {"type": ["string", "null"], "maxLength": 2048},
                 "dry_run": {"type": "boolean", "default": False},
-                "run_grouping": {"type": "boolean", "default": True},
                 "tenant_id": _TENANT_ID_PROPERTY,
             },
             "required": ["product", "version", "impl_id", "specs"],
@@ -484,11 +551,14 @@ register_mcp_tool(
             "out-of-band approval), is_enabled (per-op enable/disable "
             "that survives connector-level enable/disable cycles). Pass "
             "at least one field; passing none is rejected. Use during "
-            "review when an LLM-generated description is misleading or "
-            "when a DELETE-shaped op needs the safety_level promoted "
-            "from 'dangerous' to require approval. is_enabled=false "
-            "here STICKS: a subsequent meho.connector.enable will NOT "
-            "clobber the operator's per-op disable."
+            "review (after meho.connector.review surfaces the op) when "
+            "an LLM-generated description is misleading or when a "
+            "DELETE-shaped op needs the safety_level promoted from "
+            "'dangerous' to require approval. is_enabled=false here "
+            "STICKS: a subsequent meho.connector.enable will NOT "
+            "clobber the operator's per-op disable. Do not use this "
+            "to flip whole-connector state — pair with "
+            "meho.connector.enable / .disable for that."
         ),
         inputSchema={
             "type": "object",
@@ -568,9 +638,11 @@ register_mcp_tool(
             "duration of the disabled state). Use to roll back a "
             "regression — the connector's operations stop showing up "
             "in search_operations the moment this returns. Idempotent. "
-            "To re-enable later, call meho.connector.enable; operator-"
-            "set per-op disables are recovered from the audit log when "
-            "the re-enable cascade fires."
+            "Do NOT use as a soft toggle during normal review; pair "
+            "with meho.connector.enable to bring the connector back "
+            "after the regression is fixed. Operator-set per-op "
+            "disables are recovered from the audit log when the re-"
+            "enable cascade fires."
         ),
         inputSchema={
             "type": "object",

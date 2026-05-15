@@ -38,22 +38,28 @@ The pipeline is broken into work items per Initiative #389:
 * **T4 — Review-queue state machine** (`ingest/service.py`). Operators
   move connectors through `staged → enabled` (and `disabled` for
   regression rollback) before any op becomes dispatchable.
-* **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline.
-  T7 ships first (PR for #407) with two service classes:
-  `ConnectorAdminService` (`ingest/admin_service.py`) for
-  `ingest()` + `list_connectors()`, and `ReviewService`
-  (`ingest/service.py`, from T4) for the read + edit + state-
-  machine methods. T5 (CLI) and T6 (REST) consume the same
-  service surface. The agent's daily tool list stays unchanged;
-  the seven admin tools live under the `meho.connector.*`
-  namespace and only `tenant_admin` operators (plus the two
-  read tools at `operator` role) see them in `tools/list`.
+* **T5–T7 — CLI / REST / MCP surfaces** that drive the pipeline. T6
+  (REST routes) lands the seven `/api/v1/connectors*` endpoints —
+  `POST /ingest`, `GET /` (list), `GET /{id}/review`, `PATCH
+  /{id}/groups/{key}`, `PATCH /{id}/operations/{op_id:path}`, `POST
+  /{id}/enable`, `POST /{id}/disable`. T6 also factors the
+  cross-T5/T7-shared service layer
+  (`IngestionPipelineService`, `list_ingested_connectors`,
+  `api_schemas.*` Pydantic models) into the package so the CLI and
+  admin MCP tools consume the same Python surface without hitting
+  the network round-trip. T7 (admin MCP tools) wraps the same
+  canonical service layer — no parallel service class, no parallel
+  Pydantic models. The agent's daily tool list stays unchanged; the
+  seven admin tools live under the `meho.connector.*` namespace and
+  only `tenant_admin` operators (plus the two read tools at
+  `operator` role) see them in `tools/list`.
 * **T8 — vSphere canary** — ingest both vCenter specs end-to-end.
 * **T9 — Docs.**
 
 T1 produces the proto shape every other stage consumes; T2 is the
 single write path into `endpoint_descriptor` for ingested rows; T3
-groups them; T4 gates dispatchability behind operator review.
+groups them; T4 gates dispatchability behind operator review; T6
+exposes the whole thing over HTTP with tenant_admin / operator RBAC.
 
 ### T3 (LLM grouping) at a glance
 
@@ -106,8 +112,8 @@ seven MCP tools at module import:
 
 | Tool | Required role | Wraps |
 |------|---------------|-------|
-| `meho.connector.ingest` | `tenant_admin` | `ConnectorAdminService.ingest()` |
-| `meho.connector.list` | `operator` | `ConnectorAdminService.list_connectors()` |
+| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` |
+| `meho.connector.list` | `operator` | `list_ingested_connectors()` |
 | `meho.connector.review` | `operator` | `ReviewService.get_review_payload()` |
 | `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
 | `meho.connector.edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
@@ -122,12 +128,22 @@ operators whose role doesn't meet the `required_role` rank, and the
 `handle_tools_call` dispatcher re-checks the rank at invocation time
 so a client that guesses a hidden name is still rejected.
 
-Each tool's handler is a thin shim that constructs the right
-service class (`ConnectorAdminService` for ingest/list, `ReviewService`
-for everything else), translates the JSON-Schema-validated arguments
-into the service method's keyword arguments, and `model_dump(mode="json")`s
-the typed response. No business logic in the handler — the service
-classes are what T5 (CLI) and T6 (REST) also consume.
+Each tool's handler is a thin shim that wraps the canonical service
+layer the REST routes (T6) and CLI verbs (T5) also consume:
+`IngestionPipelineService` for `ingest`, `list_ingested_connectors`
+for `list`, and `ReviewService` for the five review / edit / enable /
+disable verbs. There is **no parallel admin service class**; the
+handler converts the JSON-Schema-validated `arguments` dict into the
+canonical `IngestRequest` Pydantic model (from `api_schemas`) and
+calls the service directly. Responses are `model_dump(mode="json")`-
+ed onto the wire.
+
+PATCH handlers (`edit_group`, `edit_op`) preserve PATCH-semantic
+intent: the handler builds the kwargs dict from `if "field" in
+arguments` key-presence checks so omitted fields never reach
+`ReviewService` (an explicit `null` would otherwise be
+indistinguishable from an omission with `arguments.get(...)`). Only
+fields the operator explicitly named are forwarded.
 
 ## Key types
 
@@ -200,6 +216,91 @@ until the operator replaces the shim with a hand-rolled per-G3.x
 subclass that adds the auth path. The shim makes the connector
 resolvable through the v2 registry so spec ingestion can proceed
 before the per-product Initiative work lands.
+
+### `IngestionPipelineService` (`ingest/pipeline.py`)
+
+End-to-end orchestrator that bundles the parse → register_ingested →
+run_llm_grouping pipeline for one connector. Constructed from an
+`Operator` (so the service-level audit rows the helpers write carry
+the originating operator's identity); the same instance is reused
+across T5's CLI verbs, T6's REST routes, and T7's admin MCP tools.
+
+The `LlmClient` Protocol is injected via a factory parameter so the
+chassis can lazy-resolve it; the default factory raises
+`LlmClientUnavailable` and the REST layer maps it onto HTTP 503. T5
+(#405) replaces the default with the production Anthropic-Messages-
+API adapter. The `embedding_service` parameter is the test seam to
+inject `AsyncMock` so unit tests don't pull the fastembed ONNX
+model from huggingface.co.
+
+`ingest(..., dry_run=True)` short-circuits both the DB writes and
+the LLM call: parses every spec and returns the parser's
+`inserted_count` projection with `grouping=None`. Operators use
+this path to validate a spec before committing.
+
+Multi-spec merge: a single `ingest()` call processes a list of
+`SpecSource` entries; each is parsed and upserted under the same
+connector triple with the spec's URI as the `spec_source` tag, so
+operators can distinguish "this op came from vcenter.yaml" vs "this
+op came from vi-json.yaml" during review.
+
+### `list_ingested_connectors()` (`ingest/list_connectors.py`)
+
+Aggregate query for `GET /api/v1/connectors`. Returns one
+`ConnectorListItem` per connector visible to the operator's tenant
+(operator's-tenant rows + built-ins, i.e. `tenant_id IS NULL`). The
+optional `status` filter narrows by aggregated review status:
+`staged` (≥1 staged group), `enabled` / `disabled` (every group
+uniform), or `all` (no filter). The implementation uses portable
+`CASE WHEN ... THEN 1 ELSE 0 END SUM` expressions rather than PG-
+only `FILTER` clauses so the same query runs against SQLite in
+tests.
+
+Source-kind filter excludes typed-connector rows from the operation
+count — this endpoint lists *ingested* connectors only, per the
+G0.7 review-queue contract; typed connectors live in the v2
+registry and operators don't drive them through the review state
+machine.
+
+### API request / response models (`ingest/api_schemas.py`)
+
+The shared Pydantic-v2 surface T5 (CLI), T6 (REST), and T7 (MCP) all
+consume so the wire contract is defined once:
+
+* `IngestRequest` / `IngestResponse` — body for `POST /ingest` and
+  its return shape. `IngestResponse.grouping` is `None` for the dry-
+  run path. `SpecSource` wraps one spec URI with room for future
+  per-spec knobs (auth headers, dialect pinning).
+* `ConnectorListItem` / `ConnectorListResponse` — one row per
+  visible connector + the wrapper for the list endpoint. The wrapper
+  keeps the JSON shape stable when future paging / cursor fields
+  land.
+* `EditGroupBody` / `EditOpBody` — PATCH bodies for the per-group
+  and per-op edit verbs. Pydantic enforces the bounded enum for
+  `safety_level` and the empty-body rejection lands as a service-
+  layer `ValueError` mapped to 400.
+* `IngestionResultModel` / `GroupingResultModel` — Pydantic
+  projections of the underlying frozen dataclasses, with an
+  added `connector_id` echo for round-trip clarity.
+
+### REST routes (`api/v1/connectors_ingest.py`)
+
+The seven `/api/v1/connectors*` routes that wire the service layer
+to the operator-facing HTTP surface. RBAC: read paths (GET /, GET
+/{id}/review) require `operator` role minimum; write paths
+(`POST /ingest`, `PATCH /groups`, `PATCH /operations`, `POST
+/enable`, `POST /disable`) require `tenant_admin`. Tenant scoping
+derives from the JWT — there is no body / query parameter that can
+override the operator's tenant. Cross-tenant probes surface as 404
+`ConnectorNotFoundError`, not 403 — same conflation `ReviewService`
+uses to keep the operator-facing failure surface uniform.
+
+The `op_id` path segment uses the `:path` converter so operations
+whose natural key contains slashes (`"GET:/api/vcenter/cluster"`)
+round-trip through URL routing intact. The route module's
+`set_llm_client_factory(factory)` helper lets the production
+bootstrap (G0.7-T5) install the Anthropic adapter and lets tests
+inject deterministic stubs.
 
 ### `parse_openapi(spec_path_or_uri, *, spec_source=None)` (`ingest/openapi.py`)
 
@@ -349,8 +450,11 @@ operations go live.
 
 * Issue #401 — T1 task.
 * Issue #403 — T2 task.
-* Issue #404 — T3 task (LLM grouping; this module).
-* Issue #402 — T4 task.
+* Issue #404 — T3 task (LLM grouping).
+* Issue #402 — T4 task (review-queue state machine).
+* Issue #405 — T5 task (CLI verbs).
+* Issue #406 — T6 task (REST routes; this module's HTTP surface).
+* Issue #407 — T7 task (admin MCP tools).
 * Initiative #389 — G0.7 spec-ingestion pipeline.
 * Goal #221 — G0 foundational substrate.
 * `meho_backplane/db/models.py::EndpointDescriptor` — the ORM target.

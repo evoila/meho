@@ -171,6 +171,7 @@ def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
 
     async def _aclose() -> None:
         connector._session_tokens.clear()
+        connector._session_paths.clear()
         for client in connector._clients.values():
             await client.aclose()
         connector._clients.clear()
@@ -300,6 +301,168 @@ async def test_session_legacy_object_shape_is_accepted_defensively() -> None:
 
     assert headers == {"vmware-api-session-id": "legacy-shape-token"}
     await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Modern → legacy session-endpoint fallback
+# ---------------------------------------------------------------------------
+#
+# Real vCenter (8.5+) serves both ``POST /api/session`` and the legacy
+# ``POST /rest/com/vmware/cis/session``; the upstream ``vmware/vcsim``
+# simulator wires only the legacy path (see
+# ``govmomi/vapi/simulator/simulator.go``, which registers handlers at
+# ``rest.Path + internal.SessionPath`` = ``/rest`` + ``/com/vmware/cis/session``
+# without a parallel ``/api/`` mount). The connector POSTs to the modern
+# path first and, on HTTP 404 only, retries against the legacy path so
+# production hits the fast path while the vcsim integration test stays
+# green across simulator versions. The path that succeeded is cached
+# per-target so :meth:`aclose` DELETEs against the same endpoint that
+# minted the token.
+
+
+@pytest.mark.asyncio
+async def test_modern_session_endpoint_is_tried_first_no_fallback_on_200() -> None:
+    """A 200 from /api/session means we never touch the legacy path.
+
+    The legacy route is *deliberately not registered* — if the connector
+    erroneously fell back to it, respx would raise an unhandled-request
+    error and fail the test. That's a stricter signal than asserting
+    ``not legacy.called`` on a pre-registered route (which respx itself
+    would also flag via ``assert_all_called``).
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        modern = mock.post("/api/session").respond(200, json="modern-path-token")
+        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert headers == {"vmware-api-session-id": "modern-path-token"}
+    assert modern.called and modern.call_count == 1
+    # The cached path records the modern endpoint so aclose targets it.
+    assert connector._session_paths == {"vcenter-a": "/api/session"}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_falls_back_to_legacy_path_on_modern_404() -> None:
+    """A 404 from /api/session triggers a retry against /rest/com/vmware/cis/session.
+
+    This is the vcsim path: stock vcsim registers the session handler
+    only at the legacy endpoint per govmomi/vapi/simulator/simulator.go.
+    Production vCenter serves both paths so the fallback is dormant there.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        modern = mock.post("/api/session").respond(404)
+        legacy = mock.post("/rest/com/vmware/cis/session").respond(
+            200, json={"value": "legacy-path-token"}
+        )
+        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert modern.called and modern.call_count == 1
+    assert legacy.called and legacy.call_count == 1
+    assert headers == {"vmware-api-session-id": "legacy-path-token"}
+    # The legacy path is recorded so aclose DELETEs against it.
+    assert connector._session_paths == {"vcenter-a": "/rest/com/vmware/cis/session"}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_does_not_fall_back_on_401_from_modern_endpoint() -> None:
+    """A 401 from /api/session is an auth failure, NOT an "endpoint missing" signal.
+
+    Falling back to the legacy endpoint on 401 would mask credential
+    problems and (worse) double the audit-log entries vCenter records
+    for failed logins, tripping its built-in account-lockout protection.
+    The fallback fires on 404 only.
+
+    The legacy route is *deliberately not registered* — if the connector
+    erroneously fell back to it, respx would raise an unhandled-request
+    error, which is a stricter check than asserting ``not legacy.called``.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        modern = mock.post("/api/session").respond(401, json={"error": "invalid_credentials"})
+        with pytest.raises(RuntimeError, match=r"vcenter-a") as exc_info:
+            await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert modern.called and modern.call_count == 1
+    # The error message names the modern endpoint (the one that actually
+    # responded 401) so operators don't chase a legacy-path red herring.
+    assert "401" in str(exc_info.value)
+    assert "/api/session" in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_legacy_path_404_surfaces_runtime_error_naming_legacy_path() -> None:
+    """When both paths 404, the error names the legacy endpoint (last attempted)."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(404)
+        with pytest.raises(RuntimeError, match=r"vcenter-a") as exc_info:
+            await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    # The last endpoint attempted is the one named — operators can see
+    # in one log line that both paths failed.
+    assert "/rest/com/vmware/cis/session" in str(exc_info.value)
+    assert "404" in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_revokes_against_legacy_path_when_fallback_was_used() -> None:
+    """Mixed-path targets each get DELETE against the endpoint that minted the token.
+
+    A target whose session lived on ``/api/session`` gets DELETE there;
+    a target whose session lived on the legacy ``/rest/com/vmware/cis/session``
+    gets DELETE there. Covers carry-over M2 from iter-1: the original
+    DELETE-emission test only proved revocation against the modern path.
+    With the fallback in place, mixed-path targets in a single connector
+    instance must each revoke against the endpoint that minted their
+    token.
+
+    The modern DELETE on ``vcenter-b`` is *deliberately not registered* —
+    if the connector erroneously DELETEd at ``/api/session`` for a
+    target whose session was established at the legacy path, respx would
+    raise an unhandled-request error.
+    """
+    connector = _make_connector()
+
+    async with respx.mock() as mock:
+        # _TARGET_A: modern path serves the session.
+        mock.post("https://vcenter-a.test.invalid/api/session").respond(200, json="modern-token-a")
+        delete_modern = mock.delete("https://vcenter-a.test.invalid/api/session").respond(204)
+        # _TARGET_B: modern path 404s, legacy path serves the session.
+        mock.post("https://vcenter-b.test.invalid/api/session").respond(404)
+        mock.post("https://vcenter-b.test.invalid/rest/com/vmware/cis/session").respond(
+            200, json="legacy-token-b"
+        )
+        delete_legacy = mock.delete(
+            "https://vcenter-b.test.invalid/rest/com/vmware/cis/session"
+        ).respond(204)
+
+        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_B, raw_jwt="")
+        await connector.aclose()
+
+    # The load-bearing pair of assertions: each target was revoked at
+    # the path that minted its token. ``vcenter-a`` -> modern DELETE,
+    # ``vcenter-b`` -> legacy DELETE; the absence of a registered modern
+    # DELETE route for vcenter-b means any drift would have surfaced
+    # as an unhandled-request error before reaching these asserts.
+    assert delete_modern.called and delete_modern.call_count == 1
+    assert delete_legacy.called and delete_legacy.call_count == 1
+    assert connector._session_paths == {}
+    assert connector._session_tokens == {}
 
 
 @pytest.mark.asyncio

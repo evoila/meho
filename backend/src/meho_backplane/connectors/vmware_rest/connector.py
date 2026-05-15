@@ -24,12 +24,19 @@ The class caches one ``vmware-api-session-id`` token per ``target.name``.
 First call to :meth:`auth_headers` against a given target invokes the
 :class:`VsphereSessionLoader` (default
 :func:`load_session_credentials_from_vault`) for the service-account
-credentials, then issues ``POST /api/session`` with HTTP basic auth. The
-JSON-string-body response is the session token; subsequent calls reuse
-the cached value. Per-target isolation is the load-bearing invariant:
-two targets must never share a session token even if their names collide
-across tenants — the cache is keyed on ``target.name`` because that's
-the operator-supplied identifier the connector receives at the boundary.
+credentials, then issues ``POST /api/session`` with HTTP basic auth. If
+the modern endpoint responds with HTTP 404, the connector retries
+against the legacy ``POST /rest/com/vmware/cis/session`` path before
+declaring failure — real vCenter serves both, but the upstream
+``vmware/vcsim`` simulator (used by the integration test in T8) wires
+the handler under the legacy path only. The successful endpoint is
+cached per-target so :meth:`aclose` revokes against the same path. The
+JSON-string-body response (or legacy ``{"value": "<token>"}`` shape) is
+the session token; subsequent calls reuse the cached value. Per-target
+isolation is the load-bearing invariant: two targets must never share a
+session token even if their names collide across tenants — the cache is
+keyed on ``target.name`` because that's the operator-supplied identifier
+the connector receives at the boundary.
 
 The session-establish flow runs under an :class:`asyncio.Lock` so two
 concurrent first-use callers against the same target don't both POST to
@@ -50,10 +57,12 @@ operator-facing dispatch sees re-authentication as a clean retry
 through the dispatcher's caller-side retry path rather than a hidden
 retry inside the connector.
 
-:meth:`aclose` revokes every cached session via ``DELETE /api/session``
-before closing the per-target httpx clients. A revoke failure is logged
-and proceeds — the operator-facing concern at shutdown is "tear down
-the httpx pool"; an in-flight 5xx during DELETE doesn't block that.
+:meth:`aclose` revokes every cached session via ``DELETE`` against the
+endpoint that minted the token (modern ``/api/session`` for production,
+legacy ``/rest/com/vmware/cis/session`` for vcsim-served targets) before
+closing the per-target httpx clients. A revoke failure is logged and
+proceeds — the operator-facing concern at shutdown is "tear down the
+httpx pool"; an in-flight 5xx during DELETE doesn't block that.
 
 Auth model gating
 -----------------
@@ -112,6 +121,21 @@ _SESSION_HEADER = "vmware-api-session-id"
 # vcsim has been known to swap between shapes between minor releases,
 # and a defensive read here costs nothing.
 _SESSION_TOKEN_OBJECT_KEY = "value"
+
+# Session endpoints. Modern vCenter (7.0+) lives at ``/api/session``;
+# the legacy ``/rest/com/vmware/cis/session`` path is still served by
+# real vCenter for backward-compat and is the *only* path the upstream
+# ``vmware/vcsim`` simulator registers (its ``vapi/simulator`` package
+# wires the handler at ``rest.Path + internal.SessionPath`` =
+# ``/rest`` + ``/com/vmware/cis/session`` and does not also mount under
+# ``/api/``). The connector tries the modern path first and falls back
+# to the legacy path on 404 so production targets (which serve both)
+# pay no extra round-trip while vcsim integration tests stay green.
+# The established path is cached per-target in ``self._session_paths``
+# so the DELETE in ``aclose()`` targets the same endpoint that minted
+# the token.
+_SESSION_PATH_MODERN = "/api/session"
+_SESSION_PATH_LEGACY = "/rest/com/vmware/cis/session"
 
 # Verbs that go through HttpConnector._request_json's tenacity retry
 # decorator. Non-idempotent verbs (POST / PUT / PATCH / DELETE) route
@@ -219,6 +243,13 @@ class VmwareRestConnector(HttpConnector):
     ) -> None:
         super().__init__()
         self._session_tokens: dict[str, str] = {}
+        # Tracks which session endpoint minted each cached token so
+        # :meth:`aclose` can DELETE against the same path. Production
+        # vCenter serves both ``/api/session`` and the legacy
+        # ``/rest/com/vmware/cis/session``; vcsim serves only the legacy
+        # path. See ``_SESSION_PATH_MODERN`` / ``_SESSION_PATH_LEGACY``
+        # for the rationale and source citations.
+        self._session_paths: dict[str, str] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -257,6 +288,17 @@ class VmwareRestConnector(HttpConnector):
         the lock acquisition itself. The slow ``POST /api/session`` call
         runs under the lock so two concurrent first-use callers against
         the same target don't both pay the round-trip cost.
+
+        Endpoint fallback: POSTs to the modern ``/api/session`` first;
+        on HTTP 404 (only) falls back to ``/rest/com/vmware/cis/session``.
+        Real vCenter serves both paths, so production targets succeed on
+        the first attempt; the upstream ``vmware/vcsim`` simulator
+        registers only the legacy path (per ``govmomi/vapi/simulator``)
+        and exercises the fallback. The successful path is recorded in
+        ``self._session_paths`` so :meth:`aclose` DELETEs the matching
+        endpoint. 401 / 403 / 5xx on the modern path are *not* retried
+        on the legacy path — those are auth/server failures, not "this
+        deployment doesn't have the modern endpoint".
         """
         async with self._session_lock:
             cached = self._session_tokens.get(target.name)
@@ -265,10 +307,8 @@ class VmwareRestConnector(HttpConnector):
             creds = await self._session_loader(target)
             client = await self._http_client(target)
             try:
-                resp = await client.post(
-                    "/api/session",
-                    auth=(creds["username"], creds["password"]),
-                )
+                username = creds["username"]
+                password = creds["password"]
             except KeyError as exc:
                 # Surface a clear error if the loader returned a dict
                 # missing one of the two required keys — a typo in a
@@ -280,23 +320,37 @@ class VmwareRestConnector(HttpConnector):
                     f"a dict missing required key {exc.args[0]!r}; need "
                     "{'username': str, 'password': str}"
                 ) from exc
+            auth = (username, password)
+            resp = await client.post(_SESSION_PATH_MODERN, auth=auth)
+            established_path = _SESSION_PATH_MODERN
+            if resp.status_code == 404:
+                # Modern endpoint not served (vcsim, very old vCenter,
+                # or a reverse-proxy that hasn't been updated). Try the
+                # legacy path before declaring failure.
+                resp = await client.post(_SESSION_PATH_LEGACY, auth=auth)
+                established_path = _SESSION_PATH_LEGACY
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 # Wrap so the operator-facing message names the target;
                 # httpx's default str() shows only the URL/status, which
                 # loses the per-target identification the dispatcher's
-                # audit row needs.
+                # audit row needs. The path in the message is the last
+                # one attempted, which distinguishes a real 404 (legacy
+                # also missing) from auth/server failure on the modern
+                # path.
                 raise RuntimeError(
                     f"vsphere session establish failed for target {target.name!r}: "
-                    f"POST /api/session returned HTTP {exc.response.status_code}"
+                    f"POST {established_path} returned HTTP {exc.response.status_code}"
                 ) from exc
             token = _extract_session_token(resp.json(), target.name)
             self._session_tokens[target.name] = token
+            self._session_paths[target.name] = established_path
             _log.info(
                 "vsphere_session_established",
                 target=target.name,
                 host=target.host,
+                session_path=established_path,
             )
             return token
 
@@ -430,13 +484,16 @@ class VmwareRestConnector(HttpConnector):
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 
-        Issues ``DELETE /api/session`` against each per-target client
-        before delegating to :meth:`HttpConnector.aclose`. A revoke
-        failure (5xx, transport error, target unreachable at shutdown)
-        is logged and proceeds — the operator-facing concern at
-        shutdown is "tear down the httpx pool", and a hung DELETE
-        on an unreachable target would otherwise block lifespan exit
-        long enough to trip Kubernetes' 30-second terminationGracePeriod.
+        Issues ``DELETE`` against each per-target client at the session
+        path recorded by :meth:`_session_token` (modern ``/api/session``
+        for production vCenter, legacy ``/rest/com/vmware/cis/session``
+        for targets where the modern path 404'd at establish time) before
+        delegating to :meth:`HttpConnector.aclose`. A revoke failure
+        (5xx, transport error, target unreachable at shutdown) is logged
+        and proceeds — the operator-facing concern at shutdown is "tear
+        down the httpx pool", and a hung DELETE on an unreachable target
+        would otherwise block lifespan exit long enough to trip
+        Kubernetes' 30-second terminationGracePeriod.
 
         The DELETE is issued before :meth:`super().aclose` so the
         cached client is still pooled when we need it. After the
@@ -444,7 +501,9 @@ class VmwareRestConnector(HttpConnector):
         """
         async with self._session_lock:
             tokens = dict(self._session_tokens)
+            paths = dict(self._session_paths)
             self._session_tokens.clear()
+            self._session_paths.clear()
         for target_name, token in tokens.items():
             client = self._clients.get(target_name)
             if client is None:
@@ -453,10 +512,16 @@ class VmwareRestConnector(HttpConnector):
                 # created during _session_token. Defensive: skip
                 # cleanly if the invariant ever drifts.
                 continue
+            # Use the same endpoint that minted the token. ``paths``
+            # is populated in lock-step with ``_session_tokens`` in
+            # ``_session_token``; the default keeps shutdown safe if
+            # a future code path ever caches a token without recording
+            # its endpoint.
+            revoke_path = paths.get(target_name, _SESSION_PATH_MODERN)
             try:
                 resp = await client.request(
                     "DELETE",
-                    "/api/session",
+                    revoke_path,
                     headers={_SESSION_HEADER: token},
                 )
                 # Log non-2xx but don't raise — shutdown proceeds.
@@ -465,11 +530,13 @@ class VmwareRestConnector(HttpConnector):
                         "vsphere_session_revoke_non_2xx",
                         target=target_name,
                         status_code=resp.status_code,
+                        session_path=revoke_path,
                     )
             except (httpx.HTTPError, OSError) as exc:
                 _log.warning(
                     "vsphere_session_revoke_failed",
                     target=target_name,
                     error=f"{type(exc).__name__}: {exc}",
+                    session_path=revoke_path,
                 )
         await super().aclose()

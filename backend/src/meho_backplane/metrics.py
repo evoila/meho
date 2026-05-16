@@ -50,6 +50,18 @@ HTTP_REQUESTS_TOTAL: Counter = Counter(
     labelnames=("method", "path", "status"),
 )
 
+#: Counter for scheduled topology-refresh attempts, partitioned by
+#: ``outcome`` (``ok`` / ``error`` / ``skipped_locked``). G9.1-T3
+#: (#450): the background scheduler increments this per (tenant, target)
+#: iteration so a stuck connector or a permanently-contended advisory
+#: lock surfaces on the ``/metrics`` scrape rather than only in logs.
+#: Same module-level-singleton rationale as ``HTTP_REQUESTS_TOTAL``.
+TOPOLOGY_REFRESH_TOTAL: Counter = Counter(
+    "topology_refresh_total",
+    "Scheduled topology-refresh attempts by outcome.",
+    labelnames=("outcome",),
+)
+
 
 def render_metrics() -> tuple[bytes, str]:
     """Render the default registry as Prometheus exposition bytes.

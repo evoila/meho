@@ -25,6 +25,37 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 __all__ = ["TopologyNode", "TopologyPath"]
 
 
+def _deep_freeze(value: Any) -> Any:
+    """Recursively make a JSON-shaped value immutable.
+
+    ``dict`` → :class:`types.MappingProxyType` (read-only view), ``list``
+    → ``tuple``, every primitive returned unchanged. Applied to
+    ``properties`` so a frozen :class:`TopologyNode` is immutable all the
+    way down — a caller cannot reach into a nested bag and mutate shared
+    result state. The inverse is :func:`_deep_thaw`.
+    """
+    if isinstance(value, dict):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
+
+
+def _deep_thaw(value: Any) -> Any:
+    """Inverse of :func:`_deep_freeze` for serialisation.
+
+    ``MappingProxyType`` → plain ``dict``, ``tuple`` → ``list``,
+    primitives unchanged, so ``model_dump`` / ``model_dump_json`` emit a
+    plain mutable JSON object rather than leaking the internal frozen
+    representation over the wire.
+    """
+    if isinstance(value, MappingProxyType):
+        return {k: _deep_thaw(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return [_deep_thaw(v) for v in value]
+    return value
+
+
 class TopologyNode(BaseModel):
     """One ``graph_node`` row reached during a traversal.
 
@@ -46,12 +77,16 @@ class TopologyNode(BaseModel):
 
     @model_validator(mode="after")
     def _freeze_properties(self) -> TopologyNode:
-        object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+        object.__setattr__(self, "properties", _deep_freeze(dict(self.properties)))
         return self
 
     @field_serializer("properties")
     def _serialize_properties(self, value: dict[str, Any]) -> dict[str, Any]:
-        return dict(value)
+        # `value` is always the top-level frozen mapping, so the thawed
+        # result is always a plain dict; the cast narrows _deep_thaw's
+        # intentionally-broad return for the field-serialiser contract.
+        thawed: dict[str, Any] = _deep_thaw(value)
+        return thawed
 
 
 class TopologyPath(BaseModel):
@@ -65,5 +100,14 @@ class TopologyPath(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    nodes: tuple[TopologyNode, ...]
-    total_hops: int
+    nodes: tuple[TopologyNode, ...] = Field(min_length=1)
+    total_hops: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _check_hops_match_nodes(self) -> TopologyPath:
+        expected = len(self.nodes) - 1
+        if self.total_hops != expected:
+            raise ValueError(
+                f"total_hops ({self.total_hops}) must equal len(nodes) - 1 ({expected})"
+            )
+        return self

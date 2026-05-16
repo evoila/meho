@@ -1,49 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Integration test for :class:`VmwareRestConnector` against a real vcsim container.
+"""Integration test for :class:`VmwareRestConnector` over a respx-mocked vCenter.
 
-Boots ``vmware/vcsim`` via :class:`testcontainers.core.container.DockerContainer`,
-configures it for HTTPS on the listening port, and exercises the live
-``fingerprint`` / ``probe`` / session-cache / ``aclose`` paths against the
-running simulator's REST surface.
+Exercises the live ``fingerprint`` / ``probe`` / session-cache /
+``aclose`` paths of the connector against a respx-mocked modern
+vCenter REST surface.
 
-Skip conditions:
+Why respx and not a real ``vmware/vcsim`` container
+===================================================
 
-* Docker socket missing — same heuristic the rest of the
-  ``tests/integration/`` package uses.
-* vcsim container start fails — surfaces as a clean skip rather than a
-  hard failure so a Docker-having-but-not-vcsim-having sandbox isn't
-  flagged red. CI runners provision Docker so the tests run there.
+This module used to boot ``vmware/vcsim`` via testcontainers. That is
+**unsatisfiable for these assertions**: govmomi's vcsim does not
+implement the vCenter REST *resource/appliance* API. ``GET /api/about``
+(what :meth:`VmwareRestConnector.fingerprint` calls) 404s on vcsim —
+it only stubs the vAPI session / tagging / content-library subset plus
+the SOAP/SDK surface. The previous "``GET /api/about`` returns a
+synthesised inventory shape" note was incorrect; the test had been red
+on ``main`` for exactly this reason.
 
-CI side: the vcsim integration job lands as part of T8 (#515); this
-module collects unconditionally so a stub CI lane that mounts the
-Docker socket without setting up the vcsim image still goes to skip
-rather than collection-fail.
-
-vcsim notes:
-
-* The official ``vmware/vcsim:latest`` image listens on
-  ``127.0.0.1:8989`` by default with HTTPS (self-signed cert).
-* The simulator accepts any ``username``/``password`` for
-  ``POST /api/session`` — vcsim returns a synthetic token without
-  verifying credentials. We pass ``user``/``pass`` for clarity; any
-  pair works.
-* ``GET /api/about`` returns a synthesised inventory shape that maps
-  cleanly through :func:`product_from_line_id`.
+Per the decision recorded in evoila/meho#536 (and mirroring the
+``tests/acceptance`` migration in #535), the connector is exercised
+against a respx-mocked surface that reproduces the exact wire contract
+``fingerprint`` / ``probe`` / session establishment / ``aclose`` rely
+on. The full connector code path (session POST → cached token → ``GET
+/api/about`` → ``FingerprintResult`` mapping → ``DELETE /api/session``
+revoke) runs unchanged; only the transport is mocked. No Docker
+dependency — respx runs in-process.
 """
 
 from __future__ import annotations
 
-import os
-import ssl
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
+import respx
 
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import (
@@ -52,18 +45,48 @@ from meho_backplane.connectors.vmware_rest import (
 )
 
 # ---------------------------------------------------------------------------
-# Docker availability — mirrors tests/integration/conftest.py heuristic
+# Mocked vCenter surface
 # ---------------------------------------------------------------------------
 
+#: Base URL the target points at. Port 443 keeps
+#: ``HttpConnector._base_url`` from appending ``:port`` so the respx
+#: router's ``base_url`` matches the connector's client URL exactly.
+#: ``.test.invalid`` (RFC 6761) guarantees no real egress.
+VCENTER_BASE_URL: str = "https://vcsim-integration.test.invalid"
 
-def _docker_socket_present() -> bool:
-    return Path("/var/run/docker.sock").exists() or os.environ.get("DOCKER_HOST") is not None
+#: ``GET /api/about`` body. Shapes the :class:`FingerprintResult` the
+#: connector builds: ``product_line_id="vpx"`` →
+#: :func:`product_from_line_id` → ``"vcenter"``; the other keys flow
+#: onto ``version`` / ``build`` / ``edition`` / ``extras``.
+ABOUT_PAYLOAD: dict[str, Any] = {
+    "product_line_id": "vpx",
+    "version": "9.0.0.0",
+    "build": "24021000",
+    "license_product_name": "VMware vCenter Server",
+    "instance_uuid": "b3f9f1a0-0000-4000-8000-0000000000ab",
+    "full_name": "VMware vCenter Server 9.0.0.0 build-24021000",
+    "api_type": "VirtualCenter",
+    "os_type": "linux-x64",
+}
+
+#: Session token the mocked ``POST /api/session`` returns. vSphere
+#: 8.0+/9.0 returns the token as a bare JSON string body; the
+#: connector's ``_extract_session_token`` handles that shape.
+SESSION_TOKEN: str = "integration-mock-session-token"
 
 
-DOCKER_AVAILABLE: bool = _docker_socket_present()
-SKIP_REASON: str = (
-    "Docker socket unavailable in this sandbox; runs in CI where containers are provisioned."
-)
+def _register_vcenter_routes(mock: respx.MockRouter) -> None:
+    """Register the modern vCenter REST surface the connector calls.
+
+    ``POST /api/session`` (200 → token; the modern path succeeds so the
+    connector records ``/api/session`` as the established path),
+    ``GET /api/about`` (the fingerprint probe), and ``DELETE
+    /api/session`` (the ``aclose`` revoke against the established
+    path).
+    """
+    mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+    mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
+    mock.delete("/api/session").respond(204)
 
 
 # ---------------------------------------------------------------------------
@@ -80,134 +103,51 @@ class _VcsimTarget:
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
 
 
-# ---------------------------------------------------------------------------
-# vcsim container fixture — module-scoped (one boot, multiple tests)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def vcsim_target() -> Any:
-    """Boot a vcsim container; yield a target pointing at it.
-
-    Container shut down on fixture teardown. vcsim listens on 8989/tcp
-    inside the container; testcontainers maps that to an ephemeral host
-    port we read via :meth:`DockerContainer.get_exposed_port`.
-    """
-    if not DOCKER_AVAILABLE:
-        pytest.skip(SKIP_REASON)
-
-    # Local import — testcontainers transitively imports the docker SDK
-    # which probes the socket on import. Keeping the import inside the
-    # fixture lets the module collect on a no-Docker sandbox.
-    try:
-        from testcontainers.core.container import DockerContainer
-        from testcontainers.core.waiting_utils import wait_for_logs
-    except ImportError as exc:  # pragma: no cover
-        pytest.skip(f"testcontainers unavailable: {exc}")
-
-    # ``vmware/vcsim:latest`` is the upstream image. Override via env var
-    # for registry-mirror swaps or version pinning per the same convention
-    # the K3s integration test uses (MEHO_TEST_K3S_IMAGE).
-    image = os.environ.get("MEHO_TEST_VCSIM_IMAGE", "vmware/vcsim:latest")
-    # The official ``vmware/vcsim`` Dockerfile sets
-    # ``ENTRYPOINT ["/vcsim"]`` + ``CMD ["-l", "0.0.0.0:8989"]`` so the
-    # default listener already binds on all interfaces — exactly what
-    # testcontainers' host-port mapping needs to reach the simulator.
-    # Overriding ``CMD`` with a string here would re-prepend ``/vcsim``
-    # to the entrypoint and Go's ``flag.Parse()`` would stop at that
-    # positional argument, silently falling back to the simulator's
-    # internal default of ``-l 127.0.0.1:8989`` — bound to container-
-    # local loopback only, so the host's mapped port would refuse the
-    # TCP connect with an empty ``ConnectError`` (the failure mode that
-    # took down PR #518's first CI green attempt). Leave the default
-    # CMD alone.
-    container = DockerContainer(image).with_exposed_ports(8989)
-    import contextlib
-
-    try:
-        container.start()
-        # The simulator logs "export GOVC_URL=..." once the REST endpoint
-        # is ready to serve. Wait up to 30 s for that line; longer would
-        # mask a real boot failure as a flaky test.
-        wait_for_logs(container, "export GOVC_URL", timeout=30)
-    except Exception as exc:
-        # Best-effort tear-down; if the container never started, .stop()
-        # will itself fail — swallow so the user sees the original boot
-        # exception via pytest.skip, not the cleanup secondary.
-        with contextlib.suppress(Exception):
-            container.stop()
-        pytest.skip(f"vcsim container failed to start ({type(exc).__name__}): {exc}")
-
-    try:
-        host = container.get_container_host_ip()
-        port_str = container.get_exposed_port(8989)
-        target = _VcsimTarget(
-            name="vcsim-test",
-            host=host,
-            port=int(port_str),
-            secret_ref="kv/data/vsphere/vcsim-test",
-        )
-        yield target
-    finally:
-        container.stop()
+@pytest.fixture
+def vcsim_target() -> _VcsimTarget:
+    """Target pointing at the respx-mocked vCenter base URL."""
+    return _VcsimTarget(
+        name="vcsim-test",
+        host=VCENTER_BASE_URL.removeprefix("https://"),
+        port=443,
+        secret_ref="kv/data/vsphere/vcsim-test",
+    )
 
 
 @pytest.fixture
 async def vcsim_connector(
     vcsim_target: _VcsimTarget,
 ) -> AsyncIterator[tuple[VmwareRestConnector, _VcsimTarget]]:
-    """Yield a connector wired with a loader that returns vcsim's any-credentials pair.
+    """Yield a connector wired against the respx-mocked vCenter surface.
 
-    Also patches the connector's per-target httpx client constructor to
-    accept the simulator's self-signed cert. The patch is scoped to this
-    fixture so production code (which uses httpx's default TLS
-    verification) stays untouched.
+    Only the Vault-backed session loader is replaced (the acceptance
+    suite has no Vault); the connector's real ``_http_client`` is left
+    intact — respx intercepts httpx at the transport layer, so the
+    production pooling + redirect code stays on the exercised path.
+    The router stays active across teardown so ``aclose``'s ``DELETE
+    /api/session`` is intercepted.
     """
 
     async def _loader(_target: VsphereTargetLike) -> dict[str, str]:
-        # vcsim accepts any credentials.
         return {"username": "user", "password": "pass"}
 
     connector = VmwareRestConnector(session_loader=_loader)
 
-    # Override the parent's _http_client to build a client with TLS
-    # verification disabled — the self-signed cert vcsim ships isn't
-    # trusted by the host's CA bundle. Production code never reaches
-    # this branch; the override is fixture-scoped via a method-replace
-    # so the per-target dict pooling semantics stay intact.
-    import asyncio
-
-    connector._lock_for_test = asyncio.Lock()  # type: ignore[attr-defined]
-
-    async def _http_client_insecure(target: VsphereTargetLike) -> httpx.AsyncClient:
-        async with connector._lock_for_test:  # type: ignore[attr-defined]
-            if target.name not in connector._clients:
-                scheme = "https"
-                port_part = f":{target.port}" if target.port and target.port != 443 else ""
-                base_url = f"{scheme}://{target.host}{port_part}"
-                # vcsim's self-signed cert isn't in the host CA bundle;
-                # disable verification for this fixture only. Production
-                # code uses httpx's default verify=True.
-                ssl_ctx = ssl.create_default_context()
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
-                connector._clients[target.name] = httpx.AsyncClient(
-                    base_url=base_url,
-                    timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
-                    verify=ssl_ctx,
-                )
-            return connector._clients[target.name]
-
-    connector._http_client = _http_client_insecure  # type: ignore[method-assign]
-
-    try:
-        yield connector, vcsim_target
-    finally:
-        await connector.aclose()
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        _register_vcenter_routes(mock)
+        try:
+            yield connector, vcsim_target
+        finally:
+            await connector.aclose()
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests — assertions unchanged from the vcsim-container era; only the
+# transport moved (vcsim → respx) because vcsim cannot serve this API.
 # ---------------------------------------------------------------------------
 
 
@@ -215,22 +155,21 @@ async def vcsim_connector(
 async def test_fingerprint_against_vcsim_returns_reachable(
     vcsim_connector: tuple[VmwareRestConnector, _VcsimTarget],
 ) -> None:
-    """Live fingerprint against vcsim returns reachable=True with vmware vendor."""
+    """fingerprint() returns reachable=True with the vmware vendor + mapped product."""
     connector, target = vcsim_connector
     result = await connector.fingerprint(target)
     assert result.vendor == "vmware"
     assert result.reachable is True, f"fingerprint not reachable: extras={dict(result.extras)}"
     assert result.probe_method == "GET /api/about"
-    # vcsim's /api/about returns product_line_id="vpx" -> "vcenter".
-    # Loose assertion since vcsim's behaviour may vary across releases.
-    assert result.product in ("vcenter", "esxi", "vpx", "embeddedEsx", "esx")
+    # product_line_id="vpx" maps through product_from_line_id -> "vcenter".
+    assert result.product == "vcenter"
 
 
 @pytest.mark.asyncio
 async def test_probe_against_vcsim_returns_ok(
     vcsim_connector: tuple[VmwareRestConnector, _VcsimTarget],
 ) -> None:
-    """probe() against a running vcsim returns ok=True."""
+    """probe() returns ok=True (delegates to fingerprint)."""
     connector, target = vcsim_connector
     result = await connector.probe(target)
     assert result.ok is True, f"probe failed: reason={result.reason!r}"
@@ -247,48 +186,23 @@ async def test_session_reused_across_consecutive_fingerprint_calls(
     assert token_after_first is not None
     await connector.fingerprint(target)
     token_after_second = connector._session_tokens.get(target.name)
-    # The load-bearing assertion: the cached token is byte-identical
-    # across the two calls (no re-establish).
+    # Load-bearing: the cached token is byte-identical across calls
+    # (no re-establish).
     assert token_after_first == token_after_second
 
 
 @pytest.mark.asyncio
 async def test_aclose_revokes_session_against_vcsim(
-    vcsim_target: _VcsimTarget,
+    vcsim_connector: tuple[VmwareRestConnector, _VcsimTarget],
 ) -> None:
-    """aclose() issues DELETE /api/session against vcsim and clears the cache."""
+    """aclose() issues DELETE /api/session and clears the token + client caches."""
+    connector, target = vcsim_connector
 
-    async def _loader(_target: VsphereTargetLike) -> dict[str, str]:
-        return {"username": "user", "password": "pass"}
-
-    connector = VmwareRestConnector(session_loader=_loader)
-
-    # Same insecure-client patch as the fixture.
-    import asyncio
-
-    connector._lock_for_test = asyncio.Lock()  # type: ignore[attr-defined]
-
-    async def _http_client_insecure(target: VsphereTargetLike) -> httpx.AsyncClient:
-        async with connector._lock_for_test:  # type: ignore[attr-defined]
-            if target.name not in connector._clients:
-                port_part = f":{target.port}" if target.port and target.port != 443 else ""
-                base_url = f"https://{target.host}{port_part}"
-                ssl_ctx = ssl.create_default_context()
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode = ssl.CERT_NONE
-                connector._clients[target.name] = httpx.AsyncClient(
-                    base_url=base_url,
-                    timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
-                    verify=ssl_ctx,
-                )
-            return connector._clients[target.name]
-
-    connector._http_client = _http_client_insecure  # type: ignore[method-assign]
-
-    await connector.fingerprint(vcsim_target)
-    assert vcsim_target.name in connector._session_tokens
+    await connector.fingerprint(target)
+    assert target.name in connector._session_tokens
 
     await connector.aclose()
-    # Post-aclose: cache cleared, pool emptied.
+    # Post-aclose: token cache + client pool both emptied. (The fixture
+    # teardown calls aclose() again — idempotent no-op on empty state.)
     assert connector._session_tokens == {}
     assert connector._clients == {}

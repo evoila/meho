@@ -61,6 +61,7 @@ from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_r
 from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_retire_router
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
+from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import keycloak_readiness_probe
@@ -285,7 +286,17 @@ app.include_router(api_v1_retrieve_eval_router)
 app.include_router(api_v1_retrieve_retire_router)
 # G0.3-T3 (#254) — targets CRUD surface. All 5 routes are tenant-scoped
 # via the JWT's tenant_id claim; cross-tenant reads are impossible.
+# G9.1-T5 (#453) extends this router with GET /api/v1/targets/discover
+# (registered before GET /{name} so the literal path wins).
 app.include_router(api_v1_targets_router)
+# G9.1-T5 (#453) — topology REST surface at /api/v1/topology*. Three
+# query routes (dependents / dependencies / path) wrapping the T4
+# recursive-CTE verbs + POST /refresh/{target_name} wrapping the T3
+# refresh service. Operator role minimum; tenant-scoped via the JWT's
+# tenant_id claim (the query verbs filter graph_node/graph_edge
+# tenant_id; refresh resolves the target tenant-scoped). The fifth
+# route (GET /api/v1/targets/discover) lives on the targets router.
+app.include_router(api_v1_topology_router)
 # G6.1-T4 (#310) -- Server-Sent Events feed at `GET /api/v1/feed`.
 # Streams events XADD'd by T3's publish-on-write hook onto
 # `meho:feed:{tenant_id}`. Same RBAC gate as /api/v1/retrieve

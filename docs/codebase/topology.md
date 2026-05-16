@@ -33,9 +33,11 @@ tenant raises `AmbiguousNodeError`; pass the optional `kind` (or
 `from_kind` / `to_kind` for `find_path`) to pin the `(tenant_id, kind,
 name)` unique row. The read package never inserts, updates, or deletes.
 
-The REST/CLI/MCP fronts (T5/T6/T7) and the `docs/architecture/topology.md`
-operator doc are out of scope here — they consume `query.py` as a thin
-shell and land in G9.1-T5 through T8.
+The REST front (T5, #453) is landed and documented below ("REST API
+surface"). The CLI/MCP fronts (T6/T7) and the
+`docs/architecture/topology.md` operator doc remain out of scope here —
+they consume `query.py` / `refresh.py` as a thin shell and land in
+G9.1-T6 through T8.
 
 ## Key types
 
@@ -215,6 +217,65 @@ repeat row `is_cycle = true` (filtered out). An `A → B → A` graph
 terminates instead of recursing forever. The `depth` / `max_hops`
 bound is an independent second guard against acyclic-but-deep graphs.
 
+## REST API surface (T5, #453)
+
+`backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
+the read + write halves. Five routes total — four on the topology
+router, one on the targets router:
+
+| Method + path | Wraps | op_id | RBAC |
+|---|---|---|---|
+| `GET /api/v1/topology/dependents/{name}` | `find_dependents` | `topology.dependents` | operator |
+| `GET /api/v1/topology/dependencies/{name}` | `find_dependencies` | `topology.dependencies` | operator |
+| `GET /api/v1/topology/path?from=A&to=B` | `find_path` | `topology.path` | operator |
+| `POST /api/v1/topology/refresh/{target_name}` | `refresh_target_topology` | `topology.refresh` | operator |
+| `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
+
+Load-bearing details:
+
+- **Route ordering.** `GET /api/v1/targets/discover` is declared on
+  the targets router *before* `GET /api/v1/targets/{name}`. FastAPI
+  resolves routes in declaration order, so the literal `/discover`
+  segment must come first or it is captured as a target name.
+- **`path` query params.** The route binds `?from=` / `?to=` via
+  Pydantic `alias` because `from` is a Python keyword. An unreachable
+  pair returns HTTP 200 with a `null` body — unreachability is a valid
+  answer, not an error.
+- **Ambiguous anchor.** `AmbiguousNodeError` (a `ValueError` from the
+  query layer) is mapped to HTTP 409 `ambiguous_node` with the
+  candidate kinds echoed in `detail` so the caller can re-issue with
+  an explicit `kind`.
+- **Depth/hop ceilings.** The route caps `depth` at 64 and `max_hops`
+  at 32 at the HTTP boundary (over the service defaults of 16 / 8) so
+  a hostile query param cannot ask the recursive CTE to walk an
+  unbounded closure (#363 performance discipline).
+- **`refresh` audit.** The route binds `audit_op_id="topology.refresh"`
+  / `audit_op_class="read"` for the chassis HTTP-level audit row; the
+  refresh *service* additionally writes its own domain-level audit row
+  + one broadcast event with the per-target counts. The two rows are
+  intentional — same shape as the operations dispatcher writing a
+  domain row alongside the middleware's HTTP row.
+- **`targets/discover`.** Iterates every connector implementation
+  registered for the product (the v2 registry, which subsumes v1
+  registrations; deduped by connector class), calls `list_candidates`
+  on each, and merges the results. One connector raising is recorded
+  in `skipped` with the exception summary and does not abort the
+  sweep. `seed_target` (optional) is resolved tenant-scoped before
+  being forwarded. The verb never creates `targets` rows
+  (auto-registration is v0.2.next per #363).
+- **Tenant scoping.** No route accepts a `tenant_id` from the path,
+  query string, or body. The query verbs filter on
+  `operator.tenant_id`; `refresh` / `discover` resolve targets
+  tenant-scoped via `resolve_target`. Cross-tenant traversal *and*
+  cross-tenant refresh are impossible by construction (proven by the
+  two-tenant integration test).
+
+Tests: `backend/tests/test_api_v1_topology.py` +
+`backend/tests/test_api_v1_targets_discover.py` (service layer patched,
+SQLite); `backend/tests/integration/test_topology_api.py` (all 5 routes
+end-to-end + the cross-tenant boundary against a real
+`pgvector/pgvector:pg16` container).
+
 ## Dependencies
 
 - `meho_backplane.connectors.resolver.resolve_connector` +
@@ -255,9 +316,12 @@ bound is an independent second guard against acyclic-but-deep graphs.
   `backend/tests/test_topology_query_schemas.py`.
 - **Unweighted only.** `find_path` treats every edge as cost 1.
   Weighted-edge support is deferred to v0.2.next per #363.
-- **No alias resolution yet.** `name_or_alias` is matched against
-  `graph_node.name` directly; alias → name resolution is the API/CLI
-  router's job (T5/T6), not this substrate's.
+- **No graph-node alias resolution yet.** `name_or_alias` is matched
+  against `graph_node.name` directly. The T5 query routes pass the
+  path/query name straight through — they do *not* alias-resolve graph
+  nodes (only the `refresh` / `targets/discover` routes alias-resolve
+  the *target* via `resolve_target`). Graph-node alias → name
+  resolution is deferred to the CLI/MCP fronts (T6/T7).
 - Streaming refresh progress for very large topologies — v0.2 is
   single-shot; deferred per Initiative #363.
 - Graph history / time-travel — soft-delete here only makes a node

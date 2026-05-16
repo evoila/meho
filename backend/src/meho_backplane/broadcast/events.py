@@ -95,13 +95,19 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
 #: are the CLI-shaped verbs (``meho vsphere ls``, ``meho meho about``)
 #: that the connector layer maps to the same read class as ``.list`` /
-#: ``.get`` / ``.info``.
+#: ``.get`` / ``.info``. ``.health`` and ``.seal_status`` are the Vault
+#: ``sys`` diagnostics verbs (G3.3-T2 #546): non-mutating cluster-state
+#: reads with no secret content, so they broadcast at the same
+#: ``read`` sensitivity as ``.list`` rather than falling through to
+#: the full-detail ``other`` class.
 _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".list",
     ".info",
     ".get",
     ".about",
     ".ls",
+    ".health",
+    ".seal_status",
 )
 
 

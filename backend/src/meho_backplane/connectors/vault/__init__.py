@@ -50,6 +50,12 @@ from meho_backplane.connectors.vault.ops import (
     register_vault_typed_operations,
     vault_kv_read,
 )
+from meho_backplane.connectors.vault.ops_sys import (
+    register_vault_sys_typed_operations,
+from meho_backplane.connectors.vault.ops_auth import (
+    VaultAuthBackendNotMountedError,
+    register_vault_auth_operations,
+)
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 register_connector_v2(
@@ -66,10 +72,16 @@ register_connector_v2(
 # connector subpackage has self-registered by the time the runner
 # iterates.
 register_typed_op_registrar(register_vault_typed_operations)
+# The ``sys`` read op group (G3.3-T2 #546) ships its own registrar so
+# the KV-v2 (#545) and sys surfaces register independently — no shared
+# handler state, distinct endpoint_descriptor rows.
+register_typed_op_registrar(register_vault_sys_typed_operations)
 
 __all__ = [
+    "VaultAuthBackendNotMountedError",
     "VaultConnector",
     "VaultTarget",
+    "register_vault_sys_typed_operations",
     "register_vault_typed_operations",
     "vault_kv_read",
 ]

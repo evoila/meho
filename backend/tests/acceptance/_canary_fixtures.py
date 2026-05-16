@@ -347,9 +347,7 @@ def _register_vcenter_rest_routes(mock: respx.MockRouter) -> None:
     mock.get("/api/vcenter/cluster").respond(
         200, json=[{"cluster": "domain-c1", "name": "canary-cluster"}]
     )
-    mock.get("/api/vcenter/host").respond(
-        200, json=[{"host": "host-1", "name": "canary-esx-01"}]
-    )
+    mock.get("/api/vcenter/host").respond(200, json=[{"host": "host-1", "name": "canary-esx-01"}])
     mock.get("/api/vcenter/datastore").respond(
         200, json=[{"datastore": "datastore-1", "name": "canary-ds-01"}]
     )

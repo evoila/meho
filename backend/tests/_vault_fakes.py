@@ -195,12 +195,43 @@ class _FakeSysBackend:
     payload: Any = None
     raise_on_read: Exception | None = None
     read_calls: list[dict[str, Any]] = field(default_factory=list)
+    # G3.3-T2 (#546) sys read op group. Each knob mirrors the
+    # ``payload`` / ``raise_on_read`` pair so the sys-op tests can
+    # inject a success body or a failure independently of the health
+    # read the connector/probe suites drive.
+    seal_status_payload: Any = None
+    raise_on_seal_status: Exception | None = None
+    seal_status_calls: int = 0
+    mounts_payload: Any = None
+    raise_on_mounts: Exception | None = None
+    mounts_calls: int = 0
+    auth_methods_payload: Any = None
+    raise_on_auth_methods: Exception | None = None
+    auth_methods_calls: int = 0
 
     def read_health_status(self, *, method: str = "HEAD", **_kwargs: Any) -> Any:
         self.read_calls.append({"method": method})
         if self.raise_on_read is not None:
             raise self.raise_on_read
         return self.payload
+
+    def read_seal_status(self) -> Any:
+        self.seal_status_calls += 1
+        if self.raise_on_seal_status is not None:
+            raise self.raise_on_seal_status
+        return self.seal_status_payload
+
+    def list_mounted_secrets_engines(self) -> Any:
+        self.mounts_calls += 1
+        if self.raise_on_mounts is not None:
+            raise self.raise_on_mounts
+        return self.mounts_payload
+
+    def list_auth_methods(self) -> Any:
+        self.auth_methods_calls += 1
+        if self.raise_on_auth_methods is not None:
+            raise self.raise_on_auth_methods
+        return self.auth_methods_payload
 
 
 @dataclass
@@ -265,6 +296,12 @@ def install_fake_client(
     secret: dict[str, Any] | None = None,
     kv_version: int | None = None,
     read_exc: Exception | None = None,
+    seal_status_payload: Any = None,
+    seal_status_exc: Exception | None = None,
+    mounts_payload: Any = None,
+    mounts_exc: Exception | None = None,
+    auth_methods_payload: Any = None,
+    auth_methods_exc: Exception | None = None,
 ) -> _FakeClient:
     """Failure-injecting variant of :func:`install_fake_vault`.
 
@@ -273,13 +310,21 @@ def install_fake_client(
     tiny (no duplicated ``_FakeClient(url=..., timeout=..., ...)`` body)
     while exposing every knob the connector / failure-mode suites need:
     login / revoke / health-read / kv-read exception injection plus
-    secret and KV-version overrides.
+    secret and KV-version overrides, and the G3.3-T2 (#546) sys read
+    group's seal-status / mounts / auth-methods payload + exception
+    injection.
     """
     fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
     fake.auth.jwt.raise_on_login = login_exc
     fake.auth.token.raise_on_revoke = revoke_exc
     fake.sys.payload = health_payload
     fake.sys.raise_on_read = health_exc
+    fake.sys.seal_status_payload = seal_status_payload
+    fake.sys.raise_on_seal_status = seal_status_exc
+    fake.sys.mounts_payload = mounts_payload
+    fake.sys.raise_on_mounts = mounts_exc
+    fake.sys.auth_methods_payload = auth_methods_payload
+    fake.sys.raise_on_auth_methods = auth_methods_exc
     if secret is not None:
         fake.secrets.kv.v2.secret = secret
     fake.secrets.kv.v2.read_exc = read_exc

@@ -88,15 +88,18 @@ jobs:
     # so no step ever starts on a fork PR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners
-    # 20-min cap: the pytest suite now actually completes (the
-    # integration TRUNCATE fix one commit earlier unblocked the
-    # tests/integration/* subtree that previously failed fast at
-    # setup), so the budget is wall-clock for the full unit-plus-
-    # integration sweep + uv sync + coverage emit, not for a
-    # short-circuit-on-first-failure run. Run 25910787068 cancelled
-    # at 49% through unit tests under the old 10-min cap; doubling
-    # gives headroom for moderate suite growth.
-    timeout-minutes: 20
+    # 40-min cap: the budget is wall-clock for the full unit-plus-
+    # integration sweep + uv sync + coverage emit (serial pytest, no
+    # xdist), not for a short-circuit-on-first-failure run. History:
+    # run 25910787068 cancelled at 49% under the old 10-min cap →
+    # bumped to 20; the G9.1 topology suite (graph_node/edge schema,
+    # refresh service, recursive-CTE query verbs, REST surface) plus
+    # its slow tests/integration/* pgvector:pg16 testcontainer cases
+    # then pushed the serial sweep past 20 min too (runs 25970564527,
+    # 25972807988 cancelled with the Pytest step at ~18m45s). Doubling
+    # to 40 restores headroom for continued suite growth. Durable fix
+    # (pytest-xdist `-n auto` parallelization) tracked as a follow-up.
+    timeout-minutes: 40
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,

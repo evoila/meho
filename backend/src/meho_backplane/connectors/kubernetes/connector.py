@@ -511,6 +511,30 @@ class KubernetesConnector(Connector):
             "result": sub_result.model_dump(mode="json"),
         }
 
+    async def logs(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.logs`` op.
+
+        Op-id: ``k8s.logs``. Delegates to
+        :func:`~meho_backplane.connectors.kubernetes.ops_logs.k8s_logs`
+        with ``self`` injected as the ``connector`` argument so the
+        handler can reach the cached :class:`ApiClient` via
+        :meth:`_get_api_client` without an extra registry lookup. The
+        module-level function carries the real logic so a future
+        per-op-handler-file split (one ``ops_<verb>.py`` per op,
+        without a class) keeps the API stable.
+
+        Schema validation runs in the dispatcher before this method
+        is called; the function-level handler re-reads only
+        validated values.
+        """
+        from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
+
+        return await k8s_logs(self, target, params)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`KUBERNETES_OPS` into ``endpoint_descriptor``.

@@ -52,6 +52,9 @@ from meho_backplane.connectors.vault.ops import (
 )
 from meho_backplane.connectors.vault.ops_sys import (
     register_vault_sys_typed_operations,
+from meho_backplane.connectors.vault.ops_auth import (
+    VaultAuthBackendNotMountedError,
+    register_vault_auth_operations,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
@@ -75,6 +78,7 @@ register_typed_op_registrar(register_vault_typed_operations)
 register_typed_op_registrar(register_vault_sys_typed_operations)
 
 __all__ = [
+    "VaultAuthBackendNotMountedError",
     "VaultConnector",
     "VaultTarget",
     "register_vault_sys_typed_operations",

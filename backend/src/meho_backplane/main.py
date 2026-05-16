@@ -83,6 +83,10 @@ from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.settings import parse_bool_env
+from meho_backplane.topology import (
+    start_topology_refresh_scheduler,
+    stop_topology_refresh_scheduler,
+)
 from meho_backplane.version import router as version_router
 
 _APP_NAME: Final[str] = "meho-backplane"
@@ -193,9 +197,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     eager_import_mcp_modules()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
+    # Scheduled topology refresh (G9.1-T3 #450). Started after connector
+    # auto-discovery (it resolves connectors per target) so the first
+    # sweep can dispatch ``discover_topology``. The task handle is kept
+    # so shutdown can cancel + await its unwind before the DB/redis
+    # pools are disposed (a sweep mid-flight must not race pool teardown).
+    topology_scheduler_task = start_topology_refresh_scheduler()
     try:
         yield
     finally:
+        await stop_topology_refresh_scheduler(topology_scheduler_task)
         await _run_lifespan_shutdown()
 
 

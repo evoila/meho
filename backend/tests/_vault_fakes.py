@@ -94,9 +94,71 @@ class _FakeTokenAuth:
 
 
 @dataclass
+class _FakeUserpassAuth:
+    """In-process stand-in for hvac's ``client.auth.userpass`` backend.
+
+    Models the three failure axes the identity-read ops branch on:
+    ``list_exc`` / ``read_exc`` inject an hvac exception (e.g.
+    :class:`hvac.exceptions.InvalidPath` for a not-mounted backend or a
+    missing user), while ``users`` drives the happy-path payload shape
+    Vault returns (``{"data": {"keys": [...]}}`` for LIST, ``{"data":
+    {...config...}}`` for GET). ``list_calls`` / ``read_calls`` record
+    the ``mount_point`` so tests can assert mount parameterisation.
+    """
+
+    users: dict[str, dict[str, Any]] = field(default_factory=dict)
+    list_exc: Exception | None = None
+    read_exc: Exception | None = None
+    list_calls: list[dict[str, Any]] = field(default_factory=list)
+    read_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def list_user(self, mount_point: str = "userpass") -> dict[str, Any]:
+        self.list_calls.append({"mount_point": mount_point})
+        if self.list_exc is not None:
+            raise self.list_exc
+        return {"data": {"keys": sorted(self.users)}}
+
+    def read_user(self, username: str, mount_point: str = "userpass") -> dict[str, Any]:
+        self.read_calls.append({"username": username, "mount_point": mount_point})
+        if self.read_exc is not None:
+            raise self.read_exc
+        return {"data": self.users[username]}
+
+
+@dataclass
+class _FakeAppRoleAuth:
+    """In-process stand-in for hvac's ``client.auth.approle`` backend.
+
+    Same shape as :class:`_FakeUserpassAuth` but keyed by role name and
+    using hvac's ``list_roles`` / ``read_role`` method names so the
+    handler's ``mount_point`` forwarding is exercised verbatim.
+    """
+
+    roles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    list_exc: Exception | None = None
+    read_exc: Exception | None = None
+    list_calls: list[dict[str, Any]] = field(default_factory=list)
+    read_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def list_roles(self, mount_point: str = "approle") -> dict[str, Any]:
+        self.list_calls.append({"mount_point": mount_point})
+        if self.list_exc is not None:
+            raise self.list_exc
+        return {"data": {"keys": sorted(self.roles)}}
+
+    def read_role(self, role_name: str, mount_point: str = "approle") -> dict[str, Any]:
+        self.read_calls.append({"role_name": role_name, "mount_point": mount_point})
+        if self.read_exc is not None:
+            raise self.read_exc
+        return {"data": self.roles[role_name]}
+
+
+@dataclass
 class _FakeAuth:
     jwt: _FakeJWTAuth
     token: _FakeTokenAuth
+    userpass: _FakeUserpassAuth = field(default_factory=_FakeUserpassAuth)
+    approle: _FakeAppRoleAuth = field(default_factory=_FakeAppRoleAuth)
 
 
 @dataclass

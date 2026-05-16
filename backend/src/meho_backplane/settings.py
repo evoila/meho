@@ -267,6 +267,16 @@ class Settings(BaseModel):
         ``COMPOSITE_MAX_DEPTH`` env var. Read once per
         ``dispatch_child`` call -- no caching beyond
         :func:`get_settings`'s :func:`lru_cache`.
+    topology_refresh_interval_seconds:
+        Cadence of the G9.1-T3 background topology-refresh loop, in
+        seconds. The scheduler (registered in the FastAPI lifespan)
+        sleeps this long between full sweeps of every tenant's
+        targets. Default 3600 (1 h) matches Initiative #363's stated
+        cadence; operators on fast-moving inventories tighten it via
+        ``TOPOLOGY_REFRESH_INTERVAL_SECONDS``. Per-target failure
+        backoff is derived from this value (2x, capped at 4 h) inside
+        the scheduler, not a separate knob. Read once per loop
+        iteration through :func:`get_settings`'s cache.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -300,6 +310,7 @@ class Settings(BaseModel):
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
+    topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -416,5 +427,8 @@ def get_settings() -> Settings:
         ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),
+        ),
+        topology_refresh_interval_seconds=int(
+            os.environ.get("TOPOLOGY_REFRESH_INTERVAL_SECONDS", "3600"),
         ),
     )

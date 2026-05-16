@@ -5,19 +5,27 @@
 
 G0.6 refactor (#391) of the G3.2-T1 (#321) skeleton. The skeleton
 shipped with an empty op surface and an ``unknown_op``-returning
-``execute()``; this module is the first concrete op the connector
+``execute()``; this module hosts the metadata rows the connector
 registers against the G0.6 substrate via
 :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
 
-The op surface is intentionally minimal in this Initiative:
+The shipped op surface today:
 
 * ``k8s.about`` -- product-flavour + version snapshot built from
   :meth:`kubernetes_asyncio.client.VersionApi.get_code`. Mirrors what
   :meth:`KubernetesConnector.fingerprint` returns but goes through the
   dispatcher so callers see the same envelope (``OperationResult``)
-  every other op produces. The full 13-op K8s surface (``k8s.pod.list``
-  / ``k8s.deployment.list`` / ...) lands in G3.2-T2..T5 (#320 work
-  items) against the same registration pattern from the start.
+  every other op produces. Landed with #391's refactor of the T1
+  skeleton.
+* ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list`` -- the core
+  inventory surface (G3.2-T2 #322). Metadata + helper functions live in
+  :mod:`~meho_backplane.connectors.kubernetes.ops_core`; this module
+  re-exports the merged tuple so registration walks a single list.
+* ``k8s.logs`` -- non-streaming pod-log fetch (G3.2-T5 #325). Metadata
+  schemas + handler live in
+  :mod:`~meho_backplane.connectors.kubernetes.ops_logs`; this module
+  builds the registration row from those exports inside
+  :func:`_kubernetes_ops`.
 
 Each op is declared in :data:`KUBERNETES_OPS` as a typed-metadata row.
 The connector's ``register_operations()`` classmethod walks the list
@@ -82,67 +90,125 @@ class KubernetesOp:
 
 #: The ops :class:`KubernetesConnector` registers at lifespan startup.
 #:
-#: ``k8s.about`` is the canary op the G0.6 refactor (#391) lands
-#: against. It returns a flat dict shaped like
+#: ``k8s.about`` is the canary op the G0.6 refactor (#391) lands against.
+#: It returns a flat dict shaped like
 #: :class:`~meho_backplane.connectors.schemas.FingerprintResult` but
 #: goes through the dispatcher path so callers exercise the
 #: register_typed_operation -> dispatch -> reduce -> audit pipeline
-#: end-to-end. The full 13-op K8s read surface lands in #320's T2..T5
-#: against this same registration pattern.
-KUBERNETES_OPS: tuple[KubernetesOp, ...] = (
-    KubernetesOp(
-        op_id="k8s.about",
-        handler_attr="about",
-        summary="Return the cluster's product flavour, version, and platform.",
-        description=(
-            "Hits the Kubernetes API server's ``GET /version`` endpoint via "
-            "``kubernetes_asyncio.client.VersionApi.get_code`` and returns a "
-            "flat dict with the cluster's product slug (rke2 / k3s / eks / "
-            "gke / aks / vanilla derived from the gitVersion suffix), full "
-            "git_version, build date, and platform string. Use to identify "
-            "the cluster before issuing higher-level ops or to populate "
-            "operator dashboards. No params; works against any target whose "
-            "kubeconfig the operator's tenant can read."
+#: end-to-end. The G3.2-T2 (#322) core inventory ops (``k8s.ls`` /
+#: ``k8s.namespace.list`` / ``k8s.node.list``) extend the tuple from
+#: :mod:`~meho_backplane.connectors.kubernetes.ops_core`. The remaining
+#: K8s read surface (workload / network / config / events / logs) lands
+#: in #320's T3..T5 against this same registration pattern.
+_K8S_ABOUT_OP = KubernetesOp(
+    op_id="k8s.about",
+    handler_attr="about",
+    summary="Return the cluster's product flavour, version, and platform.",
+    description=(
+        "Hits the Kubernetes API server's ``GET /version`` endpoint via "
+        "``kubernetes_asyncio.client.VersionApi.get_code`` and returns a "
+        "flat dict with the cluster's product slug (rke2 / k3s / eks / "
+        "gke / aks / vanilla derived from the gitVersion suffix), full "
+        "git_version, build date, and platform string. Use to identify "
+        "the cluster before issuing higher-level ops or to populate "
+        "operator dashboards. No params; works against any target whose "
+        "kubeconfig the operator's tenant can read."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "product": {"type": "string"},
+            "git_version": {"type": "string"},
+            "build_date": {"type": "string"},
+            "major": {"type": "string"},
+            "minor": {"type": "string"},
+            "platform": {"type": "string"},
+            "go_version": {"type": "string"},
+            "git_commit": {"type": "string"},
+            "git_tree_state": {"type": "string"},
+        },
+        "required": ["product", "git_version"],
+        "additionalProperties": True,
+    },
+    group_key="cluster",
+    tags=("read-only", "cluster", "identity"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call when the operator wants to identify the K8s cluster "
+            "behind a target before issuing a higher-level op (pod list, "
+            "deployment scale, etc.), or when the agent needs to pick a "
+            "version-flavoured doc page from the knowledge base."
         ),
-        parameter_schema={
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-        response_schema={
-            "type": "object",
-            "properties": {
-                "product": {"type": "string"},
-                "git_version": {"type": "string"},
-                "build_date": {"type": "string"},
-                "major": {"type": "string"},
-                "minor": {"type": "string"},
-                "platform": {"type": "string"},
-                "go_version": {"type": "string"},
-                "git_commit": {"type": "string"},
-                "git_tree_state": {"type": "string"},
-            },
-            "required": ["product", "git_version"],
-            "additionalProperties": True,
-        },
-        group_key="cluster",
-        tags=("read-only", "cluster", "identity"),
+        "parameter_hints": {},
+        "output_shape": (
+            "Flat dict; the ``product`` field is the canonical slug "
+            "(``rke2`` / ``k3s`` / ``eks`` / ``gke`` / ``aks`` / "
+            "``vanilla``). ``git_version`` carries the full v-prefixed "
+            "string including distribution suffix."
+        ),
+    },
+)
+
+
+def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
+    """Return the merged registration tuple (``k8s.about`` + core inventory ops + ``k8s.logs``).
+
+    Implemented as a function call rather than a literal-and-splat at
+    module level so the import order stays linear: ``ops.py`` defines
+    :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the T2
+    inventory ops from :mod:`ops_core` and the T5 logs op metadata
+    from :mod:`ops_logs` (each of which only depends on
+    ``KubernetesOp`` plus its own helpers). The arrangement keeps the
+    canary op's metadata co-located with the dataclass definition
+    while letting the larger surfaces live in their own modules next
+    to their helpers.
+    """
+    from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
+    from meho_backplane.connectors.kubernetes.ops_logs import (
+        K8S_LOGS_LLM_INSTRUCTIONS,
+        K8S_LOGS_PARAMETER_SCHEMA,
+        K8S_LOGS_RESPONSE_SCHEMA,
+    )
+
+    logs_op = KubernetesOp(
+        op_id="k8s.logs",
+        handler_attr="logs",
+        summary="Fetch a chunk of pod logs as a single non-streaming response.",
+        description=(
+            "Reads container stdout/stderr via the Kubernetes API's "
+            "``GET /api/v1/namespaces/{namespace}/pods/{name}/log`` route "
+            "and returns the lines in one response. Honours the standard "
+            "kubectl-style knobs -- ``--tail`` (default 100, capped at "
+            "5000), ``--container`` (required for multi-container pods), "
+            "``--since`` (duration string -- '5m', '1h', '24h', '7d'), "
+            "and ``--previous`` (logs from the prior container "
+            "instance after a restart). Pod name resolution accepts an "
+            "exact match or a unique prefix within the namespace. The "
+            "response body is capped at 1 MiB serialised; oversize "
+            "payloads are truncated line-boundary from the front (most-"
+            "recent lines kept) and ``truncated=true`` is set on the "
+            "result with ``truncated_byte_count`` carrying the dropped "
+            "byte count. Streaming (``kubectl logs -f``) is out of "
+            "scope for v0.2 -- operators following live logs continue "
+            "using the kubectl-vcf.sh fallback."
+        ),
+        parameter_schema=K8S_LOGS_PARAMETER_SCHEMA,
+        response_schema=K8S_LOGS_RESPONSE_SCHEMA,
+        group_key="logs",
+        tags=("read-only", "pod", "logs"),
         safety_level="safe",
         requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants to identify the K8s cluster "
-                "behind a target before issuing a higher-level op (pod list, "
-                "deployment scale, etc.), or when the agent needs to pick a "
-                "version-flavoured doc page from the knowledge base."
-            ),
-            "parameter_hints": {},
-            "output_shape": (
-                "Flat dict; the ``product`` field is the canonical slug "
-                "(``rke2`` / ``k3s`` / ``eks`` / ``gke`` / ``aks`` / "
-                "``vanilla``). ``git_version`` carries the full v-prefixed "
-                "string including distribution suffix."
-            ),
-        },
-    ),
-)
+        llm_instructions=K8S_LOGS_LLM_INSTRUCTIONS,
+    )
+
+    return (_K8S_ABOUT_OP, *CORE_OPS, logs_op)
+
+
+KUBERNETES_OPS: tuple[KubernetesOp, ...] = _kubernetes_ops()

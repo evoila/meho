@@ -28,13 +28,25 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 - **Op metadata** (`ops.py`) -- the `KubernetesOp` dataclass plus the
   `KUBERNETES_OPS` tuple the connector's `register_operations` walks
   at startup. The tuple merges `k8s.about` (T1's canary, refactored
-  through G0.6) with the T2 inventory ops imported from `ops_core.py`.
+  through G0.6), the T2 inventory ops (from `ops_core.py`), the T3
+  workload ops (from `ops_workload.py`), and the T5 logs op (from
+  `ops_logs.py`).
 - **Core inventory helpers** (`ops_core.py`) -- pure mapping helpers
   (`namespace_row`, `node_row`, `taint_row`, `age_seconds`) plus the
   `CORE_OPS` registration rows for `k8s.ls` / `k8s.namespace.list` /
   `k8s.node.list`. Helpers stay pure-function so the unit suite can pin
   the wire shape against synthetic `V1Namespace` / `V1Node` model
   instances without booting an event loop.
+- **Workload helpers** (`ops_workload.py`) -- pure row mappers
+  (`pod_row`, `pod_info`, `deployment_row`, `deployment_info`,
+  `container_status_row`, `pod_ready_string`) plus the prefix
+  resolvers (`resolve_pod_name`, `resolve_deployment_name`) and the
+  `WORKLOAD_OPS` registration rows for `k8s.pod.{list,info}` and
+  `k8s.deployment.{list,info}`. Two structured errors
+  (`WorkloadNotFoundError`, `AmbiguousPrefixError`) drive the
+  prefix-resolution UX: ambiguous matches surface the candidate list
+  through the dispatcher's `connector_error` envelope so callers can
+  render a "did-you-mean" hint.
 - **`KubernetesTargetLike`** (`kubeconfig.py`) -- runtime-checkable
   Protocol capturing the minimum target shape the connector reads:
   `name`, `host`, `port`, `secret_ref`. Replaced by the concrete
@@ -47,16 +59,64 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Shipped op surface
 
-| op_id                | safety | description                                              |
-| -------------------- | ------ | -------------------------------------------------------- |
-| `k8s.about`          | safe   | Product / version / platform via `VersionApi.get_code`.  |
-| `k8s.ls`             | safe   | Synthetic walker: root / namespace / namespace+kind.     |
-| `k8s.namespace.list` | safe   | `CoreV1Api.list_namespace()` -- name / status / age.    |
-| `k8s.node.list`      | safe   | `CoreV1Api.list_node()` -- status / roles / version.    |
+| op_id                  | safety | description                                              |
+| ---------------------- | ------ | -------------------------------------------------------- |
+| `k8s.about`            | safe   | Product / version / platform via `VersionApi.get_code`.  |
+| `k8s.ls`               | safe   | Synthetic walker: root / namespace / namespace+kind.     |
+| `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.     |
+| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version.     |
+| `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.            |
+| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.            |
+| `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy. |
+| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.     |
+| `k8s.logs`             | safe   | Non-streaming pod log fetch with 1 MiB body cap.         |
 
-T3 / T4 / T5 of Initiative #320 add the workload / network+config /
-logs surfaces against the same `KubernetesOp` -> `KUBERNETES_OPS` ->
-`register_operations` pattern.
+T4 of Initiative #320 still ships the network + config + events
+surfaces (`service` / `ingress` / `configmap` / `event`) against the
+same `KubernetesOp` -> `KUBERNETES_OPS` -> `register_operations`
+pattern.
+
+### Workload-op pagination (`k8s.pod.list` / `k8s.deployment.list`)
+
+The list handlers forward the standard k8s `label_selector` /
+`field_selector` / `limit` / `_continue` filter knobs to the API
+server so heavy-tenancy clusters can paginate server-side without
+streaming every row through the connector. The operator passes
+`limit=N` plus optional `continue_token=<cursor>` on each call; the
+response carries `next_continue` whenever the server signals more
+pages. Tokens are server-defined and expire after ~5-15 minutes; a
+stale token returns 410 ResourceExpired, and the handler propagates
+the API exception verbatim so the caller can restart without the
+token.
+
+`namespace` and `all_namespaces` are mutually exclusive in the
+schema's `oneOf` clause -- exactly one must be supplied. The
+`all_namespaces=true` path routes through
+`list_pod_for_all_namespaces` / `list_deployment_for_all_namespaces`;
+the per-namespace path uses the `_namespaced_` variants.
+
+### Workload-op prefix resolution (`k8s.pod.info` / `k8s.deployment.info`)
+
+Both `info` ops accept an exact name or a unique prefix within the
+namespace. Resolution shape (`_resolve_from_items` in `ops_workload.py`):
+
+1. Exact match wins -- `foo-bar` resolves to the literal `foo-bar`
+   pod even when `foo-bar-x` also exists.
+2. Otherwise the prefix matches collect into a candidate list.
+3. Zero candidates -> `WorkloadNotFoundError`.
+4. Multiple candidates -> `AmbiguousPrefixError` with the sorted
+   candidate list on `.candidates`. The dispatcher's
+   `connector_error` envelope carries the exception class name and
+   the args list, so the agent / CLI can render a "did-you-mean"
+   hint without parsing the error string.
+
+The resolver pages via `list_namespaced_pod` /
+`list_namespaced_deployment` without server-side pagination -- the
+operator-facing namespaces are typically O(10..100) objects which
+fits in one unpaginated response. Heavy-tenancy namespaces with
+hundreds of workload objects are not the prefix-resolver's target
+audience; the agent typically reaches them via the list path with
+explicit pagination.
 
 ## Control flow
 
@@ -175,12 +235,18 @@ just `len(rows)` because nothing reduces.
 
 - Parent Initiative: [#320 G3.2](https://github.com/evoila/meho/issues/320)
   -- `k8s-1.x kubernetes-asyncio` typed connector.
-- Predecessor Task: [#321 G3.2-T1](https://github.com/evoila/meho/issues/321)
-  -- `KubernetesConnector` skeleton (kubeconfig + fingerprint + probe).
-- This Task: [#322 G3.2-T2](https://github.com/evoila/meho/issues/322)
-  -- core inventory ops (`k8s.about` / `k8s.ls` /
-  `k8s.namespace.list` / `k8s.node.list`).
+- Predecessor Tasks:
+  - [#321 G3.2-T1](https://github.com/evoila/meho/issues/321) -- skeleton.
+  - [#322 G3.2-T2](https://github.com/evoila/meho/issues/322) -- core
+    inventory ops.
+  - [#323 G3.2-T3](https://github.com/evoila/meho/issues/323) -- workload
+    ops (`k8s.pod.{list,info}` / `k8s.deployment.{list,info}`).
+  - [#325 G3.2-T5](https://github.com/evoila/meho/issues/325) -- `k8s.logs`.
 - Substrate Initiative: [#388 G0.6](https://github.com/evoila/meho/issues/388)
   -- operation registry + dispatcher + JSONFlux substrate.
 - `kubernetes_asyncio`: https://github.com/tomplus/kubernetes_asyncio
 - Kubernetes API spec: https://kubernetes.io/docs/reference/kubernetes-api/
+- Kubernetes Pod API:
+  <https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/>
+- Kubernetes Deployment API:
+  <https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/deployment-v1/>

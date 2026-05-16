@@ -21,6 +21,10 @@ The shipped op surface today:
   inventory surface (G3.2-T2 #322). Metadata + helper functions live in
   :mod:`~meho_backplane.connectors.kubernetes.ops_core`; this module
   re-exports the merged tuple so registration walks a single list.
+* ``k8s.pod.{list,info}`` / ``k8s.deployment.{list,info}`` -- the
+  workload surface (G3.2-T3 #323). Metadata + helpers + handlers live
+  in :mod:`~meho_backplane.connectors.kubernetes.ops_workload`;
+  :func:`_kubernetes_ops` splats ``WORKLOAD_OPS`` into the merged tuple.
 * ``k8s.logs`` -- non-streaming pod-log fetch (G3.2-T5 #325). Metadata
   schemas + handler live in
   :mod:`~meho_backplane.connectors.kubernetes.ops_logs`; this module
@@ -158,17 +162,23 @@ _K8S_ABOUT_OP = KubernetesOp(
 
 
 def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
-    """Return the merged registration tuple (``k8s.about`` + core inventory ops + ``k8s.logs``).
+    """Return the merged registration tuple.
+
+    Composition: ``k8s.about`` (T1 canary) + ``CORE_OPS`` (T2 inventory:
+    ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list``) + ``WORKLOAD_OPS``
+    (T3 workload: ``k8s.pod.{list,info}`` / ``k8s.deployment.{list,info}``)
+    + ``k8s.logs`` (T5).
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
     :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the T2
-    inventory ops from :mod:`ops_core` and the T5 logs op metadata
-    from :mod:`ops_logs` (each of which only depends on
-    ``KubernetesOp`` plus its own helpers). The arrangement keeps the
-    canary op's metadata co-located with the dataclass definition
-    while letting the larger surfaces live in their own modules next
-    to their helpers.
+    inventory ops from :mod:`ops_core`, the T3 workload ops from
+    :mod:`ops_workload`, and the T5 logs op metadata from
+    :mod:`ops_logs` (each of which only depends on ``KubernetesOp``
+    plus its own helpers). The arrangement keeps the canary op's
+    metadata co-located with the dataclass definition while letting
+    the larger surfaces live in their own modules next to their
+    helpers.
     """
     from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
     from meho_backplane.connectors.kubernetes.ops_logs import (
@@ -176,6 +186,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         K8S_LOGS_PARAMETER_SCHEMA,
         K8S_LOGS_RESPONSE_SCHEMA,
     )
+    from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
 
     logs_op = KubernetesOp(
         op_id="k8s.logs",
@@ -208,7 +219,7 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         llm_instructions=K8S_LOGS_LLM_INSTRUCTIONS,
     )
 
-    return (_K8S_ABOUT_OP, *CORE_OPS, logs_op)
+    return (_K8S_ABOUT_OP, *CORE_OPS, *WORKLOAD_OPS, logs_op)
 
 
 KUBERNETES_OPS: tuple[KubernetesOp, ...] = _kubernetes_ops()

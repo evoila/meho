@@ -45,6 +45,7 @@ import asyncio
 from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 
@@ -243,9 +244,16 @@ async def register_vault_typed_operations(
     Production callers leave it ``None`` and the helper resolves the
     process-wide singleton via the ``register_typed_operation`` body.
 
-    Scope: today this registers only ``vault.kv.read``. G3.3 (#366)
-    will add the full KV-v2 + sys + auth read/list surface on top of
-    this helper without further substrate changes.
+    Scope: ``vault.kv.read`` (this module) plus the four
+    identity-read ops from
+    :func:`~meho_backplane.connectors.vault.ops_auth.register_vault_auth_operations`
+    (``vault.auth.userpass.list/read``, ``vault.auth.approle.list/read``;
+    Task #547). The sys read group (Task #546) and the remaining KV-v2
+    verbs (Task #545) layer on the same way -- one ``await`` into the
+    group's registrar -- without further substrate changes. Keeping
+    each group's registrations in its own module keeps the surfaces
+    independently reviewable; this helper stays the single
+    lifespan-driven entry point.
     """
     await register_typed_operation(
         product="vault",
@@ -274,3 +282,7 @@ async def register_vault_typed_operations(
         llm_instructions=_VAULT_KV_READ_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )
+    # Identity-read group (Task #547) -- registered from its own
+    # module so the auth surface stays independently reviewable while
+    # the package keeps a single lifespan-driven registrar entry.
+    await register_vault_auth_operations(embedding_service=embedding_service)

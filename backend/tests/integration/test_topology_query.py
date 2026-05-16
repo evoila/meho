@@ -33,6 +33,10 @@ Coverage matrix (mirrors the Task #451 acceptance criteria):
 * ``kind_filter`` restricts the traversal to one edge kind.
 * The tenant boundary holds: a same-named node in tenant B is invisible
   to a tenant-A query.
+* A bare-name anchor that resolves to two kinds in one tenant raises
+  ``AmbiguousNodeError``; an explicit ``kind`` pins the right closure.
+* The converging-DAG dedupe holds: a node reachable by several paths
+  appears exactly once at its minimum depth.
 * A 10k-node fixture completes a depth-16 traversal in under 100 ms.
 """
 
@@ -40,6 +44,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -49,6 +54,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphEdge, GraphNode
 from meho_backplane.topology.query import (
+    AmbiguousNodeError,
     find_dependencies,
     find_dependents,
     find_path,
@@ -174,12 +180,19 @@ async def test_find_dependents_returns_reverse_closure(
     """
     nodes = await find_dependents(_operator(TENANT_A_ID), "host1")
 
+    # One row per reachable node — NOT one per path. `app` is reachable
+    # from host1 through both vm1 and vm2; a per-path traversal returns
+    # it twice. The Counter assertion (rather than a set) is what makes
+    # the converging-DAG duplicate fail loudly instead of being masked.
+    assert Counter(n.name for n in nodes) == Counter({"host1": 1, "vm1": 1, "vm2": 1, "app": 1})
+
     by_depth: dict[int, set[str]] = {}
     for n in nodes:
         by_depth.setdefault(n.depth, set()).add(n.name)
 
     assert by_depth[0] == {"host1"}
     assert by_depth[1] == {"vm1", "vm2"}
+    # app is collapsed to its minimum-depth occurrence (depth 2).
     assert by_depth[2] == {"app"}
     # Result is ordered by (depth, name).
     assert [n.depth for n in nodes] == sorted(n.depth for n in nodes)
@@ -385,6 +398,64 @@ async def test_depth_16_traversal_on_10k_nodes_under_100ms(
     assert elapsed_ms < 100.0, f"depth-16 traversal took {elapsed_ms:.1f} ms"
 
 
+@_skip_no_docker
+async def test_same_tenant_kind_collision_disambiguated_by_kind(
+    pg_engine: None,
+) -> None:
+    """Same ``name``, two ``kind``s, one tenant — bare lookup must refuse.
+
+    ``graph_node`` uniqueness is ``(tenant_id, kind, name)``. Seed a
+    ``target`` named ``svc`` with one dependent and an unrelated ``vm``
+    named ``svc`` with a different dependent. A bare-name traversal
+    cannot pick one anchor, so it raises ``AmbiguousNodeError`` rather
+    than silently merging the two closures. Pinning ``kind`` resolves
+    to exactly the requested object's closure.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        svc_target = await _seed_node(session, tenant_id=TENANT_A_ID, kind="target", name="svc")
+        svc_vm = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="svc")
+        dep_of_target = await _seed_node(
+            session, tenant_id=TENANT_A_ID, kind="vm", name="dep-of-target"
+        )
+        dep_of_vm = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="dep-of-vm")
+        await _seed_edge(
+            session,
+            tenant_id=TENANT_A_ID,
+            from_id=dep_of_target,
+            to_id=svc_target,
+            kind="belongs-to",
+        )
+        await _seed_edge(
+            session,
+            tenant_id=TENANT_A_ID,
+            from_id=dep_of_vm,
+            to_id=svc_vm,
+            kind="runs-on",
+        )
+
+    operator = _operator(TENANT_A_ID)
+
+    with pytest.raises(AmbiguousNodeError) as excinfo:
+        await find_dependents(operator, "svc")
+    assert sorted(excinfo.value.kinds) == ["target", "vm"]
+
+    # Pinning kind picks exactly one closure — no merge.
+    target_dependents = await find_dependents(operator, "svc", kind="target")
+    assert {n.name for n in target_dependents} == {"svc", "dep-of-target"}
+
+    vm_dependents = await find_dependents(operator, "svc", kind="vm")
+    assert {n.name for n in vm_dependents} == {"svc", "dep-of-vm"}
+
+    # find_path applies the same contract independently per endpoint.
+    with pytest.raises(AmbiguousNodeError):
+        await find_path(operator, "svc", "dep-of-target")
+    pinned = await find_path(operator, "svc", "dep-of-target", from_kind="target")
+    assert pinned is not None
+    assert pinned.total_hops == 1
+    assert {n.name for n in pinned.nodes} == {"svc", "dep-of-target"}
+
+
 def test_module_imports_cleanly() -> None:
     """Cheap collection-time smoke that runs on no-Docker sandboxes.
 
@@ -398,5 +469,6 @@ def test_module_imports_cleanly() -> None:
     assert callable(query.find_dependents)
     assert callable(query.find_dependencies)
     assert callable(query.find_path)
+    assert issubclass(query.AmbiguousNodeError, ValueError)
     assert schemas.TopologyNode.model_config["frozen"] is True
     assert schemas.TopologyPath.model_config["frozen"] is True

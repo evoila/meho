@@ -53,16 +53,33 @@ Tenant scoping
 Every statement filters ``graph_node.tenant_id`` *and*
 ``graph_edge.tenant_id`` against ``operator.tenant_id`` in both the
 anchor and the recursive term. A node with the same ``(kind, name)``
-in another tenant is invisible to this tenant's traversal — the
-``(tenant_id, kind, name)`` unique index makes the root lookup
-unambiguous within the tenant.
+in another tenant is invisible to this tenant's traversal.
+
+Anchor disambiguation
+---------------------
+
+``graph_node`` uniqueness is ``(tenant_id, kind, name)`` — a ``target``
+named ``app`` and a ``vm`` named ``app`` legitimately coexist in one
+tenant. Resolving a root by ``name`` alone would anchor on *both* and
+silently traverse a merged closure of two unrelated objects. Every
+entrypoint therefore accepts an optional ``kind``: when supplied the
+anchor is pinned to ``(tenant_id, kind, name)`` (unambiguous by the
+unique index); when omitted and the name resolves to more than one
+kind in the tenant, the call raises :class:`AmbiguousNodeError` rather
+than traversing the merged closure. ``find_path`` applies the same
+contract independently to each endpoint via ``from_kind`` /
+``to_kind``.
 
 SQL parameter binding mirrors the established raw-SQL pattern in
-:mod:`meho_backplane.retrieval.retriever`: ``text()`` with ``:named``
+:mod:`meho_backplane.retrieval.retriever`: every statement is a
+fully-literal ``text("...")`` (nothing interpolated, so the SQLAlchemy
+``avoid-sqlalchemy-text`` SAST rule does not fire) with ``:named``
 binds, a ``CAST(:x AS text) IS NULL OR ...`` guard for the optional
-``kind_filter`` so one statement string serves the filtered and
-unfiltered cases, and UUIDs passed as ``str`` for the asyncpg text
-codec.
+``kind`` pin and ``kind_filter`` so one statement string serves the
+pinned/unpinned and filtered/unfiltered cases, and UUIDs passed as
+``str`` for the asyncpg text codec. The reverse and forward traversal
+directions are two separate literal statements rather than one
+f-string with the join columns swapped.
 """
 
 from __future__ import annotations
@@ -77,7 +94,34 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.topology.schemas import TopologyNode, TopologyPath
 
-__all__ = ["find_dependencies", "find_dependents", "find_path"]
+__all__ = [
+    "AmbiguousNodeError",
+    "find_dependencies",
+    "find_dependents",
+    "find_path",
+]
+
+
+class AmbiguousNodeError(ValueError):
+    """A node name resolved to more than one ``kind`` and no ``kind`` was given.
+
+    ``graph_node`` uniqueness is ``(tenant_id, kind, name)``. When a
+    traversal root (or a :func:`find_path` endpoint) is requested by
+    ``name`` alone and the tenant holds multiple kinds with that name,
+    anchoring on all of them would merge unrelated closures. The query
+    refuses instead of returning silently-wrong data; the caller must
+    re-issue with an explicit ``kind`` (or, later, an alias resolved by
+    the T5/T6 router).
+    """
+
+    def __init__(self, name: str, kinds: list[str]) -> None:
+        self.name = name
+        self.kinds = kinds
+        super().__init__(
+            f"node name {name!r} is ambiguous in this tenant — it exists "
+            f"as kinds {sorted(kinds)!r}; pass kind= to disambiguate"
+        )
+
 
 #: Default traversal depth. Matches the Task #451 contract; deep enough
 #: for real datacentre topologies (target → vm → host → datastore →
@@ -111,66 +155,143 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
     )
 
 
-def _traversal_sql(*, reverse: bool) -> Any:
-    """Build the dependents/dependencies recursive-CTE statement.
-
-    ``reverse=True`` walks edges *into* the frontier node
-    (``e.to_node_id == w.id``, step to ``e.from_node_id``) — the
-    dependents direction. ``reverse=False`` walks *out of* it
-    (``e.from_node_id == w.id``, step to ``e.to_node_id``) — the
-    dependencies direction. Only those two join columns differ; tenant
-    scoping, the optional kind filter, the depth bound, the CYCLE
-    guard, and the ``(depth, name)`` ordering are identical, so the
-    statement is built once with the join columns swapped.
-
-    The anchor row is the query root at depth 0, reached via no edge
-    (``via_edge_kind`` NULL). The depth guard in the recursive term
-    bounds an acyclic-but-deep graph; CYCLE stops true cycles; the
-    final ``NOT is_cycle`` filter drops the cycle-closing rows.
+# Reverse traversal (dependents, "what depends on me"): join edges
+# *into* the frontier node and step to their source. The outer
+# DISTINCT ON (id) collapses a node reached by several converging
+# paths to a single row at its minimum depth — CYCLE only dedupes
+# within one branch, not across converging branches of a DAG, so the
+# closure-wide collapse is what makes the result one row per node.
+# Two fully-literal statements (rather than one f-string) keep the
+# Semgrep avoid-sqlalchemy-text rule from firing: nothing is
+# interpolated, every value is a :named bind.
+_TRAVERSAL_SQL_REVERSE = text(
     """
-    if reverse:
-        join_to_frontier = "e.to_node_id = w.id"
-        step_to = "e.from_node_id"
-    else:
-        join_to_frontier = "e.from_node_id = w.id"
-        step_to = "e.to_node_id"
-
-    return text(
-        f"""
-        WITH RECURSIVE walk AS (
-            SELECT
-                n.id            AS id,
-                n.kind          AS kind,
-                n.name          AS name,
-                n.properties    AS properties,
-                0               AS depth,
-                CAST(NULL AS text) AS via_edge_kind
-            FROM graph_node n
-            WHERE n.name = :name
-              AND n.tenant_id = :tenant_id
-            UNION ALL
-            SELECT
-                n.id,
-                n.kind,
-                n.name,
-                n.properties,
-                w.depth + 1,
-                e.kind
-            FROM graph_edge e
-            JOIN walk w ON {join_to_frontier}
-            JOIN graph_node n ON n.id = {step_to}
-            WHERE e.tenant_id = :tenant_id
-              AND n.tenant_id = :tenant_id
-              AND w.depth < :depth
-              AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
-        ) CYCLE id SET is_cycle USING path
-        SELECT id, kind, name, properties, depth, via_edge_kind
+    WITH RECURSIVE walk AS (
+        SELECT
+            n.id            AS id,
+            n.kind          AS kind,
+            n.name          AS name,
+            n.properties    AS properties,
+            0               AS depth,
+            CAST(NULL AS text) AS via_edge_kind
+        FROM graph_node n
+        WHERE n.name = :name
+          AND n.tenant_id = :tenant_id
+          AND (CAST(:kind AS text) IS NULL OR n.kind = :kind)
+        UNION ALL
+        SELECT
+            n.id,
+            n.kind,
+            n.name,
+            n.properties,
+            w.depth + 1,
+            e.kind
+        FROM graph_edge e
+        JOIN walk w ON e.to_node_id = w.id
+        JOIN graph_node n ON n.id = e.from_node_id
+        WHERE e.tenant_id = :tenant_id
+          AND n.tenant_id = :tenant_id
+          AND w.depth < :depth
+          AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+    ) CYCLE id SET is_cycle USING path
+    SELECT id, kind, name, properties, depth, via_edge_kind
+    FROM (
+        SELECT DISTINCT ON (id)
+            id, kind, name, properties, depth, via_edge_kind
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
-        ORDER BY depth, name
-        """
+        ORDER BY id, depth, name
+    ) deduped
+    ORDER BY depth, name
+    """
+)
+
+# Forward traversal (dependencies, "what I depend on"): the mirror —
+# join edges *out of* the frontier node and step to their target. Only
+# the two join columns differ from the reverse statement; everything
+# else (tenant scoping, kind pin, kind filter, depth bound, CYCLE
+# guard, closure-wide DISTINCT ON dedupe, ordering) is identical.
+_TRAVERSAL_SQL_FORWARD = text(
+    """
+    WITH RECURSIVE walk AS (
+        SELECT
+            n.id            AS id,
+            n.kind          AS kind,
+            n.name          AS name,
+            n.properties    AS properties,
+            0               AS depth,
+            CAST(NULL AS text) AS via_edge_kind
+        FROM graph_node n
+        WHERE n.name = :name
+          AND n.tenant_id = :tenant_id
+          AND (CAST(:kind AS text) IS NULL OR n.kind = :kind)
+        UNION ALL
+        SELECT
+            n.id,
+            n.kind,
+            n.name,
+            n.properties,
+            w.depth + 1,
+            e.kind
+        FROM graph_edge e
+        JOIN walk w ON e.from_node_id = w.id
+        JOIN graph_node n ON n.id = e.to_node_id
+        WHERE e.tenant_id = :tenant_id
+          AND n.tenant_id = :tenant_id
+          AND w.depth < :depth
+          AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+    ) CYCLE id SET is_cycle USING path
+    SELECT id, kind, name, properties, depth, via_edge_kind
+    FROM (
+        SELECT DISTINCT ON (id)
+            id, kind, name, properties, depth, via_edge_kind
+        FROM walk
+        WHERE depth <= :depth
+          AND NOT is_cycle
+        ORDER BY id, depth, name
+    ) deduped
+    ORDER BY depth, name
+    """
+)
+
+# Anchor-ambiguity probe. Returns the distinct kinds a (tenant, name)
+# pair resolves to so the caller can refuse a merged-closure traversal
+# when more than one kind matches and no kind was pinned.
+_ANCHOR_KINDS_SQL = text(
+    """
+    SELECT DISTINCT kind
+    FROM graph_node
+    WHERE tenant_id = :tenant_id
+      AND name = :name
+    """
+)
+
+
+async def _assert_anchor_unambiguous(
+    session: Any,
+    *,
+    tenant_id: str,
+    name: str,
+    kind: str | None,
+) -> None:
+    """Raise :class:`AmbiguousNodeError` if *name* needs a ``kind``.
+
+    No-op when ``kind`` is supplied (the ``(tenant_id, kind, name)``
+    unique index already makes the anchor unambiguous) or when the name
+    resolves to at most one kind in the tenant. Only when ``kind`` is
+    omitted *and* the name spans multiple kinds does the traversal
+    refuse — anchoring on all of them would merge unrelated closures.
+    """
+    if kind is not None:
+        return
+    result = await session.execute(
+        _ANCHOR_KINDS_SQL,
+        {"tenant_id": tenant_id, "name": name},
     )
+    kinds = [r._mapping["kind"] for r in result.fetchall()]
+    if len(kinds) > 1:
+        raise AmbiguousNodeError(name, kinds)
 
 
 async def _traverse(
@@ -178,24 +299,33 @@ async def _traverse(
     name_or_alias: str,
     *,
     depth: int,
+    kind: str | None,
     kind_filter: str | None,
     reverse: bool,
 ) -> list[TopologyNode]:
     """Shared dependents/dependencies recursive-CTE traversal.
 
-    Delegates statement construction to :func:`_traversal_sql` and
-    runs it tenant-scoped on its own session, mirroring the
-    session-per-call shape of the memory / kb services.
+    Picks the reverse or forward literal statement and runs it
+    tenant-scoped on its own session, mirroring the session-per-call
+    shape of the memory / kb services. Resolves the anchor up front:
+    an ambiguous bare-name root (multiple kinds, no ``kind`` pin)
+    raises :class:`AmbiguousNodeError` rather than traversing a merged
+    closure.
     """
-    sql = _traversal_sql(reverse=reverse)
+    sql = _TRAVERSAL_SQL_REVERSE if reverse else _TRAVERSAL_SQL_FORWARD
+    tenant_id = str(operator.tenant_id)
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        await _assert_anchor_unambiguous(
+            session, tenant_id=tenant_id, name=name_or_alias, kind=kind
+        )
         result = await session.execute(
             sql,
             {
                 "name": name_or_alias,
-                "tenant_id": str(operator.tenant_id),
+                "tenant_id": tenant_id,
+                "kind": kind,
                 "depth": depth,
                 "kind_filter": kind_filter,
             },
@@ -209,17 +339,26 @@ async def find_dependents(
     operator: Operator,
     name_or_alias: str,
     *,
+    kind: str | None = None,
     depth: int = _DEFAULT_DEPTH,
     kind_filter: str | None = None,
 ) -> list[TopologyNode]:
     """Reverse traversal: every node that depends on *name_or_alias*.
 
-    Returns a flattened list ordered ``(depth, name)``: the root at
-    depth 0, its immediate dependents at depth 1, transitive dependents
-    at depth 2, and so on, up to and including ``depth``. ``kind_filter``
-    restricts the walk to edges of that ``graph_edge.kind``. The tenant
-    boundary is ``operator.tenant_id`` — a same-named node in another
-    tenant is never returned. Cycles terminate at the CYCLE clause.
+    Returns a flattened list ordered ``(depth, name)`` with **one row
+    per reachable node** (a node reachable by several converging paths
+    is collapsed to its minimum-depth occurrence): the root at depth 0,
+    its immediate dependents at depth 1, transitive dependents at depth
+    2, and so on, up to and including ``depth``.
+
+    ``kind`` pins the anchor to ``(tenant_id, kind, name_or_alias)``,
+    the unique index. Omit it only when the name is unique across kinds
+    in the tenant — if it is not, the call raises
+    :class:`AmbiguousNodeError` instead of merging unrelated closures.
+    ``kind_filter`` restricts the walk to edges of that
+    ``graph_edge.kind``. The tenant boundary is ``operator.tenant_id``
+    — a same-named node in another tenant is never returned. Cycles
+    terminate at the CYCLE clause.
 
     The root node itself is included (depth 0) so a caller can
     distinguish "node exists but has no dependents" (one-element list)
@@ -229,6 +368,7 @@ async def find_dependents(
         operator,
         name_or_alias,
         depth=depth,
+        kind=kind,
         kind_filter=kind_filter,
         reverse=True,
     )
@@ -238,21 +378,24 @@ async def find_dependencies(
     operator: Operator,
     name_or_alias: str,
     *,
+    kind: str | None = None,
     depth: int = _DEFAULT_DEPTH,
     kind_filter: str | None = None,
 ) -> list[TopologyNode]:
     """Forward traversal: everything *name_or_alias* depends on.
 
-    The mirror of :func:`find_dependents` — same shape, same tenant
-    scoping, same cycle safety and depth bound — with edges walked in
-    the opposite direction (out of the current node rather than into
-    it). Root included at depth 0; empty list means the node does not
-    exist in this tenant.
+    The mirror of :func:`find_dependents` — same shape, same one-row-
+    per-node closure dedupe, same ``kind`` disambiguation contract,
+    same tenant scoping, same cycle safety and depth bound — with edges
+    walked in the opposite direction (out of the current node rather
+    than into it). Root included at depth 0; empty list means the node
+    does not exist in this tenant.
     """
     return await _traverse(
         operator,
         name_or_alias,
         depth=depth,
+        kind=kind,
         kind_filter=kind_filter,
         reverse=False,
     )
@@ -287,6 +430,7 @@ _PATH_SQL = text(
         FROM graph_node n
         WHERE n.name = :from_name
           AND n.tenant_id = :tenant_id
+          AND (CAST(:from_kind AS text) IS NULL OR n.kind = :from_kind)
         UNION ALL
         SELECT
             be.dst,
@@ -303,6 +447,7 @@ _PATH_SQL = text(
       ON tn.id = w.node_id
      AND tn.name = :to_name
      AND tn.tenant_id = :tenant_id
+     AND (CAST(:to_kind AS text) IS NULL OR tn.kind = :to_kind)
     WHERE NOT w.is_cycle
     ORDER BY w.hops
     LIMIT 1
@@ -355,6 +500,8 @@ async def find_path(
     from_name: str,
     to_name: str,
     *,
+    from_kind: str | None = None,
+    to_kind: str | None = None,
     max_hops: int = _DEFAULT_MAX_HOPS,
 ) -> TopologyPath | None:
     """Shortest unweighted path from *from_name* to *to_name*.
@@ -368,6 +515,13 @@ async def find_path(
     *from_name* within ``max_hops`` (or either endpoint does not exist
     in this tenant).
 
+    ``from_kind`` / ``to_kind`` pin each endpoint to its
+    ``(tenant_id, kind, name)`` unique row. The same disambiguation
+    contract as the traversal verbs applies independently to each
+    endpoint: an unpinned name that resolves to multiple kinds in the
+    tenant raises :class:`AmbiguousNodeError` rather than letting an
+    unintended endpoint enter the search.
+
     A second resolving query materialises the node rows in path order
     so the :class:`TopologyPath` carries full :class:`TopologyNode`
     records, not bare ids.
@@ -376,12 +530,18 @@ async def find_path(
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
+        await _assert_anchor_unambiguous(
+            session, tenant_id=tenant_id, name=from_name, kind=from_kind
+        )
+        await _assert_anchor_unambiguous(session, tenant_id=tenant_id, name=to_name, kind=to_kind)
         path_result = await session.execute(
             _PATH_SQL,
             {
                 "tenant_id": tenant_id,
                 "from_name": from_name,
                 "to_name": to_name,
+                "from_kind": from_kind,
+                "to_kind": to_kind,
                 "max_hops": max_hops,
             },
         )

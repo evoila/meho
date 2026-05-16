@@ -1,11 +1,22 @@
-# topology — the read-side recursive-CTE graph traversal substrate
+# topology — graph refresh service + recursive-CTE traversal substrate
 
 ## Overview
 
-`backend/src/meho_backplane/topology/` is the read surface every
-blast-radius check and topology question in v0.2 dispatches through. It
-ships three async query verbs and the two Pydantic value types around
-them:
+`backend/src/meho_backplane/topology/` is the G9.1 topology graph
+package (Initiative #363). It has a **write half** (refresh service +
+scheduled background task, G9.1-T3 #450) and a **read half** (the
+recursive-CTE query verbs every blast-radius check dispatches through,
+G9.1-T4 #451). Both ride the `graph_node` + `graph_edge` tables and ORM
+models that G9.1-T1 (#448, migration `0007`) created.
+
+**Write half — entry points:**
+
+- `refresh_target_topology(target, operator) -> RefreshResult` — one
+  on-demand refresh of a single target.
+- `start_topology_refresh_scheduler() -> asyncio.Task` — the lifespan
+  background loop that sweeps every tenant's targets on a cadence.
+
+**Read half — entry points (async, read-only):**
 
 - `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None)`
   — reverse traversal, "what depends on me".
@@ -14,25 +25,29 @@ them:
 - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
   — shortest unweighted path, or `None` if unreachable.
 
-Every verb returns **one row per reachable node** (a node reachable by
-several converging paths is collapsed to its minimum-depth occurrence —
-`CYCLE` alone only dedupes within a single branch). An anchor requested
-by bare `name` that resolves to more than one `kind` in the tenant
-raises `AmbiguousNodeError` rather than traversing a merged closure;
-pass the optional `kind` (or `from_kind` / `to_kind` for `find_path`) to
-pin the `(tenant_id, kind, name)` unique row.
+Every read verb returns **one row per reachable node** (a node reachable
+by several converging paths is collapsed to its minimum-depth occurrence
+— `CYCLE` alone only dedupes within a single branch). An anchor
+requested by bare `name` that resolves to more than one `kind` in the
+tenant raises `AmbiguousNodeError`; pass the optional `kind` (or
+`from_kind` / `to_kind` for `find_path`) to pin the `(tenant_id, kind,
+name)` unique row. The read package never inserts, updates, or deletes.
 
-The package is **read-only**. `graph_node` / `graph_edge` rows are
-written by the refresh service (G9.1-T3, #450); the schema and ORM
-models are migration `0007` (G9.1-T1, #448). This package never
-inserts, updates, or deletes.
-
-The API (T5), CLI (T6), and MCP (T7) fronts consume `query.py` as a
-thin shell and never re-derive the traversal or the tenant boundary.
+The REST/CLI/MCP fronts (T5/T6/T7) and the `docs/architecture/topology.md`
+operator doc are out of scope here — they consume `query.py` as a thin
+shell and land in G9.1-T5 through T8.
 
 ## Key types
 
-### `TopologyNode` — frozen Pydantic v2
+### `RefreshResult` — frozen Pydantic v2 (write half)
+
+Returned by `refresh_target_topology`. Per-object-class disjoint counts:
+a node is in exactly one of `added_nodes` / `updated_nodes` /
+`removed_nodes` (or none, when unchanged); same for edges.
+`duration_ms` covers the whole resolve + discover + reconcile + commit
+cycle. `target_id` echoes the refreshed target.
+
+### `TopologyNode` — frozen Pydantic v2 (read half)
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -43,14 +58,88 @@ thin shell and never re-derive the traversal or the tenant boundary.
 | `depth` | `int` | Distance from the query root: root = 0, immediate = 1, transitive = 2, … |
 | `via_edge_kind` | `str \| None` | The `graph_edge.kind` of the edge used to reach this node; `None` for the root. |
 
-### `TopologyPath` — frozen Pydantic v2
+### `TopologyPath` — frozen Pydantic v2 (read half)
 
 | Field | Type | Meaning |
 |---|---|---|
 | `nodes` | `tuple[TopologyNode, ...]` | Ordered from the `from` node (`depth == 0`) to the `to` node (`depth == total_hops`). |
 | `total_hops` | `int` | Number of edges traversed; equals `len(nodes) - 1`. |
 
-## Control flow
+## Control flow — write half
+
+### `refresh_target_topology`
+
+1. `resolve_connector(target)` → `get_or_create_connector_instance(cls)`
+   (the same cached-singleton path the G0.6 dispatcher uses).
+2. `await connector.discover_topology(target)` → a `TopologyHints`
+   snapshot (nodes + edges, each with `properties`).
+3. Open one transactional session (`sessionmaker() ... session.begin()`).
+4. `_reconcile_nodes` — diff the snapshot nodes against existing
+   `graph_node` rows for `(tenant_id, target_id)`:
+   - INSERT nodes in the snapshot but not the DB.
+   - For nodes in both: refresh `last_seen`, and `properties` when they
+     changed (a no-change refresh only touches `last_seen`, so the
+     `unchanged` path reports zero `updated`).
+   - Soft-delete (set `last_seen = NULL`) nodes in the DB but absent
+     from the snapshot. A node already soft-deleted is not re-counted.
+   Returns two key→id maps: `live` (snapshot-present nodes only) and
+   `all` (every node in the target scope, including soft-deleted).
+5. `_reconcile_edges` — same diff for edges, keyed by
+   `(from_kind, from_name, to_kind, to_name, kind)`. Existing edges are
+   loaded by `from_node_id` over the **`all`** node-id set so an edge
+   whose endpoint was just dropped is still found and soft-deleted
+   rather than orphaned. Discovered edge endpoints resolve through the
+   **`live`** map; an edge whose endpoint left the snapshot falls
+   through to the soft-delete pass. A discovered edge with no matching
+   live node (a malformed connector emitting an edge without its node)
+   is logged and skipped — never inserted as a dangling FK.
+6. `_write_audit_and_broadcast` adds **one `audit_log` row to the same
+   session** — `method="REFRESH"`, `path="topology.refresh"`,
+   `payload={op_id, op_class:"read", target_id, <six counts>}`. Because
+   the audit row is in the reconcile transaction, the spec's "no
+   success without a committed audit row" invariant holds: an audit
+   failure rolls the whole refresh back.
+7. After commit, publish one `BroadcastEvent` (op_class `read`,
+   aggregate counts only — no node/edge names, so the read-class PII
+   default holds without a redactor pass). Broadcast is **fail-open**:
+   a publish exception is logged, never raised.
+
+A failure anywhere in steps 1–6 raises out of the `session.begin()`
+block, rolling everything back: no half-applied graph, no audit row.
+
+### Scheduler
+
+`_scheduler_loop` is a forever loop registered as an `asyncio.Task` in
+`main.lifespan` (after connector auto-discovery; cancelled + awaited on
+shutdown before the DB/redis pools dispose). Each iteration:
+
+- `_run_one_sweep` — enumerate tenants, then each tenant's targets, and
+  call `_refresh_one_target` per target.
+- `_refresh_one_target` — skip if inside the target's backoff window;
+  open a lock session, `pg_try_advisory_lock(hash(tenant, target))`
+  (non-blocking; on non-PostgreSQL the lock is a no-op since the test
+  process is single-replica), run the refresh, `pg_advisory_unlock` in
+  a `finally`. Success clears backoff; failure increments it
+  (`2^n × interval`, capped at 4 h) and is swallowed so one bad target
+  never stalls the sweep.
+- Sleep `TOPOLOGY_REFRESH_INTERVAL_SECONDS` (default 3600), repeat. A
+  sweep-level exception is logged and the loop continues — only
+  `CancelledError` stops it.
+
+The advisory-lock key is a blake2b digest of the two UUIDs masked to 63
+bits (non-negative, fits asyncpg's signed `bigint` binding).
+
+### Why `asyncio.create_task`, not APScheduler 4.x
+
+Task #450 prefers APScheduler 4.x but explicitly allows reusing an
+in-lifespan `asyncio` loop. As of 2026-05 APScheduler 4.x has only ever
+shipped `4.0.0aN` alphas, documented by the maintainer as "should NOT be
+used in production". The chassis ships to production and follows a "no
+new substrate / minimal dependencies" discipline, so the stdlib loop —
+the issue's own stated fallback — is the right call. Revisit if 4.x
+stabilises and a richer scheduling need (cron, persisted jobs) appears.
+
+## Control flow — read half
 
 ### Edge-direction model
 
@@ -128,45 +217,62 @@ bound is an independent second guard against acyclic-but-deep graphs.
 
 ## Dependencies
 
-- `meho_backplane.db.engine.get_sessionmaker` — each verb opens its
-  own `AsyncSession` (session-per-call, mirroring the memory / kb
-  services). No caller-owned session.
-- `meho_backplane.db.models.GraphNode` / `GraphEdge` — schema +
-  indexes (migration `0007`). The recursive joins ride
+- `meho_backplane.connectors.resolver.resolve_connector` +
+  `meho_backplane.operations._handler_resolve.get_or_create_connector_instance`
+  — connector resolution (G0.6).
+- `meho_backplane.connectors.schemas` — `TopologyHints` / `NodeHint` /
+  `EdgeHint` (G9.1-T2 #449).
+- `meho_backplane.db.models` — `GraphNode` / `GraphEdge` / `AuditLog` /
+  `Target` / `Tenant`. The recursive joins ride
   `graph_edge_tenant_from_idx` / `graph_edge_tenant_to_idx`.
+- `meho_backplane.db.engine.get_sessionmaker` — each read verb opens
+  its own `AsyncSession` (session-per-call, mirroring the memory / kb
+  services). No caller-owned session.
 - `meho_backplane.auth.operator.Operator` — `operator.tenant_id` is
-  the only tenant boundary; every statement filters node and edge
+  the only tenant boundary; every read statement filters node and edge
   `tenant_id` against it.
+- `meho_backplane.broadcast` — `BroadcastEvent` / `publish_event`
+  (fail-open, G6.1).
+- `meho_backplane.settings` — `topology_refresh_interval_seconds`.
+- `meho_backplane.metrics` — `TOPOLOGY_REFRESH_TOTAL` counter
+  (`outcome` label: `ok` / `error` / `skipped_locked`).
 - SQLAlchemy 2.0 `text()` with `:named` binds — same raw-SQL pattern
   `meho_backplane.retrieval.retriever` uses (`CAST(:x AS text) IS NULL
-  OR ...` for optional filters, UUIDs passed as `str`). Every statement
-  is a module-level fully-literal `text("...")`; nothing is
+  OR ...` for optional filters, UUIDs passed as `str`). Every read
+  statement is a module-level fully-literal `text("...")`; nothing is
   interpolated so the `avoid-sqlalchemy-text` SAST rule does not fire.
 
-## Known issues
+## Known issues / out of scope
 
-- **PostgreSQL-only.** The `WITH RECURSIVE ... CYCLE` clause is not
-  implemented by SQLite, so these verbs cannot run on the unit
-  suite's per-test SQLite DB. Tests live in
+- **PostgreSQL-only read path.** The `WITH RECURSIVE ... CYCLE` clause
+  is not implemented by SQLite, so the query verbs cannot run on the
+  unit suite's per-test SQLite DB. Tests live in
   `backend/tests/integration/test_topology_query.py` against a real
   `pgvector/pgvector:pg16` testcontainer (Docker-gated skip on
-  no-Docker sandboxes; runs in CI). v0.2 production is PostgreSQL, so
-  this is a test-harness placement, not a runtime limitation. The pure
-  Pydantic result-model contracts (deep `properties` immutability,
-  `TopologyPath` invariants) have no DB dependency and are unit-tested
-  in `backend/tests/test_topology_query_schemas.py`, which runs on
-  every sandbox.
+  no-Docker sandboxes; runs in CI). The pure Pydantic result-model
+  contracts (deep `properties` immutability, `TopologyPath` invariants)
+  have no DB dependency and are unit-tested in
+  `backend/tests/test_topology_query_schemas.py`.
 - **Unweighted only.** `find_path` treats every edge as cost 1.
   Weighted-edge support is deferred to v0.2.next per #363.
 - **No alias resolution yet.** `name_or_alias` is matched against
   `graph_node.name` directly; alias → name resolution is the API/CLI
   router's job (T5/T6), not this substrate's.
+- Streaming refresh progress for very large topologies — v0.2 is
+  single-shot; deferred per Initiative #363.
+- Graph history / time-travel — soft-delete here only makes a node
+  invisible to default queries; the history surface is G9.3.
+- Per-connector `discover_topology` overrides — each G3.x Initiative.
+- The advisory lock is a multi-replica stampede guard only; a single
+  process serialises naturally and the SQLite test path no-ops it.
 
 ## References
 
-- Parent Initiative: G9.1 #363.
+- Parent Initiative: G9.1 #363; prerequisites #448 / #449.
+- Write half: G9.1-T3 #450. Read half: G9.1-T4 #451.
 - Prerequisite schema: G9.1-T1 #448 (migration `0007`).
-- This task: G9.1-T4 #451.
+- Audit/broadcast pattern mirrored from
+  `backend/src/meho_backplane/operations/_audit.py`.
 - PostgreSQL recursive CTE + `CYCLE`:
   <https://www.postgresql.org/docs/17/queries-with.html> §7.8.2.2
   (identical in PG 16, the chassis floor).

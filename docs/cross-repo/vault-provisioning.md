@@ -31,44 +31,64 @@ cross-repo deps (consumer commitment #5 — see
 in the consumer repo). The fifth — the federation-proof test KV
 path — is the surface most easily missed during provisioning.
 
-### 1. JWT/OIDC auth method
+### 1. JWT auth method — on a **dedicated mount**
 
-Mount at `auth/oidc/` (the default Vault convention; configurable
-via `VAULT_OIDC_MOUNT_PATH` if a non-default mount is operationally
-necessary).
+The backplane authenticates with Vault's **JWT auth method**
+(`auth.jwt.jwt_login` → `POST /auth/<mount>/login`; see
+[`backend/src/meho_backplane/auth/vault.py`](../../backend/src/meho_backplane/auth/vault.py)),
+forwarding the operator/service JWT for JWKS validation. It does
+**not** use the interactive `vault login -method=oidc` flow. Mount the
+JWT method at a **dedicated path** — `auth/jwt` matches the
+backplane's default `VAULT_OIDC_MOUNT_PATH` (`jwt`):
 
 ```bash
-vault auth enable oidc
-vault write auth/oidc/config \
+vault auth enable -path=jwt jwt
+vault write auth/jwt/config \
   oidc_discovery_url=https://<keycloak-host>/realms/<realm> \
-  oidc_client_id=<keycloak-client-id> \
-  oidc_client_secret=@<(...) \
+  oidc_discovery_ca_pem=@<ca.pem> \
   default_role=meho-mcp
 ```
 
+`oidc_discovery_ca_pem` is only needed when Keycloak presents an
+internal-CA cert. Any mount path works — set `VAULT_OIDC_MOUNT_PATH`
+to match (e.g. `-path=jwt-meho` ↔ `VAULT_OIDC_MOUNT_PATH=jwt-meho`).
 The discovery URL must match `KEYCLOAK_ISSUER_URL` in the backplane's
 ConfigMap exactly. Trailing slashes are normalised on the producer
 side.
 
+> **Do not put this on an `auth/oidc/` mount.** Once a mount is in
+> OIDC-login mode (`oidc_discovery_url` + `oidc_client_id` set), Vault
+> (confirmed on 1.21.2) rejects a `role_type=jwt` role on that same
+> mount — login fails with `error configuring token validator:
+> unsupported config type`, and setting both `oidc_discovery_url` and
+> `jwks_url` on one config is rejected too. It also collides with
+> operators who want the interactive `vault login -method=oidc` path
+> on `auth/oidc/`: a single mount cannot serve both an OIDC-login role
+> and the backplane's `role_type=jwt` role. A dedicated `jwt`-type
+> mount serves `role_type=jwt` with `oidc_discovery_url` for JWKS with
+> no conflict. (evoila/meho#553; consumer-side
+> [`evoila-bosnia/claude-rdc-hetzner-dc#524`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/524).)
+
 ### 2. Role `meho-mcp`
 
-Bound to the Keycloak realm and to the backplane's audience.
-Default role name `meho-mcp` per
-[`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)'s
+Bound to the Keycloak realm and to the backplane's audience, on the
+dedicated `jwt` mount from surface 1. Default role name `meho-mcp`
+per [`backend/src/meho_backplane/settings.py`](../../backend/src/meho_backplane/settings.py)'s
 `VAULT_OIDC_ROLE`; configurable via env var if a different name fits
 the operator's Vault conventions.
 
 ```bash
-vault write auth/oidc/role/meho-mcp \
+vault write auth/jwt/role/meho-mcp \
+  role_type=jwt \
   user_claim=sub \
   bound_audiences=<keycloak-audience> \
-  role_type=jwt \
   policies=meho-mcp \
-  ttl=1h
+  token_ttl=1h
 ```
 
 The `bound_audiences` value must match `KEYCLOAK_AUDIENCE` in the
-backplane's ConfigMap.
+backplane's ConfigMap. (Substitute `jwt` with your chosen mount path
+if you didn't use the default.)
 
 ### 3. Policy `meho-mcp`
 
@@ -146,12 +166,13 @@ against the operator's Keycloak identity, OR a service-account
 JWT bound to the same role).
 
 ```bash
-# 1. Auth method exists with correct discovery URL
-vault read -format=json auth/oidc/config \
+# 1. JWT auth method exists with correct discovery URL
+#    (auth/jwt/ — the dedicated mount, NOT auth/oidc/)
+vault read -format=json auth/jwt/config \
   | jq '{oidc_discovery_url, default_role}'
 
 # 2. Role exists with correct audience binding
-vault read -format=json auth/oidc/role/meho-mcp \
+vault read -format=json auth/jwt/role/meho-mcp \
   | jq '{bound_audiences, user_claim, role_type, policies}'
 
 # 3. Policy grants meho/* read
@@ -179,7 +200,8 @@ everything it needs from Vault.
 | Failure | Diagnostic on the producer side | Consumer-side fix |
 | --- | --- | --- |
 | `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultUnreachableError"` | TCP / TLS / timeout to `VAULT_ADDR`. The readiness probe `/ready` also reports `vault` as unhealthy. | Verify `VAULT_ADDR` resolves and is reachable from the backplane Pod's network policy (egress to Vault is in the chart's NetworkPolicy by default — check `networkPolicy.vaultCIDR`) |
-| `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultRoleDeniedError"` | Vault accepted the connection but rejected the JWT for the configured role. | Verify surface 2 (role binding). Most often: `bound_audiences` doesn't match the audience the backplane is forwarding (cross-check `KEYCLOAK_AUDIENCE` env var against `vault read auth/oidc/role/meho-mcp`) |
+| `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: VaultRoleDeniedError"` | Vault accepted the connection but rejected the JWT for the configured role. | Verify surface 2 (role binding). Most often: `bound_audiences` doesn't match the audience the backplane is forwarding (cross-check `KEYCLOAK_AUDIENCE` env var against `vault read auth/jwt/role/meho-mcp`) |
+| `/api/v1/health` returns `vault.reachable=false`, `detail="login_failed: …"`; Vault server log shows `error configuring token validator: unsupported config type` | The `meho-mcp` `role_type=jwt` role was created on an `auth/oidc/` mount that's in OIDC-login mode. Vault (≥1.21.2) refuses `role_type=jwt` on an OIDC-configured mount. | Move the JWT method + role to a **dedicated mount** per surface 1 (`vault auth enable -path=jwt jwt`) and set `VAULT_OIDC_MOUNT_PATH` to match. Do not co-locate with an interactive-OIDC-login mount. (evoila/meho#553) |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: InvalidPath"` | **Missing surface 5** — federation-proof KV path doesn't exist. | Run the provisioning command from surface 5 above |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: Forbidden"` | **Missing surface 3** — policy doesn't grant read on `secret/meho/*`. | Verify surface 3 (`vault policy read meho-mcp`); the policy must include both `secret/data/meho/*` and `secret/metadata/meho/*` |
 | `/api/v1/health` returns `vault.reachable=true`, `vault.read_ok=false`, `detail="read_failed: KeyError"` or `read_failed: TypeError` | Vault returned an unexpected payload shape — KV-v1 mount instead of v2, proxy mangling the response, etc. | Verify surface 4 (KV v2 mount); the mount must be type `kv` with `options.version="2"` |
@@ -192,4 +214,5 @@ everything it needs from Vault.
 - Cross-repo handshake (cluster-side): [`./rke2-infra-coordination.md`](./rke2-infra-coordination.md)
 - Smoke leg #4 contract: [`../acceptance/smoke.md`](../acceptance/smoke.md)
 - Consumer-side parent ticket: [`evoila-bosnia/claude-rdc-hetzner-dc#293`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/293) — Vault OIDC federation to Keycloak (surfaces 1-4)
-- Vault OIDC docs: <https://developer.hashicorp.com/vault/docs/auth/jwt>
+- Dedicated-jwt-mount correction: [evoila/meho#553](https://github.com/evoila/meho/issues/553); consumer-side implementation [`evoila-bosnia/claude-rdc-hetzner-dc#524`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/524)
+- Vault JWT/OIDC auth docs: <https://developer.hashicorp.com/vault/docs/auth/jwt> (note: the **JWT** method — `role_type=jwt` — is distinct from OIDC-login mode on the same backend)

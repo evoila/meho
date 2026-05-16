@@ -69,6 +69,7 @@ import hvac.exceptions
 import pytest
 import requests.exceptions
 
+from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import all_connectors_v2
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -343,9 +344,10 @@ async def test_execute_unknown_op_returns_dispatcher_unknown_op_shape(
     assert result.extras.get("error_code") == "unknown_op"
     assert "known_op_count" in result.extras
     # The known_op_count reflects the descriptors registered for the
-    # (product="vault", version="1.x", impl_id="vault") triple --
-    # exactly one (vault.kv.read) from the typed-op upsert.
-    assert result.extras["known_op_count"] >= 1
+    # (product="vault", version="1.x", impl_id="vault") triple -- the
+    # full KV-v2 group (read, list, put, versions, delete) from the
+    # G3.3-T1 typed-op upsert.
+    assert result.extras["known_op_count"] >= 5
 
 
 # ---------------------------------------------------------------------------
@@ -506,3 +508,248 @@ async def test_execute_read_failure_surfaces_non_vault_client_error_class(
     assert result.error.startswith("connector_error:")
     assert result.extras.get("error_code") == "connector_error"
     assert result.extras.get("exception_class") == expected_exc_class
+
+
+# ---------------------------------------------------------------------------
+# G3.3-T1 — vault.kv.list / put / versions / delete
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_vault_kv_list_returns_key_names(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    fake = install_fake_client(monkeypatch, keys=["api-key", "db/"])
+    result = await VaultConnector().execute(
+        _make_target(jwt="op-jwt"),
+        "vault.kv.list",
+        {"path": "meho/test"},
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["keys"] == ["api-key", "db/"]
+    # Mount defaults to "secret" when the caller omits it.
+    assert fake.secrets.kv.v2.list_calls == [
+        {"path": "meho/test", "mount_point": "secret"},
+    ]
+
+
+async def test_execute_vault_kv_list_honors_explicit_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    fake = install_fake_client(monkeypatch, keys=["x"])
+    result = await VaultConnector().execute(
+        _make_target(),
+        "vault.kv.list",
+        {"mount": "kv-prod", "path": "team"},
+    )
+
+    assert result.status == "ok", result.error
+    assert fake.secrets.kv.v2.list_calls == [
+        {"path": "team", "mount_point": "kv-prod"},
+    ]
+
+
+async def test_execute_vault_kv_put_writes_new_version(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    fake = install_fake_client(monkeypatch, kv_version=4)
+    result = await VaultConnector().execute(
+        _make_target(jwt="op-jwt"),
+        "vault.kv.put",
+        {"path": "meho/test", "data": {"token": "s3cr3t"}, "cas": 4},
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["version"] == 5
+    assert fake.secrets.kv.v2.put_calls == [
+        {
+            "path": "meho/test",
+            "secret": {"token": "s3cr3t"},
+            "cas": 4,
+            "mount_point": "secret",
+        },
+    ]
+
+
+async def test_execute_vault_kv_put_cas_omitted_passes_none(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """No ``cas`` ⇒ hvac called with ``cas=None`` (unconditional write)."""
+    fake = install_fake_client(monkeypatch)
+    result = await VaultConnector().execute(
+        _make_target(),
+        "vault.kv.put",
+        {"path": "meho/test", "data": {"k": "v"}},
+    )
+
+    assert result.status == "ok", result.error
+    assert fake.secrets.kv.v2.put_calls[0]["cas"] is None
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"path": "p"}, {"data": {"k": "v"}}, {"path": "p", "data": {}}],
+    ids=["missing-data", "missing-path", "empty-data"],
+)
+async def test_execute_vault_kv_put_invalid_params_returns_dispatcher_error(
+    monkeypatch: pytest.MonkeyPatch,
+    params: dict[str, Any],
+    _registered_vault_typed_ops: None,
+) -> None:
+    """Schema enforces ``required`` path+data and ``minProperties`` on data."""
+    install_fake_client(monkeypatch)
+    result = await VaultConnector().execute(_make_target(), "vault.kv.put", params)
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("invalid_params:")
+    assert result.extras.get("error_code") == "invalid_params"
+
+
+async def test_execute_vault_kv_versions_returns_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    fake = install_fake_client(
+        monkeypatch,
+        kv_version=3,
+        versions_meta={
+            "1": {"created_time": "2026-01-01T00:00:00Z", "destroyed": False},
+            "3": {"created_time": "2026-03-01T00:00:00Z", "destroyed": False},
+        },
+    )
+    result = await VaultConnector().execute(
+        _make_target(),
+        "vault.kv.versions",
+        {"path": "meho/test"},
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["current_version"] == 3
+    assert set(result.result["versions"]) == {"1", "3"}
+    assert fake.secrets.kv.v2.versions_calls == [
+        {"path": "meho/test", "mount_point": "secret"},
+    ]
+
+
+async def test_execute_vault_kv_delete_soft_deletes_versions(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    fake = install_fake_client(monkeypatch)
+    result = await VaultConnector().execute(
+        _make_target(jwt="op-jwt"),
+        "vault.kv.delete",
+        {"path": "meho/test", "versions": [2, 3]},
+    )
+
+    assert result.status == "ok", result.error
+    assert isinstance(result.result, dict)
+    assert result.result["deleted_versions"] == [2, 3]
+    assert fake.secrets.kv.v2.delete_calls == [
+        {"path": "meho/test", "versions": [2, 3], "mount_point": "secret"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"path": "p"}, {"path": "p", "versions": []}, {"versions": [1]}],
+    ids=["missing-versions", "empty-versions", "missing-path"],
+)
+async def test_execute_vault_kv_delete_invalid_params_returns_dispatcher_error(
+    monkeypatch: pytest.MonkeyPatch,
+    params: dict[str, Any],
+    _registered_vault_typed_ops: None,
+) -> None:
+    """Schema enforces ``required`` path+versions and ``minItems`` on versions."""
+    install_fake_client(monkeypatch)
+    result = await VaultConnector().execute(_make_target(), "vault.kv.delete", params)
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("invalid_params:")
+    assert result.extras.get("error_code") == "invalid_params"
+
+
+@pytest.mark.parametrize(
+    "op_id,params,exc_kwarg",
+    [
+        ("vault.kv.list", {"path": "p"}, "list_exc"),
+        ("vault.kv.put", {"path": "p", "data": {"k": "v"}}, "put_exc"),
+        ("vault.kv.versions", {"path": "p"}, "versions_exc"),
+        ("vault.kv.delete", {"path": "p", "versions": [1]}, "delete_exc"),
+    ],
+    ids=["list", "put", "versions", "delete"],
+)
+async def test_execute_kv_ops_vault_error_envelope_surfaces_connector_error(
+    monkeypatch: pytest.MonkeyPatch,
+    op_id: str,
+    params: dict[str, Any],
+    exc_kwarg: str,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """A Vault-side raise on any KV-v2 verb → structured connector_error.
+
+    Mirrors the ``vault.kv.read`` read-phase contract: the handler
+    raises, the dispatcher wraps it with ``extras.exception_class``.
+    """
+    install_fake_client(
+        monkeypatch,
+        **{exc_kwarg: RuntimeError("permission denied")},
+    )
+    result = await VaultConnector().execute(_make_target(), op_id, params)
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_error:")
+    assert result.extras.get("error_code") == "connector_error"
+    assert result.extras.get("exception_class") == "RuntimeError"
+
+
+async def test_execute_vault_kv_list_malformed_payload_is_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """A malformed hvac list payload → KeyError → structured connector_error."""
+    fake = install_fake_client(monkeypatch)
+
+    def _bad_list(path: str, mount_point: str = "secret", **_kw: Any) -> dict[str, Any]:
+        return {"data": {}}  # missing "keys"
+
+    monkeypatch.setattr(fake.secrets.kv.v2, "list_secrets", _bad_list)
+    result = await VaultConnector().execute(_make_target(), "vault.kv.list", {"path": "p"})
+
+    assert result.status == "error"
+    assert result.extras.get("error_code") == "connector_error"
+    assert result.extras.get("exception_class") == "KeyError"
+
+
+@pytest.mark.parametrize(
+    "op_id,expected_class",
+    [
+        ("vault.kv.read", "credential_read"),
+        ("vault.kv.list", "credential_read"),
+        ("vault.kv.versions", "read"),
+        ("vault.kv.put", "write"),
+        ("vault.kv.delete", "write"),
+    ],
+)
+def test_kv_op_ids_classify_per_decision_3(op_id: str, expected_class: str) -> None:
+    """The G6 broadcast classifier (op-id based, decision #3) tags the KV-v2 group.
+
+    The shipped G0.6 substrate has no per-row ``op_class`` column on
+    ``endpoint_descriptor``; decision #3 locks the sensitivity
+    classifier on the op-id via ``_CREDENTIAL_READ_OPS``. This pins
+    the register-time contract the DoD asks for: ``vault.kv.read`` and
+    ``vault.kv.list`` are ``credential_read`` (aggregate-only
+    broadcast); ``vault.kv.versions`` is a plain metadata ``read``;
+    the mutating verbs are ``write``.
+    """
+    assert classify_op(op_id) == expected_class

@@ -111,12 +111,27 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_module_state() -> Iterator[None]:
-    """Reset dispatcher caches + connector registry around every test."""
+    """Reset dispatcher caches + connector registry + typed-op registrars.
+
+    ``_TYPED_OP_REGISTRARS`` is a process-global list the chassis
+    lifespan iterates at startup. ``test_importing_..._queues_composite_registrar``
+    calls :func:`clear_typed_op_registrars` and then ``importlib.reload``\\ s
+    only the vmware composites package — which re-registers *just* that
+    one registrar, permanently dropping every other registrar (Vault,
+    K8s, …) for the rest of the pytest session. A later app-booting
+    test (``test_mcp_tool_meho_status``) then runs lifespan over the
+    truncated list and mis-wires its health probes (observed:
+    ``vault.reachable`` reported wrong). Snapshot + restore the list
+    around every test in this module so the mutation can't leak —
+    same discipline already applied to the connector registry above.
+    """
+    saved_registrars = list(_TYPED_OP_REGISTRARS)
     reset_dispatcher_caches()
     clear_registry()
     yield
     reset_dispatcher_caches()
     clear_registry()
+    _TYPED_OP_REGISTRARS[:] = saved_registrars
 
 
 @pytest.fixture

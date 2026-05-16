@@ -15,10 +15,13 @@ Resolution input
 The resolver reads two attributes from ``target``:
 
 * ``target.product`` — product slug (matches ``Connector.product``).
-* ``target.fingerprint.version`` — version string from the most recent
-  fingerprint of this target (e.g. ``"9.0.2"``). Optional — when
-  unknown, the resolver falls back to v1-style entries (entries
-  registered with ``version=""``).
+* ``target.fingerprint`` → ``version`` — version string from the most
+  recent probe of this target (e.g. ``"9.0.2"``). In production
+  ``target.fingerprint`` is a JSON **dict** (the probe route persists
+  ``FingerprintResult.model_dump(mode="json")``); duck-typed test
+  targets may instead expose an object with ``.version``. The resolver
+  reads both shapes. Optional — when unknown, the resolver falls back
+  to v1-style entries (entries registered with ``version=""``).
 
 A third, optional attribute participates in the tie-break:
 
@@ -75,6 +78,7 @@ to make the binding visible in ``pyproject.toml``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -330,11 +334,24 @@ def _run_tie_break_ladder(
 
 
 def _resolve_target_version(target: Any) -> str | None:
-    """Pull ``target.fingerprint.version`` if present; tolerate absence."""
+    """Pull the target's fingerprinted version, tolerating absence.
+
+    ``target.fingerprint`` is a JSON **dict** in production: the probe
+    route persists ``FingerprintResult.model_dump(mode="json")`` to the
+    ``Target.fingerprint`` column, so the ORM hands the resolver a
+    ``Mapping``, not an object. Tests (and the module docstring's
+    duck-typed contract) may instead supply an object exposing
+    ``.version``. Read both shapes — dict via key access, object via
+    attribute access — so a real probed target resolves the same way a
+    duck-typed test target does. Reading only the attribute form (the
+    prior behaviour) made every versioned connector unresolvable for
+    every real target, since ``getattr(dict, "version", None)`` is
+    always ``None``.
+    """
     fp = getattr(target, "fingerprint", None)
     if fp is None:
         return None
-    version = getattr(fp, "version", None)
+    version = fp.get("version") if isinstance(fp, Mapping) else getattr(fp, "version", None)
     if not isinstance(version, str) or not version:
         return None
     return version

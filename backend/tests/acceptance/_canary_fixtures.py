@@ -26,45 +26,52 @@ through the dispatcher and returns ok against vcsim".
 This module inserts only the descriptor rows each dispatch test
 actually probes, with hand-authored ``method`` / ``path`` /
 ``handler_ref`` triples; no LLM, no embeddings, no grouping pass.
-Tests that need search-quality (the agent-flow E2E) drive their
-own copy of the canary's ingest pattern -- see
-:mod:`tests.acceptance.test_vmware_rest_agent_flow_e2e` for that
-path.
 
-The agent-flow E2E test does NOT consume this module's fixture; it
-uses the canary's ingest pattern (copied compactly) so the
-:func:`~meho_backplane.operations.meta_tools.search_operations` call
-has BM25 + cosine signal to rank against. Both paths converge on the
-same patched :class:`VmwareRestConnector` instance.
+All three vcsim dispatch modules consume :func:`ingested_canary_vcsim`
+directly, including
+:mod:`tests.acceptance.test_vmware_rest_agent_flow_e2e`: its
+:func:`~meho_backplane.operations.meta_tools.search_operations` step
+ranks over the seeded :data:`DISPATCH_DESCRIPTORS` summary strings on
+BM25 alone (the minimal six-op set is enough to rank
+``GET:/vcenter/vm`` first for "list virtual machines"; the full-corpus
+search-quality assertion stays in ``test_g07_vsphere_canary.py``). All
+paths converge on the same patched :class:`VmwareRestConnector`
+instance.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2
+from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Target
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
-from tests.acceptance._vcsim import VcsimEndpoint, patch_vmware_connector_for_vcsim
 
 __all__ = [
+    "CANARY_BASE_URL",
     "CANARY_CONNECTOR_ID",
+    "CANARY_FINGERPRINT",
     "CANARY_IMPL_ID",
     "CANARY_OPERATOR_TENANT",
     "CANARY_PRODUCT",
     "CANARY_VERSION",
+    "CANARY_VMS",
     "DISPATCH_DESCRIPTORS",
     "VCSIM_TARGET_NAME",
     "IngestedCanaryVcsim",
     "ingested_canary_vcsim",
+    "prewarmed_embeddings",
 ]
 
 #: Connector triple under test. Matches the canary's constants in
@@ -83,6 +90,54 @@ CANARY_OPERATOR_TENANT: UUID = UUID("00000000-0000-0000-0000-0000000000ff")
 #: Name used for the seeded vcsim Target row. Tests refer to vcsim by
 #: this stable name rather than synthesising one per test.
 VCSIM_TARGET_NAME: str = "vcsim-acceptance"
+
+#: Probe fingerprint persisted on the seeded :class:`Target`.
+#:
+#: The G0.6 resolver
+#: (:func:`~meho_backplane.connectors.resolver.resolve_connector`) binds
+#: a target to a connector implementation by matching the target's
+#: ``product`` + fingerprinted ``version`` against each connector's
+#: advertised ``supported_version_range``. ``VmwareRestConnector``
+#: advertises ``">=8.5,<10.0"``, so a target with **no** fingerprint
+#: resolves to *zero* candidates → ``NoMatchingConnector`` →
+#: ``no_connector``. A real operator-registered vSphere target always
+#: carries a probe fingerprint (CLAUDE.md postulate 3 — "targets are
+#: matched to connectors via fingerprint"); seeding one here makes the
+#: fixture represent a *probed* target rather than a half-registered
+#: one. Stored as ``FingerprintResult.model_dump(mode="json")`` — the
+#: exact dict shape the probe route persists to ``Target.fingerprint``.
+CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
+    vendor="VMware, Inc.",
+    product="vcenter",
+    version=CANARY_VERSION,
+    build="24021000",
+    reachable=True,
+    probed_at=datetime(2026, 5, 15, 12, 0, 0, tzinfo=UTC),
+    probe_method="rest-probe",
+).model_dump(mode="json")
+
+#: Base URL the seeded :class:`Target` points at. Port 443 keeps
+#: ``HttpConnector._base_url`` from appending a ``:port`` suffix, so
+#: the respx router's ``base_url`` matches the connector's client URL
+#: exactly. ``.test.invalid`` (RFC 6761 reserved) guarantees no real
+#: network egress even if respx interception ever regressed.
+CANARY_BASE_URL: str = "https://vcenter-canary.test.invalid"
+
+#: vCenter REST's modern ``GET /api/vcenter/vm`` returns a bare JSON
+#: array. 50 rows matches what the historical vcsim seed topology
+#: would have produced, so the agent-flow + JSONFlux assertions
+#: (``len(vms) == 50`` / ``handle.total_rows == 50``) are unchanged by
+#: the move off vcsim.
+CANARY_VMS: list[dict[str, object]] = [
+    {
+        "vm": f"vm-{i}",
+        "name": f"canary-vm-{i:02d}",
+        "power_state": "POWERED_ON" if i % 3 else "POWERED_OFF",
+        "cpu_count": 2,
+        "memory_size_MiB": 4096,
+    }
+    for i in range(50)
+]
 
 
 #: Descriptor rows the dispatch smoke + JSONFlux force-mode tests
@@ -144,7 +199,7 @@ class IngestedCanaryVcsim:
     operator: Operator
     connector_id: str
     target_name: str
-    endpoint: VcsimEndpoint
+    base_url: str
 
 
 async def _insert_dispatch_descriptors(
@@ -206,6 +261,40 @@ async def _insert_dispatch_descriptors(
 
 
 @pytest.fixture
+async def prewarmed_embeddings(pg_engine: None) -> None:
+    """Load the fastembed model before any respx router is active.
+
+    Depends on ``pg_engine`` (not for the DB, but because that fixture
+    chain populates the integration settings env —
+    ``KEYCLOAK_ISSUER_URL`` et al. — that
+    :func:`get_embedding_service` reads via ``get_settings()``).
+    Tests listing this before ``ingested_canary_vcsim`` therefore get:
+    env ready → model loaded (real network, no respx) → router opens.
+
+    ``search_operations`` (agent-flow step 3) embeds the query via the
+    cached :func:`~meho_backplane.retrieval.embedding.get_embedding_service`
+    singleton. fastembed fetches the ~120 MB ONNX model from
+    huggingface.co on first use; the conftest points the cache at a
+    per-test tmpdir, so that fetch is real network. If it happens
+    while :func:`ingested_canary_vcsim`'s respx router is active,
+    respx's transport patching corrupts the multi-request model
+    download (``Could not load model from any source``). Loading the
+    model *here* — before the router's context manager opens — means
+    the in-process singleton already holds it, so the search under
+    respx does zero network.
+
+    Only the agent-flow test depends on this. The dispatch-only smoke
+    / JSONFlux tests call ``call_operation`` with a known op_id (no
+    embedding path) and deliberately skip the cost. Tests that want it
+    must list this fixture **before** ``ingested_canary_vcsim`` in
+    their signature so it's set up before the router opens.
+    """
+    from meho_backplane.retrieval.embedding import get_embedding_service
+
+    await get_embedding_service().encode_one("vmware rest connector warm-up")
+
+
+@pytest.fixture
 def acceptance_operator() -> Operator:
     """Frozen :class:`Operator` the dispatch tests act as.
 
@@ -222,37 +311,96 @@ def acceptance_operator() -> Operator:
     )
 
 
+async def _vcenter_rest_session_loader(_target: object) -> dict[str, str]:
+    """Stub session loader — bypasses the not-yet-wired Vault read.
+
+    The respx router accepts any HTTP basic pair (it never validates
+    the credentials), so the values are illustrative only.
+    """
+    return {"username": "canary-svc", "password": "canary-pw"}
+
+
+def _register_vcenter_rest_routes(mock: respx.MockRouter) -> None:
+    """Register the modern (``/api``) vCenter REST surface on *mock*.
+
+    The router answers the connector's session establishment
+    (``POST /api/session`` → token; the modern path 200s so the G0.6
+    resolver-side mount resolves to ``/api``), the ``aclose()`` revoke
+    (``DELETE /api/session``), and the read ops the three dispatch
+    modules probe. ``assert_all_called=False`` on the router (set by
+    the fixture) means a test that exercises only one op doesn't trip
+    on the unused routes.
+    """
+    mock.post("/api/session").respond(200, json="canary-session-token")
+    mock.delete("/api/session").respond(204)
+    mock.get("/api/about").respond(
+        200,
+        json={
+            "product": "VMware vCenter Server",
+            "version": CANARY_VERSION,
+            "build": "24021000",
+            "product_line_id": "vpx",
+            "api_type": "vcenter",
+        },
+    )
+    mock.get("/api/vcenter/vm").respond(200, json=CANARY_VMS)
+    mock.get("/api/vcenter/cluster").respond(
+        200, json=[{"cluster": "domain-c1", "name": "canary-cluster"}]
+    )
+    mock.get("/api/vcenter/host").respond(
+        200, json=[{"host": "host-1", "name": "canary-esx-01"}]
+    )
+    mock.get("/api/vcenter/datastore").respond(
+        200, json=[{"datastore": "datastore-1", "name": "canary-ds-01"}]
+    )
+    mock.get("/api/vcenter/network").respond(
+        200, json=[{"network": "network-1", "name": "VM Network"}]
+    )
+
+
 @pytest.fixture
 async def ingested_canary_vcsim(
     pg_engine: None,
     acceptance_operator: Operator,
-    vcsim_endpoint: VcsimEndpoint,
 ) -> AsyncIterator[IngestedCanaryVcsim]:
-    """Yield a dispatcher-ready vcsim setup.
+    """Yield a dispatcher-ready vmware-rest setup over a respx-mocked vCenter.
+
+    The fixture name is retained for call-site stability across the
+    three dispatch modules; the transport is **respx**, not vcsim.
+    govmomi's vcsim does not implement the vCenter REST *resource*
+    API (``/api/vcenter/vm`` and friends 404 — it only stubs the
+    vAPI session/tagging/content-library subset + the SOAP surface),
+    so a vcsim-backed dispatch test of ``GET:/vcenter/vm`` is not
+    satisfiable. respx mocks the exact modern REST surface the
+    connector calls, so the full agent-flow chain (resolve → group →
+    search → ``call_operation`` dispatch) is still exercised
+    end-to-end against a realistic wire contract.
 
     Setup steps:
 
-    1. Insert built-in :class:`EndpointDescriptor` rows for every
-       op in :data:`DISPATCH_DESCRIPTORS` (under one enabled
+    1. Insert built-in :class:`EndpointDescriptor` rows for every op
+       in :data:`DISPATCH_DESCRIPTORS` (under one enabled
        :class:`OperationGroup`).
-    2. Seed a :class:`Target` row pointing at the live vcsim
-       endpoint (host/port/auth_model).
+    2. Seed a :class:`Target` (with a probe :data:`CANARY_FINGERPRINT`
+       so the resolver binds the versioned connector) pointing at
+       :data:`CANARY_BASE_URL`.
     3. Resolve + cache the :class:`VmwareRestConnector` instance the
-       dispatcher will use; patch its ``_session_loader`` to return
-       vcsim's no-auth credentials and its ``_http_client`` to skip
-       TLS verification of vcsim's self-signed cert.
+       dispatcher will use and patch only its ``_session_loader``
+       (no Vault in the acceptance suite). The httpx client is *not*
+       patched — respx intercepts it transparently.
+    4. Activate a respx router for :data:`CANARY_BASE_URL` and
+       register the modern vCenter REST surface.
 
-    Teardown:
+    Teardown (inside the active respx router so the ``DELETE``
+    session-revoke is intercepted):
 
-    1. ``aclose()`` the patched connector instance (releases the
-       httpx pool, revokes cached sessions).
-    2. ``reset_dispatcher_caches()`` so the next test sees a fresh,
-       unpatched instance.
+    1. ``aclose()`` the connector instance.
+    2. ``reset_dispatcher_caches()`` so the next test sees a fresh
+       instance.
 
     The :class:`VmwareRestConnector` registration survives across
-    tests under normal operation (no test runs ``clear_registry()``
-    against the v2 registry); the fixture re-imports the
-    ``vmware_rest`` package on demand if a sibling test wiped the
+    tests under normal operation; the fixture re-imports the
+    ``vmware_rest`` package on demand if a sibling test wiped the v2
     registry (the G0.7 canary's autouse cleanup does this).
     """
     await _insert_dispatch_descriptors(DISPATCH_DESCRIPTORS)
@@ -264,13 +412,14 @@ async def ingested_canary_vcsim(
             name=VCSIM_TARGET_NAME,
             aliases=[],
             product=CANARY_PRODUCT,
-            host=vcsim_endpoint.host,
-            port=vcsim_endpoint.port,
+            host=CANARY_BASE_URL.removeprefix("https://"),
+            port=443,
             fqdn=None,
-            secret_ref="kv/data/vsphere/vcsim-acceptance",
+            secret_ref="kv/data/vsphere/vcenter-canary",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},
+            fingerprint=CANARY_FINGERPRINT,
             notes="seeded by tests.acceptance._canary_fixtures.ingested_canary_vcsim",
         )
         session.add(target)
@@ -299,21 +448,36 @@ async def ingested_canary_vcsim(
         f"got {connector_cls!r}"
     )
 
-    # Materialise the cached instance the dispatcher will use, then
-    # patch it. ``get_or_create_connector_instance`` lazily
-    # constructs ``VmwareRestConnector()`` on first call; the default
-    # ``_session_loader`` is the not-yet-implemented Vault reader,
-    # which the patch immediately replaces.
+    # Materialise the cached instance the dispatcher will use; replace
+    # only the Vault-backed session loader. respx intercepts the
+    # connector's own httpx client, so ``_http_client`` is left intact
+    # (which keeps the production follow-redirects + pooling code on
+    # the exercised path).
     instance = get_or_create_connector_instance(connector_cls)
-    patch_vmware_connector_for_vcsim(instance, vcsim_endpoint)
+    instance._session_loader = _vcenter_rest_session_loader
 
-    try:
-        yield IngestedCanaryVcsim(
-            operator=acceptance_operator,
-            connector_id=CANARY_CONNECTOR_ID,
-            target_name=VCSIM_TARGET_NAME,
-            endpoint=vcsim_endpoint,
-        )
-    finally:
-        await instance.aclose()
-        reset_dispatcher_caches()
+    # ``assert_all_mocked=False``: requests that don't match a
+    # registered route (notably fastembed's one-time model fetch from
+    # huggingface.co, which ``search_operations`` triggers in the
+    # agent-flow test) pass through to the real transport rather than
+    # raising — matching how the rest of the embedding-using
+    # acceptance suite already behaves (the conftest points the
+    # fastembed cache at a per-test tmpdir; the download is real).
+    # ``assert_all_called=False``: a test that exercises one op
+    # doesn't trip on the other registered routes.
+    async with respx.mock(
+        base_url=CANARY_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        _register_vcenter_rest_routes(mock)
+        try:
+            yield IngestedCanaryVcsim(
+                operator=acceptance_operator,
+                connector_id=CANARY_CONNECTOR_ID,
+                target_name=VCSIM_TARGET_NAME,
+                base_url=CANARY_BASE_URL,
+            )
+        finally:
+            await instance.aclose()
+            reset_dispatcher_caches()

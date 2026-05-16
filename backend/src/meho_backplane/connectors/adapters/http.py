@@ -65,8 +65,35 @@ class HttpConnector(Connector):
                 self._clients[target.name] = httpx.AsyncClient(
                     base_url=self._base_url(target),
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
+                    # Follow 301/302/307/308. Vendor REST surfaces
+                    # routinely canonicalise to a trailing slash with a
+                    # 301 (the govmomi/vcsim legacy ``/rest`` mount does
+                    # this; some real appliances do too behind a
+                    # normalising reverse proxy). httpx defaults to
+                    # not following — a connector that 500s on a benign
+                    # 301 is needlessly fragile. Idempotent verbs are
+                    # safe to replay on redirect; non-idempotent ones
+                    # go through ``_post_json`` which the vendor APIs
+                    # don't 301 mid-write.
+                    follow_redirects=True,
                 )
             return self._clients[target.name]
+
+    async def mount_op_path(self, target: Target, path: str) -> str:
+        """Map an ingested-descriptor *path* onto the wire path for *target*.
+
+        Dispatcher hook for ``source_kind='ingested'`` ops: the G0.7
+        pipeline stores spec-relative descriptor paths, and some vendor
+        APIs expose those under a mount prefix the spec omits (vCenter
+        REST: ``/api`` on modern, ``/rest`` on legacy/vcsim). The
+        default is identity — most ingested APIs are reachable at the
+        descriptor path verbatim. Vendor connectors that need a mount
+        (see ``VmwareRestConnector``) override this; the override is a
+        separate seam from ``_request_json`` / ``_post_json`` so their
+        tenacity ``@retry`` wrapper stays intact.
+        """
+        del target
+        return path
 
     def _base_url(self, target: Target) -> str:
         scheme = "https"

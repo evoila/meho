@@ -60,6 +60,7 @@ from tests.acceptance._canary_fixtures import (
     IngestedCanaryVcsim,
     acceptance_operator,
     ingested_canary_vcsim,
+    prewarmed_embeddings,
 )
 from tests.acceptance._vcsim import (
     DEFAULT_VCSIM_TOPOLOGY,
@@ -88,6 +89,7 @@ __all__ = [
     "ingested_canary_vcsim",
     "integration_env",
     "pg_engine",
+    "prewarmed_embeddings",
     "vcsim_endpoint",
 ]
 

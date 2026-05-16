@@ -13,8 +13,11 @@ Coverage matrix (G4.3-T1 / Task #440 acceptance criteria):
   the consumer ``kb/`` snapshot — acceptance #3 (slugs aren't
   invented).
 * Surface filter works: ``load_corpus("memory")`` and
-  ``load_corpus("operations")`` return ``[]`` because their YAML
-  files don't ship in T1 — acceptance #4.
+  ``load_corpus("operations")`` returned ``[]`` in T1 — acceptance #4
+  (T3 #442 shipped the operations YAML, T4 #443 shipped the memory
+  YAML; both branches are now non-empty and tracked here as
+  loader-level smoke tests, with the deeper corpus-content coverage
+  living in the per-surface test files).
 * Schema discipline: frozen models reject mutation; ``extra=forbid``
   rejects unknown YAML keys; strict mode rejects type coercion.
 """
@@ -129,11 +132,19 @@ def test_load_corpus_kb_returns_ten_typed_rows() -> None:
         assert row.expected_hits, f"empty expected_hits: {row.query}"
 
 
-def test_load_corpus_memory_returns_empty_in_t1() -> None:
-    """Acceptance #4: memory corpus YAML doesn't ship in T1; returns ``[]``."""
+def test_load_corpus_memory_now_ships_after_t4() -> None:
+    """T4 #443 shipped ``memory_queries.yaml``; ``load_corpus("memory")`` is non-empty.
+
+    The deeper assertions (10 rows, all five scopes represented,
+    slugs in the safe alphabet) live in
+    ``test_retrieval_eval_memory_corpus.py``; this test guards the
+    loader-level contract that the memory branch of the dispatch
+    now returns ``MemoryCorpusQuery`` instances rather than ``[]``.
+    """
     rows = load_corpus("memory")
 
-    assert rows == []
+    assert rows, "memory corpus is empty — did memory_queries.yaml ship?"
+    assert all(isinstance(row, MemoryCorpusQuery) for row in rows)
 
 
 def test_load_corpus_operations_now_ships_after_t3() -> None:
@@ -227,6 +238,39 @@ def test_memory_corpus_query_pair_typing() -> None:
     # A bare string list must fail validation — wrong shape for memory.
     with pytest.raises(ValidationError):
         MemoryCorpusQuery.model_validate({"query": "q", "expected_hits": ["slug-a"]})
+
+
+def test_memory_corpus_query_accepts_yaml_list_pairs() -> None:
+    """YAML ``- [user, slug]`` 2-element lists coerce to tuples at the field boundary.
+
+    Guards the ``mode="before"`` field validator on
+    :class:`MemoryCorpusQuery.expected_hits`. ``yaml.safe_load``
+    produces lists, and Pydantic v2 strict tuple validation rejects
+    raw list input even when the cardinality + element types
+    match — without the coercion the entire memory-corpus YAML
+    shape from the T4 #443 corpus would fail to validate. This test
+    locks the contract: a list-of-2-element-lists is the same as a
+    list-of-2-tuples after validation.
+    """
+    row = MemoryCorpusQuery.model_validate(
+        {"query": "q", "expected_hits": [["user", "slug-a"], ["tenant", "slug-b"]]}
+    )
+
+    assert row.expected_hits == [("user", "slug-a"), ("tenant", "slug-b")]
+    assert all(isinstance(pair, tuple) for pair in row.expected_hits)
+
+
+def test_memory_corpus_query_rejects_wrong_arity_pairs() -> None:
+    """Coercion preserves Pydantic's cardinality check on tuple length."""
+    # 1-element list — wrong cardinality.
+    with pytest.raises(ValidationError):
+        MemoryCorpusQuery.model_validate({"query": "q", "expected_hits": [["user"]]})
+
+    # 3-element list — also wrong cardinality.
+    with pytest.raises(ValidationError):
+        MemoryCorpusQuery.model_validate(
+            {"query": "q", "expected_hits": [["user", "slug", "extra"]]}
+        )
 
 
 def test_operation_corpus_query_optional_govc_default() -> None:

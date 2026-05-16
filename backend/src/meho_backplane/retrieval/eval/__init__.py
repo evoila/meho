@@ -17,10 +17,12 @@ every surface in the same place. Per-surface YAML files live alongside
 this package; :func:`load_corpus` selects the right file + Pydantic
 schema for the requested surface.
 
-T1 ships the kb seed corpus (10 queries, hand-curated against the real
-consumer ``kb/`` directory). The memory + operations corpora YAML files
-land in T3/T4; :func:`load_corpus("memory")` and ``load_corpus("operations")``
-return ``[]`` until then so T2's runner can iterate every surface
+T1 shipped the kb seed corpus (10 queries, hand-curated against the
+real consumer ``kb/`` directory). T3 shipped ``operation_queries.yaml``
+(10 govc-parity queries against the vSphere REST surface). T4 shipped
+``memory_queries.yaml`` (10 queries across all five MemoryScope
+shapes). :func:`load_corpus` falls back to ``[]`` for any surface
+whose YAML is missing so T2's runner can iterate every surface
 without crashing on a missing file.
 """
 

@@ -1,6 +1,6 @@
 {
   "overall_verdict": "green",
-  "ran_at": "2026-05-15T10:35:00.344611Z",
+  "ran_at": "2026-05-15T13:40:56.363801Z",
   "surfaces": [
     {
       "baseline_coverage": null,
@@ -194,11 +194,173 @@
       "baseline_mrr": null,
       "baseline_precision_at_5": null,
       "baseline_verdict": null,
-      "coverage": 0.0,
-      "mrr": 0.0,
-      "precision_at_5": 0.0,
-      "queries": [],
-      "query_count": 0,
+      "coverage": 1.0,
+      "mrr": 1.0,
+      "precision_at_5": 1.0,
+      "queries": [
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user/kubectl-context-aliases"
+          ],
+          "meho_hits": [
+            "user/kubectl-context-aliases"
+          ],
+          "precision_at_5": 1.0,
+          "query": "what kubectl context aliases do I use",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user/ssh-jump-host-config"
+          ],
+          "meho_hits": [
+            "user/ssh-jump-host-config"
+          ],
+          "precision_at_5": 1.0,
+          "query": "my ssh jump-host config pattern",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-tenant/rdc-internal-pr-review-checklist"
+          ],
+          "meho_hits": [
+            "user-tenant/rdc-internal-pr-review-checklist"
+          ],
+          "precision_at_5": 1.0,
+          "query": "my pr review checklist for rdc-internal",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-tenant/rdc-internal-oncall-handover"
+          ],
+          "meho_hits": [
+            "user-tenant/rdc-internal-oncall-handover"
+          ],
+          "precision_at_5": 1.0,
+          "query": "my on-call handover template for rdc-internal",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-target/rdc-vcenter-vpn-notes",
+            "target/rdc-vcenter-vpn-setup"
+          ],
+          "meho_hits": [
+            "user-target/rdc-vcenter-vpn-notes"
+          ],
+          "precision_at_5": 1.0,
+          "query": "vpn setup for rdc-vcenter",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "user-target/rdc-hetzner-dc-bastion-shortcuts"
+          ],
+          "meho_hits": [
+            "user-target/rdc-hetzner-dc-bastion-shortcuts"
+          ],
+          "precision_at_5": 1.0,
+          "query": "my bastion shortcuts for rdc-hetzner-dc",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "tenant/rdc-internal-deploy-window-policy"
+          ],
+          "meho_hits": [
+            "tenant/rdc-internal-deploy-window-policy"
+          ],
+          "precision_at_5": 1.0,
+          "query": "deploy window policy for rdc-internal",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "tenant/rdc-internal-approved-helm-repos"
+          ],
+          "meho_hits": [
+            "tenant/rdc-internal-approved-helm-repos"
+          ],
+          "precision_at_5": 1.0,
+          "query": "approved helm chart repos for rdc-internal",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "target/rdc-vault-prod-unseal-runbook"
+          ],
+          "meho_hits": [
+            "target/rdc-vault-prod-unseal-runbook"
+          ],
+          "precision_at_5": 1.0,
+          "query": "vault unseal procedure for rdc-vault-prod",
+          "reciprocal_rank": 1.0
+        },
+        {
+          "baseline_coverage_at_5": null,
+          "baseline_hits": null,
+          "baseline_precision_at_5": null,
+          "baseline_reciprocal_rank": null,
+          "coverage_at_5": 1.0,
+          "expected_hits": [
+            "target/rdc-vcenter-admin-url"
+          ],
+          "meho_hits": [
+            "target/rdc-vcenter-admin-url"
+          ],
+          "precision_at_5": 1.0,
+          "query": "rdc-vcenter admin console url",
+          "reciprocal_rank": 1.0
+        }
+      ],
+      "query_count": 10,
       "surface": "memory",
       "verdict": "green"
     },

@@ -104,13 +104,19 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
       ``runner._operations_hits_to_op_ids``). The G4.3-T3 operations
       corpus shipped 10 govc-parity queries; without this branch the
       gate would flip red the moment the YAML lands.
-    * memory — no shipped corpus yet (T4 #443); falls through to the
-      empty-result path which the runner's empty-corpus-is-green rule
-      handles.
+    * memory — corpus row's first ``(scope, slug)`` expected pair,
+      encoded as a ``"<scope>:<slug>"`` source_id so the runner's
+      ``_memory_hits_to_pairs`` (split on ``:``, join first + last)
+      reduces to the expected ``"<scope>/<slug>"`` ground-truth
+      string. T4 #443 shipped the memory corpus; without this branch
+      the gate would flip red the moment the YAML lands.
     """
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
     ops_answers = {
         row.query: row.expected_op_ids[0] for row in load_corpus("operations")
+    }
+    memory_answers = {
+        row.query: row.expected_hits[0] for row in load_corpus("memory")
     }
 
     def _hit(slug: str, source: str, tenant_id: uuid.UUID) -> RetrievalHit:
@@ -140,6 +146,12 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
         if source == "operations":
             op_id = ops_answers.get(query)
             return [_hit(op_id, "operations", tenant_id)] if op_id else []
+        if source == "memory":
+            pair = memory_answers.get(query)
+            if pair is None:
+                return []
+            scope, slug = pair
+            return [_hit(f"{scope}:{slug}", "memory", tenant_id)]
         slug = kb_answers.get(query)
         return [_hit(slug, source or "kb", tenant_id)] if slug else []
 

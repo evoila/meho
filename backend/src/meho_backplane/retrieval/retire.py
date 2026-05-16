@@ -418,11 +418,13 @@ def _evaluate_eval_precision(
     """Build criterion 3 (eval precision@5 >= 0.80).
 
     *precision_at_5* is the corpus-aggregate precision number from the
-    eval runner. ``None`` means the eval surface didn't run (e.g. the
-    corpus hasn't shipped yet — memory in T4 #443, operations in T3
-    #442). An absent corpus is red here (not green) — the verdict
-    contract requires *evidence* of equivalence, and an empty corpus
-    provides none.
+    eval runner. ``None`` means the eval surface didn't run (the
+    corpus YAML is missing or empty). An absent corpus is red here
+    (not green) — the verdict contract requires *evidence* of
+    equivalence, and an empty corpus provides none. All three v0.2
+    surfaces have shipped corpora (kb T1 #440, operations T3 #442,
+    memory T4 #443); this branch covers regression scenarios where
+    a YAML is later removed or returns zero rows.
     """
     if precision_at_5 is None or query_count == 0:
         return CriterionResult(

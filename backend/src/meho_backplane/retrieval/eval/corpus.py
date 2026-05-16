@@ -12,10 +12,10 @@ schema, and returns the typed list. Validation failures raise
 entry) — a broken corpus must not silently run an eval that reports
 spuriously perfect numbers.
 
-T1 ships the kb seed corpus only. The memory + operations YAML files
-land in T4 (#443) / T3 (#442); :func:`load_corpus` returns ``[]`` for
-those surfaces until the corresponding file lands so T2's eval runner
-can iterate every surface without crashing.
+T1 shipped the kb seed corpus. The operations + memory corpora YAML
+files land in T3 (#442) and T4 (#443) respectively; :func:`load_corpus`
+falls back to ``[]`` for any surface whose YAML still hasn't shipped
+so T2's eval runner can iterate every surface without crashing.
 
 Schemas are **frozen + extra=forbid + strict** (Pydantic v2). Frozen
 keeps the loaded corpus immutable for the run lifetime — a regression
@@ -33,7 +33,7 @@ from importlib import resources
 from typing import Literal, overload
 
 import yaml
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, field_validator
 
 __all__ = [
     "CorpusValidationError",
@@ -88,7 +88,7 @@ class MemoryCorpusQuery(BaseModel):
     expected hit is a ``(scope, slug)`` pair because the same slug can
     legitimately exist under different scopes (``user`` vs
     ``user-tenant`` vs ``tenant`` etc.) and the eval cares which one
-    surfaced. The corpus YAML lands in T4 (#443).
+    surfaced. The corpus YAML ships in T4 (#443).
     """
 
     model_config = _CORPUS_MODEL_CONFIG
@@ -96,6 +96,23 @@ class MemoryCorpusQuery(BaseModel):
     query: str
     expected_hits: list[tuple[str, str]]
     notes: str | None = None
+
+    @field_validator("expected_hits", mode="before")
+    @classmethod
+    def _coerce_yaml_pairs_to_tuples(cls, value: object) -> object:
+        # ``yaml.safe_load`` produces lists for the YAML ``- [user, slug]``
+        # shape the corpus uses; Pydantic v2 strict tuple validation
+        # rejects list input even when the cardinality + element types
+        # match. Pre-coerce 2-element list pairs to tuples at the field
+        # boundary so the YAML shape documented in the corpus's editing
+        # rules round-trips through ``strict=True``. In-process callers
+        # passing actual ``tuple`` pairs (the unit-test surface) flow
+        # through unchanged. Non-list elements pass through so an
+        # operator who typo'd ``"user/slug-a"`` as a single string still
+        # gets the strict ``tuple_type`` error naming the bad entry.
+        if isinstance(value, list):
+            return [tuple(pair) if isinstance(pair, list) else pair for pair in value]
+        return value
 
 
 class OperationCorpusQuery(BaseModel):

@@ -18,13 +18,15 @@ The same dispatch path drives all three retrieval surfaces — the
 per-surface differences (slug vs ``(scope, slug)`` vs
 ``(connector_id, op_id)`` ground truth) are absorbed by per-surface
 ``_eval_<surface>`` private dispatchers that produce a uniform
-``QueryResult`` shape. Surfaces whose corpus YAML hasn't shipped yet
-(memory in T4 #443, operations in T3 #442) return an empty
-``SurfaceResult`` with ``verdict="green"`` + ``query_count=0`` —
-the "no data" green is intentional: an absent corpus must not flip
-the CI gate red. The retire-checklist verb (T6 #445) is responsible
-for asserting that an evaluable corpus actually shipped before
-trusting the green.
+``QueryResult`` shape. A surface whose corpus YAML hasn't shipped
+returns an empty ``SurfaceResult`` with ``verdict="green"`` +
+``query_count=0`` — the "no data" green is intentional: an absent
+corpus must not flip the CI gate red. (All three surface corpora
+have now shipped: kb in T1 #440, operations in T3 #442, memory in
+T4 #443; the absent-corpus branch stays as a safety net for any
+future fourth surface that lands before its corpus.) The
+retire-checklist verb (T6 #445) is responsible for asserting that
+an evaluable corpus actually shipped before trusting the green.
 
 Baseline integration
 --------------------
@@ -42,7 +44,6 @@ metric").
 Out of scope (deferred per issue body)
 --------------------------------------
 
-* **Memory + operations corpus YAML.** Land in T4 / T3.
 * **LLM-judge evaluation.** v0.2 is keyword-exact ground truth only.
 * **Cross-tenant eval.** v0.2 has one production tenant; the
   runner is tenant-scoped per the caller's ``tenant_id`` arg.
@@ -146,8 +147,8 @@ def _memory_hits_to_pairs(hits: list[RetrievalHit]) -> list[str]:
 
     Memory ``RetrievalHit.source_id`` is the chassis-internal
     ``"<scope>:<user_sub>:<slug>"`` shape (G5.1 #421); we reduce that
-    to the ``(scope, slug)`` shape the corpus YAML promises (T4 #443
-    ships the YAML, but the schema is locked in T1).
+    to the ``(scope, slug)`` shape the corpus YAML carries (schema
+    locked in T1 #440, YAML shipped in T4 #443).
     """
     pairs: list[str] = []
     for hit in hits:
@@ -378,7 +379,12 @@ async def _eval_memory(
     thresholds: Thresholds,
     k: int,
 ) -> SurfaceResult:
-    """Eval the memory surface — empty corpus until T4 #443 ships."""
+    """Eval the memory surface against the T4 #443 corpus.
+
+    Returns an empty ``SurfaceResult`` (``query_count=0`` +
+    ``verdict="green"``) if the YAML ever gets removed; the
+    populated path is the production case.
+    """
     rows = load_corpus("memory")
     queries = [
         await _eval_query(

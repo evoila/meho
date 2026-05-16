@@ -1,0 +1,154 @@
+# MEHO retrieval eval — memory seed corpus (G4.3-T4, #443).
+#
+# 10 queries covering the five MemoryScope values from
+# consumer-needs.md §G5 L137-141 — two queries per scope (user,
+# user-tenant, user-target, tenant, target). Each entry's
+# `expected_hits` is an ordered list of `[scope, slug]` pairs the
+# `search_memory` meta-tool (G5.1) should surface; the first pair is
+# the ideal top-1, subsequent pairs are acceptable top-N fallbacks
+# (drives MRR scoring in T2's runner).
+#
+# Schema: meho_backplane.retrieval.eval.corpus.MemoryCorpusQuery.
+#
+# Forward-investment posture (docs/planning/mvp-roadmap.md L122-123):
+# the memory layer materialises in v0.4 (G5.1 #421's service shipped,
+# but seeded memory data is a v0.4 deliverable). This corpus ships
+# under v0.2 so the eval gate lights up the moment v0.4 seeds
+# production memory records — no retroactive corpus scramble.
+#
+# Editing rules:
+#
+# * `scope` MUST be one of {user, user-tenant, user-target, tenant,
+#   target} — the five MemoryScope values. The
+#   `test_memory_corpus_uses_valid_scope_values` test guards against
+#   typos.
+# * `slug` must be in the safe-URL alphabet (letters, digits, hyphen,
+#   underscore, dot) — same constraint
+#   `meho_backplane.memory.schemas.validate_slug` enforces on real
+#   memories, so the corpus matches what the service can actually
+#   persist. The `test_memory_corpus_slugs_use_safe_alphabet` test
+#   guards this.
+# * Coverage: at least 2 queries per scope so a regression in any
+#   one scope shape surfaces (acceptance #2). The
+#   `test_memory_corpus_covers_all_five_scopes` test encodes this.
+# * Operator context: queries grounded in plausible RDC operator
+#   workflows (kubectl preferences, per-target VPN/SSH notes,
+#   tenant deploy policy, target runbook references) rather than
+#   synthetic placeholders. The slugs reflect the shape v0.4 seed
+#   memories will use; the operator identity (`user_sub`) lives in
+#   `documents.source_id`, not in the slug — per
+#   `MemoryService.encode_source_id`.
+
+# ---------------------------------------------------------------------------
+# user scope (2 queries) — operator-specific prefs cross-tenant.
+# ---------------------------------------------------------------------------
+
+- query: what kubectl context aliases do I use
+  expected_hits:
+    - [user, kubectl-context-aliases]
+  notes: >-
+    user scope — personal CLI prefs the operator carries across
+    every tenant they have a JWT for. Tests basic recall of a
+    non-target-scoped personal setting; no acceptable fallback
+    because another operator's kubectl prefs are not a valid answer
+    to this query.
+
+- query: my ssh jump-host config pattern
+  expected_hits:
+    - [user, ssh-jump-host-config]
+  notes: >-
+    user scope — second cross-tenant personal pref. Distinct slug
+    shape (multi-word, dash-separated) and the second-most-common
+    "my personal config for tool X" workflow operators surface on
+    Slack pre-MEHO.
+
+# ---------------------------------------------------------------------------
+# user-tenant scope (2 queries) — operator-in-tenant process notes.
+# ---------------------------------------------------------------------------
+
+- query: my pr review checklist for rdc-internal
+  expected_hits:
+    - [user-tenant, rdc-internal-pr-review-checklist]
+  notes: >-
+    user-tenant scope — operator's personal process notes bound to
+    a specific tenant. Distinct from `user` because two operators
+    in the same tenant can hold different checklists; distinct from
+    `tenant` because the team hasn't standardised this one.
+
+- query: my on-call handover template for rdc-internal
+  expected_hits:
+    - [user-tenant, rdc-internal-oncall-handover]
+  notes: >-
+    user-tenant scope — second per-operator-per-tenant slug shape.
+    Covers the "operator-private process artifact scoped to one
+    tenant" recall pattern alongside the PR-checklist query.
+
+# ---------------------------------------------------------------------------
+# user-target scope (2 queries) — operator-specific notes about a target.
+# ---------------------------------------------------------------------------
+
+- query: vpn setup for rdc-vcenter
+  expected_hits:
+    - [user-target, rdc-vcenter-vpn-notes]
+    - [target, rdc-vcenter-vpn-setup]
+  notes: >-
+    user-target scope as the ideal top-1 — operator's own VPN-config
+    quirks for the specific target (per-operator credentials, local
+    network workarounds). The target-scope `rdc-vcenter-vpn-setup`
+    is the acceptable fallback — the team-wide VPN guide. Matches
+    the issue body's worked example in #443's corpus-content section.
+
+- query: my bastion shortcuts for rdc-hetzner-dc
+  expected_hits:
+    - [user-target, rdc-hetzner-dc-bastion-shortcuts]
+  notes: >-
+    user-target scope — second per-operator-per-target slug shape
+    covering SSH aliases / port-forward shortcuts. The operator's
+    personal shell wiring tied to one specific bastion host;
+    distinct from the team-shared bastion runbook (which would land
+    under target scope).
+
+# ---------------------------------------------------------------------------
+# tenant scope (2 queries) — team-wide policy memos.
+# ---------------------------------------------------------------------------
+
+- query: deploy window policy for rdc-internal
+  expected_hits:
+    - [tenant, rdc-internal-deploy-window-policy]
+  notes: >-
+    tenant scope — team-wide policy every operator in rdc-internal
+    must see. Written by `tenant_admin` (RBAC enforced by
+    `MemoryRbacResolver.can_write`); read by every operator-in-tenant.
+
+- query: approved helm chart repos for rdc-internal
+  expected_hits:
+    - [tenant, rdc-internal-approved-helm-repos]
+  notes: >-
+    tenant scope — second team-wide policy slug. Covers the
+    procurement-style "what's the team's allowed-list for X" query
+    pattern alongside the deploy-window policy.
+
+# ---------------------------------------------------------------------------
+# target scope (2 queries) — team-shared facts/runbooks about a target.
+# ---------------------------------------------------------------------------
+
+- query: vault unseal procedure for rdc-vault-prod
+  expected_hits:
+    - [target, rdc-vault-prod-unseal-runbook]
+  notes: >-
+    target scope — team-shared runbook for one specific Vault
+    cluster. Every operator-in-tenant can read it; `tenant_admin`
+    writes it. Contrasts the user-target VPN-notes query above:
+    that one has a user-target primary + target fallback because
+    operators keep personal twists on the team guide; this runbook
+    is team property end-to-end, no per-operator override expected.
+
+- query: rdc-vcenter admin console url
+  expected_hits:
+    - [target, rdc-vcenter-admin-url]
+  notes: >-
+    target scope — second target-wide slug. Covers the
+    "team-shared reference fact about target X" query pattern,
+    distinct from the procedural target-scoped runbook (Vault
+    unseal) above, so the corpus exercises both reference and
+    procedural target-scoped memory shapes.

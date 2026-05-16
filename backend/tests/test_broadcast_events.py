@@ -204,6 +204,14 @@ class TestClassifyOp:
             ("vsphere.about", "read"),
             ("k8s.pod.get", "read"),
             ("vsphere.vm.ls", "read"),
+            # Vault sys diagnostics verbs (G3.3-T2 #546): non-mutating
+            # cluster-state reads with no secret content. They must
+            # classify as ``read`` (DoD: op_class=read), not fall
+            # through to the full-detail ``other`` class.
+            ("vault.sys.health", "read"),
+            ("vault.sys.seal_status", "read"),
+            ("vault.sys.mounts.list", "read"),
+            ("vault.sys.auth.list", "read"),
         ],
     )
     def test_read_suffixes(self, op_id: str, expected: str) -> None:

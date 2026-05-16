@@ -387,6 +387,12 @@ def patch_vmware_connector_for_vcsim(
                     base_url=base_url,
                     timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
                     verify=ssl_ctx,
+                    # Mirror production HttpConnector._http_client:
+                    # vcsim's legacy ``/rest`` mount 301s missing
+                    # trailing slashes, so the patched client must
+                    # follow redirects too or the dispatch leg sees a
+                    # spurious HTTPStatusError instead of vcsim data.
+                    follow_redirects=True,
                 )
             return clients[target.name]
 

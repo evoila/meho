@@ -55,6 +55,7 @@ from tests.acceptance._canary_fixtures import (
 
 
 async def test_agent_flow_end_to_end_against_vcsim(
+    prewarmed_embeddings: None,
     ingested_canary_vcsim: IngestedCanaryVcsim,
 ) -> None:
     """The four-step agent chain produces real vcsim data on call_operation.
@@ -147,6 +148,7 @@ async def test_agent_flow_end_to_end_against_vcsim(
 
 
 async def test_search_operations_unknown_connector_returns_no_hits(
+    prewarmed_embeddings: None,
     ingested_canary_vcsim: IngestedCanaryVcsim,
 ) -> None:
     """An unknown connector_id returns an empty hit list, not an error.

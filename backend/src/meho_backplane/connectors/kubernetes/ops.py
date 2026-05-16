@@ -5,19 +5,22 @@
 
 G0.6 refactor (#391) of the G3.2-T1 (#321) skeleton. The skeleton
 shipped with an empty op surface and an ``unknown_op``-returning
-``execute()``; this module is the first concrete op the connector
+``execute()``; this module hosts the metadata rows the connector
 registers against the G0.6 substrate via
 :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
 
-The op surface is intentionally minimal in this Initiative:
+The shipped op surface today:
 
 * ``k8s.about`` -- product-flavour + version snapshot built from
   :meth:`kubernetes_asyncio.client.VersionApi.get_code`. Mirrors what
   :meth:`KubernetesConnector.fingerprint` returns but goes through the
   dispatcher so callers see the same envelope (``OperationResult``)
-  every other op produces. The full 13-op K8s surface (``k8s.pod.list``
-  / ``k8s.deployment.list`` / ...) lands in G3.2-T2..T5 (#320 work
-  items) against the same registration pattern from the start.
+  every other op produces. Landed with #391's refactor of the T1
+  skeleton.
+* ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list`` -- the core
+  inventory surface (G3.2-T2 #322). Metadata + helper functions live in
+  :mod:`~meho_backplane.connectors.kubernetes.ops_core`; this module
+  re-exports the merged tuple so registration walks a single list.
 
 Each op is declared in :data:`KUBERNETES_OPS` as a typed-metadata row.
 The connector's ``register_operations()`` classmethod walks the list
@@ -82,67 +85,87 @@ class KubernetesOp:
 
 #: The ops :class:`KubernetesConnector` registers at lifespan startup.
 #:
-#: ``k8s.about`` is the canary op the G0.6 refactor (#391) lands
-#: against. It returns a flat dict shaped like
+#: ``k8s.about`` is the canary op the G0.6 refactor (#391) lands against.
+#: It returns a flat dict shaped like
 #: :class:`~meho_backplane.connectors.schemas.FingerprintResult` but
 #: goes through the dispatcher path so callers exercise the
 #: register_typed_operation -> dispatch -> reduce -> audit pipeline
-#: end-to-end. The full 13-op K8s read surface lands in #320's T2..T5
-#: against this same registration pattern.
-KUBERNETES_OPS: tuple[KubernetesOp, ...] = (
-    KubernetesOp(
-        op_id="k8s.about",
-        handler_attr="about",
-        summary="Return the cluster's product flavour, version, and platform.",
-        description=(
-            "Hits the Kubernetes API server's ``GET /version`` endpoint via "
-            "``kubernetes_asyncio.client.VersionApi.get_code`` and returns a "
-            "flat dict with the cluster's product slug (rke2 / k3s / eks / "
-            "gke / aks / vanilla derived from the gitVersion suffix), full "
-            "git_version, build date, and platform string. Use to identify "
-            "the cluster before issuing higher-level ops or to populate "
-            "operator dashboards. No params; works against any target whose "
-            "kubeconfig the operator's tenant can read."
-        ),
-        parameter_schema={
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-        response_schema={
-            "type": "object",
-            "properties": {
-                "product": {"type": "string"},
-                "git_version": {"type": "string"},
-                "build_date": {"type": "string"},
-                "major": {"type": "string"},
-                "minor": {"type": "string"},
-                "platform": {"type": "string"},
-                "go_version": {"type": "string"},
-                "git_commit": {"type": "string"},
-                "git_tree_state": {"type": "string"},
-            },
-            "required": ["product", "git_version"],
-            "additionalProperties": True,
-        },
-        group_key="cluster",
-        tags=("read-only", "cluster", "identity"),
-        safety_level="safe",
-        requires_approval=False,
-        llm_instructions={
-            "when_to_use": (
-                "Call when the operator wants to identify the K8s cluster "
-                "behind a target before issuing a higher-level op (pod list, "
-                "deployment scale, etc.), or when the agent needs to pick a "
-                "version-flavoured doc page from the knowledge base."
-            ),
-            "parameter_hints": {},
-            "output_shape": (
-                "Flat dict; the ``product`` field is the canonical slug "
-                "(``rke2`` / ``k3s`` / ``eks`` / ``gke`` / ``aks`` / "
-                "``vanilla``). ``git_version`` carries the full v-prefixed "
-                "string including distribution suffix."
-            ),
-        },
+#: end-to-end. The G3.2-T2 (#322) core inventory ops (``k8s.ls`` /
+#: ``k8s.namespace.list`` / ``k8s.node.list``) extend the tuple from
+#: :mod:`~meho_backplane.connectors.kubernetes.ops_core`. The remaining
+#: K8s read surface (workload / network / config / events / logs) lands
+#: in #320's T3..T5 against this same registration pattern.
+_K8S_ABOUT_OP = KubernetesOp(
+    op_id="k8s.about",
+    handler_attr="about",
+    summary="Return the cluster's product flavour, version, and platform.",
+    description=(
+        "Hits the Kubernetes API server's ``GET /version`` endpoint via "
+        "``kubernetes_asyncio.client.VersionApi.get_code`` and returns a "
+        "flat dict with the cluster's product slug (rke2 / k3s / eks / "
+        "gke / aks / vanilla derived from the gitVersion suffix), full "
+        "git_version, build date, and platform string. Use to identify "
+        "the cluster before issuing higher-level ops or to populate "
+        "operator dashboards. No params; works against any target whose "
+        "kubeconfig the operator's tenant can read."
     ),
+    parameter_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "product": {"type": "string"},
+            "git_version": {"type": "string"},
+            "build_date": {"type": "string"},
+            "major": {"type": "string"},
+            "minor": {"type": "string"},
+            "platform": {"type": "string"},
+            "go_version": {"type": "string"},
+            "git_commit": {"type": "string"},
+            "git_tree_state": {"type": "string"},
+        },
+        "required": ["product", "git_version"],
+        "additionalProperties": True,
+    },
+    group_key="cluster",
+    tags=("read-only", "cluster", "identity"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call when the operator wants to identify the K8s cluster "
+            "behind a target before issuing a higher-level op (pod list, "
+            "deployment scale, etc.), or when the agent needs to pick a "
+            "version-flavoured doc page from the knowledge base."
+        ),
+        "parameter_hints": {},
+        "output_shape": (
+            "Flat dict; the ``product`` field is the canonical slug "
+            "(``rke2`` / ``k3s`` / ``eks`` / ``gke`` / ``aks`` / "
+            "``vanilla``). ``git_version`` carries the full v-prefixed "
+            "string including distribution suffix."
+        ),
+    },
 )
+
+
+def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
+    """Return the merged registration tuple (``k8s.about`` + core inventory ops).
+
+    Implemented as a function call rather than a literal-and-splat at
+    module level so the import order stays linear: ``ops.py`` defines
+    :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the T2
+    inventory ops from :mod:`ops_core` (which itself only depends on
+    ``KubernetesOp``). The arrangement keeps the canary op's metadata
+    co-located with the dataclass definition while letting the larger
+    T2 surface live in its own module next to its helpers.
+    """
+    from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
+
+    return (_K8S_ABOUT_OP, *CORE_OPS)
+
+
+KUBERNETES_OPS: tuple[KubernetesOp, ...] = _kubernetes_ops()

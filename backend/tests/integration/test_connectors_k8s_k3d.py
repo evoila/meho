@@ -219,3 +219,95 @@ async def test_api_client_cached_across_calls_against_live_k3s(
     await connector.fingerprint(target)
     cached_client_id_after_second = id(connector._api_clients[target.name])
     assert cached_client_id_after_first == cached_client_id_after_second
+
+
+# ---------------------------------------------------------------------------
+# G3.2-T2 (#322) core inventory ops -- live k3s exercise.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_namespace_list_against_k3s_returns_default_set(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.namespace.list`` over k3s returns the bootstrap namespaces."""
+    connector, target = k3s_connector
+    result = await connector.k8s_namespace_list(target, {})
+    assert result["total"] >= 4  # default, kube-system, kube-public, kube-node-lease
+    names = {row["name"] for row in result["rows"]}
+    assert "default" in names
+    assert "kube-system" in names
+    # Phase is Active for the bootstrap set; any other phase is a real
+    # signal worth surfacing to the operator.
+    for row in result["rows"]:
+        assert row["status"] in {"Active", "Terminating"}
+
+
+@pytest.mark.asyncio
+async def test_node_list_against_k3s_returns_at_least_one_node(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.node.list`` over k3s returns the single-node default cluster."""
+    connector, target = k3s_connector
+    result = await connector.k8s_node_list(target, {})
+    assert result["total"] >= 1
+    node = result["rows"][0]
+    # k3s nodes report Ready=True post-boot; the test waits implicitly via
+    # the container fixture's start barrier (testcontainers blocks until
+    # the k3s API server's ``/readyz`` returns 200), so a NotReady reading
+    # here is a real signal, not flake.
+    assert node["status"] == "Ready"
+    # kubelet version surfaces verbatim; spot-check it's a v-prefixed
+    # SemVer-shaped string.
+    assert node["version"].startswith("v")
+    # k3s lights up the master / control-plane / etcd role labels.
+    assert node["roles"], "k3s nodes always carry at least one role label"
+
+
+@pytest.mark.asyncio
+async def test_ls_root_against_k3s_returns_namespaces_and_cluster_kinds(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.ls /`` over k3s returns the live namespace set + the fixed cluster kinds."""
+    connector, target = k3s_connector
+    result = await connector.k8s_ls(target, {"path": "/"})
+    assert result["path"] == "/"
+    assert "default" in result["namespaces"]
+    assert "kube-system" in result["namespaces"]
+    assert "nodes" in result["cluster_kinds"]
+    assert "namespaces" in result["cluster_kinds"]
+
+
+@pytest.mark.asyncio
+async def test_ls_namespace_against_k3s_returns_kind_counts(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.ls /kube-system`` returns per-kind counts via remaining_item_count."""
+    connector, target = k3s_connector
+    result = await connector.k8s_ls(target, {"path": "/kube-system"})
+    assert result["namespace"] == "kube-system"
+    assert result["cluster_kinds_omitted"] is True
+    kinds_by_label = {entry["kind"]: entry for entry in result["kinds"]}
+    # k3s ships with pods + services + configmaps in kube-system from the
+    # first boot. Assertions are existential, not exact counts -- the
+    # exact counts drift across k3s minors and aren't load-bearing.
+    assert kinds_by_label["pods"]["count"] is not None
+    assert kinds_by_label["pods"]["count"] >= 1
+    assert kinds_by_label["services"]["count"] is not None
+    assert kinds_by_label["services"]["count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_ls_namespace_kind_against_k3s_forwards_to_unknown_op(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.ls /default/pods`` forwards to ``k8s.pod.list`` -- unknown_op until T3."""
+    connector, target = k3s_connector
+    result = await connector.k8s_ls(target, {"path": "/default/pods"})
+    assert result["forwarded_to"] == "k8s.pod.list"
+    inner = result["result"]
+    # T3 hasn't shipped k8s.pod.list yet, so the dispatcher shim emits
+    # the structured unknown_op envelope. When T3 lands, this test
+    # gains a real-pod-row assertion in the inner result.
+    assert inner["status"] == "error"
+    assert inner["error"].startswith("unknown_op:")

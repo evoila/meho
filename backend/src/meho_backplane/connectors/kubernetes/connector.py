@@ -64,6 +64,12 @@ from meho_backplane.connectors.kubernetes.kubeconfig import (
     load_kubeconfig_from_vault,
 )
 from meho_backplane.connectors.kubernetes.ops import KUBERNETES_OPS
+from meho_backplane.connectors.kubernetes.ops_core import (
+    K8S_CLUSTER_KINDS,
+    K8S_NAMESPACED_KIND_LISTERS,
+    namespace_row,
+    node_row,
+)
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -72,11 +78,55 @@ from meho_backplane.connectors.schemas import (
 
 __all__ = ["KubernetesConnector", "product_from_git_version"]
 
+
 _log = structlog.get_logger(__name__)
 
 _DEFAULT_K8S_PORT = 6443
 _PROBE_TIMEOUT_SECONDS = 5.0
 _PROBE_OK_STATUSES = frozenset({200, 401})
+
+
+#: Plural kind labels (kubectl-style) -> singular op_id segment. Only
+#: the irregulars need an entry; everything else (``pods``, ``services``,
+#: ``configmaps``, ``nodes``) takes the strip-trailing-s default branch
+#: in :func:`_normalise_kind_to_singular`.
+_PLURAL_TO_SINGULAR_KIND: dict[str, str] = {
+    "ingresses": "ingress",
+    "persistentvolumeclaims": "persistentvolumeclaim",
+    "persistentvolumes": "persistentvolume",
+    "storageclasses": "storageclass",
+}
+
+
+def _normalise_kind_to_singular(kind: str) -> str:
+    """Map a ``kubectl get <kind>``-style plural to the singular op-id segment.
+
+    The path the operator types is plural-shaped (``/argocd/pods``,
+    matching their ``kubectl`` muscle memory); the op_id namespace under
+    #320 is singular-shaped (``k8s.pod.list``). The mapping is local to
+    the connector because the rest of the substrate doesn't care --
+    op_ids are opaque dotted strings to the dispatcher.
+
+    Three branches, in order:
+
+    1. Explicit plural in :data:`_PLURAL_TO_SINGULAR_KIND` -- the
+       irregulars (``ingresses``, ``persistentvolumeclaims``) that
+       don't strip a trailing ``s`` cleanly.
+    2. An operator-typed singular that already matches one of the
+       mapped singular forms (``ingress``, ``storageclass``,
+       ``persistentvolume``, ``persistentvolumeclaim``). Return as-is
+       to avoid the strip-trailing-s branch mangling ``ingress`` into
+       ``ingres``.
+    3. Default: strip a trailing ``s`` (``pods`` -> ``pod``,
+       ``services`` -> ``service``).
+    """
+    if kind in _PLURAL_TO_SINGULAR_KIND:
+        return _PLURAL_TO_SINGULAR_KIND[kind]
+    if kind in _PLURAL_TO_SINGULAR_KIND.values():
+        return kind
+    if kind.endswith("s") and len(kind) > 1:
+        return kind[:-1]
+    return kind
 
 
 def product_from_git_version(git_version: str) -> str:
@@ -237,6 +287,228 @@ class KubernetesConnector(Connector):
             "go_version": version.go_version,
             "git_commit": version.git_commit,
             "git_tree_state": version.git_tree_state,
+        }
+
+    async def k8s_namespace_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List namespaces -- one row per namespace with phase / age / labels.
+
+        Op-id: ``k8s.namespace.list``. Wraps ``CoreV1Api.list_namespace()``
+        and projects each :class:`V1Namespace` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_core.namespace_row`
+        so the wire shape is stable across the test seam (where
+        ``namespace_row`` is unit-tested directly against synthetic
+        :class:`V1Namespace` instances) and the live API path.
+
+        ``params`` is declared empty in the op's
+        :attr:`~meho_backplane.connectors.kubernetes.ops_core.K8S_NAMESPACE_LIST_PARAMETER_SCHEMA`;
+        the dispatcher's :class:`Draft202012Validator` rejects any extra
+        keys before this handler runs.
+        """
+        del params
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        resp = await core_v1.list_namespace()
+        rows = [namespace_row(ns) for ns in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_node_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List cluster nodes -- name / status / roles / version / kernel / IP / taints.
+
+        Op-id: ``k8s.node.list``. Wraps ``CoreV1Api.list_node()`` and
+        projects each :class:`V1Node` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_core.node_row`.
+        The Ready-condition mapping ("Ready" / "NotReady" / "Unknown") and
+        the role-label derivation are both helpers in :mod:`ops_core` so
+        the unit tests pin those mappings against synthetic
+        :class:`V1Node` instances without an event loop.
+        """
+        del params
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        resp = await core_v1.list_node()
+        rows = [node_row(n) for n in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_ls(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Synthetic walker -- list inventory at a logical path.
+
+        Op-id: ``k8s.ls``. Three shapes by *path*:
+
+        * ``/`` (or omitted) -- ``{namespaces: [...], cluster_kinds: [...]}``.
+          ``namespaces`` is the sorted namespace names; ``cluster_kinds`` is
+          the fixed list from
+          :data:`~meho_backplane.connectors.kubernetes.ops_core.K8S_CLUSTER_KINDS`.
+        * ``/<namespace>`` -- ``{namespace: <ns>, kinds: [{kind, count}],
+          cluster_kinds_omitted: true}``. The handler probes each kind in
+          :data:`~meho_backplane.connectors.kubernetes.ops_core.K8S_NAMESPACED_KIND_LISTERS`
+          with ``limit=1`` and reads the response's
+          ``metadata.remaining_item_count`` to derive the count without
+          pulling every row -- the operator-facing "how many pods are in
+          argocd?" question costs one round-trip per kind, not one per
+          row.
+        * ``/<namespace>/<kind>`` -- forwards to ``k8s.<kind>.list`` via
+          :meth:`execute` (the dispatcher shim). Kinds whose ``list`` op
+          hasn't shipped yet come back through ``execute``'s structured
+          ``unknown_op`` envelope; the handler does not pretend to know
+          which kinds will eventually be registered.
+
+        Forwarding-through-execute (rather than calling
+        ``CoreV1Api.list_namespaced_<kind>`` directly here) means the
+        kind-specific ops' own dispatcher path -- parameter validation,
+        future reducer-driven handle creation, audit row, broadcast --
+        runs verbatim. The forwarding handler is structural plumbing, not
+        a semantic shortcut.
+        """
+        raw_path = params.get("path", "/")
+        # Normalise the path: empty string and "/" both map to the root;
+        # leading slash is stripped before splitting so "/argocd" parses
+        # to ["argocd"], not ["", "argocd"].
+        if not isinstance(raw_path, str):
+            # Defensive: the JSON Schema's ``type: string`` should catch
+            # non-string inputs before the handler runs, but the schema's
+            # ``default`` clause means an absent param arrives as the
+            # schema default ("/"). A wrong-type override surfaces here.
+            raise TypeError(f"k8s.ls path must be a string, got {type(raw_path).__name__}")
+        segments = [s for s in raw_path.split("/") if s]
+
+        if not segments:
+            return await self._k8s_ls_root(target)
+        if len(segments) == 1:
+            return await self._k8s_ls_namespace(target, segments[0])
+        if len(segments) == 2:
+            return await self._k8s_ls_namespace_kind(target, segments[0], segments[1])
+        # Deeper paths aren't a documented v0.2 shape; collapse to the
+        # namespace/kind forwarder against the first two segments. The
+        # operator gets a useful result rather than an opaque error.
+        return await self._k8s_ls_namespace_kind(target, segments[0], segments[1])
+
+    async def _k8s_ls_root(
+        self,
+        target: KubernetesTargetLike,
+    ) -> dict[str, Any]:
+        """Cluster-root view: list namespace names + the fixed cluster-kind list."""
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        resp = await core_v1.list_namespace()
+        names = sorted(
+            ns.metadata.name
+            for ns in resp.items
+            if ns.metadata is not None and ns.metadata.name is not None
+        )
+        return {
+            "path": "/",
+            "namespaces": names,
+            "cluster_kinds": list(K8S_CLUSTER_KINDS),
+        }
+
+    async def _k8s_ls_namespace(
+        self,
+        target: KubernetesTargetLike,
+        namespace: str,
+    ) -> dict[str, Any]:
+        """Per-namespace kind summary -- one round-trip per probed kind.
+
+        Each probed kind is fetched with ``limit=1`` so the server can
+        emit the row count via :class:`V1ListMeta.remaining_item_count`
+        without streaming every row back. The total count is
+        ``len(items) + (remaining_item_count or 0)`` because the server
+        treats the first ``limit`` rows as inline and the remainder as
+        the "still to fetch" tail.
+
+        A per-kind probe that raises (RBAC-shaped 403, deprecated kind on
+        an older cluster, transient API server blip) lands as
+        ``count=None`` with the exception class on ``error`` so the
+        operator sees which kinds aren't enumerable rather than a single
+        500-shaped failure for the whole ls.
+        """
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        kinds: list[dict[str, Any]] = []
+        for kind_label, method_name in K8S_NAMESPACED_KIND_LISTERS:
+            method = getattr(core_v1, method_name, None)
+            if method is None:
+                # Defensive: a typo in the table would otherwise surface as
+                # an opaque AttributeError mid-walk. Record it as the
+                # error shape so the rest of the kinds still report.
+                kinds.append(
+                    {
+                        "kind": kind_label,
+                        "count": None,
+                        "error": f"AttributeError: CoreV1Api has no {method_name!r}",
+                    }
+                )
+                continue
+            try:
+                resp = await method(namespace=namespace, limit=1)
+                inline = len(resp.items) if resp.items is not None else 0
+                remaining = 0
+                if resp.metadata is not None and resp.metadata.remaining_item_count is not None:
+                    remaining = int(resp.metadata.remaining_item_count)
+                kinds.append({"kind": kind_label, "count": inline + remaining})
+            except Exception as exc:
+                kinds.append(
+                    {
+                        "kind": kind_label,
+                        "count": None,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+        return {
+            "path": f"/{namespace}",
+            "namespace": namespace,
+            "kinds": kinds,
+            "cluster_kinds_omitted": True,
+        }
+
+    async def _k8s_ls_namespace_kind(
+        self,
+        target: KubernetesTargetLike,
+        namespace: str,
+        kind: str,
+    ) -> dict[str, Any]:
+        """Forward to ``k8s.<kind>.list`` via the connector's dispatcher shim.
+
+        The shim resolves the kind-specific op's descriptor; an unknown
+        kind (T3/T4 hasn't shipped its ``list`` op yet) comes back as the
+        structured ``unknown_op`` envelope and the forwarder propagates
+        it verbatim in the ``result`` field, so the operator sees the
+        sub-op's exact error shape rather than a translated one.
+
+        ``kind`` is normalised before dispatch: operators type the
+        plural form (``pods``, matching ``kubectl get pods``), but the
+        op-id namespace follows the singular convention from #320's op
+        listing (``k8s.pod.list``, not ``k8s.pods.list``). The
+        :data:`_PLURAL_TO_SINGULAR_KIND` map handles the common irregulars
+        that don't strip a trailing ``s`` cleanly (``ingresses`` ->
+        ``ingress``, ``persistentvolumeclaims`` ->
+        ``persistentvolumeclaim``); everything else (``pods`` ->
+        ``pod``, ``services`` -> ``service``) takes the strip-trailing-s
+        branch. Operators who pass a singular form directly
+        (``/argocd/pod``) get a no-op normalisation.
+        """
+        op_kind = _normalise_kind_to_singular(kind)
+        sub_op_id = f"k8s.{op_kind}.list"
+        sub_params = {"namespace": namespace}
+        sub_result = await self.execute(target, sub_op_id, sub_params)
+        # OperationResult is a Pydantic model; ``.model_dump()`` gives
+        # the dict shape future dispatch-recording machinery (audit row,
+        # broadcast event) can serialise without an extra round-trip.
+        return {
+            "path": f"/{namespace}/{kind}",
+            "forwarded_to": sub_op_id,
+            "result": sub_result.model_dump(mode="json"),
         }
 
     @classmethod

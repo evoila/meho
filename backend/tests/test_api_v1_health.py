@@ -190,8 +190,10 @@ class _FakeKVv2:
     read_calls: list[dict[str, Any]] = field(default_factory=list)
     read_exc: Exception | None = None
 
-    def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-        self.read_calls.append({"path": path})
+    def read_secret_version(
+        self, path: str, mount_point: str = "secret", **_kwargs: Any
+    ) -> dict[str, Any]:
+        self.read_calls.append({"path": path, "mount_point": mount_point})
         if self.read_exc is not None:
             raise self.read_exc
         return {
@@ -363,8 +365,12 @@ def test_happy_path_returns_full_federation_response(
     assert fake.auth.jwt.login_calls == [
         {"role": "meho-mcp", "jwt": token, "path": "jwt"},
     ]
-    # The federation-proof path is hardcoded for v0.1.
-    assert fake.secrets.kv.v2.read_calls == [{"path": "meho/test/federation"}]
+    # The federation-proof path is hardcoded for v0.1; the health
+    # probe does not pass a mount, so the KV-v2 default ("secret")
+    # applies.
+    assert fake.secrets.kv.v2.read_calls == [
+        {"path": "meho/test/federation", "mount_point": "secret"},
+    ]
     # Per-request login → revoke pair.
     assert fake.auth.token.revoke_calls == 1
 

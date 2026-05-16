@@ -194,8 +194,10 @@ class _FakeKVv2:
     versions_exc: Exception | None = None
     delete_exc: Exception | None = None
 
-    def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-        self.read_calls.append({"path": path})
+    def read_secret_version(
+        self, path: str, mount_point: str = "secret", **_kwargs: Any
+    ) -> dict[str, Any]:
+        self.read_calls.append({"path": path, "mount_point": mount_point})
         if self.read_exc is not None:
             raise self.read_exc
         return {

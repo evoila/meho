@@ -82,14 +82,20 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
 
 All five register into operation group `kv`.
 
-**Mount handling.** Every handler accepts an optional `mount` param
-(JSON Schema default `"secret"`, mirroring hvac's `mount_point`
-default). The pre-existing `vault.kv.read` `path`-only call sites keep
-working; the consumer wrappers pass `<mount> <path>` explicitly for
-non-default mounts. The mount pattern rejects whitespace-only and
-slash-bearing input at param validation (`^(?=.*\S)[^/]+$`), so a bad
-mount is an `invalid_params` failure rather than a runtime
-`connector_error` (G3.3-T1 review B1/M1).
+**Mount handling.** Every handler — including `vault.kv.read` —
+accepts an optional `mount` param (JSON Schema default `"secret"`,
+mirroring hvac's `mount_point` default) forwarded as hvac's
+`mount_point`. The pre-existing `vault.kv.read` `path`-only call sites
+keep working on the default; the consumer wrappers pass
+`<mount> <path>` explicitly for non-default mounts (the Initiative
+#366 goal — retiring `scripts/_secret-read.sh`, which derived the
+mount from the path's first segment). The shared `mount` schema
+fragment uses `pattern="^(?=.*\S)[^/]+$"`: the `(?=.*\S)` lookahead
+makes an all-whitespace value a validation-time `invalid_params`
+failure rather than a value that `.strip()`s to an empty mount and
+degrades to a runtime `connector_error`; `[^/]+` rejects a
+slash-bearing value (`"secret/data"`) where hvac expects the bare
+mount handle.
 
 **Two-phase failure model.** Login-side failures (Vault unreachable,
 role denied) raise `VaultClientError` subclasses; read/write-side

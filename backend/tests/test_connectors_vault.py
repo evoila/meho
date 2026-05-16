@@ -380,29 +380,75 @@ async def test_execute_vault_kv_read_returns_secret_data(
     assert fake.auth.jwt.login_calls == [
         {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
     ]
-    assert fake.secrets.kv.v2.read_calls == [{"path": "secret/meho/test/federation"}]
+    # Mount defaults to "secret" when the caller omits it — the
+    # path-only call site keeps working unchanged.
+    assert fake.secrets.kv.v2.read_calls == [
+        {"path": "secret/meho/test/federation", "mount_point": "secret"},
+    ]
     assert fake.auth.token.revoke_calls == 1
+
+
+async def test_execute_vault_kv_read_honors_explicit_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_vault_typed_ops: None,
+) -> None:
+    """An explicit ``mount`` is forwarded as hvac's ``mount_point``.
+
+    This is the load-bearing case for Initiative #366: the consumer
+    wrappers address secrets as ``<mount> <path>`` so they can read
+    arbitrary mounts (retiring ``scripts/_secret-read.sh``, which
+    derived the mount from the path's first segment). Without mount
+    forwarding on ``vault.kv.read`` the wrapper goal is unmet.
+    """
+    fake = install_fake_client(monkeypatch, secret={"k": "v"})
+    result = await VaultConnector().execute(
+        _make_target(),
+        "vault.kv.read",
+        {"mount": "kv-prod", "path": "team/api"},
+    )
+
+    assert result.status == "ok", result.error
+    assert fake.secrets.kv.v2.read_calls == [
+        {"path": "team/api", "mount_point": "kv-prod"},
+    ]
 
 
 @pytest.mark.parametrize(
     "params",
-    [{}, {"path": ""}, {"path": "   "}],
-    ids=["missing", "empty-string", "whitespace-only"],
+    [
+        {},
+        {"path": ""},
+        {"path": "   "},
+        {"mount": "   ", "path": "p"},
+        {"mount": "secret/data", "path": "p"},
+    ],
+    ids=[
+        "missing",
+        "empty-string",
+        "whitespace-only",
+        "mount-whitespace-only",
+        "mount-with-slash",
+    ],
 )
 async def test_execute_vault_kv_read_invalid_path_returns_dispatcher_error(
     monkeypatch: pytest.MonkeyPatch,
     params: dict[str, Any],
     _registered_vault_typed_ops: None,
 ) -> None:
-    """Missing, empty, or whitespace-only ``path`` → dispatcher's ``invalid_params``.
+    """Bad ``path`` or ``mount`` → dispatcher's ``invalid_params``.
 
     The pre-G0.6 handler ran the validation inline (``isinstance``
     + ``strip``); post-refactor, the dispatcher's
     :class:`Draft202012Validator` enforces ``minLength=1`` /
-    ``pattern="\\S"`` from the registered parameter_schema.
-    The non-string ``path`` case (``{"path": 123}``) is covered by
-    the schema's ``"type": "string"`` constraint and lands in the
-    same ``invalid_params`` shape.
+    ``pattern="\\S"`` for ``path`` from the registered
+    parameter_schema. ``mount`` is the shared optional fragment whose
+    ``pattern="^(?=.*\\S)[^/]+$"`` rejects an all-whitespace value
+    (which would otherwise ``.strip()`` to an empty mount and degrade
+    to a runtime ``connector_error``) and a slash-bearing value
+    (``"secret/data"``) at validation time. The non-string ``path``
+    case (``{"path": 123}``) is covered by the schema's
+    ``"type": "string"`` constraint and lands in the same
+    ``invalid_params`` shape.
     """
     install_fake_client(monkeypatch)
     result = await VaultConnector().execute(_make_target(), "vault.kv.read", params)

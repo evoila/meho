@@ -87,11 +87,16 @@ _DEFAULT_KV_MOUNT = "secret"
 #: Shared JSON Schema fragment for the optional ``mount`` param. KV-v2
 #: mount names are single path segments (no slashes); ``pattern`` keeps
 #: a stray ``"secret/data"`` from being passed where hvac expects the
-#: bare mount handle.
+#: bare mount handle. The leading ``(?=.*\S)`` lookahead rejects an
+#: all-whitespace value at validation time (``invalid_params``) rather
+#: than letting it slip past ``minLength`` and degrade to an empty
+#: mount after the handler's ``.strip()`` — a runtime
+#: ``connector_error`` is a worse signal than a clear param-validation
+#: failure.
 _MOUNT_PROPERTY: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
-    "pattern": "^[^/]+$",
+    "pattern": "^(?=.*\\S)[^/]+$",
     "default": _DEFAULT_KV_MOUNT,
     "description": (
         "KV v2 secret-engine mount point (single path segment, no "
@@ -126,9 +131,19 @@ _PATH_PROPERTY: dict[str, Any] = {
 #: * ``additionalProperties=False`` rejects unexpected keys so a typo
 #:   like ``{"paht": "..."}`` surfaces as a clear validation error
 #:   instead of silently dispatching with a missing ``path``.
+#:
+#: ``mount`` is the shared optional KV-v2 mount fragment (defaults to
+#: ``"secret"``), matching every sibling op (list/put/versions/delete).
+#: Path-only ``vault.kv.read`` call sites keep working unchanged — the
+#: default resolves the deployment-wide KV-v2 engine — but the consumer
+#: wrappers can now address ``<mount> <path>`` for a non-default mount,
+#: which is the whole point of Initiative #366 (retiring the
+#: ``scripts/_secret-read.sh`` wrapper that derived the mount from the
+#: path's first segment).
 VAULT_KV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "mount": _MOUNT_PROPERTY,
         "path": {
             "type": "string",
             "minLength": 1,
@@ -180,11 +195,15 @@ _VAULT_KV_READ_LLM_INSTRUCTIONS: dict[str, Any] = {
         "attributed to the calling operator."
     ),
     "parameter_hints": {
+        "mount": (
+            "Optional. KV v2 mount point; defaults to 'secret', the "
+            "deployment-wide KV-v2 engine. Supply only when the secret "
+            "lives under a non-default mount."
+        ),
         "path": (
             "Required. The path under the KV v2 mount (no leading "
-            "slash, no mount prefix). The mount is configured "
-            "deployment-wide; the operator only supplies the path "
-            "below the mount."
+            "slash, no mount prefix). With the mount defaulted, the "
+            "operator supplies only the path below the mount."
         ),
     },
     "output_shape": (
@@ -214,9 +233,11 @@ async def vault_kv_read(target: Any, params: dict[str, Any]) -> dict[str, Any]:
         against the resolved target row.
     params
         Already validated by the dispatcher against
-        :data:`VAULT_KV_READ_PARAMETER_SCHEMA`. The handler only re-
-        extracts ``params["path"]`` -- the schema guarantees it's a
-        non-empty, non-whitespace string.
+        :data:`VAULT_KV_READ_PARAMETER_SCHEMA`. The handler re-extracts
+        ``params["path"]`` (schema-guaranteed non-empty, non-whitespace
+        string) and the optional ``params["mount"]`` (defaults to
+        ``"secret"`` via :data:`_DEFAULT_KV_MOUNT`, forwarded as hvac's
+        ``mount_point``).
 
     Returns
     -------
@@ -257,6 +278,7 @@ async def vault_kv_read(target: Any, params: dict[str, Any]) -> dict[str, Any]:
     # We re-strip so trailing whitespace doesn't slip into the hvac
     # call -- the schema permits ``"a "`` (one non-whitespace char) and
     # we want the wire shape to match what the operator typed.
+    mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
 
     # vault_client_for_operator is accessed via the module reference so
@@ -268,6 +290,7 @@ async def vault_kv_read(target: Any, params: dict[str, Any]) -> dict[str, Any]:
         secret_payload = await asyncio.to_thread(
             client.secrets.kv.v2.read_secret_version,
             path=path,
+            mount_point=mount,
             raise_on_deleted_version=False,
         )
         # Structural unwrap -- raises KeyError on a malformed hvac

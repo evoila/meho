@@ -35,6 +35,7 @@ Coverage matrix (per Issue #324 acceptance criteria):
 
 from __future__ import annotations
 
+import random
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -44,6 +45,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from kubernetes_asyncio.client.models import (
     CoreV1Event,
+    CoreV1EventSeries,
     V1ConfigMap,
     V1EventSource,
     V1HTTPIngressPath,
@@ -477,10 +479,15 @@ def test_configmap_list_row_keys_only_no_data_field() -> None:
     # The privacy contract: NO data, NO binary_data on the row.
     assert "data" not in row
     assert "binary_data" not in row
-    # Values must not leak via any other field on the row.
+    # Values must not leak via any other field on the row. ``in`` on a
+    # list checks element-equality; the privacy contract is substring
+    # absence, so list-typed values are flattened element-by-element
+    # and each string element is substring-scanned.
     for value in row.values():
-        if isinstance(value, (str, list)):
+        if isinstance(value, str):
             assert "secret-repo-url" not in value
+        elif isinstance(value, list):
+            assert not any(isinstance(elem, str) and "secret-repo-url" in elem for elem in value)
 
 
 def test_configmap_list_row_merges_data_and_binary_data_keys() -> None:
@@ -552,6 +559,7 @@ def _make_event(
     first_timestamp: datetime | None = None,
     last_timestamp: datetime | None = None,
     event_time: datetime | None = None,
+    series: CoreV1EventSeries | None = None,
 ) -> CoreV1Event:
     return CoreV1Event(
         metadata=V1ObjectMeta(name=name, namespace=namespace),
@@ -566,6 +574,7 @@ def _make_event(
         first_timestamp=first_timestamp,
         last_timestamp=last_timestamp,
         event_time=event_time,
+        series=series,
     )
 
 
@@ -604,8 +613,62 @@ def test_event_row_event_time_fallback_for_eventseries_shape() -> None:
     row = event_row(event, now=now)
     assert row["last_seen_seconds"] == 120
     assert row["first_seen_seconds"] == 120
-    # ``count=None`` coerces to 1 (singleton event).
+    # ``count=None`` AND ``series=None`` coerces to 1 (singleton event).
     assert row["count"] == 1
+
+
+def test_event_row_count_from_event_series_when_flat_count_unset() -> None:
+    """K8s 1.27+ EventSeries: authoritative count lives on ``series.count``.
+
+    Regression for M1 (PR #561): when ``event.count`` is None but the
+    event carries a populated ``series`` object, the row's ``count``
+    must reflect ``series.count`` (the recurring-event occurrence
+    total), not the 1-fallback used for singletons. ``kubectl
+    describe`` shows the series count for these events; the connector
+    must agree.
+    """
+    now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)
+    series = CoreV1EventSeries(
+        count=47,
+        last_observed_time=now - timedelta(seconds=30),
+    )
+    event = _make_event(
+        first_timestamp=None,
+        last_timestamp=None,
+        event_time=now - timedelta(seconds=3600),
+        count=None,
+        series=series,
+    )
+    row = event_row(event, now=now)
+    # series.count wins over the None flat count.
+    assert row["count"] == 47
+    # And series.last_observed_time wins over event_time for last_seen.
+    assert row["last_seen_seconds"] == 30
+
+
+def test_event_row_count_prefers_series_count_over_flat_count() -> None:
+    """Disagreement case: when both surfaces carry a count, the series
+    count is authoritative.
+
+    The wire reality is that ``event.count`` is left at its
+    pre-series value (frozen at the moment the API server upgraded
+    the event into a series); ``event.series.count`` is the live,
+    updated tally. Operators reading ``kubectl describe`` see the
+    series count.
+    """
+    now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)
+    series = CoreV1EventSeries(
+        count=99,
+        last_observed_time=now - timedelta(seconds=10),
+    )
+    event = _make_event(
+        last_timestamp=now - timedelta(seconds=10),
+        first_timestamp=now - timedelta(seconds=3600),
+        count=3,
+        series=series,
+    )
+    row = event_row(event, now=now)
+    assert row["count"] == 99
 
 
 def test_event_row_missing_involved_object_surfaces_none_fields() -> None:
@@ -869,8 +932,12 @@ async def test_k8s_event_list_field_selector_forwarded() -> None:
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
         assert kwargs["namespace"] == "argocd"
         assert kwargs["field_selector"] == "type=Warning"
-        # Default limit applied even when caller omits it.
-        assert kwargs["limit"] == DEFAULT_EVENT_LIMIT
+        # The wire request always asks for MAX_EVENT_LIMIT; the
+        # caller's (or default) ``limit`` is the post-sort truncation
+        # bound, not the API-side limit. See the
+        # ``test_k8s_event_list_fetches_max_then_sorts_client_side``
+        # regression for rationale.
+        assert kwargs["limit"] == MAX_EVENT_LIMIT
 
     assert result["total"] == 1
     assert result["rows"][0]["type"] == "Warning"
@@ -878,7 +945,26 @@ async def test_k8s_event_list_field_selector_forwarded() -> None:
 
 @pytest.mark.asyncio
 async def test_k8s_event_list_default_limit() -> None:
-    """Without an explicit ``limit`` param, the handler passes DEFAULT_EVENT_LIMIT to the API."""
+    """Without an explicit ``limit``, the post-sort truncation uses DEFAULT_EVENT_LIMIT.
+
+    The wire request still asks for the MAX_EVENT_LIMIT superset (so
+    the client-side recency sort is correct); the truncation that
+    follows uses DEFAULT_EVENT_LIMIT when the caller didn't override
+    ``limit``. This test pins both: the wire-side cap and the
+    result-side default truncation.
+    """
+    now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)
+    # Build DEFAULT_EVENT_LIMIT+10 events so the default truncation
+    # actually fires; without enough rows the test would silently
+    # pass for any default value.
+    api_events: list[CoreV1Event] = [
+        _make_event(
+            name=f"evt-{i}",
+            last_timestamp=now - timedelta(seconds=10 + i),
+            first_timestamp=now - timedelta(seconds=3600),
+        )
+        for i in range(DEFAULT_EVENT_LIMIT + 10)
+    ]
     connector = _make_connector()
     with (
         patch(
@@ -889,13 +975,18 @@ async def test_k8s_event_list_default_limit() -> None:
         patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
     ):
         list_resp = MagicMock()
-        list_resp.items = []
+        list_resp.items = api_events
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
-        await connector.k8s_event_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_event_list(_TARGET, {"namespace": "argocd"})
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
-        assert kwargs["limit"] == DEFAULT_EVENT_LIMIT
+        # Wire: always MAX_EVENT_LIMIT.
+        assert kwargs["limit"] == MAX_EVENT_LIMIT
         # No field_selector kwarg when caller didn't pass one.
         assert "field_selector" not in kwargs
+
+    # Post-sort truncation: DEFAULT_EVENT_LIMIT.
+    assert result["total"] == DEFAULT_EVENT_LIMIT
+    assert len(result["rows"]) == DEFAULT_EVENT_LIMIT
 
 
 @pytest.mark.asyncio
@@ -904,10 +995,17 @@ async def test_k8s_event_list_limit_respects_value_and_ordered_by_last_seen() ->
 
     The handler's ``event_row`` computes ``last_seen_seconds`` against
     ``datetime.now(UTC)`` (no ``now`` seam at the handler layer -- it
-    flows through ``ops_config.event_row``'s default branch). The test
+    flows through ``ops_events.event_row``'s default branch). The test
     is invariant to the wall clock: it constructs events whose
     last_timestamps are evenly spaced from a moving reference and
     asserts the **relative ordering** + post-sort name sequence.
+
+    Also pins the wire-side contract: the handler must request
+    ``MAX_EVENT_LIMIT`` rows from the API regardless of the caller's
+    ``limit``, because the K8s events endpoint has no server-side
+    last-seen ordering guarantee. See
+    ``test_k8s_event_list_fetches_max_then_sorts_client_side`` for
+    the dedicated regression on that wire contract.
     """
     # Use a recent reference so the elapsed-seconds values are bounded
     # and never negative regardless of test latency.
@@ -923,8 +1021,6 @@ async def test_k8s_event_list_limit_respects_value_and_ordered_by_last_seen() ->
         for i in range(12)
     ]
     # Shuffle order so the test catches a missing sort.
-    import random
-
     random.Random(42).shuffle(api_events)
 
     connector = _make_connector()
@@ -941,7 +1037,10 @@ async def test_k8s_event_list_limit_respects_value_and_ordered_by_last_seen() ->
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
         result = await connector.k8s_event_list(_TARGET, {"namespace": "argocd", "limit": 10})
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
-        assert kwargs["limit"] == 10
+        # The handler always pulls up to MAX_EVENT_LIMIT, never the
+        # caller's smaller ``limit`` -- the recency sort needs the
+        # superset to be correct.
+        assert kwargs["limit"] == MAX_EVENT_LIMIT
 
     # Limit truncates to 10 most-recent (after sort).
     assert result["total"] == 10
@@ -952,6 +1051,66 @@ async def test_k8s_event_list_limit_respects_value_and_ordered_by_last_seen() ->
     # The 10 kept rows are the 10 most-recent input events (evt-0..evt-9).
     names = [row["name"] for row in result["rows"]]
     assert names == [f"evt-{i}" for i in range(10)]
+
+
+@pytest.mark.asyncio
+async def test_k8s_event_list_fetches_max_then_sorts_client_side() -> None:
+    """Regression for the "most-recent-N" acceptance criterion (B1).
+
+    The K8s events endpoint returns rows in resource-version order
+    with **no server-side ordering guarantee** by ``lastTimestamp`` --
+    see
+    https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions.
+    If the handler passed the caller's ``limit`` straight to the API,
+    the server-truncated subset would not contain the actual N most
+    recent events. The handler therefore must request up to
+    :data:`MAX_EVENT_LIMIT` rows, sort by ``last_seen_seconds``
+    client-side, then truncate to the caller's ``limit``.
+
+    This test mocks the API to return 25 events deliberately
+    creation-ordered so the "wrong" prefix (the first 5) is **not**
+    the recency-correct answer. With ``limit=5`` the kept rows must
+    be the 5 most-recent by last_seen, not the first 5 the mock
+    returned.
+    """
+    reference = datetime.now(UTC)
+    # Build 25 events where ``evt-{i}`` last fired ``10 + 10*i`` seconds
+    # ago, so evt-0 is most recent and evt-24 oldest. Return them in
+    # *reverse* recency order from the mock API so a naive
+    # "trust the API order + truncate" implementation would keep the
+    # 5 OLDEST instead of the 5 newest.
+    api_events: list[CoreV1Event] = [
+        _make_event(
+            name=f"evt-{i}",
+            last_timestamp=reference - timedelta(seconds=10 + 10 * i),
+            first_timestamp=reference - timedelta(seconds=10 + 10 * i + 600),
+        )
+        for i in range(25)
+    ]
+    api_events.reverse()  # API returns oldest-first; sort must overcome this.
+
+    connector = _make_connector()
+    with (
+        patch(
+            "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+            new_callable=AsyncMock,
+            return_value=MagicMock(close=AsyncMock()),
+        ),
+        patch("meho_backplane.connectors.kubernetes.connector.client.CoreV1Api") as core_v1_cls,
+    ):
+        list_resp = MagicMock()
+        list_resp.items = api_events
+        core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
+        result = await connector.k8s_event_list(_TARGET, {"namespace": "argocd", "limit": 5})
+        kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
+        # Wire-side: ask for the superset, not the caller's limit.
+        assert kwargs["limit"] == MAX_EVENT_LIMIT
+
+    # Client-side: kept rows are the 5 truly most-recent (evt-0..evt-4),
+    # not the 5 the API server returned at the head of its response.
+    assert result["total"] == 5
+    names = [row["name"] for row in result["rows"]]
+    assert names == [f"evt-{i}" for i in range(5)]
 
 
 @pytest.mark.asyncio
@@ -971,4 +1130,7 @@ async def test_k8s_event_list_limit_clamps_at_max() -> None:
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
         await connector.k8s_event_list(_TARGET, {"namespace": "argocd", "limit": 99999})
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
+        # The API request always asks for MAX_EVENT_LIMIT regardless
+        # of how the caller's ``limit`` was clamped -- the clamp
+        # affects the post-sort truncation, not the wire request.
         assert kwargs["limit"] == MAX_EVENT_LIMIT

@@ -177,11 +177,22 @@ def event_row(
     metadata = event.metadata
     last_seen = _event_last_seen(event)
     first_seen = _event_first_seen(event)
-    # ``count`` is None for the 1.27+ EventSeries singletons; coerce to
-    # the operator-mental-model default of 1 (one observation) so the
-    # row's type is stable.
-    raw_count = event.count
-    count: int = int(raw_count) if raw_count is not None else 1
+    # K8s 1.27+ moved the authoritative occurrence count for recurring
+    # events onto ``event.series.count`` (CoreV1EventSeries); the
+    # pre-1.27 surface kept it on ``event.count``. Both attributes are
+    # always present on a CoreV1Event for backward compat, but on a
+    # series-shape event ``event.count`` is None while
+    # ``event.series.count`` carries the real number. Prefer the
+    # series count; fall back to the flat field; default to 1 only
+    # when neither surface has set anything (the EventSeries singleton
+    # shape, where a single observation has no ``series`` yet).
+    series = event.series
+    if series is not None and getattr(series, "count", None) is not None:
+        count: int = int(series.count)
+    elif event.count is not None:
+        count = int(event.count)
+    else:
+        count = 1
     return {
         "name": metadata.name if metadata is not None else None,
         "namespace": metadata.namespace if metadata is not None else None,

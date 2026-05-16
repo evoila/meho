@@ -435,22 +435,30 @@ class KubernetesConnector(Connector):
         Op-id: ``k8s.event.list``. Wraps
         ``CoreV1Api.list_namespaced_event(namespace, field_selector=..., limit=...)``
         and projects each :class:`CoreV1Event` through
-        :func:`~meho_backplane.connectors.kubernetes.ops_config.event_row`.
+        :func:`~meho_backplane.connectors.kubernetes.ops_events.event_row`.
 
-        The sort + truncate happens **client-side** even when the K8s
-        API accepts a ``limit`` kwarg, because the API server returns
-        rows in resource-version order (creation order), not
-        last-seen order -- a row that was first created long ago but
-        last fired seconds ago would otherwise sort below a newer row
-        that hasn't fired recently. Pulling the API's ``limit`` worth
-        of rows and re-sorting locally is the simplest way to ensure
-        the operator sees the truly most-recent events.
+        The K8s API server returns events in resource-version order
+        (creation order), **not** last-seen order, and offers no
+        server-side ``orderBy`` knob -- see
+        https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions
+        for the ordering contract. Passing the caller's ``limit``
+        directly to the API would therefore truncate an arbitrary
+        creation-ordered prefix before the client-side
+        :func:`sort_event_rows_recent_first` ever runs, defeating the
+        "N most-recent" acceptance criterion: an event created hours
+        ago but firing every minute would drop out of a small
+        ``--limit 10`` result while an old quiescent event near the
+        top of the creation order kept its slot.
 
-        To stay within the API server's response budget when the
-        client wants a small ``limit``, the handler still passes the
-        ``limit`` kwarg to the API: the wire request asks for the
-        rows the operator wanted, and the client-side sort just
-        reorders the subset before returning.
+        Instead, the handler always asks the API for up to
+        :data:`MAX_EVENT_LIMIT` rows -- a bounded superset -- then
+        sorts the projection by ``last_seen_seconds`` and truncates
+        client-side to the caller's ``limit``. The cap is set in
+        :mod:`ops_events` (currently 500) at the same operator-ergonomic
+        ceiling the schema's ``maximum`` enforces; above that the
+        operator is better served by a ``field_selector`` than by a
+        bigger result set (the K8s API itself paginates above ~1k
+        items per response in most deployments).
         """
         from meho_backplane.connectors.kubernetes.ops_events import (
             DEFAULT_EVENT_LIMIT,
@@ -471,7 +479,11 @@ class KubernetesConnector(Connector):
 
         api_client = await self._get_api_client(target)
         core_v1 = client.CoreV1Api(api_client)
-        kwargs: dict[str, Any] = {"namespace": namespace, "limit": limit}
+        # Always pull up to MAX_EVENT_LIMIT rows so the client-side
+        # sort sees the full recency-relevant superset; the caller's
+        # ``limit`` truncates after the sort. See the docstring above
+        # for the ordering rationale.
+        kwargs: dict[str, Any] = {"namespace": namespace, "limit": MAX_EVENT_LIMIT}
         if field_selector:
             kwargs["field_selector"] = field_selector
         resp = await core_v1.list_namespaced_event(**kwargs)

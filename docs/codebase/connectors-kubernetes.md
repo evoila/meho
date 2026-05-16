@@ -87,7 +87,7 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` -- class / hosts / TLS / rules. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` -- **keys only, NO values**. |
 | `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
-| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` -- most-recent-first + field_selector + limit. |
+| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 
 T6 of Initiative #320 (CLI alias verbs + k3d acceptance) extends this

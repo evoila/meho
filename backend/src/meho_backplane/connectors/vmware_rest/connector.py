@@ -93,6 +93,11 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.connectors.vmware_rest._mount import (
+    SESSION_PATH_LEGACY,
+    SESSION_PATH_MODERN,
+    mounted_path,
+)
 from meho_backplane.connectors.vmware_rest.session import (
     VsphereSessionLoader,
     VsphereTargetLike,
@@ -122,20 +127,13 @@ _SESSION_HEADER = "vmware-api-session-id"
 # and a defensive read here costs nothing.
 _SESSION_TOKEN_OBJECT_KEY = "value"
 
-# Session endpoints. Modern vCenter (7.0+) lives at ``/api/session``;
-# the legacy ``/rest/com/vmware/cis/session`` path is still served by
-# real vCenter for backward-compat and is the *only* path the upstream
-# ``vmware/vcsim`` simulator registers (its ``vapi/simulator`` package
-# wires the handler at ``rest.Path + internal.SessionPath`` =
-# ``/rest`` + ``/com/vmware/cis/session`` and does not also mount under
-# ``/api/``). The connector tries the modern path first and falls back
-# to the legacy path on 404 so production targets (which serve both)
-# pay no extra round-trip while vcsim integration tests stay green.
-# The established path is cached per-target in ``self._session_paths``
-# so the DELETE in ``aclose()`` targets the same endpoint that minted
-# the token.
-_SESSION_PATH_MODERN = "/api/session"
-_SESSION_PATH_LEGACY = "/rest/com/vmware/cis/session"
+# Session endpoints + the spec-relative-op → /api-or-/rest mount
+# mapping live in ``._mount`` (extracted to keep this module within
+# the code-quality size budget; see that module's docstring for the
+# full modern-vs-legacy + vcsim rationale). ``SESSION_PATH_MODERN`` /
+# ``SESSION_PATH_LEGACY`` drive session establishment + the
+# ``aclose()`` revoke; ``mounted_path`` maps an ingested descriptor
+# path onto the mount the target's established session selected.
 
 # Verbs that go through HttpConnector._request_json's tenacity retry
 # decorator. Non-idempotent verbs (POST / PUT / PATCH / DELETE) route
@@ -247,7 +245,7 @@ class VmwareRestConnector(HttpConnector):
         # :meth:`aclose` can DELETE against the same path. Production
         # vCenter serves both ``/api/session`` and the legacy
         # ``/rest/com/vmware/cis/session``; vcsim serves only the legacy
-        # path. See ``_SESSION_PATH_MODERN`` / ``_SESSION_PATH_LEGACY``
+        # path. See ``SESSION_PATH_MODERN`` / ``SESSION_PATH_LEGACY``
         # for the rationale and source citations.
         self._session_paths: dict[str, str] = {}
         self._session_lock = asyncio.Lock()
@@ -279,6 +277,34 @@ class VmwareRestConnector(HttpConnector):
             )
         token = await self._session_token(target)
         return {_SESSION_HEADER: token}
+
+    async def mount_op_path(self, target: VsphereTargetLike, path: str) -> str:
+        """Map a spec-relative ingested-op *path* onto *target*'s live mount.
+
+        Overrides the identity :meth:`HttpConnector.mount_op_path` hook
+        the dispatcher calls for ``source_kind='ingested'`` ops. Ingested
+        descriptors carry spec-relative paths (``/vcenter/vm``); the
+        vCenter REST API is mounted at ``/api`` on modern vCenter and
+        ``/rest`` on legacy vCenter / vcsim. Establishing the session is
+        what records the live mount in :attr:`_session_paths` (the
+        modern→legacy 404 fallback in :meth:`_session_token`); it's
+        idempotent + cached, so calling it here costs nothing on the
+        warm path and is what lets the *first* op against a legacy-only
+        target (vcsim) mount correctly instead of defaulting to ``/api``
+        and 404ing. The pure mapping — including the already-mounted
+        pass-through — lives in :func:`._mount.mounted_path`.
+
+        This is a dedicated dispatcher hook rather than a
+        ``_request_json`` / ``_post_json`` override on purpose: those
+        carry tenacity's ``@retry`` (and the ``.retry`` attribute that
+        retry-aware tests + callers introspect), and ``fingerprint()``
+        reaches ``GET /api/about`` through ``_get_json`` *pre-session*
+        — overriding the transport methods would both strip ``.retry``
+        and force a spurious session establish on the pre-auth probe.
+        """
+        await self._session_token(target)
+        session_path = self._session_paths.get(target.name, SESSION_PATH_MODERN)
+        return mounted_path(session_path, path)
 
     async def _session_token(self, target: VsphereTargetLike) -> str:
         """Return the cached session token for *target*, establishing one on first use.
@@ -321,14 +347,14 @@ class VmwareRestConnector(HttpConnector):
                     "{'username': str, 'password': str}"
                 ) from exc
             auth = (username, password)
-            resp = await client.post(_SESSION_PATH_MODERN, auth=auth)
-            established_path = _SESSION_PATH_MODERN
+            resp = await client.post(SESSION_PATH_MODERN, auth=auth)
+            established_path = SESSION_PATH_MODERN
             if resp.status_code == 404:
                 # Modern endpoint not served (vcsim, very old vCenter,
                 # or a reverse-proxy that hasn't been updated). Try the
                 # legacy path before declaring failure.
-                resp = await client.post(_SESSION_PATH_LEGACY, auth=auth)
-                established_path = _SESSION_PATH_LEGACY
+                resp = await client.post(SESSION_PATH_LEGACY, auth=auth)
+                established_path = SESSION_PATH_LEGACY
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
@@ -517,7 +543,7 @@ class VmwareRestConnector(HttpConnector):
             # ``_session_token``; the default keeps shutdown safe if
             # a future code path ever caches a token without recording
             # its endpoint.
-            revoke_path = paths.get(target_name, _SESSION_PATH_MODERN)
+            revoke_path = paths.get(target_name, SESSION_PATH_MODERN)
             try:
                 resp = await client.request(
                     "DELETE",

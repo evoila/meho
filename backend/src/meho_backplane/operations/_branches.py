@@ -156,6 +156,14 @@ async def dispatch_ingested(
         params,
     )
     substituted = _substitute_path(path_template, path_params)
+    # Vendor connectors may expose ingested ops under a mount prefix
+    # the spec omits (vCenter REST: ``/api`` modern / ``/rest`` legacy).
+    # ``mount_op_path`` defaults to identity on HttpConnector; the
+    # getattr keeps this branch tolerant of a connector that predates
+    # the hook rather than hard-failing on a missing attribute.
+    mount_op_path = getattr(connector, "mount_op_path", None)
+    if mount_op_path is not None:
+        substituted = await mount_op_path(target, substituted)
     raw_jwt = operator.raw_jwt
     if method in ("GET", "HEAD", "OPTIONS"):
         request_json = getattr(connector, "_request_json", None)

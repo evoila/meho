@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -154,6 +155,72 @@ def test_resolve_outside_advertised_range_returns_no_match() -> None:
         cls=_VmwareRest9,
     )
     target = _FakeTarget(product="vmware", fingerprint=_fingerprint("8.0.0"))
+    with pytest.raises(NoMatchingConnector, match="vmware"):
+        resolve_connector(target)
+
+
+# ---------------------------------------------------------------------------
+# Production fingerprint shape — a JSON dict, not a duck-typed object
+# ---------------------------------------------------------------------------
+#
+# Regression guard for the v0.2 ship blocker: the ORM stores
+# ``Target.fingerprint`` as ``FingerprintResult.model_dump(mode="json")``
+# — a plain dict. The resolver previously read the version with
+# ``getattr(fp, "version", None)``, which is always ``None`` on a dict,
+# so *every* real probed target failed to match any versioned connector
+# (→ ``NoMatchingConnector`` → ``no_connector`` at dispatch). Every
+# pre-existing resolver test used the duck-typed ``_FakeFingerprint``
+# object, so the dict path had zero coverage and shipped broken. These
+# two tests pin the production shape.
+
+
+@dataclass
+class _DictFingerprintTarget:
+    """Target whose ``fingerprint`` is the real JSON dict, not an object."""
+
+    product: str
+    fingerprint: dict[str, object] | None = None
+    preferred_impl_id: str | None = None
+
+
+def test_resolve_reads_version_from_dict_fingerprint() -> None:
+    """A probed target (dict fingerprint) resolves the versioned connector."""
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareRest9,
+    )
+    fingerprint = FingerprintResult(
+        vendor="VMware, Inc.",
+        product="vcenter",
+        version="9.0.2",
+        reachable=True,
+        probed_at=datetime(2026, 5, 15, tzinfo=UTC),
+        probe_method="rest-probe",
+    ).model_dump(mode="json")
+    target = _DictFingerprintTarget(product="vmware", fingerprint=fingerprint)
+    assert resolve_connector(target) is _VmwareRest9
+
+
+def test_resolve_dict_fingerprint_without_version_skips_versioned_connector() -> None:
+    """A dict fingerprint missing ``version`` matches no versioned connector.
+
+    Mirrors the pre-fingerprint window: a target row exists but the
+    probe hasn't populated a version yet. A versioned connector must
+    not bind on no version (the resolver's documented contract); the
+    failure mode is a clean ``NoMatchingConnector``, not a wrong bind.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_VmwareRest9,
+    )
+    target = _DictFingerprintTarget(
+        product="vmware",
+        fingerprint={"vendor": "VMware, Inc.", "product": "vcenter", "reachable": True},
+    )
     with pytest.raises(NoMatchingConnector, match="vmware"):
         resolve_connector(target)
 

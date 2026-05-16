@@ -704,6 +704,86 @@ async def test_k8s_ls_path_with_extra_segments_collapses_to_two_arg_forward() ->
 
 
 # ---------------------------------------------------------------------------
+# Tests -- _normalise_kind_to_singular (regression: PR #543 review B1)
+# ---------------------------------------------------------------------------
+
+
+def test_normalise_kind_to_singular_pins_every_irregular_plural() -> None:
+    """Each entry in ``_PLURAL_TO_SINGULAR_KIND`` maps to its singular form."""
+    from meho_backplane.connectors.kubernetes.connector import (
+        _PLURAL_TO_SINGULAR_KIND,
+        _normalise_kind_to_singular,
+    )
+
+    for plural, singular in _PLURAL_TO_SINGULAR_KIND.items():
+        assert _normalise_kind_to_singular(plural) == singular
+
+
+def test_normalise_kind_to_singular_is_idempotent_on_singular_kinds_ending_in_s() -> None:
+    """Singular kinds ending in 's' must NOT have the trailing 's' stripped.
+
+    Regression: PR #543 review finding B1. Before the fix, the
+    strip-trailing-s default branch mangled ``ingress`` -> ``ingres`` and
+    ``storageclass`` -> ``storageclas`` for operators who typed the
+    singular form directly (``/argocd/ingress``). The guard now returns
+    the kind unchanged when it already matches one of the mapped
+    singular forms.
+    """
+    from meho_backplane.connectors.kubernetes.connector import (
+        _PLURAL_TO_SINGULAR_KIND,
+        _normalise_kind_to_singular,
+    )
+
+    for singular in _PLURAL_TO_SINGULAR_KIND.values():
+        assert _normalise_kind_to_singular(singular) == singular, (
+            f"singular kind {singular!r} should pass through unchanged"
+        )
+    # Spot-checks for the most operator-visible cases.
+    assert _normalise_kind_to_singular("ingress") == "ingress"
+    assert _normalise_kind_to_singular("storageclass") == "storageclass"
+    assert _normalise_kind_to_singular("persistentvolume") == "persistentvolume"
+    assert _normalise_kind_to_singular("persistentvolumeclaim") == "persistentvolumeclaim"
+
+
+def test_normalise_kind_to_singular_strips_trailing_s_on_regular_plurals() -> None:
+    """The strip-trailing-s default branch still handles the common case."""
+    from meho_backplane.connectors.kubernetes.connector import (
+        _normalise_kind_to_singular,
+    )
+
+    assert _normalise_kind_to_singular("pods") == "pod"
+    assert _normalise_kind_to_singular("services") == "service"
+    assert _normalise_kind_to_singular("configmaps") == "configmap"
+    assert _normalise_kind_to_singular("nodes") == "node"
+    assert _normalise_kind_to_singular("namespaces") == "namespace"
+
+
+@pytest.mark.asyncio
+async def test_k8s_ls_forwards_singular_ingress_path_without_mangling() -> None:
+    """``/argocd/ingress`` (singular) forwards to ``k8s.ingress.list``, not ``k8s.ingres.list``.
+
+    Regression: PR #543 review finding m2. The forwarder runs the
+    operator-typed kind through :func:`_normalise_kind_to_singular`
+    before composing the sub-op id; the B1 fix ensures the singular
+    form survives the normalisation.
+    """
+    from meho_backplane.operations import typed_register as tr_module
+
+    connector = _make_connector()
+    with patch.object(
+        tr_module,
+        "encode_endpoint_text",
+        AsyncMock(return_value=[0.1] * 384),
+    ):
+        await KubernetesConnector.register_operations()
+
+    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/ingress"})
+
+    assert result["path"] == "/argocd/ingress"
+    assert result["forwarded_to"] == "k8s.ingress.list"
+
+
+# ---------------------------------------------------------------------------
 # Tests -- end-to-end through execute() shim (registered op dispatch)
 # ---------------------------------------------------------------------------
 

@@ -79,8 +79,6 @@ from meho_backplane.connectors.schemas import (
 __all__ = ["KubernetesConnector", "product_from_git_version"]
 
 
-
-
 _log = structlog.get_logger(__name__)
 
 _DEFAULT_K8S_PORT = 6443
@@ -109,13 +107,23 @@ def _normalise_kind_to_singular(kind: str) -> str:
     the connector because the rest of the substrate doesn't care --
     op_ids are opaque dotted strings to the dispatcher.
 
-    Default branch: strip a trailing ``s``. The irregulars
-    (``ingresses``, ``persistentvolumeclaims``) live in
-    :data:`_PLURAL_TO_SINGULAR_KIND` so the function stays declarative
-    rather than chained ``if/elif``.
+    Three branches, in order:
+
+    1. Explicit plural in :data:`_PLURAL_TO_SINGULAR_KIND` -- the
+       irregulars (``ingresses``, ``persistentvolumeclaims``) that
+       don't strip a trailing ``s`` cleanly.
+    2. An operator-typed singular that already matches one of the
+       mapped singular forms (``ingress``, ``storageclass``,
+       ``persistentvolume``, ``persistentvolumeclaim``). Return as-is
+       to avoid the strip-trailing-s branch mangling ``ingress`` into
+       ``ingres``.
+    3. Default: strip a trailing ``s`` (``pods`` -> ``pod``,
+       ``services`` -> ``service``).
     """
     if kind in _PLURAL_TO_SINGULAR_KIND:
         return _PLURAL_TO_SINGULAR_KIND[kind]
+    if kind in _PLURAL_TO_SINGULAR_KIND.values():
+        return kind
     if kind.endswith("s") and len(kind) > 1:
         return kind[:-1]
     return kind

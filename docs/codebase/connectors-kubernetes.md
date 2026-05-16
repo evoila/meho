@@ -11,7 +11,7 @@ calls via the descriptor table, and the operator surface is the
 meta-tools (`search_operations` / `call_operation`) plus the
 forthcoming CLI alias verbs (G3.2-T6).
 
-The connector replaces the consumer's daily `kubectl-vcf.sh` wrapper for
+The connector replaces the operator's daily `kubectl-vcf.sh` wrapper for
 read workflows -- inventory listing, workload inspection, log fetching.
 Write operations stay in the wrapper until v0.2.next ships policy +
 approval flow.

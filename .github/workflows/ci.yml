@@ -88,21 +88,25 @@ jobs:
     # so no step ever starts on a fork PR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners
-    # 25-min cap: this job is the FAST gate — ruff + ruff-format +
-    # mypy + the unit pytest sweep with tests/integration/ EXCLUDED
-    # (--ignore=tests/integration). The container-heavy integration
-    # subtree moved to the sibling `python-integration` job below.
-    # History: the serial full sweep blew the 10→20→40-min caps
-    # (runs 25910787068, 25970564527, 25972807988, 25987329377 —
-    # the last timed out at exactly 40m28s with the integration
-    # testcontainer cases only ~5% through at 7.5 min). Splitting
-    # the suite makes this required gate deterministic and fast;
-    # 25 min is generous headroom for the unit sweep + uv sync +
-    # coverage emit. Job name is intentionally unchanged so the
-    # existing branch-protection required check stays satisfied.
-    # Further parallelization (pytest-xdist `-n auto`) tracked in
-    # #564.
-    timeout-minutes: 25
+    # 50-min cap: this job is the deterministic required gate — ruff
+    # + ruff-format + mypy + the unit pytest sweep with
+    # tests/integration/ EXCLUDED (--ignore=tests/integration). The
+    # container-heavy integration subtree moved to the sibling
+    # `python-integration` job below (which finishes in ~4 min — it
+    # is only ~5% of the test count, never the bottleneck). The real
+    # cost is the serial UNIT suite itself: run 25992737115 reached
+    # only 62% in a 25-min cap, extrapolating to ~40 min wall-clock
+    # for ruff+mypy+uv-sync+unit+coverage. History: the combined
+    # serial sweep blew the 10→20→40-min caps (runs 25910787068,
+    # 25970564527, 25972807988, 25987329377). Splitting integration
+    # out + a 50-min cap makes this gate deterministic (no
+    # testcontainer variance) with headroom for unit-suite growth.
+    # Job name is intentionally unchanged so the existing
+    # branch-protection required check stays satisfied. The durable
+    # fix that brings this back under ~10 min — pytest-xdist
+    # `-n auto` parallelization of the serial unit suite — is
+    # tracked in #564.
+    timeout-minutes: 50
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,

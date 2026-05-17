@@ -90,7 +90,8 @@ both share one connection):
    `parse_os_release` and surfaced under `extras["os"]`. Falls back
    to `cat /etc/debian_version` when `/etc/os-release` is missing
    (older Debian releases); the bare version string from
-   `/etc/debian_version` is prefixed with `debian ` for consistency.
+   `/etc/debian_version` is prefixed with `"debian "` (note the
+   trailing space) for consistency with the os-release shape.
 
 `probe_method` is the fixed string `"ssh: named -v"`.
 `extras["named_conf_path"]` carries the Debian-family default

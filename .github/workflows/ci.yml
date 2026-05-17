@@ -103,9 +103,12 @@ jobs:
     # testcontainer variance) with headroom for unit-suite growth.
     # Job name is intentionally unchanged so the existing
     # branch-protection required check stays satisfied. The durable
-    # fix that brings this back under ~10 min — pytest-xdist
-    # `-n auto` parallelization of the serial unit suite — is
-    # tracked in #564.
+    # fix — pytest-xdist `-n auto` parallelization of the unit suite —
+    # LANDED via #585 (which removed the global-registry isolation
+    # leaks that blocked it; see the Pytest step below). The 50-min
+    # cap is now generous headroom kept deliberately for the first
+    # parallel CI runs; retune downward once real multi-core CI
+    # wall-clock is observed (local: 10:18 → 6:14).
     timeout-minutes: 50
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
@@ -231,24 +234,26 @@ jobs:
         run: uv run python -m meho_backplane.retrieval.warm
 
       - name: Pytest (unit + coverage)
-        # NOT YET PARALLELIZED — deliberately serial. pytest-xdist `-n
-        # auto` (the job header's long-standing target) was implemented
-        # and measured (serial 4:43 → xdist 1:29 locally) but a
-        # controlled same-commit diff (serial 2007/0/0 vs `-n auto
-        # --dist loadscope` 2006/1/2) proved the suite has PRE-EXISTING
-        # cross-module global-registry isolation leaks: tests/
-        # test_mcp_registry.py + tests/test_audit_middleware.py pass
-        # ONLY in the full-suite serial collection order — they fail in
-        # ANY repartition, including a dedicated serial 2-file pass
-        # (locally verified red), so no split-pass workaround is
-        # viable. Parallelizing the unit job is therefore HARD-BLOCKED
-        # on the registry snapshot/restore fix in #585; flip this to
-        # `-n auto --dist loadscope --maxfail=1` there. The fastembed
-        # model cache + HF_TOKEN above are the safe wins shipped now.
-        # -x fast-fail. --ignore=tests/integration → the container-
-        # heavy subtree runs in the sibling `python-integration` job.
-        # Coverage is the unit sweep only; combined cov is #564.
-        run: uv run pytest -x --ignore=tests/integration --cov=meho_backplane --cov-report=xml --cov-report=term tests/
+        # PARALLELIZED via pytest-xdist (#585 unblocked this). The
+        # serial sweep was the job's dominant cost (~49 min in CI vs
+        # ~5 min local). #585 added process-wide global-registry
+        # snapshot/restore + deterministic MCP-module import in
+        # tests/conftest.py, eliminating the cross-module isolation
+        # leaks that previously made `-n auto` red on
+        # test_mcp_registry / test_audit_middleware. Controlled
+        # same-commit proof (acceptance of #585): serial 2007/0/0 and
+        # `-n auto --dist loadscope` 2007/0/0 — identical, empty
+        # failure set; local wall-clock serial 10:18 → xdist 6:14
+        # (limited by core count; CI multi-core gets the ~49→~10 min).
+        # -n auto: one worker per core. --dist loadscope: a module's
+        # tests stay on one worker so module-/session-scoped fixtures
+        # (testcontainers PG, embedding service) instantiate per
+        # worker, not per test. --maxfail=1 preserves the old `-x`
+        # fast-fail (xdist ignores `-x`). --ignore=tests/integration →
+        # the container-heavy subtree runs in the sibling
+        # `python-integration` job. Coverage is the unit sweep only;
+        # combined cov is #564.
+        run: uv run pytest -n auto --dist loadscope --maxfail=1 --ignore=tests/integration --cov=meho_backplane --cov-report=xml --cov-report=term tests/
 
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).

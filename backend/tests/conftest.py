@@ -336,6 +336,83 @@ def _no_secret_leak_sweep(
 
 
 # ---------------------------------------------------------------------------
+# Global-registry test isolation (#585 — unblocks pytest-xdist)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _force_import_mcp_modules() -> None:
+    """Import every MCP tool/resource module ONCE per worker, up front.
+
+    ``register_mcp_tool`` / ``register_mcp_resource`` fire as *module-
+    import side effects*; :func:`eager_import_mcp_modules` only triggers
+    them on a module's first import (Python caches imports).
+    ``clear_registries()`` (the per-test reset in
+    ``tests/test_mcp_registry.py``) empties ``_TOOLS`` but cannot
+    un-import modules, so whether a later lifespan-driven
+    ``eager_import_mcp_modules()`` re-populates real tools depends purely
+    on import history — deterministic only in full-suite *serial*
+    collection order. That coupling is exactly what made
+    ``test_mcp_registry`` / ``test_audit_middleware`` pass serially but
+    fail under ``pytest-xdist`` (#585; the #540 class generalised).
+
+    Forcing the imports once at session start makes the registration
+    side effects fire before any test, so every subsequent
+    ``eager_import_mcp_modules()`` (lifespan startup, any worker, any
+    order) is a cached no-op. Combined with the per-test
+    snapshot/restore below, registry state becomes a pure function of
+    what each test explicitly registers — order- and worker-independent.
+    """
+    from meho_backplane.mcp.registry import eager_import_mcp_modules
+
+    eager_import_mcp_modules()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_registries() -> Iterator[None]:
+    """Snapshot/restore every process-global registry around each test.
+
+    The backplane keeps mutable module-level registries that the app
+    lifespan and ``@register_*`` decorators populate:
+    ``mcp.registry._TOOLS`` / ``_RESOURCES``,
+    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``, and
+    ``operations.typed_register._TYPED_OP_REGISTRARS``. None had a
+    process-wide per-test reset, so a test that triggered the lifespan
+    leaked real registrations into whatever test the (xdist) scheduler
+    ran next on the same worker. #540 fixed exactly one of these with a
+    local fixture; this generalises the snapshot/restore to all of
+    them, process-wide.
+
+    Snapshot the *contents* (not the binding — other modules hold the
+    same dict/list objects, so rebinding would not propagate) at setup,
+    restore them verbatim at teardown. Restore-not-clear: registrations
+    a test legitimately makes survive *within* that test; only the
+    cross-test bleed is removed.
+    """
+    from meho_backplane.connectors import registry as conn_reg
+    from meho_backplane.mcp import registry as mcp_reg
+    from meho_backplane.operations import typed_register as typed_reg
+
+    tools = dict(mcp_reg._TOOLS)
+    resources = dict(mcp_reg._RESOURCES)
+    connectors_v1 = dict(conn_reg._REGISTRY)
+    connectors_v2 = dict(conn_reg._REGISTRY_V2)
+    registrars = list(typed_reg._TYPED_OP_REGISTRARS)
+    try:
+        yield
+    finally:
+        mcp_reg._TOOLS.clear()
+        mcp_reg._TOOLS.update(tools)
+        mcp_reg._RESOURCES.clear()
+        mcp_reg._RESOURCES.update(resources)
+        conn_reg._REGISTRY.clear()
+        conn_reg._REGISTRY.update(connectors_v1)
+        conn_reg._REGISTRY_V2.clear()
+        conn_reg._REGISTRY_V2.update(connectors_v2)
+        typed_reg._TYPED_OP_REGISTRARS[:] = registrars
+
+
+# ---------------------------------------------------------------------------
 # Shared JWT / JWKS helpers (lifted from tests/test_auth_jwt.py)
 # ---------------------------------------------------------------------------
 

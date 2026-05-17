@@ -135,6 +135,34 @@ production-path approval gate is G7/G10 policy territory (see the
 through G7 / G10 policy logic once those Goals land"). `safety_level`
 is the load-bearing signal that future gate keys on.
 
+## JSONFlux result-handle path (`vault.kv.list`)
+
+`vault.kv.list` is the only set-shaped op on the v0.2 Vault surface
+(it returns `{"keys": [...]}`; every other op returns a bounded scalar
+or single-secret dict). Per v0.1-spec §4 / CLAUDE.md postulate 6, a
+set larger than the JSONFlux threshold (~50 rows / 4 KB) must come
+back as a sample + `ResultHandle`, not the raw list.
+
+The wrapping is the **dispatcher's** job, not the handler's: the
+handler returns `{"keys": [...]}` verbatim and `dispatch` passes it
+through the configured `Reducer` before audit/broadcast. v0.2 ships
+only `PassThroughReducer`, so the **v0.2 default is pass-through** —
+`vault.kv.list` returns the full inline key list with
+`OperationResult.handle is None`, regardless of key count. The real
+threshold-aware reducer (and the `result_query` / `result_aggregate` /
+`result_describe` / `result_export` meta-tools that read a handle
+back) ships in a follow-on Initiative; swapping it in touches one
+`set_default_reducer` call, not the Vault handler.
+
+`tests/test_vault_kv_list_jsonflux.py` (G3.3-T4) pins both halves of
+the contract: ≤50 keys stays inline with no handle (the shipped v0.2
+default), and — with a threshold-aware reducer installed via the
+`set_default_reducer` seam — >50 keys produces `{sample, ...}` on
+`result` plus a `ResultHandle` whose `total_rows` / `sample_rows`
+carry exactly what a future `result_describe` / `result_query` will
+read. The agent never sees the raw >50-key list once a handle is
+produced.
+
 ## Control flow
 
 1. Importing `connectors.vault` (package `__init__.py`) registers

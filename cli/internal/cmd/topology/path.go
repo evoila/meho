@@ -105,7 +105,8 @@ func runPath(cmd *cobra.Command, opts pathOptions) error {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"--max-hops must be between 1 and %d; got %d", _maxHopsMax, opts.MaxHops)),
+				"--max-hops must be between 1 and %d (or 0/omitted for the server default of 8); got %d",
+				_maxHopsMax, opts.MaxHops)),
 			opts.JSONOut,
 		)
 	}

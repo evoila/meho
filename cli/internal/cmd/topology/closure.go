@@ -57,7 +57,8 @@ func runClosure(cmd *cobra.Command, opts closureOptions) error {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
-				"--depth must be between 1 and %d; got %d", _depthMax, opts.Depth)),
+				"--depth must be between 1 and %d (or 0/omitted for the server default of 16); got %d",
+				_depthMax, opts.Depth)),
 			opts.JSONOut,
 		)
 	}

@@ -28,6 +28,11 @@ type RefreshResult struct {
 	AddedEdges   int    `json:"added_edges"`
 	RemovedEdges int    `json:"removed_edges"`
 	UpdatedEdges int    `json:"updated_edges"`
+	// DurationMs is wall-clock for the whole resolve + discover +
+	// reconcile + commit cycle. float64 mirrors the backend
+	// RefreshResult.duration_ms (a Python float), so --json round-trips
+	// the full T5 contract rather than silently dropping the field.
+	DurationMs float64 `json:"duration_ms"`
 }
 
 // newRefreshCmd returns the `meho topology refresh <target>` command.
@@ -124,4 +129,5 @@ func printRefreshSummary(w io.Writer, target string, r *RefreshResult) {
 	fmt.Fprintf(w, "refreshed topology for %q (target_id=%s)\n", target, r.TargetID)
 	fmt.Fprintf(w, "  nodes:  +%d  -%d  ~%d\n", r.AddedNodes, r.RemovedNodes, r.UpdatedNodes)
 	fmt.Fprintf(w, "  edges:  +%d  -%d  ~%d\n", r.AddedEdges, r.RemovedEdges, r.UpdatedEdges)
+	fmt.Fprintf(w, "  took:   %.0f ms\n", r.DurationMs)
 }

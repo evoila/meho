@@ -51,7 +51,7 @@ func TestRefreshJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/refresh/t", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(RefreshResult{TargetID: "z", AddedNodes: 1})
+		_ = json.NewEncoder(w).Encode(RefreshResult{TargetID: "z", AddedNodes: 1, DurationMs: 42.5})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -67,6 +67,11 @@ func TestRefreshJSON(t *testing.T) {
 	}
 	if decoded.TargetID != "z" || decoded.AddedNodes != 1 {
 		t.Errorf("--json decode produced %+v", decoded)
+	}
+	// duration_ms is part of the T5 RefreshResult contract; --json
+	// must round-trip it, not silently drop it.
+	if decoded.DurationMs != 42.5 {
+		t.Errorf("--json dropped duration_ms: got %v, want 42.5", decoded.DurationMs)
 	}
 }
 

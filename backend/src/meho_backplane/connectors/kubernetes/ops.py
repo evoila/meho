@@ -25,6 +25,15 @@ The shipped op surface today:
   workload surface (G3.2-T3 #323). Metadata + helpers + handlers live
   in :mod:`~meho_backplane.connectors.kubernetes.ops_workload`;
   :func:`_kubernetes_ops` splats ``WORKLOAD_OPS`` into the merged tuple.
+* ``k8s.service.list`` / ``k8s.ingress.list`` -- network ops
+  (G3.2-T4 #324). Metadata + helpers in
+  :mod:`~meho_backplane.connectors.kubernetes.ops_network`.
+* ``k8s.configmap.list`` (keys-only) / ``k8s.configmap.info``
+  (full data) -- config ops (G3.2-T4 #324). Metadata + helpers in
+  :mod:`~meho_backplane.connectors.kubernetes.ops_config`.
+* ``k8s.event.list`` -- observability op (G3.2-T4 #324). Metadata +
+  helpers in :mod:`~meho_backplane.connectors.kubernetes.ops_events`
+  (split out of ops_config to fit the 600-line code-quality cap).
 * ``k8s.logs`` -- non-streaming pod-log fetch (G3.2-T5 #325). Metadata
   schemas + handler live in
   :mod:`~meho_backplane.connectors.kubernetes.ops_logs`; this module
@@ -165,27 +174,36 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
     """Return the merged registration tuple.
 
     Composition: ``k8s.about`` (T1 canary) + ``CORE_OPS`` (T2 inventory:
-    ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list``) + ``WORKLOAD_OPS``
-    (T3 workload: ``k8s.pod.{list,info}`` / ``k8s.deployment.{list,info}``)
+    ``k8s.ls`` / ``k8s.namespace.list`` / ``k8s.node.list``) +
+    ``WORKLOAD_OPS`` (T3 workload: ``k8s.pod.{list,info}`` /
+    ``k8s.deployment.{list,info}``) + ``NETWORK_OPS`` (T4 network:
+    ``k8s.service.list`` / ``k8s.ingress.list``) + ``CONFIG_OPS`` (T4
+    config: ``k8s.configmap.list`` keys-only / ``k8s.configmap.info``
+    full data) + ``EVENT_OPS`` (T4 observability: ``k8s.event.list``)
     + ``k8s.logs`` (T5).
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
     :class:`KubernetesOp` + ``_K8S_ABOUT_OP``, then imports the T2
     inventory ops from :mod:`ops_core`, the T3 workload ops from
-    :mod:`ops_workload`, and the T5 logs op metadata from
+    :mod:`ops_workload`, the T4 network ops from :mod:`ops_network`,
+    the T4 config ops from :mod:`ops_config`, the T4 event ops from
+    :mod:`ops_events`, and the T5 logs op metadata from
     :mod:`ops_logs` (each of which only depends on ``KubernetesOp``
     plus its own helpers). The arrangement keeps the canary op's
     metadata co-located with the dataclass definition while letting
     the larger surfaces live in their own modules next to their
     helpers.
     """
+    from meho_backplane.connectors.kubernetes.ops_config import CONFIG_OPS
     from meho_backplane.connectors.kubernetes.ops_core import CORE_OPS
+    from meho_backplane.connectors.kubernetes.ops_events import EVENT_OPS
     from meho_backplane.connectors.kubernetes.ops_logs import (
         K8S_LOGS_LLM_INSTRUCTIONS,
         K8S_LOGS_PARAMETER_SCHEMA,
         K8S_LOGS_RESPONSE_SCHEMA,
     )
+    from meho_backplane.connectors.kubernetes.ops_network import NETWORK_OPS
     from meho_backplane.connectors.kubernetes.ops_workload import WORKLOAD_OPS
 
     logs_op = KubernetesOp(
@@ -219,7 +237,15 @@ def _kubernetes_ops() -> tuple[KubernetesOp, ...]:
         llm_instructions=K8S_LOGS_LLM_INSTRUCTIONS,
     )
 
-    return (_K8S_ABOUT_OP, *CORE_OPS, *WORKLOAD_OPS, logs_op)
+    return (
+        _K8S_ABOUT_OP,
+        *CORE_OPS,
+        *WORKLOAD_OPS,
+        *NETWORK_OPS,
+        *CONFIG_OPS,
+        *EVENT_OPS,
+        logs_op,
+    )
 
 
 KUBERNETES_OPS: tuple[KubernetesOp, ...] = _kubernetes_ops()

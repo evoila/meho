@@ -661,11 +661,11 @@ async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
     """Kinds whose ``list`` op isn't registered come back as ``unknown_op`` via the shim.
 
     Pinned against a kind the registered surface deliberately does not
-    cover (``services`` ships under G3.2-T4 #324). T3 (#323) brought
-    ``k8s.pod.list`` and ``k8s.deployment.list`` into the registered
-    set, so the original ``/argocd/pods`` probe now resolves to a real
-    handler -- using ``services`` instead keeps the test pinned on the
-    unknown-op shape until T4 lands its own coverage.
+    cover. T3 (#323) brought ``k8s.pod.list`` and ``k8s.deployment.list``
+    into the registered set; T4 (#324) added ``service`` / ``ingress`` /
+    ``configmap`` / ``event``. ``statefulsets`` is out of v0.2 scope (no
+    ``k8s.statefulset.list`` op registered), so it keeps the test pinned
+    on the unknown-op shape until a future Task adds it.
     """
     from meho_backplane.operations import typed_register as tr_module
 
@@ -677,10 +677,10 @@ async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
     ):
         await KubernetesConnector.register_operations()
 
-    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/services"})
+    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/statefulsets"})
 
-    assert result["path"] == "/argocd/services"
-    assert result["forwarded_to"] == "k8s.service.list"
+    assert result["path"] == "/argocd/statefulsets"
+    assert result["forwarded_to"] == "k8s.statefulset.list"
     inner = result["result"]
     assert inner["status"] == "error"
     assert inner["error"].startswith("unknown_op:")

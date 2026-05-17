@@ -337,6 +337,161 @@ class KubernetesConnector(Connector):
         rows = [node_row(n) for n in resp.items]
         return {"rows": rows, "total": len(rows)}
 
+    async def k8s_service_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List services in a namespace -- name / type / cluster_ip / ports / selector.
+
+        Op-id: ``k8s.service.list``. Wraps
+        ``CoreV1Api.list_namespaced_service(namespace)`` and projects
+        each :class:`V1Service` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_network.service_row`.
+        The helper is pure so the unit suite pins the wire shape against
+        synthetic fixtures without booting an event loop.
+        """
+        from meho_backplane.connectors.kubernetes.ops_network import service_row
+
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        resp = await core_v1.list_namespaced_service(namespace=params["namespace"])
+        rows = [service_row(s) for s in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_ingress_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List ingresses in a namespace -- class / hosts / TLS hosts / rules.
+
+        Op-id: ``k8s.ingress.list``. Wraps
+        ``NetworkingV1Api.list_namespaced_ingress(namespace)`` and
+        projects each :class:`V1Ingress` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_network.ingress_row`.
+        """
+        from meho_backplane.connectors.kubernetes.ops_network import ingress_row
+
+        api_client = await self._get_api_client(target)
+        networking_v1 = client.NetworkingV1Api(api_client)
+        resp = await networking_v1.list_namespaced_ingress(namespace=params["namespace"])
+        rows = [ingress_row(i) for i in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_configmap_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List configmaps in a namespace -- **keys only, no values**.
+
+        Op-id: ``k8s.configmap.list``. Wraps
+        ``CoreV1Api.list_namespaced_config_map(namespace)`` and projects
+        each :class:`V1ConfigMap` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_config.configmap_list_row`,
+        which deliberately omits ``data`` / ``binary_data`` values.
+        Operators wanting values call ``k8s.configmap.info`` per
+        configmap so the audit row records the targeted read.
+        """
+        from meho_backplane.connectors.kubernetes.ops_config import configmap_list_row
+
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        resp = await core_v1.list_namespaced_config_map(namespace=params["namespace"])
+        rows = [configmap_list_row(cm) for cm in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_configmap_info(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read a single configmap with full data + binary_data.
+
+        Op-id: ``k8s.configmap.info``. Wraps
+        ``CoreV1Api.read_namespaced_config_map(name, namespace)`` and
+        projects the result through
+        :func:`~meho_backplane.connectors.kubernetes.ops_config.configmap_info`.
+        Counterpart to ``k8s.configmap.list``; the targeted read records
+        a per-configmap audit row.
+        """
+        from meho_backplane.connectors.kubernetes.ops_config import configmap_info
+
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        cm = await core_v1.read_namespaced_config_map(
+            name=params["name"], namespace=params["namespace"]
+        )
+        return configmap_info(cm)
+
+    async def k8s_event_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List events in a namespace, sorted most-recent-first, truncated to ``limit``.
+
+        Op-id: ``k8s.event.list``. Wraps
+        ``CoreV1Api.list_namespaced_event(namespace, field_selector=..., limit=...)``
+        and projects each :class:`CoreV1Event` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_events.event_row`.
+
+        The K8s API server returns events in resource-version order
+        (creation order), **not** last-seen order, and offers no
+        server-side ``orderBy`` knob -- see
+        https://kubernetes.io/docs/reference/using-api/api-concepts/#resource-versions
+        for the ordering contract. Passing the caller's ``limit``
+        directly to the API would therefore truncate an arbitrary
+        creation-ordered prefix before the client-side
+        :func:`sort_event_rows_recent_first` ever runs, defeating the
+        "N most-recent" acceptance criterion: an event created hours
+        ago but firing every minute would drop out of a small
+        ``--limit 10`` result while an old quiescent event near the
+        top of the creation order kept its slot.
+
+        Instead, the handler always asks the API for up to
+        :data:`MAX_EVENT_LIMIT` rows -- a bounded superset -- then
+        sorts the projection by ``last_seen_seconds`` and truncates
+        client-side to the caller's ``limit``. The cap is set in
+        :mod:`ops_events` (currently 500) at the same operator-ergonomic
+        ceiling the schema's ``maximum`` enforces; above that the
+        operator is better served by a ``field_selector`` than by a
+        bigger result set (the K8s API itself paginates above ~1k
+        items per response in most deployments).
+        """
+        from meho_backplane.connectors.kubernetes.ops_events import (
+            DEFAULT_EVENT_LIMIT,
+            MAX_EVENT_LIMIT,
+            event_row,
+            sort_event_rows_recent_first,
+        )
+
+        namespace = params["namespace"]
+        limit = int(params.get("limit", DEFAULT_EVENT_LIMIT))
+        # Defence in depth: the schema's ``maximum`` already enforces
+        # the cap. Keep the explicit clamp so a future schema relaxation
+        # cannot exceed the ceiling silently -- same discipline as
+        # ``k8s.logs``'s tail clamp.
+        if limit > MAX_EVENT_LIMIT:
+            limit = MAX_EVENT_LIMIT
+        field_selector = params.get("field_selector")
+
+        api_client = await self._get_api_client(target)
+        core_v1 = client.CoreV1Api(api_client)
+        # Always pull up to MAX_EVENT_LIMIT rows so the client-side
+        # sort sees the full recency-relevant superset; the caller's
+        # ``limit`` truncates after the sort. See the docstring above
+        # for the ordering rationale.
+        kwargs: dict[str, Any] = {"namespace": namespace, "limit": MAX_EVENT_LIMIT}
+        if field_selector:
+            kwargs["field_selector"] = field_selector
+        resp = await core_v1.list_namespaced_event(**kwargs)
+        rows = [event_row(e) for e in resp.items]
+        sorted_rows = sort_event_rows_recent_first(rows)
+        truncated = sorted_rows[:limit]
+        return {"rows": truncated, "total": len(truncated)}
+
     async def k8s_ls(
         self,
         target: KubernetesTargetLike,

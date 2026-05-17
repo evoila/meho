@@ -42,11 +42,25 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `container_status_row`, `pod_ready_string`) plus the prefix
   resolvers (`resolve_pod_name`, `resolve_deployment_name`) and the
   `WORKLOAD_OPS` registration rows for `k8s.pod.{list,info}` and
-  `k8s.deployment.{list,info}`. Two structured errors
+  `k8s.deployment.{list,info}` (G3.2-T3 #323). Two structured errors
   (`WorkloadNotFoundError`, `AmbiguousPrefixError`) drive the
   prefix-resolution UX: ambiguous matches surface the candidate list
   through the dispatcher's `connector_error` envelope so callers can
   render a "did-you-mean" hint.
+- **Network helpers** (`ops_network.py`) -- pure mapping helpers
+  (`service_row`, `service_port_row`, `ingress_row`, `ingress_rule_row`,
+  `ingress_path_row`) plus the `NETWORK_OPS` registration rows for
+  `k8s.service.list` / `k8s.ingress.list` (G3.2-T4 #324).
+- **Config helpers** (`ops_config.py`) -- pure mapping helpers
+  (`configmap_list_row`, `configmap_info`) plus the `CONFIG_OPS`
+  registration rows for `k8s.configmap.list` / `k8s.configmap.info`
+  (G3.2-T4 #324).
+- **Event helpers** (`ops_events.py`) -- pure mapping helpers
+  (`event_row`, `sort_event_rows_recent_first`) plus the `EVENT_OPS`
+  registration row for `k8s.event.list` (G3.2-T4 #324). Split out of
+  `ops_config.py` to fit under the 600-line code-quality cap; the
+  separation also aligns with the operator mental model (events are
+  observability, configmaps are configuration).
 - **`KubernetesTargetLike`** (`kubeconfig.py`) -- runtime-checkable
   Protocol capturing the minimum target shape the connector reads:
   `name`, `host`, `port`, `secret_ref`. Replaced by the concrete
@@ -59,22 +73,26 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 ## Shipped op surface
 
-| op_id                  | safety | description                                              |
-| ---------------------- | ------ | -------------------------------------------------------- |
-| `k8s.about`            | safe   | Product / version / platform via `VersionApi.get_code`.  |
-| `k8s.ls`               | safe   | Synthetic walker: root / namespace / namespace+kind.     |
-| `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.     |
-| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version.     |
-| `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.            |
-| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.            |
-| `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy. |
-| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.     |
-| `k8s.logs`             | safe   | Non-streaming pod log fetch with 1 MiB body cap.         |
+| op_id                  | safety | description                                                       |
+| ---------------------- | ------ | ----------------------------------------------------------------- |
+| `k8s.about`            | safe   | Product / version / platform via `VersionApi.get_code`.           |
+| `k8s.ls`               | safe   | Synthetic walker: root / namespace / namespace+kind.              |
+| `k8s.namespace.list`   | safe   | `CoreV1Api.list_namespace()` -- name / status / age.              |
+| `k8s.node.list`        | safe   | `CoreV1Api.list_node()` -- status / roles / version.              |
+| `k8s.pod.list`         | safe   | Pods with selectors + server-side pagination.                     |
+| `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
+| `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
+| `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
+| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` -- type / cluster_ip / ports / selector. |
+| `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` -- class / hosts / TLS / rules. |
+| `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` -- **keys only, NO values**. |
+| `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
+| `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. |
+| `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 
-T4 of Initiative #320 still ships the network + config + events
-surfaces (`service` / `ingress` / `configmap` / `event`) against the
-same `KubernetesOp` -> `KUBERNETES_OPS` -> `register_operations`
-pattern.
+T6 of Initiative #320 (CLI alias verbs + k3d acceptance) extends this
+surface against the same `KubernetesOp` -> `KUBERNETES_OPS` ->
+`register_operations` pattern.
 
 ### Workload-op pagination (`k8s.pod.list` / `k8s.deployment.list`)
 
@@ -117,6 +135,20 @@ fits in one unpaginated response. Heavy-tenancy namespaces with
 hundreds of workload objects are not the prefix-resolver's target
 audience; the agent typically reaches them via the list path with
 explicit pagination.
+
+### ConfigMap privacy split
+
+`k8s.configmap.list` and `k8s.configmap.info` deliberately split the
+read surface: the list op returns `keys` (the union of `data` +
+`binary_data` keys) but **never** the values, so a routine "what's
+configured here?" scan does not bulk-broadcast configmap content
+through the SSE / audit feed. Operators wanting values call
+`k8s.configmap.info` per configmap; the audit row records the
+targeted read so a post-incident query can answer "who read which
+configmap when?". v0.2 classifies `info` as `op_class=read`; G6.3 may
+upgrade specific configmap-name patterns (managed-by
+`secret-translator`, names matching `*-secret-config`) to
+`sensitive-read`.
 
 ## Control flow
 
@@ -242,6 +274,9 @@ just `len(rows)` because nothing reduces.
   - [#323 G3.2-T3](https://github.com/evoila/meho/issues/323) -- workload
     ops (`k8s.pod.{list,info}` / `k8s.deployment.{list,info}`).
   - [#325 G3.2-T5](https://github.com/evoila/meho/issues/325) -- `k8s.logs`.
+- This Task: [#324 G3.2-T4](https://github.com/evoila/meho/issues/324)
+  -- network + config + event ops (`k8s.service.list` /
+  `k8s.ingress.list` / `k8s.configmap.list/info` / `k8s.event.list`).
 - Substrate Initiative: [#388 G0.6](https://github.com/evoila/meho/issues/388)
   -- operation registry + dispatcher + JSONFlux substrate.
 - `kubernetes_asyncio`: https://github.com/tomplus/kubernetes_asyncio

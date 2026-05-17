@@ -136,7 +136,9 @@ cli/
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
-    │   └── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
+    │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
+    │   └── topology/          # G9.1-T6 #454 — `meho topology refresh/dependents/dependencies/path` over the T5 REST surface (#453).
+    │                          #   (the 5th T6 verb, `meho targets discover`, lives in targets/discover.go.)
     │       ├── vault.go          # NewRootCmd + shared HTTP/auth/render helpers + ConnectorID const.
     │       ├── dispatch.go       # CallResult/callRequestBody + dispatchOp + renderCallResult + generic renderer.
     │       ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops, #545).
@@ -710,14 +712,15 @@ G0.6-T13 DoD was "three CLI verbs", not four.
 
 ## Targets registry (`meho targets`, G0.3-T5 #256)
 
-`cli/internal/cmd/targets/` registers the three operator-facing verbs
-that wrap the targets registry routes from G0.3-T3 (#254) and the
-G0.3-T1.5 (#477) probe-persistence remediation. The verbs are the
-operator-side surface for the per-tenant `targets` table — a
-fingerprinted catalog of vendor systems the operator manages (vCenter
-hosts, Vault instances, k8s clusters, …) that the G0.6 dispatcher
-resolves at `call` time. Write verbs (`create` / `update` / `delete`)
-are deferred; bulk import lands under G0.3-T6 (#257).
+`cli/internal/cmd/targets/` registers the operator-facing verbs that
+wrap the targets registry routes from G0.3-T3 (#254), the G0.3-T1.5
+(#477) probe-persistence remediation, and the G9.1-T6 (#454) discover
+verb. The verbs are the operator-side surface for the per-tenant
+`targets` table — a fingerprinted catalog of vendor systems the
+operator manages (vCenter hosts, Vault instances, k8s clusters, …)
+that the G0.6 dispatcher resolves at `call` time. Write verbs
+(`create` / `update` / `delete`) are deferred; bulk import lands
+under G0.3-T6 (#257).
 
 ### Subcommands
 
@@ -746,13 +749,27 @@ are deferred; bulk import lands under G0.3-T6 (#257).
   cached fingerprint survives. A connector that raises propagates as
   a 500; per the #477 accepted trade-off the CLI surfaces the
   underlying detail rather than masking it as a graceful failure.
+- `meho targets discover <product> [--seed-target <name>]` — calls
+  `GET /api/v1/targets/discover` (G9.1-T6 #454, the verb #256
+  explicitly deferred here). Iterates every connector registered for
+  `<product>`, calling each connector's `list_candidates` hook, and
+  renders the merged candidate `NAME / HOST / PORT / CONFIDENCE`
+  table plus a `SKIPPED / REASON` table for connectors that
+  contributed nothing. Read-only — it never creates `targets` rows;
+  the operator reviews and runs `meho targets create`
+  (auto-registration is v0.2.next). `--seed-target` scopes discovery
+  to one already-registered target's reach; it is resolved
+  tenant-scoped server-side, so a cross-tenant seed name 404s like a
+  typo. Documented in depth under "Topology verbs" (the verb is part
+  of G9.1-T6 and shares that initiative's contract).
 
-### Reserved flags (same shape across all three verbs)
+### Reserved flags (same shape across the verbs)
 
 - `--json` — emit the raw JSON envelope to stdout instead of the human
   render. Stable schemas: `list` → `[]TargetSummary`; `describe` →
   full `Target` (including `fingerprint` + `preferred_impl_id`);
-  `probe` → `FingerprintResult`.
+  `probe` → `FingerprintResult`; `discover` →
+  `TargetsDiscoverResult` (`discovered` + `skipped`).
 - `--backplane <url>` — override the backplane URL (defaults to the
   URL recorded by `meho login`).
 
@@ -866,6 +883,79 @@ Pydantic models (duplicated per package to avoid the cmd/* import
 cycle cmd/root.go's graft would otherwise create). Exit codes: `0`
 status=ok, `1` status=error/denied (via the `errOpError` sentinel),
 `2` auth_expired, `3` unreachable, `4` unexpected_response.
+
+## Topology verbs (`meho topology`, G9.1-T6 #454)
+
+`cli/internal/cmd/topology/` registers the four operator-facing
+topology verbs that wrap the T5 REST surface (#453). The fifth
+G9.1-T6 verb, `meho targets discover`, lives under the `meho targets`
+parent (`cli/internal/cmd/targets/discover.go`) because the backend
+registers `GET /api/v1/targets/discover` on the targets router, under
+the canonical `/api/v1/targets` prefix.
+
+### Subcommands
+
+- `meho topology refresh <target>` — `POST
+  /api/v1/topology/refresh/<target>`. Rediscovers one target's
+  topology and reconciles it into the graph; renders the per-target
+  `nodes: +A -R ~U` / `edges: +A -R ~U` count summary. The backend
+  resolves `<target>` tenant-scoped, so a cross-tenant target 404s
+  identically to a typo (cross-tenant refresh is impossible by
+  construction).
+- `meho topology dependents <name|alias> [--depth N] [--kind K]
+  [--node-kind K]` — `GET /api/v1/topology/dependents/<name>`.
+  Reverse closure ("what depends on me" — the blast-radius verb
+  consumer-needs.md L258 specifies, run *before* a destructive op).
+  Renders a depth-ordered `DEPTH / KIND / NAME / VIA` table; the
+  anchor is row 0 (empty VIA) so an operator distinguishes "exists,
+  no dependents" (one row) from "not in this tenant" (zero rows).
+- `meho topology dependencies <name|alias> [--depth N] [--kind K]
+  [--node-kind K]` — `GET /api/v1/topology/dependencies/<name>`.
+  Forward closure ("what I depend on") — the mirror of `dependents`,
+  same table shape and contract, opposite walk direction.
+- `meho topology path <from> <to> [--max-hops N] [--from-kind K]
+  [--to-kind K]` — `GET /api/v1/topology/path?from=A&to=B`. Shortest
+  unweighted path rendered as a `kind/name -> … (N hops)` chain, or
+  the no-path line when unreachable / an endpoint is missing /
+  cross-tenant (all the same `null` answer, exit 0, never an error).
+
+### Flag → query-param mapping
+
+The route exposes `kind` (anchor `(tenant_id, kind, name)` pin) and
+`kind_filter` (walk-edge filter) as two distinct params. Per the #454
+spec `--kind <edge_kind>` is the **edge** filter, so `--kind` maps to
+`kind_filter`; the separate `--node-kind` flag maps to `kind` and is
+the remedy the 409 `ambiguous_node` render points at ("re-run with
+--node-kind …"). `path` maps `--from-kind`/`--to-kind` →
+`from_kind`/`to_kind` and `--max-hops` → `max_hops`. `--depth`
+(1..64) and `--max-hops` (1..32) mirror the API's `Query(le=…)`
+ceilings and fail fast client-side (no 422 round-trip), the same
+discipline `meho targets list --limit` applies.
+
+### Reserved flags (every verb)
+
+- `--json` — emit the raw envelope to stdout instead of the human
+  render. Stable schemas: `refresh` → `RefreshResult`;
+  `dependents`/`dependencies` → `[]TopologyNode`; `path` →
+  `TopologyPath` or literal `null` (the unreachable answer, emitted
+  verbatim so jq consumers see one contract).
+- `--backplane <url>` — override the backplane URL (defaults to the
+  URL `meho login` recorded).
+
+### HTTP shape + exit codes
+
+Same in-package `resolveBackplane` / `doAuthedRequest` /
+`renderRequestError` trio every sibling verb tree carries (the
+shared-helper-vs-import-cycle reason `kb.go` documents — Initiative
+#363 names a `cli/internal/api_client/topology.go`, but the codebase
+convention supersedes that path; the intent is satisfied in-package).
+`renderHTTPError` adds the topology-specific 409 `ambiguous_node`
+classifier (names the colliding kinds + the `--node-kind` remedy) and
+reuses the resolver's structured 404 near-miss formatter for
+`refresh`. Exit codes: `0` ok (including empty closure / no drift /
+no path — all operationally meaningful, never 404), `2` auth_expired,
+`3` unreachable, `4` unexpected_response (404 / 409 / malformed),
+`5` insufficient_role (403; backend names the required role).
 
 ## Server-driven discovery (`internal/discovery/`)
 

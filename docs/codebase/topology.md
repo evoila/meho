@@ -46,9 +46,12 @@ G9.1-T7 through T8.
 
 Returned by `refresh_target_topology`. Per-object-class disjoint counts:
 a node is in exactly one of `added_nodes` / `updated_nodes` /
-`removed_nodes` (or none, when unchanged); same for edges.
-`duration_ms` covers the whole resolve + discover + reconcile + commit
-cycle. `target_id` echoes the refreshed target.
+`removed_nodes`, or in none of them when it is unchanged — there is no
+`unchanged` count, an unchanged node simply increments nothing; same
+for edges. `duration_ms` covers the whole resolve + discover +
+reconcile + commit cycle. `target_id` echoes the refreshed target. The
+CLI `refresh` verb renders exactly these as `nodes: +A -R ~U` /
+`edges: +A -R ~U` (no fourth column) and surfaces `duration_ms`.
 
 ### `TopologyNode` — frozen Pydantic v2 (read half)
 

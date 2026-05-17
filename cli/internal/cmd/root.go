@@ -20,6 +20,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
+	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
 	"github.com/evoila/meho/cli/internal/discovery"
@@ -152,6 +153,15 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot shadow
 	// the built-in `vault` parent.
 	root.AddCommand(vault.NewRootCmd())
+
+	// G9.1-T6 (#454) -- topology graph verbs (refresh / dependents /
+	// dependencies / path) for Initiative #363. Thin cobra wrappers
+	// over the four /api/v1/topology* routes shipped by G9.1-T5
+	// (#453); the fifth T6 verb, `meho targets discover`, lives on
+	// the targets parent next to the other /api/v1/targets routes.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `topology` parent.
+	root.AddCommand(topology.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

@@ -33,15 +33,14 @@ tenant raises `AmbiguousNodeError`; pass the optional `kind` (or
 `from_kind` / `to_kind` for `find_path`) to pin the `(tenant_id, kind,
 name)` unique row. The read package never inserts, updates, or deletes.
 
-The REST front (T5, #453) is landed and documented below ("REST API
-surface"). The MCP front (T7, #455) is landed too — the two
+surface"). The CLI front (T6, #454) is landed and documented below
+("CLI front"). The MCP front (T7, #455) is landed too — the two
 narrow-waist meta-tools `query_topology` (parametric: `kind` selects
 `dependents` / `dependencies` / `path`) and `list_targets` register in
 `mcp/tools/topology.py` and call `query.py` / `select(TargetORM)`
-directly (sibling fronts on one backplane, not REST wrappers). The CLI
-front (T6) and the `docs/architecture/topology.md` operator doc remain
-out of scope here — they consume `query.py` / `refresh.py` as a thin
-shell and land in G9.1-T6 and T8.
+directly (sibling fronts on one backplane, not REST wrappers). Only the
+`docs/architecture/topology.md` operator doc remains out of scope here —
+it lands in G9.1-T8.
 
 ## Key types
 
@@ -49,9 +48,12 @@ shell and land in G9.1-T6 and T8.
 
 Returned by `refresh_target_topology`. Per-object-class disjoint counts:
 a node is in exactly one of `added_nodes` / `updated_nodes` /
-`removed_nodes` (or none, when unchanged); same for edges.
-`duration_ms` covers the whole resolve + discover + reconcile + commit
-cycle. `target_id` echoes the refreshed target.
+`removed_nodes`, or in none of them when it is unchanged — there is no
+`unchanged` count, an unchanged node simply increments nothing; same
+for edges. `duration_ms` covers the whole resolve + discover +
+reconcile + commit cycle. `target_id` echoes the refreshed target. The
+CLI `refresh` verb renders exactly these as `nodes: +A -R ~U` /
+`edges: +A -R ~U` (no fourth column) and surfaces `duration_ms`.
 
 ### `TopologyNode` — frozen Pydantic v2 (read half)
 
@@ -279,6 +281,73 @@ Tests: `backend/tests/test_api_v1_topology.py` +
 SQLite); `backend/tests/integration/test_topology_api.py` (all 5 routes
 end-to-end + the cross-tenant boundary against a real
 `pgvector/pgvector:pg16` container).
+
+## CLI front (T6, #454)
+
+`cli/internal/cmd/topology/` is the operator front for the four
+topology routes; `cli/internal/cmd/targets/discover.go` (sibling of
+`targets/list.go`) is the front for `GET /api/v1/targets/discover`.
+The split mirrors where the backend registers each route — discover
+sits under the `/api/v1/targets` prefix, so its verb sits under the
+`meho targets` parent rather than `meho topology`.
+
+| Verb | Route | Default render |
+|---|---|---|
+| `meho topology refresh <target>` | `POST /topology/refresh/{t}` | `nodes: +A -R ~U` / `edges: +A -R ~U` summary |
+| `meho topology dependents <name>` | `GET /topology/dependents/{n}` | `DEPTH / KIND / NAME / VIA` table |
+| `meho topology dependencies <name>` | `GET /topology/dependencies/{n}` | same table, mirror direction |
+| `meho topology path <from> <to>` | `GET /topology/path?from=&to=` | `kind/name -> … (N hops)` chain |
+| `meho targets discover <product>` | `GET /targets/discover?product=` | candidates + skipped tables |
+
+Load-bearing details:
+
+- **No `cli/internal/api_client/topology.go`.** Initiative #363
+  names that path, but the CLI codebase convention (documented in
+  `cli/internal/cmd/kb/kb.go`) is one in-package
+  `resolveBackplane` / `doAuthedRequest` / `renderRequestError` trio
+  per verb tree, not a shared client package — a shared helper
+  imported from `cmd/*` and a per-tree package closes an import
+  cycle. The topology trio lives in `topology/topology.go`; the
+  intent ("a Go client for the T5 routes") is satisfied in-package.
+- **`--kind` is the edge filter; `--node-kind` disambiguates the
+  anchor.** The route takes `kind` (anchor `(tenant_id, kind, name)`
+  pin) and `kind_filter` (walk-edge filter) as two distinct params.
+  The verb spec in #454 says `--kind <edge_kind>`, so `--kind` maps
+  to `kind_filter`; the separate `--node-kind` flag maps to `kind`
+  and is the remedy the 409 `ambiguous_node` render points at.
+- **Flag→param mapping for `path`.** `from`/`to` are positional
+  args sent as the `?from=`/`?to=` query params; `--from-kind` /
+  `--to-kind` map to `from_kind` / `to_kind`; `--max-hops` to
+  `max_hops`.
+- **Client-side range guards.** `--depth` (1..64) and `--max-hops`
+  (1..32) mirror the API's `Query(le=...)` ceilings and fail fast
+  client-side so the operator sees the constraint instead of a 422,
+  matching the `meho targets list --limit` precedent.
+- **Tenant boundary surfaces as the not-found / empty / null
+  shape.** A cross-tenant target on `refresh` → resolver 404
+  (`unexpected_response`, exit 4, near-misses surfaced). A
+  cross-tenant node name on `dependents`/`dependencies` → empty list
+  → the "no node named …" line (exit 0). A cross-tenant endpoint on
+  `path` → `null` → the no-path line (exit 0). The CLI never
+  distinguishes "exists in another tenant" from "does not exist" —
+  the backend already collapses them, and the CLI render preserves
+  that.
+- **`path` returns `TopologyPath | null`.** A literal JSON `null`
+  (HTTP 200) is the unreachable / missing-endpoint answer. `getPath`
+  decodes into a nil `*Path` (the CLI's local mirror type; distinct
+  from a decode error);
+  `--json` re-emits `null` verbatim so a jq consumer sees one
+  stable contract.
+- **Exit codes** match the sibling verb trees: 0 ok (including
+  empty/no-drift/no-path), 2 auth_expired, 3 unreachable, 4
+  unexpected_response (404/409/malformed), 5 insufficient_role.
+
+Tests: `cli/internal/cmd/topology/{topology,e2e}_test.go` (path
+builders, renderers, and end-to-end through the auth+transport stack
+against `httptest` — including the 409 ambiguous-node, the
+cross-tenant 404/empty/null boundary, 403, and 401 cases);
+`cli/internal/cmd/targets/discover_test.go` (discover path builder,
+tables, happy path, `--json`, cross-tenant seed 404).
 
 ## Dependencies
 

@@ -332,7 +332,8 @@ Load-bearing details:
   that.
 - **`path` returns `TopologyPath | null`.** A literal JSON `null`
   (HTTP 200) is the unreachable / missing-endpoint answer. `getPath`
-  decodes into a nil `*TopologyPath` (distinct from a decode error);
+  decodes into a nil `*Path` (the CLI's local mirror type; distinct
+  from a decode error);
   `--json` re-emits `null` verbatim so a jq consumer sees one
   stable contract.
 - **Exit codes** match the sibling verb trees: 0 ok (including

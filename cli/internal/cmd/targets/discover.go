@@ -45,14 +45,14 @@ type SkippedConnector struct {
 	Reason string `json:"reason"`
 }
 
-// TargetsDiscoverResult mirrors the backend aggregate
+// DiscoverResult mirrors the backend aggregate
 // (backend/src/meho_backplane/api/v1/targets.py): merged candidate
 // list across every connector registered for the product, plus the
 // connectors that contributed nothing. The verb never auto-creates
 // `targets` rows — the operator reviews `discovered` and runs
 // `meho targets create` (Initiative #363: auto-registration is
 // v0.2.next).
-type TargetsDiscoverResult struct {
+type DiscoverResult struct {
 	Discovered []CandidateHint    `json:"discovered"`
 	Skipped    []SkippedConnector `json:"skipped"`
 }
@@ -158,12 +158,12 @@ func buildDiscoverPath(opts discoverOptions) string {
 	return "/api/v1/targets/discover?" + q.Encode()
 }
 
-func getDiscover(ctx context.Context, backplaneURL string, opts discoverOptions) (*TargetsDiscoverResult, error) {
+func getDiscover(ctx context.Context, backplaneURL string, opts discoverOptions) (*DiscoverResult, error) {
 	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildDiscoverPath(opts), nil)
 	if err != nil {
 		return nil, err
 	}
-	var out TargetsDiscoverResult
+	var out DiscoverResult
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode discover response: %w", err)
 	}
@@ -176,7 +176,7 @@ func getDiscover(ctx context.Context, backplaneURL string, opts discoverOptions)
 // why an expected candidate is absent. Zero candidates renders the
 // no-candidates line (operationally meaningful — an empty lab) rather
 // than a bare header.
-func printDiscoverTables(w io.Writer, r *TargetsDiscoverResult) {
+func printDiscoverTables(w io.Writer, r *DiscoverResult) {
 	if len(r.Discovered) == 0 {
 		fmt.Fprintln(w, "no candidate targets discovered for this product")
 	} else {

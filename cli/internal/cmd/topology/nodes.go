@@ -8,7 +8,7 @@ import (
 	"io"
 )
 
-// TopologyNode mirrors the backend TopologyNode Pydantic model
+// Node mirrors the backend TopologyNode Pydantic model
 // (backend/src/meho_backplane/topology/schemas.py). `Properties` is a
 // free-form JSON object the connector populated; the CLI renders it
 // only in --json mode (the table view stays scannable). `ViaEdgeKind`
@@ -16,7 +16,7 @@ import (
 // for the query root (depth 0, reached by no edge). Hand-written for
 // the same generated-client-decoupling reason the other verb trees
 // document.
-type TopologyNode struct {
+type Node struct {
 	ID          string         `json:"id"`
 	Kind        string         `json:"kind"`
 	Name        string         `json:"name"`
@@ -34,7 +34,7 @@ type TopologyNode struct {
 // backend's one-element-vs-empty contract makes, and the surface
 // where a cross-tenant query reads as "not found" rather than leaking
 // another tenant's node.
-func printNodeClosure(w io.Writer, root string, nodes []TopologyNode) {
+func printNodeClosure(w io.Writer, root string, nodes []Node) {
 	if len(nodes) == 0 {
 		fmt.Fprintf(w, "no node named %q in this tenant (or no matching closure)\n", root)
 		return

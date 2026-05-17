@@ -16,16 +16,16 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// TopologyPath mirrors the backend TopologyPath Pydantic model
+// Path mirrors the backend TopologyPath Pydantic model
 // (backend/src/meho_backplane/topology/schemas.py). `Nodes` runs from
 // the `from` node (depth 0) to the `to` node (depth == TotalHops)
 // inclusive; `TotalHops == len(Nodes) - 1`. The route returns JSON
 // `null` (HTTP 200) when `to` is unreachable from `from` within
 // max_hops, or either endpoint does not exist in the tenant —
 // unreachability is a valid answer, not an error.
-type TopologyPath struct {
-	Nodes     []TopologyNode `json:"nodes"`
-	TotalHops int            `json:"total_hops"`
+type Path struct {
+	Nodes     []Node `json:"nodes"`
+	TotalHops int    `json:"total_hops"`
 }
 
 // _maxHopsMax mirrors the API's Query(le=32) ceiling
@@ -148,15 +148,15 @@ func buildPathQuery(opts pathOptions) string {
 	return "/api/v1/topology/path?" + q.Encode()
 }
 
-func getPath(ctx context.Context, backplaneURL string, opts pathOptions) (*TopologyPath, error) {
+func getPath(ctx context.Context, backplaneURL string, opts pathOptions) (*Path, error) {
 	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildPathQuery(opts), nil)
 	if err != nil {
 		return nil, err
 	}
 	// The route's response_model is `TopologyPath | None`: a literal
 	// JSON `null` is the unreachable answer, decoded here as a nil
-	// *TopologyPath (distinct from a decode error).
-	var out *TopologyPath
+	// *Path (distinct from a decode error).
+	var out *Path
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode path response: %w", err)
 	}
@@ -166,7 +166,7 @@ func getPath(ctx context.Context, backplaneURL string, opts pathOptions) (*Topol
 // printPath renders the hop chain as `a -> b -> c (N hops)`, or the
 // no-path line when the backend returned null (unreachable, missing
 // endpoint, or cross-tenant — all the same answer).
-func printPath(w io.Writer, from, to string, p *TopologyPath) {
+func printPath(w io.Writer, from, to string, p *Path) {
 	if p == nil || len(p.Nodes) == 0 {
 		fmt.Fprintf(w, "no path from %q to %q within the hop budget\n", from, to)
 		return

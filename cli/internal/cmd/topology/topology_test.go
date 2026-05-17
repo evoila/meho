@@ -158,7 +158,7 @@ func TestPrintNodeClosureEmpty(t *testing.T) {
 // dependent with its via-edge kind.
 func TestPrintNodeClosureRendersRows(t *testing.T) {
 	via := "runs-on"
-	rows := []TopologyNode{
+	rows := []Node{
 		{ID: "1", Kind: "host", Name: "esxi-1", Depth: 0, ViaEdgeKind: nil},
 		{ID: "2", Kind: "vm", Name: "web-1", Depth: 1, ViaEdgeKind: &via},
 	}
@@ -185,8 +185,8 @@ func TestPrintPathNil(t *testing.T) {
 // TestPrintPathChain — a two-hop chain renders kind/name arrows and a
 // pluralised hop count.
 func TestPrintPathChain(t *testing.T) {
-	p := &TopologyPath{
-		Nodes: []TopologyNode{
+	p := &Path{
+		Nodes: []Node{
 			{Kind: "vm", Name: "web-1"},
 			{Kind: "host", Name: "esxi-1"},
 			{Kind: "datastore", Name: "ds-1"},
@@ -206,8 +206,8 @@ func TestPrintPathChain(t *testing.T) {
 
 // TestPrintPathSingleHopSingular — one hop is rendered "1 hop".
 func TestPrintPathSingleHopSingular(t *testing.T) {
-	p := &TopologyPath{
-		Nodes:     []TopologyNode{{Kind: "vm", Name: "a"}, {Kind: "host", Name: "b"}},
+	p := &Path{
+		Nodes:     []Node{{Kind: "vm", Name: "a"}, {Kind: "host", Name: "b"}},
 		TotalHops: 1,
 	}
 	var buf bytes.Buffer

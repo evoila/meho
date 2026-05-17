@@ -115,7 +115,7 @@ func TestDependentsHappyPathFlagsPassThrough(t *testing.T) {
 		}
 		via := "routes-through"
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]TopologyNode{
+		_ = json.NewEncoder(w).Encode([]Node{
 			{ID: "1", Kind: "service", Name: "customer-a-prod-foo", Depth: 0},
 			{ID: "2", Kind: "ingress", Name: "ing-1", Depth: 1, ViaEdgeKind: &via},
 		})
@@ -139,12 +139,12 @@ func TestDependentsHappyPathFlagsPassThrough(t *testing.T) {
 	}
 }
 
-// TestDependenciesJSON — --json round-trips the []TopologyNode shape.
+// TestDependenciesJSON — --json round-trips the []Node shape.
 func TestDependenciesJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/topology/dependencies/web", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]TopologyNode{{ID: "1", Kind: "vm", Name: "web", Depth: 0}})
+		_ = json.NewEncoder(w).Encode([]Node{{ID: "1", Kind: "vm", Name: "web", Depth: 0}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -157,7 +157,7 @@ func TestDependenciesJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runClosure --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded []TopologyNode
+	var decoded []Node
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}
@@ -241,8 +241,8 @@ func TestPathReachable(t *testing.T) {
 			t.Errorf("max_hops param: got %q; want 5", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(TopologyPath{
-			Nodes: []TopologyNode{
+		_ = json.NewEncoder(w).Encode(Path{
+			Nodes: []Node{
 				{Kind: "vm", Name: "web"},
 				{Kind: "datastore", Name: "ds"},
 			},

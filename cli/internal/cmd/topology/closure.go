@@ -40,7 +40,7 @@ type closureOptions struct {
 	// param). Empty → unpinned; an ambiguous name then returns 409
 	// ambiguous_node and the renderer points the operator back here.
 	NodeKind string
-	// JSONOut emits the raw []TopologyNode envelope.
+	// JSONOut emits the raw []Node envelope.
 	JSONOut bool
 	// BackplaneOverride overrides the configured backplane URL.
 	BackplaneOverride string
@@ -101,12 +101,12 @@ func buildClosurePath(opts closureOptions) string {
 	return path
 }
 
-func getClosure(ctx context.Context, backplaneURL string, opts closureOptions) ([]TopologyNode, error) {
+func getClosure(ctx context.Context, backplaneURL string, opts closureOptions) ([]Node, error) {
 	raw, err := doAuthedRequest(ctx, backplaneURL, "GET", buildClosurePath(opts), nil)
 	if err != nil {
 		return nil, err
 	}
-	var out []TopologyNode
+	var out []Node
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("decode %s response: %w", opts.Verb, err)
 	}

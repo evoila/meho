@@ -36,7 +36,7 @@ func TestBuildDiscoverPathSetsSeed(t *testing.T) {
 // no-candidates line (operationally meaningful) without a header.
 func TestPrintDiscoverTablesEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	printDiscoverTables(&buf, &TargetsDiscoverResult{})
+	printDiscoverTables(&buf, &DiscoverResult{})
 	out := buf.String()
 	if !strings.Contains(out, "no candidate targets discovered") {
 		t.Errorf("empty render missing no-candidates hint; got %q", out)
@@ -50,7 +50,7 @@ func TestPrintDiscoverTablesEmpty(t *testing.T) {
 // table both render.
 func TestPrintDiscoverTablesRendersBoth(t *testing.T) {
 	port := 443
-	r := &TargetsDiscoverResult{
+	r := &DiscoverResult{
 		Discovered: []CandidateHint{
 			{Name: "esxi-2", Host: "esxi-2.lab", Port: &port, Confidence: "high"},
 		},
@@ -86,7 +86,7 @@ func TestRunDiscoverHappyPath(t *testing.T) {
 		}
 		port := 443
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(TargetsDiscoverResult{
+		_ = json.NewEncoder(w).Encode(DiscoverResult{
 			Discovered: []CandidateHint{
 				{Name: "esxi-2", Host: "esxi-2.lab", Port: &port, Confidence: "high"},
 			},
@@ -114,7 +114,7 @@ func TestRunDiscoverJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets/discover", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(TargetsDiscoverResult{
+		_ = json.NewEncoder(w).Encode(DiscoverResult{
 			Discovered: []CandidateHint{{Name: "c1", Host: "h1", Confidence: "low"}},
 			Skipped:    []SkippedConnector{},
 		})
@@ -128,7 +128,7 @@ func TestRunDiscoverJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runDiscover --json: %v; stderr=%s", err, stderr.String())
 	}
-	var decoded TargetsDiscoverResult
+	var decoded DiscoverResult
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}

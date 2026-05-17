@@ -218,14 +218,19 @@ func TestPrintPathSingleHopSingular(t *testing.T) {
 }
 
 // TestFormatAmbiguousNode — the 409 envelope is rendered into a line
-// that names the colliding kinds and the --node-kind remedy.
+// that names the colliding kinds and the --node-kind remedy (the
+// anchor `kind` pin). It must NOT point at --kind, which maps to the
+// edge filter `kind_filter` and would not clear the 409.
 func TestFormatAmbiguousNode(t *testing.T) {
 	body := `{"detail":{"error":"ambiguous_node","name":"prod","kinds":["host","vm"]}}`
 	got := formatAmbiguousNode(body)
-	for _, want := range []string{`"prod"`, "host", "vm", "--kind"} {
+	for _, want := range []string{`"prod"`, "host", "vm", "--node-kind"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("formatAmbiguousNode missing %q in %q", want, got)
 		}
+	}
+	if strings.Contains(strings.ReplaceAll(got, "--node-kind", ""), "--kind") {
+		t.Errorf("formatAmbiguousNode must not point at --kind (edge filter); got %q", got)
 	}
 }
 

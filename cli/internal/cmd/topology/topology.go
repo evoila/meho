@@ -9,7 +9,7 @@
 //   - `meho topology refresh <target> [--json]` —
 //     POST /api/v1/topology/refresh/{target}. Rediscovers one
 //     target's topology and reconciles it into the graph; renders
-//     the per-target added/removed/updated/unchanged counts. Role:
+//     the per-target added/removed/updated node + edge counts. Role:
 //     operator.
 //   - `meho topology dependents <name|alias> [--depth N]
 //     [--kind <edge_kind>] [--json]` — GET
@@ -174,7 +174,9 @@ func normaliseURL(s string) (string, error) {
 //     node is an empty list / null path, 200), so a 404 there is a
 //     routing surprise surfaced verbatim.
 //   - 409 with detail.error == "ambiguous_node" → unexpected, listing
-//     the colliding kinds so the operator can re-issue with --kind.
+//     the colliding kinds so the operator can re-issue with
+//     --node-kind (the anchor `kind` pin; --kind is the edge filter
+//     and does not clear this 409).
 //   - Any other 4xx/5xx → unexpected with the raw body.
 //   - Pure transport errors (timeouts, DNS, connection refused) →
 //     unreachable.
@@ -251,7 +253,9 @@ func renderHTTPError(
 	case http.StatusConflict:
 		// 409 from the query layer's AmbiguousNodeError: a bare name
 		// resolved to more than one graph_node.kind. Surface the
-		// colliding kinds so the operator re-issues with --kind.
+		// colliding kinds so the operator re-issues with --node-kind
+		// (the anchor `kind` pin — not --kind, which is the edge
+		// filter `kind_filter` and cannot clear the ambiguity).
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(formatAmbiguousNode(he.Body)),
 			jsonOut,
@@ -334,14 +338,16 @@ func formatNotFound(body string) string {
 }
 
 // formatAmbiguousNode renders a 409 ambiguous_node envelope into one
-// line that names the colliding kinds and the --kind remedy.
+// line that names the colliding kinds and the --node-kind remedy.
+// The anchor pin is --node-kind (the route's `kind` param); --kind is
+// the edge filter (`kind_filter`) and does not resolve this 409.
 func formatAmbiguousNode(body string) string {
 	var env detailEnvelope
 	if err := json.Unmarshal([]byte(body), &env); err == nil {
 		var detail ambiguousNodeDetail
 		if jerr := json.Unmarshal(env.Detail, &detail); jerr == nil && detail.Error == "ambiguous_node" {
 			return fmt.Sprintf(
-				"node %q is ambiguous across kinds: %s — re-run with --kind <one of them>",
+				"node %q is ambiguous across kinds: %s — re-run with --node-kind <one of them>",
 				detail.Name, strings.Join(detail.Kinds, ", "))
 		}
 	}

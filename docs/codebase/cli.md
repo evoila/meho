@@ -769,7 +769,7 @@ under G0.3-T6 (#257).
   render. Stable schemas: `list` → `[]TargetSummary`; `describe` →
   full `Target` (including `fingerprint` + `preferred_impl_id`);
   `probe` → `FingerprintResult`; `discover` →
-  `TargetsDiscoverResult` (`discovered` + `skipped`).
+  `DiscoverResult` (`discovered` + `skipped`).
 - `--backplane <url>` — override the backplane URL (defaults to the
   URL recorded by `meho login`).
 
@@ -936,8 +936,8 @@ discipline `meho targets list --limit` applies.
 
 - `--json` — emit the raw envelope to stdout instead of the human
   render. Stable schemas: `refresh` → `RefreshResult`;
-  `dependents`/`dependencies` → `[]TopologyNode`; `path` →
-  `TopologyPath` or literal `null` (the unreachable answer, emitted
+  `dependents`/`dependencies` → `[]Node`; `path` →
+  `Path` or literal `null` (the unreachable answer, emitted
   verbatim so jq consumers see one contract).
 - `--backplane <url>` — override the backplane URL (defaults to the
   URL `meho login` recorded).

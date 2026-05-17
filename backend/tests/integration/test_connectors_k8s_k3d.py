@@ -467,3 +467,130 @@ async def test_deployment_info_against_k3s_returns_full_detail(
     assert "status" in info
     assert "containers" in info
     assert len(info["containers"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# G3.2-T4 (#324) network + config + event ops -- live k3s exercise.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_service_list_against_k3s_returns_kubernetes_service(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.service.list --namespace default`` returns the bootstrap ``kubernetes`` service."""
+    connector, target = k3s_connector
+    result = await connector.k8s_service_list(target, {"namespace": "default"})
+    # Every k3s cluster ships with the ``kubernetes`` ClusterIP service
+    # in the ``default`` namespace -- it's the API server's in-cluster
+    # endpoint. Use it as the existence assertion; specific cluster_ip
+    # values vary across boots so don't pin those.
+    names = {row["name"] for row in result["rows"]}
+    assert "kubernetes" in names
+    kube_svc = next(row for row in result["rows"] if row["name"] == "kubernetes")
+    assert kube_svc["type"] == "ClusterIP"
+    assert kube_svc["cluster_ip"]
+    assert any(port["port"] == 443 for port in kube_svc["ports"])
+
+
+@pytest.mark.asyncio
+async def test_ingress_list_against_k3s_returns_empty_or_default(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.ingress.list --namespace default`` returns the (likely-empty) ingress list.
+
+    k3s ships Traefik in ``kube-system`` but no ingresses by default in
+    ``default``. The assertion is structural -- the call succeeds and
+    returns the expected envelope shape -- not numeric. A list-op that
+    failed against a real cluster would surface as an exception here.
+    """
+    connector, target = k3s_connector
+    result = await connector.k8s_ingress_list(target, {"namespace": "default"})
+    assert isinstance(result["rows"], list)
+    assert result["total"] == len(result["rows"])
+
+
+@pytest.mark.asyncio
+async def test_configmap_list_against_k3s_keys_only_data_absent(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.configmap.list --namespace kube-system`` returns keys-only rows; data absent.
+
+    The privacy contract pinned by the unit tests is re-asserted here
+    against the live cluster: even with real configmaps in
+    ``kube-system`` (k3s ships several including ``coredns`` and
+    ``local-path-config``), the list-op rows MUST NOT carry ``data``
+    or ``binary_data``.
+    """
+    connector, target = k3s_connector
+    result = await connector.k8s_configmap_list(target, {"namespace": "kube-system"})
+    assert result["total"] >= 1, "k8s kube-system should ship at least one configmap"
+    for row in result["rows"]:
+        # Privacy contract: keys populated, values absent.
+        assert "keys" in row
+        assert "data" not in row
+        assert "binary_data" not in row
+
+
+@pytest.mark.asyncio
+async def test_configmap_info_against_k3s_returns_full_data(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.configmap.info`` returns full data + binary_data for a known configmap.
+
+    Picks a configmap from ``k8s.configmap.list`` and re-reads it via
+    ``info``; the test is independent of which specific configmap k3s
+    happens to ship in this version.
+    """
+    connector, target = k3s_connector
+    list_result = await connector.k8s_configmap_list(target, {"namespace": "kube-system"})
+    assert list_result["rows"], "need at least one configmap to exercise info"
+    first = list_result["rows"][0]
+    info_result = await connector.k8s_configmap_info(
+        target, {"name": first["name"], "namespace": "kube-system"}
+    )
+    assert info_result["name"] == first["name"]
+    assert info_result["namespace"] == "kube-system"
+    # ``data`` is a dict (possibly empty if the configmap has only
+    # binary_data); ``metadata.labels`` / ``metadata.annotations`` are
+    # always-present dicts in the wire shape.
+    assert isinstance(info_result["data"], dict)
+    assert isinstance(info_result["binary_data"], dict)
+    assert isinstance(info_result["metadata"]["labels"], dict)
+
+
+@pytest.mark.asyncio
+async def test_event_list_against_k3s_returns_namespaced_events(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.event.list --namespace kube-system`` returns recent events sorted recent-first."""
+    connector, target = k3s_connector
+    result = await connector.k8s_event_list(target, {"namespace": "kube-system", "limit": 50})
+    # k3s emits events during boot (pod scheduling, image pulls, leader
+    # election); the kube-system namespace always has some.
+    assert isinstance(result["rows"], list)
+    # Ordering is most-recent-first by ``last_seen_seconds`` (smaller
+    # value = more recent).
+    seen = [
+        row["last_seen_seconds"] for row in result["rows"] if row["last_seen_seconds"] is not None
+    ]
+    assert seen == sorted(seen)
+
+
+@pytest.mark.asyncio
+async def test_event_list_against_k3s_field_selector_filters(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``--field-selector type=Warning`` returns only Warning events.
+
+    May return zero rows on a healthy cluster -- the assertion is that
+    every returned row matches the filter, not that any rows exist.
+    """
+    connector, target = k3s_connector
+    result = await connector.k8s_event_list(
+        target,
+        {"namespace": "kube-system", "field_selector": "type=Warning"},
+    )
+    assert isinstance(result["rows"], list)
+    for row in result["rows"]:
+        assert row["type"] == "Warning"

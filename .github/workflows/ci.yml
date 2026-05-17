@@ -194,6 +194,21 @@ jobs:
         # are already declared there.
         run: uv run mypy src/
 
+      - name: Embedding-model drift guard (evoila/meho#574)
+        # Regression guard for #574: actually instantiate
+        # TextEmbedding(DEFAULT_EMBEDDING_MODEL) + run one real embed,
+        # so a fastembed<->model-repo drift (the model repo dropping
+        # `model_optimized.onnx`, fastembed remapping the HF source,
+        # an incompatible fastembed bump, …) fails THIS PR instead of
+        # CrashLooping in production on a clean deploy. Green ci.yml on
+        # a runtime-fetched model cannot catch this; this step does.
+        # The image build runs the same module to BAKE the model
+        # (backend/Dockerfile); here we only assert, into a writable
+        # temp dir because the runner sandbox can't write `/opt`.
+        env:
+          MEHO_WARM_CACHE_DIR: ${{ runner.temp }}/warm-cache
+        run: uv run python -m meho_backplane.retrieval.warm
+
       - name: Pytest (unit + coverage)
         # -x exits on first failure (fast feedback on PR runs).
         # --ignore=tests/integration EXCLUDES the container-heavy

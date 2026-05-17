@@ -129,7 +129,9 @@ def isolated_registry() -> Iterator[None]:
     in any test file that imports the fixture after the first one
     runs. The G4.1-T3 kb meta-tools (``mcp.tools.knowledge``) and the
     matching ``meho://kb/{slug}`` resource (``mcp.resources.kb``) join
-    the list for the same reason.
+    the list for the same reason. The G9.1-T7 topology meta-tools
+    (``mcp.tools.topology`` — ``query_topology`` + ``list_targets``)
+    join the list for the same reason.
     """
     from meho_backplane.mcp.resources import kb as kb_resource
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
@@ -139,6 +141,7 @@ def isolated_registry() -> Iterator[None]:
         knowledge,
         meho_status,
         operations,
+        topology,
     )
 
     clear_registries()
@@ -147,6 +150,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(connector_admin)
     importlib.reload(audit)
     importlib.reload(knowledge)
+    importlib.reload(topology)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)

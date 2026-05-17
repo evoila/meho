@@ -49,12 +49,13 @@ data:
   DATABASE_POOL_TIMEOUT: {{ .Values.config.databasePoolTimeout | quote }}
   # G0.4-T2 (#259) — retrieval substrate fastembed model + on-disk cache
   # path. The cache path here is the env-var contract the backplane
-  # honours; the matching `retrieval.modelCache.mountPath` value (above)
-  # is what the PVC actually mounts. Operators flipping
-  # `retrieval.modelCache.enabled=false` should still leave this
-  # pointing at the chart's default — the backplane falls back to
-  # writing weights to that path even without a PVC backing it (an
-  # `emptyDir`-equivalent ephemeral write that re-downloads weights on
-  # every restart).
+  # honours. The chart default `/opt/meho/model-cache` is the image
+  # layer the default model is BAKED INTO at build time (evoila/meho#574)
+  # — no PVC, no runtime HuggingFace download for the shipped default.
+  # Only repoint this (and enable `retrieval.modelCache`) when overriding
+  # `retrievalEmbeddingModel` to a non-default model fetched at runtime;
+  # if you point it at a writable PVC mountPath, that PVC is what
+  # survives restarts (and is subject to the #574 partial-cache caveat
+  # documented on `retrieval.modelCache`).
   RETRIEVAL_EMBEDDING_MODEL: {{ .Values.config.retrievalEmbeddingModel | quote }}
   RETRIEVAL_MODEL_CACHE_DIR: {{ .Values.config.retrievalModelCacheDir | quote }}

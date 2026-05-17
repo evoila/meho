@@ -207,12 +207,14 @@ def _default_retrieval_model_cache_dir(
     """Redirect fastembed's ONNX model cache to a writable per-test dir.
 
     The production default at :attr:`Settings.retrieval_model_cache_dir`
-    is ``/var/cache/fastembed`` so the Helm chart's PVC mount survives
-    pod restarts without re-downloading the ~120 MB ONNX blob. That
-    path is read-only on macOS dev sandboxes and on the
-    gha-runner-scale-set CI sandbox (every recent merged PR on main
-    shows 3 FAILURE statuses in ``statusCheckRollup`` for exactly this
-    reason; see Task #472).
+    is ``/opt/meho/model-cache`` — the image layer the default model is
+    baked into at build time (evoila/meho#574). That path does not
+    exist (and its parent is not writable) on macOS dev sandboxes or on
+    the gha-runner-scale-set CI sandbox, so a test that constructs
+    :class:`Settings` without this override would hit the same
+    ``PermissionError`` the old ``/var/cache/fastembed`` default caused
+    (every recent merged PR on main once showed 3 FAILURE statuses in
+    ``statusCheckRollup`` for exactly this reason; see Task #472).
 
     Failure surface: the FastAPI lifespan in
     :mod:`meho_backplane.main` calls

@@ -120,6 +120,38 @@ WORKDIR /app
 # installed in /app/.venv.
 COPY --from=builder --chown=meho:0 /app/.venv /app/.venv
 
+# ---------- Bake the default embedding model into the image (#574) ----------
+# Pre-download the shipped default fastembed model into an IMAGE LAYER at
+# /opt/meho/model-cache (== Settings.retrieval_model_cache_dir default ==
+# embedding.BAKED_MODEL_CACHE_DIR). Rationale:
+#
+#   * Out-of-the-box startup (evoila/meho#574). The chart previously relied
+#     on a runtime HuggingFace download into a *persistent RWO PVC*.
+#     fastembed treats an existing snapshot dir as "model present" and never
+#     re-fetches, so one interrupted/partial first download — or a CSI
+#     volume that doesn't preserve the HF cache's
+#     `snapshots/<sha>/*.onnx -> ../../blobs/<hash>` symlinks — poisons that
+#     PVC permanently and EVERY fresh pod CrashLoops identically with
+#     `onnxruntime ... NO_SUCHFILE ... model_optimized.onnx`. An image layer
+#     preserves symlinks, is read-only, and removes the PVC from the
+#     correctness path for the shipped default.
+#   * Air-gap (the egress half of evoila/meho#572): first boot needs no
+#     HuggingFace egress.
+#   * Regression guard (reporter ask #1): `meho_backplane.retrieval.warm`
+#     instantiates TextEmbedding(default) AND runs one real embed, so a
+#     fastembed<->model-repo drift fails THIS BUILD (non-zero RUN) instead
+#     of CrashLooping in production — the exact failure green ci.yml on a
+#     runtime-fetched model cannot catch.
+#
+# No uv build-cache mount here: the download must land in the image layer,
+# not in a discarded BuildKit cache. Runs while still root so it can create
+# /opt/meho; chowned to the runtime uid (1001, gid 0) afterwards so the
+# non-root USER below can read it. `chmod -R g=u` keeps it group-readable
+# for the arbitrary-uid / restricted-PSA case (gid is always 0).
+RUN python -m meho_backplane.retrieval.warm \
+ && chown -R 1001:0 /opt/meho \
+ && chmod -R g=u /opt/meho
+
 USER 1001:0
 
 EXPOSE 8000

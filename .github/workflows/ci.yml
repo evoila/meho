@@ -194,6 +194,23 @@ jobs:
         # are already declared there.
         run: uv run mypy src/
 
+      - name: Cache fastembed model (drift-guard + slow-lane)
+        # The drift-guard below downloads the ~67 MB default ONNX model
+        # from HuggingFace. Without this cache every run re-fetches it
+        # unauthenticated over the cluster's shared NAT egress (HF
+        # rate-limits anonymous pulls) — pure repeated cost on the
+        # slowest required job. Key on uv.lock: fastembed's version is
+        # pinned there, so a fastembed bump (which can remap the HF
+        # source/filename) misses the cache and the model re-downloads
+        # exactly once, then re-saves. restore-keys lets an unrelated
+        # lock change still reuse the prior model blob.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
+
       - name: Embedding-model drift guard (evoila/meho#574)
         # Regression guard for #574: actually instantiate
         # TextEmbedding(DEFAULT_EMBEDDING_MODEL) + run one real embed,
@@ -203,27 +220,34 @@ jobs:
         # CrashLooping in production on a clean deploy. Green ci.yml on
         # a runtime-fetched model cannot catch this; this step does.
         # The image build runs the same module to BAKE the model
-        # (backend/Dockerfile); here we only assert, into a writable
-        # temp dir because the runner sandbox can't write `/opt`.
+        # (backend/Dockerfile); here we only assert, into the cached
+        # workspace dir (the runner sandbox can't write `/opt`).
+        # HF_TOKEN (if the secret is configured) authenticates the
+        # download for higher HF rate limits + faster pulls; absent →
+        # empty → anonymous (current behaviour, no regression).
         env:
-          MEHO_WARM_CACHE_DIR: ${{ runner.temp }}/warm-cache
+          MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run python -m meho_backplane.retrieval.warm
 
       - name: Pytest (unit + coverage)
-        # -x exits on first failure (fast feedback on PR runs).
-        # --ignore=tests/integration EXCLUDES the container-heavy
-        # integration subtree (pgvector/valkey/k3d/vcsim
-        # testcontainers) — it runs in the sibling `python-integration`
-        # job so this required gate stays fast + deterministic.
-        # --cov=meho_backplane emits a coverage report; --cov-report=xml
-        # produces coverage.xml in the working dir, which the next step
-        # uploads as the `python-coverage` artifact consumed by
-        # SonarCloud (quality-gate.yml). --cov-report=term echoes the
-        # summary into the workflow log. NOTE: coverage now reflects
-        # the unit sweep only; integration-only-covered lines are not
-        # counted. Combined coverage (cov-append across both jobs) is
-        # a follow-up on #564 — acceptable interim since SonarCloud's
-        # gate is new-code-coverage weighted.
+        # NOT YET PARALLELIZED — deliberately serial. pytest-xdist `-n
+        # auto` (the job header's long-standing target) was implemented
+        # and measured (serial 4:43 → xdist 1:29 locally) but a
+        # controlled same-commit diff (serial 2007/0/0 vs `-n auto
+        # --dist loadscope` 2006/1/2) proved the suite has PRE-EXISTING
+        # cross-module global-registry isolation leaks: tests/
+        # test_mcp_registry.py + tests/test_audit_middleware.py pass
+        # ONLY in the full-suite serial collection order — they fail in
+        # ANY repartition, including a dedicated serial 2-file pass
+        # (locally verified red), so no split-pass workaround is
+        # viable. Parallelizing the unit job is therefore HARD-BLOCKED
+        # on the registry snapshot/restore fix in #585; flip this to
+        # `-n auto --dist loadscope --maxfail=1` there. The fastembed
+        # model cache + HF_TOKEN above are the safe wins shipped now.
+        # -x fast-fail. --ignore=tests/integration → the container-
+        # heavy subtree runs in the sibling `python-integration` job.
+        # Coverage is the unit sweep only; combined cov is #564.
         run: uv run pytest -x --ignore=tests/integration --cov=meho_backplane --cov-report=xml --cov-report=term tests/
 
       - name: Upload Python coverage artifact
@@ -301,7 +325,10 @@ jobs:
         # Only the tests/integration/ subtree. No --cov here: coverage
         # is emitted by the unit job (see its NOTE); combined coverage
         # is a #564 follow-up. -x for fast-fail on the first broken
-        # integration case.
+        # integration case. Deliberately NOT parallelized: the unit
+        # job is the ~49min bottleneck (now split-parallelized); this
+        # job is ~6min and its container-heavy fixtures under xdist
+        # are unverified — out of scope for the perf change.
         run: uv run pytest -x tests/integration/
 
   go-lint-test:

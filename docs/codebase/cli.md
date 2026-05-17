@@ -127,14 +127,22 @@ cli/
     │   │   ├── search.go         # `meho operation search` (GET /api/v1/operations/search).
     │   │   ├── call.go           # `meho operation call`   (POST /api/v1/operations/call).
     │   │   └── operation_test.go # render + helper + sentinel tests.
-    │   └── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling.
-    │       ├── retrieval.go            # NewRootCmd.
-    │       ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval).
-    │       ├── eval_test.go            # output-contract + URL-resolution tests.
-    │       ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464.
-    │       ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
-    │       ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
-    │       └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
+    │   ├── retrieval/         # G4.3-T2 #441 — retrieval-quality tooling.
+    │   │   ├── retrieval.go            # NewRootCmd.
+    │   │   ├── eval.go                 # `meho retrieval eval` (POST /api/v1/retrieve/eval).
+    │   │   ├── eval_test.go            # output-contract + URL-resolution tests.
+    │   │   ├── usage.go                # `meho retrieval usage` (GET /api/v1/retrieve/usage) — G4.3-T5b #464.
+    │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
+    │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
+    │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
+    │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
+    │   └── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
+    │       ├── vault.go          # NewRootCmd + shared HTTP/auth/render helpers + ConnectorID const.
+    │       ├── dispatch.go       # CallResult/callRequestBody + dispatchOp + renderCallResult + generic renderer.
+    │       ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops, #545).
+    │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
+    │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
+    │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.
@@ -785,6 +793,79 @@ envelope, 409 carries `ambiguous_target` with colliding names, and
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the
   source of truth is the backplane, not a stale local copy.
+
+## Vault alias verbs (`meho vault`, G3.3-T6 #550)
+
+`cli/internal/cmd/vault/` registers the operator-facing alias verb
+tree for the `vault-1.x` typed connector (Initiative #366). It is the
+same pattern as the `vmware` tree (G3.1-T7 #511): a thin cobra layer
+that pre-bakes one `connector_id` so operators don't type it on every
+dispatch. Every verb POSTs to `POST /api/v1/operations/call` — the
+same G0.6 dispatcher route the agent surface uses — so auth, policy,
+audit, JSONFlux, and broadcast all run identically whether an agent
+calls `call_operation` or an operator runs `meho vault …`. Per
+[CLAUDE.md](../../CLAUDE.md) postulate 5 these alias verbs are
+operator-only ergonomics and are **not** mirrored on the MCP surface.
+
+`ConnectorID = "vault-1.x"` is the dispatcher's natural-key encoding
+of `(product="vault", version="1.x", impl_id="vault")`, pinned by the
+backend connector-id-parse contract test. A future re-versioning is a
+single-line edit.
+
+### Subcommands
+
+- `meho vault kv read|list|put|versions|delete <mount> <path>` —
+  the KV-v2 group (`vault.kv.*`, ops registered by G3.3-T1 #545). The
+  `<mount> <path>` positional pair maps to `params.mount` /
+  `params.path`; the CLI always sends `mount` explicitly so the
+  operator's choice is authoritative (no client-side default that
+  could drift from the handler's `"secret"`). `put` takes
+  `--data '<json>'|@<file>` and an optional `--cas N`
+  (check-and-set; only sent when explicitly passed). `delete` takes
+  `--versions 3,4,5` (parsed client-side to `[]int` so a bad value is
+  an argv error, not a backend schema-rejection round-trip). `read`
+  replaces the consumer's `_secret-read.sh secret/<mount>/<path>`
+  wrapper.
+- `meho vault sys health|seal-status|mounts-list|auth-list` — read-
+  only diagnostics (`vault.sys.*`, G3.3-T2 #546). No args, no params.
+- `meho vault auth userpass-list|userpass-read <user>|approle-list|approle-read <role>`
+  — read-only identity browse (`vault.auth.*`, G3.3-T3 #547). The
+  `read` verbs map their single positional to the op's schema key
+  (`username` for userpass, `role_name` for approle).
+
+### Reserved flags (same shape across every verb)
+
+- `--target <slug>` — the Vault target the dispatcher resolves
+  server-side (sent as `{"name": "<slug>"}`; absent → `null` on the
+  wire).
+- `--json` — emit the raw `OperationResult` envelope instead of the
+  human render.
+- `--backplane <url>` — override the backplane URL (defaults to the
+  URL recorded by `meho login`).
+
+### Output discipline
+
+Vault payloads (secret data, metadata, version maps, mount maps) are
+nested JSON the operator reads as a tree, so every verb uses the
+generic indented-JSON renderer rather than a per-shape table — a
+per-op table buys little over the dump while risking contract-drift
+panics. Set-shaped responses (`vault kv list`,
+`vault auth userpass-list`, …) arrive **already reduced** to the
+JSONFlux sample + result-handle envelope by the dispatcher; the CLI
+prints that verbatim with the handle hint intact, consistent with the
+`vmware` sibling. Operators drill into a handle with the
+`meho operation` result verbs.
+
+### HTTP shape + exit codes
+
+Identical to the `meho operation` surface (the verbs are pre-scoped
+wrappers over the same route): bearer injection + one-shot
+401-refresh-retry via `api.NewAuthedClient`, hand-written
+`CallResult` / `callRequestBody` structs mirroring the backend
+Pydantic models (duplicated per package to avoid the cmd/* import
+cycle cmd/root.go's graft would otherwise create). Exit codes: `0`
+status=ok, `1` status=error/denied (via the `errOpError` sentinel),
+`2` auth_expired, `3` unreachable, `4` unexpected_response.
 
 ## Server-driven discovery (`internal/discovery/`)
 

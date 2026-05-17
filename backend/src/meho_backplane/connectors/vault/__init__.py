@@ -48,7 +48,11 @@ from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
 from meho_backplane.connectors.vault.ops import (
     register_vault_typed_operations,
+    vault_kv_delete,
+    vault_kv_list,
+    vault_kv_put,
     vault_kv_read,
+    vault_kv_versions,
 )
 from meho_backplane.connectors.vault.ops_auth import (
     VaultAuthBackendNotMountedError,
@@ -85,5 +89,9 @@ __all__ = [
     "register_vault_auth_operations",
     "register_vault_sys_typed_operations",
     "register_vault_typed_operations",
+    "vault_kv_delete",
+    "vault_kv_list",
+    "vault_kv_put",
     "vault_kv_read",
+    "vault_kv_versions",
 ]

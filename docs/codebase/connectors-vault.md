@@ -58,6 +58,110 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   The three authenticated ops forward the operator JWT via
   `vault_client_for_operator` and offload the blocking `hvac` call with
   `asyncio.to_thread`.
+- **`auth` read op group** (`ops_auth.py`, G3.3-T3 #547) —
+  `register_vault_auth_operations()` registers `vault.auth.userpass.list`
+  / `vault.auth.userpass.read` / `vault.auth.approle.list` /
+  `vault.auth.approle.read` under group key `auth`, all
+  `safety_level='safe'`. Mount path is parameterised (defaults
+  `userpass` / `approle`); a not-mounted backend raises
+  `VaultAuthBackendNotMountedError`. AppRole secret-id generation is
+  deliberately out of scope (v0.2.next, behind a policy gate). It is
+  registered from its own module via the
+  `register_vault_auth_operations()` call at the end of
+  `register_vault_typed_operations()`.
+
+## KV-v2 op group
+
+| op_id | hvac call | safety_level | op_class (broadcast) |
+|---|---|---|---|
+| `vault.kv.read` | `read_secret_version` | safe | `credential_read` |
+| `vault.kv.list` | `list_secrets` | safe | `credential_read` |
+| `vault.kv.versions` | `read_secret_metadata` | safe | `read` |
+| `vault.kv.put` | `create_or_update_secret` | caution | `write` |
+| `vault.kv.delete` | `delete_secret_versions` | dangerous | `write` |
+
+All five register into operation group `kv`.
+
+**Mount handling.** Every handler — including `vault.kv.read` —
+accepts an optional `mount` param (JSON Schema default `"secret"`,
+mirroring hvac's `mount_point` default) forwarded as hvac's
+`mount_point`. The pre-existing `vault.kv.read` `path`-only call sites
+keep working on the default; the consumer wrappers pass
+`<mount> <path>` explicitly for non-default mounts (the Initiative
+#366 goal — retiring `scripts/_secret-read.sh`, which derived the
+mount from the path's first segment). The shared `mount` schema
+fragment uses `pattern="^(?=.*\S)[^/]+$"`: the `(?=.*\S)` lookahead
+makes an all-whitespace value a validation-time `invalid_params`
+failure rather than a value that `.strip()`s to an empty mount and
+degrades to a runtime `connector_error`; `[^/]+` rejects a
+slash-bearing value (`"secret/data"`) where hvac expects the bare
+mount handle.
+
+**Two-phase failure model.** Login-side failures (Vault unreachable,
+role denied) raise `VaultClientError` subclasses; read/write-side
+failures (KV miss, malformed payload, CAS mismatch, permission
+denied) raise the underlying exception. Callers that need the
+distinction (the `/api/v1/health` route) string-match
+`extras["exception_class"]` against the known `VaultClientError`
+subclass names. Structural unwrap of the hvac payload raises
+`KeyError` on a malformed envelope so the dispatcher reports a
+structured error rather than an unhandled exception.
+
+## Broadcast PII discipline (decision #3)
+
+The G6 broadcast publisher emits an aggregate-only payload for
+`credential_read` and `audit_query` ops. The sensitivity class is
+derived **from the op-id**, not a per-descriptor field:
+`broadcast.events.classify_op` consults the `_CREDENTIAL_READ_OPS`
+allowlist (currently `{vault.kv.read, vault.kv.list}`) and the
+`_WRITE_SUFFIXES` / `_READ_SUFFIXES` tuples. The shipped G0.6
+`endpoint_descriptor` table has **no `op_class` column** — decision #3
+locks the classifier on the op-id, so the register-time signal is the
+op-id itself. `vault.kv.versions` reads only version metadata (never
+secret values) and is deliberately a plain `read`, not
+`credential_read`. The `.put` / `.versions` suffixes were added to the
+write / read suffix tuples by #545 — without that, `vault.kv.put`
+would have classified `other` and broadcast the written secret to
+every operator (the credential-leak fix).
+
+## Approval gating
+
+`vault.kv.put` (`caution`) and `vault.kv.delete` (`dangerous`)
+register with `requires_approval=False` — the dev default.
+`requires_approval` is a static boolean on the descriptor; the shipped
+G0.6 substrate has no per-path approval predicate. The
+production-path approval gate is G7/G10 policy territory (see the
+`EndpointDescriptor` model docstring: `caution`/`dangerous` ops "flow
+through G7 / G10 policy logic once those Goals land"). `safety_level`
+is the load-bearing signal that future gate keys on.
+
+## JSONFlux result-handle path (`vault.kv.list`)
+
+`vault.kv.list` is the only set-shaped op on the v0.2 Vault surface
+(it returns `{"keys": [...]}`; every other op returns a bounded scalar
+or single-secret dict). Per v0.1-spec §4 / CLAUDE.md postulate 6, a
+set larger than the JSONFlux threshold (~50 rows / 4 KB) must come
+back as a sample + `ResultHandle`, not the raw list.
+
+The wrapping is the **dispatcher's** job, not the handler's: the
+handler returns `{"keys": [...]}` verbatim and `dispatch` passes it
+through the configured `Reducer` before audit/broadcast. v0.2 ships
+only `PassThroughReducer`, so the **v0.2 default is pass-through** —
+`vault.kv.list` returns the full inline key list with
+`OperationResult.handle is None`, regardless of key count. The real
+threshold-aware reducer (and the `result_query` / `result_aggregate` /
+`result_describe` / `result_export` meta-tools that read a handle
+back) ships in a follow-on Initiative; swapping it in touches one
+`set_default_reducer` call, not the Vault handler.
+
+`tests/test_vault_kv_list_jsonflux.py` (G3.3-T4) pins both halves of
+the contract: ≤50 keys stays inline with no handle (the shipped v0.2
+default), and — with a threshold-aware reducer installed via the
+`set_default_reducer` seam — >50 keys produces `{sample, ...}` on
+`result` plus a `ResultHandle` whose `total_rows` / `sample_rows`
+carry exactly what a future `result_describe` / `result_query` will
+read. The agent never sees the raw >50-key list once a handle is
+produced.
 
 ## Control flow
 
@@ -65,7 +169,9 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
    `VaultConnector` against the v2 registry synchronously and queues
    two typed-op registrars (`register_vault_typed_operations`,
    `register_vault_sys_typed_operations`) onto the lifespan-driven
-   registrar list.
+   registrar list. `register_vault_typed_operations` registers the
+   KV-v2 group and then calls `register_vault_auth_operations` for the
+   `auth` group.
 2. At FastAPI lifespan startup, `run_typed_op_registrars()` invokes
    both registrars, which upsert the `endpoint_descriptor` rows. Upsert
    is idempotent: a restart against unchanged descriptions is a no-op
@@ -123,12 +229,20 @@ surfaces a raw traceback to the agent.
   lands.
 - `sys` writes (unseal, mount/unmount, policy write) are deliberately
   out of scope for v0.2.
+- AppRole secret-id generation is out of scope for v0.2 (high-risk
+  write with policy implications; v0.2.next behind a policy gate).
 
 ## References
 
 - Initiative #366 (G3.3 vault-1.x typed op surface); Goal #214.
-- Task #546 (G3.3-T2 sys read op group); sibling #545 (G3.3-T1 KV-v2).
+- Tasks: #545 (G3.3-T1 KV-v2), #546 (G3.3-T2 sys read group),
+  #547 (G3.3-T3 auth read group).
 - Substrate: #388 (G0.6 operation registry), #390 (Refactor-Vault).
-- Vault sys API: https://developer.hashicorp.com/vault/api-docs/system
+- Vault API: https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2
+  (KV-v2), https://developer.hashicorp.com/vault/api-docs/system (sys),
+  https://developer.hashicorp.com/vault/api-docs/auth/userpass
+  (userpass), https://developer.hashicorp.com/vault/api-docs/auth/approle
+  (approle).
+- Decision #3 PII redaction: `docs/planning/v0.2-decisions.md`.
 - CLAUDE.md postulates 1 (typed connectors first-class) and 7
   (synchronous append-only audit).

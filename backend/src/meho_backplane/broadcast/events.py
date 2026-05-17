@@ -82,14 +82,18 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
 )
 
 #: Op-id suffixes that imply mutation. Append to this tuple when a new
-#: write-shaped verb spelling lands (no current users beyond the four
-#: in decision #3). Order doesn't matter — :meth:`str.endswith` accepts
-#: a tuple and short-circuits on the first match.
+#: write-shaped verb spelling lands. ``.put`` is the KV-v2 write verb
+#: (``vault.kv.put`` — G3.3-T1 #545); without it a secret write would
+#: fall through to ``other`` and broadcast its full params, leaking the
+#: written secret payload to every operator. Order doesn't matter —
+#: :meth:`str.endswith` accepts a tuple and short-circuits on the
+#: first match.
 _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".create",
     ".update",
     ".delete",
     ".patch",
+    ".put",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
@@ -99,7 +103,10 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
 #: ``sys`` diagnostics verbs (G3.3-T2 #546): non-mutating cluster-state
 #: reads with no secret content, so they broadcast at the same
 #: ``read`` sensitivity as ``.list`` rather than falling through to
-#: the full-detail ``other`` class.
+#: the full-detail ``other`` class. ``.versions`` is the KV-v2
+#: version-metadata browse (``vault.kv.versions`` — G3.3-T1 #545): a
+#: read of metadata only (no secret values), so it likewise classifies
+#: ``read`` rather than ``credential_read``.
 _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".list",
     ".info",
@@ -108,6 +115,7 @@ _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".ls",
     ".health",
     ".seal_status",
+    ".versions",
 )
 
 

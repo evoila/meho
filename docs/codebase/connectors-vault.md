@@ -215,6 +215,54 @@ surfaces a raw traceback to the agent.
   / `register_typed_op_registrar`.
 - `meho_backplane.broadcast.events` — `classify_op` (op-id → op_class).
 
+## Integration harness (G3.3-T7, dev-mode CI)
+
+The unit suites mock hvac through `tests/_vault_fakes.py` (the
+`_build_client` seam). The real-Vault layer lives in
+`backend/tests/integration/test_connectors_vault_dev_e2e.py`: it boots
+a `hashicorp/vault:1.18` server in dev mode via testcontainers'
+`DockerContainer`, seeds the surfaces every op touches, then
+dispatches every registered `vault.kv.*` / `vault.sys.*` /
+`vault.auth.*` op through the real `dispatch()` against the live Vault
+and a real Postgres audit store (reusing the integration conftest's
+`pg_engine` fixture).
+
+- **Container.** Default entrypoint runs `vault server -dev`;
+  `VAULT_DEV_ROOT_TOKEN_ID` pins the generated root token,
+  `VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200` makes the host-mapped port
+  reachable, `IPC_LOCK` is granted (Vault mlocks memory). Image
+  overridable via `MEHO_TEST_VAULT_IMAGE` (same env-knob shape as
+  `MEHO_TEST_PGVECTOR_IMAGE`); `ci.yml` sets it to the Harbor proxy
+  mirror. Docker-socket-absent sandbox skips cleanly — the gate
+  matches `tests/integration/conftest.py`.
+- **Seed.** Dev mode mounts KV-v2 at `secret/`. The fixture writes a
+  plain secret, a twice-written secret (so `vault.kv.versions` sees
+  `current_version == 2`), and a `bulk/` folder with > 50 child keys
+  (the set-shape fixture G3.3-T4's threshold test also consumes). It
+  enables `userpass` + `approle` and seeds one user / one role.
+- **Client seam.** Dev mode has no OIDC method, so the test
+  monkeypatches `vault_client_for_operator` to yield a root-token
+  client bound to the container and pins `VAULT_ADDR` for the
+  `_build_client` path (`sys.health` / `sys.seal_status`). Only
+  credential acquisition is swapped; the full handler → hvac →
+  unwrap → dispatcher → audit → broadcast path runs unchanged.
+- **Assertions.** Each op asserts the live response shape, a single
+  synchronously-committed `audit_log` row (postulate 7), and the
+  broadcast `op_class` — `write` for `kv.put` / `kv.delete`,
+  `credential_read` for `kv.read` / `kv.list`, `read` for the
+  KV-v2 / sys metadata reads and the `.list` auth ops
+  (`auth.userpass.list` / `auth.approle.list`), and `other` for the
+  two `.read` auth-config ops (`auth.userpass.read` /
+  `auth.approle.read`). The `.read` suffix is deliberately absent
+  from `_READ_SUFFIXES` so the suffix check never over-matches the
+  `credential_read`-allowlisted `vault.kv.read`; the auth-config
+  `.read` ops therefore fall through to `other`, which is the safe
+  over-broadcast direction for non-secret auth-method metadata
+  (decision #3).
+- **Secrets discipline.** The dev-root token is generated into the
+  in-memory throwaway container and only ever lives in the fixture's
+  return value — never logged, never asserted, never persisted.
+
 ## Known issues
 
 - `VaultTarget` is a pre-G0.3 placeholder; replace with the real
@@ -236,7 +284,9 @@ surfaces a raw traceback to the agent.
 
 - Initiative #366 (G3.3 vault-1.x typed op surface); Goal #214.
 - Tasks: #545 (G3.3-T1 KV-v2), #546 (G3.3-T2 sys read group),
-  #547 (G3.3-T3 auth read group).
+  #547 (G3.3-T3 auth read group), #551 (G3.3-T7 dev-mode CI
+  integration harness).
+- Vault dev mode: https://developer.hashicorp.com/vault/docs/concepts/dev-server
 - Substrate: #388 (G0.6 operation registry), #390 (Refactor-Vault).
 - Vault API: https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2
   (KV-v2), https://developer.hashicorp.com/vault/api-docs/system (sys),

@@ -122,6 +122,14 @@ jobs:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+      # Vault dev-mode container for the G3.3-T7 kv/sys/auth e2e suite
+      # (backend/tests/integration/test_connectors_vault_dev_e2e.py).
+      # Same env-knob shape as the rows above: the test reads this with
+      # a docker.io short-name default (`hashicorp/vault:1.18`), so the
+      # Harbor-proxy swap is config-only — no source change. Pinned to
+      # the 1.18 LTS minor (not `:latest`) so an upstream Vault release
+      # never breaks an unrelated PR.
+      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
     defaults:
       run:
         # backend/ is the only Python project today; pyproject.toml

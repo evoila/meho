@@ -33,7 +33,15 @@ What this harness proves (issue #551 DoD)
   (CLAUDE.md postulate 7), and that the broadcast event's
   ``op_class`` is correct — ``write`` for ``vault.kv.put`` /
   ``vault.kv.delete``, ``credential_read`` for ``vault.kv.read`` /
-  ``vault.kv.list``, ``read`` for the metadata / sys / auth reads.
+  ``vault.kv.list``, ``read`` for the KV-v2 / sys metadata reads and
+  the ``.list`` auth ops, and ``other`` for the two ``.read``
+  auth-config ops (``vault.auth.userpass.read`` /
+  ``vault.auth.approle.read``). ``.read`` is deliberately absent from
+  ``_READ_SUFFIXES`` so the suffix check never over-matches the
+  ``credential_read``-allowlisted ``vault.kv.read``; the auth-config
+  ``.read`` ops therefore classify ``other``, the safe
+  over-broadcast direction for non-secret auth-method metadata
+  (decision #3). The test assertions below encode this split.
 * The dev-root token is generated into the container via
   ``VAULT_DEV_ROOT_TOKEN_ID`` and only ever held in the fixture's
   return value — it is never written to a workflow log, a committed
@@ -401,8 +409,21 @@ async def _assert_audited(
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
-        rows = (await fresh.execute(select(AuditLog).where(AuditLog.path == op_id))).scalars().all()
-    assert len(rows) == 1, f"expected exactly one audit row for {op_id}, got {len(rows)}"
+        rows = (
+            (
+                await fresh.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == op_id,
+                        AuditLog.operator_sub == operator_sub,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1, (
+        f"expected exactly one audit row for {op_id} / operator {operator_sub}, got {len(rows)}"
+    )
     row = rows[0]
     assert row.method == "DISPATCH"
     assert row.status_code == 200

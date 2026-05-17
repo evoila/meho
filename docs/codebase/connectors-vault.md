@@ -250,7 +250,15 @@ and a real Postgres audit store (reusing the integration conftest's
   synchronously-committed `audit_log` row (postulate 7), and the
   broadcast `op_class` — `write` for `kv.put` / `kv.delete`,
   `credential_read` for `kv.read` / `kv.list`, `read` for the
-  metadata / sys / auth reads.
+  KV-v2 / sys metadata reads and the `.list` auth ops
+  (`auth.userpass.list` / `auth.approle.list`), and `other` for the
+  two `.read` auth-config ops (`auth.userpass.read` /
+  `auth.approle.read`). The `.read` suffix is deliberately absent
+  from `_READ_SUFFIXES` so the suffix check never over-matches the
+  `credential_read`-allowlisted `vault.kv.read`; the auth-config
+  `.read` ops therefore fall through to `other`, which is the safe
+  over-broadcast direction for non-secret auth-method metadata
+  (decision #3).
 - **Secrets discipline.** The dev-root token is generated into the
   in-memory throwaway container and only ever lives in the fixture's
   return value — never logged, never asserted, never persisted.

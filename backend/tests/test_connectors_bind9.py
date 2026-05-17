@@ -267,6 +267,48 @@ async def test_remote_bash_with_sudo_uses_fixed_argv_and_streams_password_via_st
     assert kwargs["check"] is False
 
 
+@pytest.mark.parametrize(
+    "injection_shape, char_name",
+    [
+        ("password\nrm -rf /\n", "newline"),
+        ("password\rsmuggled-line", "carriage-return"),
+        ("password\x00trailing-nul", "nul"),
+    ],
+)
+async def test_remote_bash_with_sudo_rejects_multiline_password(
+    injection_shape: str,
+    char_name: str,
+) -> None:
+    """Control chars in ``sudo_password`` must raise before any wire IO.
+
+    The helper's safety contract is "password is exactly stdin line 1,
+    bash reads line 2 onwards as the script". A password containing
+    ``\\n`` / ``\\r`` / ``\\x00`` breaks that invariant by terminating
+    sudo's read early and feeding the trailing bytes to ``bash -s``
+    as commands. The validation runs before :meth:`_connect` -- the
+    test asserts a ``ValueError`` is raised without an SSH connection
+    being attempted.
+    """
+    connector = Bind9Connector()
+    connect_mock = AsyncMock()
+    with (
+        patch.object(connector, "_connect", connect_mock),
+        pytest.raises(ValueError, match="single line"),
+    ):
+        await connector._remote_bash_with_sudo(
+            _TARGET,
+            "echo body",
+            raw_jwt="jwt",
+            sudo_password=injection_shape,
+        )
+    # Defense-in-depth: validation must run before any wire IO, so the
+    # SSH connection mock was never invoked. ``char_name`` distinguishes
+    # the parametrise case in test output on failure.
+    assert not connect_mock.called, (
+        f"{char_name} injection: _connect was called before sudo_password validation"
+    )
+
+
 async def test_remote_bash_with_sudo_does_not_log_password(
     _mock_ssh_conn: MagicMock,
     caplog: pytest.LogCaptureFixture,

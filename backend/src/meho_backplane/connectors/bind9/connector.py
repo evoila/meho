@@ -169,6 +169,10 @@ class Bind9Connector(SshConnector):
     version = "9.x"
     impl_id = "bind9-ssh"
 
+    # ~18 lines of executable body wrapped in ~65 lines of docstring
+    # encoding the safe-sudo invariant; iter-1 `p1` praised the
+    # structural shape; splitting would decouple safety rationale from
+    # the API it constrains.  # code-quality-allow: load-bearing safety primitive
     async def _remote_bash_with_sudo(
         self,
         target: Target,
@@ -225,12 +229,38 @@ class Bind9Connector(SshConnector):
             Wall-clock timeout in seconds. Raises
             :exc:`asyncio.TimeoutError` on expiry.
 
+        Raises
+        ------
+        ValueError
+            *sudo_password* contains ``\\n``, ``\\r``, or ``\\x00``. The
+            helper's safety contract is "password is exactly stdin
+            line 1, bash reads line 2 onwards as the script"; a
+            control character in *sudo_password* breaks that
+            invariant by terminating sudo's read early and feeding
+            the trailing bytes to ``bash -s`` as commands. The check
+            runs **before** :meth:`_connect` so an invalid credential
+            never opens a wire connection.
+
         Returns
         -------
         :class:`asyncssh.SSHCompletedProcess`
             The completed process; callers inspect ``exit_status`` and
             ``stdout`` / ``stderr`` like any other ``conn.run`` result.
         """
+        # Single-line invariant for sudo_password. If a caller feeds a
+        # password containing ``\n`` / ``\r`` / ``\x00``, sudo's stdin
+        # reader treats the first newline as end-of-password and bash
+        # receives the trailing bytes as additional commands -- the
+        # exact leak shape this helper exists to make structurally
+        # unrepresentable. Reject at entry, before _connect, so an
+        # invalid credential never opens a wire connection and the
+        # error surfaces as a programming bug rather than a remote
+        # exec.
+        if any(ch in sudo_password for ch in ("\n", "\r", "\x00")):
+            raise ValueError(
+                "sudo_password must be a single line: newline / carriage-return / NUL "
+                "characters would smuggle additional bash commands onto stdin"
+            )
         conn = await self._connect(target, raw_jwt)
         stdin_payload = f"{sudo_password}\n{script}\n"
         # ``conn.run(cmd, input=...)`` is the canonical asyncssh shape

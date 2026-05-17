@@ -68,6 +68,7 @@ implementation to track separately:
 | [`kb-migration.md`](./kb-migration.md) | How to migrate the consumer's `kb/` knowledge corpus into MEHO via the G4.1 surface — `meho kb ingest/search/list/show/add/delete`, the ≥1-month overlap, the G4.3 eval, and the operator-driven retire decision. Companion architecture: [`docs/architecture/kb.md`](../architecture/kb.md). |
 | [`mcp-client-setup.md`](./mcp-client-setup.md) | How to wire an MCP client (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) to a running MEHO backplane, plus the Keycloak realm-side audience configuration. |
 | [`retrieval-retirement.md`](./retrieval-retirement.md) | How to retire the consumer's pre-MEHO retrieval workflows (kb / memory / operations surfaces) using `meho retrieval retire-checklist` — 5-criterion decision matrix, per-surface retire + rollback procedures, `retrieval-migration-blocker` label workflow. Companion automation: [`scripts/setup-retrieval-migration-blocker-label.sh`](../../scripts/setup-retrieval-migration-blocker-label.sh). |
+| [`vault-onboarding.md`](./vault-onboarding.md) | How to use the G3.3 `vault-1.x` op surface — the `meho vault kv/sys/auth …` verb tree, target/auth model, the agent meta-tool path, JSONFlux behaviour for `vault.kv.list`, the `credential_read` PII guarantee, and the `_secret-read.sh` / `vault.sh` → `meho vault …` migration table. Companion engineering doc: [`docs/codebase/connectors-vault.md`](../codebase/connectors-vault.md); federation-chain prerequisite: [`vault-provisioning.md`](./vault-provisioning.md). |
 
 ## Related
 

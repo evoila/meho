@@ -71,17 +71,26 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     get_settings.cache_clear()
 
 
-@pytest.fixture(autouse=True)
-def _clean_bind9_registry() -> Iterator[None]:
-    """Re-register :class:`Bind9Connector` after the suite-level registry sweep.
+@pytest.fixture
+def _bind9_registered() -> Iterator[None]:
+    """Opt-in fixture: ensure ``Bind9Connector`` is in the v2 registry.
 
-    ``test_connectors_registry.py`` (alphabetically earlier) has an
-    autouse ``clear_registry()``; this fixture restores the bind9
-    entry that ``connectors/bind9/__init__.py`` would have set so
-    registry-shaped assertions in this module see the production
-    state. Mirrors the
-    :func:`tests.test_connectors_k8s_dispatcher_shim._clean_kubernetes_registry`
-    pattern.
+    **Not autouse.** A previous version made this autouse so registry-
+    shaped assertions saw the production state regardless of test
+    ordering -- but that defeated
+    :func:`test_package_import_registers_v2_entry_only`: the autouse
+    body called :func:`clear_registry` and then
+    :func:`register_connector_v2` itself, so the test would pass even
+    if ``connectors/bind9/__init__.py`` never registered the connector.
+    The registration test now drives its own clear + reload to observe
+    the import side-effect (see that test for the canonical pattern).
+
+    The remaining tests in this module exercise :class:`Bind9Connector`
+    directly (``Bind9Connector()`` plus mocked seams) -- they read the
+    descriptor row via SQL, not the in-memory registry -- so neither
+    autouse re-registration nor this opt-in fixture is required. The
+    fixture is retained for any future test that *does* need the v2
+    registry populated and is not itself testing the import side-effect.
     """
     clear_registry()
     register_connector_v2(
@@ -144,7 +153,30 @@ def test_registry_v2_class_attrs() -> None:
 
 
 def test_package_import_registers_v2_entry_only() -> None:
-    """Importing the package registers under the v2 triple, no v1 dual-write."""
+    """Importing the package registers under the v2 triple, no v1 dual-write.
+
+    Drives the registry clear + reload itself so the assertion observes
+    the **side-effect of importing the package** rather than a fixture's
+    re-registration. A previous incarnation of this test ran behind an
+    autouse fixture that pre-populated the registry; the test would
+    pass even if ``connectors/bind9/__init__.py`` no longer called
+    ``register_connector_v2``. The reload pattern matches
+    :func:`tests.test_connectors_vmware_rest_composites_register.test_importing_vmware_rest_subpackage_queues_composite_registrar`
+    (#509) for the same reason.
+    """
+    import importlib
+
+    import meho_backplane.connectors.bind9 as bind9_pkg
+
+    clear_registry()
+    # Force the module-top-level ``register_connector_v2`` call in
+    # ``bind9/__init__.py`` to fire under the cleared registry. The
+    # ``Bind9Connector`` class object is owned by
+    # ``connectors.bind9.connector`` which is *not* reloaded here, so
+    # the post-reload registry entry points at the same class object
+    # the rest of this module imports at the top.
+    importlib.reload(bind9_pkg)
+
     v2 = all_connectors_v2()
     assert v2[("bind9", "9.x", "bind9-ssh")] is Bind9Connector
     # Bind9 has no v1 chassis history (see ``__init__.py`` docstring);

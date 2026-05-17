@@ -209,7 +209,7 @@ flowchart TD
 
 The eight phases (steps 2–9) map directly to function calls in the dispatcher module:
 
-1. **Parse `connector_id`** → `(product, version, impl_id)` via [`_lookup.parse_connector_id`](../../backend/src/meho_backplane/operations/_lookup.py). Convention: `connector_id` is `"<impl_id>-<version>"` (e.g. `"vmware-rest-9.0"`, `"kubernetes-asyncio-1.x"`); the parser splits on the last hyphen-major-version pattern.
+1. **Parse `connector_id`** → `(product, version, impl_id)` via [`_lookup.parse_connector_id`](../../backend/src/meho_backplane/operations/_lookup.py). Convention: `connector_id` is `"<impl_id>-<version>"` (e.g. `"vmware-rest-9.0"`, `"vault-1.x"`, `"k8s-1.x"`); the parser splits on the last hyphen-major-version pattern. For single-impl connectors (Vault, K8s) the convention is `impl_id == product` so the form collapses to `"<product>-<version>"`; multi-impl connectors (vmware-rest) keep the discriminator in `impl_id`.
 2. **Look up `EndpointDescriptor`** by the natural key `(tenant_id, product, version, impl_id, op_id)` with the tenant union (`tenant_id IS NULL OR tenant_id == operator.tenant_id`). Miss → structured `unknown_op` error with `known_op_count` in `extras` so the agent's "did you mean" path has a signal.
 3. **Validate `params`** against `descriptor.parameter_schema` via `jsonschema.Draft202012Validator`. Invalid → structured `invalid_params` error carrying every validator path that failed.
 4. **Policy gate.** v0.2 default-allow; `requires_approval=True` → `denied`. The gate writes an audit row before returning (so denials are visible in `audit_log` even though the op never executed).

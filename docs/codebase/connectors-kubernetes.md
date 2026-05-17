@@ -4,12 +4,17 @@
 
 The `kubernetes` connector is the typed `Connector` subclass that
 dispatches operator-facing Kubernetes operations under the
-`(product="k8s", version="1.x", impl_id="kubernetes-asyncio")` registry
-triple. It builds on the G0.6 operation registry: handlers register at
+`(product="k8s", version="1.x", impl_id="k8s")` registry triple. The
+single-impl `impl_id == product` shape mirrors the Vault sibling; the
+library name `kubernetes_asyncio` lives in the package layout +
+`pyproject.toml` dependency, not the registry's natural-key triple. It builds on the G0.6 operation registry: handlers register at
 lifespan startup via `register_typed_operation()`, the dispatcher routes
 calls via the descriptor table, and the operator surface is the
-meta-tools (`search_operations` / `call_operation`) plus the
-forthcoming CLI alias verbs (G3.2-T6).
+meta-tools (`search_operations` / `call_operation`) plus the CLI
+alias verbs that ship with G3.2-T6 (`meho k8s <verb> --target <name>
+…`), implemented in [`cli/internal/cmd/k8s/`](../../cli/internal/cmd/k8s/)
+and documented in
+[`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md).
 
 The connector replaces the operator's daily `kubectl-vcf.sh` wrapper for
 read workflows -- inventory listing, workload inspection, log fetching.
@@ -22,7 +27,7 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 
 - **`KubernetesConnector`** (`connector.py`) -- `Connector` subclass.
   Class attributes: `product="k8s"`, `version="1.x"`,
-  `impl_id="kubernetes-asyncio"`. Caches a per-target
+  `impl_id="k8s"`. Caches a per-target
   `kubernetes_asyncio.client.ApiClient` keyed on `secret_ref`; the
   kubeconfig loader is injectable for tests.
 - **Op metadata** (`ops.py`) -- the `KubernetesOp` dataclass plus the
@@ -90,9 +95,18 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 | `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 
-T6 of Initiative #320 (CLI alias verbs + k3d acceptance) extends this
-surface against the same `KubernetesOp` -> `KUBERNETES_OPS` ->
-`register_operations` pattern.
+G3.2-T6 (CLI alias verbs + k3d E2E acceptance + operator-facing
+onboarding doc) layers operator ergonomics on top of this surface
+without adding new ops. The CLI verbs in
+[`cli/internal/cmd/k8s/`](../../cli/internal/cmd/k8s/) pre-bake
+`connector_id="k8s-1.x"` on the existing
+`POST /api/v1/operations/call` route; the E2E harness in
+[`backend/tests/integration/test_connectors_k8s_e2e.py`](../../backend/tests/integration/test_connectors_k8s_e2e.py)
+proves dispatcher -> handler -> k3s round-trips through the
+`search_operations` + `call_operation` meta-tools for every registered
+op; the onboarding recipe in
+[`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md)
+is the operator cookbook for migrating off `kubectl-vcf.sh`.
 
 ### Workload-op pagination (`k8s.pod.list` / `k8s.deployment.list`)
 
@@ -156,9 +170,8 @@ upgrade specific configmap-name patterns (managed-by
 
 1. The connector package's `__init__.py` calls
    `register_connector_v2(product="k8s", version="1.x",
-   impl_id="kubernetes-asyncio", cls=KubernetesConnector)` at import
-   time. The v1 entry under `"k8s"` is preserved for chassis-route
-   compat.
+   impl_id="k8s", cls=KubernetesConnector)` at import time. The v1
+   entry under `"k8s"` is preserved for chassis-route compat.
 2. The same module appends
    `register_kubernetes_typed_operations` to the typed-op registrar
    list via `register_typed_op_registrar`.
@@ -266,7 +279,7 @@ just `len(rows)` because nothing reduces.
 ## References
 
 - Parent Initiative: [#320 G3.2](https://github.com/evoila/meho/issues/320)
-  -- `k8s-1.x kubernetes-asyncio` typed connector.
+  -- `k8s-1.x` typed connector (library: `kubernetes_asyncio`).
 - Predecessor Tasks:
   - [#321 G3.2-T1](https://github.com/evoila/meho/issues/321) -- skeleton.
   - [#322 G3.2-T2](https://github.com/evoila/meho/issues/322) -- core

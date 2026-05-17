@@ -37,11 +37,14 @@ func TestRootCmdHasExpectedSubcommands(t *testing.T) {
 // TestRootHelpListsDynamicCommands wires a synthetic manifest
 // through setDynamicRegistrar and confirms `meho --help` lists the
 // dynamic command. This is the acceptance criterion 6 mock test:
-// fake `k8s` advertisement → registered → `--help` shows it.
+// fake `flarp` advertisement → registered → `--help` shows it.
+// The synthetic name is deliberately not a real built-in
+// (`k8s`/`vault`/`vmware`/...) so the dynamic registrar's
+// "refuse to shadow a built-in" guard doesn't reject it.
 func TestRootHelpListsDynamicCommands(t *testing.T) {
 	manifest := &discovery.CommandManifest{
 		Commands: []discovery.Command{
-			{Name: "k8s", Short: "Kubernetes operations"},
+			{Name: "flarp", Short: "Synthetic test connector"},
 		},
 	}
 	restore := setDynamicRegistrar(func(root *cobra.Command) {
@@ -60,21 +63,21 @@ func TestRootHelpListsDynamicCommands(t *testing.T) {
 		t.Fatalf("--help failed: %v", err)
 	}
 	help := stdout.String()
-	if !strings.Contains(help, "k8s") {
-		t.Errorf("`meho --help` did not list dynamic k8s command:\n%s", help)
+	if !strings.Contains(help, "flarp") {
+		t.Errorf("`meho --help` did not list dynamic flarp command:\n%s", help)
 	}
-	if !strings.Contains(help, "Kubernetes operations") {
+	if !strings.Contains(help, "Synthetic test connector") {
 		t.Errorf("`meho --help` missing dynamic short description:\n%s", help)
 	}
 }
 
-// TestRootRunsDynamicCommand confirms `meho k8s --help` resolves
+// TestRootRunsDynamicCommand confirms `meho flarp --help` resolves
 // and emits the dynamic command's help, not the root help. This
 // is the latter half of the acceptance criterion 6 mock test.
 func TestRootRunsDynamicCommand(t *testing.T) {
 	manifest := &discovery.CommandManifest{
 		Commands: []discovery.Command{
-			{Name: "k8s", Short: "Kubernetes operations",
+			{Name: "flarp", Short: "Synthetic test connector",
 				Subcommands: []discovery.Command{
 					{Name: "list", Short: "List managed clusters"},
 				},
@@ -92,12 +95,12 @@ func TestRootRunsDynamicCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stdout)
-	root.SetArgs([]string{"k8s", "--help"})
+	root.SetArgs([]string{"flarp", "--help"})
 	if err := root.Execute(); err != nil {
-		t.Fatalf("k8s --help failed: %v", err)
+		t.Fatalf("flarp --help failed: %v", err)
 	}
 	help := stdout.String()
 	if !strings.Contains(help, "list") {
-		t.Errorf("`meho k8s --help` did not list nested `list` subcommand:\n%s", help)
+		t.Errorf("`meho flarp --help` did not list nested `list` subcommand:\n%s", help)
 	}
 }

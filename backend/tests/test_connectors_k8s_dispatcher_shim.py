@@ -6,10 +6,10 @@
 Coverage matrix (per Task #391 acceptance criteria):
 
 * :class:`KubernetesConnector` advertises the registry v2 metadata
-  ``("k8s", "1.x", "kubernetes-asyncio")``.
+  ``("k8s", "1.x", "k8s")``.
 * Importing the package registers the connector against both the v1
   registry (``"k8s"``) and the v2 registry
-  (``("k8s", "1.x", "kubernetes-asyncio")``).
+  (``("k8s", "1.x", "k8s")``).
 * :meth:`KubernetesConnector.register_operations` upserts one row per
   entry in :data:`~meho_backplane.connectors.kubernetes.ops.KUBERNETES_OPS`
   into ``endpoint_descriptor`` and is idempotent (second call hits the
@@ -96,7 +96,7 @@ def _clean_kubernetes_registry() -> Iterator[None]:
     register_connector_v2(
         product="k8s",
         version="1.x",
-        impl_id="kubernetes-asyncio",
+        impl_id="k8s",
         cls=KubernetesConnector,
     )
     yield
@@ -178,7 +178,7 @@ def test_registry_v2_class_attrs() -> None:
     """Class-level attrs match the v2 triple the package registers."""
     assert KubernetesConnector.product == "k8s"
     assert KubernetesConnector.version == "1.x"
-    assert KubernetesConnector.impl_id == "kubernetes-asyncio"
+    assert KubernetesConnector.impl_id == "k8s"
     assert KubernetesConnector.supported_version_range is None
     assert KubernetesConnector.priority == 0
 
@@ -191,7 +191,7 @@ def test_package_import_registers_both_v1_and_v2_entries() -> None:
     v2 = all_connectors_v2()
     assert v2[("k8s", "", "")] is KubernetesConnector
     # v2 canonical entry with the full triple.
-    assert v2[("k8s", "1.x", "kubernetes-asyncio")] is KubernetesConnector
+    assert v2[("k8s", "1.x", "k8s")] is KubernetesConnector
     # The v1 single-product table only carries the "k8s" entry; the v2
     # canonical key has no presence in the v1 table by design.
     assert "k8s" in all_connectors()
@@ -232,7 +232,7 @@ async def test_register_operations_upserts_one_row_per_op(
             select(EndpointDescriptor).where(
                 EndpointDescriptor.product == "k8s",
                 EndpointDescriptor.version == "1.x",
-                EndpointDescriptor.impl_id == "kubernetes-asyncio",
+                EndpointDescriptor.impl_id == "k8s",
             )
         )
         rows = result.scalars().all()
@@ -278,7 +278,7 @@ async def test_register_operations_is_idempotent_on_re_call() -> None:
             select(EndpointDescriptor).where(
                 EndpointDescriptor.product == "k8s",
                 EndpointDescriptor.version == "1.x",
-                EndpointDescriptor.impl_id == "kubernetes-asyncio",
+                EndpointDescriptor.impl_id == "k8s",
             )
         )
         rows = result.scalars().all()

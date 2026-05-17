@@ -1,11 +1,13 @@
-# Kubernetes connector (`k8s-1.x`, `kubernetes-asyncio`)
+# Kubernetes connector (`k8s-1.x`, library `kubernetes_asyncio`)
 
 ## Overview
 
 The Kubernetes connector ships read-only typed operations against any
 Kubernetes API server reachable from the backplane. It is identified by
-the registry-v2 triple `(product="k8s", version="1.x",
-impl_id="kubernetes-asyncio")` and is the v0.2 successor to the
+the registry-v2 triple `(product="k8s", version="1.x", impl_id="k8s")`
+(single-impl pattern, mirroring Vault -- the library name
+`kubernetes_asyncio` lives in the package layout + `pyproject.toml`
+dependency, not the registry triple) and is the v0.2 successor to the
 operator's `kubectl-vcf.sh` daily-wrapper.
 
 Operations register into the G0.6 `endpoint_descriptor` table via
@@ -70,7 +72,8 @@ copy this pattern in G3.x).
 1. `meho_backplane.connectors.kubernetes` package init:
    * Calls `register_connector("k8s", KubernetesConnector)` (v1
      registry, backward-compat) and `register_connector_v2(...)` with
-     the canonical `(product, version, impl_id)` triple.
+     the canonical `(product, version, impl_id)` triple
+     (`("k8s", "1.x", "k8s")`).
    * Registers `register_kubernetes_typed_operations` onto the
      lifespan-driven registrar list via `register_typed_op_registrar()`.
 2. FastAPI lifespan calls `_eager_import_connectors()`, then
@@ -89,9 +92,10 @@ copy this pattern in G3.x).
 
 ### Dispatch -- operator/agent call
 
-1. Caller invokes `POST /api/v1/operations/call` with a
-   `connector_id="kubernetes-asyncio-1.x"` (or the legacy
-   `"k8s-1.x"` form) and an `op_id="k8s.<verb>"`.
+1. Caller invokes `POST /api/v1/operations/call` with the canonical
+   `connector_id="k8s-1.x"` and an `op_id="k8s.<verb>"`. The triple
+   parses cleanly through
+   `parse_connector_id("k8s-1.x") -> ("k8s", "1.x", "k8s")`.
 2. The dispatcher resolves the `endpoint_descriptor` row by
    `(tenant_id, product, version, impl_id, op_id)`.
 3. JSON Schema validator (`Draft202012Validator`) checks `params`

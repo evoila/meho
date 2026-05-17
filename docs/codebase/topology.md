@@ -38,9 +38,14 @@ surface"). The CLI front (T6, #454) is landed and documented below
 narrow-waist meta-tools `query_topology` (parametric: `kind` selects
 `dependents` / `dependencies` / `path`) and `list_targets` register in
 `mcp/tools/topology.py` and call `query.py` / `select(TargetORM)`
-directly (sibling fronts on one backplane, not REST wrappers). Only the
-`docs/architecture/topology.md` operator doc remains out of scope here —
-it lands in G9.1-T8.
+directly (sibling fronts on one backplane, not REST wrappers). G9.1-T8
+(#456) shipped the closing acceptance suite
+(`backend/tests/integration/test_topology_g91_acceptance.py` + the
+parametric `backend/tests/fixtures/topology_10k_nodes.py` 10k-node
+generator) and the operator-facing docs
+[`docs/architecture/topology.md`](../architecture/topology.md) +
+[`docs/cross-repo/topology-onboarding.md`](../cross-repo/topology-onboarding.md);
+the whole G9.1 surface is now landed.
 
 ## Key types
 

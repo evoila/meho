@@ -88,18 +88,21 @@ jobs:
     # so no step ever starts on a fork PR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: meho-runners
-    # 40-min cap: the budget is wall-clock for the full unit-plus-
-    # integration sweep + uv sync + coverage emit (serial pytest, no
-    # xdist), not for a short-circuit-on-first-failure run. History:
-    # run 25910787068 cancelled at 49% under the old 10-min cap →
-    # bumped to 20; the G9.1 topology suite (graph_node/edge schema,
-    # refresh service, recursive-CTE query verbs, REST surface) plus
-    # its slow tests/integration/* pgvector:pg16 testcontainer cases
-    # then pushed the serial sweep past 20 min too (runs 25970564527,
-    # 25972807988 cancelled with the Pytest step at ~18m45s). Doubling
-    # to 40 restores headroom for continued suite growth. Durable fix
-    # (pytest-xdist `-n auto` parallelization) tracked as a follow-up.
-    timeout-minutes: 40
+    # 25-min cap: this job is the FAST gate — ruff + ruff-format +
+    # mypy + the unit pytest sweep with tests/integration/ EXCLUDED
+    # (--ignore=tests/integration). The container-heavy integration
+    # subtree moved to the sibling `python-integration` job below.
+    # History: the serial full sweep blew the 10→20→40-min caps
+    # (runs 25910787068, 25970564527, 25972807988, 25987329377 —
+    # the last timed out at exactly 40m28s with the integration
+    # testcontainer cases only ~5% through at 7.5 min). Splitting
+    # the suite makes this required gate deterministic and fast;
+    # 25 min is generous headroom for the unit sweep + uv sync +
+    # coverage emit. Job name is intentionally unchanged so the
+    # existing branch-protection required check stays satisfied.
+    # Further parallelization (pytest-xdist `-n auto`) tracked in
+    # #564.
+    timeout-minutes: 25
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
@@ -181,12 +184,20 @@ jobs:
 
       - name: Pytest (unit + coverage)
         # -x exits on first failure (fast feedback on PR runs).
+        # --ignore=tests/integration EXCLUDES the container-heavy
+        # integration subtree (pgvector/valkey/k3d/vcsim
+        # testcontainers) — it runs in the sibling `python-integration`
+        # job so this required gate stays fast + deterministic.
         # --cov=meho_backplane emits a coverage report; --cov-report=xml
         # produces coverage.xml in the working dir, which the next step
         # uploads as the `python-coverage` artifact consumed by
         # SonarCloud (quality-gate.yml). --cov-report=term echoes the
-        # summary into the workflow log.
-        run: uv run pytest -x --cov=meho_backplane --cov-report=xml --cov-report=term tests/
+        # summary into the workflow log. NOTE: coverage now reflects
+        # the unit sweep only; integration-only-covered lines are not
+        # counted. Combined coverage (cov-append across both jobs) is
+        # a follow-up on #564 — acceptable interim since SonarCloud's
+        # gate is new-code-coverage weighted.
+        run: uv run pytest -x --ignore=tests/integration --cov=meho_backplane --cov-report=xml --cov-report=term tests/
 
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).
@@ -203,6 +214,59 @@ jobs:
           path: backend/coverage.xml
           retention-days: 7
           if-no-files-found: warn
+
+  python-integration:
+    name: Python (integration testcontainers)
+    # Sibling of python-lint-test. Holds the container-heavy
+    # tests/integration/ subtree (pgvector/valkey/k3d/vcsim
+    # testcontainers) that made the combined serial sweep blow every
+    # timeout cap (see python-lint-test comment). Separated so the
+    # required lint+mypy+unit gate stays fast and deterministic while
+    # integration still runs on every PR. This job is NOT yet in the
+    # branch-protection required-check set — promoting it requires a
+    # repo-admin settings change (documented in the PR). Until then it
+    # is a visible, fail-loud signal but not merge-blocking.
+    # 60-min cap: container pulls + DinD spin-up + the serial
+    # integration sweep. pytest-xdist loadgroup parallelization to
+    # bring this well under cap is tracked in #564.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners
+    timeout-minutes: 60
+    env:
+      MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
+      MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
+      MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Docker Hub login (for testcontainers pulls)
+        # Same rationale as python-lint-test's login step — the
+        # integration subtree is the heaviest testcontainers consumer
+        # (pgvector/valkey/k3d/vcsim), so authenticated pulls are
+        # load-bearing here in particular.
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Sync Python environment (locked)
+        run: uv sync --locked --all-groups
+
+      - name: Pytest (integration testcontainers)
+        # Only the tests/integration/ subtree. No --cov here: coverage
+        # is emitted by the unit job (see its NOTE); combined coverage
+        # is a #564 follow-up. -x for fast-fail on the first broken
+        # integration case.
+        run: uv run pytest -x tests/integration/
 
   go-lint-test:
     name: Go (golangci-lint + go test)

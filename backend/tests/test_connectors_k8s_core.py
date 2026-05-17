@@ -658,14 +658,18 @@ async def test_k8s_ls_namespace_kind_with_rbac_403_records_error() -> None:
 
 @pytest.mark.asyncio
 async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
-    """Kinds whose ``list`` op isn't registered come back as ``unknown_op`` via the shim."""
-    # ``k8s.pod.list`` isn't registered (T3 ships it). The shim returns the
-    # dispatcher's structured ``unknown_op`` envelope; the forwarder
-    # surfaces it verbatim under ``result``.
+    """Kinds whose ``list`` op isn't registered come back as ``unknown_op`` via the shim.
+
+    Pinned against a kind the registered surface deliberately does not
+    cover (``services`` ships under G3.2-T4 #324). T3 (#323) brought
+    ``k8s.pod.list`` and ``k8s.deployment.list`` into the registered
+    set, so the original ``/argocd/pods`` probe now resolves to a real
+    handler -- using ``services`` instead keeps the test pinned on the
+    unknown-op shape until T4 lands its own coverage.
+    """
     from meho_backplane.operations import typed_register as tr_module
 
     connector = _make_connector()
-    # Register only the T2 surface so the descriptor lookup is deterministic.
     with patch.object(
         tr_module,
         "encode_endpoint_text",
@@ -673,11 +677,10 @@ async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
     ):
         await KubernetesConnector.register_operations()
 
-    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/pods"})
+    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/services"})
 
-    assert result["path"] == "/argocd/pods"
-    assert result["forwarded_to"] == "k8s.pod.list"
-    # The shim's ``unknown_op`` envelope -- serialised via ``model_dump(mode='json')``.
+    assert result["path"] == "/argocd/services"
+    assert result["forwarded_to"] == "k8s.service.list"
     inner = result["result"]
     assert inner["status"] == "error"
     assert inner["error"].startswith("unknown_op:")
@@ -686,7 +689,12 @@ async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
 
 @pytest.mark.asyncio
 async def test_k8s_ls_path_with_extra_segments_collapses_to_two_arg_forward() -> None:
-    """``k8s.ls /ns/kind/extra`` collapses to the ``/ns/kind`` forwarder shape."""
+    """``k8s.ls /ns/kind/extra`` collapses to the ``/ns/kind`` forwarder shape.
+
+    Uses ``services`` (still unshipped post-T3) so the inner result is
+    the deterministic ``unknown_op`` envelope; the assertion target is
+    the canonical 2-segment collapse, not the sub-op's success.
+    """
     from meho_backplane.operations import typed_register as tr_module
 
     connector = _make_connector()
@@ -697,10 +705,10 @@ async def test_k8s_ls_path_with_extra_segments_collapses_to_two_arg_forward() ->
     ):
         await KubernetesConnector.register_operations()
 
-    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/pods/extra/segments"})
-    assert result["forwarded_to"] == "k8s.pod.list"
+    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/services/extra/segments"})
+    assert result["forwarded_to"] == "k8s.service.list"
     # The path retained is the canonical 2-segment shape.
-    assert result["path"] == "/argocd/pods"
+    assert result["path"] == "/argocd/services"
 
 
 # ---------------------------------------------------------------------------

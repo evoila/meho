@@ -535,6 +535,60 @@ class KubernetesConnector(Connector):
 
         return await k8s_logs(self, target, params)
 
+    async def k8s_pod_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.pod.list`` op (G3.2-T3 #323).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.kubernetes.ops_workload.k8s_pod_list`.
+        Same module-level-function shape :meth:`logs` uses so a future
+        per-op-handler-file split keeps the registration API stable.
+        """
+        from meho_backplane.connectors.kubernetes.ops_workload import (
+            k8s_pod_list as _k8s_pod_list,
+        )
+
+        return await _k8s_pod_list(self, target, params)
+
+    async def k8s_pod_info(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.pod.info`` op (G3.2-T3 #323)."""
+        from meho_backplane.connectors.kubernetes.ops_workload import (
+            k8s_pod_info as _k8s_pod_info,
+        )
+
+        return await _k8s_pod_info(self, target, params)
+
+    async def k8s_deployment_list(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.deployment.list`` op (G3.2-T3 #323)."""
+        from meho_backplane.connectors.kubernetes.ops_workload import (
+            k8s_deployment_list as _k8s_deployment_list,
+        )
+
+        return await _k8s_deployment_list(self, target, params)
+
+    async def k8s_deployment_info(
+        self,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``k8s.deployment.info`` op (G3.2-T3 #323)."""
+        from meho_backplane.connectors.kubernetes.ops_workload import (
+            k8s_deployment_info as _k8s_deployment_info,
+        )
+
+        return await _k8s_deployment_info(self, target, params)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`KUBERNETES_OPS` into ``endpoint_descriptor``.

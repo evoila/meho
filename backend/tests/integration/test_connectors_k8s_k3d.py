@@ -301,13 +301,169 @@ async def test_ls_namespace_against_k3s_returns_kind_counts(
 async def test_ls_namespace_kind_against_k3s_forwards_to_unknown_op(
     k3s_connector: tuple[KubernetesConnector, _K3sTarget],
 ) -> None:
-    """``k8s.ls /default/pods`` forwards to ``k8s.pod.list`` -- unknown_op until T3."""
+    """``k8s.ls /default/pods`` forwards to ``k8s.pod.list``.
+
+    Pre-T3, this exercised the dispatcher's ``unknown_op`` shape.
+    T3 (#323) registers ``k8s.pod.list``, but registration only runs
+    inside the lifespan-driven
+    :meth:`KubernetesConnector.register_operations`; this test
+    constructs the connector directly, so no descriptor row is written
+    to ``endpoint_descriptor`` and the dispatcher shim still surfaces
+    ``unknown_op`` on the forwarded sub-call. Live registration +
+    end-to-end dispatch is covered by the chassis lifespan tests, not
+    by this module.
+    """
     connector, target = k3s_connector
     result = await connector.k8s_ls(target, {"path": "/default/pods"})
     assert result["forwarded_to"] == "k8s.pod.list"
     inner = result["result"]
-    # T3 hasn't shipped k8s.pod.list yet, so the dispatcher shim emits
-    # the structured unknown_op envelope. When T3 lands, this test
-    # gains a real-pod-row assertion in the inner result.
     assert inner["status"] == "error"
     assert inner["error"].startswith("unknown_op:")
+
+
+# ---------------------------------------------------------------------------
+# G3.2-T3 (#323) workload ops -- live k3s exercise.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pod_list_against_k3s_returns_kube_system_pods(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.pod.list -n kube-system`` returns the bootstrap pods.
+
+    k3s ships coredns + traefik + local-path-provisioner + metrics-server
+    pods in ``kube-system`` post-boot; the assertion is existential
+    (at least one pod) rather than exact-list because the k3s minor
+    drift adds/removes shipped components.
+    """
+    connector, target = k3s_connector
+    result = await connector.k8s_pod_list(target, {"namespace": "kube-system"})
+    assert result["total"] >= 1
+    sample = result["rows"][0]
+    for key in ("name", "namespace", "status", "ready", "restarts", "age_seconds", "node", "ip"):
+        assert key in sample
+    assert sample["namespace"] == "kube-system"
+
+
+@pytest.mark.asyncio
+async def test_pod_list_all_namespaces_against_k3s(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.pod.list --all-namespaces`` returns pods spanning multiple namespaces."""
+    connector, target = k3s_connector
+    result = await connector.k8s_pod_list(target, {"all_namespaces": True})
+    assert result["total"] >= 1
+    namespaces = {row["namespace"] for row in result["rows"]}
+    # k3s' bootstrap pods live in kube-system.
+    assert "kube-system" in namespaces
+
+
+@pytest.mark.asyncio
+async def test_pod_list_server_side_limit_caps_rows(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``limit=1`` enforces a one-row page; further pages reachable via continue_token."""
+    connector, target = k3s_connector
+    result = await connector.k8s_pod_list(target, {"namespace": "kube-system", "limit": 1})
+    assert result["total"] == 1
+    # next_continue presence depends on whether kube-system has >1 pod
+    # (it normally does on k3s); single-pod namespaces omit the token.
+    # Both shapes are valid; when present, the cursor round-trips
+    # cleanly back through a second list call.
+    if "next_continue" in result:
+        page_2 = await connector.k8s_pod_list(
+            target,
+            {
+                "namespace": "kube-system",
+                "limit": 1,
+                "continue_token": result["next_continue"],
+            },
+        )
+        assert page_2["total"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_pod_info_against_k3s_resolves_prefix(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.pod.info`` resolves a unique prefix and returns full container detail."""
+    connector, target = k3s_connector
+    listing = await connector.k8s_pod_list(target, {"namespace": "kube-system"})
+    assert listing["total"] >= 1
+    pod_name = listing["rows"][0]["name"]
+    # k3s pod names follow ``<deployment>-<hash>-<id>``; the first
+    # segment is unique when only one pod from a given deployment
+    # exists. Fall back to the full name when the prefix would clash.
+    prefix = pod_name.split("-", 1)[0]
+    prefix_matches = [r for r in listing["rows"] if r["name"].startswith(prefix)]
+    target_name = prefix if len(prefix_matches) == 1 else pod_name
+    info = await connector.k8s_pod_info(
+        target, {"pod_name": target_name, "namespace": "kube-system"}
+    )
+    assert info["name"] == pod_name
+    assert info["namespace"] == "kube-system"
+    assert isinstance(info["containers"], list)
+    assert len(info["containers"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_pod_info_not_found_raises_against_k3s(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """A non-existent pod name surfaces :class:`WorkloadNotFoundError`."""
+    from meho_backplane.connectors.kubernetes.ops_workload import WorkloadNotFoundError
+
+    connector, target = k3s_connector
+    with pytest.raises(WorkloadNotFoundError):
+        await connector.k8s_pod_info(
+            target,
+            {"pod_name": "definitely-not-a-real-pod-zzz", "namespace": "kube-system"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_deployment_list_against_k3s_kube_system(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.deployment.list -n kube-system`` returns the bootstrap deployments.
+
+    k3s ships coredns + metrics-server + local-path-provisioner +
+    traefik as deployments in ``kube-system``; this assertion is
+    existential (at least one) for k3s-minor drift tolerance.
+    """
+    connector, target = k3s_connector
+    result = await connector.k8s_deployment_list(target, {"namespace": "kube-system"})
+    assert result["total"] >= 1
+    sample = result["rows"][0]
+    for key in (
+        "name",
+        "namespace",
+        "replicas_desired",
+        "replicas_ready",
+        "replicas_available",
+        "image",
+        "age_seconds",
+        "strategy",
+    ):
+        assert key in sample
+    assert sample["namespace"] == "kube-system"
+
+
+@pytest.mark.asyncio
+async def test_deployment_info_against_k3s_returns_full_detail(
+    k3s_connector: tuple[KubernetesConnector, _K3sTarget],
+) -> None:
+    """``k8s.deployment.info`` returns the full template + status block."""
+    connector, target = k3s_connector
+    listing = await connector.k8s_deployment_list(target, {"namespace": "kube-system"})
+    assert listing["total"] >= 1
+    dep_name = listing["rows"][0]["name"]
+    info = await connector.k8s_deployment_info(
+        target, {"deployment_name": dep_name, "namespace": "kube-system"}
+    )
+    assert info["name"] == dep_name
+    assert info["namespace"] == "kube-system"
+    assert "status" in info
+    assert "containers" in info
+    assert len(info["containers"]) >= 1

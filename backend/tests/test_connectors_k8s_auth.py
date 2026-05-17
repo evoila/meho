@@ -373,11 +373,13 @@ async def test_execute_returns_unknown_op_for_every_op_id() -> None:
     """Unknown op_ids surface the dispatcher's structured ``unknown_op`` shape.
 
     Post-G0.6 (#391) the connector's ``execute`` is a thin shim that
-    delegates to a global ``endpoint_descriptor`` lookup; an op_id that
-    nothing registered (here ``k8s.pod.list``, which T2-T5 of #320 will
-    land) hits :func:`~meho_backplane.operations._errors.result_unknown_op`
-    and returns the dispatcher's canonical error envelope rather than
-    the pre-refactor hard-coded ``{"known_ops": []}`` shape.
+    delegates to a global ``endpoint_descriptor`` lookup; this test
+    never calls ``register_operations()``, so the DB row set is empty
+    and any op_id -- including ones T3+ have since registered
+    elsewhere -- hits
+    :func:`~meho_backplane.operations._errors.result_unknown_op` and
+    returns the dispatcher's canonical error envelope rather than the
+    pre-refactor hard-coded ``{"known_ops": []}`` shape.
     """
     connector = _make_connector_with_stub_kubeconfig()
     result = await connector.execute(_TARGET_A, "k8s.pod.list", {"namespace": "argocd"})

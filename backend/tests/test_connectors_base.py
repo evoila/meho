@@ -222,11 +222,16 @@ def test_shipped_subclasses_advertise_v2_metadata_per_their_initiative() -> None
 
     # G0.6 refactor (#391) flipped the K8s connector from the v1 single-
     # product slug ``"kubernetes"`` to the v2-canonical ``"k8s"`` /
-    # ``"1.x"`` / ``"kubernetes-asyncio"`` triple. ``supported_version_range``
-    # and ``priority`` still inherit the ABC defaults from G0.6-T3 (#394).
+    # ``"1.x"`` / ``"k8s"`` triple. The G3.2-T6 precursor (#326) realigned
+    # the impl_id from the library name ``"kubernetes-asyncio"`` to the
+    # single-impl ``impl_id == product`` shape that parse_connector_id
+    # round-trips for ``"k8s-1.x"``; the library name now lives in the
+    # package layout + pyproject.toml dependency, not the registry triple.
+    # ``supported_version_range`` and ``priority`` still inherit the ABC
+    # defaults from G0.6-T3 (#394).
     assert KubernetesConnector.product == "k8s"
     assert KubernetesConnector.version == "1.x"
-    assert KubernetesConnector.impl_id == "kubernetes-asyncio"
+    assert KubernetesConnector.impl_id == "k8s"
     assert KubernetesConnector.supported_version_range is None
     assert KubernetesConnector.priority == 0
 

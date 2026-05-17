@@ -146,13 +146,15 @@ def _make_connector_with_stub_kubeconfig() -> KubernetesConnector:
 
 def test_kubernetes_connector_subclasses_connector_abc() -> None:
     # G0.6 refactor (#391) flipped ``product`` from ``"kubernetes"`` to
-    # the v2-canonical ``"k8s"`` so the dispatcher's connector_id parser
-    # (``"kubernetes-asyncio-1.x"`` -> ``("k8s", "1.x", "kubernetes-asyncio")``)
-    # round-trips cleanly.
+    # the v2-canonical ``"k8s"``. G3.2-T6 precursor (#326) then realigned
+    # ``impl_id`` from the library name ``"kubernetes-asyncio"`` to the
+    # single-impl ``impl_id == product`` shape so the dispatcher's
+    # connector_id parser round-trips the canonical ``"k8s-1.x"`` form
+    # (``parse_connector_id("k8s-1.x")`` -> ``("k8s", "1.x", "k8s")``).
     assert issubclass(KubernetesConnector, Connector)
     assert KubernetesConnector.product == "k8s"
     assert KubernetesConnector.version == "1.x"
-    assert KubernetesConnector.impl_id == "kubernetes-asyncio"
+    assert KubernetesConnector.impl_id == "k8s"
 
 
 def test_default_loader_raises_until_g03_lands() -> None:

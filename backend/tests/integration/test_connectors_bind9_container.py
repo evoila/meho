@@ -16,10 +16,18 @@ Skip conditions:
 * Docker socket missing -- same heuristic the rest of the
   ``tests/integration/`` package uses; agent sandboxes without Docker
   skip, CI runners with Docker provisioned run.
-* Image build / container start fails (privileged-mode requirement on
-  some hosts, etc.) -- surfaces as a clean skip rather than a hard
-  failure so a Docker-having-but-build-flaky sandbox is not flagged
-  red.
+* ``testcontainers`` Python package itself unimportable (extremely
+  rare; covered for defensive completeness).
+
+Once ``DOCKER_AVAILABLE`` is true, image build and container start
+failures are **not** caught and converted to ``pytest.skip``: a broken
+Dockerfile, a missing apt package on bookworm, or an entrypoint
+regression must surface as a test failure in the CI integration job
+rather than masquerade as a clean skip. Earlier versions wrapped
+``image.build()`` / ``container.start()`` in ``except Exception:
+pytest.skip(...)`` so the agent sandbox would not flag red on
+transient Docker quirks; that swallowed real regressions, so the
+swallow is gone.
 
 The image build is bounded (~150 MiB after apt installs ``bind9 bind9-host
 bind9utils openssh-server``); the container start is bounded by the
@@ -144,26 +152,23 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
         # only so a missing override does not race to publish.
         tag = os.environ.get("MEHO_TEST_BIND9_TAG", "meho-test-bind9:9.18-bookworm")
 
-        try:
-            image = DockerImage(path=build_dir, tag=tag)
-            image.build()
-        except Exception as exc:
-            pytest.skip(
-                f"bind9 image build failed ({type(exc).__name__}): {exc}; "
-                "the CI integration job provisions Docker + the image build "
-                "succeeds there"
-            )
+        # Build the image. ``DOCKER_AVAILABLE`` is already true here, so
+        # any build failure is a real Dockerfile / package / index-fetch
+        # regression and must surface as a test failure rather than a
+        # skip. The pre-fix shape wrapped this in ``except Exception:
+        # pytest.skip(...)`` and lost CI signal on broken images.
+        image = DockerImage(path=build_dir, tag=tag)
+        image.build()
 
         container = DockerContainer(tag).with_exposed_ports(22)
+        container.start()
         try:
-            container.start()
             # Wait for sshd to log readiness before tests connect.
+            # ``wait_for_logs`` raises ``TimeoutError`` after 30 s of no
+            # match; we let it propagate so a regression in the inline
+            # entrypoint surfaces rather than silently skipping. The
+            # container is torn down in the outer ``finally`` regardless.
             wait_for_logs(container, "Server listening on", timeout=30.0)
-        except Exception as exc:
-            container.stop()
-            pytest.skip(f"bind9 container failed to start ({type(exc).__name__}): {exc}")
-
-        try:
             host = container.get_container_host_ip()
             port = int(container.get_exposed_port(22))
             # named starts in the background just before sshd; give

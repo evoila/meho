@@ -20,6 +20,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
+	"github.com/evoila/meho/cli/internal/cmd/vault"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
 	"github.com/evoila/meho/cli/internal/discovery"
 )
@@ -138,6 +139,19 @@ func newRootCmd() *cobra.Command {
 	// the backplane manifest cannot shadow the built-in `vmware`
 	// parent.
 	root.AddCommand(vmware.NewRootCmd())
+
+	// G3.3-T6 (#550) -- vault-1.x operator alias verbs for Initiative
+	// #366. The verb tree pre-bakes connector_id="vault-1.x" on top of
+	// the existing /api/v1/operations/call dispatcher route so operators
+	// don't type the connector ID on every invocation. Ships the KV-v2
+	// (read/list/put/versions/delete), sys (health/seal-status/mounts-
+	// list/auth-list), and auth (userpass/approle list+read) verbs over
+	// the typed ops registered by G3.3-T1/T2/T3 (#545/#546/#547).
+	// `meho vault kv read --target rdc-vault secret <path>` replaces the
+	// consumer's `_secret-read.sh` wrapper. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot shadow
+	// the built-in `vault` parent.
+	root.AddCommand(vault.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

@@ -212,6 +212,10 @@ class TestClassifyOp:
             ("vault.sys.seal_status", "read"),
             ("vault.sys.mounts.list", "read"),
             ("vault.sys.auth.list", "read"),
+            # KV-v2 version-metadata browse (G3.3-T1 #545): a read of
+            # metadata only (no secret values) → ``read``, not
+            # ``credential_read``.
+            ("vault.kv.versions", "read"),
         ],
     )
     def test_read_suffixes(self, op_id: str, expected: str) -> None:
@@ -224,6 +228,10 @@ class TestClassifyOp:
             ("vsphere.vm.update", "write"),
             ("vsphere.vm.delete", "write"),
             ("k8s.deployment.patch", "write"),
+            # KV-v2 write verb (G3.3-T1 #545). Without ``.put`` in the
+            # write-suffix tuple this would fall through to ``other``
+            # and broadcast the full secret payload.
+            ("vault.kv.put", "write"),
         ],
     )
     def test_write_suffixes(self, op_id: str, expected: str) -> None:

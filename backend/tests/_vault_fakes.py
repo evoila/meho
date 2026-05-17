@@ -162,14 +162,42 @@ class _FakeAuth:
 
 
 @dataclass
+class _DeleteResponse:
+    """Stand-in for hvac's 204 ``requests.Response`` from a soft-delete."""
+
+    status_code: int = 204
+
+
+@dataclass
 class _FakeKVv2:
     secret: dict[str, Any] = field(default_factory=lambda: {"username": "demo"})
     version: int = 7
     read_calls: list[dict[str, Any]] = field(default_factory=list)
     read_exc: Exception | None = None
+    # G3.3-T1 KV-v2 op group. Each verb gets its own call log and a
+    # dedicated exception-injection knob so the failure-mode tests can
+    # target one op without disturbing the others. Defaults are benign
+    # so the pre-existing read-only suites that never touch these
+    # attributes keep passing.
+    keys: list[str] = field(default_factory=lambda: ["alpha", "beta/"])
+    versions_meta: dict[str, Any] = field(
+        default_factory=lambda: {
+            "1": {"created_time": "2026-01-01T00:00:00Z", "destroyed": False},
+        }
+    )
+    list_calls: list[dict[str, Any]] = field(default_factory=list)
+    put_calls: list[dict[str, Any]] = field(default_factory=list)
+    versions_calls: list[dict[str, Any]] = field(default_factory=list)
+    delete_calls: list[dict[str, Any]] = field(default_factory=list)
+    list_exc: Exception | None = None
+    put_exc: Exception | None = None
+    versions_exc: Exception | None = None
+    delete_exc: Exception | None = None
 
-    def read_secret_version(self, path: str, **_kwargs: Any) -> dict[str, Any]:
-        self.read_calls.append({"path": path})
+    def read_secret_version(
+        self, path: str, mount_point: str = "secret", **_kwargs: Any
+    ) -> dict[str, Any]:
+        self.read_calls.append({"path": path, "mount_point": mount_point})
         if self.read_exc is not None:
             raise self.read_exc
         return {
@@ -178,6 +206,60 @@ class _FakeKVv2:
                 "metadata": {"version": self.version, "path": path},
             }
         }
+
+    def list_secrets(
+        self, path: str, mount_point: str = "secret", **_kwargs: Any
+    ) -> dict[str, Any]:
+        self.list_calls.append({"path": path, "mount_point": mount_point})
+        if self.list_exc is not None:
+            raise self.list_exc
+        return {"data": {"keys": list(self.keys)}}
+
+    def create_or_update_secret(
+        self,
+        path: str,
+        secret: dict[str, Any],
+        cas: int | None = None,
+        mount_point: str = "secret",
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        self.put_calls.append(
+            {"path": path, "secret": secret, "cas": cas, "mount_point": mount_point}
+        )
+        if self.put_exc is not None:
+            raise self.put_exc
+        return {"data": {"version": self.version + 1}}
+
+    def read_secret_metadata(
+        self, path: str, mount_point: str = "secret", **_kwargs: Any
+    ) -> dict[str, Any]:
+        self.versions_calls.append({"path": path, "mount_point": mount_point})
+        if self.versions_exc is not None:
+            raise self.versions_exc
+        return {
+            "data": {
+                "current_version": self.version,
+                "versions": dict(self.versions_meta),
+            }
+        }
+
+    def delete_secret_versions(
+        self,
+        path: str,
+        versions: list[int],
+        mount_point: str = "secret",
+        **_kwargs: Any,
+    ) -> _DeleteResponse:
+        self.delete_calls.append(
+            {"path": path, "versions": list(versions), "mount_point": mount_point}
+        )
+        if self.delete_exc is not None:
+            raise self.delete_exc
+        # Vault's soft-delete returns 204 with no body; hvac yields the
+        # underlying ``requests.Response``. The handler ignores the
+        # return value (it echoes the requested versions), so a minimal
+        # status-only stand-in is enough.
+        return _DeleteResponse()
 
 
 @dataclass
@@ -302,6 +384,12 @@ def install_fake_client(
     mounts_exc: Exception | None = None,
     auth_methods_payload: Any = None,
     auth_methods_exc: Exception | None = None,
+    keys: list[str] | None = None,
+    versions_meta: dict[str, Any] | None = None,
+    list_exc: Exception | None = None,
+    put_exc: Exception | None = None,
+    versions_exc: Exception | None = None,
+    delete_exc: Exception | None = None,
 ) -> _FakeClient:
     """Failure-injecting variant of :func:`install_fake_vault`.
 
@@ -310,9 +398,11 @@ def install_fake_client(
     tiny (no duplicated ``_FakeClient(url=..., timeout=..., ...)`` body)
     while exposing every knob the connector / failure-mode suites need:
     login / revoke / health-read / kv-read exception injection plus
-    secret and KV-version overrides, and the G3.3-T2 (#546) sys read
+    secret and KV-version overrides, the G3.3-T2 (#546) sys read
     group's seal-status / mounts / auth-methods payload + exception
-    injection.
+    injection, and the G3.3-T1 KV-v2 verbs (list / put / versions /
+    delete) with per-verb exception injection and key/version-metadata
+    overrides.
     """
     fake = install_fake_vault(monkeypatch, kv_version=kv_version if kv_version is not None else 11)
     fake.auth.jwt.raise_on_login = login_exc
@@ -325,7 +415,16 @@ def install_fake_client(
     fake.sys.raise_on_mounts = mounts_exc
     fake.sys.auth_methods_payload = auth_methods_payload
     fake.sys.raise_on_auth_methods = auth_methods_exc
+    kv = fake.secrets.kv.v2
     if secret is not None:
-        fake.secrets.kv.v2.secret = secret
-    fake.secrets.kv.v2.read_exc = read_exc
+        kv.secret = secret
+    kv.read_exc = read_exc
+    if keys is not None:
+        kv.keys = keys
+    if versions_meta is not None:
+        kv.versions_meta = versions_meta
+    kv.list_exc = list_exc
+    kv.put_exc = put_exc
+    kv.versions_exc = versions_exc
+    kv.delete_exc = delete_exc
     return fake

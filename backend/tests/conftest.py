@@ -296,6 +296,20 @@ def _no_secret_leak_sweep(
     captured_chunks: list[tuple[str, str]] = []
     real_readouterr = capfd.readouterr
 
+    # xdist hardening (#585): ``capfd`` is OS-fd-level capture and, under
+    # pytest-xdist, is NOT cleanly per-test isolated — bytes emitted at a
+    # worker boundary (a prior test's un-drained tail on the same worker,
+    # an async/500-path structlog line flushed late) would otherwise be
+    # swept and attributed to *this* test's teardown, tripping the
+    # secret-leak check on output this test never produced (observed
+    # CI-only, non-deterministic, on `-n N`; not reproducible serially
+    # or at any local worker count). Discard whatever is buffered before
+    # this test's body so the sweep inspects only what THIS test emits.
+    # Strictly more accurate serially too, and it cannot weaken the
+    # scan: the recording proxy below still captures every byte this
+    # test produces from here on.
+    real_readouterr()
+
     def _recording_readouterr() -> Any:
         result = real_readouterr()
         captured_chunks.append((result.out, result.err))

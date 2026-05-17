@@ -390,9 +390,15 @@ async def test_remote_bash_with_sudo_does_not_log_script_body(
             sudo_password="pwd",  # NOSONAR
         )
 
+    # Mirror the password test's full attribute-dict sweep -- a future
+    # log-shape refactor could surface the script body via a structured
+    # event field (``cmd_body``, ``payload``, etc.) that ``getMessage()``
+    # never renders, and the message-only check would silently regress.
     for record in caplog.records:
         rendered = record.getMessage()
         assert script not in rendered
+        for key, value in record.__dict__.items():
+            assert script not in str(value), f"script body leaked into log record attr {key!r}"
 
 
 def test_remote_bash_with_sudo_signature_makes_misordering_unrepresentable() -> None:

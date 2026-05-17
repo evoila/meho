@@ -16,6 +16,7 @@ import (
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
+	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
@@ -162,6 +163,19 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `topology` parent.
 	root.AddCommand(topology.NewRootCmd())
+
+	// G3.2-T6 (#326) -- k8s-1.x operator alias verbs for Initiative
+	// #320. The verb tree pre-bakes connector_id="k8s-1.x" on top of
+	// the existing /api/v1/operations/call dispatcher route so operators
+	// don't type the connector ID on every invocation. Ships the 14
+	// read-only ops (about/ls + namespace/node list + pod/deployment
+	// list+info + service/ingress/configmap list + configmap info +
+	// event list + logs) registered by G3.2-T1..T5 (#321/#322/#323/
+	// #324/#325). `meho k8s pod list --target rke2-meho --namespace
+	// argocd` replaces the consumer's `kubectl-vcf.sh -n argocd get
+	// pods` wrapper. Registered before registerDynamicSubcommands so
+	// the backplane manifest cannot shadow the built-in `k8s` parent.
+	root.AddCommand(k8s.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

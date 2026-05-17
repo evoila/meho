@@ -263,6 +263,15 @@ jobs:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
+      # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
+      # and the existing tests/integration/test_connectors_k8s_k3d.py).
+      # Pinned to the same minor the k3d/k3s fixture's in-code default
+      # uses (rancher/k3s:v1.32.5-k3s1) so the Harbor proxy serves the
+      # exact tag the testcontainers fixture asks for, without a docker.io
+      # round-trip.
+      MEHO_TEST_K3S_IMAGE: harbor.evba.lab/dockerhub-proxy/rancher/k3s:v1.32.5-k3s1
     defaults:
       run:
         working-directory: backend

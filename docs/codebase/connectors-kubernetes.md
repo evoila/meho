@@ -10,8 +10,11 @@ library name `kubernetes_asyncio` lives in the package layout +
 `pyproject.toml` dependency, not the registry's natural-key triple. It builds on the G0.6 operation registry: handlers register at
 lifespan startup via `register_typed_operation()`, the dispatcher routes
 calls via the descriptor table, and the operator surface is the
-meta-tools (`search_operations` / `call_operation`) plus the
-forthcoming CLI alias verbs (G3.2-T6).
+meta-tools (`search_operations` / `call_operation`) plus the CLI
+alias verbs that ship with G3.2-T6 (`meho k8s <verb> --target <name>
+…`), implemented in [`cli/internal/cmd/k8s/`](../../cli/internal/cmd/k8s/)
+and documented in
+[`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md).
 
 The connector replaces the operator's daily `kubectl-vcf.sh` wrapper for
 read workflows -- inventory listing, workload inspection, log fetching.
@@ -92,9 +95,18 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
 | `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 
-T6 of Initiative #320 (CLI alias verbs + k3d acceptance) extends this
-surface against the same `KubernetesOp` -> `KUBERNETES_OPS` ->
-`register_operations` pattern.
+G3.2-T6 (CLI alias verbs + k3d E2E acceptance + operator-facing
+onboarding doc) layers operator ergonomics on top of this surface
+without adding new ops. The CLI verbs in
+[`cli/internal/cmd/k8s/`](../../cli/internal/cmd/k8s/) pre-bake
+`connector_id="k8s-1.x"` on the existing
+`POST /api/v1/operations/call` route; the E2E harness in
+[`backend/tests/integration/test_connectors_k8s_e2e.py`](../../backend/tests/integration/test_connectors_k8s_e2e.py)
+proves dispatcher -> handler -> k3s round-trips through the
+`search_operations` + `call_operation` meta-tools for every registered
+op; the onboarding recipe in
+[`docs/cross-repo/kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md)
+is the operator cookbook for migrating off `kubectl-vcf.sh`.
 
 ### Workload-op pagination (`k8s.pod.list` / `k8s.deployment.list`)
 

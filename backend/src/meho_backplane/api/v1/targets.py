@@ -65,16 +65,19 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.connectors.registry import get_connector
-from meho_backplane.connectors.schemas import AuthModel, FingerprintResult
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import all_connectors_v2, get_connector
+from meho_backplane.connectors.schemas import AuthModel, CandidateHint, FingerprintResult
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import Target, TargetCreate, TargetSummary, TargetUpdate
 
@@ -89,6 +92,47 @@ router = APIRouter(prefix="/api/v1/targets", tags=["targets"])
 #: :mod:`meho_backplane.api.v1.retrieve`.
 _require_operator = Depends(require_role(TenantRole.OPERATOR))
 _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
+
+#: Canonical op id for the discover route's audit row + broadcast.
+#: ``.discover`` is not one of the broadcast classifier's read/write
+#: verb suffixes, so the explicit ``audit_op_class="read"`` override
+#: this constant pairs with is load-bearing (mirrors the ``kb.show``
+#: rationale in :mod:`meho_backplane.api.v1.kb`).
+_DISCOVER_OP_ID = "targets.discover"
+
+
+class SkippedConnector(BaseModel):
+    """One connector that did not contribute candidates for a product.
+
+    ``name`` is the connector implementation key (the ``impl_id`` from
+    the v2 registry, or the class name for a v1-only registration).
+    ``reason`` is a short human string — ``"no candidates"`` when the
+    connector ran cleanly but inferred nothing, or the exception class
+    + message when ``list_candidates`` raised (one bad connector must
+    not fail the whole discover sweep).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    reason: str
+
+
+class TargetsDiscoverResult(BaseModel):
+    """Aggregated discover output across every connector for a product.
+
+    ``discovered`` is the merged candidate list from every connector
+    registered for the requested product; ``skipped`` records the
+    connectors that contributed nothing (clean-but-empty or errored).
+    The verb never auto-creates ``targets`` rows — the operator reviews
+    ``discovered`` and runs ``meho targets create`` (Initiative #363:
+    auto-registration is v0.2.next).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    discovered: list[CandidateHint]
+    skipped: list[SkippedConnector]
 
 
 def _to_summary(t: TargetORM) -> TargetSummary:
@@ -149,6 +193,100 @@ async def list_targets(
     stmt = stmt.order_by(TargetORM.name).limit(limit)
     result = await session.execute(stmt)
     return [_to_summary(t) for t in result.scalars().all()]
+
+
+@router.get("/discover", response_model=TargetsDiscoverResult)
+async def discover_targets(
+    product: str = Query(...),
+    seed_target: str | None = Query(default=None),
+    operator: Operator = _require_operator,
+    session: AsyncSession = Depends(get_session),
+) -> TargetsDiscoverResult:
+    """Discover potentially-reachable targets for a *product*.
+
+    Iterates every connector implementation registered for *product*
+    and calls
+    :meth:`~meho_backplane.connectors.base.Connector.list_candidates`
+    on each, merging the results. ``seed_target`` (optional) scopes the
+    discovery to one already-registered target's reach (e.g. peer
+    Kubernetes clusters in the same kubeconfig context tree); it is
+    resolved tenant-scoped via
+    :func:`~meho_backplane.targets.resolver.resolve_target` so a
+    principal can only seed from a target in their own tenant
+    (cross-tenant seeding is impossible). 404 with near-misses when the
+    seed name does not resolve.
+
+    The verb is **read-only** — it returns candidates, never creates
+    ``targets`` rows (Initiative #363: auto-registration is v0.2.next;
+    the operator runs ``meho targets create`` after review). One
+    connector raising does not fail the sweep: it is recorded in
+    ``skipped`` with the exception summary and the rest still run.
+
+    Registered **before** ``GET /{name}`` on the same router so the
+    literal ``/discover`` segment is matched as this route rather than
+    captured as a target name by the parametrised describe route
+    (FastAPI resolves routes in declaration order).
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_DISCOVER_OP_ID,
+        audit_op_class="read",
+    )
+
+    seed: TargetORM | None = None
+    if seed_target is not None:
+        # resolve_target raises HTTPException(404/409) directly and
+        # binds target_id into contextvars for the audit row.
+        seed = await resolve_target(session, operator.tenant_id, seed_target)
+
+    # Enumerate every connector implementation registered for the
+    # product. The v2 registry keys on (product, version, impl_id) and
+    # subsumes v1 registrations (as (product, "", "")), so one pass
+    # covers connectors registered by either entry point. Dedupe by
+    # connector class so a product with one impl registered under both
+    # registry layers is not probed twice.
+    impls: dict[type[Connector], str] = {}
+    for (reg_product, version, impl_id), cls in all_connectors_v2().items():
+        if reg_product != product:
+            continue
+        # Human-meaningful label: prefer impl_id, fall back to a
+        # version tag, then the class name (v1-only registration keys
+        # both fields empty).
+        label = impl_id or version or cls.__name__
+        impls.setdefault(cls, label)
+
+    discovered: list[CandidateHint] = []
+    skipped: list[SkippedConnector] = []
+
+    for cls, label in impls.items():
+        connector = get_or_create_connector_instance(cls)
+        try:
+            candidates = await connector.list_candidates(seed)
+        except Exception as exc:
+            # One bad connector must not abort the whole sweep — record
+            # the failure and continue with the remaining connectors.
+            _log.warning(
+                "targets_discover_connector_failed",
+                product=product,
+                connector=label,
+                tenant_id=str(operator.tenant_id),
+                error=repr(exc),
+            )
+            skipped.append(SkippedConnector(name=label, reason=f"{type(exc).__name__}: {exc}"))
+            continue
+        if candidates:
+            discovered.extend(candidates)
+        else:
+            skipped.append(SkippedConnector(name=label, reason="no candidates"))
+
+    _log.info(
+        "targets_discover_completed",
+        product=product,
+        tenant_id=str(operator.tenant_id),
+        connectors=len(impls),
+        discovered=len(discovered),
+        skipped=len(skipped),
+    )
+    return TargetsDiscoverResult(discovered=discovered, skipped=skipped)
 
 
 @router.get("/{name}", response_model=Target)

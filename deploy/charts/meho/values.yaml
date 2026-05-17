@@ -174,11 +174,17 @@ config:
   vaultTimeoutSeconds: "10.0"
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
-  # Retrieval substrate (G0.4-T2 #259). The chart sets the model cache
-  # dir to match the PVC mount point so a `retrieval.modelCache.enabled`
-  # flip is the operator's single source of truth for the cache path.
+  # Retrieval substrate (G0.4-T2 #259). The default model is BAKED INTO
+  # THE IMAGE at /opt/meho/model-cache (backend/Dockerfile warm step,
+  # evoila/meho#574) so first boot is offline + version-locked and does
+  # NOT depend on a persistent PVC that can be poisoned by a partial
+  # first download. Leave `retrievalModelCacheDir` at the baked path
+  # unless you also override `retrievalEmbeddingModel` to a non-default
+  # model that must be fetched at runtime — in that case point it at the
+  # opt-in `retrieval.modelCache` PVC mountPath and set
+  # `retrieval.modelCache.enabled: true`.
   retrievalEmbeddingModel: "BAAI/bge-small-en-v1.5"
-  retrievalModelCacheDir: "/var/cache/fastembed"
+  retrievalModelCacheDir: "/opt/meho/model-cache"
 
 postgres:
   # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
@@ -308,21 +314,30 @@ connectors:
   # surface lands post-Goal-2 with the first product ticket.
   enabled: []
 
-# Retrieval substrate (G0.4, Initiative #225). The backplane's fastembed
-# pipeline (G0.4-T2 #259) downloads ~120 MB of ONNX weights for the
-# default model `BAAI/bge-small-en-v1.5` to a local cache. The chart
-# mounts a PVC at `retrieval.modelCache.mountPath` so pod restarts don't
-# re-download. The PVC is RWO (single-attach): v0.2 ships single-replica
-# anyway, and a multi-replica deploy can either disable the PVC and pay
-# the per-pod download or provide its own RWX PVC via `extraVolumes` +
-# `extraVolumeMounts`.
+# Retrieval substrate (G0.4, Initiative #225). The shipped default model
+# `BAAI/bge-small-en-v1.5` is BAKED INTO THE IMAGE at
+# `/opt/meho/model-cache` (backend/Dockerfile warm step, evoila/meho#574)
+# so the default deploy needs neither HuggingFace egress nor a PVC: first
+# boot is offline + version-locked. The `modelCache` PVC below is
+# therefore an OPT-IN optimisation for operators who override
+# `config.retrievalEmbeddingModel` to a non-default model that must be
+# fetched at runtime — it is `enabled: false` by default. It is RWO
+# (single-attach); v0.2 ships single-replica anyway.
+#
+# WARNING (evoila/meho#574): when you do enable this PVC for a custom
+# model, fastembed treats an existing snapshot dir as "present" and will
+# NOT re-fetch — a partial/interrupted first download (or a CSI volume
+# that doesn't preserve the HF cache's `snapshots/<sha>/*.onnx ->
+# ../../blobs/<hash>` symlinks) poisons the PVC permanently and every
+# fresh pod CrashLoops. Recovery is to delete the PVC and redeploy.
 retrieval:
   modelCache:
-    # -- Mount the model-cache PVC on the backplane Pod. When `false`,
-    # the chart skips the PVC + the volume mount and fastembed downloads
-    # weights to an ephemeral path on every pod restart (acceptable for
-    # short-lived dev clusters; not for production).
-    enabled: true
+    # -- Mount an extra writable model-cache PVC on the backplane Pod.
+    # Default `false`: the shipped default model is baked into the image,
+    # so the default deploy needs no PVC. Set `true` ONLY when you
+    # override `config.retrievalEmbeddingModel` to a non-default model
+    # that is fetched at runtime and you want it to survive pod restarts.
+    enabled: false
     # -- Requested PVC size. `BAAI/bge-small-en-v1.5` is ~120 MB on
     # disk; 200Mi gives headroom for the tokenizer metadata plus a
     # future swap to a same-dim multilingual model without resizing.

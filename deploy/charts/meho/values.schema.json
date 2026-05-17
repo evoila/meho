@@ -217,7 +217,7 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^/",
-          "description": "Absolute filesystem path where fastembed reads / writes cached ONNX weights. Must match `retrieval.modelCache.mountPath` when the PVC is enabled — the chart does not cross-validate the two values to keep override flexibility for operators that mount via `extraVolumes`."
+          "description": "Absolute filesystem path fastembed reads cached ONNX weights from. Default `/opt/meho/model-cache` is the image layer the shipped default model is baked into at build time (evoila/meho#574) — offline + version-locked first boot, no PVC needed. Repoint to a writable `retrieval.modelCache.mountPath` (and set `retrieval.modelCache.enabled: true`) only when overriding `config.retrievalEmbeddingModel` to a non-default model fetched at runtime; the chart does not cross-validate the two values to keep override flexibility for operators that mount via `extraVolumes`."
         }
       }
     },

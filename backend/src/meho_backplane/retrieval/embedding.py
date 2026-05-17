@@ -36,13 +36,18 @@ Design choices (locked by the Initiative body):
   the thread-pool default (cpu_count + 4) is plenty for the v0.2
   request shape (one embed per indexing call, one per retrieval
   query).
-* **Model cache directory.** fastembed downloads ONNX weights on
-  first use to a local cache (default ``~/.cache/fastembed``). The
-  chart mounts a PVC at ``/var/cache/fastembed`` so pod restarts
-  don't re-download the ~120 MB blob. The settings field
-  ``retrieval_model_cache_dir`` lets dev/test override (e.g.
-  ``$HOME/.cache/fastembed`` so SQLite tests reuse a developer's
-  existing cache).
+* **Model cache directory.** The shipped default model is baked into
+  the image at :data:`BAKED_MODEL_CACHE_DIR` (``/opt/meho/model-cache``)
+  by ``backend/Dockerfile``'s ``meho_backplane.retrieval.warm`` step,
+  so first boot loads it offline + version-locked with no runtime
+  HuggingFace download and no PVC dependency (evoila/meho#574; also
+  closes the air-gap half of #572). The settings field
+  ``retrieval_model_cache_dir`` defaults to that baked path; dev/test
+  override it (e.g. ``$HOME/.cache/fastembed`` so SQLite tests reuse a
+  developer's existing cache), and operators who override the model to
+  a non-default identifier point it at the opt-in
+  ``retrieval.modelCache`` PVC so the runtime-fetched weights survive
+  pod restarts.
 
 Out of scope here (other tasks / out-of-scope per Initiative):
 
@@ -65,7 +70,39 @@ from typing import Any
 
 import structlog
 
-__all__ = ["EmbeddingService", "get_embedding_service", "reset_embedding_service_for_testing"]
+__all__ = [
+    "BAKED_MODEL_CACHE_DIR",
+    "DEFAULT_EMBEDDING_MODEL",
+    "EMBEDDING_DIMENSION",
+    "EmbeddingService",
+    "get_embedding_service",
+    "reset_embedding_service_for_testing",
+]
+
+#: The default fastembed model the backplane ships **and bakes into the
+#: image** (``backend/Dockerfile`` runtime stage runs
+#: ``python -m meho_backplane.retrieval.warm``, which downloads exactly
+#: this). Single source of truth: :attr:`Settings.retrieval_embedding_model`'s
+#: Field default *and* its env-loader fallback both reference this
+#: constant, so the literal lives in exactly one place and the baked
+#: artifact can never silently disagree with the runtime default.
+#: Changing it requires re-baking the image; a change in output
+#: dimensionality additionally requires a re-embed migration (see
+#: :data:`EMBEDDING_DIMENSION`).
+DEFAULT_EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+
+#: Filesystem path the image bakes the default model into at build time
+#: and the default ``cache_dir`` the backplane reads at runtime. This is
+#: an **image layer**, not a mounted PVC: first boot is therefore
+#: offline + version-locked (closes the air-gap half of evoila/meho#572)
+#: and is immune to the persistent-PVC partial/symlink-corruption
+#: failure mode that deterministically CrashLoops every fresh pod
+#: (evoila/meho#574 — fastembed treats an existing snapshot dir as
+#: "present" and will not re-fetch, so one broken populate poisons the
+#: PVC forever). The optional ``retrieval.modelCache`` PVC is now an
+#: opt-in optimisation for operator-overridden *non-default* models, not
+#: a correctness dependency for the shipped default.
+BAKED_MODEL_CACHE_DIR: str = "/opt/meho/model-cache"
 
 #: Embedding dimensionality the backplane commits to in v0.2 - must
 #: match the ``vector(384)`` column type in migration ``0003`` and the
@@ -196,10 +233,38 @@ class EmbeddingService:
                 model=self._model_name,
                 cache_dir=self._cache_dir,
             )
-            self._model = TextEmbedding(
-                model_name=self._model_name,
-                cache_dir=self._cache_dir,
-            )
+            try:
+                self._model = TextEmbedding(
+                    model_name=self._model_name,
+                    cache_dir=self._cache_dir,
+                )
+            except Exception as exc:
+                # fastembed builds the onnxruntime InferenceSession in
+                # the TextEmbedding constructor, so a partial/corrupt
+                # cache surfaces here as a raw
+                # ``onnxruntime ... NO_SUCHFILE: ... model_optimized.onnx
+                # ... File doesn't exist`` ten frames deep — opaque at
+                # the "Application startup failed" line operators
+                # actually see. Re-raise with the operator-actionable
+                # diagnosis: the model+fastembed pair is fine; the cache
+                # is the suspect, and fastembed will NOT self-heal a
+                # populated-but-broken snapshot dir (evoila/meho#574).
+                raise RuntimeError(
+                    f"embedding model {self._model_name!r} failed to "
+                    f"load from cache_dir {self._cache_dir!r}: "
+                    f"{type(exc).__name__}: {exc}. The shipped default "
+                    f"({DEFAULT_EMBEDDING_MODEL!r}) is baked into the "
+                    f"image at {BAKED_MODEL_CACHE_DIR!r} and loads "
+                    f"offline; this almost always means a partial or "
+                    f"symlink-broken cache (a dangling HF symlink or a "
+                    f"truncated *.onnx blob from an interrupted first "
+                    f"download) — fastembed treats an existing snapshot "
+                    f"directory as 'present' and will not re-fetch it. "
+                    f"Fix: clear {self._cache_dir!r} and let it "
+                    f"re-download, or unset RETRIEVAL_MODEL_CACHE_DIR / "
+                    f"RETRIEVAL_EMBEDDING_MODEL to use the baked default "
+                    f"(evoila/meho#574)."
+                ) from exc
             log.info(
                 "embedding_model_loaded",
                 model=self._model_name,

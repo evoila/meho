@@ -36,6 +36,11 @@ from typing import Final
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+from meho_backplane.retrieval.embedding import (
+    BAKED_MODEL_CACHE_DIR,
+    DEFAULT_EMBEDDING_MODEL,
+)
+
 __all__ = ["Settings", "get_settings", "parse_bool_env"]
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
@@ -223,11 +228,21 @@ class Settings(BaseModel):
         dimension model (e.g. a multilingual 384-dim variant) is
         zero-migration.
     retrieval_model_cache_dir:
-        Filesystem path fastembed uses to cache downloaded ONNX
-        weights. Default ``/var/cache/fastembed`` matches the Helm
-        chart's PVC mount point (``deploy/charts/meho/values.yaml``
-        ``retrieval.modelCache.mountPath``) so pod restarts skip the
-        ~120 MB re-download. Dev/test overrides via
+        Filesystem path fastembed reads ONNX weights from. Default
+        :data:`~meho_backplane.retrieval.embedding.BAKED_MODEL_CACHE_DIR`
+        (``/opt/meho/model-cache``) is an **image layer** the
+        ``backend/Dockerfile`` runtime stage bakes the default model
+        into at build time (``python -m meho_backplane.retrieval.warm``),
+        so the shipped default loads offline + version-locked with no
+        runtime HuggingFace egress and no dependency on a persistent
+        PVC. This deliberately replaced the old
+        ``/var/cache/fastembed`` PVC-mount default: a populated-but-
+        partial PVC (dangling HF symlink / truncated ``*.onnx`` blob)
+        is never self-healed by fastembed and deterministically
+        CrashLoops every fresh pod (evoila/meho#574). The optional
+        ``retrieval.modelCache`` PVC remains available for operators who
+        override ``RETRIEVAL_EMBEDDING_MODEL`` to a *non-default* model
+        that is fetched at runtime. Dev/test overrides via
         ``RETRIEVAL_MODEL_CACHE_DIR`` typically point at
         ``$HOME/.cache/fastembed`` so a developer's existing cache is
         reused across runs.
@@ -297,11 +312,11 @@ class Settings(BaseModel):
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
     retrieval_embedding_model: str = Field(
-        default="BAAI/bge-small-en-v1.5",
+        default=DEFAULT_EMBEDDING_MODEL,
         min_length=1,
     )
     retrieval_model_cache_dir: str = Field(
-        default="/var/cache/fastembed",
+        default=BAKED_MODEL_CACHE_DIR,
         min_length=1,
     )
     broadcast_redis_url: str = Field(
@@ -412,11 +427,11 @@ def get_settings() -> Settings:
         ),
         retrieval_embedding_model=os.environ.get(
             "RETRIEVAL_EMBEDDING_MODEL",
-            "BAAI/bge-small-en-v1.5",
+            DEFAULT_EMBEDDING_MODEL,
         ),
         retrieval_model_cache_dir=os.environ.get(
             "RETRIEVAL_MODEL_CACHE_DIR",
-            "/var/cache/fastembed",
+            BAKED_MODEL_CACHE_DIR,
         ),
         broadcast_redis_url=os.environ.get(
             "BROADCAST_REDIS_URL",

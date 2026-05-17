@@ -34,10 +34,14 @@ tenant raises `AmbiguousNodeError`; pass the optional `kind` (or
 name)` unique row. The read package never inserts, updates, or deletes.
 
 The REST front (T5, #453) is landed and documented below ("REST API
-surface"). The CLI/MCP fronts (T6/T7) and the
-`docs/architecture/topology.md` operator doc remain out of scope here —
-they consume `query.py` / `refresh.py` as a thin shell and land in
-G9.1-T6 through T8.
+surface"). The MCP front (T7, #455) is landed too — the two
+narrow-waist meta-tools `query_topology` (parametric: `kind` selects
+`dependents` / `dependencies` / `path`) and `list_targets` register in
+`mcp/tools/topology.py` and call `query.py` / `select(TargetORM)`
+directly (sibling fronts on one backplane, not REST wrappers). The CLI
+front (T6) and the `docs/architecture/topology.md` operator doc remain
+out of scope here — they consume `query.py` / `refresh.py` as a thin
+shell and land in G9.1-T6 and T8.
 
 ## Key types
 

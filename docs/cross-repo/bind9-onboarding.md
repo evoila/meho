@@ -240,7 +240,7 @@ $ meho bind9 record remove esx-dc6.evba.lab \
 `bind9-dns.sh --add-a-record …` invocation. The wrapper composed a
 zonefile edit + `rndc reload` + a dig-verify by hand; the MEHO op
 routes the same flow through the atomic-apply primitive (see
-[Atomic-apply contract](#atomic-apply-contract) below).
+[Atomic-apply contract](#the-atomic-apply-contract) below).
 
 ### Config browse + write — `meho bind9 config …`
 

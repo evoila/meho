@@ -64,7 +64,10 @@ from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
-from meho_backplane.auth.jwt import keycloak_readiness_probe
+from meho_backplane.auth.jwt import (
+    AUDIENCE_NOT_CONFIGURED_REMEDIATION,
+    keycloak_readiness_probe,
+)
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.broadcast import (
     broadcast_readiness_probe,
@@ -79,6 +82,7 @@ from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
+from meho_backplane.mcp.auth import mcp_resource_uri
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars
@@ -113,6 +117,39 @@ async def _preload_embedding_model() -> None:
             error_class=type(exc).__name__,
             error_message=str(exc),
         )
+
+
+def _assert_mcp_resource_uri_configured() -> None:
+    """Fail loudly at startup when the MCP audience can't be resolved.
+
+    The ``/mcp`` router is mounted unconditionally (no enable flag), so
+    a deploy that sets neither ``MCP_RESOURCE_URI`` nor ``BACKPLANE_URL``
+    leaves the resolved audience empty and **every** ``/mcp`` request
+    fails closed with a 401 — the MCP surface is dark with no signal
+    pointing at the cause (consumer dogfood signal #633). Per-request
+    fail-closed is correct security posture but a context-free 401 is a
+    terrible operability posture: an operator following the published
+    runbooks cannot tell the surface is misconfigured rather than down.
+
+    Resolving the same way :func:`meho_backplane.mcp.auth.mcp_resource_uri`
+    does and aborting startup converts that silent dark surface into a
+    CrashLoopBackOff carrying the actionable remediation — the same
+    fail-fast-on-missing-security-config posture the
+    :class:`~meho_backplane.settings.Settings` field validators already
+    take for ``DATABASE_URL`` / ``BROADCAST_REDIS_URL``, and the same
+    crash-loud posture :func:`run_typed_op_registrars` takes for an
+    unpopulated dispatch table. The chart now derives a default from
+    ``ingress.host`` for the common ingress-fronted deploy, so this
+    guard only fires on a genuinely unresolvable config (no ingress,
+    nothing set).
+
+    Raises :class:`RuntimeError` with
+    :data:`~meho_backplane.auth.jwt.AUDIENCE_NOT_CONFIGURED_REMEDIATION`
+    so the lifespan crashes and the operator sees the fix in the pod
+    logs, not buried in a per-request 401 body.
+    """
+    if not mcp_resource_uri():
+        raise RuntimeError(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
 
 
 async def _run_lifespan_shutdown() -> None:
@@ -196,6 +233,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.
     eager_import_mcp_modules()
+    # MCP audience guard (G0.8-T4 #633). The /mcp router is mounted
+    # unconditionally; a deploy with neither MCP_RESOURCE_URI nor
+    # BACKPLANE_URL leaves the audience empty and every /mcp request
+    # 401s with no signal. Crash loudly here with the remediation
+    # instead of serving a dark, silent surface.
+    _assert_mcp_resource_uri_configured()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
     # Scheduled topology refresh (G9.1-T3 #450). Started after connector

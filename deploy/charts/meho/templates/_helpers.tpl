@@ -59,6 +59,49 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Effective backplane base URL (no trailing slash).
+
+Resolution order (mirrors backend mcp.auth.mcp_resource_uri's intent at
+the chart layer so the documented default actually materialises — #633):
+
+  1. `config.backplaneUrl` when the operator set it explicitly.
+  2. Derived from the Ingress when `ingress.enabled` and `ingress.host`
+     are set: `https://<host>` if `ingress.tls.enabled`, else
+     `http://<host>`. This makes the documented `${BACKPLANE_URL}/mcp`
+     default real for the common ingress-fronted deploy without the
+     operator setting anything MCP-specific.
+  3. Empty string otherwise (no ingress, nothing set) — the backend's
+     startup guard then fails loudly with the remediation rather than
+     serving a dark /mcp surface.
+*/}}
+{{- define "meho.backplaneUrl" -}}
+{{- if .Values.config.backplaneUrl -}}
+{{- .Values.config.backplaneUrl | trimSuffix "/" -}}
+{{- else if and .Values.ingress.enabled .Values.ingress.host -}}
+{{- $scheme := ternary "https" "http" .Values.ingress.tls.enabled -}}
+{{- printf "%s://%s" $scheme .Values.ingress.host -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Effective MCP resource URI (canonical, no trailing slash).
+
+  1. `config.mcpResourceUri` when set explicitly (non-default mount).
+  2. `<backplaneUrl>/mcp` when the effective backplane URL is non-empty.
+  3. Empty string otherwise — backend startup guard handles the fail.
+*/}}
+{{- define "meho.mcpResourceUri" -}}
+{{- if .Values.config.mcpResourceUri -}}
+{{- .Values.config.mcpResourceUri | trimSuffix "/" -}}
+{{- else -}}
+{{- $base := include "meho.backplaneUrl" . -}}
+{{- if $base -}}
+{{- printf "%s/mcp" $base -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Create the name of the service account to use.
 */}}
 {{- define "meho.serviceAccountName" -}}

@@ -19,6 +19,8 @@ MEHO validates every `/mcp` request's Bearer token with `aud == MCP_RESOURCE_URI
 
 `MCP_RESOURCE_URI` defaults to `${BACKPLANE_URL}/mcp` if unset. For the standard deployment, `BACKPLANE_URL=https://meho.example.com` produces `MCP_RESOURCE_URI=https://meho.example.com/mcp`.
 
+> **Chart-derived default (G0.8-T4 #633).** When you deploy via the Helm chart with an Ingress configured (the default), you do **not** set `BACKPLANE_URL` or `MCP_RESOURCE_URI` yourself — the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` into the backplane ConfigMap. Override `config.backplaneUrl` only if the public URL differs from the Ingress host, or `config.mcpResourceUri` only for a non-default MCP mount. If the chart can resolve neither (no Ingress and nothing set), the backplane **fails loudly at startup** (CrashLoopBackOff) with a log line naming `MCP_RESOURCE_URI` / `BACKPLANE_URL` and this step — it does not serve a dark, silent `/mcp`. The same remediation appears in the `/mcp` 401 response `detail` if a token reaches an unconfigured surface. You still must complete the Keycloak audience-mapper step below regardless of how the URI is set.
+
 ```bash
 # Add an audience-protocol-mapper to the MCP client (see Step 2 for the
 # client itself). The "included client audience" is the value the server

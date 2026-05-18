@@ -174,6 +174,22 @@ config:
   vaultTimeoutSeconds: "10.0"
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
+  # MCP audience binding (G0.8-T4 #633). The `/mcp` router is mounted
+  # unconditionally; every `/mcp` Bearer token must carry
+  # `aud == MCP_RESOURCE_URI`. Leave both blank for the common
+  # ingress-fronted deploy: the chart derives
+  # `BACKPLANE_URL=https://<ingress.host>` (scheme follows
+  # `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp`
+  # so the documented default actually materialises. Set `backplaneUrl`
+  # explicitly when the public URL differs from the Ingress host (split
+  # horizon, external LB). Set `mcpResourceUri` explicitly only for a
+  # non-default MCP mount point. When neither is set AND no Ingress is
+  # configured, the backend fails loudly at startup with the remediation
+  # (it does NOT serve a dark, silent `/mcp`). The operator must still
+  # add a matching Keycloak oidc-audience-mapper — see
+  # `docs/cross-repo/mcp-client-setup.md` Step 1.
+  backplaneUrl: ""
+  mcpResourceUri: ""
   # Retrieval substrate (G0.4-T2 #259). The default model is BAKED INTO
   # THE IMAGE at /opt/meho/model-cache (backend/Dockerfile warm step,
   # evoila/meho#574) so first boot is offline + version-locked and does

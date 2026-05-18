@@ -195,6 +195,18 @@ jobs:
             -summary \
             /tmp/rendered.yaml
 
+          # G0.8-T4 (#633): with no config.backplaneUrl / config.mcpResourceUri
+          # set, the chart MUST derive MCP_RESOURCE_URI from the Ingress host
+          # so the documented `${BACKPLANE_URL}/mcp` default actually
+          # materialises for the common ingress-fronted deploy. The override
+          # set above pins ingress.host=meho.test + ingress.tls — so the
+          # derived value is https://meho.test/mcp. A regression here
+          # silently re-darkens the /mcp surface.
+          grep -Eq '^[[:space:]]*MCP_RESOURCE_URI:[[:space:]]*"https://meho\.test/mcp"[[:space:]]*$' /tmp/rendered.yaml \
+            || { echo "::error::chart did not derive MCP_RESOURCE_URI from ingress.host (G0.8-T4 #633 regression)"; exit 1; }
+          grep -Eq '^[[:space:]]*BACKPLANE_URL:[[:space:]]*"https://meho\.test"[[:space:]]*$' /tmp/rendered.yaml \
+            || { echo "::error::chart did not derive BACKPLANE_URL from ingress.host (G0.8-T4 #633 regression)"; exit 1; }
+
   helm-test:
     name: helm install + helm test (pgvector preflight)
     # G0.4-T6 (#263) -- spins up a kind cluster, installs a

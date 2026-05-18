@@ -97,6 +97,7 @@ from meho_backplane.settings import Settings, get_settings
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "AUDIENCE_NOT_CONFIGURED_REMEDIATION",
     "clear_jwks_cache",
     "keycloak_readiness_probe",
     "verify_jwt",
@@ -107,6 +108,24 @@ __all__ = [
 #: tight: a hung Keycloak should fail-closed quickly rather than
 #: starving request capacity.
 _HTTP_TIMEOUT_SECONDS: float = 5.0
+
+#: Operator-facing remediation appended to the ``audience_not_configured``
+#: 401. The bare ``audience_not_configured`` token told an operator *that*
+#: the MCP audience was unset but not *what to do* — the consumer dogfood
+#: signal (#633) was an operator staring at a context-free 401 with the
+#: ``/mcp`` surface dark. The text names the two settings that resolve the
+#: audience and the Keycloak audience-mapper step, and links the operator
+#: runbook. Static (no token/claim/secret interpolation) so it stays safe
+#: to surface in an unauthenticated 401 body and to log verbatim from
+#: :func:`meho_backplane.mcp.auth.verify_mcp_jwt`.
+AUDIENCE_NOT_CONFIGURED_REMEDIATION: str = (
+    "audience_not_configured: the MCP resource URI is unset, so every /mcp "
+    "request fails closed. Set MCP_RESOURCE_URI (e.g. https://<host>/mcp, no "
+    "trailing slash) or BACKPLANE_URL (the URI is then derived as "
+    "${BACKPLANE_URL}/mcp), and add a Keycloak oidc-audience-mapper carrying "
+    "that exact value on the client that issues the caller's token. See "
+    "docs/cross-repo/mcp-client-setup.md Step 1."
+)
 
 #: Algorithms accepted on the JWS header. Pinning to ``RS256`` mitigates
 #: the algorithm-confusion class of attacks (CVE-2016-10555); Keycloak
@@ -477,17 +496,22 @@ async def verify_jwt_for_audience(
     centralised handler.
 
     Defence in depth: an empty or whitespace-only ``expected_audience``
-    short-circuits to ``audience_not_configured`` 401. The MCP route
-    derives the audience from ``MCP_RESOURCE_URI`` / ``BACKPLANE_URL``
-    and returns an empty string when neither is set; without this
-    guard the fail-closed property would rely on the *issuer* never
-    emitting a token with an empty ``aud`` claim — a true assumption
-    against any real Keycloak deployment but one external invariant
-    away from a bypass. Failing the check locally to the verifier
-    makes the property auditable in one place.
+    short-circuits to a 401 whose ``detail`` is
+    :data:`AUDIENCE_NOT_CONFIGURED_REMEDIATION` — it still starts with
+    the ``audience_not_configured`` token (callers that match the prefix
+    keep working) but now also names ``MCP_RESOURCE_URI`` /
+    ``BACKPLANE_URL`` + the Keycloak audience-mapper step and links the
+    operator runbook, so the failure is actionable rather than opaque
+    (#633). The MCP route derives the audience from ``MCP_RESOURCE_URI``
+    / ``BACKPLANE_URL`` and returns an empty string when neither is set;
+    without this guard the fail-closed property would rely on the
+    *issuer* never emitting a token with an empty ``aud`` claim — a true
+    assumption against any real Keycloak deployment but one external
+    invariant away from a bypass. Failing the check locally to the
+    verifier makes the property auditable in one place.
     """
     if not expected_audience or not expected_audience.strip():
-        raise _http_401("audience_not_configured")
+        raise _http_401(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
     token = _extract_bearer_token(authorization)
     settings = get_settings()
     claims = await _decode_with_kid_rotation(

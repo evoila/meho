@@ -126,8 +126,11 @@ than this, the likely cause is a missing/disabled traversal index on
 - **Curated edges (G9.2, [#364](https://github.com/evoila/meho/issues/364)).**
   Auto-discovery only emits the four high-confidence edge kinds.
   Cross-system relationships (`authenticates-via`, `depends-on`,
-  `replicates-to`, `backed-up-by`) need explicit operator assertion via
-  `meho topology annotate` (tenant-admin) — landing in G9.2.
+  `replicates-to`, `backed-up-by`, `routes-via`, `policy-binds`)
+  need explicit operator assertion via `meho topology annotate`
+  (tenant-admin). The full curated-edge surface (CLI verbs, REST
+  routes, MCP tools, §6 conflict-resolution rules) is documented in
+  [topology-annotation.md](./topology-annotation.md).
 - **History (G9.3, [#365](https://github.com/evoila/meho/issues/365)).**
   A refresh that no longer sees a node soft-deletes it (`last_seen`
   cleared, the row is retained — never SQL-deleted). In G9.1 a

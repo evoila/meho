@@ -34,17 +34,35 @@ every blast-radius check and topology question goes through.
 
 The API (T5), CLI (T6), and MCP (T7) fronts consume :mod:`query` as a
 thin shell and never re-derive the traversal or the tenant boundary.
+
+**Resolver — Task #594 (G9.2-T2):** the public name → :class:`GraphNode`
+resolver the annotation flow (G9.2 T3 / T4) calls before writing or
+reading an edge endpoint. Works for non-target nodes (``target_id IS
+NULL``) as well as registered targets.
+
+* :func:`meho_backplane.topology.resolvers.resolve_node`
+* :class:`meho_backplane.topology.resolvers.AmbiguousNodeError` —
+  re-exported by :mod:`query` for back-compat with pre-G9.2 importers.
+* :class:`meho_backplane.topology.resolvers.NodeNotFoundError`
 """
 
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
+from meho_backplane.topology.resolvers import (
+    AmbiguousNodeError,
+    NodeNotFoundError,
+    resolve_node,
+)
 from meho_backplane.topology.scheduler import (
     start_topology_refresh_scheduler,
     stop_topology_refresh_scheduler,
 )
 
 __all__ = [
+    "AmbiguousNodeError",
+    "NodeNotFoundError",
     "RefreshResult",
     "refresh_target_topology",
+    "resolve_node",
     "start_topology_refresh_scheduler",
     "stop_topology_refresh_scheduler",
 ]

@@ -49,7 +49,6 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vault.connector import VaultTarget
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
@@ -181,12 +180,14 @@ async def _probe_vault_federation(
     controllable URL substrings never leak into a 200 response body
     or into a structlog payload.
     """
-    target = VaultTarget(raw_jwt=operator.raw_jwt)
+    # The vault.kv.read handler reads the operator JWT from the
+    # request-scoped Operator (G0.8-T3 #629), not a target row; the
+    # connector is resolved by connector_id, so target is None.
     result = await dispatch(
         operator=operator,
         connector_id="vault-1.x",
         op_id="vault.kv.read",
-        target=target,
+        target=None,
         params={"path": _FEDERATION_PROOF_PATH},
     )
 

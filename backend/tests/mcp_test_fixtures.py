@@ -131,9 +131,13 @@ def isolated_registry() -> Iterator[None]:
     matching ``meho://kb/{slug}`` resource (``mcp.resources.kb``) join
     the list for the same reason. The G9.1-T7 topology meta-tools
     (``mcp.tools.topology`` — ``query_topology`` + ``list_targets``)
-    join the list for the same reason.
+    join the list for the same reason. The G5.1-T3 memory meta-tools
+    (``mcp.tools.memory`` — ``search_memory`` + ``add_to_memory``) and
+    the matching ``meho://memory/{scope}/{slug}`` resource
+    (``mcp.resources.memory``) join for the same reason.
     """
     from meho_backplane.mcp.resources import kb as kb_resource
+    from meho_backplane.mcp.resources import memory as memory_resource
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
         audit,
@@ -143,6 +147,7 @@ def isolated_registry() -> Iterator[None]:
         operations,
         topology,
     )
+    from meho_backplane.mcp.tools import memory as memory_tools
 
     clear_registries()
     importlib.reload(meho_status)
@@ -151,9 +156,11 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(audit)
     importlib.reload(knowledge)
     importlib.reload(topology)
+    importlib.reload(memory_tools)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)
+    importlib.reload(memory_resource)
     yield
     clear_registries()
 

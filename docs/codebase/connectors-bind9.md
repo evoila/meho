@@ -76,9 +76,14 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
   (`bind9_config_show`), and the four T4 write handlers:
   `bind9_config_apply_file` (single-fragment write, atomic-apply
   single-file mode), `bind9_config_apply_views` (multi-file tree
-  write, atomic-apply tar mode), `bind9_config_backup` (`tar -czf`
-  of `/etc/bind/` to `/var/backups/meho-bind9/<timestamp>.tar.gz`
-  with a JSON listing of existing backups), and `bind9_config_reload`
+  write, atomic-apply tar mode -- `primary_path` is validated to
+  reference one of the staged files so the primitive's success-path
+  audit-slice capture cannot hit a missing file after a successful
+  reload, which would otherwise force a double-apply on retry),
+  `bind9_config_backup` (`tar -czf` of `/etc/bind/` to
+  `/var/backups/meho-bind9/<timestamp>[-<tag>]-<hex>.tar.gz` with a
+  JSON listing of existing backups; the 24-bit hex suffix breaks
+  same-second + same-tag collisions), and `bind9_config_reload`
   (`rndc reload` with structured success/failure envelope). The
   pure `pack_views_tar` helper builds the multi-file archive
   client-side. The `CONFIG_OPS` registration table carries all five

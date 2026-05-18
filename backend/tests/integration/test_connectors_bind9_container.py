@@ -763,8 +763,13 @@ async def test_config_backup_against_real_bind9_creates_archive(
         # The listing must contain at least this backup we just made.
         ids = {row["id"] for row in result["rows"]}
         assert result["backup_id"] in ids
-        # Verify the artifact actually exists on disk.
-        cmd = f"ls -1 {result['path']}"
+        # Verify the artifact actually exists on disk. ``shlex.quote``
+        # is defence-in-depth -- the backup path is currently composed
+        # from a tag pattern + timestamp + hex suffix, none of which
+        # carries shell metacharacters, but quoting keeps the test
+        # robust if the path schema ever picks up a wider character
+        # class (e.g. tag pattern relaxed in a future op).
+        cmd = f"ls -1 {shlex.quote(result['path'])}"
         proc = await connector._run_command(bind9_container_target, cmd, raw_jwt="")
         ls_stderr = getattr(proc, "stderr", "")
         assert proc.exit_status == 0, (

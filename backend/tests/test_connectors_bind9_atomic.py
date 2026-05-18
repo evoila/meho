@@ -403,6 +403,52 @@ class TestPipelineScriptRollbackShape:
         )
         assert '[ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]' in script
 
+    def test_rollback_uses_freeze_reload_thaw_for_zone(self) -> None:
+        """Rollback must freeze -> reload -> thaw the affected zone (in that order).
+
+        Regression for the iter-2 blocker (B4): a plain ``rndc reload``
+        is a NO-OP for a zone whose on-disk SOA serial has REGRESSED
+        relative to the in-memory version. After a successful stage +
+        reload, named caches the staged zone keyed by its (higher)
+        SOA serial; restoring the snapshot zonefile brings back the
+        original (lower) serial, and named refuses to reload it --
+        the staged zone keeps serving in memory even though the disk
+        was restored byte-identically. The integration test at
+        backend/tests/integration/test_connectors_bind9_container.py::
+        test_atomic_apply_rollback_on_dig_verify_failure_leaves_tree_unchanged
+        caught this against a real bind9 container.
+
+        The canonical bind9 incantation that bypasses the serial
+        check is freeze -> reload -> thaw on the specific zone:
+        freeze tells named to drop its in-memory state for the zone,
+        reload re-reads the zonefile unconditionally, and thaw
+        restores normal operation. This test pins the load-bearing
+        ordering inside rollback().
+        """
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/snap.tar.gz",
+            audit_slice_path="/etc/bind/db.evba.lab",
+            zone_name="evba.lab",
+            bind_root="/etc/bind",
+        )
+        freeze_idx = script.find('rndc freeze "$ZONE_NAME"')
+        reload_idx = script.find('rndc reload "$ZONE_NAME"')
+        thaw_idx = script.find('rndc thaw "$ZONE_NAME"')
+        assert freeze_idx != -1, "rollback() must invoke ``rndc freeze`` on the zone"
+        assert reload_idx != -1, "rollback() must invoke ``rndc reload`` on the zone"
+        assert thaw_idx != -1, "rollback() must invoke ``rndc thaw`` on the zone"
+        assert freeze_idx < reload_idx < thaw_idx, (
+            "rollback() must freeze BEFORE reloading and thaw AFTER reloading; "
+            "any other ordering either leaves the zone frozen or fails to "
+            "force a re-read of the restored zonefile."
+        )
+        # The freeze/thaw block must be inside a ZONE_NAME guard so a
+        # primitive invoked before zone resolution doesn't fire freeze
+        # against an empty zone argument.
+        guard_idx = script.find('if [ -n "$ZONE_NAME" ]')
+        assert guard_idx != -1, "freeze/reload/thaw must be guarded on non-empty $ZONE_NAME"
+        assert guard_idx < freeze_idx, "the $ZONE_NAME guard must precede the freeze call"
+
 
 class TestPipelineScriptStageShape:
     """The stage step must route write failures through rollback / FAILED_STEP."""

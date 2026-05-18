@@ -59,12 +59,18 @@ state -- either the whole script completed, or nothing about
    return success.
 
 Step 6's rollback is the most paranoid case: named has already
-loaded the change; the rollback restores the prior tree and reloads
-named back to that. The dig-verify failure mode this guards against
-is "the staged file parses but doesn't actually resolve <fqdn>
-post-reload" -- a logic bug in the caller's stager, or a view's RPZ
-swallowing the new record. Either way, the operator-visible state
-post-rollback is identical to pre-op.
+loaded the change; the rollback restores the prior tree and forces
+named back to it via ``rndc freeze`` -> ``rndc reload`` -> ``rndc
+thaw`` on the affected zone. The freeze/thaw cycle bypasses
+named's SOA-serial cache, which otherwise treats a "regression"
+to the snapshot's lower serial as a no-op and leaves the staged
+in-memory zone in place even though the disk has been restored.
+The dig-verify failure mode this guards against is "the staged
+file parses but doesn't actually resolve <fqdn> post-reload" -- a
+logic bug in the caller's stager, or a view's RPZ swallowing the
+new record. Either way, the operator-visible state post-rollback
+is identical to pre-op (disk byte-identical + in-memory zone
+view re-read from the restored zonefile).
 
 State capture
 -------------
@@ -232,6 +238,32 @@ rollback() {{
             find "$BIND_ROOT" -mindepth 1 -delete > /dev/null 2>&1 || true
         fi
         tar -xzf "$SNAPSHOT_PATH" -C / > /dev/null 2>&1 || true
+        # Force named to re-read the restored zonefile regardless of
+        # its SOA serial. A plain ``rndc reload`` is a no-op when the
+        # restored file's SOA serial is LOWER than the staged file's
+        # SOA -- named caches the in-memory zone keyed by serial and
+        # refuses to load a "regression". After a successful stage +
+        # reload, the in-memory zone for $ZONE_NAME holds the staged
+        # (higher) serial; restoring the snapshot brings back the
+        # original (lower) serial on disk and a naive reload would
+        # leave named serving the staged content forever.
+        #
+        # The canonical bind9 incantation that bypasses the serial
+        # check is freeze -> reload -> thaw on the specific zone:
+        # freeze marks the zone as not dynamically updatable and
+        # tells named to drop its in-memory state for it; the
+        # subsequent reload re-reads the zonefile from disk
+        # unconditionally; thaw restores normal operation. The
+        # whole-server ``rndc reload`` fallback covers cases where
+        # the named ZONE_NAME does not match a configured zone (the
+        # freeze would error harmlessly) or the rollback occurred
+        # before zone resolution -- ``|| true`` keeps every step
+        # best-effort because rollback must never itself throw.
+        if [ -n "$ZONE_NAME" ]; then
+            rndc freeze "$ZONE_NAME" > /dev/null 2>&1 || true
+            rndc reload "$ZONE_NAME" > /dev/null 2>&1 || true
+            rndc thaw "$ZONE_NAME" > /dev/null 2>&1 || true
+        fi
         rndc reload > /dev/null 2>&1 || true
     fi
 }}

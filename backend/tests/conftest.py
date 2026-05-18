@@ -257,6 +257,41 @@ def _default_retrieval_model_cache_dir(
 
 
 @pytest.fixture(autouse=True)
+def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin a non-empty ``BACKPLANE_URL`` so the lifespan boots in tests.
+
+    G0.8-T4 (#633) added :func:`meho_backplane.main._assert_mcp_resource_uri_configured`
+    to the FastAPI lifespan: the ``/mcp`` router is mounted
+    unconditionally, so a deploy with neither ``MCP_RESOURCE_URI`` nor
+    ``BACKPLANE_URL`` set now fails loudly at startup instead of
+    serving a dark, silent ``/mcp``. The whole ``test_mcp_*`` /
+    ``test_auth_config`` / ``test_middleware`` family boots the app via
+    ``with TestClient(app)`` (which runs the lifespan); without a
+    process-default for ``BACKPLANE_URL`` every one of them would now
+    crash on the new guard for a reason unrelated to what they test.
+
+    Setting it here, before any test imports :func:`get_settings`,
+    makes the default deploy-shape "MCP audience resolvable" so the
+    guard passes silently. Tests that *exercise* the unresolvable path
+    (``test_empty_audience_setting_returns_401``,
+    ``test_audience_not_configured_401_detail_is_actionable``,
+    ``test_mcp_startup_guard``) override with
+    ``monkeypatch.setenv("BACKPLANE_URL", "")`` — ``MonkeyPatch.setenv``
+    is last-write, so the per-test override wins over this autouse
+    default (same precedence contract :func:`_default_database_url`
+    documents).
+
+    The ``get_settings.cache_clear()`` brackets mirror the sibling
+    autouse fixtures so a stale cached ``Settings`` cannot leak the
+    value across tests.
+    """
+    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_secret_leak_sweep(
     caplog: pytest.LogCaptureFixture,
     capfd: pytest.CaptureFixture[str],

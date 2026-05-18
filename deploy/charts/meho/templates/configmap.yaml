@@ -59,3 +59,21 @@ data:
   # documented on `retrieval.modelCache`).
   RETRIEVAL_EMBEDDING_MODEL: {{ .Values.config.retrievalEmbeddingModel | quote }}
   RETRIEVAL_MODEL_CACHE_DIR: {{ .Values.config.retrievalModelCacheDir | quote }}
+  # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
+  # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
+  # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
+  # sets neither the resolved audience is empty and every /mcp request
+  # 401s with no signal. These keys are only emitted when an effective
+  # value resolves — explicit `config.backplaneUrl` / `config.mcpResourceUri`,
+  # or derived from the Ingress host for the common ingress-fronted
+  # deploy (see `meho.backplaneUrl` / `meho.mcpResourceUri` helpers).
+  # When nothing resolves the keys are omitted (env var stays unset) and
+  # the backend's startup guard fails loudly with the remediation.
+  {{- $backplaneUrl := include "meho.backplaneUrl" . }}
+  {{- if $backplaneUrl }}
+  BACKPLANE_URL: {{ $backplaneUrl | quote }}
+  {{- end }}
+  {{- $mcpResourceUri := include "meho.mcpResourceUri" . }}
+  {{- if $mcpResourceUri }}
+  MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
+  {{- end }}

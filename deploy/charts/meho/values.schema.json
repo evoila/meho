@@ -218,6 +218,16 @@
           "minLength": 1,
           "pattern": "^/",
           "description": "Absolute filesystem path fastembed reads cached ONNX weights from. Default `/opt/meho/model-cache` is the image layer the shipped default model is baked into at build time (evoila/meho#574) — offline + version-locked first boot, no PVC needed. Repoint to a writable `retrieval.modelCache.mountPath` (and set `retrieval.modelCache.enabled: true`) only when overriding `config.retrievalEmbeddingModel` to a non-default model fetched at runtime; the chart does not cross-validate the two values to keep override flexibility for operators that mount via `extraVolumes`."
+        },
+        "backplaneUrl": {
+          "type": "string",
+          "pattern": "^(|https?://.+)$",
+          "description": "MCP audience binding (G0.8-T4 #633). Public base URL of the backplane, no trailing slash. Leave blank for the common ingress-fronted deploy: the chart derives `https://<ingress.host>` (scheme follows `ingress.tls.enabled`). Set explicitly when the public URL differs from the Ingress host. Must be empty or an `http(s)://` URL."
+        },
+        "mcpResourceUri": {
+          "type": "string",
+          "pattern": "^(|https?://.+)$",
+          "description": "MCP audience binding (G0.8-T4 #633). Canonical MCP resource URI, no trailing slash. Leave blank to derive `${BACKPLANE_URL}/mcp` (the documented default). Set explicitly only for a non-default MCP mount point. Must match the Keycloak oidc-audience-mapper value — see `docs/cross-repo/mcp-client-setup.md` Step 1. Must be empty or an `http(s)://` URL."
         }
       }
     },

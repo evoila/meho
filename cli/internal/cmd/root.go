@@ -18,6 +18,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
+	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
@@ -141,6 +142,17 @@ func newRootCmd() *cobra.Command {
 	// the backplane manifest cannot shadow the built-in `vmware`
 	// parent.
 	root.AddCommand(vmware.NewRootCmd())
+
+	// G3.5-T3 (#615) -- nsx-rest-4.2 operator alias verbs for
+	// Initiative #368. The verb tree pre-bakes connector_id=
+	// "nsx-rest-4.2" on top of the existing /api/v1/operations/call
+	// dispatcher route. Ships the 9 read-only NSX core verbs (about,
+	// node list, cluster status, segment list, transport-zone list,
+	// tier0 list, tier1 list, firewall policy list, firewall rule list)
+	// plus operation search/call meta-tool wrappers.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `nsx` parent.
+	root.AddCommand(nsx.NewRootCmd())
 
 	// G3.3-T6 (#550) -- vault-1.x operator alias verbs for Initiative
 	// #366. The verb tree pre-bakes connector_id="vault-1.x" on top of

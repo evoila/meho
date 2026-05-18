@@ -101,6 +101,12 @@ meho retrieval retire-checklist --json
 
 It combines the eval results with the open-blocker count (GitHub issues labelled `retrieval-migration-blocker`) into a per-surface GREEN / YELLOW / RED verdict over five criteria. When the **kb** surface is GREEN on all five and the team agrees daily use has shifted:
 
+> **Which surface feeds the overlap clock — read this before you start dogfooding.** The daily-use criteria (criterion 1 "days since first daily use" and criterion 2 "operator breadth") are fed **only by the audited MCP search meta-tools**: `search_knowledge` (kb), `search_memory` (memory), `search_operations` (operations). Those land in `audit_log` under `/mcp/tools/call/<tool>` and are the surfaces named in the `counted_surfaces` field of both `meho retrieval usage --json` and `meho retrieval retire-checklist --json` (e.g. `["mcp:search_knowledge", "mcp:search_memory", "mcp:search_operations"]`).
+>
+> **REST `POST /api/v1/retrieve` is deliberately excluded** (`rest_excluded: true` in the same responses). It runs the identical retrieval substrate but audits under `/api/v1/retrieve`, which is not a counted path — so a `search_knowledge` call ticks the clock while a REST `/retrieve` call does not. Counting REST too is intentionally out of scope for v0.2 (it would change audit volume and risk double-counting against the MCP path).
+>
+> **Practical consequence:** if you dogfood the ≥1-month overlap exclusively through REST `/retrieve` (or before `/mcp` is configured at all), `total_searches` stays `0` and the retire checklist stays RED on criteria 1 + 2 for the entire window — not because the migration failed, but because the counted surface saw no traffic. Dogfood through the MCP `search_knowledge` tool (the agent-facing surface) so the overlap clock actually ticks. The zero is no longer silent: `counted_surfaces` + `rest_excluded` on every `usage` / `retire-checklist` response tell you exactly why a zero is a zero.
+
 1. Open a PR in `evoila-bosnia/claude-rdc-hetzner-dc` removing `kb/`.
 2. Update the consumer's `CLAUDE.md` to drop "grep `kb/`" patterns in favour of "use `meho kb search`".
 3. Keep the deleted directory recoverable from git history (a tag or the merge commit SHA is enough — see Rollback).

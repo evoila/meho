@@ -33,17 +33,28 @@ state -- either the whole script completed, or nothing about
    only -- the rollback always uses the full tar snapshot.
 3. **Stage.** Write the caller's proposed file content (passed as
    bytes) to the audit-slice path.
-4. **Validate.** Run ``named-checkzone <zone> <file>`` against the
-   staged file. Non-zero exit -> failure: restore from snapshot,
-   ``rndc reload``, return ``checkconf`` step.
+4. **Validate.** Run the caller-supplied ``BIND9_VALIDATE_CMD``
+   against the staged tree. Non-zero exit -> failure: restore from
+   snapshot, ``rndc reload``, return ``checkconf`` step.
 
-   Why ``named-checkzone`` rather than ``named-checkconf -p``: the
-   latter parses the *active* config tree (which already references
-   the new file, since step 3 wrote in place). A syntactically broken
-   zonefile would be caught either way, but ``named-checkzone`` runs
-   the per-zone integrity check at the granularity the operator's
-   change actually has -- a record-write only touches one zonefile,
-   so per-zone is the right blast-radius for the validation gate.
+   The default validate command is
+   ``named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH"`` (record-write
+   contract -- per-zone integrity check, the granularity a record
+   change actually has). T4 (#590) config-write callers
+   (``config.apply_file`` / ``config.apply_views``) override with
+   ``named-checkconf -p > /dev/null`` -- the whole-config parse is
+   the right blast-radius when the change may touch ``named.conf``
+   itself or a fragment file that ``named-checkzone`` cannot
+   evaluate in isolation.
+
+   Why default to ``named-checkzone`` rather than always
+   ``named-checkconf -p``: the latter parses the *active* config
+   tree (which already references the staged file, since step 3
+   wrote in place). For a single-zonefile record-write, the per-zone
+   check fails faster and surfaces the bind9 diagnostic (offending
+   record + reason); for a config-fragment write where the structural
+   shape may have changed, the whole-config parse is the correct
+   gate.
 5. **Reload.** ``rndc reload`` -- bind9 picks up the staged file.
    Non-zero exit -> restore from snapshot, ``rndc reload`` again to
    come back to the known-good config, return ``reload`` step.
@@ -255,12 +266,19 @@ class AtomicApplyResult:
 # ``shlex.quote`` wraps every interpolation regardless -- defence in
 # depth.
 #
-# ``BIND9_VERIFY_CMD`` and ``BIND9_STAGED_B64`` are exported as
-# environment variables in the script body (not interpolated into the
-# script text) so a verify command containing single quotes or a
-# multiline staged-bytes payload cannot break the shell quoting -- the
-# script reads them via ``$VAR`` after the bash interpreter has parsed
-# the literal script body.
+# ``BIND9_VERIFY_CMD``, ``BIND9_VALIDATE_CMD``, ``BIND9_STAGED_B64``,
+# and ``BIND9_STAGED_TAR_B64`` are exported as environment variables
+# in the script body (not interpolated into the script text) so a
+# verify command containing single quotes or a multiline staged-bytes
+# payload cannot break the shell quoting -- the script reads them via
+# ``$VAR`` after the bash interpreter has parsed the literal script
+# body. Two staging shapes share the step 3 branch: single-file mode
+# (``BIND9_STAGED_B64``, the T3 record-write contract) and multi-file
+# tar mode (``BIND9_STAGED_TAR_B64``, T4 ``config.apply_views``);
+# step 4 always evaluates ``BIND9_VALIDATE_CMD`` so the same primitive
+# can run ``named-checkzone`` for record writes and ``named-checkconf``
+# for config writes without per-caller branching outside the env-var
+# slot.
 _PIPELINE_TEMPLATE: str = """\
 set -e -u -o pipefail
 SNAPSHOT_PATH={snapshot_path}
@@ -415,35 +433,81 @@ if [ -f "$AUDIT_SLICE_PATH" ]; then
 fi
 echo "===STATE_BEFORE_END==="
 
-# Step 3: stage. The staged bytes arrive base64-encoded in the
-# BIND9_STAGED_B64 env var so a payload containing arbitrary bytes
-# (including newlines and quoting that would clash with heredoc
-# delimiters) round-trips unchanged. Decoded inline. Wrapped in the
-# same explicit-check shape every other step uses so a write failure
-# (ENOSPC / EACCES / read-only fs / base64 decode failure on a corrupt
-# payload) routes through rollback and surfaces step=``stage`` rather
-# than exiting under ``set -e`` with no rollback and no FAILED_STEP
-# marker (which would degrade to the snapshot-step fallback even
-# though the snapshot succeeded and the audit slice may be partially
-# truncated).
-if ! STAGE_OUT=$(printf '%s' "$BIND9_STAGED_B64" | base64 -d > "$AUDIT_SLICE_PATH" 2>&1); then
-    rollback
-    echo "===FAILED_STEP===stage"
-    echo "===FAILED_DETAIL_BEGIN==="
-    printf '%s' "$STAGE_OUT"
-    echo
-    echo "===FAILED_DETAIL_END==="
-    exit 9
+# Step 3: stage. Two mutually exclusive shapes share this step --
+# the contract is "either write one file, or extract a tar archive
+# of multiple files under $BIND_ROOT". Both arrive base64-encoded so
+# arbitrary bytes (including newlines and quoting that would clash
+# with heredoc delimiters) round-trip unchanged.
+#
+# * Single-file mode (T3 record writes / T4 ``config.apply_file``):
+#   ``BIND9_STAGED_B64`` carries the file content; the step writes
+#   it to ``$AUDIT_SLICE_PATH`` and preserves the ``root:bind`` mode
+#   bits the daemon expects on a zonefile.
+# * Multi-file mode (T4 ``config.apply_views``):
+#   ``BIND9_STAGED_TAR_B64`` carries a tar.gz archive whose member
+#   paths are absolute (rooted at ``/``). The step extracts it with
+#   ``tar -xzf - -C /`` so the archive overlays the live bind tree.
+#   Members outside ``$BIND_ROOT`` are refused at the Python-side
+#   archive build (see ``_pack_views_directory``), so the extraction
+#   target stays scoped.
+#
+# Both shapes route a write failure (ENOSPC / EACCES / read-only fs /
+# corrupt base64 / tar member outside expected path) through
+# ``rollback`` and emit ``===FAILED_STEP===stage``. Without this
+# guard ``set -e`` would exit the script under ``-e -o pipefail``
+# with no rollback and no FAILED_STEP marker, degrading to the
+# snapshot-step fallback even though the snapshot succeeded.
+if [ -n "${{BIND9_STAGED_TAR_B64:-}}" ]; then
+    # Multi-file mode: extract the staged tar over $BIND_ROOT.
+    # ``--no-same-owner`` lets us run inside the container fixture
+    # without honouring uid/gid baked into the archive (which would
+    # come from the orchestrator's tmpdir build); the daemon's
+    # ``chown root:bind`` is applied by the snapshot-restore path
+    # on rollback and by named's own file-create logic on success.
+    # Pipeline split across lines (bash command substitution
+    # accepts newlines inside ``$(...)``) so the rendered script
+    # stays under the linter's column cap.
+    if ! STAGE_OUT=$(
+        printf '%s' "$BIND9_STAGED_TAR_B64" | base64 -d \
+            | tar -xzf - -C / --no-same-owner 2>&1
+    ); then
+        rollback
+        echo "===FAILED_STEP===stage"
+        echo "===FAILED_DETAIL_BEGIN==="
+        printf '%s' "$STAGE_OUT"
+        echo
+        echo "===FAILED_DETAIL_END==="
+        exit 9
+    fi
+else
+    # Single-file mode: write the staged bytes to the audit slice.
+    if ! STAGE_OUT=$(printf '%s' "$BIND9_STAGED_B64" | base64 -d > "$AUDIT_SLICE_PATH" 2>&1); then
+        rollback
+        echo "===FAILED_STEP===stage"
+        echo "===FAILED_DETAIL_BEGIN==="
+        printf '%s' "$STAGE_OUT"
+        echo
+        echo "===FAILED_DETAIL_END==="
+        exit 9
+    fi
+    # Preserve the bind:bind ownership the daemon expects on a zonefile.
+    chown root:bind "$AUDIT_SLICE_PATH" 2>/dev/null || true
+    chmod 644 "$AUDIT_SLICE_PATH" 2>/dev/null || true
 fi
-# Preserve the bind:bind ownership the daemon expects.
-chown root:bind "$AUDIT_SLICE_PATH" 2>/dev/null || true
-chmod 644 "$AUDIT_SLICE_PATH" 2>/dev/null || true
 
-# Step 4: validate against the staged file. named-checkzone validates
-# the zonefile against the zone name; any non-zero exit triggers
-# rollback. Stderr is captured so the failure surface carries the
-# real diagnostic (bind9 prints the offending line + reason).
-if ! CHECKZONE_OUT=$(named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH" 2>&1); then
+# Step 4: validate the staged tree. The validate command is
+# caller-supplied via ``$BIND9_VALIDATE_CMD`` so the primitive serves
+# both shapes:
+#   * T3 record writes: ``named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH"``
+#     (per-zone integrity check, the granularity the change has).
+#   * T4 config writes: ``named-checkconf -p > /dev/null``
+#     (whole-config parse check; the change may touch ``named.conf``
+#     itself or a fragment file that ``named-checkzone`` cannot
+#     evaluate in isolation).
+# Any non-zero exit triggers rollback; stderr is captured so the
+# failure surface carries the real bind9 diagnostic (offending line +
+# reason).
+if ! CHECKZONE_OUT=$(eval "$BIND9_VALIDATE_CMD" 2>&1); then
     rollback
     echo "===FAILED_STEP===checkconf"
     echo "===FAILED_DETAIL_BEGIN==="
@@ -602,7 +666,9 @@ def _parse_pipeline_output(
 
 def _compose_full_script(
     *,
-    staged_bytes: bytes,
+    staged_bytes: bytes | None,
+    staged_tar_bytes: bytes | None,
+    validate_command: str,
     verify_command: str,
     pipeline_script: str,
 ) -> str:
@@ -610,19 +676,33 @@ def _compose_full_script(
 
     base64-encoding the staged bytes keeps the value safe to splice
     into an env-var assignment regardless of the bytes' shape (control
-    characters, embedded NULs, etc.). ``BIND9_VERIFY_CMD`` is
-    single-quoted; any single quote in the caller's command is escaped
-    via the standard ``'\\''`` rewrite. Pulled out of
-    :func:`atomic_apply` to keep the parent function within the
-    code-quality block limit and to make the env-var quoting logic
-    independently testable.
+    characters, embedded NULs, etc.). ``BIND9_VERIFY_CMD`` and
+    ``BIND9_VALIDATE_CMD`` are single-quoted; any single quote in the
+    caller's command is escaped via the standard ``'\\''`` rewrite.
+    Pulled out of :func:`atomic_apply` to keep the parent function
+    within the code-quality block limit and to make the env-var
+    quoting logic independently testable.
+
+    Exactly one of ``staged_bytes`` / ``staged_tar_bytes`` must be set.
+    The pipeline script branches on whether ``BIND9_STAGED_TAR_B64`` is
+    non-empty; the other env var is exported as the empty string so
+    ``set -u`` does not fire on the unused branch.
     """
     import base64
 
-    staged_b64 = base64.b64encode(staged_bytes).decode("ascii")
+    if (staged_bytes is None) == (staged_tar_bytes is None):
+        raise ValueError("exactly one of staged_bytes / staged_tar_bytes must be provided")
+
+    file_b64 = base64.b64encode(staged_bytes).decode("ascii") if staged_bytes is not None else ""
+    tar_b64 = (
+        base64.b64encode(staged_tar_bytes).decode("ascii") if staged_tar_bytes is not None else ""
+    )
+    validate_quoted = "'" + validate_command.replace("'", "'\\''") + "'"
     verify_quoted = "'" + verify_command.replace("'", "'\\''") + "'"
     return (
-        f"export BIND9_STAGED_B64='{staged_b64}'\n"
+        f"export BIND9_STAGED_B64='{file_b64}'\n"
+        f"export BIND9_STAGED_TAR_B64='{tar_b64}'\n"
+        f"export BIND9_VALIDATE_CMD={validate_quoted}\n"
         f"export BIND9_VERIFY_CMD={verify_quoted}\n"
         f"{pipeline_script}"
     )
@@ -685,19 +765,32 @@ async def atomic_apply(
     raw_jwt: str,
     sudo_password: str,
     audit_slice_path: str,
-    zone_name: str,
-    staged_bytes: bytes,
+    zone_name: str = "",
+    staged_bytes: bytes | None = None,
+    staged_tar_bytes: bytes | None = None,
+    validate_command: str | None = None,
     verify_command: str,
     bind_root: str = "/etc/bind",
 ) -> AtomicApplyResult:
-    """Stage *staged_bytes* at *audit_slice_path* with full snapshot rollback.
+    """Stage proposed content under *audit_slice_path* with full snapshot rollback.
 
     Returns :class:`AtomicApplyResult` on success; raises
     :class:`AtomicApplyError` with the failed step on any failure.
     By the time this returns (success or raise), the remote
     ``/etc/bind/`` tree is in a single coherent state: either the
-    staged file is live + reload succeeded + verify succeeded, OR the
-    pre-op tree is restored byte-identical via the snapshot tar.
+    staged content is live + reload succeeded + verify succeeded, OR
+    the pre-op tree is restored byte-identical via the snapshot tar.
+
+    Two staging shapes are supported. Exactly one of *staged_bytes* /
+    *staged_tar_bytes* must be set:
+
+    * **Single-file** (``staged_bytes``) -- the bytes are written to
+      ``audit_slice_path``; ``root:bind`` ownership + mode 644 are
+      applied. Used by record writes and ``config.apply_file``.
+    * **Multi-file** (``staged_tar_bytes``) -- a tar.gz archive whose
+      members carry absolute paths rooted at ``/`` is extracted in
+      place; the staged tree overlays the live bind root. Used by
+      ``config.apply_views``.
 
     Parameters
     ----------
@@ -711,20 +804,41 @@ async def atomic_apply(
         invariants (no newlines / NUL) apply.
     audit_slice_path
         The file the operation semantically edits (the affected
-        zonefile, typically). Used for ``state_before`` /
-        ``state_after`` capture and as the staging write target.
+        zonefile, the primary config fragment, etc.). Used for
+        ``state_before`` / ``state_after`` capture; in single-file
+        mode this is also the staging write target. In multi-file
+        mode the caller picks the most representative slice for
+        audit replay.
     zone_name
-        Zone name passed to ``named-checkzone`` for validation.
+        Zone name passed to the default ``named-checkzone``
+        validate command and to the rollback SOA-bump logic. Pass
+        ``""`` (the default) for config-write ops that don't have
+        a zone-scope -- the SOA-bump branch is guarded against an
+        empty zone name and becomes a no-op, and the caller must
+        supply a non-zone validate via *validate_command*.
     staged_bytes
-        The proposed file content. Streamed via a base64 env var so
+        Single-file mode payload. Mutually exclusive with
+        *staged_tar_bytes*. Streamed via a base64 env var so
         arbitrary bytes (incl. newlines) round-trip unchanged.
+    staged_tar_bytes
+        Multi-file mode payload -- a tar.gz archive. Mutually
+        exclusive with *staged_bytes*. Members must carry absolute
+        paths under *bind_root* (enforced by the caller's archive
+        build helper).
+    validate_command
+        Shell command run under sudo to validate the staged tree
+        before ``rndc reload``. When ``None``, the primitive renders
+        the default ``named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH"``
+        (the T3 record-write contract). Config-write callers pass an
+        explicit value -- typically ``named-checkconf -p > /dev/null``.
     verify_command
         Shell command that exits 0 iff the post-reload state matches
         the operation's intent. Commonly
-        ``dig @localhost <fqdn> +short A | grep -qx <expected-ip>``.
-        Run under sudo (the same shell as the rest of the pipeline);
-        callers needing to drop privileges should do so inside the
-        command.
+        ``dig @localhost <fqdn> +short A | grep -qx <expected-ip>`` for
+        record writes, ``named-checkconf > /dev/null`` for config writes
+        (a "config still parses after the live reload" sanity check),
+        or a `dig` that resolves a representative record under the new
+        views file.
     bind_root
         Root directory snapshotted by tar. Defaults to ``/etc/bind``;
         the only escape hatch is for tests using a temporary tree.
@@ -734,6 +848,8 @@ async def atomic_apply(
     AtomicApplyError
         On any failure at any step. ``error.step`` carries the
         failing step verb; the pre-op tree is restored.
+    ValueError
+        Neither or both of *staged_bytes* / *staged_tar_bytes* set.
     """
     # Per-call snapshot path. ``secrets.token_hex`` gives 32 hex chars
     # of CSPRNG entropy -- collision-resistant across concurrent
@@ -747,8 +863,19 @@ async def atomic_apply(
         zone_name=zone_name,
         bind_root=bind_root,
     )
+    effective_validate = (
+        validate_command
+        if validate_command is not None
+        # T3 default: per-zone checkzone against the staged zonefile.
+        # Quoted via the bash-side expansion of $ZONE_NAME and
+        # $AUDIT_SLICE_PATH (already shlex-quoted into the template
+        # by _build_pipeline_script).
+        else ('named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH"')
+    )
     full_script = _compose_full_script(
         staged_bytes=staged_bytes,
+        staged_tar_bytes=staged_tar_bytes,
+        validate_command=effective_validate,
         verify_command=verify_command,
         pipeline_script=pipeline_script,
     )

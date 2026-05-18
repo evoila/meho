@@ -19,10 +19,13 @@ G3.4-T3 (#589) extends ``ops_record`` with the two record-write ops
 (``bind9.record.add`` / ``bind9.record.remove``), atomic-applied via
 :mod:`~meho_backplane.connectors.bind9._atomic`.
 
-The remaining write ops (``bind9.config.apply_*``,
-``bind9.config.backup``, ``bind9.config.reload``) land under T4 (#590)
-by extending :data:`BIND9_OPS` from their own module; the registration
-walk in :meth:`Bind9Connector.register_operations` does not change.
+G3.4-T4 (#590) extends ``ops_config`` with the four config-write ops
+(``bind9.config.apply_file``, ``bind9.config.apply_views``,
+``bind9.config.backup``, ``bind9.config.reload``). ``apply_file`` and
+``apply_views`` route through the atomic-apply primitive (single-file
+and multi-file tar modes respectively); ``backup`` and ``reload`` do
+not (additive / single-command respectively). The registration walk
+in :meth:`Bind9Connector.register_operations` does not change.
 
 The dataclass + tuple shape mirrors the Kubernetes connector
 (:mod:`~meho_backplane.connectors.kubernetes.ops`) so the registration
@@ -141,10 +144,11 @@ def _bind9_ops() -> tuple[Bind9Op, ...]:
     Composition: ``bind9.about`` (T1 canary) + ``ZONE_OPS`` (T2 read:
     ``bind9.zone.list`` / ``bind9.zone.read``) + ``RECORD_OPS`` (T2
     read ``bind9.record.get`` + T3 writes ``bind9.record.add`` /
-    ``bind9.record.remove``) + ``CONFIG_OPS`` (T2 read:
-    ``bind9.config.show``). T4 (#590) will append the config-write
-    group (``bind9.config.apply_views`` / ``bind9.config.apply_file``
-    / ``bind9.config.backup`` / ``bind9.config.reload``).
+    ``bind9.record.remove``) + ``CONFIG_OPS`` (T2 read
+    ``bind9.config.show`` + T4 writes ``bind9.config.apply_file``,
+    ``bind9.config.apply_views``, ``bind9.config.backup``,
+    ``bind9.config.reload``). Eleven ops total -- the full Initiative
+    #367 §4 op surface.
 
     Implemented as a function call rather than a literal-and-splat at
     module level so the import order stays linear: ``ops.py`` defines
@@ -167,10 +171,11 @@ def _bind9_ops() -> tuple[Bind9Op, ...]:
 #: T1 shipped ``bind9.about``; T2 (#588) adds the read op group
 #: (``bind9.zone.list/read``, ``bind9.record.get``,
 #: ``bind9.config.show``); T3 (#589) adds the record-write group
-#: (``bind9.record.add/remove``); T4 (#590) will add the config-write
-#: group (``bind9.config.apply_views``, ``bind9.config.apply_file``,
-#: ``bind9.config.backup``, ``bind9.config.reload``). The shape of
-#: each follow-on PR is "import a new module-level tuple and splat it
+#: (``bind9.record.add/remove``); T4 (#590) adds the config-write
+#: group (``bind9.config.apply_file``, ``bind9.config.apply_views``,
+#: ``bind9.config.backup``, ``bind9.config.reload``) -- 11 ops in
+#: total, the full Initiative #367 §4 surface. The shape of each
+#: follow-on PR is "import a new module-level tuple and splat it
 #: into :data:`BIND9_OPS` via :func:`_bind9_ops`" -- the registration
 #: walk in :meth:`Bind9Connector.register_operations` does not need to
 #: change.

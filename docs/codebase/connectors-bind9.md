@@ -58,18 +58,31 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
   transforms, and the `RECORD_OPS` registration table.
 - **`_atomic.py`** -- T3 (#589) atomic-apply primitive. One async
   `atomic_apply()` helper that runs the seven-step bash pipeline
-  (snapshot, capture state_before, stage, named-checkzone validate,
-  rndc reload, caller-supplied dig-verify predicate, on-failure
-  snapshot rollback) in a single `_remote_bash_with_sudo` invocation.
-  Returns `AtomicApplyResult(state_before, state_after,
-  audit_slice_path)`; raises `AtomicApplyError(step, detail)` on any
-  failure -- by the time the helper returns, the remote `/etc/bind/`
-  tree is either fully-staged-and-verified or byte-identical to the
-  pre-op snapshot.
-- **`ops_config.py`** -- T2 config-read op module. Pure path-safety
-  filter (`ensure_path_under_root`), handler (`bind9_config_show`),
-  and the `CONFIG_OPS` registration table. T4 will append
-  config-write ops to this module.
+  (snapshot, capture state_before, stage, validate, rndc reload,
+  caller-supplied verify predicate, on-failure snapshot rollback)
+  in a single `_remote_bash_with_sudo` invocation. T4 (#590)
+  generalised the validate step from hardcoded `named-checkzone` to
+  a caller-supplied `BIND9_VALIDATE_CMD` env var (default still
+  `named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH"` for record
+  writes) and added a multi-file tar staging shape
+  (`staged_tar_bytes`) so `config.apply_views` can deposit a whole
+  views subtree atomically. Returns `AtomicApplyResult(state_before,
+  state_after, audit_slice_path)`; raises `AtomicApplyError(step,
+  detail)` on any failure -- by the time the helper returns, the
+  remote `/etc/bind/` tree is either fully-staged-and-verified or
+  byte-identical to the pre-op snapshot.
+- **`ops_config.py`** -- T2 config-read + T4 config-write op module.
+  Pure path-safety filter (`ensure_path_under_root`), read handler
+  (`bind9_config_show`), and the four T4 write handlers:
+  `bind9_config_apply_file` (single-fragment write, atomic-apply
+  single-file mode), `bind9_config_apply_views` (multi-file tree
+  write, atomic-apply tar mode), `bind9_config_backup` (`tar -czf`
+  of `/etc/bind/` to `/var/backups/meho-bind9/<timestamp>.tar.gz`
+  with a JSON listing of existing backups), and `bind9_config_reload`
+  (`rndc reload` with structured success/failure envelope). The
+  pure `pack_views_tar` helper builds the multi-file archive
+  client-side. The `CONFIG_OPS` registration table carries all five
+  ops.
 - **`parse_named_version()`** / **`parse_os_release()`**
   (`connector.py`) -- pure helpers. `parse_named_version` recovers
   the `<X.Y.Z>` version triple from a `BIND <X.Y.Z>-<distro-suffix>`
@@ -101,9 +114,10 @@ whole seven-step pipeline (snapshot, stage, validate, reload,
 verify, rollback) runs as one bash body fed to
 `_remote_bash_with_sudo`, so the snapshot and the rollback always
 share an interpreter on the target. T4 (#590)'s
-`bind9.config.apply_views` / `bind9.config.apply_file` /
-`bind9.config.backup` / `bind9.config.reload` will all route their
-elevated-privilege calls through it.
+`bind9.config.apply_file` / `bind9.config.apply_views` route through
+the same atomic-apply primitive; `bind9.config.backup` and
+`bind9.config.reload` bypass the atomic shape (additive / single
+command) but still route their sudo through this helper.
 
 ## `fingerprint(target)`
 
@@ -147,7 +161,7 @@ the most-specific class first (`PermissionDenied` is a subclass of
 `DisconnectError` in asyncssh) so the dispatch maps to the right
 reason.
 
-## Shipped op surface (T1 + T2 + T3)
+## Shipped op surface (T1 + T2 + T3 + T4 = 11 ops)
 
 | Op id | Handler | Safety | Description |
 | ----- | ------- | ------ | ----------- |
@@ -158,9 +172,16 @@ reason.
 | `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; verify predicate = `dig` returns the new IP |
 | `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `caution` | Atomic remove of A + AAAA at the given FQDN with snapshot rollback; verify predicate = `dig` no longer resolves the FQDN |
 | `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked |
+| `bind9.config.apply_file` | `Bind9Connector.bind9_config_apply_file` | `dangerous` | Atomic single-fragment write via T3's primitive; validate = `named-checkconf -p`; verify = config still parses after live reload |
+| `bind9.config.apply_views` | `Bind9Connector.bind9_config_apply_views` | `dangerous` | Atomic multi-file tree write (tar mode of T3's primitive); validate = `named-checkconf -p`; verify = caller-supplied `dig` or fallback parse check |
+| `bind9.config.backup` | `Bind9Connector.bind9_config_backup` | `caution` | `tar -czf` of `/etc/bind/` under `/var/backups/meho-bind9/`; returns backup ID + listing of existing backups |
+| `bind9.config.reload` | `Bind9Connector.bind9_config_reload` | `caution` | `rndc reload` with structured success/failure envelope; captures `rndc status` before/after for audit |
 
-The T4 config-write op surface lands in a follow-on PR against this
-same `BIND9_OPS`-splat registration shape.
+The `dangerous` safety tier is reserved for T4's apply ops -- a bad
+views file can dark the whole resolver. The production-path gate
+(G7/G10) keys on `safety_level`, so the apply ops carry an additional
+warning in their `description` + `llm_instructions` that any agent
+proposing the write sees.
 
 ## Atomic-apply primitive (T3 #589)
 
@@ -356,17 +377,38 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
   unsupported-type / missing-sudo-password rejection branches; (6)
   the registration metadata (`safety_level=caution`, write-warning
   in description + `llm_instructions`, `additionalProperties=False`).
+- `backend/tests/test_connectors_bind9_config.py` -- T4 unit suite.
+  Covers (1) `pack_views_tar` pure builder (absolute member names,
+  traversal rejection, mode-bit pinning, UTF-8 round-trip); (2)
+  `_parse_reload_output` sentinel parser; (3) `bind9_config_apply_file`
+  and `bind9_config_apply_views` route through `atomic_apply` with
+  the expected validate command + staging shape (asserted by mocking
+  the primitive and inspecting the call kwargs -- the load-bearing
+  T4 constraint that no rollback logic is duplicated in
+  `ops_config.py`); (4) `bind9_config_apply_file` rejects traversal
+  paths pre-stage with no atomic-apply invocation; (5)
+  `bind9_config_backup` shapes the create + list script correctly,
+  parses the JSON listing into rows, emits `op_class=write` +
+  `state_after` only (no `state_before`); (6) `bind9_config_reload`
+  structured envelope distinguishing success from rndc failure
+  without raising on non-zero rndc exit; (7) registration metadata
+  for the four T4 ops (safety levels, global-atomic warnings,
+  `additionalProperties=False`, handler-attr resolution).
 - `backend/tests/integration/test_connectors_bind9_container.py` --
   containerised smoke test against a Debian-bookworm image with
   `bind9 bind9-host bind9utils dnsutils openssh-server` installed.
   Builds the image inline from a Dockerfile fixture (T2 seeds an
   `evba.lab` zone with each supported record type so the read-op
-  tests assert against a real container). T3 extends with end-to-end
+  tests assert against a real container). T3 extended with end-to-end
   add / remove tests, longest-suffix zone resolution against a real
   `named-checkconf -p`, and the two byte-identical-tree rollback
   assertions (checkzone failure + verify failure) gated on a
-  pre/post-op `sha256sum` of the bind config root. Skip-on-no-Docker
-  matches the rest of `tests/integration/`.
+  pre/post-op `sha256sum` of the bind config root. T4 extends with
+  end-to-end `config.reload` / `config.backup` / `config.apply_file`
+  / `config.apply_views` tests plus two byte-identical-tree rollback
+  assertions for the apply ops (invalid fragment / invalid views
+  tree both refuse via `named-checkconf -p` and roll back cleanly).
+  Skip-on-no-Docker matches the rest of `tests/integration/`.
 
 ## References
 
@@ -374,6 +416,7 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
 - Skeleton task: [#587 G3.4-T1 Bind9Connector skeleton](https://github.com/evoila/meho/issues/587)
 - Read op group: [#588 G3.4-T2 bind9 read op group](https://github.com/evoila/meho/issues/588)
 - Atomic-apply + record-writes: [#589 G3.4-T3 bind9 atomic-apply primitive + record.add / record.remove](https://github.com/evoila/meho/issues/589)
+- Config-write op group: [#590 G3.4-T4 bind9 config-write op group](https://github.com/evoila/meho/issues/590)
 - Adapter inherited: [#243 G0.2-T4 SshConnector adapter](https://github.com/evoila/meho/issues/243)
 - Registration substrate: [#395 G0.6-T4 register_typed_operation()](https://github.com/evoila/meho/issues/395)
 - Sibling skeleton precedent: [#321 G3.2-T1 KubernetesConnector skeleton](https://github.com/evoila/meho/issues/321) + `backend/src/meho_backplane/connectors/kubernetes/connector.py`

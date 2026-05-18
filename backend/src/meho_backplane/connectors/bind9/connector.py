@@ -47,7 +47,10 @@ This module ships:
 
 The remaining 10 ops (zone / record / config reads + writes) land
 under G3.4-T2..T4 by extending :data:`BIND9_OPS` from their own
-modules; the dispatcher shim does not change.
+modules; the dispatcher shim does not change. T4 (#590) completes
+the 11-op surface with ``bind9.config.apply_file``,
+``bind9.config.apply_views`` (atomic-apply reuse),
+``bind9.config.backup``, and ``bind9.config.reload``.
 """
 
 from __future__ import annotations
@@ -545,6 +548,76 @@ class Bind9Connector(SshConnector):
         )
 
         return await _bind9_config_show(self, target, params)
+
+    async def bind9_config_apply_file(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``bind9.config.apply_file`` (G3.4-T4 #590).
+
+        Atomic single-fragment write via the T3 atomic-apply primitive
+        (single-file staging mode). Routes sudo through
+        :meth:`_remote_bash_with_sudo`.
+        """
+        from meho_backplane.connectors.bind9.ops_config import (
+            bind9_config_apply_file as _bind9_config_apply_file,
+        )
+
+        return await _bind9_config_apply_file(self, target, params)
+
+    async def bind9_config_apply_views(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``bind9.config.apply_views`` (G3.4-T4 #590).
+
+        Atomic multi-file tree write via the T3 atomic-apply primitive
+        (multi-file tar mode). Routes sudo through
+        :meth:`_remote_bash_with_sudo`.
+        """
+        from meho_backplane.connectors.bind9.ops_config import (
+            bind9_config_apply_views as _bind9_config_apply_views,
+        )
+
+        return await _bind9_config_apply_views(self, target, params)
+
+    async def bind9_config_backup(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``bind9.config.backup`` (G3.4-T4 #590).
+
+        ``tar -czf`` of ``/etc/bind/`` into a timestamped backup file,
+        plus a listing of existing backups. Does NOT route through
+        atomic-apply (additive, no rollback contract). Routes sudo
+        through :meth:`_remote_bash_with_sudo`.
+        """
+        from meho_backplane.connectors.bind9.ops_config import (
+            bind9_config_backup as _bind9_config_backup,
+        )
+
+        return await _bind9_config_backup(self, target, params)
+
+    async def bind9_config_reload(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``bind9.config.reload`` (G3.4-T4 #590).
+
+        ``rndc reload`` with a structured success/failure envelope.
+        Does NOT route through atomic-apply (single command, no staging,
+        no rollback contract). Routes sudo through
+        :meth:`_remote_bash_with_sudo`.
+        """
+        from meho_backplane.connectors.bind9.ops_config import (
+            bind9_config_reload as _bind9_config_reload,
+        )
+
+        return await _bind9_config_reload(self, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

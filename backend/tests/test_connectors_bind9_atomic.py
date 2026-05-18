@@ -259,18 +259,36 @@ class TestPipelineScript:
         assert "'/tmp/snap;evil'" in script
         assert "'/etc/bind/foo;evil'" in script
 
-    def test_script_uses_named_checkzone_not_checkconf(self) -> None:
-        """Step 4 must invoke ``named-checkzone`` (per-zone) not ``named-checkconf -p``."""
+    def test_script_uses_caller_supplied_validate_command(self) -> None:
+        """Step 4 evaluates ``$BIND9_VALIDATE_CMD`` -- caller picks the validator.
+
+        T4 (#590) made the validate command caller-supplied so the
+        primitive serves both record writes (``named-checkzone
+        <zone> <file>``) and config writes (``named-checkconf -p >
+        /dev/null``). The template's step-4 line was previously
+        hardcoded to ``named-checkzone``; now it routes through the
+        env var. The default value is still ``named-checkzone "$ZONE_NAME"
+        "$AUDIT_SLICE_PATH"`` (composed by :func:`atomic_apply` when
+        the caller doesn't override it -- T3 record-write contract
+        stays intact).
+        """
         script = _build_pipeline_script(
             snapshot_path="/tmp/s",
             audit_slice_path="/etc/bind/f",
             zone_name="z",
             bind_root="/etc/bind",
         )
-        assert "named-checkzone" in script
-        # ``named-checkconf -p`` would parse the live config tree --
-        # not what step 4 needs. Pin the negative.
-        assert "named-checkconf -p" not in script
+        # The step-4 evaluation must reference the validate env var.
+        assert "BIND9_VALIDATE_CMD" in script
+        # The executable step-4 line is ``if ! CHECKZONE_OUT=$(eval
+        # "$BIND9_VALIDATE_CMD"...`` -- pin that exact shape so a
+        # refactor cannot accidentally re-hardcode the validator.
+        assert 'eval "$BIND9_VALIDATE_CMD"' in script
+        # No hardcoded ``named-checkzone "$ZONE_NAME"...`` executable
+        # invocation (only docstring / comment mentions remain after
+        # T4 made the validate command caller-supplied). The exact
+        # pre-T4 invocation line is gone.
+        assert 'named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH" 2>&1' not in script
 
     def test_script_calls_rndc_reload(self) -> None:
         script = _build_pipeline_script(

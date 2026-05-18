@@ -35,17 +35,45 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.openapi.models import Example
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations.meta_tools import (
     CallOperationBody,
     OperationDescriptor,
+    UnknownConnectorError,
     call_operation,
     describe_descriptor,
     list_operation_groups,
     search_operations,
 )
+
+#: Shared OpenAPI metadata for the ``connector_id`` query param on the
+#: ``/groups`` and ``/search`` routes. The format is ``<impl_id>-<version>``
+#: (NOT the bare product slug) — documented inline so the generated
+#: ``/openapi.json`` the agent and operators read carries the contract,
+#: rather than it living only in ``docs/cross-repo/connector-ingestion.md``.
+_CONNECTOR_ID_DESCRIPTION = (
+    "Connector implementation id in `<impl_id>-<version>` form — e.g. "
+    "`vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product "
+    "name (`vault`, `vmware`): a bare product slug names no connector "
+    "and returns 404. Discover valid ids via `GET /api/v1/connectors`."
+)
+_CONNECTOR_ID_EXAMPLES: dict[str, Example] = {
+    "vmware_rest": Example(
+        summary="vCenter REST (generic, ingested)",
+        value="vmware-rest-9.0",
+    ),
+    "vault": Example(
+        summary="HashiCorp Vault (typed)",
+        value="vault-1.x",
+    ),
+    "k8s": Example(
+        summary="Kubernetes (typed)",
+        value="k8s-1.x",
+    ),
+}
 
 __all__ = ["router"]
 
@@ -63,21 +91,35 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
 @router.get("/groups")
 async def get_groups(
-    connector_id: str = Query(min_length=1),
+    connector_id: str = Query(
+        min_length=1,
+        description=_CONNECTOR_ID_DESCRIPTION,
+        openapi_examples=_CONNECTOR_ID_EXAMPLES,
+    ),
     operator: Operator = _require_operator,
 ) -> dict[str, Any]:
     """List enabled operation groups for *connector_id*.
 
-    Delegates to :func:`list_operation_groups`. Unknown connector_id
-    returns ``{"groups": []}`` (empty is meaningful — the connector
-    exists but has no enabled groups yet).
+    Delegates to :func:`list_operation_groups`. An *unknown*
+    ``connector_id`` (no operations registered for the parsed triple)
+    is a ``404`` — not an empty ``200``: the empty-catalog trap was
+    that a mis-shaped id looked identical to an empty connector. A
+    *known* connector with zero enabled groups still returns
+    ``{"groups": []}`` (that empty is operationally meaningful).
     """
-    return await list_operation_groups(operator, {"connector_id": connector_id})
+    try:
+        return await list_operation_groups(operator, {"connector_id": connector_id})
+    except UnknownConnectorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/search")
 async def get_search(
-    connector_id: str = Query(min_length=1),
+    connector_id: str = Query(
+        min_length=1,
+        description=_CONNECTOR_ID_DESCRIPTION,
+        openapi_examples=_CONNECTOR_ID_EXAMPLES,
+    ),
     query: str = Query(min_length=1),
     group: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
@@ -86,17 +128,22 @@ async def get_search(
     """Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.
 
     Delegates to :func:`search_operations`. See its docstring for the
-    full algorithm and tenant scoping.
+    full algorithm and tenant scoping. Unknown ``connector_id`` → ``404``
+    (same unknown-vs-known-empty contract as ``/groups``); a known
+    connector with no matching ops returns ``200`` with an empty list.
     """
-    return await search_operations(
-        operator,
-        {
-            "connector_id": connector_id,
-            "query": query,
-            "group": group,
-            "limit": limit,
-        },
-    )
+    try:
+        return await search_operations(
+            operator,
+            {
+                "connector_id": connector_id,
+                "query": query,
+                "group": group,
+                "limit": limit,
+            },
+        )
+    except UnknownConnectorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/call")

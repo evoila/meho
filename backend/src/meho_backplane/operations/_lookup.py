@@ -29,9 +29,10 @@ from uuid import UUID
 from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 
 __all__ = [
+    "connector_exists",
     "count_known_ops",
     "lookup_descriptor",
     "parse_connector_id",
@@ -156,3 +157,66 @@ async def count_known_ops(
             )
         )
         return len(result.all())
+
+
+async def connector_exists(
+    *,
+    tenant_id: UUID,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> bool:
+    """Return whether *caller-visible* operations data exists for *(product, version, impl_id)*.
+
+    "Exists" is deliberately decoupled from ``is_enabled`` /
+    ``review_status``: a connector that has registered descriptors or
+    groups but has none *enabled* yet is still a *known* connector. The
+    meta-tools use this to tell "unknown connector_id" (no rows at all
+    for the triple — surface a 404 so a malformed/mis-shaped id fails
+    loud) apart from "known connector, zero enabled groups" (rows exist
+    but none enabled — a meaningful empty list, ``200 []``).
+
+    Existence is scoped to what the calling operator can see: built-in /
+    global rows (``tenant_id IS NULL``) plus this tenant's own rows
+    (``tenant_id == tenant_id``). This mirrors the tenant boundary the
+    data-returning queries enforce (``list_operation_groups`` /
+    ``search_operations`` in ``meta_tools``). Without it the existence
+    probe would be a cross-tenant presence oracle — a connector private
+    to tenant B would make the gate return ``True`` for a tenant-A
+    caller, yielding ``200 []`` where the caller-visible answer is
+    "unknown" and the correct response is ``404``.
+
+    The DB is the source of truth rather than the in-memory connector
+    registry: every registered connector (typed, v1-compat, and
+    ingested generic) writes ``endpoint_descriptor`` / ``operation_group``
+    rows, and the registry is process-local while the rows are durable.
+    Two cheap ``LIMIT 1`` existence probes — descriptors first (the
+    common case), groups as the fallback for a connector whose groups
+    were seeded ahead of its operations.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        descriptor_hit = await session.execute(
+            select(EndpointDescriptor.id)
+            .where(
+                (EndpointDescriptor.tenant_id.is_(None))
+                | (EndpointDescriptor.tenant_id == tenant_id),
+                EndpointDescriptor.product == product,
+                EndpointDescriptor.version == version,
+                EndpointDescriptor.impl_id == impl_id,
+            )
+            .limit(1)
+        )
+        if descriptor_hit.first() is not None:
+            return True
+        group_hit = await session.execute(
+            select(OperationGroup.id)
+            .where(
+                (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == tenant_id),
+                OperationGroup.product == product,
+                OperationGroup.version == version,
+                OperationGroup.impl_id == impl_id,
+            )
+            .limit(1)
+        )
+        return group_hit.first() is not None

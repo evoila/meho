@@ -108,10 +108,12 @@ register_mcp_tool(
             "operations. Call this FIRST when you don't know which "
             "operation to invoke -- it narrows the search space from "
             "hundreds of operations to a handful of relevant ones. "
-            'Argument: `connector_id` (e.g. "vmware-rest-9.0"). '
-            "Returns groups in name order; unknown connector_id returns "
-            "an empty groups list (operationally meaningful: the "
-            "connector exists but has no enabled groups yet)."
+            "Argument: `connector_id` in `<impl_id>-<version>` form "
+            '(e.g. "vmware-rest-9.0", "vault-1.x") -- NOT the bare '
+            "product name. Returns groups in name order. An UNKNOWN "
+            "connector_id is an error (no such connector); a KNOWN "
+            "connector with no enabled groups returns an empty list "
+            "(operationally meaningful: it exists, nothing enabled yet)."
         ),
         inputSchema={
             "type": "object",
@@ -120,8 +122,9 @@ register_mcp_tool(
                     "type": "string",
                     "description": (
                         "Connector identifier in the form "
-                        '`<impl_id>-<version>` (e.g. "vmware-rest-9.0") '
-                        'or a v1-style single-product slug (e.g. "vault").'
+                        '`<impl_id>-<version>` (e.g. "vmware-rest-9.0", '
+                        '"vault-1.x") -- NOT the bare product name. A '
+                        "value naming no registered connector is an error."
                     ),
                     "minLength": 1,
                 },
@@ -175,8 +178,10 @@ register_mcp_tool(
             "`call_operation` on it. Arguments: `connector_id` (required), "
             "`query` (required, free-form), `group` (optional, narrows "
             "to that group's ops), `limit` (default 10, max 50). "
-            "Unknown group narrows the result set to zero hits; that is "
-            "not an error."
+            "`connector_id` is `<impl_id>-<version>` (NOT the bare "
+            "product name); an unknown connector_id is an error. An "
+            "unknown group, by contrast, narrows the result set to "
+            "zero hits and is not an error."
         ),
         inputSchema={
             "type": "object",

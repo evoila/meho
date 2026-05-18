@@ -152,6 +152,7 @@ from meho_backplane.operations.ingest import (
     list_ingested_connectors,
 )
 from meho_backplane.operations.meta_tools import (
+    UnknownConnectorError,
     call_operation,
     list_operation_groups,
     search_operations,
@@ -1228,15 +1229,20 @@ async def test_canary_search_operations_respects_connector_scope(
     ingested_canary: _CanaryIngestState,
     canary_operator: Operator,
 ) -> None:
-    """Searching an unknown connector returns an empty hit list, not an error."""
-    response = await search_operations(
-        canary_operator,
-        {
-            "connector_id": "phantom-9.9",
-            "query": "list virtual machines",
-        },
-    )
-    assert response["hits"] == [], response
+    """Searching an unknown connector raises UnknownConnectorError.
+
+    G0.8-T5 (#630): the prior "unknown connector → empty hits" contract
+    was the empty-catalog trap. The meta-tool now fails loud (REST → 404)
+    so a mis-shaped connector_id can't masquerade as an empty connector.
+    """
+    with pytest.raises(UnknownConnectorError):
+        await search_operations(
+            canary_operator,
+            {
+                "connector_id": "phantom-9.9",
+                "query": "list virtual machines",
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

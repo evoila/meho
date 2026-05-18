@@ -259,7 +259,12 @@ async def list_operation_groups(
     """
     connector_id = arguments["connector_id"]
     product, version, impl_id = parse_connector_id(connector_id)
-    if not await connector_exists(product=product, version=version, impl_id=impl_id):
+    if not await connector_exists(
+        tenant_id=operator.tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    ):
         raise UnknownConnectorError(
             f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
             f"(e.g. 'vmware-rest-9.0', 'vault-1.x'); see GET /api/v1/connectors"
@@ -362,7 +367,12 @@ async def search_operations(
         limit = SEARCH_LIMIT_MAX
 
     product, version, impl_id = parse_connector_id(connector_id)
-    if not await connector_exists(product=product, version=version, impl_id=impl_id):
+    if not await connector_exists(
+        tenant_id=operator.tenant_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    ):
         raise UnknownConnectorError(
             f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
             f"(e.g. 'vmware-rest-9.0', 'vault-1.x'); see GET /api/v1/connectors"

@@ -326,6 +326,64 @@ async def test_list_operation_groups_tenant_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_connector_existence_is_tenant_scoped() -> None:
+    """G0.8-T5: the unknown-vs-known-empty decision is per-tenant.
+
+    Regression for the cross-tenant presence oracle: ``connector_exists``
+    must not treat a connector private to another tenant as "known".
+
+    * A connector whose only rows are tenant-A-private must read as
+      *unknown* to tenant B — ``UnknownConnectorError`` (REST → 404), not
+      an empty ``200 []``. Otherwise tenant B learns the connector exists
+      somewhere and the empty-catalog trap is merely re-scoped per tenant.
+    * A NULL-tenant (built-in / shared) connector stays visible to every
+      tenant — the scoping must not over-restrict and 404 a shared
+      connector for a tenant that has no private rows of its own.
+    """
+    # Tenant-A-private connector: rows exist, but only for tenant A.
+    await _seed_group(
+        tenant_id=_TENANT_A,
+        product="private",
+        version="1.x",
+        impl_id="private",
+        group_key="a-only",
+        name="Tenant A only",
+        when_to_use="tenant a private.",
+    )
+    # Shared / built-in connector visible to all tenants.
+    await _seed_group(
+        tenant_id=None,
+        product="shared",
+        version="1.x",
+        impl_id="shared",
+        group_key="builtin",
+        name="Shared",
+        when_to_use="global.",
+    )
+
+    op_a = _make_operator(tenant_id=_TENANT_A)
+    op_b = _make_operator(tenant_id=_TENANT_B)
+
+    # (a) Tenant B cannot see tenant A's private connector at all: the
+    #     caller-visible answer is "unknown", so this is a 404, never
+    #     a 200 [].
+    with pytest.raises(UnknownConnectorError) as excinfo:
+        await list_operation_groups(op_b, {"connector_id": "private-1.x"})
+    assert "private-1.x" in str(excinfo.value)
+
+    # Tenant A still sees its own private connector (no false 404).
+    result_a = await list_operation_groups(op_a, {"connector_id": "private-1.x"})
+    assert [g["group_key"] for g in result_a["groups"]] == ["a-only"]
+
+    # (b) The NULL-tenant shared connector is visible to both tenants —
+    #     scoping must not over-restrict and 404 a shared connector.
+    result_shared_a = await list_operation_groups(op_a, {"connector_id": "shared-1.x"})
+    result_shared_b = await list_operation_groups(op_b, {"connector_id": "shared-1.x"})
+    assert [g["group_key"] for g in result_shared_a["groups"]] == ["builtin"]
+    assert [g["group_key"] for g in result_shared_b["groups"]] == ["builtin"]
+
+
+@pytest.mark.asyncio
 async def test_list_operation_groups_includes_operation_count(
     stub_embedding_service: AsyncMock,
 ) -> None:
@@ -596,7 +654,14 @@ async def test_search_operations_unknown_group_returns_empty_hits(
 async def test_search_operations_enforces_tenant_boundary(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Tenant-scoped descriptors don't leak across tenants."""
+    """Tenant-A-private descriptors don't leak into tenant B's hits.
+
+    The connector carries a shared (``tenant_id IS NULL``) descriptor so
+    it is legitimately *known* to both tenants — that keeps this test
+    focused on the hit-list tenant boundary rather than the existence
+    gate (whose own per-tenant 404 behaviour is covered by
+    ``test_connector_existence_is_tenant_scoped``).
+    """
     sessionmaker = get_sessionmaker()
     from datetime import UTC, datetime
 
@@ -630,6 +695,38 @@ async def test_search_operations_enforces_tenant_boundary(
                 updated_at=datetime.now(UTC),
             )
         )
+        # Shared descriptor so the connector is known to every tenant —
+        # without it the tenant-scoped existence gate would 404 tenant B
+        # before the hit-list boundary is even exercised.
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id="vault.shared.op",
+                source_kind="typed",
+                method=None,
+                path=None,
+                handler_ref="tests.test_operations_meta_tools._module_handler",
+                summary="Shared op for reading data.",
+                description="shared op.",
+                group_id=None,
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=None,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
 
     op_a = _make_operator(tenant_id=_TENANT_A)
     op_b = _make_operator(tenant_id=_TENANT_B)
@@ -642,6 +739,7 @@ async def test_search_operations_enforces_tenant_boundary(
         {"connector_id": "vault-1.x", "query": "read"},
     )
 
+    # Tenant A sees its own private op; tenant B never does.
     assert any(h["op_id"] == "vault.tenant.a.op" for h in result_a["hits"])
     assert all(h["op_id"] != "vault.tenant.a.op" for h in result_b["hits"])
 

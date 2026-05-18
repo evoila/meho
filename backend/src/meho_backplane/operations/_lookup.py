@@ -161,11 +161,12 @@ async def count_known_ops(
 
 async def connector_exists(
     *,
+    tenant_id: UUID,
     product: str,
     version: str,
     impl_id: str,
 ) -> bool:
-    """Return whether any operations data exists for *(product, version, impl_id)*.
+    """Return whether *caller-visible* operations data exists for *(product, version, impl_id)*.
 
     "Exists" is deliberately decoupled from ``is_enabled`` /
     ``review_status``: a connector that has registered descriptors or
@@ -174,6 +175,16 @@ async def connector_exists(
     for the triple — surface a 404 so a malformed/mis-shaped id fails
     loud) apart from "known connector, zero enabled groups" (rows exist
     but none enabled — a meaningful empty list, ``200 []``).
+
+    Existence is scoped to what the calling operator can see: built-in /
+    global rows (``tenant_id IS NULL``) plus this tenant's own rows
+    (``tenant_id == tenant_id``). This mirrors the tenant boundary the
+    data-returning queries enforce (``list_operation_groups`` /
+    ``search_operations`` in ``meta_tools``). Without it the existence
+    probe would be a cross-tenant presence oracle — a connector private
+    to tenant B would make the gate return ``True`` for a tenant-A
+    caller, yielding ``200 []`` where the caller-visible answer is
+    "unknown" and the correct response is ``404``.
 
     The DB is the source of truth rather than the in-memory connector
     registry: every registered connector (typed, v1-compat, and
@@ -188,6 +199,8 @@ async def connector_exists(
         descriptor_hit = await session.execute(
             select(EndpointDescriptor.id)
             .where(
+                (EndpointDescriptor.tenant_id.is_(None))
+                | (EndpointDescriptor.tenant_id == tenant_id),
                 EndpointDescriptor.product == product,
                 EndpointDescriptor.version == version,
                 EndpointDescriptor.impl_id == impl_id,
@@ -199,6 +212,7 @@ async def connector_exists(
         group_hit = await session.execute(
             select(OperationGroup.id)
             .where(
+                (OperationGroup.tenant_id.is_(None)) | (OperationGroup.tenant_id == tenant_id),
                 OperationGroup.product == product,
                 OperationGroup.version == version,
                 OperationGroup.impl_id == impl_id,

@@ -92,11 +92,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AnnotateConflictError",
+    "AnnotatePlan",
     "AutoEdgeDeletionError",
     "InvalidEdgeKindError",
     "NodeRef",
     "UnannotateSelectorError",
     "annotate_edge",
+    "annotate_edge_in_txn",
     "unannotate_edge",
 ]
 
@@ -631,127 +633,241 @@ async def annotate_edge(
             kinds and no ``kind`` was pinned on the
             :class:`NodeRef`.
     """
-    canonical_kind = _validate_kind(kind)
-
     async with session.begin():
-        from_node = await resolve_node(session, operator.tenant_id, from_ref.name, from_ref.kind)
-        to_node = await resolve_node(session, operator.tenant_id, to_ref.name, to_ref.kind)
-
-        now = datetime.now(UTC)
-        existing = await _find_existing_edge(
+        plan = await annotate_edge_in_txn(
             session,
-            tenant_id=operator.tenant_id,
-            from_id=from_node.id,
-            to_id=to_node.id,
-            kind=canonical_kind,
-        )
-
-        properties = {
-            "note": note,
-            "evidence_url": evidence_url,
-            "annotated_by": operator.sub,
-            "annotated_at": now.isoformat(),
-        }
-
-        if existing is None:
-            edge = GraphEdge(
-                id=uuid.uuid4(),
-                tenant_id=operator.tenant_id,
-                from_node_id=from_node.id,
-                to_node_id=to_node.id,
-                kind=canonical_kind,
-                source="curated",
-                properties=properties,
-                discovered_by=operator.sub,
-                first_seen=now,
-                last_seen=now,
-            )
-            session.add(edge)
-            await session.flush()
-        else:
-            # Idempotent path covers two cases:
-            #
-            # 1. **Re-annotate of an already-curated row.** Merge new
-            #    free-text fields onto the existing properties; the
-            #    ``source='curated'`` and any reciprocal ``conflicts_with``
-            #    / ``superseded_by`` markers are preserved so the
-            #    re-annotate does not silently drop the §6 back-references.
-            #
-            # 2. **Annotate over an existing ``source='auto'`` edge with
-            #    the same triple.** The operator's intent is to take
-            #    ownership of that edge going forward — set notes /
-            #    evidence, run §6 conflict detection from it, eventually
-            #    revoke via :func:`unannotate_edge`. Leaving the row as
-            #    ``source='auto'`` would (a) make the triple-form
-            #    unannotate raise :class:`AutoEdgeDeletionError` so the
-            #    operator cannot revoke their own annotation; (b) let the
-            #    next refresh's :func:`_merge_edge_properties` overwrite
-            #    the free-text props (only the reserved markers are
-            #    preserved on the merge path); (c) make
-            #    :func:`_mark_same_kind_different_endpoint_superseded` on
-            #    a future annotate mis-target the row as another auto
-            #    edge. The promotion to ``source='curated'`` and
-            #    ``discovered_by=operator.sub`` makes the operator the
-            #    canonical author from this call onward.
-            merged = dict(existing.properties or {})
-            for key, value in properties.items():
-                merged[key] = value
-            existing.properties = merged
-            existing.last_seen = now
-            if existing.source != "curated":
-                existing.source = "curated"
-                existing.discovered_by = operator.sub
-            edge = existing
-
-        superseded = await _mark_same_kind_different_endpoint_superseded(
-            session,
-            tenant_id=operator.tenant_id,
-            curated_edge_id=edge.id,
-            from_id=from_node.id,
-            to_id=to_node.id,
-            kind=canonical_kind,
-        )
-        conflicts = await _mark_incompatible_kinds_conflict(
-            session,
-            tenant_id=operator.tenant_id,
-            curated_edge=edge,
-            from_id=from_node.id,
-            to_id=to_node.id,
-            kind=canonical_kind,
-        )
-
-        audit_id = uuid.uuid4()
-        payload = _audit_payload(
-            op_id=_ANNOTATE_OP_ID,
-            from_node=from_node,
-            to_node=to_node,
-            kind=canonical_kind,
-            edge_id=edge.id,
+            operator,
+            from_ref,
+            kind,
+            to_ref,
             note=note,
             evidence_url=evidence_url,
-            superseded=superseded,
-            conflicts=conflicts,
         )
-        session.add(
-            _build_audit_row(
-                audit_id=audit_id,
-                operator=operator,
-                method=_AUDIT_METHOD_ANNOTATE,
-                op_id=_ANNOTATE_OP_ID,
-                target_id=_broadcast_target_id(from_node),
-                payload=payload,
-            )
-        )
-        target_name = from_node.name
 
     await _publish(
-        audit_id=audit_id,
+        audit_id=plan.audit_id,
         operator=operator,
         op_id=_ANNOTATE_OP_ID,
-        target_name=target_name,
-        payload=payload,
+        target_name=plan.target_name,
+        payload=plan.audit_payload,
     )
-    return edge
+    return plan.edge
+
+
+@dataclass(frozen=True, slots=True)
+class AnnotatePlan:
+    """Result of one :func:`annotate_edge_in_txn` call.
+
+    Carries the row + every post-commit broadcast input the caller needs
+    to publish the broadcast event(s) outside the SQL transaction. The
+    single-edge wrapper :func:`annotate_edge` publishes one event per
+    call; the bulk helper publishes one per row after the batch
+    transaction commits, mirroring the same broadcast-after-commit
+    discipline.
+
+    Fields:
+
+    * ``edge`` — the upserted :class:`GraphEdge` row (flushed inside the
+      caller-owned transaction).
+    * ``audit_id`` — pre-allocated id of the ``audit_log`` row written
+      for this annotation; broadcast events reference it under
+      ``audit_id``.
+    * ``audit_payload`` — the shared dict the audit row + the broadcast
+      event both carry.
+    * ``target_name`` — the from-node's name; surfaces in the broadcast
+      event's ``target_name`` field per the chassis convention.
+    * ``was_created`` — ``True`` when this call inserted a fresh row,
+      ``False`` when it merged onto an existing row (idempotent
+      re-annotate or auto→curated promotion). The bulk-import helper
+      re-derives its per-row ``create`` / ``update`` / ``conflict``
+      classification from this flag plus the post-commit marker arrays
+      so intra-batch duplicates (two rows resolving to the same triple
+      in one batch) and inter-pass races between validation and apply
+      cannot leave the reported counts disagreeing with the committed
+      state.
+    """
+
+    edge: GraphEdge
+    audit_id: uuid.UUID
+    audit_payload: dict[str, Any]
+    target_name: str
+    was_created: bool
+
+
+async def annotate_edge_in_txn(
+    session: AsyncSession,
+    operator: Operator,
+    from_ref: NodeRef,
+    kind: str,
+    to_ref: NodeRef,
+    *,
+    note: str | None = None,
+    evidence_url: str | None = None,
+) -> AnnotatePlan:
+    """In-transaction body of :func:`annotate_edge` — caller owns the txn.
+
+    The single-edge wrapper :func:`annotate_edge` opens its own
+    ``session.begin()`` block around this call and then publishes the
+    broadcast event after commit. The bulk-import helper
+    :func:`bulk_import_edges` (G9.2-T8 #600) calls this function N times
+    inside one shared transaction so the batch is all-or-nothing per
+    the issue body's atomicity criterion, then publishes one broadcast
+    event per row after the batch commits.
+
+    The function performs the four side effects ``annotate_edge``
+    documents (resolve endpoints, idempotent upsert, §6 conflict
+    detection, write the audit row) but **does not commit and does not
+    publish**. It returns an :class:`AnnotatePlan` so the caller can
+    drive the broadcast after its own commit.
+
+    The function expects ``session`` to be inside an active
+    transaction. Calling outside a transaction is an error — the
+    upsert + conflict-mark sequence must be atomic per row, and the
+    function does not open its own ``session.begin()``.
+
+    Args, return shape, and raised errors otherwise match
+    :func:`annotate_edge` verbatim.
+    """
+    canonical_kind = _validate_kind(kind)
+
+    from_node = await resolve_node(session, operator.tenant_id, from_ref.name, from_ref.kind)
+    to_node = await resolve_node(session, operator.tenant_id, to_ref.name, to_ref.kind)
+
+    now = datetime.now(UTC)
+    existing = await _find_existing_edge(
+        session,
+        tenant_id=operator.tenant_id,
+        from_id=from_node.id,
+        to_id=to_node.id,
+        kind=canonical_kind,
+    )
+
+    properties = {
+        "note": note,
+        "evidence_url": evidence_url,
+        "annotated_by": operator.sub,
+        "annotated_at": now.isoformat(),
+    }
+
+    if existing is None:
+        edge = GraphEdge(
+            id=uuid.uuid4(),
+            tenant_id=operator.tenant_id,
+            from_node_id=from_node.id,
+            to_node_id=to_node.id,
+            kind=canonical_kind,
+            source="curated",
+            properties=properties,
+            discovered_by=operator.sub,
+            first_seen=now,
+            last_seen=now,
+        )
+        session.add(edge)
+        await session.flush()
+        was_created = True
+    else:
+        # Idempotent path covers two cases:
+        #
+        # 1. **Re-annotate of an already-curated row.** Merge new
+        #    free-text fields onto the existing properties; the
+        #    ``source='curated'`` and any reciprocal ``conflicts_with``
+        #    / ``superseded_by`` markers are preserved so the
+        #    re-annotate does not silently drop the §6 back-references.
+        #
+        # 2. **Annotate over an existing ``source='auto'`` edge with
+        #    the same triple.** The operator's intent is to take
+        #    ownership of that edge going forward — set notes /
+        #    evidence, run §6 conflict detection from it, eventually
+        #    revoke via :func:`unannotate_edge`. Leaving the row as
+        #    ``source='auto'`` would (a) make the triple-form
+        #    unannotate raise :class:`AutoEdgeDeletionError` so the
+        #    operator cannot revoke their own annotation; (b) let the
+        #    next refresh's :func:`_merge_edge_properties` overwrite
+        #    the free-text props (only the reserved markers are
+        #    preserved on the merge path); (c) make
+        #    :func:`_mark_same_kind_different_endpoint_superseded` on
+        #    a future annotate mis-target the row as another auto
+        #    edge. The promotion to ``source='curated'`` and
+        #    ``discovered_by=operator.sub`` makes the operator the
+        #    canonical author from this call onward.
+        merged = dict(existing.properties or {})
+        for key, value in properties.items():
+            merged[key] = value
+        promoting = existing.source != "curated"
+        if promoting:
+            # §6 invariant: a curated edge must never carry an
+            # ``superseded_by`` marker — that marker is meaningful only
+            # on ``source='auto'`` rows that the conflict-detection
+            # scan stamped against a different-endpoint curated
+            # assertion. When the same triple gets re-annotated, the
+            # auto row's stale marker would otherwise persist onto the
+            # promoted curated row and hide it from
+            # :func:`find_dependents` / :func:`find_dependencies` —
+            # the traversal CTE filters
+            # ``properties->>'superseded_by' IS NULL``. Drop the key
+            # here so the promoted curated edge is immediately visible.
+            #
+            # ``conflicts_with`` (bidirectional, list-shaped) is kept:
+            # the entries point at *other-kind* edges over the same
+            # endpoint pair, which still exist and still conflict; the
+            # incompatible-kinds scan below re-stamps the curated side
+            # without dropping the legitimate back-references.
+            merged.pop(_SUPERSEDED_BY, None)
+        existing.properties = merged
+        existing.last_seen = now
+        if promoting:
+            existing.source = "curated"
+            existing.discovered_by = operator.sub
+        edge = existing
+        was_created = False
+
+    superseded = await _mark_same_kind_different_endpoint_superseded(
+        session,
+        tenant_id=operator.tenant_id,
+        curated_edge_id=edge.id,
+        from_id=from_node.id,
+        to_id=to_node.id,
+        kind=canonical_kind,
+    )
+    conflicts = await _mark_incompatible_kinds_conflict(
+        session,
+        tenant_id=operator.tenant_id,
+        curated_edge=edge,
+        from_id=from_node.id,
+        to_id=to_node.id,
+        kind=canonical_kind,
+    )
+
+    audit_id = uuid.uuid4()
+    payload = _audit_payload(
+        op_id=_ANNOTATE_OP_ID,
+        from_node=from_node,
+        to_node=to_node,
+        kind=canonical_kind,
+        edge_id=edge.id,
+        note=note,
+        evidence_url=evidence_url,
+        superseded=superseded,
+        conflicts=conflicts,
+    )
+    session.add(
+        _build_audit_row(
+            audit_id=audit_id,
+            operator=operator,
+            method=_AUDIT_METHOD_ANNOTATE,
+            op_id=_ANNOTATE_OP_ID,
+            target_id=_broadcast_target_id(from_node),
+            payload=payload,
+        )
+    )
+
+    return AnnotatePlan(
+        edge=edge,
+        audit_id=audit_id,
+        audit_payload=payload,
+        target_name=from_node.name,
+        was_created=was_created,
+    )
 
 
 async def unannotate_edge(

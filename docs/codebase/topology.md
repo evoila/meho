@@ -436,7 +436,7 @@ so the guard runs only where the column is JSONB.
 ## REST API surface (T5, #453 + G9.2-T5 #597)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Eight routes total — seven on the topology
+the read + write halves. Nine routes total — eight on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -448,6 +448,7 @@ router, one on the targets router:
 | `POST /api/v1/topology/edges` | `annotate_edge` (T3 #595) | `topology.annotate` | **tenant_admin** |
 | `DELETE /api/v1/topology/edges/{edge_id}` | `unannotate_edge` (T3 #595) | `topology.unannotate` | **tenant_admin** |
 | `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
+| `POST /api/v1/topology/edges/bulk` | `bulk_import_edges` (T8 #600) | `topology.bulk_import` | **tenant_admin** |
 | `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
 
 Load-bearing details:
@@ -541,6 +542,98 @@ end-to-end + the cross-tenant boundary against a real
 `pgvector/pgvector:pg16` container). Curated-edge end-to-end coverage
 is the T9 integration sweep (#601).
 
+## Bulk import (G9.2-T8 #600)
+
+`backend/src/meho_backplane/topology/bulk_import.py` is the batch
+annotation service the CLI verb `meho topology bulk-import <file>` and
+the REST endpoint `POST /api/v1/topology/edges/bulk` both call. It is
+the operator-facing lever for seeding the consumer's prose
+`INVENTORY.md` cross-system graph at onboarding without a 30-verb
+shell loop.
+
+**Service entry point (async, write half):**
+
+- `bulk_import_edges(session, operator, rows, *, dry_run=False) -> BulkImportResult`
+  — runs a two-pass batch annotation. Pass 1 (validation) resolves
+  every row's endpoints + kind inside one `session.begin()` block;
+  any row's failure aggregates into a single
+  `BulkImportValidationError` carrying every row's diagnostic. Pass 2
+  (apply) opens a fresh `session.begin()` block and calls
+  `annotate_edge_in_txn` for each row inside it, so the whole batch
+  commits or rolls back atomically — no partial apply. Dry-run skips
+  pass 2 and returns the per-row plan only. Post-commit publishes one
+  broadcast event per row via the shared fail-open `_publish` helper;
+  per-row audit rows are written inside the apply transaction by
+  `annotate_edge_in_txn`, so the audit + broadcast count matches the
+  issue criterion: one audit row per edge + one broadcast event per
+  edge.
+
+**Atomicity contract.** The whole batch lives in one transaction.
+A validation failure on any row rolls back the entire transaction —
+no partial apply. The chosen semantics (the issue body offered two
+options — atomic OR partial with explicit failure reporting) are
+atomic-only in v0.2 because:
+
+- The consumer's INVENTORY.md is the source of truth: a
+  partially-applied batch leaves the operator with no clean re-run
+  path other than "diff what landed vs the file, fix the file, rerun";
+  an atomic failure surfaces the bad row and lets the operator
+  fix-and-retry.
+- Bulk import is a v0.2 stretch (Initiative #364 §7); a future
+  widening to a `--continue-on-error` mode is back-compat and can ship
+  in a follow-up.
+- The per-row audit + broadcast events still fire — one per applied
+  row — so a successful batch is indistinguishable from N single
+  annotates at the audit / event level.
+
+**Refactor.** `annotate.py` was extracted into an in-transaction
+helper `annotate_edge_in_txn` that returns an `AnnotatePlan`; the
+single-edge `annotate_edge` is now a thin wrapper that opens
+`session.begin()`, calls the helper, then publishes one broadcast
+event after commit. `bulk_import_edges` calls the same helper N times
+inside one shared transaction. Backwards compat is preserved — every
+existing caller of `annotate_edge` sees the same shape, audit row,
+and broadcast event.
+
+**Wire shape.** The REST body is
+`{"edges": [{"from", "kind", "to", "note"?, "evidence_url"?}, ...], "dry_run"?: bool}`.
+`from` / `to` accept the same `_EdgeEndpoint` `{name, kind?}` shape
+the single-edge endpoint uses; `kind` is the closed `GraphEdgeKind`
+enum so an unknown kind is rejected at the Pydantic boundary (422)
+before any service runs. `extra="forbid"` rejects typo'd fields at
+the boundary. The response is
+`{dry_run, created, updated, conflicts, rows: [...]}` where each row
+carries `{index, action, edge_id?, from_name, from_kind, to_name,
+to_kind, kind, superseded, conflicts}` so the operator (or the CLI's
+human-table renderer) can see the §6 conflict markers attached to
+each applied edge.
+
+**HTTP boundary guards.** The route caps the batch size at 1000 rows
+(`_BULK_IMPORT_MAX_EDGES`); the consumer's INVENTORY.md lists ~30 v0.2
+curated edges, so the cap is well above realistic use but low enough
+that a stray hostile body cannot hold a single transaction open
+indefinitely. The service layer is unbounded by design — the size
+guard belongs at the HTTP boundary.
+
+**CLI verb.** `meho topology bulk-import <file> [--dry-run] [--json]`
+reads YAML or JSON (yaml.v3's parser is a JSON superset for the
+shapes we accept, so a single `yaml.Unmarshal` call handles both)
+and posts the whole batch. Endpoints accept either a bare scalar
+(common case) or a `{name, kind}` map (ambiguity disambiguator) via
+the custom `UnmarshalYAML`. The 422 `invalid_bulk` envelope is
+rendered as a structured per-row list so the operator can pinpoint
+each broken edge in the source file without scanning every row.
+
+**Tests:**
+- `backend/tests/test_topology_bulk_import.py` — unit suite on
+  `sqlite+aiosqlite` (happy-path, idempotency, dry-run, validation
+  failures, §6 conflict classification).
+- `backend/tests/test_api_v1_topology.py` (the `bulk_import` section)
+  — RBAC + 422 envelopes + apply / dry-run round-trip with the
+  service mocked.
+- `cli/internal/cmd/topology/bulk_import_test.go` — YAML/JSON parser
+  + invalid-bulk renderer + end-to-end against an httptest server.
+
 ## CLI front (T6, #454)
 
 `cli/internal/cmd/topology/` is the operator front for the four
@@ -556,6 +649,10 @@ sits under the `/api/v1/targets` prefix, so its verb sits under the
 | `meho topology dependents <name>` | `GET /topology/dependents/{n}` | `DEPTH / KIND / NAME / VIA` table |
 | `meho topology dependencies <name>` | `GET /topology/dependencies/{n}` | same table, mirror direction |
 | `meho topology path <from> <to>` | `GET /topology/path?from=&to=` | `kind/name -> … (N hops)` chain |
+| `meho topology annotate <from> <kind> <to>` | `POST /topology/edges` | `annotated edge: ...` summary |
+| `meho topology unannotate <edge-id>` (or tuple) | `DELETE /topology/edges/{id}` | `deleted edge ...` line |
+| `meho topology list-edges` | `GET /topology/edges` | `KIND / SOURCE / FROM / TO / LAST_SEEN` table |
+| `meho topology bulk-import <file>` | `POST /topology/edges/bulk` | applied/planned counts + per-row table |
 | `meho targets discover <product>` | `GET /targets/discover?product=` | candidates + skipped tables |
 
 Load-bearing details:

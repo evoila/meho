@@ -1042,3 +1042,260 @@ async def test_list_edges_route_binds_read_op_id(client: TestClient) -> None:
     payload = rows[0].payload or {}
     assert payload.get("op_id") == "topology.list_edges"
     assert payload.get("op_class") == "read"
+
+
+# ---------------------------------------------------------------------------
+# G9.2-T8 (#600) — bulk import
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_import_route_mounted_on_main_app() -> None:
+    """``POST /api/v1/topology/edges/bulk`` appears in the OpenAPI document."""
+    from meho_backplane.main import app as main_app
+
+    paths = main_app.openapi()["paths"]
+    assert "/api/v1/topology/edges/bulk" in paths
+    assert "post" in paths["/api/v1/topology/edges/bulk"]
+
+
+def test_bulk_import_unauthenticated_returns_401(client: TestClient) -> None:
+    resp = client.post(
+        "/api/v1/topology/edges/bulk",
+        json={"edges": [{"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}}]},
+    )
+    assert resp.status_code == 401
+
+
+def test_bulk_import_operator_returns_403(client: TestClient) -> None:
+    """``operator`` is below ``tenant_admin``; bulk must 403."""
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+                ]
+            },
+        )
+    assert resp.status_code == 403
+
+
+def test_bulk_import_empty_edges_returns_422(client: TestClient) -> None:
+    """``edges`` is non-empty (``min_length=1``)."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={"edges": []},
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_too_many_edges_returns_422(client: TestClient) -> None:
+    """The route caps the batch size at 1000 rows."""
+    key, token = _admin_token_value()
+    edges = [
+        {"from": {"name": f"a-{i}"}, "kind": "depends-on", "to": {"name": f"b-{i}"}}
+        for i in range(1001)
+    ]
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={"edges": edges},
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_unknown_kind_returns_422(client: TestClient) -> None:
+    """A typo'd ``kind`` is caught at the Pydantic boundary."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "made-up", "to": {"name": "b"}},
+                ]
+            },
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_unknown_field_returns_422(client: TestClient) -> None:
+    """``extra='forbid'`` rejects typo'd field names at the boundary."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {
+                        "from": {"name": "a"},
+                        "kind": "depends-on",
+                        "to": {"name": "b"},
+                        "evidnce_url": "https://typo",
+                    }
+                ]
+            },
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_admin_round_trip(client: TestClient) -> None:
+    """``tenant_admin`` POST calls ``bulk_import_edges`` and renders the response.
+
+    The service helper is stubbed out — the surface under test is the
+    route's coercion of the JSON body into :class:`BulkImportRow`
+    instances plus the response model shape. The integration suite
+    (T9-style) exercises the real service against a live DB; here we
+    only verify that the route's wire-shape contract holds.
+    """
+    from meho_backplane.topology.bulk_import import BulkEdgeResult, BulkImportResult
+
+    key, token = _admin_token_value()
+    fake_result = BulkImportResult(
+        dry_run=False,
+        created=1,
+        updated=1,
+        conflicts=0,
+        rows=[
+            BulkEdgeResult(
+                index=0,
+                action="create",
+                edge_id=str(uuid.uuid4()),
+                from_name="sa-a",
+                from_kind="principal",
+                to_name="vr-a",
+                to_kind="vault-role",
+                kind="authenticates-via",
+                superseded=[],
+                conflicts=[],
+            ),
+            BulkEdgeResult(
+                index=1,
+                action="update",
+                edge_id=str(uuid.uuid4()),
+                from_name="svc-orders",
+                from_kind="service",
+                to_name="db-orders",
+                to_kind="service",
+                kind="depends-on",
+                superseded=[],
+                conflicts=[],
+            ),
+        ],
+    )
+    fake = AsyncMock(return_value=fake_result)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.bulk_import_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {
+                        "from": {"name": "sa-a", "kind": "principal"},
+                        "kind": "authenticates-via",
+                        "to": {"name": "vr-a", "kind": "vault-role"},
+                    },
+                    {
+                        "from": {"name": "svc-orders", "kind": "service"},
+                        "kind": "depends-on",
+                        "to": {"name": "db-orders", "kind": "service"},
+                    },
+                ]
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["dry_run"] is False
+    assert body["created"] == 1
+    assert body["updated"] == 1
+    assert len(body["rows"]) == 2
+    assert body["rows"][0]["action"] == "create"
+    fake.assert_awaited_once()
+
+
+def test_bulk_import_dry_run_forwards_flag(client: TestClient) -> None:
+    """``dry_run=true`` is forwarded to the service kwarg."""
+    from meho_backplane.topology.bulk_import import BulkImportResult
+
+    key, token = _admin_token_value()
+    fake_result = BulkImportResult(dry_run=True, created=0, updated=0, conflicts=0, rows=[])
+    fake = AsyncMock(return_value=fake_result)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.bulk_import_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+                ],
+                "dry_run": True,
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["dry_run"] is True
+    assert fake.call_args.kwargs == {"dry_run": True}
+
+
+def test_bulk_import_validation_error_returns_422(client: TestClient) -> None:
+    """``BulkImportValidationError`` maps to 422 with the per-row error list."""
+    from meho_backplane.topology.bulk_import import (
+        BulkImportRowError,
+        BulkImportValidationError,
+    )
+
+    key, token = _admin_token_value()
+    fake = AsyncMock(
+        side_effect=BulkImportValidationError(
+            [
+                BulkImportRowError(
+                    index=1,
+                    error="node_not_found",
+                    message="node 'ghost' not found",
+                    name="ghost",
+                    kind="vm",
+                ),
+            ]
+        )
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.bulk_import_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+                    {"from": {"name": "ghost"}, "kind": "depends-on", "to": {"name": "z"}},
+                ]
+            },
+        )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "invalid_bulk"
+    assert len(detail["errors"]) == 1
+    assert detail["errors"][0]["index"] == 1
+    assert detail["errors"][0]["error"] == "node_not_found"

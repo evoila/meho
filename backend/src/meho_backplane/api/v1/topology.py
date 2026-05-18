@@ -111,6 +111,11 @@ from meho_backplane.topology.annotate import (
     annotate_edge,
     unannotate_edge,
 )
+from meho_backplane.topology.bulk_import import (
+    BulkImportRow,
+    BulkImportValidationError,
+    bulk_import_edges,
+)
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
     find_dependencies,
@@ -155,6 +160,17 @@ _OP_REFRESH = "topology.refresh"
 _OP_ANNOTATE = "topology.annotate"
 _OP_UNANNOTATE = "topology.unannotate"
 _OP_LIST_EDGES = "topology.list_edges"
+_OP_BULK_IMPORT = "topology.bulk_import"
+
+#: HTTP-boundary ceiling on the number of edges accepted in one
+#: ``POST /edges/bulk`` body. The consumer's INVENTORY.md
+#: (https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/rdc-hetzner-dc/INVENTORY.md)
+#: lists ~30 curated cross-system edges at v0.2; the ceiling is sized
+#: well above that so onboarding does not need to chunk the file, but
+#: low enough that a stray hostile body cannot hold a single transaction
+#: open for an unbounded scan. The service layer is unbounded by
+#: design — the HTTP boundary is where the size guard belongs.
+_BULK_IMPORT_MAX_EDGES = 1000
 
 #: HTTP-boundary ceiling on the ``GET /edges`` ``limit`` query param.
 #: Mirrors :data:`meho_backplane.topology.query._MAX_EDGE_LIMIT`; pinned
@@ -619,6 +635,197 @@ async def list_edges_route(
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
     return edges
+
+
+# ---------------------------------------------------------------------------
+# G9.2-T8 (#600) — bulk import
+# ---------------------------------------------------------------------------
+
+
+class _BulkImportEdge(BaseModel):
+    """One edge in the ``POST /api/v1/topology/edges/bulk`` body.
+
+    Same wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,
+    note?, evidence_url?}``) — ``from`` is bound via ``alias`` because
+    it is a Python keyword. ``kind`` is typed against
+    :class:`GraphEdgeKind` so an unknown kind fails at the boundary
+    (HTTP 422) before any service call runs, and the per-row error
+    surfaces inside the standard FastAPI validation envelope with the
+    row index in ``loc``. ``extra="forbid"`` rejects typo'd keys so a
+    misspelled ``evidnce_url`` is caught at the boundary rather than
+    silently dropped.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+
+    from_endpoint: _EdgeEndpoint = Field(alias="from")
+    kind: GraphEdgeKind
+    to_endpoint: _EdgeEndpoint = Field(alias="to")
+    note: str | None = Field(default=None, max_length=2000)
+    evidence_url: str | None = Field(default=None, max_length=2000)
+
+
+class _BulkImportRequest(BaseModel):
+    """Inbound body for ``POST /api/v1/topology/edges/bulk``.
+
+    ``edges`` is a non-empty list bounded at the HTTP boundary by
+    :data:`_BULK_IMPORT_MAX_EDGES`. Zero rows are rejected at 422
+    rather than silently no-op'ing — an empty body is almost always a
+    mistake in the operator's YAML / JSON file, and 422 surfaces it
+    immediately. ``dry_run`` defaults to ``False`` per the issue
+    body's "the CLI calls --dry-run explicitly" convention.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    edges: list[_BulkImportEdge] = Field(
+        min_length=1,
+        max_length=_BULK_IMPORT_MAX_EDGES,
+    )
+    dry_run: bool = Field(default=False)
+
+
+class _BulkImportRowResponse(BaseModel):
+    """One row's outcome in the ``POST /edges/bulk`` response.
+
+    Mirrors :class:`~meho_backplane.topology.bulk_import.BulkEdgeResult`
+    on the wire. ``edge_id`` is null in dry-run mode (no row exists)
+    and on the apply-pass ``create`` rows where the service hasn't
+    been called yet at validation time — the apply path always
+    populates it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    index: int
+    action: str
+    edge_id: str | None
+    from_name: str
+    from_kind: str
+    to_name: str
+    to_kind: str
+    kind: str
+    superseded: list[str]
+    conflicts: list[str]
+
+
+class _BulkImportResponse(BaseModel):
+    """Response body for ``POST /api/v1/topology/edges/bulk``.
+
+    ``dry_run`` echoes the call-site flag so a CLI rendering the JSON
+    response can branch on it; ``created`` / ``updated`` / ``conflicts``
+    are the aggregate counts the service computed; ``rows`` carries the
+    per-row outcome in source order.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    dry_run: bool
+    created: int
+    updated: int
+    conflicts: int
+    rows: list[_BulkImportRowResponse]
+
+
+@router.post(
+    "/edges/bulk",
+    response_model=_BulkImportResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def bulk_import_edges_route(
+    body: _BulkImportRequest,
+    operator: Operator = _require_admin,
+    session: AsyncSession = Depends(get_raw_session),
+) -> _BulkImportResponse:
+    """Batch-annotate edges from a single body in one transaction.
+
+    Wraps
+    :func:`~meho_backplane.topology.bulk_import.bulk_import_edges`
+    (G9.2-T8 #600). Validation runs first against every row; a single
+    invalid row rejects the entire batch (no partial apply). The
+    apply pass writes every row inside one transaction so the
+    "all-or-nothing per the issue body" criterion holds.
+
+    Per-row audit + broadcast events fire one per applied row,
+    mirroring the single-edge :func:`annotate_edge` flow; the
+    chassis HTTP-level audit row at this route binds
+    ``op_id="topology.bulk_import"`` / ``op_class="write"`` so the
+    batch lives alongside the per-row audit trail under a recognisable
+    parent identity.
+
+    Error mapping:
+
+    * **Pydantic 422** on body shape (unknown ``kind``, typo'd field,
+      empty ``edges``, more than 1000 rows) — fails at the boundary
+      before the service runs.
+    * **422 invalid_bulk** with a per-row error list on
+      :class:`BulkImportValidationError` — every row's failure is
+      surfaced together so the operator fixes the file in one pass.
+    * **200** on a successful apply or a successful dry-run.
+
+    Uses HTTP 200 (not 201) for both apply and dry-run paths: the
+    request is fundamentally a list mutation (create + update mix)
+    where 201 is misleading for the update / dry-run path.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_BULK_IMPORT,
+        audit_op_class="write",
+    )
+    rows = [
+        BulkImportRow(
+            from_ref=edge.from_endpoint.to_ref(),
+            kind=edge.kind.value,
+            to_ref=edge.to_endpoint.to_ref(),
+            note=edge.note,
+            evidence_url=edge.evidence_url,
+        )
+        for edge in body.edges
+    ]
+    try:
+        result = await bulk_import_edges(session, operator, rows, dry_run=body.dry_run)
+    except BulkImportValidationError as exc:
+        # Surface every row's failure together. The operator's source
+        # YAML / JSON is authoritative; a single 422 with the structured
+        # list lets them fix every row in one pass rather than the
+        # walk-the-file-N-times loop a per-row error would force.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "invalid_bulk",
+                "errors": [
+                    {
+                        "index": e.index,
+                        "error": e.error,
+                        "message": e.message,
+                        "name": e.name,
+                        "kind": e.kind,
+                        "kinds": e.kinds,
+                    }
+                    for e in exc.errors
+                ],
+            },
+        ) from exc
+    return _BulkImportResponse(
+        dry_run=result.dry_run,
+        created=result.created,
+        updated=result.updated,
+        conflicts=result.conflicts,
+        rows=[
+            _BulkImportRowResponse(
+                index=row.index,
+                action=row.action,
+                edge_id=row.edge_id,
+                from_name=row.from_name,
+                from_kind=row.from_kind,
+                to_name=row.to_name,
+                to_kind=row.to_kind,
+                kind=row.kind,
+                superseded=row.superseded,
+                conflicts=row.conflicts,
+            )
+            for row in result.rows
+        ],
+    )
 
 
 def _node_not_found_http(exc: NodeNotFoundError) -> HTTPException:

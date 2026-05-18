@@ -94,6 +94,16 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".delete",
     ".patch",
     ".put",
+    # bind9 record-write verbs (G3.4-T3 #589). The bind9 connector
+    # uses ``.add`` / ``.remove`` rather than ``.create`` / ``.delete``
+    # to match the consumer wrapper's verb shape (``--add-a-record``
+    # / ``--remove-record``). Without these suffixes ``classify_op``
+    # would fall through to ``other`` and the broadcast classifier
+    # would emit the full param dict (including the rdata) as a
+    # ``other``-class event rather than redact under the ``write``
+    # branch.
+    ".add",
+    ".remove",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``

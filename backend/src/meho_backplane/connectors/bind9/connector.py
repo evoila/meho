@@ -505,6 +505,35 @@ class Bind9Connector(SshConnector):
 
         return await _bind9_record_get(self, target, params)
 
+    async def bind9_record_add(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``bind9.record.add`` op (G3.4-T3 #589).
+
+        Atomic A/AAAA add via the staged-validate-commit-reload-verify-
+        rollback primitive in :mod:`~meho_backplane.connectors.bind9._atomic`.
+        Routes sudo through :meth:`_remote_bash_with_sudo`.
+        """
+        from meho_backplane.connectors.bind9.ops_record import (
+            bind9_record_add as _bind9_record_add,
+        )
+
+        return await _bind9_record_add(self, target, params)
+
+    async def bind9_record_remove(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``bind9.record.remove`` op (G3.4-T3 #589)."""
+        from meho_backplane.connectors.bind9.ops_record import (
+            bind9_record_remove as _bind9_record_remove,
+        )
+
+        return await _bind9_record_remove(self, target, params)
+
     async def bind9_config_show(
         self,
         target: Target,

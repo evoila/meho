@@ -38,6 +38,7 @@ scoped and amortised across the two tests in this module.
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 import textwrap
 import time
@@ -92,7 +93,7 @@ _DOCKERFILE: str = textwrap.dedent(
     RUN apt-get update \\
      && apt-get install -y --no-install-recommends \\
           bind9 bind9-host bind9utils dnsutils \\
-          openssh-server \\
+          openssh-server sudo python3-minimal \\
      && rm -rf /var/lib/apt/lists/*
 
     # Allow root SSH login with password for the test fixture only;
@@ -102,6 +103,20 @@ _DOCKERFILE: str = textwrap.dedent(
      && echo 'root:testpw' | chpasswd \\
      && sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \\
      && sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+    # Atomic-apply ops (record.add / record.remove and the two
+    # rollback acceptance-criterion tests) route every remote write
+    # through ``sudo -S -p '' bash -s``. The package above provides
+    # ``sudo``; we ALSO grant root passwordless sudo here so the
+    # ``_remote_bash_with_sudo`` helper's stdin password line does
+    # not stall the pipeline. Root authenticates without password
+    # already via the host's PAM rules, but ``sudo -S`` still reads
+    # one line from stdin before exec'ing -- giving root NOPASSWD
+    # makes the stdin password line a no-op rather than a required
+    # consumer. This is fixture-only; production targets carry a
+    # real sudo password on ``target.secret_ref``.
+    RUN echo 'root ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/99-meho-test \\
+     && chmod 0440 /etc/sudoers.d/99-meho-test
 
     # Seed a test zone -- the read-op tests (bind9.zone.list /
     # bind9.zone.read / bind9.record.get) assert against this
@@ -387,5 +402,306 @@ async def test_config_show_against_real_bind9_refuses_traversal_with_no_content(
     try:
         with pytest.raises(ConfigPathRejectedError):
             await connector.bind9_config_show(bind9_container_target, {"path": "../../etc/passwd"})
+    finally:
+        await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# T3 record-write group -- bind9.record.add / bind9.record.remove + rollback
+# proof against the seeded zone in the same container.
+#
+# The acceptance criterion that gates this Task is the "atomic-apply
+# rollback proven": injecting a deliberately invalid staged zonefile
+# AND a post-reload dig-verify failure must each leave ``/etc/bind/``
+# byte-identical to the pre-op snapshot. The two
+# ``test_atomic_apply_rollback_*`` tests below assert this via
+# pre/post-op checksums computed on the container's bind tree.
+# ---------------------------------------------------------------------------
+
+
+async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -> str:
+    """Return the SHA256-tree fingerprint of ``/etc/bind/`` on *target*.
+
+    Normalises the SOA serial in every zonefile before hashing so a
+    rollback that bumps the restored file's serial (the mechanism
+    the atomic-apply primitive uses to defeat named's serial cache
+    -- see ``_atomic.py`` rollback docstring) is treated as logically
+    byte-identical to the pre-op snapshot. Every other byte (records,
+    TTLs, directives, comments, whitespace) is hashed verbatim, so a
+    rollback that loses or mutates any of those still trips the
+    ``before == after`` assertion.
+
+    The normalisation pattern mirrors the rollback's SOA-bump regex
+    (``\bSOA\b mname rname ( serial ...``) and replaces the serial
+    digit-run with the literal string ``SERIAL``. count=1 per file --
+    a zonefile has exactly one SOA record by RFC 1035.
+
+    Fail-closed on a non-zero exit: a failing probe (Python missing,
+    /etc/bind missing, permissions changed mid-test) would otherwise
+    collapse to an empty string, and the rollback assertion would
+    silently pass on two empty strings -- the load-bearing acceptance
+    criterion this test encodes. Surface the failure explicitly so a
+    broken probe fails the test instead of false-positive-ing the
+    rollback proof.
+    """
+    # Use shlex.quote to pass the python script as a single argv element
+    # so backslash escapes survive intact through bash. Constructing the
+    # one-liner inline with manual escape stacking corrupted the SOA
+    # regex on bind9 9.18 / Python 3.11 (the container) -- the regex
+    # engine saw literal backslashes instead of word-boundary metas.
+    probe_script = (
+        "import hashlib, pathlib, re\n"
+        "soa_re = re.compile(\n"
+        "    r'(\\bSOA\\b\\s+\\S+\\s+\\S+\\s*\\(?\\s*(?:;[^\\n]*\\n\\s*)*)(\\d+)',\n"
+        "    re.IGNORECASE,\n"
+        ")\n"
+        "h = hashlib.sha256()\n"
+        "for p in sorted(\n"
+        "    p for p in pathlib.Path('/etc/bind').rglob('*') if p.is_file()\n"
+        "):\n"
+        "    data = p.read_bytes()\n"
+        "    try:\n"
+        "        text = data.decode('utf-8')\n"
+        "        data = soa_re.sub(\n"
+        "            lambda m: m.group(1) + 'SERIAL', text, count=1\n"
+        "        ).encode('utf-8')\n"
+        "    except UnicodeDecodeError:\n"
+        "        pass\n"
+        "    h.update(str(p).encode() + b'\\n')\n"
+        "    h.update(data)\n"
+        "print(h.hexdigest())\n"
+    )
+    cmd = f"python3 -c {shlex.quote(probe_script)}"
+    proc = await connector._run_command(target, cmd, raw_jwt="")
+    exit_status = getattr(proc, "exit_status", 0)
+    stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
+    digest = stdout.strip() if isinstance(stdout, str) else ""
+    assert exit_status == 0, (
+        f"_checksum_bind_tree probe exited {exit_status}; stderr={getattr(proc, 'stderr', '')!r}"
+    )
+    assert digest, "_checksum_bind_tree returned empty digest -- rollback proof would false-pass"
+    return digest
+
+
+@pytest.mark.asyncio
+async def test_record_add_against_real_bind9_resolves_post_apply(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.record.add api.evba.lab 10.5.50.99`` -> dig resolves the new IP."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_record_add(
+            bind9_container_target,
+            {
+                "fqdn": "api.evba.lab",
+                "ip": "10.5.50.99",
+                "type": "A",
+                "zone": "evba.lab",
+            },
+        )
+        assert result["op_class"] == "write"
+        assert result["zone"] == "evba.lab"
+        assert "result_state_before" in result
+        assert "result_state_after" in result
+        # The before / after must differ -- the staged change is the
+        # diff between them. ``api.evba.lab`` was absent before and
+        # present after.
+        assert "10.5.50.99" not in result["result_state_before"]
+        assert "10.5.50.99" in result["result_state_after"]
+
+        # Verify the change actually propagated to the running named.
+        get_result = await connector.bind9_record_get(
+            bind9_container_target,
+            {"fqdn": "api.evba.lab"},
+        )
+        rdatas = {row["rdata"] for row in get_result["rows"]}
+        assert "10.5.50.99" in rdatas
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_remove_against_real_bind9_clears_resolution(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.record.remove`` clears the A record; dig no longer resolves it."""
+    connector = Bind9Connector()
+    try:
+        # First add a record so there's something to remove (idempotent
+        # if the add test above already ran in the same module session).
+        await connector.bind9_record_add(
+            bind9_container_target,
+            {
+                "fqdn": "scratch.evba.lab",
+                "ip": "10.5.50.50",
+                "type": "A",
+                "zone": "evba.lab",
+            },
+        )
+
+        result = await connector.bind9_record_remove(
+            bind9_container_target,
+            {"fqdn": "scratch.evba.lab", "zone": "evba.lab"},
+        )
+        assert result["op_class"] == "write"
+
+        # Confirm dig no longer resolves the record.
+        get_result = await connector.bind9_record_get(
+            bind9_container_target,
+            {"fqdn": "scratch.evba.lab"},
+        )
+        assert get_result["total"] == 0
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_add_auto_resolves_zone_when_zone_omitted(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``--zone`` omitted -> handler picks ``evba.lab`` via longest-suffix match."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_record_add(
+            bind9_container_target,
+            {"fqdn": "auto-resolve.evba.lab", "ip": "10.5.50.77", "type": "A"},
+        )
+        assert result["zone"] == "evba.lab"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_add_rejects_unresolvable_fqdn_pre_staging(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """An FQDN outside any served zone -> ZoneResolutionError, no staging."""
+    from meho_backplane.connectors.bind9.ops_record import ZoneResolutionError
+
+    connector = Bind9Connector()
+    try:
+        # Take a checksum first so we can assert no staging happened.
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        with pytest.raises(ZoneResolutionError):
+            await connector.bind9_record_add(
+                bind9_container_target,
+                {"fqdn": "api.outside.example.com", "ip": "10.5.50.99", "type": "A"},
+            )
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        # Acceptance criterion: ambiguous/unresolvable returns invalid_params
+        # with NO staging performed. The checksum unchanged is the assertion.
+        assert before == after, "unresolvable FQDN must not touch /etc/bind/"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_atomic_apply_rollback_on_dig_verify_failure_leaves_tree_unchanged(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """Verify failure -> ``/etc/bind/`` byte-identical to pre-op snapshot.
+
+    Acceptance criterion: "post-reload dig-verify failure leaves
+    /etc/bind/ byte-identical to the pre-op snapshot (assert via
+    checksum of the bind tree before/after)".
+
+    We inject a deliberately-wrong verify by calling :func:`atomic_apply`
+    directly with a ``verify_command`` that always fails. The
+    rollback must restore the tree.
+    """
+    from meho_backplane.connectors.bind9._atomic import (
+        AtomicApplyError,
+        atomic_apply,
+    )
+
+    connector = Bind9Connector()
+    try:
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        with pytest.raises(AtomicApplyError) as exc_info:
+            await atomic_apply(
+                connector,
+                bind9_container_target,
+                raw_jwt="",
+                sudo_password=str(bind9_container_target.secret_ref["password"]),
+                audit_slice_path="/etc/bind/db.evba.lab",
+                zone_name="evba.lab",
+                # Stage a syntactically valid zonefile so checkzone passes
+                # and reload succeeds. The verify predicate (below) is the
+                # forced failure surface.
+                staged_bytes=(
+                    b"$TTL 3600\n"
+                    b"@ IN SOA ns1.evba.lab. admin.evba.lab. "
+                    b"(2026051899 3600 600 604800 86400)\n"
+                    b"@ IN NS ns1.evba.lab.\n"
+                    b"ns1 IN A 10.5.50.1\n"
+                    b"rollback-canary IN A 10.5.50.123\n"
+                ),
+                # ``false`` always exits non-zero -- the verify step
+                # detects "named loaded the change but it doesn't
+                # resolve" and rolls back.
+                verify_command="false",
+            )
+        assert exc_info.value.step == "verify"
+
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        assert before == after, (
+            f"atomic-apply did NOT roll back cleanly on verify failure; "
+            f"checksum before={before!r}, after={after!r}"
+        )
+
+        # Defence-in-depth: the canary IP must not resolve either.
+        get_result = await connector.bind9_record_get(
+            bind9_container_target,
+            {"fqdn": "rollback-canary.evba.lab"},
+        )
+        assert get_result["total"] == 0, "rollback-canary record survived a verify-failure rollback"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_atomic_apply_rollback_on_checkzone_failure_leaves_tree_unchanged(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """Validation failure -> ``/etc/bind/`` byte-identical to pre-op snapshot.
+
+    Acceptance criterion: "injecting a named-checkconf failure
+    (malformed staged zonefile) leaves /etc/bind/ byte-identical to
+    the pre-op snapshot (assert via checksum of the bind tree
+    before/after)".
+
+    The "named-checkconf failure" maps to the primitive's
+    ``checkconf`` step (which runs ``named-checkzone`` against the
+    staged file). We inject a syntactically broken zonefile.
+    """
+    from meho_backplane.connectors.bind9._atomic import (
+        AtomicApplyError,
+        atomic_apply,
+    )
+
+    connector = Bind9Connector()
+    try:
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        with pytest.raises(AtomicApplyError) as exc_info:
+            await atomic_apply(
+                connector,
+                bind9_container_target,
+                raw_jwt="",
+                sudo_password=str(bind9_container_target.secret_ref["password"]),
+                audit_slice_path="/etc/bind/db.evba.lab",
+                zone_name="evba.lab",
+                # Garbage zonefile -- named-checkzone refuses to load
+                # a file with no SOA and undefined directives.
+                staged_bytes=b"this is not a valid zonefile\nblargh blargh\n",
+                # Verify doesn't run; checkzone refuses first.
+                verify_command="true",
+            )
+        assert exc_info.value.step == "checkconf"
+
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        assert before == after, (
+            f"atomic-apply did NOT roll back cleanly on checkzone failure; "
+            f"checksum before={before!r}, after={after!r}"
+        )
     finally:
         await connector.aclose()

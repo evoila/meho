@@ -232,6 +232,13 @@ class TestClassifyOp:
             # write-suffix tuple this would fall through to ``other``
             # and broadcast the full secret payload.
             ("vault.kv.put", "write"),
+            # bind9 record-write verbs (G3.4-T3 #589). The bind9
+            # connector uses ``.add`` / ``.remove`` to match the
+            # consumer wrapper's verb shape; without these suffixes
+            # the rdata (FQDN + IP) would broadcast as ``other`` rather
+            # than redact under the ``write`` branch.
+            ("bind9.record.add", "write"),
+            ("bind9.record.remove", "write"),
         ],
     )
     def test_write_suffixes(self, op_id: str, expected: str) -> None:

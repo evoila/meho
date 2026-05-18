@@ -389,3 +389,255 @@ async def test_config_show_against_real_bind9_refuses_traversal_with_no_content(
             await connector.bind9_config_show(bind9_container_target, {"path": "../../etc/passwd"})
     finally:
         await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# T3 record-write group -- bind9.record.add / bind9.record.remove + rollback
+# proof against the seeded zone in the same container.
+#
+# The acceptance criterion that gates this Task is the "atomic-apply
+# rollback proven": injecting a deliberately invalid staged zonefile
+# AND a post-reload dig-verify failure must each leave ``/etc/bind/``
+# byte-identical to the pre-op snapshot. The two
+# ``test_atomic_apply_rollback_*`` tests below assert this via
+# pre/post-op checksums computed on the container's bind tree.
+# ---------------------------------------------------------------------------
+
+
+async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -> str:
+    """Return the SHA256-tree fingerprint of ``/etc/bind/`` on *target*.
+
+    The fingerprint covers every file's content + path so a rollback
+    that leaves the tree byte-identical produces the identical
+    fingerprint. ``find -type f | sort | xargs sha256sum`` is the
+    standard incantation; we add the absolute paths into the digest
+    by hashing the find+sha256sum combined output.
+    """
+    cmd = "find /etc/bind -type f -printf '%p\\n' | sort | xargs -d '\\n' sha256sum | sha256sum"
+    proc = await connector._run_command(target, cmd, raw_jwt="")
+    stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
+    return stdout.strip() if isinstance(stdout, str) else ""
+
+
+@pytest.mark.asyncio
+async def test_record_add_against_real_bind9_resolves_post_apply(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.record.add api.evba.lab 10.5.50.99`` -> dig resolves the new IP."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_record_add(
+            bind9_container_target,
+            {
+                "fqdn": "api.evba.lab",
+                "ip": "10.5.50.99",
+                "type": "A",
+                "zone": "evba.lab",
+            },
+        )
+        assert result["op_class"] == "write"
+        assert result["zone"] == "evba.lab"
+        assert "result_state_before" in result
+        assert "result_state_after" in result
+        # The before / after must differ -- the staged change is the
+        # diff between them. ``api.evba.lab`` was absent before and
+        # present after.
+        assert "10.5.50.99" not in result["result_state_before"]
+        assert "10.5.50.99" in result["result_state_after"]
+
+        # Verify the change actually propagated to the running named.
+        get_result = await connector.bind9_record_get(
+            bind9_container_target,
+            {"fqdn": "api.evba.lab"},
+        )
+        rdatas = {row["rdata"] for row in get_result["rows"]}
+        assert "10.5.50.99" in rdatas
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_remove_against_real_bind9_clears_resolution(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.record.remove`` clears the A record; dig no longer resolves it."""
+    connector = Bind9Connector()
+    try:
+        # First add a record so there's something to remove (idempotent
+        # if the add test above already ran in the same module session).
+        await connector.bind9_record_add(
+            bind9_container_target,
+            {
+                "fqdn": "scratch.evba.lab",
+                "ip": "10.5.50.50",
+                "type": "A",
+                "zone": "evba.lab",
+            },
+        )
+
+        result = await connector.bind9_record_remove(
+            bind9_container_target,
+            {"fqdn": "scratch.evba.lab", "zone": "evba.lab"},
+        )
+        assert result["op_class"] == "write"
+
+        # Confirm dig no longer resolves the record.
+        get_result = await connector.bind9_record_get(
+            bind9_container_target,
+            {"fqdn": "scratch.evba.lab"},
+        )
+        assert get_result["total"] == 0
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_add_auto_resolves_zone_when_zone_omitted(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``--zone`` omitted -> handler picks ``evba.lab`` via longest-suffix match."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_record_add(
+            bind9_container_target,
+            {"fqdn": "auto-resolve.evba.lab", "ip": "10.5.50.77", "type": "A"},
+        )
+        assert result["zone"] == "evba.lab"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_add_rejects_unresolvable_fqdn_pre_staging(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """An FQDN outside any served zone -> ZoneResolutionError, no staging."""
+    from meho_backplane.connectors.bind9.ops_record import ZoneResolutionError
+
+    connector = Bind9Connector()
+    try:
+        # Take a checksum first so we can assert no staging happened.
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        with pytest.raises(ZoneResolutionError):
+            await connector.bind9_record_add(
+                bind9_container_target,
+                {"fqdn": "api.outside.example.com", "ip": "10.5.50.99", "type": "A"},
+            )
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        # Acceptance criterion: ambiguous/unresolvable returns invalid_params
+        # with NO staging performed. The checksum unchanged is the assertion.
+        assert before == after, "unresolvable FQDN must not touch /etc/bind/"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_atomic_apply_rollback_on_dig_verify_failure_leaves_tree_unchanged(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """Verify failure -> ``/etc/bind/`` byte-identical to pre-op snapshot.
+
+    Acceptance criterion: "post-reload dig-verify failure leaves
+    /etc/bind/ byte-identical to the pre-op snapshot (assert via
+    checksum of the bind tree before/after)".
+
+    We inject a deliberately-wrong verify by calling :func:`atomic_apply`
+    directly with a ``verify_command`` that always fails. The
+    rollback must restore the tree.
+    """
+    from meho_backplane.connectors.bind9._atomic import (
+        AtomicApplyError,
+        atomic_apply,
+    )
+
+    connector = Bind9Connector()
+    try:
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        with pytest.raises(AtomicApplyError) as exc_info:
+            await atomic_apply(
+                connector,
+                bind9_container_target,
+                raw_jwt="",
+                sudo_password=str(bind9_container_target.secret_ref["password"]),
+                audit_slice_path="/etc/bind/db.evba.lab",
+                zone_name="evba.lab",
+                # Stage a syntactically valid zonefile so checkzone passes
+                # and reload succeeds. The verify predicate (below) is the
+                # forced failure surface.
+                staged_bytes=(
+                    b"$TTL 3600\n"
+                    b"@ IN SOA ns1.evba.lab. admin.evba.lab. "
+                    b"(2026051899 3600 600 604800 86400)\n"
+                    b"@ IN NS ns1.evba.lab.\n"
+                    b"ns1 IN A 10.5.50.1\n"
+                    b"rollback-canary IN A 10.5.50.123\n"
+                ),
+                # ``false`` always exits non-zero -- the verify step
+                # detects "named loaded the change but it doesn't
+                # resolve" and rolls back.
+                verify_command="false",
+            )
+        assert exc_info.value.step == "verify"
+
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        assert before == after, (
+            f"atomic-apply did NOT roll back cleanly on verify failure; "
+            f"checksum before={before!r}, after={after!r}"
+        )
+
+        # Defence-in-depth: the canary IP must not resolve either.
+        get_result = await connector.bind9_record_get(
+            bind9_container_target,
+            {"fqdn": "rollback-canary.evba.lab"},
+        )
+        assert get_result["total"] == 0, "rollback-canary record survived a verify-failure rollback"
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_atomic_apply_rollback_on_checkzone_failure_leaves_tree_unchanged(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """Validation failure -> ``/etc/bind/`` byte-identical to pre-op snapshot.
+
+    Acceptance criterion: "injecting a named-checkconf failure
+    (malformed staged zonefile) leaves /etc/bind/ byte-identical to
+    the pre-op snapshot (assert via checksum of the bind tree
+    before/after)".
+
+    The "named-checkconf failure" maps to the primitive's
+    ``checkconf`` step (which runs ``named-checkzone`` against the
+    staged file). We inject a syntactically broken zonefile.
+    """
+    from meho_backplane.connectors.bind9._atomic import (
+        AtomicApplyError,
+        atomic_apply,
+    )
+
+    connector = Bind9Connector()
+    try:
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        with pytest.raises(AtomicApplyError) as exc_info:
+            await atomic_apply(
+                connector,
+                bind9_container_target,
+                raw_jwt="",
+                sudo_password=str(bind9_container_target.secret_ref["password"]),
+                audit_slice_path="/etc/bind/db.evba.lab",
+                zone_name="evba.lab",
+                # Garbage zonefile -- named-checkzone refuses to load
+                # a file with no SOA and undefined directives.
+                staged_bytes=b"this is not a valid zonefile\nblargh blargh\n",
+                # Verify doesn't run; checkzone refuses first.
+                verify_command="true",
+            )
+        assert exc_info.value.step == "checkconf"
+
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        assert before == after, (
+            f"atomic-apply did NOT roll back cleanly on checkzone failure; "
+            f"checksum before={before!r}, after={after!r}"
+        )
+    finally:
+        await connector.aclose()

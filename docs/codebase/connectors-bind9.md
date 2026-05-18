@@ -46,15 +46,26 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
   T2 added the read op group via a `_bind9_ops()` composition
   function (mirrors K8s `_kubernetes_ops()`) that splats per-area
   tuples from `ops_zone.py`, `ops_record.py`, and `ops_config.py`.
-  T3-T4 will follow the same shape.
+  T4 will follow the same shape.
 - **`ops_zone.py`** -- T2 zone-read ops module. Pure parsers
   (`parse_named_checkconf_zones`, `parse_zonefile`), bound-method
   handler functions (`bind9_zone_list`, `bind9_zone_read`), and the
   `ZONE_OPS` registration table.
-- **`ops_record.py`** -- T2 record-read op module. Pure parser
-  (`parse_dig_answer`), handler (`bind9_record_get`), and the
-  `RECORD_OPS` registration table. T3 will append record-write ops to
-  this module.
+- **`ops_record.py`** -- T2 record-read + T3 record-write op module.
+  Pure parser (`parse_dig_answer`), read handler (`bind9_record_get`),
+  T3 (#589) write handlers (`bind9_record_add`, `bind9_record_remove`)
+  with longest-suffix zone resolution + pure dnspython zonefile
+  transforms, and the `RECORD_OPS` registration table.
+- **`_atomic.py`** -- T3 (#589) atomic-apply primitive. One async
+  `atomic_apply()` helper that runs the seven-step bash pipeline
+  (snapshot, capture state_before, stage, named-checkzone validate,
+  rndc reload, caller-supplied dig-verify predicate, on-failure
+  snapshot rollback) in a single `_remote_bash_with_sudo` invocation.
+  Returns `AtomicApplyResult(state_before, state_after,
+  audit_slice_path)`; raises `AtomicApplyError(step, detail)` on any
+  failure -- by the time the helper returns, the remote `/etc/bind/`
+  tree is either fully-staged-and-verified or byte-identical to the
+  pre-op snapshot.
 - **`ops_config.py`** -- T2 config-read op module. Pure path-safety
   filter (`ensure_path_under_root`), handler (`bind9_config_show`),
   and the `CONFIG_OPS` registration table. T4 will append
@@ -85,9 +96,13 @@ wrong position. The replacement encodes safety by construction:
 | `sudo_password` cannot be passed positionally | The parameter is keyword-only (signature uses `*,` separator) |
 
 The primitive is mandatory for every sudo-requiring op. T3 (#589)'s
-atomic-apply primitive layers on top of it; T4 (#590)'s
+atomic-apply primitive (`_atomic.py`) layers on top of it -- the
+whole seven-step pipeline (snapshot, stage, validate, reload,
+verify, rollback) runs as one bash body fed to
+`_remote_bash_with_sudo`, so the snapshot and the rollback always
+share an interpreter on the target. T4 (#590)'s
 `bind9.config.apply_views` / `bind9.config.apply_file` /
-`bind9.config.backup` / `bind9.config.reload` all route their
+`bind9.config.backup` / `bind9.config.reload` will all route their
 elevated-privilege calls through it.
 
 ## `fingerprint(target)`
@@ -132,7 +147,7 @@ the most-specific class first (`PermissionDenied` is a subclass of
 `DisconnectError` in asyncssh) so the dispatch maps to the right
 reason.
 
-## Shipped op surface (T1 + T2)
+## Shipped op surface (T1 + T2 + T3)
 
 | Op id | Handler | Safety | Description |
 | ----- | ------- | ------ | ----------- |
@@ -140,10 +155,88 @@ reason.
 | `bind9.zone.list` | `Bind9Connector.bind9_zone_list` | `safe` | Parse `named-checkconf -p` into zone rows: `{name, file, type}` per declared zone |
 | `bind9.zone.read` | `Bind9Connector.bind9_zone_read` | `safe` | Resolve zonefile via `named-checkconf -p`, read + parse via dnspython; row per rrset member `{name, ttl, class, type, rdata}` |
 | `bind9.record.get` | `Bind9Connector.bind9_record_get` | `safe` | `dig @localhost <fqdn> <type>` parsed into structured rows; defaults to A; supports A / AAAA / CNAME / MX / TXT |
+| `bind9.record.add` | `Bind9Connector.bind9_record_add` | `caution` | Atomic A/AAAA record write with snapshot rollback; resolves owning zone via longest-suffix match when `zone` omitted; verify predicate = `dig` returns the new IP |
+| `bind9.record.remove` | `Bind9Connector.bind9_record_remove` | `caution` | Atomic remove of A + AAAA at the given FQDN with snapshot rollback; verify predicate = `dig` no longer resolves the FQDN |
 | `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked |
 
-The T3-T4 op surface lands in follow-on PRs against this same
-`BIND9_OPS`-splat registration shape.
+The T4 config-write op surface lands in a follow-on PR against this
+same `BIND9_OPS`-splat registration shape.
+
+## Atomic-apply primitive (T3 #589)
+
+`_atomic.py` exposes one async `atomic_apply()` helper used by every
+mutating op (record-writes today, config-writes when T4 lands). The
+discipline is the load-bearing safety contract Initiative #367 calls
+WI5 -- DNS is global; a half-applied zone change wedges every
+consumer of this nameserver. The primitive runs a fixed seven-step
+pipeline inside one `_remote_bash_with_sudo` invocation:
+
+1. **Snapshot.** `tar -czf` the bind config root to a per-call
+   `/tmp/meho-bind9-snapshot-<token>.tar.gz`. Captures every file
+   under the bind root, not just the affected zonefile -- callbacks
+   may transitively edit `named.conf.local` or fragment files.
+2. **Capture state_before.** `cat` the caller-supplied audit-slice
+   path with sentinel framing so the Python side can split the
+   slice content out of the script's progress output.
+3. **Stage.** Write the caller's `staged_bytes` to the audit-slice
+   path. Staged bytes arrive base64-encoded via env var so arbitrary
+   bytes (control characters, embedded NULs) round-trip unchanged.
+4. **Validate.** `named-checkzone <zone> <file>` against the staged
+   file. Non-zero exit -> rollback + raise `AtomicApplyError("checkconf",
+   detail)`. (Per-zone, not the parent-config-tree `named-checkconf -p`,
+   so the validation gate matches the blast-radius of the operator's
+   change.)
+5. **Reload.** `rndc reload`. Non-zero exit -> rollback + raise
+   `AtomicApplyError("reload", detail)`.
+6. **Verify.** Run the caller-supplied verify command (e.g.
+   `dig @localhost <fqdn> +short A | grep -qxF <expected-ip>`).
+   Non-zero exit -> rollback + raise `AtomicApplyError("verify",
+   detail)`. The rollback restores the pre-op tree and reloads named
+   back to it, so the operator-visible state post-rollback is
+   identical to pre-op.
+7. **Success.** Capture state_after; delete the snapshot tar.
+
+The integration suite asserts byte-identical-tree rollback via
+`find /etc/bind -type f | xargs sha256sum | sha256sum` before / after
+each failure scenario (checkzone-fail + verify-fail both covered).
+
+### Why one bash script vs N round-trips
+
+A 7-call pipeline would pay sudo's TTY-less-cache cost seven times,
+write seven structured-log rows, and could leave the staged file in
+place if the network blipped between stage and validate. Bundling
+into one remote bash keeps the pipeline atomic from the target's
+POV; the bash body is generated entirely by `_atomic.py` (no
+caller-supplied substring lands in shell), so the safe-sudo
+helper's invariants extend uninjured.
+
+### Zone resolution when `--zone` is omitted
+
+`bind9.record.add` / `bind9.record.remove` accept an optional
+`zone` parameter. When omitted, the handler resolves the owning
+zone from `named-checkconf -p` (T2's zone parser) by longest-suffix
+match against the FQDN:
+
+* The FQDN's label sequence must end with the zone's label sequence
+  -- label boundaries are atomic, so `api.evba.lab` matches
+  `evba.lab` but not `ba.lab`.
+* The root zone (`.`) is excluded from candidates.
+* On a tie at the longest suffix, raises `ZoneResolutionError(reason="ambiguous", candidates=[...])`.
+* On no match, raises `ZoneResolutionError(reason="unresolvable", fqdn=...)`.
+
+Both errors raise **before** any staging, so the dispatcher's
+`invalid_params` envelope reports the rejection with zero side
+effects on the remote tree.
+
+### Audit integration
+
+Both write handlers emit `op_class="write"` plus
+`result_state_before` / `result_state_after` (the full pre/post-op
+zonefile text captured by `atomic_apply`). These power the G8.2
+audit-replay path; the broadcast classifier's `_WRITE_SUFFIXES`
+tuple is extended to include `.add` / `.remove` so a future
+broadcast leak via `classify_op` falling through to `other` cannot
+surface the rdata.
 
 ## Read op group (T2 #588)
 
@@ -248,20 +341,39 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
   invocations, missing-zone errors, NXDOMAIN-as-empty-rows, and the
   path-rejection-leaks-no-content invariant through the dispatcher
   seam.
+- `backend/tests/test_connectors_bind9_atomic.py` -- T3 unit suite.
+  Covers (1) the longest-suffix `resolve_zone_for_fqdn` resolver
+  including label-boundary, root-zone-excluded, ambiguous, and
+  unresolvable cases; (2) the pure dnspython zonefile transforms
+  (`_add_record_to_zonefile` / `_remove_record_from_zonefile`) with
+  SOA-serial bump assertions; (3) the `_build_pipeline_script`
+  shlex-quote contract and `_parse_pipeline_output` sentinel
+  framing; (4) `atomic_apply` success + every rollback branch
+  (`checkconf`, `reload`, `verify`, plus the unparseable-output
+  fallback that narrows to `snapshot`); (5) the `bind9_record_add` /
+  `bind9_record_remove` handlers' happy path, zone-omitted
+  longest-suffix resolution, invalid-IP / type-family-mismatch /
+  unsupported-type / missing-sudo-password rejection branches; (6)
+  the registration metadata (`safety_level=caution`, write-warning
+  in description + `llm_instructions`, `additionalProperties=False`).
 - `backend/tests/integration/test_connectors_bind9_container.py` --
   containerised smoke test against a Debian-bookworm image with
   `bind9 bind9-host bind9utils dnsutils openssh-server` installed.
-  Builds the image inline from a Dockerfile fixture (T2 extension
-  seeds an `evba.lab` zone with each supported record type so the
-  read-op tests assert against a real container) and exercises the
-  T2 read ops end-to-end. Skip-on-no-Docker matches the rest of
-  `tests/integration/`.
+  Builds the image inline from a Dockerfile fixture (T2 seeds an
+  `evba.lab` zone with each supported record type so the read-op
+  tests assert against a real container). T3 extends with end-to-end
+  add / remove tests, longest-suffix zone resolution against a real
+  `named-checkconf -p`, and the two byte-identical-tree rollback
+  assertions (checkzone failure + verify failure) gated on a
+  pre/post-op `sha256sum` of the bind config root. Skip-on-no-Docker
+  matches the rest of `tests/integration/`.
 
 ## References
 
 - Parent Initiative: [#367 G3.4 bind9-9.x typed-SSH connector](https://github.com/evoila/meho/issues/367)
 - Skeleton task: [#587 G3.4-T1 Bind9Connector skeleton](https://github.com/evoila/meho/issues/587)
 - Read op group: [#588 G3.4-T2 bind9 read op group](https://github.com/evoila/meho/issues/588)
+- Atomic-apply + record-writes: [#589 G3.4-T3 bind9 atomic-apply primitive + record.add / record.remove](https://github.com/evoila/meho/issues/589)
 - Adapter inherited: [#243 G0.2-T4 SshConnector adapter](https://github.com/evoila/meho/issues/243)
 - Registration substrate: [#395 G0.6-T4 register_typed_operation()](https://github.com/evoila/meho/issues/395)
 - Sibling skeleton precedent: [#321 G3.2-T1 KubernetesConnector skeleton](https://github.com/evoila/meho/issues/321) + `backend/src/meho_backplane/connectors/kubernetes/connector.py`

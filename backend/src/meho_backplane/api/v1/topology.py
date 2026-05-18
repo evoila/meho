@@ -101,7 +101,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.db.engine import get_session
+from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import GraphEdge, GraphEdgeKind, GraphNode
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.topology.annotate import (
@@ -289,7 +289,7 @@ async def path(
 async def refresh(
     target_name: str,
     operator: Operator = _require_operator,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_raw_session),
 ) -> RefreshResult:
     """Rediscover *target_name*'s topology and reconcile it into the graph.
 
@@ -418,7 +418,7 @@ class _AnnotateEdgeRequest(BaseModel):
 async def annotate_edge_route(
     body: _AnnotateEdgeRequest,
     operator: Operator = _require_admin,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_raw_session),
 ) -> TopologyEdge:
     """Create or upsert a curated edge.
 
@@ -490,7 +490,7 @@ async def annotate_edge_route(
 async def unannotate_edge_route(
     edge_id: uuid.UUID,
     operator: Operator = _require_admin,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_raw_session),
 ) -> None:
     """Hard-delete a curated edge by id and clear its reciprocal markers.
 
@@ -569,7 +569,7 @@ async def list_edges_route(
     ),
     offset: int = Query(default=0, ge=0),
     operator: Operator = _require_operator,
-    session: AsyncSession = Depends(get_session),
+    session: AsyncSession = Depends(get_raw_session),
 ) -> list[TopologyEdge]:
     """Flat filterable listing of edges in the caller's tenant.
 

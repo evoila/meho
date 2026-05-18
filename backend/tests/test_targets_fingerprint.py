@@ -217,8 +217,13 @@ def test_migration_0009_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         "0009 upgrade did not add preferred_impl_id column"
     )
 
-    # Downgrade one revision — should remove both columns.
-    command.downgrade(cfg, "-1")
+    # Downgrade to revision 0008 — should remove both columns added by
+    # 0009. Target an explicit revision rather than the relative ``-1``
+    # so the test stays anchored on the 0009 transition as later
+    # migrations land on top of head (e.g. 0010 widens
+    # ``graph_edge.kind`` -- a ``-1`` downgrade from head would only
+    # revert 0010 and leave the 0009 columns intact).
+    command.downgrade(cfg, "0008")
     with sync_engine.connect() as conn:
         columns_after_downgrade = {
             row[1] for row in conn.execute(text("PRAGMA table_info(targets)")).fetchall()

@@ -833,12 +833,13 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "`depends-on`, `replicates-to`, `backed-up-by`, `routes-via`, "
     "`policy-binds`.\n\n"
     "Returns `{edge_id, from: {id, kind, name}, to: {id, kind, name}, "
-    'kind, source: "curated", superseded: [<auto-edge-id>...], '
-    "conflicts: [<edge-id>...]}`. `superseded` lists auto edges this "
-    "annotation displaced (same kind, different endpoint); `conflicts` "
-    "lists edges of an incompatible kind over the same endpoint pair. "
-    "Both lists are diagnostics — the recovery flow is to "
-    "`meho.topology.unannotate` this edge."
+    'kind, source: "curated", conflicts: [<edge-id>...]}`. `conflicts` '
+    "lists edges of an incompatible kind over the same endpoint pair — "
+    "a diagnostic; the recovery flow is to `meho.topology.unannotate` "
+    "this edge. (Auto edges displaced by this annotation are stamped "
+    "`properties.superseded_by` on the database row and recorded in the "
+    "audit/broadcast payload, but are not surfaced on the tool's return "
+    "shape — inspect them with `query_topology {kind: edges}` if needed.)"
 )
 
 
@@ -967,7 +968,7 @@ _UNANNOTATE_INPUT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
         "edge_id": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": (
                 "UUID of the curated `graph_edge` to remove. Mutually "
                 "exclusive with the `(from_name, kind, to_name)` triple — "
@@ -977,56 +978,85 @@ _UNANNOTATE_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "maxLength": 64,
         },
         "from_name": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": (
                 "Triple selector: the edge's `from` endpoint name. Must "
                 "appear together with `kind` and `to_name` (or with "
                 "neither, when using `edge_id`)."
             ),
+            "minLength": 1,
             "maxLength": 256,
         },
         "kind": {
-            "type": ["string", "null"],
-            "enum": [None, *_EDGE_KIND_VALUES],
+            "type": "string",
+            "enum": list(_EDGE_KIND_VALUES),
             "description": (
                 "Triple selector: the edge's `graph_edge.kind`. Must "
                 "appear together with `from_name` and `to_name`."
             ),
         },
         "to_name": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": (
                 "Triple selector: the edge's `to` endpoint name. Must "
                 "appear together with `from_name` and `kind`."
             ),
+            "minLength": 1,
             "maxLength": 256,
         },
         "from_node_kind": {
             "type": ["string", "null"],
             "description": (
                 "Optional `graph_node.kind` pin for the `from_name` "
-                "endpoint, used for ambiguity disambiguation."
+                "endpoint, used for ambiguity disambiguation. Only "
+                "meaningful with the triple selector form."
             ),
+            "minLength": 1,
             "maxLength": 64,
         },
         "to_node_kind": {
             "type": ["string", "null"],
             "description": (
                 "Optional `graph_node.kind` pin for the `to_name` "
-                "endpoint, used for ambiguity disambiguation."
+                "endpoint, used for ambiguity disambiguation. Only "
+                "meaningful with the triple selector form."
             ),
+            "minLength": 1,
             "maxLength": 64,
         },
     },
     "additionalProperties": False,
+    # XOR at the wire boundary: either `edge_id` alone, or the full
+    # `(from_name, kind, to_name)` triple. Partial triples, both
+    # selectors, or neither are rejected by jsonschema (Draft 2020-12)
+    # before reaching the service. The substrate-level XOR guard in
+    # `_unannotate_handler` stays as belt-and-suspenders for the
+    # never-validated path (direct in-process callers).
+    "oneOf": [
+        {
+            "required": ["edge_id"],
+            "not": {
+                "anyOf": [
+                    {"required": ["from_name"]},
+                    {"required": ["kind"]},
+                    {"required": ["to_name"]},
+                ],
+            },
+        },
+        {
+            "required": ["from_name", "kind", "to_name"],
+            "not": {"required": ["edge_id"]},
+        },
+    ],
 }
 
 
 _UNANNOTATE_DESCRIPTION: Final[str] = (
     "Hard-delete a curated `graph_edge` and clear its reciprocal §6 "
     "markers (tenant_admin only). Pass either `edge_id` OR the full "
-    "`(from_name, kind, to_name)` triple — both forms or partial input "
-    "is rejected at -32602. Tenant-scoped automatically.\n\n"
+    "`(from_name, kind, to_name)` triple — both forms, partial triples, "
+    "or empty strings are rejected at the inputSchema layer (-32602) "
+    "before the service is reached. Tenant-scoped automatically.\n\n"
     "WHEN TO CALL: an annotation was wrong and needs to be revoked — "
     "the operator originally asserted `service-X depends-on database-Y` "
     "but it turns out the real dependency is `database-Z`. "
@@ -1050,9 +1080,12 @@ async def _unannotate_handler(
     """Dispatch a ``meho.topology.unannotate`` call to :func:`unannotate_edge`.
 
     The two selector forms (UUID primary key vs. ``(from, kind, to)``
-    triple) are mutually exclusive at the service layer — passing both
-    or neither raises :class:`UnannotateSelectorError`, which surfaces
-    as ``-32602``.
+    triple) are mutually exclusive at the wire boundary — the tool's
+    ``inputSchema`` rejects partial triples, both selectors, and the
+    empty-arguments case with a -32602 jsonschema error before reaching
+    this handler. The service-layer :class:`UnannotateSelectorError`
+    guard stays for the never-validated path (direct in-process
+    callers), so the matrix is fully covered.
 
     :class:`AutoEdgeDeletionError` is the §6 auto-vs-curated refusal —
     surfaces as ``-32602`` with the substrate's "auto edges resurrect

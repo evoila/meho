@@ -308,18 +308,40 @@ def test_admin_tools_visible_to_tenant_admin(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            "meho.topology.annotate",
+            {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"},
+        ),
+        (
+            "meho.topology.unannotate",
+            {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"},
+        ),
+    ],
+    ids=["annotate", "unannotate"],
+)
 def test_admin_tool_call_from_non_admin_is_forbidden(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    tool_name: str,
+    arguments: dict[str, Any],
 ) -> None:
-    """Direct tools/call from an operator-role session → -32602 forbidden."""
+    """tools/call on either admin tool from an operator session → -32602 forbidden.
+
+    Both admin tools share the dispatcher RBAC gate
+    (``required_role=TENANT_ADMIN``); the forbidden refusal must fire
+    before the inputSchema is even consulted, so the rejection is
+    independent of selector shape.
+    """
     client, _op = client_with_operator
-    response = _annotate_call(
-        client,
-        3,
-        {
-            "from_name": "svc-x",
-            "kind": "depends-on",
-            "to_name": "db-y",
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
         },
     )
     body = response.json()
@@ -600,10 +622,17 @@ async def test_unannotate_curated_edge_via_triple(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_unannotate_rejects_both_selectors(
+def test_unannotate_rejects_both_selectors_at_schema_layer(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """Passing both edge_id and triple → -32602 (UnannotateSelectorError)."""
+    """Passing both ``edge_id`` and the triple → -32602 at the schema layer.
+
+    The substrate-level :class:`UnannotateSelectorError` still guards
+    direct in-process callers (and is asserted by
+    :mod:`tests.test_topology_annotate`); over the MCP wire the
+    rejection now fires at the inputSchema ``oneOf`` before any handler
+    runs.
+    """
     client, _op = client_with_operator
     response = _unannotate_call(
         client,
@@ -617,14 +646,89 @@ def test_unannotate_rejects_both_selectors(
     )
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
-    assert "exactly one selector" in body["error"]["message"]
+    assert "inputSchema" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_unannotate_rejects_empty_arguments_at_schema_layer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """An empty ``{}`` argument bag → -32602 (neither selector form)."""
+    client, _op = client_with_operator
+    response = _unannotate_call(client, 62, {})
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "inputSchema" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.parametrize(
+    "partial_triple",
+    [
+        # `from_name` missing — the other two triple keys present.
+        {"kind": "depends-on", "to_name": "b"},
+        # `kind` missing.
+        {"from_name": "a", "to_name": "b"},
+        # `to_name` missing.
+        {"from_name": "a", "kind": "depends-on"},
+    ],
+    ids=["missing-from_name", "missing-kind", "missing-to_name"],
+)
+def test_unannotate_rejects_partial_triple_at_schema_layer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    partial_triple: dict[str, Any],
+) -> None:
+    """A triple with one of (from_name, kind, to_name) missing → -32602."""
+    client, _op = client_with_operator
+    response = _unannotate_call(client, 63, partial_triple)
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "inputSchema" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+@pytest.mark.parametrize(
+    "empty_field",
+    ["edge_id", "from_name", "to_name"],
+)
+def test_unannotate_rejects_empty_string_selector_at_schema_layer(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    empty_field: str,
+) -> None:
+    """Empty strings in any selector slot → -32602 (``minLength: 1`` enforced).
+
+    A ``""`` field is structurally different from omitted: it would
+    satisfy the ``oneOf`` ``required`` check on its own. Without
+    ``minLength: 1`` the empty value would slip through the schema and
+    only fail at the substrate (or not fail at all if the substrate
+    didn't notice). The schema now rejects it at the front.
+    """
+    client, _op = client_with_operator
+    # Build a valid base shape for whichever selector form contains the
+    # empty field, then overwrite the targeted field with the empty
+    # string.
+    if empty_field == "edge_id":
+        arguments: dict[str, Any] = {"edge_id": ""}
+    else:
+        arguments = {"from_name": "a", "kind": "depends-on", "to_name": "b"}
+        arguments[empty_field] = ""
+    response = _unannotate_call(client, 64, arguments)
+    body = response.json()
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "inputSchema" in body["error"]["message"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
 def test_unannotate_rejects_malformed_edge_id(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A non-UUID edge_id is caught at the front before service dispatch."""
+    """A non-UUID edge_id is caught at the front before service dispatch.
+
+    The inputSchema doesn't constrain the UUID *format* — the handler
+    still owns the ``uuid.UUID(...)`` parse and surfaces -32602 with a
+    pointed "not a valid UUID" message. The schema's ``minLength: 1``
+    is satisfied by the non-empty garbage string.
+    """
     client, _op = client_with_operator
     response = _unannotate_call(client, 61, {"edge_id": "not-a-uuid"})
     body = response.json()
@@ -753,6 +857,39 @@ def test_annotate_description_warns_against_auto_kinds() -> None:
     # Names at least the canonical cross-system kinds.
     assert "authenticates-via" in desc
     assert "tenant_admin" in desc
+
+
+def test_annotate_description_matches_actual_response_shape() -> None:
+    """The annotate description must not advertise response fields the handler
+    does not populate (B1 regression on PR #654).
+
+    The handler returns ``edge_id / from / to / kind / source / conflicts``;
+    earlier iterations also claimed ``superseded: [<auto-edge-id>...]`` on
+    the response shape, but ``annotate_edge`` only stamps that on the
+    auto-edge ``properties`` and on the audit/broadcast payload — it
+    never surfaces it on the return value. Description-vs-impl drift
+    here is load-bearing for an LLM agent reading the description as
+    the API contract.
+    """
+    entry = get_tool("meho.topology.annotate")
+    assert entry is not None
+    defn = entry[0]
+    desc = defn.description
+    declared = set(defn.outputSchema.get("properties", {}).keys())
+    # outputSchema is the canonical contract — anything the description
+    # *names* as a response key must be in it.
+    assert declared == {"edge_id", "from", "to", "kind", "source", "conflicts"}
+    # Belt-and-suspenders: the literal "Returns `{...}`" clause names
+    # only the keys above.
+    assert "Returns `{edge_id, from:" in desc
+    # `superseded` is the substrate-side §6 marker
+    # (`properties.superseded_by` on the displaced auto-edge row +
+    # audit payload field), never a response key on this tool. The
+    # description may *mention*
+    # the mechanism in parenthetical guidance but must not advertise it
+    # as a returned key.
+    assert "superseded: [<auto-edge-id>...]" not in desc
+    assert "superseded_by" in desc  # parenthetical reference to the substrate mechanism remains
 
 
 def test_unannotate_description_names_auto_refusal() -> None:

@@ -211,14 +211,27 @@ def downgrade() -> None:
     row-narrowing predicate is "this kind is not in the post-downgrade
     vocabulary", regardless of how the row was written.
     """
+    # Use a lightweight Core ``Table`` reference instead of ``sa.text``:
+    # an ``IN(...)`` clause built from a module-level constant tuple is
+    # not a SQL-injection vector, but Semgrep's
+    # ``avoid-sqlalchemy-text`` rule (and prudent migration hygiene)
+    # prefers Core/expression-language operators over raw text for any
+    # query the migration ships. ``sa.table``/``sa.column`` give us the
+    # parameterised ``IN`` + ``GROUP BY`` shape without reflecting the
+    # full ORM model -- migrations must stay self-contained.
+    graph_edge = sa.table(
+        "graph_edge",
+        sa.column("kind", sa.Text()),
+    )
+    count_col = sa.func.count().label("n")
+    blocking_stmt = (
+        sa.select(graph_edge.c.kind, count_col)
+        .where(graph_edge.c.kind.in_(_CURATED_ONLY_KINDS))
+        .group_by(graph_edge.c.kind)
+    )
+
     bind = op.get_bind()
-    blocking_rows = bind.execute(
-        sa.text(
-            "SELECT kind, COUNT(*) AS n FROM graph_edge "
-            f"WHERE kind IN ({', '.join(f"'{k}'" for k in _CURATED_ONLY_KINDS)}) "
-            "GROUP BY kind"
-        )
-    ).all()
+    blocking_rows = bind.execute(blocking_stmt).all()
 
     if blocking_rows:
         total = sum(row.n for row in blocking_rows)

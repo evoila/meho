@@ -60,17 +60,44 @@ state -- either the whole script completed, or nothing about
 
 Step 6's rollback is the most paranoid case: named has already
 loaded the change; the rollback restores the prior tree and forces
-named back to it via ``rndc freeze`` -> ``rndc reload`` -> ``rndc
-thaw`` on the affected zone. The freeze/thaw cycle bypasses
-named's SOA-serial cache, which otherwise treats a "regression"
-to the snapshot's lower serial as a no-op and leaves the staged
-in-memory zone in place even though the disk has been restored.
+named back to it by rewriting the restored zonefile's SOA serial
+to ``cached_serial + 1`` before issuing ``rndc reload``. The serial
+bump bypasses named's SOA-serial cache, which otherwise treats a
+"regression" to the snapshot's lower serial as a no-op and leaves
+the staged in-memory zone in place even though the disk has been
+restored.
+
+The mechanism the iter-3 attempt tried -- ``rndc freeze`` followed
+by ``rndc reload`` -- is documented to act only on zones with
+dynamic-update configuration. For a fully static zone (no
+``allow-update`` / no ``update-policy`` stanza, which is the
+common-case bind9 deployment), ``rndc freeze`` is a no-op and
+does NOT drop named's in-memory zone state; the subsequent reload
+remains gated by the SOA serial. The CI integration test against
+a real bind9 container caught this -- the canary record survived
+the freeze/reload/thaw rollback because freeze never evicted the
+cached zone.
+
+The current mechanism (SOA-bump) is robust because it makes the
+restored file look like a forward step to named regardless of how
+the zone is configured: we read named's cached serial via
+``dig @localhost <zone> SOA``, set the restored file's serial to
+``cached + 1``, then ``rndc reload``. The zonefile content
+otherwise stays byte-identical to the snapshot -- only the SOA
+serial line changes, by exactly the amount needed to defeat the
+cache. The rollback contract is therefore "disk content
+logically restored; SOA serial may be incremented to force named
+to accept the restoration" -- a one-line departure from
+strict-byte-identity that the operator-visible state explicitly
+tolerates, since the SOA serial number is metadata bind9
+manages on every change anyway.
+
 The dig-verify failure mode this guards against is "the staged
 file parses but doesn't actually resolve <fqdn> post-reload" -- a
 logic bug in the caller's stager, or a view's RPZ swallowing the
 new record. Either way, the operator-visible state post-rollback
-is identical to pre-op (disk byte-identical + in-memory zone
-view re-read from the restored zonefile).
+is identical to pre-op (disk content restored + in-memory zone
+view re-read from the restored zonefile, modulo the bumped serial).
 
 State capture
 -------------
@@ -224,46 +251,95 @@ BIND_ROOT={bind_root}
 
 rollback() {{
     if [ -f "$SNAPSHOT_PATH" ]; then
-        # Byte-identical rollback contract: the snapshot tar must
-        # restore /etc/bind/ to exactly its pre-op shape, including
-        # the absence of any file the stage step (or a future T4
-        # config-write op) created after the snapshot was taken.
-        # ``tar -xzf`` extracts in place but does NOT remove files
-        # that exist on disk but not in the archive, so a naive
-        # extract leaves orphans behind. We therefore clear $BIND_ROOT
-        # first, then extract -- with an explicit guard against an
-        # empty / "/" value so a misconfiguration can never rm -rf
-        # the host root.
+        # Logically-byte-identical rollback contract: the snapshot
+        # tar must restore /etc/bind/ to exactly its pre-op shape,
+        # including the absence of any file the stage step (or a
+        # future T4 config-write op) created after the snapshot was
+        # taken. ``tar -xzf`` extracts in place but does NOT remove
+        # files that exist on disk but not in the archive, so a
+        # naive extract leaves orphans behind. We therefore clear
+        # $BIND_ROOT first, then extract -- with an explicit guard
+        # against an empty / "/" value so a misconfiguration can
+        # never rm -rf the host root.
         if [ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]; then
             find "$BIND_ROOT" -mindepth 1 -delete > /dev/null 2>&1 || true
         fi
         tar -xzf "$SNAPSHOT_PATH" -C / > /dev/null 2>&1 || true
-        # Force named to re-read the restored zonefile regardless of
-        # its SOA serial. A plain ``rndc reload`` is a no-op when the
-        # restored file's SOA serial is LOWER than the staged file's
-        # SOA -- named caches the in-memory zone keyed by serial and
-        # refuses to load a "regression". After a successful stage +
-        # reload, the in-memory zone for $ZONE_NAME holds the staged
-        # (higher) serial; restoring the snapshot brings back the
-        # original (lower) serial on disk and a naive reload would
-        # leave named serving the staged content forever.
+
+        # Force named to re-read the restored zonefile regardless
+        # of its SOA serial. A plain ``rndc reload`` is a no-op
+        # when the restored file's SOA serial is LOWER than the
+        # staged file's SOA -- named caches the in-memory zone
+        # keyed by serial and refuses to load a "regression". After
+        # a successful stage + reload, the in-memory zone for
+        # $ZONE_NAME holds the staged (higher) serial; restoring
+        # the snapshot brings back the original (lower) serial on
+        # disk and a naive reload would leave named serving the
+        # staged content forever.
         #
-        # The canonical bind9 incantation that bypasses the serial
-        # check is freeze -> reload -> thaw on the specific zone:
-        # freeze marks the zone as not dynamically updatable and
-        # tells named to drop its in-memory state for it; the
-        # subsequent reload re-reads the zonefile from disk
-        # unconditionally; thaw restores normal operation. The
-        # whole-server ``rndc reload`` fallback covers cases where
-        # the named ZONE_NAME does not match a configured zone (the
-        # freeze would error harmlessly) or the rollback occurred
-        # before zone resolution -- ``|| true`` keeps every step
-        # best-effort because rollback must never itself throw.
+        # ``rndc freeze`` would only work on a zone configured for
+        # dynamic update (allow-update / update-policy); for the
+        # common static-zone case it is documented to be a no-op
+        # and does NOT drop named's in-memory state. The reliable
+        # mechanism across both static and dynamic zones is to
+        # rewrite the restored zonefile's SOA serial to
+        # (cached_serial + 1) so the reload looks like a forward
+        # step. ``dig @localhost <zone> SOA +short`` returns the
+        # serial named currently has in memory; we bump that by
+        # one and Python-rewrite the SOA line in-place. Python is
+        # the right tool here because the SOA record's grammar has
+        # multiple legal forms (single-line, parenthesised
+        # multi-line, comments interleaved) and a regex with
+        # IGNORECASE + DOTALL handles them all without the
+        # fragility of an awk state-machine. The restored file
+        # carries the snapshot's content byte-for-byte EXCEPT for
+        # the SOA serial; the rest of the zonefile (every record,
+        # every TTL, every directive) round-trips unchanged.
+        #
+        # All steps are best-effort (``|| true``) -- rollback must
+        # never itself raise; the worst-case observable surface is
+        # the same as the freeze-based attempt was (named keeps
+        # the staged zone) plus a fallback whole-server reload.
         if [ -n "$ZONE_NAME" ]; then
-            rndc freeze "$ZONE_NAME" > /dev/null 2>&1 || true
+            CACHED_SERIAL=$(dig @localhost "$ZONE_NAME" SOA +short 2>/dev/null \\
+                | awk '{{print $3}}' | head -1)
+            if [ -n "$CACHED_SERIAL" ] && [ -f "$AUDIT_SLICE_PATH" ]; then
+                NEW_SERIAL=$((CACHED_SERIAL + 1))
+                python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL" <<'PYEOF' > /dev/null 2>&1 || true
+import re
+import sys
+
+zone_file = sys.argv[1]
+new_serial = sys.argv[2]
+with open(zone_file) as f:
+    text = f.read()
+# SOA record grammar (RFC 1035 + bind9 zonefile dialect):
+#   <name> [<ttl>] [<class>] SOA <mname> <rname> <serial> <refresh> <retry> <expire> <minimum>
+# The serial may appear inline or inside a parenthesised group
+# with arbitrary whitespace / comments. We match the SOA keyword
+# (case-insensitive), then mname, rname, an optional ``(``, then
+# the first integer -- which is the serial. count=1 so only the
+# first SOA in the file is touched (zonefiles have exactly one
+# per zone but we are defensive).
+pattern = re.compile(
+    r"(\\bSOA\\b\\s+\\S+\\s+\\S+\\s*\\(?\\s*(?:;[^\\n]*\\n\\s*)*)(\\d+)",
+    re.IGNORECASE,
+)
+new_text, n = pattern.subn(
+    lambda m: m.group(1) + new_serial,
+    text,
+    count=1,
+)
+if n == 1:
+    with open(zone_file, "w") as f:
+        f.write(new_text)
+PYEOF
+            fi
             rndc reload "$ZONE_NAME" > /dev/null 2>&1 || true
-            rndc thaw "$ZONE_NAME" > /dev/null 2>&1 || true
         fi
+        # Whole-server fallback for cases where the per-zone reload
+        # missed (ZONE_NAME not configured, rndc channel hiccup,
+        # the SOA-bump Python step failed silently). Best-effort.
         rndc reload > /dev/null 2>&1 || true
     fi
 }}

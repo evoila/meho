@@ -403,27 +403,37 @@ class TestPipelineScriptRollbackShape:
         )
         assert '[ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]' in script
 
-    def test_rollback_uses_freeze_reload_thaw_for_zone(self) -> None:
-        """Rollback must freeze -> reload -> thaw the affected zone (in that order).
+    def test_rollback_bumps_soa_serial_before_reload(self) -> None:
+        """Rollback must bump the restored zonefile's SOA serial to defeat named's cache.
 
-        Regression for the iter-2 blocker (B4): a plain ``rndc reload``
-        is a NO-OP for a zone whose on-disk SOA serial has REGRESSED
-        relative to the in-memory version. After a successful stage +
-        reload, named caches the staged zone keyed by its (higher)
-        SOA serial; restoring the snapshot zonefile brings back the
-        original (lower) serial, and named refuses to reload it --
-        the staged zone keeps serving in memory even though the disk
-        was restored byte-identically. The integration test at
-        backend/tests/integration/test_connectors_bind9_container.py::
+        Regression for the iter-2 / iter-3 blocker (B4): a plain
+        ``rndc reload`` is a NO-OP for a zone whose on-disk SOA
+        serial has REGRESSED relative to the in-memory version.
+        After a successful stage + reload, named caches the staged
+        zone keyed by its (higher) SOA serial; restoring the
+        snapshot zonefile brings back the original (lower) serial,
+        and named refuses to reload it -- the staged zone keeps
+        serving in memory even though the disk was restored. The
+        integration test at backend/tests/integration/
+        test_connectors_bind9_container.py::
         test_atomic_apply_rollback_on_dig_verify_failure_leaves_tree_unchanged
         caught this against a real bind9 container.
 
-        The canonical bind9 incantation that bypasses the serial
-        check is freeze -> reload -> thaw on the specific zone:
-        freeze tells named to drop its in-memory state for the zone,
-        reload re-reads the zonefile unconditionally, and thaw
-        restores normal operation. This test pins the load-bearing
-        ordering inside rollback().
+        The iter-3 attempt -- ``rndc freeze`` + ``rndc reload`` +
+        ``rndc thaw`` -- failed in CI because ``rndc freeze`` is a
+        documented no-op on a static (non-DDNS) zone and does NOT
+        drop named's in-memory state. The CI fixture's zone has no
+        ``allow-update`` / ``update-policy`` stanza, so the freeze
+        was effectively absent and the subsequent reload remained
+        gated by the SOA serial.
+
+        The mechanism that works on both static and dynamic zones is
+        to read named's cached SOA serial via ``dig @localhost
+        <zone> SOA +short``, set the restored zonefile's serial to
+        ``cached_serial + 1``, and then ``rndc reload <zone>``. The
+        reload now looks like a forward step and named re-reads the
+        file unconditionally. This test pins the load-bearing
+        sequence inside rollback().
         """
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
@@ -431,23 +441,136 @@ class TestPipelineScriptRollbackShape:
             zone_name="evba.lab",
             bind_root="/etc/bind",
         )
-        freeze_idx = script.find('rndc freeze "$ZONE_NAME"')
-        reload_idx = script.find('rndc reload "$ZONE_NAME"')
-        thaw_idx = script.find('rndc thaw "$ZONE_NAME"')
-        assert freeze_idx != -1, "rollback() must invoke ``rndc freeze`` on the zone"
-        assert reload_idx != -1, "rollback() must invoke ``rndc reload`` on the zone"
-        assert thaw_idx != -1, "rollback() must invoke ``rndc thaw`` on the zone"
-        assert freeze_idx < reload_idx < thaw_idx, (
-            "rollback() must freeze BEFORE reloading and thaw AFTER reloading; "
-            "any other ordering either leaves the zone frozen or fails to "
-            "force a re-read of the restored zonefile."
+
+        # The cached-serial read via dig must precede the zone reload
+        # so the restored file's SOA can be bumped above it.
+        dig_idx = script.find('dig @localhost "$ZONE_NAME" SOA +short')
+        assert dig_idx != -1, (
+            "rollback() must read named's cached SOA serial via dig "
+            "to know how high to bump the restored zonefile's serial"
         )
-        # The freeze/thaw block must be inside a ZONE_NAME guard so a
-        # primitive invoked before zone resolution doesn't fire freeze
+
+        # Python-side SOA-bump heredoc must be present and reference
+        # the restored zonefile path + new serial.
+        py_heredoc_idx = script.find('python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL"')
+        assert py_heredoc_idx != -1, (
+            "rollback() must invoke an inline python3 SOA-bump on the "
+            "restored zonefile -- shell/awk alone cannot reliably handle "
+            "the parenthesised / single-line / commented SOA shapes"
+        )
+        # The heredoc body must compile a SOA-targeting regex and
+        # write the bumped serial back to the file.
+        assert "re.compile" in script, (
+            "the inline python must compile a regex to locate the SOA "
+            "serial (single-line and parenthesised forms both occur)"
+        )
+        assert "\\bSOA\\b" in script, (
+            "the regex must anchor on the SOA token (word-boundary) so "
+            "an arbitrary 'SOA' substring inside a record name cannot "
+            "shadow the real SOA line"
+        )
+
+        # The zone-scoped reload must happen AFTER the serial bump
+        # (otherwise named sees the unbumped serial and the reload
+        # is the same no-op the freeze-only attempt was).
+        zone_reload_idx = script.find('rndc reload "$ZONE_NAME"')
+        assert zone_reload_idx != -1, (
+            "rollback() must invoke ``rndc reload <zone>`` after the "
+            "SOA-bump so named re-reads the restored zonefile"
+        )
+        assert py_heredoc_idx < zone_reload_idx, (
+            "the SOA-bump must run BEFORE the zone-scoped rndc reload; "
+            "reloading first would defeat the bump (named would see "
+            "the unbumped serial and skip the reload)"
+        )
+
+        # The SOA-bump must be guarded on non-empty $ZONE_NAME so a
+        # primitive invoked before zone resolution doesn't fire dig
         # against an empty zone argument.
         guard_idx = script.find('if [ -n "$ZONE_NAME" ]')
-        assert guard_idx != -1, "freeze/reload/thaw must be guarded on non-empty $ZONE_NAME"
-        assert guard_idx < freeze_idx, "the $ZONE_NAME guard must precede the freeze call"
+        assert guard_idx != -1, (
+            "the dig/SOA-bump/reload block must be guarded on non-empty $ZONE_NAME"
+        )
+        assert guard_idx < dig_idx, (
+            "the $ZONE_NAME guard must precede the dig call so the rollback "
+            "skips cleanly when invoked before zone resolution"
+        )
+
+        # The previous attempt's freeze/thaw INVOCATIONS must be
+        # gone -- they were inert on static zones and would mislead
+        # anyone reading the rollback path into believing the
+        # in-memory state is being dropped that way. We match on
+        # the executable line shape (the quoted ``$ZONE_NAME``
+        # argument) rather than the bare verb so the comment that
+        # explains WHY freeze was removed can still mention the
+        # word.
+        assert 'rndc freeze "$ZONE_NAME"' not in script, (
+            "rollback() must not invoke ``rndc freeze``: it is a no-op "
+            "on static zones (per iter-3 incident) and the SOA-bump "
+            "approach replaces it"
+        )
+        assert 'rndc thaw "$ZONE_NAME"' not in script, (
+            "rollback() must not invoke ``rndc thaw``: there is no "
+            "freeze to undo under the SOA-bump approach"
+        )
+
+    def test_rollback_python_soa_regex_matches_both_zonefile_shapes(self) -> None:
+        """The embedded Python SOA-bump must rewrite both single-line and parenthesised SOAs.
+
+        bind9 zonefile grammar permits two surface shapes for the
+        SOA record: a single-line form
+        (``@ IN SOA mname rname serial refresh retry expire min``)
+        and a parenthesised multi-line form
+        (``@ IN SOA mname rname ( serial refresh retry expire min )``).
+        The CI integration fixture writes the parenthesised form;
+        :func:`_bump_soa_serial` in ops_record.py emits the
+        single-line form via dnspython's :meth:`Zone.to_text`. The
+        rollback bumper must handle both because it may see either
+        on disk depending on whether the snapshot was taken before
+        or after a record-write op.
+
+        This test extracts the embedded regex from the rendered
+        script and exercises it directly against both shapes to
+        catch any quoting drift between the rendered text and what
+        ``python3 -`` actually sees on the wire.
+        """
+        import re as _re
+
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/snap.tar.gz",
+            audit_slice_path="/etc/bind/db.evba.lab",
+            zone_name="evba.lab",
+            bind_root="/etc/bind",
+        )
+        # Extract the embedded regex pattern verbatim from the script
+        # so this test exercises EXACTLY what runs on the wire.
+        match = _re.search(
+            r'pattern = re\.compile\(\s*r"([^"]+)"',
+            script,
+        )
+        assert match is not None, "embedded SOA-bump regex must be present and parseable"
+        embedded_pattern = _re.compile(match.group(1), _re.IGNORECASE)
+
+        single_line = (
+            "$TTL 3600\n"
+            "@ IN SOA ns1.evba.lab. admin.evba.lab. 2026051801 3600 600 604800 86400\n"
+            "@ IN NS ns1.evba.lab.\n"
+        )
+        new_text, n = embedded_pattern.subn(
+            lambda m: m.group(1) + "2026051900", single_line, count=1
+        )
+        assert n == 1, "embedded regex must match the single-line SOA shape"
+        assert "2026051900 3600 600 604800 86400" in new_text
+
+        multiline = (
+            "$TTL 3600\n"
+            "@ IN SOA ns1.evba.lab. admin.evba.lab. (\n"
+            "    2026051801 3600 600 604800 86400 )\n"
+            "@   IN NS ns1.evba.lab.\n"
+        )
+        new_text, n = embedded_pattern.subn(lambda m: m.group(1) + "2026051900", multiline, count=1)
+        assert n == 1, "embedded regex must match the parenthesised multi-line SOA shape"
+        assert "2026051900 3600 600 604800 86400 )" in new_text
 
 
 class TestPipelineScriptStageShape:
@@ -613,6 +736,89 @@ rollback
         # And the tree digest must match exactly.
         assert _tree_digest() == before, (
             "rollback did not restore /etc/bind/ byte-identical to the snapshot"
+        )
+
+    def test_embedded_python_bumps_soa_on_restored_zonefile(
+        self,
+        tmp_path: Any,
+    ) -> None:
+        """The Python heredoc embedded in rollback() rewrites the SOA serial in place.
+
+        The behavioural test that covers the full rollback path
+        (snapshot tar restore + SOA bump + rndc reload) requires a
+        live bind9 named -- exercised in
+        backend/tests/integration/test_connectors_bind9_container.py.
+        This unit-level test isolates the SOA-bump step: run the
+        embedded python3 program against a temp zonefile, confirm
+        the file's SOA serial is rewritten to the requested value
+        and every other byte stays put. Catches regressions in the
+        heredoc quoting / regex / encoding between releases.
+        """
+        import subprocess
+
+        # Build a parenthesised-multi-line zonefile -- the form the
+        # CI bind9 fixture writes and the form most prone to regex
+        # drift.
+        zone_text = (
+            "$TTL 3600\n"
+            "@ IN SOA ns1.evba.lab. admin.evba.lab. (\n"
+            "    2026051801 3600 600 604800 86400 )\n"
+            "@   IN NS ns1.evba.lab.\n"
+            "ns1 IN A 10.5.50.1\n"
+            "rollback-canary IN A 10.5.50.123\n"
+        )
+        zone_file = tmp_path / "db.evba.lab"
+        zone_file.write_text(zone_text)
+
+        # Extract the python3 program body from the rendered script.
+        # The heredoc body is everything between the literal
+        # ``<<'PYEOF'`` and ``PYEOF`` line markers.
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/snap.tar.gz",
+            audit_slice_path=str(zone_file),
+            zone_name="evba.lab",
+            bind_root="/etc/bind",
+        )
+        start_marker = "<<'PYEOF'"
+        end_marker = "\nPYEOF\n"
+        start = script.find(start_marker)
+        assert start != -1, "PYEOF heredoc start marker missing from rendered script"
+        body_start = script.find("\n", start) + 1
+        body_end = script.find(end_marker, body_start)
+        assert body_end != -1, "PYEOF heredoc end marker missing from rendered script"
+        py_body = script[body_start:body_end]
+
+        # Run the program: ``python3 - <zone_file> <new_serial>``.
+        # Pipe the body in via stdin to mirror the heredoc semantics.
+        new_serial = "2026051999"
+        result = subprocess.run(
+            ["python3", "-", str(zone_file), new_serial],
+            input=py_body,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"embedded python heredoc failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+
+        # The serial must be rewritten to the requested value; every
+        # other byte (SOA mname, rname, the other rdata, the rest of
+        # the records) must round-trip unchanged.
+        new_text = zone_file.read_text()
+        assert new_serial in new_text, "SOA serial was not rewritten to the requested value"
+        assert "2026051801" not in new_text, (
+            "the original serial is still present -- the regex matched in the wrong place"
+        )
+        assert "ns1.evba.lab. admin.evba.lab." in new_text, "mname/rname round-trip failed"
+        assert "rollback-canary IN A 10.5.50.123" in new_text, (
+            "rdata below the SOA was clobbered by the rewrite"
+        )
+        # Diff exactly one numeric token replaced.
+        assert new_text == zone_text.replace("2026051801", new_serial), (
+            "the SOA-bump must change ONLY the serial; the rest of the "
+            "zonefile must be byte-identical"
         )
 
 

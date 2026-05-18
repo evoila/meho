@@ -67,24 +67,38 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from meho_backplane.connectors.bind9 import (
+# meho_backplane is the first-party editable install in this monorepo and
+# ships no py.typed marker yet; the `import-untyped` suppressions below
+# are the same shape used elsewhere in tests/integration/ for first-party
+# imports. The mypy CI gate is restricted to src/, so test files are not
+# routinely type-checked — but anyone running `mypy --strict` on this
+# file should see a clean run.
+from meho_backplane.connectors.bind9 import (  # type: ignore[import-untyped]
     BIND9_OPS,
     Bind9Connector,
     register_bind9_typed_operations,
 )
-from meho_backplane.connectors.registry import (
+from meho_backplane.connectors.registry import (  # type: ignore[import-untyped]
     clear_registry,
     register_connector_v2,
 )
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.engine import get_sessionmaker  # type: ignore[import-untyped]
+from meho_backplane.db.models import AuditLog  # type: ignore[import-untyped]
 from meho_backplane.db.models import Target as TargetORM
-from meho_backplane.operations import dispatch, reset_dispatcher_caches
-from meho_backplane.operations.dispatcher import set_default_reducer
-from meho_backplane.operations.meta_tools import call_operation, search_operations
-from meho_backplane.operations.reducer import PassThroughReducer
+from meho_backplane.operations import (  # type: ignore[import-untyped]
+    dispatch,
+    reset_dispatcher_caches,
+)
+from meho_backplane.operations.dispatcher import (  # type: ignore[import-untyped]
+    set_default_reducer,
+)
+from meho_backplane.operations.meta_tools import (  # type: ignore[import-untyped]
+    call_operation,
+    search_operations,
+)
+from meho_backplane.operations.reducer import PassThroughReducer  # type: ignore[import-untyped]
 from tests.test_operations_dispatcher import _make_operator
 
 # ---------------------------------------------------------------------------
@@ -144,12 +158,21 @@ class _Bind9Target:
     ``port`` + ``secret_ref``. Mirrors the
     :class:`_Bind9Target` stub in ``test_connectors_bind9_container.py``
     plus the dispatcher-resolver fields.
+
+    ``secret_ref`` is a Vault-path string here — matching the
+    canonical column shape (`backplane.db.models.Target.secret_ref` is
+    ``Text``, a vault path that ``hvac`` resolves into SSH credentials
+    on production). The container's real SSH credentials never live
+    on the target stub; they ride a connector-instance preseed (see
+    :class:`_SeededBind9Connector` below), the same single-seam swap
+    the K8s E2E harness (`tests/integration/test_connectors_k8s_e2e.py`)
+    uses for its ``kubeconfig_loader``.
     """
 
     name: str
     host: str
     port: int | None
-    secret_ref: dict[str, Any]
+    secret_ref: str
     product: str = "bind9"
     auth_model: str = "shared_service_account"
     raw_jwt: str | None = "<dev-test-jwt>"
@@ -168,6 +191,29 @@ class _Bind9Target:
             version = "9.18.0"
 
         self.fingerprint = _FP()
+
+
+@dataclass(frozen=True)
+class _ContainerCreds:
+    """SSH credentials the bind9 testcontainer is provisioned with.
+
+    Lives outside :class:`_Bind9Target` so the target stub matches the
+    production ``Target.secret_ref: str`` (Vault path) shape exactly;
+    the test wiring injects these creds into the dispatcher's
+    per-class connector instance and into the sudo-password resolver
+    helpers (see :func:`bind9_e2e`).
+    """
+
+    username: str
+    password: str
+
+
+# Canonical Vault-path string the seeded Target row carries. The
+# preseeded :class:`_SeededBind9Connector` short-circuits the
+# Vault resolve to the testcontainer's real credentials, so the
+# path itself is never resolved against a Vault server. Mirrors the
+# K8s E2E harness's ``"kv/data/k8s/k3s-e2e"`` placeholder.
+_BIND9_VAULT_PATH: str = "kv/dev/bind9/e2e"
 
 
 # ---------------------------------------------------------------------------
@@ -229,21 +275,35 @@ _DOCKERFILE: str = textwrap.dedent(
 
 
 @pytest.fixture(scope="module")
-def bind9_container_target() -> Iterator[_Bind9Target]:
-    """Build the bind9 image, start the container, yield a target stub.
+def bind9_container_target() -> Iterator[tuple[_Bind9Target, _ContainerCreds]]:
+    """Build the bind9 image, start the container, yield (target, creds).
 
     Mirrors the existing ``test_connectors_bind9_container.py`` fixture
     so the container boot path is identical — one harness boots one
     container, not two — but yields the augmented ``_Bind9Target`` shape
-    the dispatcher's resolver expects (``.product`` + ``.fingerprint``).
+    the dispatcher's resolver expects (``.product`` + ``.fingerprint``)
+    paired with the testcontainer's SSH credentials. The credentials
+    travel separately from the target stub because the target stub
+    matches the production ``Target.secret_ref: str`` column shape (a
+    Vault path); the credentials are injected into the dispatcher's
+    connector-instance cache by :func:`bind9_e2e`.
+
+    Container-scope: module. The per-test :func:`bind9_e2e` fixture
+    snapshots ``/etc/bind/`` before yield and restores it on teardown,
+    so write-op state (`record.add` / `config.apply_*`) cannot leak
+    across tests. Module-scope keeps the ~10 s container boot off the
+    per-test path while the snapshot/restore still gives every test a
+    pristine ``/etc/bind/``.
     """
     if not DOCKER_AVAILABLE:
         pytest.skip(SKIP_REASON)
 
     try:
-        from testcontainers.core.container import DockerContainer
-        from testcontainers.core.image import DockerImage
-        from testcontainers.core.waiting_utils import wait_for_logs
+        from testcontainers.core.container import DockerContainer  # type: ignore[import-untyped]
+        from testcontainers.core.image import DockerImage  # type: ignore[import-untyped]
+        from testcontainers.core.waiting_utils import (  # type: ignore[import-untyped]
+            wait_for_logs,
+        )
     except ImportError as exc:  # pragma: no cover -- testcontainers ships these in 4.x
         pytest.skip(f"testcontainers missing module: {exc}")
 
@@ -268,11 +328,36 @@ def bind9_container_target() -> Iterator[_Bind9Target]:
                 name=_TARGET_NAME,
                 host=host,
                 port=port,
-                secret_ref={"username": "root", "password": "testpw"},  # NOSONAR -- container-local
+                secret_ref=_BIND9_VAULT_PATH,
             )
-            yield target
+            # NOSONAR -- container-local credentials, never leave the testcontainer.
+            creds = _ContainerCreds(username="root", password="testpw")
+            yield target, creds
         finally:
             container.stop()
+
+
+class _SeededBind9Connector(Bind9Connector):  # type: ignore[misc]
+    """Bind9Connector preseeded with the testcontainer's SSH credentials.
+
+    Production :class:`Bind9Connector` (via its
+    :class:`~meho_backplane.connectors.adapters.ssh.SshConnector`
+    base) reads SSH credentials from ``target.secret_ref`` as a dict.
+    The production ``Target.secret_ref`` column is ``Text`` (a Vault
+    path); production resolves that path through ``hvac`` before
+    ``_auth_config`` is reached. Wiring the full Vault path in the
+    sandbox is out of scope for this harness, so this subclass
+    short-circuits :meth:`_auth_config` to return the
+    testcontainer's credentials directly. Single-seam swap; mirrors
+    the K8s E2E harness's ``kubeconfig_loader`` injection.
+    """
+
+    def __init__(self, *, creds: _ContainerCreds) -> None:
+        super().__init__()
+        self._test_creds = creds
+
+    async def _auth_config(self, target: Any) -> dict[str, Any]:
+        return {"username": self._test_creds.username, "password": self._test_creds.password}
 
 
 # ---------------------------------------------------------------------------
@@ -290,11 +375,103 @@ def stub_embedding_service() -> AsyncMock:
     return service
 
 
+async def _snapshot_etc_bind(host: str, port: int, creds: _ContainerCreds) -> bytes:
+    """Tar /etc/bind/ over SSH and return the archive bytes.
+
+    Runs on the testcontainer's SSH endpoint; the container's root
+    user has full read on /etc/bind/ (the testcontainer is provisioned
+    with ``NOPASSWD: ALL`` sudo and the container runs as root by
+    default). The archive is held in memory so the per-test fixture's
+    teardown can restore /etc/bind/ byte-identical, defeating
+    write-op state bleed across tests.
+    """
+    import asyncssh  # local import so non-Docker test runs don't pay the import cost
+
+    async with asyncssh.connect(
+        host,
+        port=port,
+        username=creds.username,
+        password=creds.password,
+        known_hosts=None,
+    ) as conn:
+        result = await conn.run("tar -C / -cf - etc/bind", encoding=None, check=True)
+    stdout = result.stdout
+    if not isinstance(stdout, (bytes, bytearray)):
+        raise RuntimeError(
+            f"unexpected snapshot stdout type {type(stdout).__name__}; expected bytes"
+        )
+    return bytes(stdout)
+
+
+async def _restore_etc_bind(host: str, port: int, creds: _ContainerCreds, snapshot: bytes) -> None:
+    """Restore /etc/bind/ from the tar archive captured by :func:`_snapshot_etc_bind`.
+
+    Wipes and extracts in one bash invocation under sudo (the
+    testcontainer's `root ALL=(ALL) NOPASSWD: ALL` sudoers line keeps
+    this hands-off). Reloads named so any zone-content change from the
+    test under-test is washed out before the next test starts.
+    """
+    import asyncssh
+
+    async with asyncssh.connect(
+        host,
+        port=port,
+        username=creds.username,
+        password=creds.password,
+        known_hosts=None,
+    ) as conn:
+        # `tar -xf -` reads the archive from stdin. The wipe is
+        # explicit (rm -rf /etc/bind/*) so any files added by the
+        # test that the snapshot didn't carry are removed before the
+        # restore lays down the original tree.
+        process = await conn.create_process(
+            "sudo -S -p '' bash -c 'rm -rf /etc/bind/* && tar -C / -xf -'",
+            stdin=asyncssh.PIPE,
+            stdout=asyncssh.PIPE,
+            stderr=asyncssh.PIPE,
+            encoding=None,
+        )
+        # The sudoers line is NOPASSWD, but sudo -S still consumes
+        # a leading newline as the "password" before reading the
+        # archive bytes off stdin.
+        process.stdin.write(b"\n")
+        process.stdin.write(snapshot)
+        process.stdin.write_eof()
+        await process.wait()
+        if process.exit_status not in (0, None):
+            stderr = await process.stderr.read()
+            raise RuntimeError(
+                f"restore /etc/bind/ failed (exit={process.exit_status}): {stderr!r}"
+            )
+        # Reload named so the restored zones take effect; -ENOENT here
+        # is tolerable (rndc may not see the apex on a fresh restore
+        # under some kernels) and the next test's named-checkconf in
+        # the atomic-apply path will refresh anyway.
+        await conn.run("sudo -n rndc reload", check=False)
+
+
+@pytest.fixture
+def bind9_creds(
+    bind9_container_target: tuple[_Bind9Target, _ContainerCreds],
+) -> _ContainerCreds:
+    """Expose the testcontainer's SSH credentials to per-test wiring.
+
+    The rollback-acceptance tests build their own production-shape
+    :class:`Bind9Connector` to drive ``connector.bind9_config_apply_*``
+    directly (no dispatcher path); they need the credentials to
+    construct a :class:`_SeededBind9Connector` whose ``_auth_config``
+    short-circuits the Vault read.
+    """
+    _target, creds = bind9_container_target
+    return creds
+
+
 @pytest.fixture
 async def bind9_e2e(
-    bind9_container_target: _Bind9Target,
+    bind9_container_target: tuple[_Bind9Target, _ContainerCreds],
     pg_engine: None,
     stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[_Bind9Target]:
     """Wire the bind9 connector at the live container + real PG audit store.
 
@@ -310,21 +487,34 @@ async def bind9_e2e(
     4. Run :func:`register_bind9_typed_operations` to UPSERT every
        op into ``endpoint_descriptor``.
     5. Insert a tenant-scoped :class:`~meho_backplane.db.models.Target`
-       ORM row so the ``call_operation`` meta-tool path — which
-       resolves ``arguments["target"]={"name": ...}`` through the
-       tenant-scoped :func:`resolve_target` — exercises the real
-       contract.
-
-    No connector-instance preseed: the bind9 connector reads SSH
-    credentials directly from ``target.secret_ref``, so the seeded
-    Target row's secret_ref is enough — no kubeconfig-style loader
-    seam needed.
+       ORM row (``secret_ref=_BIND9_VAULT_PATH`` — the string shape
+       the ``Target.secret_ref: Text`` column actually accepts) so the
+       ``call_operation`` meta-tool path — which resolves
+       ``arguments["target"]={"name": ...}`` through the tenant-scoped
+       :func:`resolve_target` — exercises the real contract.
+    6. Preseed the dispatcher's per-class connector instance cache with
+       a :class:`_SeededBind9Connector` carrying the testcontainer's
+       SSH credentials. Single-seam swap that mirrors
+       ``test_connectors_k8s_e2e.py``'s ``kubeconfig_loader``
+       injection; nothing in the production substrate changes.
+    7. Monkey-patch the module-level
+       :func:`~meho_backplane.connectors.bind9.ops_config._sudo_password_for_target`
+       and
+       :func:`~meho_backplane.connectors.bind9.ops_record._sudo_password_from_target`
+       helpers to return the testcontainer's password. Those helpers
+       are free functions called by the typed-op handlers (they read
+       ``target.secret_ref`` as a dict, which it no longer is), so
+       a target-aware short-circuit here is the cleanest seam.
+    8. Snapshot ``/etc/bind/`` over SSH so write-op tests
+       (`record.add` / `record.remove` / `config.apply_*`) can be
+       rolled back to a known-good tree on teardown, eliminating
+       cross-test state bleed.
 
     The ``targets`` table is a soft-FK column the ``pg_engine`` fixture
     does not truncate, so the row is deleted on teardown to keep
     per-test isolation.
     """
-    target = bind9_container_target
+    target, creds = bind9_container_target
 
     reset_dispatcher_caches()
     set_default_reducer(PassThroughReducer())
@@ -335,6 +525,29 @@ async def bind9_e2e(
         impl_id="bind9-ssh",
         cls=Bind9Connector,
     )
+
+    # Phase 6 — preseed the connector instance the dispatcher resolves
+    # to. The cache is keyed by the registered class (Bind9Connector),
+    # not by the concrete subclass; preseeding the subclass instance
+    # under the Bind9Connector key is the supported test pattern.
+    from meho_backplane.operations import _handler_resolve as _hr
+
+    seeded_connector = _SeededBind9Connector(creds=creds)
+    _hr._CONNECTOR_INSTANCE_CACHE[Bind9Connector] = seeded_connector
+
+    # Phase 7 — short-circuit the sudo-password resolvers. These are
+    # free functions on the ops_config / ops_record modules; the
+    # production resolver reads `target.secret_ref` as a dict, which
+    # it no longer is. Returning the container's password directly
+    # is the cleanest seam.
+    from meho_backplane.connectors.bind9 import ops_config as _ops_config
+    from meho_backplane.connectors.bind9 import ops_record as _ops_record
+
+    def _container_sudo_password(_target: Any) -> str:
+        return creds.password
+
+    monkeypatch.setattr(_ops_config, "_sudo_password_for_target", _container_sudo_password)
+    monkeypatch.setattr(_ops_record, "_sudo_password_from_target", _container_sudo_password)
 
     await register_bind9_typed_operations(embedding_service=stub_embedding_service)
 
@@ -351,9 +564,12 @@ async def bind9_e2e(
                 host=target.host,
                 port=target.port,
                 fqdn=None,
-                # secret_ref on the ORM row is the SSH credential dict;
-                # the bind9 SshConnector reads it directly via
-                # ``_auth_config``.
+                # The Target.secret_ref column is Text — a Vault path
+                # string, not a credentials dict. The seeded connector
+                # instance (phase 6) and the monkey-patched sudo helpers
+                # (phase 7) collectively replace the production
+                # Vault-resolve so the string here is never resolved
+                # against an actual Vault server.
                 secret_ref=target.secret_ref,
                 auth_model="shared_service_account",
                 vpn_required=False,
@@ -366,20 +582,27 @@ async def bind9_e2e(
             )
         )
 
+    # Phase 8 — snapshot /etc/bind/ so per-test write-op state is
+    # rolled back on teardown. The snapshot is held in memory (small
+    # — the test image's /etc/bind/ is <100 KB) so teardown is a
+    # single SSH round-trip.
+    assert target.port is not None, "container fixture failed to expose port 22"
+    snapshot = await _snapshot_etc_bind(target.host, target.port, creds)
+
     try:
         yield target
     finally:
         # Closing every Bind9Connector instance the dispatcher's
         # per-class cache may have built. Tolerant of double-close.
-        from meho_backplane.operations import _handler_resolve as _hr
-
         with contextlib.suppress(Exception):
             cached = _hr._CONNECTOR_INSTANCE_CACHE.get(Bind9Connector)
             if cached is not None:
                 await cached.aclose()
+        # Restore /etc/bind/ from the pre-test snapshot so write-op
+        # state from this test does not bleed into the next one.
+        with contextlib.suppress(Exception):
+            await _restore_etc_bind(target.host, target.port, creds, snapshot)
         # Delete the seeded Target row.
-        from sqlalchemy import delete
-
         with contextlib.suppress(Exception):
             async with sessionmaker() as session, session.begin():
                 await session.execute(
@@ -910,11 +1133,14 @@ async def test_agent_meta_tool_flow_search_then_call_record_add(
 @pytest.mark.asyncio
 async def test_atomic_rollback_on_invalid_apply_views_leaves_tree_unchanged(
     bind9_e2e: _Bind9Target,
+    bind9_creds: _ContainerCreds,
 ) -> None:
     """An invalid apply_views payload rolls back to the pre-op snapshot."""
-    from meho_backplane.connectors.bind9._atomic import AtomicApplyError
+    from meho_backplane.connectors.bind9._atomic import (  # type: ignore[import-untyped]
+        AtomicApplyError,
+    )
 
-    connector = Bind9Connector()
+    connector = _SeededBind9Connector(creds=bind9_creds)
     try:
         before = await _checksum_bind_tree(connector, bind9_e2e)
         with pytest.raises(AtomicApplyError) as exc_info:
@@ -941,11 +1167,12 @@ async def test_atomic_rollback_on_invalid_apply_views_leaves_tree_unchanged(
 @pytest.mark.asyncio
 async def test_atomic_rollback_on_invalid_apply_file_leaves_tree_unchanged(
     bind9_e2e: _Bind9Target,
+    bind9_creds: _ContainerCreds,
 ) -> None:
     """An invalid apply_file fragment rolls back to the pre-op snapshot."""
     from meho_backplane.connectors.bind9._atomic import AtomicApplyError
 
-    connector = Bind9Connector()
+    connector = _SeededBind9Connector(creds=bind9_creds)
     try:
         before = await _checksum_bind_tree(connector, bind9_e2e)
         with pytest.raises(AtomicApplyError) as exc_info:
@@ -969,13 +1196,16 @@ async def test_atomic_rollback_on_invalid_apply_file_leaves_tree_unchanged(
 @pytest.mark.asyncio
 async def test_atomic_rollback_on_unresolvable_record_add_leaves_tree_unchanged(
     bind9_e2e: _Bind9Target,
+    bind9_creds: _ContainerCreds,
 ) -> None:
     """An FQDN outside every served zone refuses pre-stage and the tree
     is byte-identical.
     """
-    from meho_backplane.connectors.bind9.ops_record import ZoneResolutionError
+    from meho_backplane.connectors.bind9.ops_record import (  # type: ignore[import-untyped]
+        ZoneResolutionError,
+    )
 
-    connector = Bind9Connector()
+    connector = _SeededBind9Connector(creds=bind9_creds)
     try:
         before = await _checksum_bind_tree(connector, bind9_e2e)
         with pytest.raises(ZoneResolutionError):
@@ -1004,22 +1234,47 @@ async def test_atomic_rollback_on_unresolvable_record_add_leaves_tree_unchanged(
 
 
 def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() -> None:
-    """No file under ``connectors/`` invokes ``sudo`` outside the safe primitive.
+    """No file under ``connectors/`` builds a ``sudo`` argv outside the safe primitive.
 
     Walks every ``*.py`` under
-    ``backend/src/meho_backplane/connectors/`` looking for any ``sudo``
-    literal in source. The only files that may carry one are
-    :mod:`~meho_backplane.connectors.bind9.connector` (the
-    ``_remote_bash_with_sudo`` helper itself, including its docstring
-    references) and :mod:`~meho_backplane.connectors.bind9._atomic`
-    (the atomic-apply primitive that routes its writes through the
-    helper).
+    ``backend/src/meho_backplane/connectors/`` looking for any string
+    literal whose first token is ``sudo`` — the shape of a sudo argv,
+    whether it appears as the remote command of an SSH ``run`` call
+    (e.g. ``"sudo -S -p '' bash -s"``) or as the first element of a
+    Python list / tuple argv (e.g. ``["sudo", "-S", ...]``,
+    ``("sudo",)``).
 
-    A regression — a sibling connector hand-rolling a ``sudo -S`` or
-    embedding a password in a remote argv — surfaces here as a clear
-    "offender" list pointing at the file that re-introduced the
-    mis-ordered-payload shape behind the 2026-05-04 / 2026-05-05
-    credential leaks (Initiative #367 WI1).
+    Two files are whitelisted by absolute path because they own the
+    safe-sudo primitive:
+
+    * :mod:`~meho_backplane.connectors.bind9.connector` — the
+      ``_remote_bash_with_sudo`` helper, the single legitimate
+      sudo-argv site (``_SUDO_BASH_REMOTE_CMD``).
+    * :mod:`~meho_backplane.connectors.bind9._atomic` — the
+      atomic-apply primitive that funnels its writes through the
+      helper. It carries no sudo argv of its own (it streams a bash
+      script body to ``_remote_bash_with_sudo``); whitelisting it keeps
+      the contract explicit so a future refactor that hoists a sudo
+      argv there is still a deliberate, reviewed step.
+
+    Every sibling connector (and every other bind9 module —
+    ``ops.py`` / ``ops_record.py`` / ``ops_config.py`` /
+    ``ops_zone.py``) is held to the invariant; a regression — a
+    re-introduced ``["sudo", "-S", ...]`` somewhere — surfaces here
+    as a clear offender list pointing at the file that brought back
+    the mis-ordered-payload shape behind the 2026-05-04 /
+    2026-05-05 credential leaks (Initiative #367 WI1).
+
+    Detection shape — ``(?<=['"])sudo(?=['"\\s\\\\])`` — matches
+    ``sudo`` only when immediately preceded by a quote AND followed
+    by a quote / whitespace / backslash. That covers
+    ``"sudo"`` (list-form element), ``'sudo'``, ``"sudo -S ..."``,
+    and ``"sudo\\n"``, while rejecting prose mentions like
+    ``"a sudo credential"`` or the identifier ``sudo_password``.
+    The regex's strictness is *load-bearing*: a looser ``\\bsudo\\b``
+    would false-positive on every docstring mention; a stricter
+    ``\\bsudo\\s+`` would miss the list-form
+    ``["sudo", "-S", ...]`` shape.
 
     This is the same invariant the unit test in
     ``tests/test_connectors_bind9.py`` already asserts; restating it
@@ -1033,7 +1288,23 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
     assert connectors_root.is_dir(), (
         f"connectors root not found at {connectors_root}; test layout drifted"
     )
-    allowed_files = set((connectors_root / "bind9").glob("*.py"))
+    # Narrow whitelist: only the two files that own the safe-sudo
+    # primitive. Everything else under bind9/ (ops_*.py) is held to
+    # the invariant; they reference sudo only via docstrings / error
+    # messages / the ``"sudo_password"`` dict key, all of which the
+    # detection regex below correctly ignores.
+    allowed_files = {
+        connectors_root / "bind9" / "connector.py",
+        connectors_root / "bind9" / "_atomic.py",
+    }
+    # Match `sudo` only as the first token of a string literal — the
+    # universal shape of sudo argv construction, whether it's
+    # ``"sudo -S -p '' bash -s"`` (single-string remote command) or
+    # the first element of a list/tuple argv (``["sudo", "-S", ...]``,
+    # ``("sudo",)``). Rejects prose mentions ("a sudo credential"),
+    # docstring narrative ("the sudo password reuses..."), and the
+    # identifier ``sudo_password`` (no preceding quote).
+    sudo_argv_re = re.compile(r"""(?<=["'])sudo(?=["'\s\\])""")
     offenders: list[str] = []
     for path in connectors_root.rglob("*.py"):
         if path in allowed_files:
@@ -1042,11 +1313,11 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        # Match `sudo ` followed by an argv token (defence vs benign
-        # mentions in docstrings of unrelated connectors).
-        if re.search(r"\bsudo\s+[\w-]", text):
+        if sudo_argv_re.search(text):
             offenders.append(str(path.relative_to(connectors_root)))
     assert not offenders, (
-        "Found `sudo ` references outside the bind9 safe-primitive surface:\n"
+        "Found sudo-argv construction outside the bind9 safe-primitive surface "
+        "(connector.py + _atomic.py). Every match below re-introduces the "
+        "mis-ordered-payload shape that leaked credentials twice in 2026-05:\n"
         + "\n".join(offenders)
     )

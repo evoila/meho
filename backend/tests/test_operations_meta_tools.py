@@ -8,8 +8,10 @@ Coverage matrix (G0.6-T8 / Task #399 acceptance criteria):
 * ``list_operation_groups`` returns enabled groups for a known
   ``connector_id`` with their ``when_to_use`` strings + per-group
   operation counts. Disabled groups are omitted.
-* ``list_operation_groups`` returns an empty groups list for an unknown
-  ``connector_id`` (no 404 -- empty is operationally meaningful).
+* ``list_operation_groups`` / ``search_operations`` raise
+  ``UnknownConnectorError`` for an unknown ``connector_id`` (REST → 404,
+  G0.8-T5 #630); a known connector with zero enabled groups still
+  returns an empty list (the meaningful-empty case is preserved).
 * Tenant scoping on ``list_operation_groups`` -- a tenant-curated group
   is visible only to that tenant.
 * ``search_operations`` ranks hits via hybrid BM25+cosine RRF; the
@@ -48,6 +50,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations.meta_tools import (
+    UnknownConnectorError,
     call_operation,
     describe_descriptor,
     list_operation_groups,
@@ -226,13 +229,34 @@ async def test_list_operation_groups_returns_enabled_groups_with_when_to_use() -
 
 
 @pytest.mark.asyncio
-async def test_list_operation_groups_returns_empty_list_for_unknown_connector() -> None:
-    """AC: unknown connector_id -> empty groups list (not 404)."""
+async def test_list_operation_groups_unknown_connector_raises() -> None:
+    """G0.8-T5: unknown connector_id raises UnknownConnectorError.
+
+    The route layer maps that to a 404; the prior behaviour (empty
+    ``groups`` list, HTTP 200) was the "empty catalog" trap.
+    """
     operator = _make_operator()
 
-    result = await list_operation_groups(operator, {"connector_id": "ghost-9.9"})
+    with pytest.raises(UnknownConnectorError) as excinfo:
+        await list_operation_groups(operator, {"connector_id": "ghost-9.9"})
 
-    assert result == {"connector_id": "ghost-9.9", "groups": []}
+    assert "ghost-9.9" in str(excinfo.value)
+    assert "<impl_id>-<version>" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_search_operations_unknown_connector_raises(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """G0.8-T5: search_operations raises UnknownConnectorError too —
+    identical unknown-vs-known-empty semantics across both meta-tools."""
+    operator = _make_operator()
+
+    with pytest.raises(UnknownConnectorError):
+        await search_operations(
+            operator,
+            {"connector_id": "ghost-9.9", "query": "anything"},
+        )
 
 
 @pytest.mark.asyncio
@@ -367,7 +391,22 @@ async def test_list_operation_groups_includes_operation_count(
 async def test_search_operations_returns_empty_list_on_empty_corpus(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """No descriptors registered -> ``hits`` is an empty list."""
+    """A KNOWN connector with no matching descriptors -> empty ``hits``.
+
+    The connector is made known-as-data via a seeded group (no
+    descriptors), so this exercises the known-empty path rather than
+    the unknown-connector path (which now raises ``UnknownConnectorError``;
+    see ``test_search_operations_unknown_connector_raises``).
+    """
+    await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV v2",
+        when_to_use="kv.",
+    )
     operator = _make_operator()
 
     result = await search_operations(

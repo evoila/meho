@@ -29,9 +29,10 @@ from uuid import UUID
 from sqlalchemy import select
 
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 
 __all__ = [
+    "connector_exists",
     "count_known_ops",
     "lookup_descriptor",
     "parse_connector_id",
@@ -156,3 +157,52 @@ async def count_known_ops(
             )
         )
         return len(result.all())
+
+
+async def connector_exists(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> bool:
+    """Return whether any operations data exists for *(product, version, impl_id)*.
+
+    "Exists" is deliberately decoupled from ``is_enabled`` /
+    ``review_status``: a connector that has registered descriptors or
+    groups but has none *enabled* yet is still a *known* connector. The
+    meta-tools use this to tell "unknown connector_id" (no rows at all
+    for the triple — surface a 404 so a malformed/mis-shaped id fails
+    loud) apart from "known connector, zero enabled groups" (rows exist
+    but none enabled — a meaningful empty list, ``200 []``).
+
+    The DB is the source of truth rather than the in-memory connector
+    registry: every registered connector (typed, v1-compat, and
+    ingested generic) writes ``endpoint_descriptor`` / ``operation_group``
+    rows, and the registry is process-local while the rows are durable.
+    Two cheap ``LIMIT 1`` existence probes — descriptors first (the
+    common case), groups as the fallback for a connector whose groups
+    were seeded ahead of its operations.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        descriptor_hit = await session.execute(
+            select(EndpointDescriptor.id)
+            .where(
+                EndpointDescriptor.product == product,
+                EndpointDescriptor.version == version,
+                EndpointDescriptor.impl_id == impl_id,
+            )
+            .limit(1)
+        )
+        if descriptor_hit.first() is not None:
+            return True
+        group_hit = await session.execute(
+            select(OperationGroup.id)
+            .where(
+                OperationGroup.product == product,
+                OperationGroup.version == version,
+                OperationGroup.impl_id == impl_id,
+            )
+            .limit(1)
+        )
+        return group_hit.first() is not None

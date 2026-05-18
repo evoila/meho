@@ -80,6 +80,7 @@ from sqlalchemy import select
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations._lookup import connector_exists, parse_connector_id
 from meho_backplane.operations._search import hybrid_search, resolve_group_id
 from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.targets.resolver import resolve_target
@@ -90,11 +91,30 @@ __all__ = [
     "OperationDescriptor",
     "OperationGroupSummary",
     "OperationSearchHit",
+    "UnknownConnectorError",
     "call_operation",
     "describe_descriptor",
     "list_operation_groups",
     "search_operations",
 ]
+
+
+class UnknownConnectorError(ValueError):
+    """Raised when a ``connector_id`` names no registered connector.
+
+    A *domain* exception, not a transport one. The shared meta-tool
+    handlers (REST route, MCP transport, CLI) must not couple to
+    :class:`fastapi.HTTPException` — the MCP server's generic
+    ``except Exception`` would otherwise mistranslate a clean
+    "unknown connector" into a JSON-RPC ``INTERNAL_ERROR`` (a worse
+    trap than the empty-200 this task removes). The REST route maps
+    this to ``404`` explicitly; the MCP/CLI surfaces let it propagate
+    as the structured handler error they already render. Subclasses
+    :class:`ValueError` to stay consistent with the other meta-tool
+    domain exceptions (e.g. the missing-target ``ValueError`` mapped
+    to ``400`` in :mod:`meho_backplane.api.v1.operations`).
+    """
+
 
 _log = structlog.get_logger(__name__)
 
@@ -226,15 +246,24 @@ async def list_operation_groups(
     Only ``review_status='enabled'`` groups are returned — staged /
     disabled groups remain hidden from the agent. Tenant scoping: the
     union of built-in (``tenant_id IS NULL``) and tenant-curated
-    (``tenant_id == operator.tenant_id``) rows. Unknown ``connector_id``
-    returns an empty ``groups`` list rather than a 404 — empty is
-    operationally meaningful (the agent learns the connector has no
-    enabled groups yet).
+    (``tenant_id == operator.tenant_id``) rows.
+
+    An *unknown* ``connector_id`` (no descriptors or groups registered
+    for the parsed ``(product, version, impl_id)`` triple) raises
+    :class:`UnknownConnectorError` — the REST route maps that to a
+    ``404``. A *known* connector with zero enabled groups still returns
+    an empty ``groups`` list (``200 []``): that empty is operationally
+    meaningful (the connector exists; nothing is enabled yet). The
+    distinction ends the "empty catalog" trap where a mis-shaped
+    ``connector_id`` looked indistinguishable from an empty connector.
     """
     connector_id = arguments["connector_id"]
-    from meho_backplane.operations._lookup import parse_connector_id
-
     product, version, impl_id = parse_connector_id(connector_id)
+    if not await connector_exists(product=product, version=version, impl_id=impl_id):
+        raise UnknownConnectorError(
+            f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
+            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'); see GET /api/v1/connectors"
+        )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         # Count operations per group in a single pass so the response can
@@ -316,6 +345,12 @@ async def search_operations(
     signal scores + ranks are surfaced so the agent (and operator
     debugging) can see whether a hit came from lexical match, semantic
     match, or both.
+
+    Like :func:`list_operation_groups`, an *unknown* ``connector_id``
+    raises :class:`UnknownConnectorError` (REST → ``404``) while a
+    *known* connector with no matching ops still returns an empty
+    ``hits`` list (``200 []``) — identical unknown-vs-known-empty
+    semantics across both meta-tools.
     """
     connector_id = arguments["connector_id"]
     query = arguments["query"]
@@ -326,9 +361,12 @@ async def search_operations(
     if limit > SEARCH_LIMIT_MAX:
         limit = SEARCH_LIMIT_MAX
 
-    from meho_backplane.operations._lookup import parse_connector_id
-
     product, version, impl_id = parse_connector_id(connector_id)
+    if not await connector_exists(product=product, version=version, impl_id=impl_id):
+        raise UnknownConnectorError(
+            f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
+            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'); see GET /api/v1/connectors"
+        )
     started = time.monotonic()
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

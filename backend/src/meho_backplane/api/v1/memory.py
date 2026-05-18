@@ -437,7 +437,26 @@ async def forget(
     service returns -- on the exception path it stays unbound,
     which is the truthful signal (we don't know whether the row
     existed because the call failed).
+
+    Slug length is bounded at the path-parameter parse stage
+    (mirrors the recall route) so a pathological slug substring in
+    the URL can't be bound onto audit/broadcast contextvars before
+    the service's regex pass would have rejected it. 404 (not 422)
+    preserves the idempotent-delete contract: a probing caller
+    can't distinguish "slug shape rejected at the edge" from
+    "slug not found".
     """
+    if len(slug) > _SLUG_MAX_LENGTH:
+        # Path parameter overrun -- defence-in-depth before the
+        # service's regex pass, and before bind_contextvars writes
+        # the oversized slug into the audit/broadcast payload.
+        # Surface as 404 to match the idempotent-missing contract
+        # the rest of this route documents (a 422 here would let a
+        # probing caller distinguish edge-reject from not-found).
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="memory_not_found",
+        )
     structlog.contextvars.bind_contextvars(
         audit_op_id=_MEMORY_OP_IDS["forget"],
         audit_op_class="write",

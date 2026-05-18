@@ -804,6 +804,64 @@ def test_forget_target_scope_without_target_name_returns_422(
     assert "target_name" in response.json()["detail"]
 
 
+@pytest.mark.asyncio
+async def test_forget_oversized_slug_returns_404_without_binding_slug(
+    client: TestClient,
+) -> None:
+    """Oversized DELETE slug → 404 before ``bind_contextvars`` runs.
+
+    The recall route guards ``len(slug) > _SLUG_MAX_LENGTH`` *before*
+    ``bind_contextvars`` so the oversized slug never lands in the
+    audit/broadcast payload. The forget route applies the same guard
+    for parity (review finding m1, PR #643). This regression proves:
+
+    * the route returns 404 (not 422, mirrors recall's info-leak shape)
+    * :meth:`MemoryService.forget` is never invoked (the edge guard
+      rejects before the service call)
+    * the audit row's payload does NOT contain ``slug`` (because
+      ``bind_contextvars`` never ran on this request) -- without the
+      guard the oversized substring would be pessimistically bound
+      into the audit payload before the service rejects it.
+
+    The middleware always emits an audit row for the request, so the
+    test asserts *what's in the payload*, not *that no row exists*.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    # 257 chars -- one over _SLUG_MAX_LENGTH (256).
+    oversized_slug = "a" * 257
+    fake_forget = AsyncMock(return_value=True)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.forget", fake_forget),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.delete(
+            f"/api/v1/memory/user/{oversized_slug}",
+            headers=_authed(token),
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "memory_not_found"
+    # Service must NOT be called -- edge guard rejected the request.
+    fake_forget.assert_not_called()
+
+    rows = await _audit_rows_for_path(f"/api/v1/memory/user/{oversized_slug}")
+    delete_rows = [r for r in rows if r.method == "DELETE"]
+    assert len(delete_rows) == 1, "expected exactly one audit row for oversized DELETE"
+    payload = delete_rows[0].payload
+    # Slug guard runs BEFORE bind_contextvars -- so neither op_id, scope,
+    # nor slug should be present on the audit row's payload. The truthful
+    # signal is that the route never classified this request as a
+    # memory.forget op_id (it short-circuited at the edge).
+    assert "slug" not in payload, (
+        "oversized slug must NOT appear in audit payload "
+        "(bind_contextvars must run *after* the length guard)"
+    )
+    assert payload.get("op_id") != "memory.forget", (
+        "an early-rejected request must not classify as memory.forget"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Audit op_id binding contract
 # ---------------------------------------------------------------------------

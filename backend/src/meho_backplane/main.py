@@ -337,7 +337,13 @@ app.include_router(api_v1_kb_router)
 # collapse to 404 (not 403) to prevent enumerating other operators via
 # status-code differential. Per-scope RBAC is delegated to the service's
 # :class:`MemoryRbacResolver` (e.g. only ``tenant_admin`` writes
-# ``tenant``-scoped); route-layer dependency is ``require_role(OPERATOR)``.
+# ``tenant``-scoped). Route-layer dependency is split: reads gated by
+# ``require_role(READ_ONLY)`` (``GET /api/v1/memory`` +
+# ``GET /api/v1/memory/{scope}/{slug}``), writes by ``require_role(OPERATOR)``
+# (``POST /api/v1/memory`` + ``DELETE /api/v1/memory/{scope}/{slug}``) --
+# the split is load-bearing because :class:`MemoryRbacResolver`
+# explicitly allows ``read_only`` operators to read ``tenant`` /
+# ``target`` scopes per consumer-needs §G5 L131.
 # Audit + broadcast op_ids: ``memory.remember`` / ``memory.list`` /
 # ``memory.recall`` / ``memory.forget`` -- bound via the ``audit_op_id`` /
 # ``audit_op_class`` contextvar overrides the chassis publisher honours.

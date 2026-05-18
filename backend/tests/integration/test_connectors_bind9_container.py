@@ -92,7 +92,7 @@ _DOCKERFILE: str = textwrap.dedent(
     RUN apt-get update \\
      && apt-get install -y --no-install-recommends \\
           bind9 bind9-host bind9utils dnsutils \\
-          openssh-server \\
+          openssh-server sudo \\
      && rm -rf /var/lib/apt/lists/*
 
     # Allow root SSH login with password for the test fixture only;
@@ -102,6 +102,20 @@ _DOCKERFILE: str = textwrap.dedent(
      && echo 'root:testpw' | chpasswd \\
      && sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \\
      && sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+    # Atomic-apply ops (record.add / record.remove and the two
+    # rollback acceptance-criterion tests) route every remote write
+    # through ``sudo -S -p '' bash -s``. The package above provides
+    # ``sudo``; we ALSO grant root passwordless sudo here so the
+    # ``_remote_bash_with_sudo`` helper's stdin password line does
+    # not stall the pipeline. Root authenticates without password
+    # already via the host's PAM rules, but ``sudo -S`` still reads
+    # one line from stdin before exec'ing -- giving root NOPASSWD
+    # makes the stdin password line a no-op rather than a required
+    # consumer. This is fixture-only; production targets carry a
+    # real sudo password on ``target.secret_ref``.
+    RUN echo 'root ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/99-meho-test \\
+     && chmod 0440 /etc/sudoers.d/99-meho-test
 
     # Seed a test zone -- the read-op tests (bind9.zone.list /
     # bind9.zone.read / bind9.record.get) assert against this
@@ -412,11 +426,25 @@ async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -
     fingerprint. ``find -type f | sort | xargs sha256sum`` is the
     standard incantation; we add the absolute paths into the digest
     by hashing the find+sha256sum combined output.
+
+    Fail-closed on a non-zero exit: a failing probe (find / sha256sum
+    not available, /etc/bind missing, permissions changed mid-test)
+    would otherwise collapse to an empty string, and the rollback
+    assertion ``before == after`` would silently pass on two empty
+    strings -- the load-bearing acceptance criterion this test
+    encodes. Surface the failure explicitly so a broken probe fails
+    the test instead of false-positive-ing the rollback proof.
     """
     cmd = "find /etc/bind -type f -printf '%p\\n' | sort | xargs -d '\\n' sha256sum | sha256sum"
     proc = await connector._run_command(target, cmd, raw_jwt="")
+    exit_status = getattr(proc, "exit_status", 0)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
-    return stdout.strip() if isinstance(stdout, str) else ""
+    digest = stdout.strip() if isinstance(stdout, str) else ""
+    assert exit_status == 0, (
+        f"_checksum_bind_tree probe exited {exit_status}; stderr={getattr(proc, 'stderr', '')!r}"
+    )
+    assert digest, "_checksum_bind_tree returned empty digest -- rollback proof would false-pass"
+    return digest
 
 
 @pytest.mark.asyncio

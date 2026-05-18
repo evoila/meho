@@ -78,6 +78,7 @@ __all__ = [
     "BIND9_RECORD_REMOVE_LLM_INSTRUCTIONS",
     "BIND9_RECORD_REMOVE_PARAMETER_SCHEMA",
     "RECORD_OPS",
+    "RemoteCommandError",
     "ZoneResolutionError",
     "bind9_record_add",
     "bind9_record_get",
@@ -85,6 +86,52 @@ __all__ = [
     "parse_dig_answer",
     "resolve_zone_for_fqdn",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Remote-command failure surface
+# ---------------------------------------------------------------------------
+
+
+class RemoteCommandError(RuntimeError):
+    """A remote ``_run_command`` invocation exited non-zero.
+
+    The pre-T3 shape parsed ``proc.stdout`` regardless of
+    ``proc.exit_status`` -- a failing ``named-checkconf -p`` (named
+    not running, missing config, perms) degraded into "empty zone
+    list" which then surfaced as :class:`ZoneResolutionError`
+    ``unresolvable`` even though the FQDN itself was fine. CodeRabbit
+    flagged the four sites where the shape leaked operational faults
+    into the wrong error class; this is the typed surface every site
+    now raises so the dispatcher's ``connector_error`` branch carries
+    the real failure shape (command + exit_status + stderr) rather
+    than guessing.
+    """
+
+    def __init__(self, command: str, exit_status: int, stderr: str) -> None:
+        super().__init__(
+            f"remote command {command!r} exited {exit_status}: {stderr.strip() or '<no stderr>'}"
+        )
+        self.command: str = command
+        self.exit_status: int = exit_status
+        self.stderr: str = stderr
+
+
+def _require_zero_exit(proc: Any, *, command: str) -> str:
+    """Return ``proc.stdout`` decoded as text, or raise on non-zero exit.
+
+    Centralises the exit-status check so every remote-command call
+    site routes failures through the same typed surface. The check
+    runs **before** the caller parses stdout, so a failing command
+    cannot silently degrade into "the parse returned empty".
+    """
+    exit_status = getattr(proc, "exit_status", 0)
+    if exit_status != 0:
+        stderr_raw = getattr(proc, "stderr", "")
+        stderr_text = stderr_raw if isinstance(stderr_raw, str) else ""
+        raise RemoteCommandError(command, int(exit_status), stderr_text)
+    stdout_raw = getattr(proc, "stdout", "")
+    return stdout_raw if isinstance(stdout_raw, str) else ""
 
 
 # Supported record types for ``bind9.record.get`` -- the operator-relevant
@@ -387,14 +434,23 @@ def resolve_zone_for_fqdn(zones: list[str], fqdn: str) -> str:
     a root-served record is well outside this connector's scope, and
     treating ``.`` as a match for every FQDN would break the
     longest-suffix invariant (every FQDN trivially ends with ``.``).
+
+    DNS names are case-insensitive (RFC 1035 §2.3.3): ``API.EVBA.lab``
+    must match the zone ``evba.lab`` the same way the running daemon
+    treats them as equivalent. We lower-case both sides before the
+    label comparison so a mixed-case operator input is not rejected
+    as unresolvable. The returned zone name preserves the canonical
+    lower-case form (zonefile paths derived from this value flow
+    through ``named-checkconf -p`` which already normalises to
+    lower-case in its output, so the round-trip is stable).
     """
-    fqdn_normalised = fqdn.rstrip(".")
+    fqdn_normalised = fqdn.rstrip(".").lower()
     fqdn_labels = fqdn_normalised.split(".")
     best_match: str | None = None
     best_label_count = -1
     ties: list[str] = []
     for zone in zones:
-        zone_normalised = zone.rstrip(".")
+        zone_normalised = zone.rstrip(".").lower()
         if not zone_normalised or zone_normalised == ".":
             continue
         zone_labels = zone_normalised.split(".")
@@ -436,9 +492,9 @@ async def _resolve_zone_via_checkconf(
         parse_named_checkconf_zones,
     )
 
-    proc = await connector._run_command(target, "named-checkconf -p", raw_jwt="")
-    stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
-    output = stdout if isinstance(stdout, str) else ""
+    cmd = "named-checkconf -p"
+    proc = await connector._run_command(target, cmd, raw_jwt="")
+    output = _require_zero_exit(proc, command=cmd)
     rows = parse_named_checkconf_zones(output)
     zone_names = [row["name"] for row in rows]
     zone_name = resolve_zone_for_fqdn(zone_names, fqdn)
@@ -633,9 +689,15 @@ async def _read_zonefile_text(
     path-safety.
     """
     quoted_path = "'" + zonefile_path.replace("'", "'\\''") + "'"
-    cat_proc = await connector._run_command(target, f"cat {quoted_path}", raw_jwt="")
-    cat_stdout = (cat_proc.stdout or "") if hasattr(cat_proc, "stdout") else ""
-    return cat_stdout if isinstance(cat_stdout, str) else ""
+    cmd = f"cat {quoted_path}"
+    # ``cat`` is non-zero on missing-file / permission-denied; a silent
+    # degrade to "" would let the dnspython parser surface the read
+    # failure as a malformed-zonefile error and lose the real root
+    # cause (the file isn't readable). Route through the typed surface
+    # so the dispatcher's connector_error envelope carries the actual
+    # remote exit status + stderr.
+    cat_proc = await connector._run_command(target, cmd, raw_jwt="")
+    return _require_zero_exit(cat_proc, command=cmd)
 
 
 async def bind9_record_add(
@@ -812,9 +874,9 @@ async def _resolve_zonefile_path_for_zone(
         _resolve_zonefile_path,
     )
 
-    proc = await connector._run_command(target, "named-checkconf -p", raw_jwt="")
-    stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
-    output = stdout if isinstance(stdout, str) else ""
+    cmd = "named-checkconf -p"
+    proc = await connector._run_command(target, cmd, raw_jwt="")
+    output = _require_zero_exit(proc, command=cmd)
     try:
         return _resolve_zonefile_path(output, zone_name)
     except ZonefileReadError as exc:

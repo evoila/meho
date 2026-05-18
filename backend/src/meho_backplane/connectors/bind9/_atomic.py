@@ -218,6 +218,19 @@ BIND_ROOT={bind_root}
 
 rollback() {{
     if [ -f "$SNAPSHOT_PATH" ]; then
+        # Byte-identical rollback contract: the snapshot tar must
+        # restore /etc/bind/ to exactly its pre-op shape, including
+        # the absence of any file the stage step (or a future T4
+        # config-write op) created after the snapshot was taken.
+        # ``tar -xzf`` extracts in place but does NOT remove files
+        # that exist on disk but not in the archive, so a naive
+        # extract leaves orphans behind. We therefore clear $BIND_ROOT
+        # first, then extract -- with an explicit guard against an
+        # empty / "/" value so a misconfiguration can never rm -rf
+        # the host root.
+        if [ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]; then
+            find "$BIND_ROOT" -mindepth 1 -delete > /dev/null 2>&1 || true
+        fi
         tar -xzf "$SNAPSHOT_PATH" -C / > /dev/null 2>&1 || true
         rndc reload > /dev/null 2>&1 || true
     fi
@@ -245,8 +258,23 @@ echo "===STATE_BEFORE_END==="
 # Step 3: stage. The staged bytes arrive base64-encoded in the
 # BIND9_STAGED_B64 env var so a payload containing arbitrary bytes
 # (including newlines and quoting that would clash with heredoc
-# delimiters) round-trips unchanged. Decoded inline.
-printf '%s' "$BIND9_STAGED_B64" | base64 -d > "$AUDIT_SLICE_PATH"
+# delimiters) round-trips unchanged. Decoded inline. Wrapped in the
+# same explicit-check shape every other step uses so a write failure
+# (ENOSPC / EACCES / read-only fs / base64 decode failure on a corrupt
+# payload) routes through rollback and surfaces step=``stage`` rather
+# than exiting under ``set -e`` with no rollback and no FAILED_STEP
+# marker (which would degrade to the snapshot-step fallback even
+# though the snapshot succeeded and the audit slice may be partially
+# truncated).
+if ! STAGE_OUT=$(printf '%s' "$BIND9_STAGED_B64" | base64 -d > "$AUDIT_SLICE_PATH" 2>&1); then
+    rollback
+    echo "===FAILED_STEP===stage"
+    echo "===FAILED_DETAIL_BEGIN==="
+    printf '%s' "$STAGE_OUT"
+    echo
+    echo "===FAILED_DETAIL_END==="
+    exit 9
+fi
 # Preserve the bind:bind ownership the daemon expects.
 chown root:bind "$AUDIT_SLICE_PATH" 2>/dev/null || true
 chmod 644 "$AUDIT_SLICE_PATH" 2>/dev/null || true
@@ -350,34 +378,61 @@ def _parse_pipeline_output(
     dict keys, not empty strings -- so the caller can distinguish "the
     section was present and contained empty content" from "the script
     didn't reach that section".
+
+    Newline fidelity: ``splitlines(keepends=True)`` preserves each
+    line's exact line-ending bytes; sentinel-bracketed sections are
+    reassembled via ``"".join(...)`` so the captured slice round-trips
+    every byte of the original content (including or excluding a
+    trailing newline depending on what the source file carried). The
+    audit-replay path (G8.2) compares pre/post-op slice content
+    byte-for-byte; a parser that normalised line endings would force
+    every replay to diff cosmetically and obscure real semantic
+    differences. Marker detection uses ``rstrip("\\r\\n")`` so the
+    ``=== ... ===`` prefix/suffix checks match regardless of the
+    line's terminator (Unix LF, Windows CRLF, or a final line with no
+    terminator at all).
     """
     sections: dict[str, list[str]] = {}
     current: str | None = None
     failed_step: str | None = None
     saw_success = False
 
-    for raw_line in stdout.splitlines():
+    for raw_line in stdout.splitlines(keepends=True):
+        stripped = raw_line.rstrip("\r\n")
         # ``===FAILED_STEP===<name>`` -- one-line marker
-        if raw_line.startswith("===FAILED_STEP==="):
-            failed_step = raw_line[len("===FAILED_STEP===") :].strip()
+        if stripped.startswith("===FAILED_STEP==="):
+            failed_step = stripped[len("===FAILED_STEP===") :].strip()
             continue
-        if raw_line == "===SUCCESS===":
+        if stripped == "===SUCCESS===":
             saw_success = True
             continue
         # ``===<NAME>_BEGIN===`` opens a multi-line section
-        if raw_line.startswith("===") and raw_line.endswith("_BEGIN==="):
-            name = raw_line[len("===") : -len("_BEGIN===")]
+        if stripped.startswith("===") and stripped.endswith("_BEGIN==="):
+            name = stripped[len("===") : -len("_BEGIN===")]
             current = name
             sections[name] = []
             continue
         # ``===<NAME>_END===`` closes the current section
-        if raw_line.startswith("===") and raw_line.endswith("_END==="):
+        if stripped.startswith("===") and stripped.endswith("_END==="):
             current = None
             continue
         if current is not None:
             sections[current].append(raw_line)
 
-    result: dict[str, str] = {name: "\n".join(lines) for name, lines in sections.items()}
+    result: dict[str, str] = {name: "".join(lines) for name, lines in sections.items()}
+    # The bash script bookends each captured slice with explicit
+    # ``echo`` calls (which append a newline of their own) so the slice
+    # arrives with one trailing LF that the script added, not the
+    # source file. Strip exactly one terminal newline (if present) so
+    # the captured value matches what ``cat`` produced on the wire --
+    # the file content itself. Multi-line slices keep their internal
+    # newlines intact byte-for-byte. The "exactly one" rule is what
+    # distinguishes this from the pre-fix splitlines/join shape, which
+    # silently dropped a trailing-newline distinction that mattered
+    # for audit replay.
+    for name in ("STATE_BEFORE", "STATE_AFTER", "FAILED_DETAIL"):
+        if name in result and result[name].endswith("\n"):
+            result[name] = result[name][:-1]
     if failed_step is not None:
         result["FAILED_STEP"] = failed_step
     if saw_success:

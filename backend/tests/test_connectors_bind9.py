@@ -467,6 +467,77 @@ def test_sudo_is_only_referenced_via_the_safe_primitive() -> None:
     )
 
 
+def test_no_sudo_shell_fragment_outside_connector_and_atomic() -> None:
+    """Defence-in-depth: only bind9/connector.py + bind9/_atomic.py may carry ``sudo ``.
+
+    The :func:`test_sudo_is_only_referenced_via_the_safe_primitive`
+    test guards the whole-connectors-tree boundary; this complementary
+    check tightens the rule *inside* the bind9 package. Only two
+    files are permitted to embed a literal ``sudo `` shell fragment
+    in production code:
+
+    * ``connector.py`` -- defines :meth:`_remote_bash_with_sudo`, the
+      sole safe-sudo primitive.
+    * ``_atomic.py`` -- the atomic-apply primitive routes its remote
+      exec through :meth:`_remote_bash_with_sudo`; the bash pipeline
+      it renders contains ``sudo``-adjacent reload / checkzone calls
+      (those run as root via the safe primitive's bash -s), not a
+      ``sudo`` shell fragment per se, but the file passes through
+      this filter as a matter of policy.
+
+    A new sibling module (T4 ``ops_config`` / future write-op groups)
+    that embeds ``sudo `` directly bypasses the safe primitive's
+    invariants -- newline / NUL stripping, stdin password streaming,
+    structured logging. T4 will add ``config.apply_*`` ops via the
+    SAME safe primitive (the rendering will happen in
+    ``_atomic.py``); any module-level ``sudo ``-string fragment in
+    a new file fails this check.
+
+    Strips comments and docstring lines so module-level prose
+    referencing ``sudo`` is non-load-bearing.
+    """
+    from pathlib import Path
+
+    bind9_root = (
+        Path(__file__).resolve().parent.parent / "src" / "meho_backplane" / "connectors" / "bind9"
+    )
+    import re
+
+    permitted_filenames = {"connector.py", "_atomic.py"}
+    # Match a shell-fragment-shaped ``sudo <cmd>`` -- a string literal
+    # opening with ``"sudo `` or ``'sudo `` (where the next token is
+    # the command to elevate). Prose strings like
+    # ``"bind9 write ops require a sudo credential"`` carry the word
+    # ``sudo`` in the middle of a sentence and are NOT shell fragments;
+    # this regex deliberately excludes them.
+    shell_fragment_re = re.compile(r"""['"]sudo\s+\S""")
+    offenders: list[str] = []
+    for py_file in bind9_root.glob("*.py"):
+        if py_file.name in permitted_filenames:
+            continue
+        content = py_file.read_text(encoding="utf-8")
+        # Strip comments and skip lines inside a docstring (``"""`` or
+        # ``'''``). A line-based filter is adequate -- the assertion
+        # fires only on shell-fragment-shaped literals, and docstrings
+        # are toggled out by the triple-quote bookkeeping below.
+        in_docstring = False
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            stripped = line.strip()
+            triple_count = stripped.count('"""') + stripped.count("'''")
+            if triple_count % 2 == 1:
+                in_docstring = not in_docstring
+                continue
+            if in_docstring:
+                continue
+            code = line.split("#", 1)[0]
+            if shell_fragment_re.search(code):
+                offenders.append(f"{py_file.name}:{lineno}: {line!r}")
+    assert not offenders, (
+        "Found ``sudo <cmd>`` shell-fragment literals outside connector.py / _atomic.py:\n"
+        + "\n".join(offenders)
+    )
+
+
 # ---------------------------------------------------------------------------
 # fingerprint -- canonical shape + version parsing (AC #4)
 # ---------------------------------------------------------------------------

@@ -49,6 +49,7 @@ from meho_backplane.connectors.bind9._atomic import (
     atomic_apply,
 )
 from meho_backplane.connectors.bind9.ops_record import (
+    RemoteCommandError,
     ZoneResolutionError,
     _add_record_to_zonefile,
     _remove_record_from_zonefile,
@@ -154,6 +155,20 @@ class TestResolveZoneForFqdn:
             resolve_zone_for_fqdn(["evba.lab", "evba.lab."], "api.evba.lab")
         assert exc_info.value.reason == "ambiguous"
         assert sorted(exc_info.value.candidates) == ["evba.lab", "evba.lab"]
+
+    def test_mixed_case_fqdn_matches_lowercase_zone(self) -> None:
+        """DNS names are case-insensitive (RFC 1035 §2.3.3).
+
+        Operator input through the API surface arrives in whatever
+        case the human typed (``API.EVBA.LAB``); the running daemon
+        treats it as equivalent to ``api.evba.lab``. The resolver
+        must do the same -- a case-sensitive comparison would reject
+        legitimate input as unresolvable.
+        """
+        assert resolve_zone_for_fqdn(["evba.lab"], "API.EVBA.lab") == "evba.lab"
+        assert resolve_zone_for_fqdn(["EVBA.LAB"], "api.evba.lab") == "evba.lab"
+        # Mixed case on both sides.
+        assert resolve_zone_for_fqdn(["EvBa.LaB"], "Api.EvBa.lAb") == "evba.lab"
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +316,258 @@ class TestPipelineParse:
         assert sections["FAILED_STEP"] == "checkconf"
         assert "broken.example" in sections["FAILED_DETAIL"]
         assert "SUCCESS" not in sections
+
+    def test_internal_blank_lines_preserved(self) -> None:
+        """A zonefile slice with blank rows round-trips verbatim (audit replay).
+
+        The pre-fix splitlines/join shape coalesced the section content
+        cleanly but the upgrade to ``splitlines(keepends=True)`` must
+        preserve every internal newline exactly. A blank line between
+        two record lines is the canonical fixture for this -- bind9
+        zonefiles use them as visual separators and the audit-replay
+        path (G8.2) expects to diff them byte-for-byte.
+        """
+        output = (
+            "===STATE_BEFORE_BEGIN===\nline 1\n\nline 3\n===STATE_BEFORE_END===\n===SUCCESS===\n"
+        )
+        sections = _parse_pipeline_output(output)
+        # Three logical lines with a blank in the middle. The trailing
+        # newline on the last ``line 3`` is the echo-injected one and
+        # must be stripped (it's the bash script's terminator, not the
+        # source file's).
+        assert sections["STATE_BEFORE"] == "line 1\n\nline 3"
+
+    def test_crlf_markers_still_match(self) -> None:
+        """Sentinel detection tolerates CRLF -- the parser strips both \\r and \\n."""
+        output = (
+            "===STATE_BEFORE_BEGIN===\r\ncontent\r\n===STATE_BEFORE_END===\r\n===SUCCESS===\r\n"
+        )
+        sections = _parse_pipeline_output(output)
+        # Marker detection is line-ending agnostic; the content
+        # captured preserves the CRLF exactly (audit-replay diff
+        # behaviour: the source file's actual line endings matter).
+        assert "SUCCESS" in sections
+        assert sections["STATE_BEFORE"] == "content\r"
+
+
+class TestPipelineScriptRollbackShape:
+    """The rollback() shell function must produce a byte-identical /etc/bind/."""
+
+    def test_rollback_clears_bind_root_before_extracting_snapshot(self) -> None:
+        """Files created post-snapshot must be removed; ``tar -xzf`` alone leaves orphans.
+
+        Acceptance criterion: ``atomic_apply`` rollback restores
+        /etc/bind/ byte-identical to the pre-op snapshot. A naive
+        ``tar -xzf $SNAPSHOT -C /`` extracts in place but does NOT
+        remove files that exist on disk but not in the archive.
+        T4 (#590) will reuse this primitive to add new fragment files
+        under /etc/bind/; if rollback leaves them behind the
+        byte-identical contract is broken.
+
+        The fix is structural: clear $BIND_ROOT (guarded against an
+        empty or "/" value) BEFORE running ``tar -xzf``. This test
+        pins the load-bearing ordering in the rendered script.
+        """
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/snap.tar.gz",
+            audit_slice_path="/etc/bind/db.evba.lab",
+            zone_name="evba.lab",
+            bind_root="/etc/bind",
+        )
+        # The clear-then-extract ordering inside rollback() is what
+        # makes the rollback byte-identical for newly-staged files.
+        clear_idx = script.find('find "$BIND_ROOT" -mindepth 1 -delete')
+        extract_idx = script.find('tar -xzf "$SNAPSHOT_PATH"')
+        assert clear_idx != -1, "rollback() must clear $BIND_ROOT before extracting"
+        assert extract_idx != -1, "rollback() must still extract the snapshot tar"
+        assert clear_idx < extract_idx, (
+            "rollback() must clear $BIND_ROOT BEFORE extracting the snapshot; "
+            "the reverse order would race the new-file removal against the "
+            "freshly-extracted snapshot content."
+        )
+
+    def test_rollback_guards_against_empty_or_root_bind_root(self) -> None:
+        """``$BIND_ROOT == "/"`` must NOT trigger the find-delete clear.
+
+        Defence-in-depth: a future misconfiguration (operator passes
+        an empty string, or the default escape hatch widens) cannot
+        be allowed to rm -rf the host root. The bash guard
+        ``[ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]`` is what
+        keeps the destructive operation scoped.
+        """
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/snap.tar.gz",
+            audit_slice_path="/etc/bind/db.evba.lab",
+            zone_name="evba.lab",
+            bind_root="/etc/bind",
+        )
+        assert '[ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]' in script
+
+
+class TestPipelineScriptStageShape:
+    """The stage step must route write failures through rollback / FAILED_STEP."""
+
+    def test_stage_wraps_base64_in_explicit_check(self) -> None:
+        """A base64-decode / write failure must call rollback + emit FAILED_STEP=stage.
+
+        The pre-fix shape ran the base64-decode pipe directly under
+        ``set -e -o pipefail`` -- a failure (ENOSPC / EACCES /
+        read-only fs / corrupt b64) exited the script immediately
+        without calling rollback() and without emitting
+        ``===FAILED_STEP===stage``. The Python-side parser then saw
+        neither SUCCESS nor FAILED_STEP and degraded to the
+        snapshot-step fallback, even though the snapshot had succeeded
+        and the audit slice file was now in an indeterminate state
+        (the failed write may have truncated it to zero bytes).
+
+        This test pins the explicit-check shape every other step
+        uses: ``if ! STAGE_OUT=$(...); then rollback; FAILED_STEP=stage;
+        exit; fi``.
+        """
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/s",
+            audit_slice_path="/etc/bind/f",
+            zone_name="z",
+            bind_root="/etc/bind",
+        )
+        # The shape: a single ``if ! STAGE_OUT=$(...)`` guard around
+        # the base64 pipe.
+        assert "if ! STAGE_OUT=$(printf" in script
+        # Rollback must be called from the stage branch.
+        stage_branch_start = script.find("if ! STAGE_OUT=")
+        stage_branch_end = script.find("fi", stage_branch_start)
+        stage_branch = script[stage_branch_start:stage_branch_end]
+        assert "rollback" in stage_branch
+        assert "===FAILED_STEP===stage" in stage_branch
+
+
+class TestAtomicApplyStageFailureBranch:
+    """End-to-end stage failure surfaces as AtomicApplyError(step='stage')."""
+
+    async def test_stage_failure_raises_with_step_stage(self) -> None:
+        """A stage-step failure pipes back through the same parser as the other steps."""
+        connector = Bind9Connector()
+        # Synthetic output the bash script would emit on a stage
+        # write failure: STATE_BEFORE captured, then rollback fired,
+        # then FAILED_STEP=stage + detail.
+        failure_output = (
+            "===STATE_BEFORE_BEGIN===\n"
+            "pre-op content\n"
+            "===STATE_BEFORE_END===\n"
+            "===FAILED_STEP===stage\n"
+            "===FAILED_DETAIL_BEGIN===\n"
+            "base64: invalid input\n"
+            "===FAILED_DETAIL_END===\n"
+        )
+        with (
+            patch.object(
+                connector,
+                "_remote_bash_with_sudo",
+                AsyncMock(return_value=_completed_process(stdout=failure_output, exit_status=9)),
+            ),
+            pytest.raises(AtomicApplyError) as exc_info,
+        ):
+            await atomic_apply(
+                connector,
+                _TARGET,
+                raw_jwt="",
+                sudo_password="pw",  # NOSONAR
+                audit_slice_path="/etc/bind/db.evba.lab",
+                zone_name="evba.lab",
+                staged_bytes=b"whatever",
+                verify_command="true",
+            )
+        assert exc_info.value.step == "stage"
+        assert "base64: invalid input" in exc_info.value.detail
+
+
+class TestRollbackByteIdenticalForNewFiles:
+    """End-to-end: a file created in the stage step is gone after rollback.
+
+    Simulates the rollback path against an in-process /etc/bind/ tree
+    by running the rendered shell script through ``bash -c`` (not the
+    full connector pipeline -- no sudo, no SSH, no rndc reload). The
+    test pins WI5's load-bearing claim: the primitive's rollback is
+    byte-identical even when post-snapshot files exist.
+    """
+
+    async def test_rollback_removes_post_snapshot_files(
+        self,
+        tmp_path: Any,
+    ) -> None:
+        """Stage a new file into a sandbox /etc/bind/, force a failure, verify removal."""
+        import hashlib
+        import subprocess
+
+        # Build a sandbox bind root with two existing files.
+        bind_root = tmp_path / "bind"
+        bind_root.mkdir()
+        (bind_root / "named.conf").write_text("# existing\n")
+        (bind_root / "db.evba.lab").write_text("$TTL 3600\n@ IN SOA . . 1 1 1 1 1\n")
+
+        # Pre-op checksum of the sandbox tree.
+        def _tree_digest() -> str:
+            files = sorted(p for p in bind_root.rglob("*") if p.is_file())
+            h = hashlib.sha256()
+            for f in files:
+                h.update(str(f.relative_to(bind_root)).encode())
+                h.update(b"\0")
+                h.update(f.read_bytes())
+                h.update(b"\0")
+            return h.hexdigest()
+
+        before = _tree_digest()
+
+        # Render a pipeline script targeting the sandbox bind root,
+        # then run JUST the rollback path: take a snapshot of the
+        # sandbox tree, create a new file under it, then invoke
+        # rollback() explicitly. The full pipeline involves named /
+        # rndc / sudo which we cannot exercise in-process; the
+        # rollback shape is what the byte-identical contract hinges
+        # on so we exercise it directly.
+        snapshot = tmp_path / "snap.tar.gz"
+        rollback_script = f"""set -e
+SNAPSHOT_PATH={snapshot!s}
+BIND_ROOT={bind_root!s}
+
+rollback() {{
+    if [ -f "$SNAPSHOT_PATH" ]; then
+        if [ -n "$BIND_ROOT" ] && [ "$BIND_ROOT" != "/" ]; then
+            find "$BIND_ROOT" -mindepth 1 -delete > /dev/null 2>&1 || true
+        fi
+        tar -xzf "$SNAPSHOT_PATH" -C / > /dev/null 2>&1 || true
+    fi
+}}
+
+# Take the snapshot (matches step 1 of the real pipeline).
+ROOT_NO_SLASH="${{BIND_ROOT#/}}"
+tar -czf "$SNAPSHOT_PATH" -C / "$ROOT_NO_SLASH" > /dev/null
+
+# Simulate the stage step creating a new file under bind root.
+echo "post-snapshot content" > "$BIND_ROOT/new-fragment.conf"
+
+# Force rollback.
+rollback
+"""
+        result = subprocess.run(
+            ["bash", "-c", rollback_script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"rollback script failed: {result.stderr}"
+
+        # The new file must NOT exist after rollback -- the
+        # byte-identical contract requires every post-snapshot file
+        # to be cleared, not just the pre-existing files restored.
+        assert not (bind_root / "new-fragment.conf").exists(), (
+            "rollback left a post-snapshot file in place; byte-identical contract violated"
+        )
+        # And the tree digest must match exactly.
+        assert _tree_digest() == before, (
+            "rollback did not restore /etc/bind/ byte-identical to the snapshot"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -617,8 +884,18 @@ class TestRecordAddHandler:
         # No staging happened -- the sudo path was never touched.
         assert sudo_mock.await_count == 0
 
-    async def test_zone_ambiguous_rejects_pre_staging(self) -> None:
-        """Two zones tie for longest suffix -> ZoneResolutionError ambiguous."""
+    async def test_zone_non_ambiguous_resolve_with_checkconf(self) -> None:
+        """Two distinct zones in checkconf -> resolver picks the right suffix.
+
+        Originally written as ``test_zone_ambiguous_rejects_pre_staging``;
+        the in-handler ambiguous case never legitimately fires because
+        T2's ``parse_named_checkconf_zones`` normalises duplicates. The
+        pure-function ambiguous test
+        (``test_ambiguous_raises_with_candidates``) covers the
+        ZoneResolutionError(ambiguous) branch directly. This test
+        anchors the happy path: two zones in checkconf, the FQDN
+        suffixes one, the resolver picks it.
+        """
         connector = Bind9Connector()
         # Construct a checkconf output with two identical-depth zones.
         # The longest-suffix match against ``api.evba.lab`` will tie.
@@ -854,6 +1131,113 @@ class TestBind9OpsRegistration:
         type_schema = op.parameter_schema["properties"]["type"]
         assert set(type_schema["enum"]) == {"A", "AAAA"}
         assert type_schema["default"] == "A"
+
+
+# ---------------------------------------------------------------------------
+# Remote-command exit-status discipline -- M1 from the iter-1 review
+# ---------------------------------------------------------------------------
+
+
+class TestRemoteCommandExitStatus:
+    """``_run_command`` failures route through :class:`RemoteCommandError`.
+
+    The pre-fix shape parsed ``proc.stdout`` regardless of
+    ``proc.exit_status`` at four sites; a failing remote command then
+    degraded into an empty parse result + the caller's typed error
+    (``ZoneResolutionError(unresolvable)`` or a dnspython parse fail)
+    instead of surfacing the real operational fault. Each test below
+    pins the contract at one call site: non-zero exit -> the typed
+    surface, not a silent degrade.
+    """
+
+    async def test_zone_resolution_raises_on_checkconf_failure(self) -> None:
+        """``named-checkconf -p`` exit != 0 -> RemoteCommandError, not ZoneResolutionError."""
+        connector = Bind9Connector()
+        # named-checkconf -p fails (named not running, config missing,
+        # perms) -> non-zero exit + stderr. The handler MUST surface
+        # this as the typed remote-command error, not as
+        # "ZoneResolutionError unresolvable" (the pre-fix shape).
+        run_mock = AsyncMock(
+            return_value=_completed_process(
+                stdout="",
+                stderr="/etc/bind/named.conf:5: missing ';' before end of file\n",
+                exit_status=1,
+            )
+        )
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            pytest.raises(RemoteCommandError) as exc_info,
+        ):
+            await bind9_record_add(
+                connector,
+                _TARGET,
+                {"fqdn": "api.evba.lab", "ip": "10.5.50.99"},
+            )
+        assert exc_info.value.exit_status == 1
+        assert "named-checkconf -p" in exc_info.value.command
+        assert "missing ';'" in exc_info.value.stderr
+
+    async def test_cat_zonefile_failure_raises_remote_command_error(self) -> None:
+        """``cat $zonefile`` exit != 0 -> RemoteCommandError, not a parse error.
+
+        The pre-fix shape collapsed cat failures to ``""`` which then
+        surfaced as a dnspython parse error -- obscuring the real
+        cause (missing file / permissions).
+        """
+        connector = Bind9Connector()
+        # First call (checkconf) succeeds; second call (cat) fails.
+        run_mock = AsyncMock(
+            side_effect=[
+                _completed_process(stdout=_CHECKCONF_OUTPUT, exit_status=0),
+                _completed_process(
+                    stdout="",
+                    stderr="cat: /etc/bind/db.evba.lab: Permission denied\n",
+                    exit_status=1,
+                ),
+            ]
+        )
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            patch.object(connector, "_remote_bash_with_sudo", AsyncMock()),
+            pytest.raises(RemoteCommandError) as exc_info,
+        ):
+            await bind9_record_add(
+                connector,
+                _TARGET,
+                {"fqdn": "api.evba.lab", "ip": "10.5.50.99", "zone": "evba.lab"},
+            )
+        assert exc_info.value.exit_status == 1
+        assert "cat" in exc_info.value.command
+        assert "Permission denied" in exc_info.value.stderr
+
+    async def test_explicit_zone_checkconf_failure_raises_remote_command_error(self) -> None:
+        """``_resolve_zonefile_path_for_zone`` (explicit --zone branch) checks exit too."""
+        connector = Bind9Connector()
+        # The explicit-zone path goes through
+        # ``_resolve_zonefile_path_for_zone`` which also runs
+        # named-checkconf -p. A non-zero exit must surface the typed
+        # error.
+        run_mock = AsyncMock(
+            return_value=_completed_process(
+                stdout="",
+                stderr="named-checkconf: cannot open '/etc/bind/named.conf'\n",
+                exit_status=2,
+            )
+        )
+        with (
+            patch.object(connector, "_run_command", run_mock),
+            pytest.raises(RemoteCommandError) as exc_info,
+        ):
+            await bind9_record_add(
+                connector,
+                _TARGET,
+                {
+                    "fqdn": "api.evba.lab",
+                    "ip": "10.5.50.99",
+                    "zone": "evba.lab",  # explicit -- goes through resolve_zonefile_path_for_zone
+                },
+            )
+        assert exc_info.value.exit_status == 2
 
 
 # ---------------------------------------------------------------------------

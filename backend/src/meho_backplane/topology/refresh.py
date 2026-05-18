@@ -126,6 +126,48 @@ def _properties_differ(current: Any, incoming: Any) -> bool:
     return dict(current) != dict(incoming)
 
 
+#: Keys in ``graph_edge.properties`` reserved for §6 conflict-detection
+#: markers written by :mod:`meho_backplane.topology.annotate`.
+#: :func:`_reconcile_edges` must **preserve** these on the refresh
+#: write path — overwriting them clears the sticky-supersede invariant
+#: on the next probe and silently brings a superseded auto edge back
+#: into traversal. Initiative #364 §6 (Task #595, G9.2-T3) locks this
+#: invariant; the merge logic in :func:`_merge_edge_properties` below
+#: implements it.
+_RESERVED_MARKER_KEYS: tuple[str, ...] = ("superseded_by", "conflicts_with")
+
+
+def _merge_edge_properties(
+    current: Any,
+    incoming: Any,
+) -> dict[str, Any]:
+    """Return ``incoming`` merged with the reserved markers from ``current``.
+
+    A refresh hint owns the connector's view of an edge — everything
+    *except* the conflict markers an operator's annotation may have
+    stamped on the row. Wholesale overwriting ``edge.properties`` (the
+    pre-#595 behaviour) erased those markers on the next probe, which
+    broke the sticky-supersede invariant in §6 of Initiative #364:
+
+    * a curated annotation marked an auto edge ``superseded_by``;
+    * the next refresh re-saw the auto edge and overwrote
+      ``properties`` from the hint;
+    * the supersede mark vanished and the auto edge silently
+      reappeared in traversal.
+
+    The fix is a key-level merge: reserved keys (``superseded_by``,
+    ``conflicts_with``) survive from ``current``; everything else is
+    sourced from ``incoming``. Only :func:`unannotate_edge` of the
+    curated row clears the supersede mark (Initiative #364 §6).
+    """
+    merged = dict(incoming)
+    current_dict = dict(current or {})
+    for key in _RESERVED_MARKER_KEYS:
+        if key in current_dict:
+            merged[key] = current_dict[key]
+    return merged
+
+
 async def _reconcile_nodes(
     session: AsyncSession,
     *,
@@ -332,11 +374,17 @@ async def _reconcile_edges(
             )
             added += 1
             continue
+        # Merge — not overwrite — so the §6 conflict markers
+        # (``superseded_by`` / ``conflicts_with``) an operator's
+        # annotation may have stamped on this row survive the refresh.
+        # The wholesale-overwrite this used to do silently cleared the
+        # sticky-supersede invariant; see :func:`_merge_edge_properties`.
+        merged_properties = _merge_edge_properties(existing_edge.properties, hint.properties)
         if existing_edge.last_seen is None or _properties_differ(
-            existing_edge.properties, hint.properties
+            existing_edge.properties, merged_properties
         ):
             updated += 1
-        existing_edge.properties = dict(hint.properties)
+        existing_edge.properties = merged_properties
         existing_edge.last_seen = now
 
     for key, row in existing_by_key.items():

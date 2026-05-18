@@ -55,6 +55,20 @@ Every statement filters ``graph_node.tenant_id`` *and*
 anchor and the recursive term. A node with the same ``(kind, name)``
 in another tenant is invisible to this tenant's traversal.
 
+Superseded-edge exclusion (Initiative #364 §6, Task #595)
+---------------------------------------------------------
+
+The recursive term of every traversal verb filters
+``graph_edge.properties->>'superseded_by' IS NULL`` — auto edges that
+an operator's curated annotation has marked superseded drop out of
+every closure. The mark is sticky across refresh (preserved by
+:func:`meho_backplane.topology.refresh._reconcile_edges`) and only
+cleared by :func:`meho_backplane.topology.annotate.unannotate_edge` of
+the curated row. The guard fires on all four edge-pulling sites: the
+forward and reverse recursive terms here, and **both legs** of the
+``bi_edge`` CTE in :data:`_PATH_SQL` (missing the reversed leg would
+let a superseded edge be walked backwards into a shortest path).
+
 Anchor disambiguation
 ---------------------
 
@@ -164,6 +178,16 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
 # Two fully-literal statements (rather than one f-string) keep the
 # Semgrep avoid-sqlalchemy-text rule from firing: nothing is
 # interpolated, every value is a :named bind.
+#
+# Traversal exclusion (§6 of Initiative #364, Task #595): the recursive
+# term filters ``e.properties->>'superseded_by' IS NULL`` so an auto
+# edge an operator's curated annotation has marked superseded is
+# invisible to the closure. ``->>`` is PG's text-extract JSON operator
+# (PG 16 manual §9.16); the column is JSONB on PG (and JSON on the
+# unit-test SQLite engine, which never runs this CTE — recursive CYCLE
+# is PG-only, per the docstring above). A row with no
+# ``superseded_by`` key reads ``NULL`` from ``->>`` and passes the
+# filter, so the guard does not affect non-superseded edges.
 _TRAVERSAL_SQL_REVERSE = text(
     """
     WITH RECURSIVE walk AS (
@@ -193,6 +217,7 @@ _TRAVERSAL_SQL_REVERSE = text(
           AND n.tenant_id = :tenant_id
           AND w.depth < :depth
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND e.properties->>'superseded_by' IS NULL
     ) CYCLE id SET is_cycle USING path
     SELECT id, kind, name, properties, depth, via_edge_kind
     FROM (
@@ -211,7 +236,8 @@ _TRAVERSAL_SQL_REVERSE = text(
 # join edges *out of* the frontier node and step to their target. Only
 # the two join columns differ from the reverse statement; everything
 # else (tenant scoping, kind pin, kind filter, depth bound, CYCLE
-# guard, closure-wide DISTINCT ON dedupe, ordering) is identical.
+# guard, closure-wide DISTINCT ON dedupe, ordering, §6 superseded-edge
+# exclusion) is identical.
 _TRAVERSAL_SQL_FORWARD = text(
     """
     WITH RECURSIVE walk AS (
@@ -241,6 +267,7 @@ _TRAVERSAL_SQL_FORWARD = text(
           AND n.tenant_id = :tenant_id
           AND w.depth < :depth
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND e.properties->>'superseded_by' IS NULL
     ) CYCLE id SET is_cycle USING path
     SELECT id, kind, name, properties, depth, via_edge_kind
     FROM (
@@ -409,10 +436,12 @@ _PATH_SQL = text(
         SELECT from_node_id AS src, to_node_id AS dst, kind
         FROM graph_edge
         WHERE tenant_id = :tenant_id
+          AND properties->>'superseded_by' IS NULL
         UNION ALL
         SELECT to_node_id AS src, from_node_id AS dst, kind
         FROM graph_edge
         WHERE tenant_id = :tenant_id
+          AND properties->>'superseded_by' IS NULL
     ),
     walk AS (
         SELECT

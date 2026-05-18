@@ -25,6 +25,30 @@ models that G9.1-T1 (#448, migration `0007`) created.
 - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
   — shortest unweighted path, or `None` if unreachable.
 
+**Annotation — entry points (async, write half, G9.2-T3 #595):**
+
+- `annotate_edge(session, operator, from_ref, kind, to_ref, *, note=None, evidence_url=None) -> GraphEdge`
+  — create or refresh a curated edge. Resolves both endpoints via
+  `resolve_node`, validates `kind` against `GraphEdgeKind`,
+  idempotent on `(tenant_id, from_node_id, to_node_id, kind)`. Runs
+  §6 conflict detection (sticky `superseded_by` for
+  same-kind/different-endpoint auto edges; bidirectional
+  `conflicts_with` for incompatible kinds over the same endpoint
+  pair). Writes one audit row (`op_id="topology.annotate"`,
+  `op_class="write"`) and publishes one broadcast event.
+- `unannotate_edge(session, operator, *, edge_id=None, from_ref=None, kind=None, to_ref=None) -> UUID`
+  — hard-delete a curated edge (selector is either `edge_id` or the
+  full triple; both/neither → `UnannotateSelectorError`). Refuses
+  `source='auto'` rows with `AutoEdgeDeletionError` (auto edges
+  resurrect on next refresh). Clears reciprocal `superseded_by` /
+  `conflicts_with` markers the deleted edge left on auto rows.
+  Writes one audit row + one broadcast event.
+
+Both service functions own a `session.begin()` block internally and
+publish broadcast events after commit (fail-open per the refresh
+pattern). The REST routes (T5), CLI verbs (T6), and MCP tools (T7)
+funnel through these primitives.
+
 **Resolver — entry point (async, read-only, G9.2-T2 #594):**
 
 - `resolve_node(session, tenant_id, name, kind=None) -> GraphNode` —
@@ -309,6 +333,85 @@ branch and stop recursing into an already-visited node, flagging the
 repeat row `is_cycle = true` (filtered out). An `A → B → A` graph
 terminates instead of recursing forever. The `depth` / `max_hops`
 bound is an independent second guard against acyclic-but-deep graphs.
+
+### Superseded-edge exclusion (G9.2-T3 #595)
+
+Every traversal CTE filters
+`graph_edge.properties->>'superseded_by' IS NULL` in its recursive
+term — an auto edge an operator's curated annotation has marked
+superseded drops out of every closure. The guard fires on **four**
+edge-pulling sites: the recursive term of both
+`_TRAVERSAL_SQL_REVERSE` and `_TRAVERSAL_SQL_FORWARD`, and **both
+legs** of the `bi_edge` CTE in `_PATH_SQL` (the forward leg
+`from→to` and the reversed leg `to→from`; missing the reversed leg
+would let a superseded edge be walked backwards into a shortest path).
+
+The supersede mark is sticky across refresh: `_reconcile_edges` merges
+incoming hint `properties` against the reserved keys (`superseded_by`,
+`conflicts_with`) so a re-observed auto edge keeps the marker that
+`annotate_edge` stamped. Only `unannotate_edge` of the curated row
+clears the marker. The `->>` operator is PG-only (manual §9.16); the
+recursive CTE is itself PG-only, so the guard runs only where the
+column is JSONB.
+
+## Annotation control flow (write half — G9.2-T3 #595)
+
+### `annotate_edge`
+
+1. Validate `kind` against `GraphEdgeKind` (raise
+   `InvalidEdgeKindError` *before* any DB read).
+2. `async with session.begin()` — one transaction wraps the whole
+   resolve + write + conflict-scan + audit-row.
+3. `resolve_node` for both endpoints (`operator.tenant_id` is the
+   scope; cross-tenant references resolve to `NodeNotFoundError`).
+4. Look up the existing edge for the
+   `(tenant_id, from_node_id, to_node_id, kind)` unique tuple. Found
+   → merge `properties` and refresh `last_seen` (idempotent). Absent
+   → `INSERT` a fresh row with `source='curated'`,
+   `discovered_by=operator.sub`,
+   `properties={note, evidence_url, annotated_by, annotated_at}`.
+5. **§6 conflict detection.** Same-kind / different-endpoint: scan
+   auto edges sharing `from_node_id` + `kind` + `source='auto'` and
+   a *different* `to_node_id`; stamp their `properties.superseded_by
+   = <curated-id>`. Incompatible-kind: scan edges on the same
+   `(from_node_id, to_node_id)` of any *other* kind; append the
+   curated id to each row's `properties.conflicts_with` (deduped)
+   and reciprocally append each conflicting edge's id to the
+   curated row.
+6. Add one `audit_log` row in the same session
+   (`method="ANNOTATE"`, `path="topology.annotate"`,
+   `payload={op_id, op_class:"write", edge_id, from, to, kind, note,
+   evidence_url, superseded[], conflicts[]}`, `target_id` =
+   from-node's `target_id` when non-null).
+7. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
+   set explicitly because the `.annotate` suffix is not in
+   `_WRITE_SUFFIXES`; §10 of #364 locks the *write* classification
+   so annotations broadcast in full per the G6.1 default classifier).
+   Publish is fail-open: a publish exception is logged, never raised.
+
+### `unannotate_edge`
+
+1. Validate the selector — exactly one of `edge_id` or the full
+   `(from_ref, kind, to_ref)` triple. Both / neither / partial triple
+   → `UnannotateSelectorError`.
+2. `async with session.begin()`.
+3. Resolve the target row. `edge_id` path: `session.get` + tenant
+   check (a row in another tenant looks "not found" — the tenant
+   boundary holds). Triple path: `resolve_node` for each endpoint
+   + the unique-tuple lookup.
+4. Refuse if `edge.source != "curated"` — auto edges resurrect on
+   next refresh, so manual deletion is meaningless;
+   `AutoEdgeDeletionError`. The API layer maps this to HTTP 409.
+5. Scan every edge in the tenant whose `properties.superseded_by` or
+   `properties.conflicts_with` references the removed edge id;
+   clear the back-references so a superseded auto edge reappears in
+   traversal and dangling ids do not linger.
+6. `session.delete(edge)` (hard delete — curated history lives on
+   via G9.3).
+7. Add one `audit_log` row in the same session
+   (`method="UNANNOTATE"`, `path="topology.unannotate"`,
+   `op_class="write"`). Commit. Publish one broadcast event
+   (fail-open).
 
 ## REST API surface (T5, #453)
 

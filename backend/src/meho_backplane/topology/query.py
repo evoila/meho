@@ -92,35 +92,26 @@ from sqlalchemy.engine import Row
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.topology.resolvers import (
+    AmbiguousNodeError,
+    _collect_distinct_kinds,
+)
 from meho_backplane.topology.schemas import TopologyNode, TopologyPath
 
+# ``AmbiguousNodeError`` was historically defined in this module and is
+# part of the G9.1 read-half public surface; Task #594 (G9.2-T2) moved
+# the canonical definition into :mod:`meho_backplane.topology.resolvers`
+# so the ambiguity rule is owned by the resolver (the surface that also
+# carries :func:`resolve_node` / :class:`NodeNotFoundError`). The
+# re-import preserves every pre-existing
+# ``from meho_backplane.topology.query import AmbiguousNodeError`` call
+# site without churn.
 __all__ = [
     "AmbiguousNodeError",
     "find_dependencies",
     "find_dependents",
     "find_path",
 ]
-
-
-class AmbiguousNodeError(ValueError):
-    """A node name resolved to more than one ``kind`` and no ``kind`` was given.
-
-    ``graph_node`` uniqueness is ``(tenant_id, kind, name)``. When a
-    traversal root (or a :func:`find_path` endpoint) is requested by
-    ``name`` alone and the tenant holds multiple kinds with that name,
-    anchoring on all of them would merge unrelated closures. The query
-    refuses instead of returning silently-wrong data; the caller must
-    re-issue with an explicit ``kind`` (or, later, an alias resolved by
-    the T5/T6 router).
-    """
-
-    def __init__(self, name: str, kinds: list[str]) -> None:
-        self.name = name
-        self.kinds = kinds
-        super().__init__(
-            f"node name {name!r} is ambiguous in this tenant — it exists "
-            f"as kinds {sorted(kinds)!r}; pass kind= to disambiguate"
-        )
 
 
 #: Default traversal depth. Matches the Task #451 contract; deep enough
@@ -255,18 +246,6 @@ _TRAVERSAL_SQL_FORWARD = text(
     """
 )
 
-# Anchor-ambiguity probe. Returns the distinct kinds a (tenant, name)
-# pair resolves to so the caller can refuse a merged-closure traversal
-# when more than one kind matches and no kind was pinned.
-_ANCHOR_KINDS_SQL = text(
-    """
-    SELECT DISTINCT kind
-    FROM graph_node
-    WHERE tenant_id = :tenant_id
-      AND name = :name
-    """
-)
-
 
 async def _assert_anchor_unambiguous(
     session: Any,
@@ -282,14 +261,19 @@ async def _assert_anchor_unambiguous(
     resolves to at most one kind in the tenant. Only when ``kind`` is
     omitted *and* the name spans multiple kinds does the traversal
     refuse — anchoring on all of them would merge unrelated closures.
+
+    Delegates the kind-collection query to
+    :func:`meho_backplane.topology.resolvers._collect_distinct_kinds`
+    so the ambiguity-probe SQL is single-sourced between the
+    traversal verbs and :func:`resolve_node`. The not-found
+    behavior intentionally stays unchanged here: a name that maps to
+    zero kinds is a silent no-op for traversal (G9.1 contract — an
+    empty result rather than an exception), only ``resolve_node``
+    surfaces :class:`NodeNotFoundError`.
     """
     if kind is not None:
         return
-    result = await session.execute(
-        _ANCHOR_KINDS_SQL,
-        {"tenant_id": tenant_id, "name": name},
-    )
-    kinds = [r._mapping["kind"] for r in result.fetchall()]
+    kinds = await _collect_distinct_kinds(session, tenant_id=tenant_id, name=name)
     if len(kinds) > 1:
         raise AmbiguousNodeError(name, kinds)
 

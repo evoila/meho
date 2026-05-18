@@ -25,6 +25,22 @@ models that G9.1-T1 (#448, migration `0007`) created.
 - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
   — shortest unweighted path, or `None` if unreachable.
 
+**Resolver — entry point (async, read-only, G9.2-T2 #594):**
+
+- `resolve_node(session, tenant_id, name, kind=None) -> GraphNode` —
+  name → row resolver the G9.2 annotation flow (T3 / T4 in
+  Initiative #364) calls before writing or reading an edge endpoint.
+  Returns the unique `GraphNode` row, or raises
+  `AmbiguousNodeError` (bare name maps to multiple kinds in the
+  tenant) / `NodeNotFoundError` (no match — including names that
+  exist only in another tenant). Works for non-target nodes
+  (`target_id IS NULL`) as well as registered targets. The
+  ambiguity-probe SQL is shared with the traversal verbs'
+  `_assert_anchor_unambiguous`, so the "name → multiple kinds"
+  surface is single-sourced; traversal's not-found behavior is
+  unchanged (empty result, not a raise) — only `resolve_node`
+  surfaces `NodeNotFoundError`.
+
 Every read verb returns **one row per reachable node** (a node reachable
 by several converging paths is collapsed to its minimum-depth occurrence
 — `CYCLE` alone only dedupes within a single branch). An anchor
@@ -204,6 +220,20 @@ matched `kinds`) when `kind` is omitted and the name spans multiple
 kinds. `find_path` applies the same probe independently to each
 endpoint. Alias → name resolution remains the T5/T6 router's job; this
 substrate matches `graph_node.name` directly.
+
+As of G9.2-T2 (#594), `AmbiguousNodeError` is defined in
+`meho_backplane.topology.resolvers` (alongside `resolve_node` and the
+new `NodeNotFoundError`) and re-exported by
+`meho_backplane.topology.query` for back-compat with pre-G9.2
+importers. The kind-collection SQL is single-sourced in the resolver
+module; the traversal's `_assert_anchor_unambiguous` and
+`resolve_node` call into the same helper, so the "name → multiple
+kinds in this tenant" surface stays consistent across the two
+call paths. The not-found behavior intentionally differs between the
+two surfaces: `resolve_node` raises `NodeNotFoundError`; the
+traversal verbs keep G9.1's silent-on-miss contract (empty result,
+not an exception) — opting traversal into the stricter raise-on-miss
+contract is explicitly out of scope for G9.2-T2.
 
 The root is always included at depth 0, so callers distinguish "node
 exists but has no dependents" (one-element list) from "node does not

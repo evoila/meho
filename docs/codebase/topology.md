@@ -102,10 +102,17 @@ name)` unique row. The read package never inserts, updates, or deletes.
 surface"). The CLI front (T6, #454) is landed and documented below
 ("CLI front"). The MCP front (T7, #455) is landed too — the two
 narrow-waist meta-tools `query_topology` (parametric: `kind` selects
-`dependents` / `dependencies` / `path`) and `list_targets` register in
-`mcp/tools/topology.py` and call `query.py` / `select(TargetORM)`
-directly (sibling fronts on one backplane, not REST wrappers). G9.1-T8
-(#456) shipped the closing acceptance suite
+`dependents` / `dependencies` / `path` / `edges`) and `list_targets`
+register in `mcp/tools/topology.py` and call `query.py` /
+`select(TargetORM)` directly (sibling fronts on one backplane, not
+REST wrappers). G9.2-T7 (#598) widened the parametric tool with the
+`edges` facet (dispatches to `list_edges` — replaces a standalone
+`list_edges` meta-tool) and added the admin-namespace pair
+`meho.topology.annotate` / `meho.topology.unannotate`
+(`required_role=TENANT_ADMIN`, `op_class="write"`); both admin tools
+call `annotate_edge` / `unannotate_edge` directly and are visible only
+to a tenant_admin-scoped session. G9.1-T8 (#456) shipped the closing
+acceptance suite
 (`backend/tests/integration/test_topology_g91_acceptance.py` + the
 parametric `backend/tests/fixtures/topology_10k_nodes.py` 10k-node
 generator) and the operator-facing docs

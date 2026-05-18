@@ -411,22 +411,42 @@ async def test_conflict_same_kind_marks_auto_superseded_and_survives_refresh(
     Drives every leg of the §6 same-kind rule end-to-end:
 
     1. The annotate POST stamps ``properties.superseded_by =
-       <curated-id>`` on the auto row.
+       <curated-id>`` on the auto row, and the recursive-CTE
+       supersede filter inside :func:`find_dependents` /
+       :func:`find_dependencies` / :func:`find_path` removes the
+       superseded edge from every traversal in both directions.
     2. A second probe (simulated by calling
        :func:`refresh_target_topology` against a connector that
        re-emits the same auto edge hint with empty properties) does
        **not** clear the supersede marker. The refresh path's
-       :func:`_merge_edge_properties` preserves the reserved keys.
+       :func:`_merge_edge_properties` preserves the reserved keys;
+       the traversal exclusion is still in force after the refresh.
     3. ``unannotate`` of the curated row clears the supersede mark
        on the auto row — the row is now visible to a fresh
-       ``list_edges`` call with no markers.
+       ``list_edges`` call with no markers, and the traversal
+       closures + shortest-path query walk the edge again.
     """
     from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
 
     nodes = await _seed_same_kind_conflict_fixture(TENANT_A_ID)
-    await _insert_target(tenant_id=TENANT_A_ID, name="vc-a")
+    target_id = await _insert_target(tenant_id=TENANT_A_ID, name="vc-a")
 
     key, token = _token(role=TenantRole.TENANT_ADMIN, tenant_id=TENANT_A_ID, sub="op-a")
+
+    # Build the same Operator the route handler would have passed;
+    # tenant_admin is fine — the refresh is not role-gated below the
+    # service primitive, and ``find_dependents`` / ``find_dependencies``
+    # only use the tenant scope from this operator.
+    from meho_backplane.auth.operator import Operator
+
+    operator = Operator(
+        sub="op-a",
+        name=None,
+        email=None,
+        raw_jwt="not-a-real-jwt",
+        tenant_id=uuid.UUID(TENANT_A_ID),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
 
     with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
@@ -453,33 +473,88 @@ async def test_conflict_same_kind_marks_auto_superseded_and_survives_refresh(
                 "auto edge should carry properties.superseded_by pointing at the curated row"
             )
 
+            # Traversal must already exclude the superseded auto edge:
+            # the recursive CTE filter
+            # ``e.properties->>'superseded_by' IS NULL`` (query.py L220 /
+            # L270) drops the row from forward + reverse closures alike.
+            # ``host-X`` should not appear as a dependency of ``vm-A``
+            # (no surviving outbound edge), and ``vm-A`` should not
+            # appear as a dependent of ``host-X`` (no surviving inbound
+            # edge). The curated competitor ``host-Y`` still does.
+            from meho_backplane.topology.query import (
+                find_dependencies,
+                find_dependents,
+                find_path,
+            )
+
+            deps_of_vm_a = await find_dependencies(operator, "vm-A", kind="vm")
+            names_of_vm_a = {n.name for n in deps_of_vm_a}
+            assert "host-X" not in names_of_vm_a, (
+                "superseded auto edge must drop out of find_dependencies"
+            )
+            assert "host-Y" in names_of_vm_a, (
+                "curated competitor must remain visible to find_dependencies"
+            )
+
+            dependents_of_host_x = await find_dependents(operator, "host-X", kind="host")
+            names_into_host_x = {n.name for n in dependents_of_host_x}
+            assert "vm-A" not in names_into_host_x, (
+                "superseded auto edge must drop out of find_dependents"
+            )
+
+            # Bidirectional shortest path crosses the same supersede
+            # filter (query.py L439 / L444 inside the ``bi_edge`` CTE),
+            # so the only surviving route from ``vm-A`` to ``host-X`` is
+            # "no route" — ``find_path`` returns ``None``.
+            assert (
+                await find_path(operator, "vm-A", "host-X", from_kind="vm", to_kind="host") is None
+            ), "find_path must not walk through a superseded auto edge"
+
             # --- 2. Simulate the next refresh re-seeing the auto edge ---
             # Calling refresh_target_topology directly is honest end-to-end —
             # the production scheduler path runs the same _reconcile_edges
             # under the hood. The connector's hint has empty properties, so
             # a pre-#595 wholesale overwrite would have erased the marker.
+            #
+            # The production signature is ``(target, operator)`` where
+            # ``target`` is the ``Target`` ORM row (refresh.py L589); we
+            # load it through a fresh session and let the function open
+            # its own transactions inside ``_apply_reconcile``. Broadcast
+            # is patched alongside the annotate publish hook so the
+            # post-commit publish in refresh.py does not exercise the
+            # real event bus inside the test.
             from meho_backplane.topology.refresh import refresh_target_topology
 
             sm = get_sessionmaker()
             async with sm() as session:
-                # Build the same Operator the route handler would have
-                # passed; tenant_admin is fine — the refresh is not
-                # role-gated below the service primitive.
-                from meho_backplane.auth.operator import Operator
+                target_row = (
+                    await session.execute(select(TargetORM).where(TargetORM.id == target_id))
+                ).scalar_one()
 
-                operator = Operator(
-                    sub="op-a",
-                    name=None,
-                    email=None,
-                    raw_jwt="not-a-real-jwt",
-                    tenant_id=uuid.UUID(TENANT_A_ID),
-                    tenant_role=TenantRole.TENANT_ADMIN,
-                )
-                await refresh_target_topology(session, operator, "vc-a")
+            with patch(
+                "meho_backplane.topology.refresh.publish_event",
+                new_callable=AsyncMock,
+            ):
+                await refresh_target_topology(target_row, operator)
 
             props_after_refresh = await _get_edge_props(nodes["auto_edge"])
             assert props_after_refresh.get("superseded_by") == str(curated_id), (
                 "supersede marker must survive the next refresh (sticky §6)"
+            )
+
+            # Traversal exclusion is still in force after the refresh —
+            # the auto edge stayed superseded, so the closures still
+            # omit ``vm-A → host-X``.
+            deps_of_vm_a = await find_dependencies(operator, "vm-A", kind="vm")
+            names_of_vm_a = {n.name for n in deps_of_vm_a}
+            assert "host-X" not in names_of_vm_a, (
+                "auto edge must remain hidden from find_dependencies after refresh"
+            )
+
+            dependents_of_host_x = await find_dependents(operator, "host-X", kind="host")
+            names_into_host_x = {n.name for n in dependents_of_host_x}
+            assert "vm-A" not in names_into_host_x, (
+                "auto edge must remain hidden from find_dependents after refresh"
             )
 
             # --- 3. Unannotate the curated row → auto marker cleared ---
@@ -492,6 +567,31 @@ async def test_conflict_same_kind_marks_auto_superseded_and_survives_refresh(
             props_after_unannotate = await _get_edge_props(nodes["auto_edge"])
             assert "superseded_by" not in props_after_unannotate, (
                 "unannotate should clear the reciprocal supersede marker on the auto row"
+            )
+
+            # With the supersede marker gone, the auto edge is once
+            # again visible to traversal in both directions, and the
+            # shortest-path query now finds a single-hop route
+            # ``vm-A → host-X``. This is the restoration leg of the
+            # traversal-visibility invariant the issue's test matrix
+            # enumerates for the same-kind §6 case.
+            deps_of_vm_a = await find_dependencies(operator, "vm-A", kind="vm")
+            names_of_vm_a = {n.name for n in deps_of_vm_a}
+            assert "host-X" in names_of_vm_a, (
+                "cleared auto edge must re-appear in find_dependencies"
+            )
+
+            dependents_of_host_x = await find_dependents(operator, "host-X", kind="host")
+            names_into_host_x = {n.name for n in dependents_of_host_x}
+            assert "vm-A" in names_into_host_x, (
+                "cleared auto edge must re-appear in find_dependents"
+            )
+
+            restored_path = await find_path(
+                operator, "vm-A", "host-X", from_kind="vm", to_kind="host"
+            )
+            assert restored_path is not None, (
+                "find_path must walk the restored auto edge after unannotate"
             )
 
 

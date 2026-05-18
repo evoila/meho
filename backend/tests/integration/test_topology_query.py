@@ -456,6 +456,134 @@ async def test_same_tenant_kind_collision_disambiguated_by_kind(
     assert {n.name for n in pinned.nodes} == {"svc", "dep-of-target"}
 
 
+# ---------------------------------------------------------------------------
+# §6 traversal-exclusion guard (G9.2-T3 #595): superseded auto edges drop
+# out of every traversal verb; non-superseded edges are unaffected.
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_docker
+async def test_superseded_edge_excluded_from_dependents(
+    pg_engine: None,
+) -> None:
+    """An auto edge marked ``superseded_by`` is invisible to find_dependents.
+
+    Seed ``vm-A --runs-on--> host-X`` as an auto edge, then stamp
+    ``properties.superseded_by`` (the mark a curated annotation would
+    leave per Initiative #364 §6). ``find_dependents`` on ``host-X``
+    must NOT report vm-A — the reverse traversal's recursive term now
+    filters ``properties->>'superseded_by' IS NULL``.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        vm_a = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="ts-vm-a")
+        host_x = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="ts-host-x")
+        edge = GraphEdge(
+            id=uuid.uuid4(),
+            tenant_id=TENANT_A_ID,
+            from_node_id=vm_a,
+            to_node_id=host_x,
+            kind="runs-on",
+            source="auto",
+            properties={"superseded_by": str(uuid.uuid4())},
+            discovered_by="test",
+        )
+        session.add(edge)
+
+    nodes = await find_dependents(_operator(TENANT_A_ID), "ts-host-x")
+    names = {n.name for n in nodes}
+    # The host exists; vm-A is filtered out by the superseded guard.
+    assert "ts-host-x" in names
+    assert "ts-vm-a" not in names
+
+
+@_skip_no_docker
+async def test_superseded_edge_excluded_from_dependencies(
+    pg_engine: None,
+) -> None:
+    """Forward traversal mirrors the reverse guard: superseded edges drop."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        vm_a = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="tf-vm-a")
+        host_x = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="tf-host-x")
+        edge = GraphEdge(
+            id=uuid.uuid4(),
+            tenant_id=TENANT_A_ID,
+            from_node_id=vm_a,
+            to_node_id=host_x,
+            kind="runs-on",
+            source="auto",
+            properties={"superseded_by": str(uuid.uuid4())},
+            discovered_by="test",
+        )
+        session.add(edge)
+
+    nodes = await find_dependencies(_operator(TENANT_A_ID), "tf-vm-a")
+    names = {n.name for n in nodes}
+    assert "tf-vm-a" in names
+    assert "tf-host-x" not in names
+
+
+@_skip_no_docker
+async def test_superseded_edge_excluded_from_find_path_both_legs(
+    pg_engine: None,
+) -> None:
+    """``bi_edge`` filters both legs — a superseded edge is unwalkable in
+    either direction.
+
+    Seed ``A --runs-on--> B`` as auto + superseded. ``find_path(A, B)``
+    must return ``None`` — both the forward leg
+    (``A.from_node_id → A.to_node_id``) and the reversed leg
+    (``B.to_node_id ← A.from_node_id``) are filtered out by the guard.
+    Without the reversed-leg filter the path ``A ← B`` would still
+    appear, hiding the supersede contract.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        a = await _seed_node(session, tenant_id=TENANT_A_ID, kind="vm", name="tp-a")
+        b = await _seed_node(session, tenant_id=TENANT_A_ID, kind="host", name="tp-b")
+        edge = GraphEdge(
+            id=uuid.uuid4(),
+            tenant_id=TENANT_A_ID,
+            from_node_id=a,
+            to_node_id=b,
+            kind="runs-on",
+            source="auto",
+            properties={"superseded_by": str(uuid.uuid4())},
+            discovered_by="test",
+        )
+        session.add(edge)
+
+    forward = await find_path(_operator(TENANT_A_ID), "tp-a", "tp-b")
+    reverse = await find_path(_operator(TENANT_A_ID), "tp-b", "tp-a")
+    assert forward is None
+    assert reverse is None
+
+
+@_skip_no_docker
+async def test_guard_does_not_drop_non_superseded_edges(
+    known_graph: dict[str, uuid.UUID],
+) -> None:
+    """Regression: a graph with zero superseded edges returns the identical
+    closure.
+
+    The known 5-node / 6-edge graph from :func:`known_graph` carries
+    no ``superseded_by`` markers; the closure must match the
+    pre-guard expected set exactly. A malformed guard (e.g.
+    ``properties->>'superseded_by' = 'x'`` instead of ``IS NULL``)
+    would silently drop every edge here.
+    """
+    nodes = await find_dependents(_operator(TENANT_A_ID), "host1")
+    assert {n.name for n in nodes} == {"host1", "vm1", "vm2", "app"}
+
+    deps = await find_dependencies(_operator(TENANT_A_ID), "app")
+    assert {n.name for n in deps} == {"app", "vm1", "vm2", "host1", "ds1"}
+
+    path = await find_path(_operator(TENANT_A_ID), "app", "ds1")
+    assert path is not None
+    assert path.total_hops == 2
+
+
 def test_module_imports_cleanly() -> None:
     """Cheap collection-time smoke that runs on no-Docker sandboxes.
 

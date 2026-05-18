@@ -45,6 +45,22 @@ NULL``) as well as registered targets.
   re-exported by :mod:`query` for back-compat with pre-G9.2 importers.
 * :class:`meho_backplane.topology.resolvers.NodeNotFoundError`
 
+**Annotate / unannotate — Task #595 (G9.2-T3):** the curated-edge
+write service. Resolves both endpoints, validates ``kind`` against
+:class:`~meho_backplane.db.models.GraphEdgeKind`, runs §6 conflict
+detection (sticky ``superseded_by`` for same-kind/different-endpoint
+auto edges; bidirectional ``conflicts_with`` for incompatible kinds
+over the same endpoint pair), and writes one audit row + one
+broadcast event per operation. The REST routes (T5), CLI verbs (T6),
+and MCP tools (T7) all funnel through these two primitives.
+
+* :func:`meho_backplane.topology.annotate.annotate_edge`
+* :func:`meho_backplane.topology.annotate.unannotate_edge`
+* :class:`meho_backplane.topology.annotate.NodeRef`
+* :class:`meho_backplane.topology.annotate.InvalidEdgeKindError`
+* :class:`meho_backplane.topology.annotate.AutoEdgeDeletionError`
+* :class:`meho_backplane.topology.annotate.UnannotateSelectorError`
+
 **Edge listing — Task #596 (G9.2-T4):** the flat tenant-scoped
 filter-composable read helper for ``graph_edge`` rows. The T5 REST
 route ``GET /api/v1/topology/edges``, the T6 CLI
@@ -57,6 +73,15 @@ than re-deriving the tenant boundary or the filter composition.
 * :class:`meho_backplane.topology.schemas.TopologyEdgeEndpoint`
 """
 
+from meho_backplane.topology.annotate import (
+    AnnotateConflictError,
+    AutoEdgeDeletionError,
+    InvalidEdgeKindError,
+    NodeRef,
+    UnannotateSelectorError,
+    annotate_edge,
+    unannotate_edge,
+)
 from meho_backplane.topology.query import list_edges
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.resolvers import (
@@ -72,13 +97,20 @@ from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
 
 __all__ = [
     "AmbiguousNodeError",
+    "AnnotateConflictError",
+    "AutoEdgeDeletionError",
+    "InvalidEdgeKindError",
     "NodeNotFoundError",
+    "NodeRef",
     "RefreshResult",
     "TopologyEdge",
     "TopologyEdgeEndpoint",
+    "UnannotateSelectorError",
+    "annotate_edge",
     "list_edges",
     "refresh_target_topology",
     "resolve_node",
     "start_topology_refresh_scheduler",
     "stop_topology_refresh_scheduler",
+    "unannotate_edge",
 ]

@@ -44,12 +44,19 @@ names.
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
   `/api/v1/retrieve` route (G0.4-T5 #262, `source="kb"` scoped)
   for the search verb.
+- `meho migrate ...` (G5.3-T1 #608) — laptop-local memory migration
+  surface. T1 ships the `migrate` parent + `memory` subcommand skeleton
+  (flags wired, RunE stub). Flow logic (scanner, huh interactive picker,
+  dry-run preview, backplane submit, mark-migrated) lands in T2–T5 of
+  Initiative #375 (#609–#612). The `charm.land/huh/v2` interactive-form
+  library (MIT) is declared as a direct dependency in T1 and used by
+  T2–T5 for the interactive migration UX.
 
 ## Module layout
 
 ```text
 cli/
-├── go.mod                  # github.com/evoila/meho/cli; Go 1.22.
+├── go.mod                  # github.com/evoila/meho/cli; Go 1.25.8.
 ├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
 ├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
@@ -135,6 +142,9 @@ cli/
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
+    │   ├── migrate/           # G5.3-T1 #608 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
+    │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2 (declares dep; used by T2–T5).
+    │   │   └── memory.go         # `meho migrate memory` skeleton — 5 flags wired, RunE stub.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 — `meho topology refresh/dependents/dependencies/path` over the T5 REST surface (#453).
@@ -145,6 +155,8 @@ cli/
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
     │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
+    ├── migrate/               # G5.3-T1 #608 — pure-logic helpers for the memory migration flow (Initiative #375).
+    │   └── doc.go                # placeholder package; flow helpers land in T2–T5 (#609–#612).
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.
@@ -551,8 +563,8 @@ end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
 [oapi-codegen v2.5](https://github.com/oapi-codegen/oapi-codegen)
 from `cli/api/openapi.json` — a committed snapshot of the
 backplane's OpenAPI document. v2.5 is the last v2.x release with
-Go 1.22 minimum; later versions require Go 1.24+ and would bump
-the module's `go` directive prematurely. The generator itself runs
+Go 1.25.8 minimum (raised from 1.22 by charm.land/huh/v2 v2.0.3's
+transitive deps in PR #640). The generator itself runs
 on a newer Go toolchain (downloaded automatically by `go install`
 when the host has Go 1.21+) so this is a build-time vs.
 runtime split.
@@ -1368,21 +1380,23 @@ Direct:
 * `golang.org/x/oauth2` — supplies `Config.DeviceAuth` and
   `Config.DeviceAccessToken` for the RFC 8628 device-code flow,
   plus `Config.TokenSource` for the T3 refresh path. Pinned at
-  `v0.26.0`, the last release that still targets Go 1.22; later
-  versions require Go 1.23+ and would bump the module's go
-  directive prematurely.
+  `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
+  upgrades is lifted now that the module requires Go 1.25.8.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated
   client uses (JSON merging for `oneOf` unions, parameter styling
-  per RFC 6570). Pinned at `v1.1.1` for Go 1.22 compatibility;
-  later runtimes require Go 1.24+.
+  per RFC 6570). Pinned at `v1.1.1`; the Go 1.22 compatibility
+  constraint that blocked upgrades is lifted now that the module
+  requires Go 1.25.8 — upgrade tracked as a follow-up.
 
 Build-time tool (not in `go.mod`; installed under `bin/` via
 `make tools`):
 
 * `github.com/oapi-codegen/oapi-codegen/v2` — the OpenAPI → Go
   client generator itself. Pinned at `v2.5.0`, the last v2.x
-  release that still targets Go 1.22 as the minimum module go
-  directive. `make tools` runs `go install …@v2.5.0` with
+  release whose module go directive was compatible with Go 1.22;
+  now that the module requires Go 1.25.8, a newer v2.x may be
+  used — upgrade tracked as a follow-up. `make tools` runs
+  `go install …@v2.5.0` with
   `GOBIN=$PWD/bin`; the generator itself executes on a Go 1.24+
   toolchain that Go downloads automatically (the `go install`
   command honours the dep's `go` directive).

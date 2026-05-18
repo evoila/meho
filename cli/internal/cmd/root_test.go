@@ -27,7 +27,7 @@ func TestRootCmdHasExpectedSubcommands(t *testing.T) {
 	for _, c := range root.Commands() {
 		names[c.Name()] = true
 	}
-	for _, want := range []string{"version", "login", "status", "operation", "retrieval", "connector", "targets", "vmware"} {
+	for _, want := range []string{"version", "login", "status", "operation", "retrieval", "connector", "targets", "vmware", "migrate"} {
 		if !names[want] {
 			t.Errorf("expected built-in subcommand %q; got %v", want, names)
 		}

@@ -426,10 +426,10 @@ so the guard runs only where the column is JSONB.
    `op_class="write"`). Commit. Publish one broadcast event
    (fail-open).
 
-## REST API surface (T5, #453)
+## REST API surface (T5, #453 + G9.2-T5 #597)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Five routes total — four on the topology
+the read + write halves. Eight routes total — seven on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -438,6 +438,9 @@ router, one on the targets router:
 | `GET /api/v1/topology/dependencies/{name}` | `find_dependencies` | `topology.dependencies` | operator |
 | `GET /api/v1/topology/path?from=A&to=B` | `find_path` | `topology.path` | operator |
 | `POST /api/v1/topology/refresh/{target_name}` | `refresh_target_topology` | `topology.refresh` | operator |
+| `POST /api/v1/topology/edges` | `annotate_edge` (T3 #595) | `topology.annotate` | **tenant_admin** |
+| `DELETE /api/v1/topology/edges/{edge_id}` | `unannotate_edge` (T3 #595) | `topology.unannotate` | **tenant_admin** |
+| `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
 | `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
 
 Load-bearing details:
@@ -453,7 +456,8 @@ Load-bearing details:
 - **Ambiguous anchor.** `AmbiguousNodeError` (a `ValueError` from the
   query layer) is mapped to HTTP 409 `ambiguous_node` with the
   candidate kinds echoed in `detail` so the caller can re-issue with
-  an explicit `kind`.
+  an explicit `kind`. Used by the four read verbs and by `POST /edges`
+  / `GET /edges` when an endpoint name is ambiguous.
 - **Depth/hop ceilings.** The route caps `depth` at 64 and `max_hops`
   at 32 at the HTTP boundary (over the service defaults of 16 / 8) so
   a hostile query param cannot ask the recursive CTE to walk an
@@ -464,6 +468,49 @@ Load-bearing details:
   + one broadcast event with the per-target counts. The two rows are
   intentional — same shape as the operations dispatcher writing a
   domain row alongside the middleware's HTTP row.
+- **Curated-edge writes are `tenant_admin`.** `POST /edges` and
+  `DELETE /edges/{id}` sit behind `require_role(TenantRole.TENANT_ADMIN)`
+  — Initiative #364 §5: annotation is a policy-layer assertion, so an
+  operator-level member must not be able to add a `depends-on` edge
+  that shrinks the auto-flagged blast radius of an op they then run.
+  Same gate the canonical `POST /api/v1/targets` precedent (G0.3)
+  uses. `GET /edges` stays at `operator` (a tenant inventory view).
+- **§3 auto-edge deletion → 409.** `AutoEdgeDeletionError` (raised when
+  `DELETE /edges/{id}` resolves a `source='auto'` row) maps to HTTP 409
+  `auto_edge_deletion` with the edge id and a message naming the
+  auto-vs-curated rule. Auto edges resurrect on the next refresh, so a
+  hard delete is meaningless — the CLI / MCP fronts can prompt the
+  operator to annotate-over-auto instead. Missing or cross-tenant ids
+  collapse to 404 `edge_not_found` (the tenant boundary is opaque to
+  the caller; leaking "exists in another tenant" would violate it).
+- **Curated-edge write audit class.** `POST` / `DELETE` bind
+  `audit_op_class="write"` explicitly — `.annotate` / `.unannotate`
+  are not in the broadcast classifier's `_WRITE_SUFFIXES` so the
+  default classifier would fall through to `op_class="other"` and the
+  broadcast event would under-emit per §10. `GET /edges` binds
+  `op_class="read"`.
+- **`POST /edges` body shape.** The request body is
+  `{"from": {"name": ..., "kind"?}, "kind": <GraphEdgeKind>,
+    "to": {"name": ..., "kind"?}, "note"?, "evidence_url"?}` —
+  `from` / `to` are nested `_EdgeEndpoint` objects (mirrors the
+  service-layer `NodeRef` dataclass on the wire). `kind` is typed
+  against `GraphEdgeKind` so Pydantic rejects unknown kinds at the
+  boundary with 422 before the service runs. `extra="forbid"` rejects
+  typo'd keys at the boundary too.
+- **`GET /edges` query params** are forwarded straight through to
+  `list_edges` (`kind?`, `source?` constrained to `auto|curated` by a
+  regex pattern, `from?` / `to?` aliased because `from` is a Python
+  keyword, `conflicts?` bool, `limit?` capped at 1000, `offset?`). A
+  bare `from` / `to` that resolves to multiple kinds surfaces as 409
+  `ambiguous_node` — the caller re-issues with an explicit kind. A
+  name that resolves to no node yields an empty list, not a 404 —
+  consistent with the helper's "missing anchor → empty result" shape.
+- **`TopologyEdge` wire alias.** The Pydantic model attributes are
+  `from_endpoint` / `to_endpoint` (Python keywords forbid the bare
+  forms); `Field(serialization_alias="from"|"to")` restores the wire
+  shape Initiative #364 §8 specifies. FastAPI's default
+  `response_model_by_alias=True` honours the alias so every response
+  body lands as `{from, to, ...}` without manual `model_dump` calls.
 - **`targets/discover`.** Iterates every connector implementation
   registered for the product (the v2 registry, which subsumes v1
   registrations; deduped by connector class), calls `list_candidates`
@@ -475,15 +522,17 @@ Load-bearing details:
 - **Tenant scoping.** No route accepts a `tenant_id` from the path,
   query string, or body. The query verbs filter on
   `operator.tenant_id`; `refresh` / `discover` resolve targets
-  tenant-scoped via `resolve_target`. Cross-tenant traversal *and*
-  cross-tenant refresh are impossible by construction (proven by the
-  two-tenant integration test).
+  tenant-scoped via `resolve_target`; `annotate_edge` /
+  `unannotate_edge` / `list_edges` resolve endpoints + filter on
+  `operator.tenant_id`. Cross-tenant traversal, refresh, annotation,
+  and listing are all impossible by construction.
 
 Tests: `backend/tests/test_api_v1_topology.py` +
 `backend/tests/test_api_v1_targets_discover.py` (service layer patched,
-SQLite); `backend/tests/integration/test_topology_api.py` (all 5 routes
+SQLite); `backend/tests/integration/test_topology_api.py` (read + refresh
 end-to-end + the cross-tenant boundary against a real
-`pgvector/pgvector:pg16` container).
+`pgvector/pgvector:pg16` container). Curated-edge end-to-end coverage
+is the T9 integration sweep (#601).
 
 ## CLI front (T6, #454)
 

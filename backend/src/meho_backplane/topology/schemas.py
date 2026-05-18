@@ -168,18 +168,21 @@ class TopologyEdge(BaseModel):
     """
 
     # ``from`` / ``to`` are Python keywords; the attribute names are
-    # ``from_endpoint`` / ``to_endpoint``. The serialised wire shape
-    # (``from`` / ``to``, per the issue body's spec) is the route
-    # layer's concern — T5 applies a route-side alias on
-    # ``model_dump(by_alias=True)`` rather than coupling this
-    # substrate model to the HTTP framing. Keeping the attribute names
-    # plain keeps mypy and the Pydantic plugin honest (a Field alias
-    # makes the construct-time kwarg invisible to the static checker).
-    model_config = ConfigDict(frozen=True)
+    # ``from_endpoint`` / ``to_endpoint`` so kwargs / mypy stay clean.
+    # The wire shape (``from`` / ``to``, per Initiative #364 §8) is
+    # restored by ``serialization_alias`` on each field: FastAPI emits
+    # the model with ``model_dump(by_alias=True)`` by default for
+    # response models, so the JSON keys land as the issue body specifies
+    # without coupling every route handler to a manual ``by_alias=True``
+    # dump. ``populate_by_name=True`` lets the construct-time kwargs
+    # accept both the attribute name and the alias — important for
+    # in-process callers (tests, MCP fronts) that construct instances
+    # directly with Python identifiers.
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     id: UUID
-    from_endpoint: TopologyEdgeEndpoint
-    to_endpoint: TopologyEdgeEndpoint
+    from_endpoint: TopologyEdgeEndpoint = Field(serialization_alias="from")
+    to_endpoint: TopologyEdgeEndpoint = Field(serialization_alias="to")
     kind: str
     source: str
     properties: dict[str, Any] = Field(default_factory=dict)

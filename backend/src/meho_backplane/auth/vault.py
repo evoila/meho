@@ -324,9 +324,11 @@ async def vault_readiness_probe() -> ProbeResult:
 
     # Lazy import: connectors.vault.connector imports auth.vault at module
     # level, so a top-level import here would create a cycle.
-    from meho_backplane.connectors.vault.connector import VaultConnector, VaultTarget
+    from meho_backplane.connectors.vault.connector import VaultConnector
 
-    connector_probe = await VaultConnector().probe(VaultTarget())
+    # probe() reads Vault connection params from settings, not the
+    # target — the readiness probe has no target row, so pass None.
+    connector_probe = await VaultConnector().probe(None)
     return ProbeResult(
         name="vault",
         ok=connector_probe.ok,

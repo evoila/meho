@@ -45,22 +45,24 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import hvac.exceptions
 import pytest
 import requests.exceptions
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import classify_op
 from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
 )
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.vault import (
     VaultConnector,
-    VaultTarget,
     register_vault_sys_typed_operations,
 )
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -116,8 +118,39 @@ async def _registered_vault_sys_ops(
     yield
 
 
-def _make_target(jwt: str = "fake.jwt.value") -> VaultTarget:
-    return VaultTarget(raw_jwt=jwt)
+def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
+    """Request-scoped operator carrying the bearer token the vault
+    handlers forward to Vault's JWT/OIDC auth (G0.8-T3 #629). Replaces
+    the pre-#224 ``VaultTarget(raw_jwt=...)`` stub.
+    """
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+async def _dispatch_vault(
+    op_id: str, params: dict[str, Any], *, jwt: str = "fake.jwt.value"
+) -> OperationResult:
+    """Dispatch a vault op through the real operator-aware path.
+
+    Mirrors ``/api/v1/operations/call`` / MCP ``call_operation``: the
+    dispatcher threads a real :class:`Operator`, resolves the connector
+    by ``connector_id``, and ``target`` is ``None`` (vault connection
+    params come from settings). The handler reads the JWT from
+    ``operator.raw_jwt`` — the #629 contract.
+    """
+    return await dispatch(
+        operator=_make_operator(jwt),
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=None,
+        params=params,
+    )
 
 
 _SYS_OP_IDS = (
@@ -197,7 +230,7 @@ async def test_health_happy_path_returns_classified_payload(
             "cluster_name": "meho-vault",
         },
     )
-    result = await VaultConnector().execute(_make_target(), "vault.sys.health", {})
+    result = await _dispatch_vault("vault.sys.health", {})
 
     assert result.status == "ok", result.error
     assert result.result == {
@@ -224,7 +257,7 @@ async def test_health_sealed_vault_returns_ok_false(
         monkeypatch,
         health_payload={"initialized": True, "sealed": True},
     )
-    result = await VaultConnector().execute(_make_target(), "vault.sys.health", {})
+    result = await _dispatch_vault("vault.sys.health", {})
 
     assert result.status == "ok", result.error
     assert result.result["ok"] is False
@@ -241,7 +274,7 @@ async def test_health_unreachable_vault_surfaces_structured_error(
         monkeypatch,
         health_exc=requests.exceptions.ConnectionError("dns failure"),
     )
-    result = await VaultConnector().execute(_make_target(), "vault.sys.health", {})
+    result = await _dispatch_vault("vault.sys.health", {})
 
     assert result.status == "error"
     assert result.error is not None
@@ -270,7 +303,7 @@ async def test_seal_status_happy_path_returns_raw_object(
         "version": "1.18.0",
     }
     fake = install_fake_client(monkeypatch, seal_status_payload=seal)
-    result = await VaultConnector().execute(_make_target(jwt="op-jwt"), "vault.sys.seal_status", {})
+    result = await _dispatch_vault("vault.sys.seal_status", {}, jwt="op-jwt")
 
     assert result.status == "ok", result.error
     assert result.result == seal
@@ -292,7 +325,7 @@ async def test_mounts_list_unwraps_envelope_data(
         monkeypatch,
         mounts_payload={"request_id": "abc", "data": mounts_data, "warnings": None},
     )
-    result = await VaultConnector().execute(_make_target(), "vault.sys.mounts.list", {})
+    result = await _dispatch_vault("vault.sys.mounts.list", {})
 
     assert result.status == "ok", result.error
     assert result.result == {"mounts": mounts_data}
@@ -311,7 +344,7 @@ async def test_auth_list_unwraps_envelope_data(
         monkeypatch,
         auth_methods_payload={"request_id": "def", "data": auth_data, "warnings": None},
     )
-    result = await VaultConnector().execute(_make_target(), "vault.sys.auth.list", {})
+    result = await _dispatch_vault("vault.sys.auth.list", {})
 
     assert result.status == "ok", result.error
     assert result.result == {"auth_methods": auth_data}
@@ -343,7 +376,7 @@ async def test_authenticated_sys_op_login_failure_surfaces_vault_client_error(
 ) -> None:
     """Login failure on an authenticated sys op → connector_error w/ VaultClientError class."""
     install_fake_client(monkeypatch, login_exc=login_exc, **kwargs)
-    result = await VaultConnector().execute(_make_target(), op_id, {})
+    result = await _dispatch_vault(op_id, {})
 
     assert result.status == "error"
     assert result.error is not None

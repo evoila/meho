@@ -62,17 +62,17 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
 )
-from meho_backplane.connectors.schemas import ResultHandle
+from meho_backplane.connectors.schemas import OperationResult, ResultHandle
 from meho_backplane.connectors.vault import (
     VaultConnector,
-    VaultTarget,
     register_vault_typed_operations,
 )
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
@@ -216,8 +216,38 @@ def threshold_reducer() -> Iterator[None]:
         reset_dispatcher_caches()
 
 
-def _make_target(jwt: str = "fake.jwt.value") -> VaultTarget:
-    return VaultTarget(raw_jwt=jwt)
+def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
+    """Request-scoped operator carrying the bearer token the vault
+    handlers forward to Vault's JWT/OIDC auth (G0.8-T3 #629). Replaces
+    the pre-#224 ``VaultTarget(raw_jwt=...)`` stub.
+    """
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=jwt,
+        tenant_id=uuid.UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+async def _dispatch_vault(
+    op_id: str, params: dict[str, Any], *, jwt: str = "fake.jwt.value"
+) -> OperationResult:
+    """Dispatch a vault op through the real operator-aware path.
+
+    The dispatcher threads a real :class:`Operator`, resolves the
+    connector by ``connector_id``, and ``target`` is ``None`` (vault
+    connection params come from settings). The handler reads the JWT
+    from ``operator.raw_jwt`` — the #629 contract.
+    """
+    return await dispatch(
+        operator=_make_operator(jwt),
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=None,
+        params=params,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +271,10 @@ async def test_kv_list_under_threshold_returns_inline_list_no_handle(
     small_keys = [f"secret-{i}" for i in range(_THRESHOLD)]  # exactly 50 — at, not over
     install_fake_client(monkeypatch, keys=small_keys)
 
-    result = await VaultConnector().execute(
-        _make_target(jwt="op-jwt"),
+    result = await _dispatch_vault(
         "vault.kv.list",
         {"path": "meho/test"},
+        jwt="op-jwt",
     )
 
     assert result.status == "ok", result.error
@@ -273,8 +303,7 @@ async def test_kv_list_under_threshold_passes_through_even_with_real_reducer(
     boundary_keys = [f"secret-{i}" for i in range(_THRESHOLD)]  # exactly 50
     install_fake_client(monkeypatch, keys=boundary_keys)
 
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.kv.list",
         {"path": "meho/test"},
     )
@@ -318,10 +347,10 @@ async def test_kv_list_over_threshold_returns_sample_and_handle(
     big_keys = [f"secret-{i}" for i in range(_THRESHOLD + 75)]  # 125 keys, well over
     install_fake_client(monkeypatch, keys=big_keys)
 
-    result = await VaultConnector().execute(
-        _make_target(jwt="op-jwt"),
+    result = await _dispatch_vault(
         "vault.kv.list",
         {"path": "meho/test"},
+        jwt="op-jwt",
     )
 
     assert result.status == "ok", result.error

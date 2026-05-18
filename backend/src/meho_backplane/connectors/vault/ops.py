@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing >600-line module (per-op
+# JSON Schema + LLM-instruction blobs for the 5-op KV-v2 group, ~827
+# lines before G0.8-T3 #629). The #629 fix is a localised auth-contract
+# change (handler signature + JWT source); a module split is explicitly
+# out of scope per the issue ("the fix is localised to the vault
+# connector handler"). Splitting tracked separately if it lands.
 
 """Vault typed-op handlers + ``endpoint_descriptor`` registration helper.
 
@@ -30,12 +36,12 @@ register-time signal is the op-id itself; a regression test pins the
 ``classify_op`` contract for both ops.
 
 Each handler is an ``async def`` module-level function with the
-``(target, params) -> dict[str, Any]`` shape the G0.6 dispatcher (T5
-#396) expects from a typed op (see
-:class:`~meho_backplane.operations.typed_register.TypedOpHandler`). The
-dispatcher validates ``params`` against the registered
-``parameter_schema`` before invoking the handler; the handler's only
-job is the Vault HTTP call + the success-payload shape.
+``(operator, target, params) -> dict[str, Any]`` shape the G0.6
+dispatcher (T5 #396) expects from a typed op (see
+:func:`~meho_backplane.operations._branches.dispatch_typed`). The JWT
+is read from ``operator.raw_jwt`` (request-scoped) and forwarded to
+:func:`~meho_backplane.auth.vault.vault_client_for_operator`, never off
+the persisted ``Target`` row (G0.8-T3 #629).
 
 Failure handling differs from the pre-G0.6 ``OP_MAP`` model: handlers
 now **raise** rather than returning a structured ``OperationResult``.
@@ -63,6 +69,7 @@ import asyncio
 from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vault.ops_auth import register_vault_auth_operations
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -216,21 +223,21 @@ _VAULT_KV_READ_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
-async def vault_kv_read(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Read a KV v2 secret from Vault via OIDC-forwarded operator JWT.
 
     Op-id: ``vault.kv.read``.
 
     Parameters
     ----------
+    operator
+        Request-scoped operator. ``operator.raw_jwt`` is forwarded to
+        :func:`~meho_backplane.auth.vault.vault_client_for_operator` for
+        the JWT/OIDC login (G0.8-T3 #629).
     target
-        Duck-typed target. Only ``target.raw_jwt`` is read, by way of
-        :func:`~meho_backplane.auth.vault.vault_client_for_operator`.
-        :class:`~meho_backplane.connectors.vault.connector.VaultTarget`
-        is the concrete shape today; once G0.3 (#224) lands its
-        ``Target`` model the connector resolver picks the
-        :class:`VaultConnector` and the dispatcher binds this handler
-        against the resolved target row.
+        The resolved :class:`~meho_backplane.targets.schemas.Target`
+        row (or ``None`` for connector-id-routed calls). Unused by this
+        handler — Vault connection params come from settings.
     params
         Already validated by the dispatcher against
         :data:`VAULT_KV_READ_PARAMETER_SCHEMA`. The handler re-extracts
@@ -282,11 +289,9 @@ async def vault_kv_read(target: Any, params: dict[str, Any]) -> dict[str, Any]:
     path: str = str(params["path"]).strip()
 
     # vault_client_for_operator is accessed via the module reference so
-    # that test monkeypatches on vault_module._build_client propagate
-    # through the call chain. The target object is duck-typed:
-    # vault_client_for_operator only accesses target.raw_jwt, which
-    # VaultTarget provides.
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    # test monkeypatches on vault_module._build_client propagate through
+    # the call chain. It reads operator.raw_jwt for the JWT/OIDC login.
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         secret_payload = await asyncio.to_thread(
             client.secrets.kv.v2.read_secret_version,
             path=path,
@@ -364,7 +369,7 @@ _VAULT_KV_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
-async def vault_kv_list(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_kv_list(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """List key names at a KV v2 folder path.
 
     Op-id: ``vault.kv.list``. Read-only. Classified ``credential_read``
@@ -380,7 +385,7 @@ async def vault_kv_list(target: Any, params: dict[str, Any]) -> dict[str, Any]:
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         list_payload = await asyncio.to_thread(
             client.secrets.kv.v2.list_secrets,
             path=path,
@@ -469,7 +474,7 @@ _VAULT_KV_PUT_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
-async def vault_kv_put(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_kv_put(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Write a new version of a KV v2 secret.
 
     Op-id: ``vault.kv.put``. Mutating (``op_class=write``,
@@ -484,7 +489,7 @@ async def vault_kv_put(target: Any, params: dict[str, Any]) -> dict[str, Any]:
     secret: dict[str, Any] = params["data"]
     cas = params.get("cas")
 
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         write_payload = await asyncio.to_thread(
             client.secrets.kv.v2.create_or_update_secret,
             path=path,
@@ -545,7 +550,9 @@ _VAULT_KV_VERSIONS_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
-async def vault_kv_versions(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_kv_versions(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """Read the version metadata for a KV v2 secret.
 
     Op-id: ``vault.kv.versions``. Read-only (``op_class=read``,
@@ -557,7 +564,7 @@ async def vault_kv_versions(target: Any, params: dict[str, Any]) -> dict[str, An
     mount: str = str(params.get("mount", _DEFAULT_KV_MOUNT)).strip()
     path: str = str(params["path"]).strip()
 
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         meta_payload = await asyncio.to_thread(
             client.secrets.kv.v2.read_secret_metadata,
             path=path,
@@ -632,7 +639,9 @@ _VAULT_KV_DELETE_LLM_INSTRUCTIONS: dict[str, Any] = {
 }
 
 
-async def vault_kv_delete(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_kv_delete(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """Soft-delete specific versions of a KV v2 secret.
 
     Op-id: ``vault.kv.delete``. Mutating (``op_class=write``,
@@ -647,7 +656,7 @@ async def vault_kv_delete(target: Any, params: dict[str, Any]) -> dict[str, Any]
     path: str = str(params["path"]).strip()
     versions: list[int] = list(params["versions"])
 
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         await asyncio.to_thread(
             client.secrets.kv.v2.delete_secret_versions,
             path=path,

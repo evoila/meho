@@ -45,6 +45,13 @@ spec:
             - configMapRef:
                 name: {{ include "meho.fullname" . }}-config
           env:
+            # Surfaces the deployed chart's version to the backplane so
+            # GET /version reports a real `chart_version` (#631). chart.yml
+            # stamps `.Chart.Version` to the calver at package time; this
+            # is the only path that carries that value into the running
+            # container (the image build does not know its chart release).
+            - name: CHART_VERSION
+              value: {{ .Chart.Version | quote }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

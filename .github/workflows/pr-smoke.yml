@@ -203,6 +203,15 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
+          # Build-identity stamps (#631) — same Dockerfile ARG/ENV path as
+          # image.yml. Without these the PR image ships GIT_SHA=unknown and
+          # the smoke script's `git_sha != "unknown"` assertion is
+          # unsatisfiable. PR_HEAD_SHA (the immutable head sha the build
+          # is pinned to) is the honest source here, not github.sha (which
+          # under pull_request_target is the base merge commit).
+          build-args: |
+            GIT_SHA=${{ env.PR_HEAD_SHA }}
+            BUILD_DATE=${{ github.event.pull_request.updated_at }}
           # GHA-backed remote cache. Shared scope with image.yml means the
           # PR build reuses every layer the main-push cache already has,
           # dropping cold-build wall-clock to a handful of seconds when

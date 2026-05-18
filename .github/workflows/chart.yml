@@ -195,6 +195,25 @@ jobs:
             -summary \
             /tmp/rendered.yaml
 
+      - name: Assert Deployment carries CHART_VERSION env (#631)
+        # GET /version reports a real chart_version only if the chart's
+        # Deployment injects CHART_VERSION from .Chart.Version. Render the
+        # chart and assert the env var is present with the in-tree
+        # Chart.yaml `version` value (0.1.0 on a fresh checkout; the
+        # publish job rewrites it to the calver at package time, but the
+        # template binding — `value: {{ .Chart.Version | quote }}` — is
+        # what this gate proves). grep -F on the exact `name:`/`value:`
+        # pair fails the job loud if the env binding ever regresses.
+        run: |
+          set -euo pipefail
+          CHART_VER="$(grep -E '^version:' deploy/charts/meho/Chart.yaml \
+            | head -1 | awk '{print $2}')"
+          echo ">> Chart.yaml version = ${CHART_VER}"
+          grep -F -A1 'name: CHART_VERSION' /tmp/rendered.yaml \
+            | grep -F "value: \"${CHART_VER}\"" \
+            || { echo "::error title=CHART_VERSION env missing::Deployment must inject CHART_VERSION=${CHART_VER} from .Chart.Version (#631)" >&2; exit 1; }
+          echo ">> CHART_VERSION env present with value ${CHART_VER}"
+
   helm-test:
     name: helm install + helm test (pgvector preflight)
     # G0.4-T6 (#263) -- spins up a kind cluster, installs a

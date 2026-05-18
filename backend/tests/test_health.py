@@ -7,8 +7,10 @@ Coverage matrix (per Task #19 acceptance criteria):
 
 * ``/healthz`` always returns 200, even with a failing probe registered.
 * ``/version`` returns the env-injected triple (``GIT_SHA``,
-  ``BUILD_DATE``) and falls back to ``"unknown"`` when env vars are
-  absent. ``chart_version`` is always ``None`` at the chassis stage.
+  ``BUILD_DATE``, ``CHART_VERSION``). ``git_sha`` / ``build_date`` fall
+  back to ``"unknown"`` when their env vars are absent or empty;
+  ``chart_version`` falls back to ``None`` (#631 — the chart's
+  Deployment injects ``CHART_VERSION`` from ``.Chart.Version``).
 * ``/ready`` returns 503 with an empty registry (default v0.1 state),
   200 once a passing probe is registered, and 503 again with one
   failing probe registered alongside a passing one (so the failure
@@ -91,6 +93,7 @@ def test_healthz_ignores_failing_probes(client: TestClient) -> None:
 def test_version_falls_back_to_unknown(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GIT_SHA", raising=False)
     monkeypatch.delenv("BUILD_DATE", raising=False)
+    monkeypatch.delenv("CHART_VERSION", raising=False)
 
     response = client.get("/version")
 
@@ -105,6 +108,7 @@ def test_version_falls_back_to_unknown(client: TestClient, monkeypatch: pytest.M
 def test_version_reads_env_vars(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_SHA", "abc1234")
     monkeypatch.setenv("BUILD_DATE", "2026-05-09T12:00:00Z")
+    monkeypatch.setenv("CHART_VERSION", "0.1.20260518-abc1234")
 
     response = client.get("/version")
 
@@ -112,16 +116,24 @@ def test_version_reads_env_vars(client: TestClient, monkeypatch: pytest.MonkeyPa
     assert response.json() == {
         "git_sha": "abc1234",
         "build_date": "2026-05-09T12:00:00Z",
-        "chart_version": None,
+        "chart_version": "0.1.20260518-abc1234",
     }
 
 
 def test_version_treats_empty_env_as_unknown(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Empty strings are as uninformative as unset; coerce to ``"unknown"``."""
+    """Empty strings are as uninformative as unset.
+
+    ``git_sha`` / ``build_date`` coerce to ``"unknown"``;
+    ``chart_version`` coerces to ``None`` (its unset sentinel — the
+    field is typed ``str | None`` and a null release is more honest
+    than the string ``"unknown"`` for a value that is only ever a
+    semver-shaped chart version when known).
+    """
     monkeypatch.setenv("GIT_SHA", "")
     monkeypatch.setenv("BUILD_DATE", "")
+    monkeypatch.setenv("CHART_VERSION", "")
 
     response = client.get("/version")
 
@@ -131,6 +143,20 @@ def test_version_treats_empty_env_as_unknown(
         "build_date": "unknown",
         "chart_version": None,
     }
+
+
+def test_version_chart_version_unset_is_null(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``CHART_VERSION`` unset (bare-image / local run) → ``null``, no exception."""
+    monkeypatch.setenv("GIT_SHA", "deadbeef")
+    monkeypatch.setenv("BUILD_DATE", "2026-05-18T00:00:00Z")
+    monkeypatch.delenv("CHART_VERSION", raising=False)
+
+    response = client.get("/version")
+
+    assert response.status_code == 200
+    assert response.json()["chart_version"] is None
 
 
 # ---------------------------------------------------------------------------

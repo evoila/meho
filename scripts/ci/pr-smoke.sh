@@ -97,6 +97,15 @@ version_json="$(curl -sSf \
 echo "$version_json" \
   | jq -e '.git_sha and .git_sha != "unknown" and (.git_sha | length) > 0' >/dev/null
 
+echo ">> assert /version exposes a non-null chart_version (#631)"
+# The chart's Deployment injects CHART_VERSION from .Chart.Version, so a
+# helm-installed backplane MUST report a real chart_version. A null (the
+# bare-image / local fallback) or the literal "unknown" both fail: this
+# is the deployed-chart provenance the governance backplane exists to
+# answer. Same `jq -e` gotcha guard as the git_sha assertion above.
+echo "$version_json" \
+  | jq -e '.chart_version and .chart_version != "unknown" and (.chart_version | length) > 0' >/dev/null
+
 echo ">> assert /api/v1/health unauthenticated returns 401"
 # Negative authentication test: hitting the federation-proof endpoint
 # without a Keycloak access token MUST be rejected as 401. A 200 here

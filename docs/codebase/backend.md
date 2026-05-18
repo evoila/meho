@@ -578,7 +578,7 @@ PYTHONPATH-leak imports.
 | `ProbeResult` (`dataclass`) | `src/meho_backplane/health.py` | Frozen record `(name, ok, detail)` returned by every readiness probe. Surfaced verbatim in the `/ready` response body. |
 | `register_probe` / `run_probes` / `run_probes_async` / `clear_probes` | `src/meho_backplane/health.py` | Public registry API. G2.2 (Vault, Keycloak) and G2.3 (DB migrations) call `register_probe` at startup. `run_probes()` returns the sync subset (test-friendly); `run_probes_async()` awaits async probes too and is what `/ready` calls. `clear_probes` is test-only. |
 | `health.router` (`/healthz`, `/ready`) | `src/meho_backplane/health.py` | Liveness and readiness endpoints. `/healthz` is unconditional 200; `/ready` aggregates the probe registry and **fails closed on the empty default** (vacuous-truth trap explicitly guarded). |
-| `version.router` (`/version`) | `src/meho_backplane/version.py` | Build identity. Reads `GIT_SHA` and `BUILD_DATE` env vars (injected via `docker build --build-arg`); falls back to `"unknown"` when unset or empty. `chart_version` is `None` until G2.5. |
+| `version.router` (`/version`) | `src/meho_backplane/version.py` | Build identity. Reads `GIT_SHA`, `BUILD_DATE` (injected via `docker build --build-arg` by `image.yml` / `pr-smoke.yml`, #631) and `CHART_VERSION` (injected by the chart's Deployment from `.Chart.Version`, #631) env vars. `git_sha` / `build_date` fall back to `"unknown"` when unset or empty; `chart_version` falls back to `None`. |
 | `configure_logging` | `src/meho_backplane/logging.py` | Configures structlog: `merge_contextvars` → `add_log_level` → `TimeStamper(iso, utc)` → `dict_tracebacks` → `JSONRenderer`, writing to stdout. Idempotent. The logger factory is constructed as `PrintLoggerFactory()` with **no `file=` argument** — structlog's `PrintLogger.msg` then resolves `sys.stdout` lazily at write time (calls `print()` with no `file=` keyword whenever `self._file is sys.stdout`). Tests under `pytest`'s `capfd` swap `sys.stdout` for a wrapped fd that gets closed on test teardown; the lazy shape avoids capturing that wrapped fd at lifespan-startup time and surviving into a later test as a closed-fd `ValueError` from `cache_logger_on_first_use=True`. Production behaviour unchanged because the real process `sys.stdout` does not get rebound at runtime. |
 | `RequestContextMiddleware` | `src/meho_backplane/middleware.py` | Pure-ASGI middleware. Per request: extracts/mints a `request_id`, clears any leftover contextvars and binds the new `request_id`, mirrors it onto the `X-Request-Id` response header, increments `http_requests_total{method,path,status}`, emits one `request_completed` JSON log line with method / path / status / duration_ms (which inherits any contextvars bound during the request, including `operator_sub` and `tenant_id` from `verify_jwt_and_bind`). |
 | `verify_jwt_and_bind` | `src/meho_backplane/middleware.py` | FastAPI dependency wrapper around `verify_jwt`. On successful validation, binds `operator_sub` (the JWT's `sub` claim) and `tenant_id` (`str(operator.tenant_id)` — JSON renderer cannot serialise raw `uuid.UUID`) into structlog contextvars so every subsequent log line in the request scope carries both fields automatically. Authenticated routes use `Depends(verify_jwt_and_bind)` instead of `Depends(verify_jwt)` directly. Lives alongside the middleware because `RequestContextMiddleware`'s request-entry `clear_contextvars` call is what guarantees the bound keys do not leak across requests reusing the same asyncio task. `tenant_role` is intentionally *not* bound — it's enforced at the dependency layer (G0.1-T4 `require_role`) so handlers reach for the typed `Operator` instead of pulling roles out of contextvars. G0.8-T1 (#628): after binding contextvars the wrapper calls `tenancy.ensure_tenant(operator.tenant_id, …)` in its own short `get_sessionmaker()` session (the same own-session pattern `AuditMiddleware` uses), committed before the route runs so the row is visible to the route's transaction. This is the just-in-time tenant-seed seam — every authenticated route flows through this wrapper, and it is the first point `operator.tenant_id` is available as a verified value, so seeding here guarantees no tenant-scoped write hits `documents_tenant_id_fkey` on a fresh deploy. |
@@ -684,8 +684,8 @@ PYTHONPATH-leak imports.
 6. The wrapped app dispatches each request to its route handler:
    - `GET /` → `root()` returns the identity dict.
    - `GET /healthz` → `healthz()` returns `{"status": "ok"}` with 200.
-   - `GET /version` → reads `GIT_SHA` / `BUILD_DATE` env vars per
-     request (cheap; no caching needed).
+   - `GET /version` → reads `GIT_SHA` / `BUILD_DATE` / `CHART_VERSION`
+     env vars per request (cheap; no caching needed).
    - `GET /ready` → calls `run_probes_async()` (which awaits async
      probes and calls sync probes inline) and translates the
      aggregate into a 200 / 503 `JSONResponse`.
@@ -834,7 +834,16 @@ The runtime stage stamps the published image with OCI annotations
 - `org.opencontainers.image.vendor=evoila`
 
 `revision` and `created` flow into `GET /version` via the same build
-args, so the registry view and the running app agree on identity.
+args, so the registry view and the running app agree on identity. In
+`image.yml` the `BUILD_DATE` build-arg is sourced from
+`docker/metadata-action`'s `org.opencontainers.image.created` label
+output (`fromJSON(steps.meta.outputs.json).labels[...]`), so the OCI
+`created` annotation and the `/version` `build_date` are guaranteed to
+be the same single value rather than two independently-computed
+timestamps that can drift (#631). The third `/version` field,
+`chart_version`, is **not** an image build-arg — it is injected at
+deploy time by the chart's Deployment template from `.Chart.Version`,
+because the image build cannot know which chart release wraps it.
 
 ### Cosign keyless signing (Task #34, ADR 0006)
 

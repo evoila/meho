@@ -86,7 +86,7 @@ func (e *bulkImportEndpoint) UnmarshalYAML(node *yaml.Node) error {
 
 // bulkImportRequest is the wire shape for
 // POST /api/v1/topology/edges/bulk: `{edges: [...], dry_run: bool}`.
-// The route accepts both ``dry_run=true/false`` in the body and a
+// The route accepts both “dry_run=true/false“ in the body and a
 // canonical 200 response.
 type bulkImportRequest struct {
 	Edges  []bulkImportEdgeYAML `json:"edges"`
@@ -117,7 +117,7 @@ type bulkImportResponse struct {
 
 // bulkImportError mirrors the 422 invalid_bulk envelope.
 type bulkImportErrorEnvelope struct {
-	Error  string                `json:"error"`
+	Error  string                 `json:"error"`
 	Errors []bulkImportRowErrJSON `json:"errors"`
 }
 

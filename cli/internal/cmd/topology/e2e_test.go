@@ -400,7 +400,7 @@ func TestAnnotateRoundTripVisibleViaListEdgesThenUnannotate(t *testing.T) {
 	cmd, stdout, stderr := newRunCmd(t)
 	if err := runAnnotate(cmd, annotateOptions{
 		From: "service-x", Kind: "depends-on", To: "database-y",
-		EvidenceURL: "https://docs/example",
+		EvidenceURL:       "https://docs/example",
 		BackplaneOverride: srv.URL,
 	}); err != nil {
 		t.Fatalf("runAnnotate: %v; stderr=%s", err, stderr.String())

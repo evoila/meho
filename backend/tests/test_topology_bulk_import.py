@@ -454,3 +454,131 @@ async def test_bulk_import_flags_supersede_as_conflict() -> None:
 
     assert result.rows[0].action == "conflict"
     assert str(auto_edge_id) in result.rows[0].superseded
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_flags_incompatible_kind_as_conflict_in_dry_run() -> None:
+    """A row whose endpoint pair already has a *different-kind* edge classifies ``conflict``.
+
+    Regression guard for PR #667 B2: ``_classify_row`` originally only
+    detected same-kind / different-endpoint supersedes (§6 class 1)
+    and missed the incompatible-kind / same-endpoint class (§6 class 2).
+    A dry-run plan over a pair that already has ``depends-on(svc → db)``
+    auto + a new ``routes-through(svc → db)`` curated row must surface
+    as ``conflict`` so the apply pass's bidirectional ``conflicts_with``
+    marker write is visible pre-apply.
+    """
+    tenant_id = await _seed_tenant()
+    svc = await _seed_node(tenant_id, kind="service", name="svc")
+    db = await _seed_node(tenant_id, kind="service", name="db")
+    auto_depends = await _seed_auto_edge(tenant_id, from_id=svc, to_id=db, kind="depends-on")
+
+    rows = [
+        BulkImportRow(
+            from_ref=NodeRef("svc", "service"),
+            kind="routes-through",
+            to_ref=NodeRef("db", "service"),
+        ),
+    ]
+    sessionmaker = get_sessionmaker()
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            plan = await bulk_import_edges(session, _operator(tenant_id), rows, dry_run=True)
+
+    assert plan.dry_run is True
+    assert plan.conflicts == 1
+    assert plan.rows[0].action == "conflict"
+    assert str(auto_depends) in plan.rows[0].conflicts
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_flags_incompatible_kind_as_conflict_on_apply() -> None:
+    """The apply pass also reports incompatible-kind conflicts in the post-commit counts.
+
+    Companion to the dry-run test above — confirms that the apply
+    pass's re-derived counts (M1 fix) honour the §6 class-2 conflict
+    classification the same way the dry-run plan does.
+    """
+    tenant_id = await _seed_tenant()
+    svc = await _seed_node(tenant_id, kind="service", name="svc")
+    db = await _seed_node(tenant_id, kind="service", name="db")
+    await _seed_auto_edge(tenant_id, from_id=svc, to_id=db, kind="depends-on")
+
+    rows = [
+        BulkImportRow(
+            from_ref=NodeRef("svc", "service"),
+            kind="routes-through",
+            to_ref=NodeRef("db", "service"),
+        ),
+    ]
+    sessionmaker = get_sessionmaker()
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            result = await bulk_import_edges(session, _operator(tenant_id), rows)
+
+    assert result.dry_run is False
+    assert result.conflicts == 1
+    assert result.created == 0  # M1: bidirectional conflict promotes to ``conflict``.
+    assert result.rows[0].action == "conflict"
+    assert len(result.rows[0].conflicts) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Action re-derivation from post-commit state (M1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_intra_batch_duplicate_counts_match_db_state() -> None:
+    """Two rows in one batch resolving to the same triple report 1 created + 1 update.
+
+    Regression guard for PR #667 M1: ``_materialise_apply_rows``
+    originally carried forward pass-1's action verbatim. Pass-1 saw
+    *both* duplicate rows as missing (the first row was not yet
+    flushed at the time pass-1 ran), so the count came out as
+    ``created=2`` while the DB only held one edge — the second annotate
+    inside the apply transaction merged onto the first row instead of
+    inserting a new one. The fix re-derives action from the apply
+    pass's actual insert-vs-merge outcome
+    (:attr:`AnnotatePlan.was_created`).
+    """
+    tenant_id = await _seed_tenant()
+    await _seed_node(tenant_id, kind="vm", name="vm-1")
+    await _seed_node(tenant_id, kind="host", name="host-1")
+
+    rows = [
+        BulkImportRow(
+            from_ref=NodeRef("vm-1", "vm"),
+            kind="runs-on",
+            to_ref=NodeRef("host-1", "host"),
+            note="first",
+        ),
+        BulkImportRow(
+            from_ref=NodeRef("vm-1", "vm"),
+            kind="runs-on",
+            to_ref=NodeRef("host-1", "host"),
+            note="second — same triple as row 0",
+        ),
+    ]
+    sessionmaker = get_sessionmaker()
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            result = await bulk_import_edges(session, _operator(tenant_id), rows)
+
+    # Exactly one edge was committed — the second row was an in-batch
+    # merge onto the first.
+    async with sessionmaker() as session:
+        edges = (
+            (await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+    assert len(edges) == 1
+    # Reported counts match the committed state: 1 created + 1 updated,
+    # not 2 created. Both row records point at the same edge id.
+    assert result.created == 1
+    assert result.updated == 1
+    assert result.conflicts == 0
+    actions = sorted(r.action for r in result.rows)
+    assert actions == ["create", "update"]
+    assert {r.edge_id for r in result.rows} == {str(edges[0].id)}

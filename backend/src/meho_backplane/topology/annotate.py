@@ -676,12 +676,22 @@ class AnnotatePlan:
       event both carry.
     * ``target_name`` — the from-node's name; surfaces in the broadcast
       event's ``target_name`` field per the chassis convention.
+    * ``was_created`` — ``True`` when this call inserted a fresh row,
+      ``False`` when it merged onto an existing row (idempotent
+      re-annotate or auto→curated promotion). The bulk-import helper
+      re-derives its per-row ``create`` / ``update`` / ``conflict``
+      classification from this flag plus the post-commit marker arrays
+      so intra-batch duplicates (two rows resolving to the same triple
+      in one batch) and inter-pass races between validation and apply
+      cannot leave the reported counts disagreeing with the committed
+      state.
     """
 
     edge: GraphEdge
     audit_id: uuid.UUID
     audit_payload: dict[str, Any]
     target_name: str
+    was_created: bool
 
 
 async def annotate_edge_in_txn(
@@ -754,6 +764,7 @@ async def annotate_edge_in_txn(
         )
         session.add(edge)
         await session.flush()
+        was_created = True
     else:
         # Idempotent path covers two cases:
         #
@@ -782,12 +793,33 @@ async def annotate_edge_in_txn(
         merged = dict(existing.properties or {})
         for key, value in properties.items():
             merged[key] = value
+        promoting = existing.source != "curated"
+        if promoting:
+            # §6 invariant: a curated edge must never carry an
+            # ``superseded_by`` marker — that marker is meaningful only
+            # on ``source='auto'`` rows that the conflict-detection
+            # scan stamped against a different-endpoint curated
+            # assertion. When the same triple gets re-annotated, the
+            # auto row's stale marker would otherwise persist onto the
+            # promoted curated row and hide it from
+            # :func:`find_dependents` / :func:`find_dependencies` —
+            # the traversal CTE filters
+            # ``properties->>'superseded_by' IS NULL``. Drop the key
+            # here so the promoted curated edge is immediately visible.
+            #
+            # ``conflicts_with`` (bidirectional, list-shaped) is kept:
+            # the entries point at *other-kind* edges over the same
+            # endpoint pair, which still exist and still conflict; the
+            # incompatible-kinds scan below re-stamps the curated side
+            # without dropping the legitimate back-references.
+            merged.pop(_SUPERSEDED_BY, None)
         existing.properties = merged
         existing.last_seen = now
-        if existing.source != "curated":
+        if promoting:
             existing.source = "curated"
             existing.discovered_by = operator.sub
         edge = existing
+        was_created = False
 
     superseded = await _mark_same_kind_different_endpoint_superseded(
         session,
@@ -834,6 +866,7 @@ async def annotate_edge_in_txn(
         audit_id=audit_id,
         audit_payload=payload,
         target_name=from_node.name,
+        was_created=was_created,
     )
 
 

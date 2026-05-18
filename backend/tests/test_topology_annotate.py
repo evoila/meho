@@ -1208,3 +1208,80 @@ async def test_refresh_strips_reserved_markers_from_connector_hints() -> None:
     finally:
         clear_registry()
         reset_connector_instance_cache()
+
+
+@pytest.mark.asyncio
+async def test_promotion_clears_stale_superseded_by_marker() -> None:
+    """Re-annotating a superseded auto edge must clear ``superseded_by``.
+
+    Regression guard for PR #667 B1: an earlier curated assertion of
+    ``runs-on(vm-a → host-y)`` stamped ``superseded_by`` on a prior
+    auto edge ``runs-on(vm-a → host-x)``. The operator then asserts the
+    auto edge's own triple as canonical (``runs-on(vm-a → host-x)``) —
+    typical recovery flow after realising the first curated assertion
+    pointed at the wrong host. The auto→curated promotion must drop the
+    stale ``superseded_by`` key so the new curated edge is *visible* to
+    :func:`find_dependents` / :func:`find_dependencies` (their CTE
+    filters out edges with ``properties->>'superseded_by' IS NOT NULL``).
+    Leaving the marker in place would leave the curated assertion
+    silently absent from every traversal — §6's sticky-supersede semantics
+    apply only to ``source='auto'`` rows.
+    """
+    tenant_id = await _seed_tenant("b1-promotion-tenant")
+    vm = await _seed_node(tenant_id, kind="vm", name="vm-a")
+    host = await _seed_node(tenant_id, kind="host", name="host-x")
+    # Seed the auto edge already-superseded — pointing at a synthetic
+    # curated id we never actually inserted; the marker is the load-
+    # bearing state for the regression.
+    stale_curated_id = uuid.uuid4()
+    auto_edge_id = await _seed_auto_edge(
+        tenant_id,
+        from_id=vm,
+        to_id=host,
+        kind="runs-on",
+        properties={
+            "superseded_by": str(stale_curated_id),
+            "discovered_port": 22,
+        },
+    )
+
+    sessionmaker = get_sessionmaker()
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            edge = await annotate_edge(
+                session,
+                _operator(tenant_id, sub="op-reclaim"),
+                NodeRef("vm-a", "vm"),
+                "runs-on",
+                NodeRef("host-x", "host"),
+                note="reclaiming after wrong supersede",
+            )
+
+    # Same row id — auto→curated promotion is in-place.
+    assert edge.id == auto_edge_id
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(GraphEdge).where(GraphEdge.id == auto_edge_id))
+        ).scalar_one()
+    assert row.source == "curated"
+    # B1 fix: the stale superseded_by marker is gone.
+    assert "superseded_by" not in row.properties
+    # The operator-supplied note and the unrelated auto-discovery
+    # property both persist — the clear is targeted, not a wipe.
+    assert row.properties["note"] == "reclaiming after wrong supersede"
+    assert row.properties.get("discovered_port") == 22
+
+    # Traversal-visibility check that does not depend on PG JSON
+    # operators: the curated row is the sole edge in this tenant, and
+    # its ``superseded_by`` is unset — so a SELECT mirroring the CTE's
+    # filter shape (in portable form) returns it.
+    async with sessionmaker() as session:
+        visible_rows = (
+            (await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+    visible = [r for r in visible_rows if (r.properties or {}).get("superseded_by") is None]
+    assert len(visible) == 1
+    assert visible[0].id == auto_edge_id

@@ -553,6 +553,21 @@ async def _classify_row(
             # listing flags it pre-apply.
             action = "conflict"
 
+    # Incompatible-kind / same-endpoint scan: §6 class 2. The apply
+    # pass's :func:`annotate._mark_incompatible_kinds_conflict` will
+    # stamp bidirectional ``conflicts_with`` markers; pre-apply we
+    # surface the row as ``conflict`` so the dry-run plan exposes
+    # the recoverability listing for *both* §6 classes (the
+    # same-kind / different-endpoint case above and the
+    # incompatible-kind / same-endpoint case here). Reads only;
+    # marker writes happen in the apply transaction.
+    incoming_conflict_kinds = await _scan_would_conflict_kinds(
+        session, operator, from_node.id, to_node.id, canonical_kind
+    )
+    if incoming_conflict_kinds:
+        conflicts = list({*conflicts, *incoming_conflict_kinds})
+        action = "conflict"
+
     return action, _EdgeSummary(
         edge_id=edge_id,
         from_name=from_node.name,
@@ -590,6 +605,37 @@ async def _scan_would_supersede(
     return [str(r.id) for r in rows]
 
 
+async def _scan_would_conflict_kinds(
+    session: AsyncSession,
+    operator: Operator,
+    from_id: object,
+    to_id: object,
+    kind: str,
+) -> list[str]:
+    """Read-only counterpart of
+    :func:`annotate._mark_incompatible_kinds_conflict`.
+
+    Returns the ids of edges that already exist over the same endpoint
+    pair with a *different* ``kind`` — the §6 class-2 (incompatible-kind
+    / same-endpoint) conflict signal. Reads only; the apply pass's
+    bidirectional ``conflicts_with`` marker write is what makes the
+    conflict effective in the audit / broadcast payloads.
+
+    The query mirrors :func:`annotate._mark_incompatible_kinds_conflict`'s
+    SELECT verbatim so the plan-pass classification and the apply-pass
+    marker write target the same row set; a divergence between the two
+    would let dry-run plans hide §6 conflicts the apply would surface.
+    """
+    stmt = select(GraphEdge).where(
+        GraphEdge.tenant_id == operator.tenant_id,
+        GraphEdge.from_node_id == from_id,
+        GraphEdge.to_node_id == to_id,
+        GraphEdge.kind != kind,
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [str(r.id) for r in rows]
+
+
 def _materialise_apply_rows(
     plans: list[AnnotatePlan],
     plan_rows: list[BulkEdgeResult],
@@ -602,23 +648,59 @@ def _materialise_apply_rows(
     rows, and the audit payload carries the final ``superseded`` /
     ``conflicts`` lists post-marker-write — so we re-pack the result
     using those authoritative numbers.
+
+    The per-row ``action`` is re-derived from the apply pass's actual
+    insert-vs-merge outcome (:attr:`AnnotatePlan.was_created`) plus the
+    post-commit marker arrays, **not** carried forward from the pass-1
+    plan. The pass-1 ``action`` is a *prediction* that two situations
+    can invalidate:
+
+    1. **Intra-batch duplicates.** Two rows in the same batch resolving
+       to the same ``(from, to, kind)`` triple — pass-1 saw the row as
+       missing for both rows (the first row was not yet flushed); pass-2
+       inserts on row N and merges on row N+1. Carrying pass-1's action
+       forward would count both as ``create`` and report 2 created
+       edges when the DB only holds 1.
+
+    2. **Inter-pass races.** A concurrent transaction inserted the row
+       between pass-1 and pass-2. Pass-1 planned ``create``; pass-2 got
+       a unique-constraint hit on flush, then the second annotate
+       merged onto the racing row. Pass-1's action no longer reflects
+       what actually happened.
+
+    Re-deriving from the apply outcome makes the reported counts match
+    the committed DB state by construction. Any post-commit marker
+    array — ``superseded`` (§6 class 1, same-kind/different-endpoint)
+    or ``conflicts`` (§6 class 2, incompatible-kind/same-endpoint) —
+    forces ``action='conflict'`` so the recoverability listing
+    surfaces; otherwise ``was_created`` distinguishes ``create``
+    (fresh insert) from ``update`` (idempotent merge).
     """
     out: list[BulkEdgeResult] = []
     for plan_row, applied in zip(plan_rows, plans, strict=True):
         payload = applied.audit_payload
         edge = applied.edge
+        superseded = [str(s) for s in payload.get("superseded", [])]
+        conflicts = [str(c) for c in payload.get("conflicts", [])]
+        action: BulkEdgeAction
+        if superseded or conflicts:
+            action = "conflict"
+        elif applied.was_created:
+            action = "create"
+        else:
+            action = "update"
         out.append(
             BulkEdgeResult(
                 index=plan_row.index,
-                action=plan_row.action,
+                action=action,
                 edge_id=str(edge.id),
                 from_name=plan_row.from_name,
                 from_kind=plan_row.from_kind,
                 to_name=plan_row.to_name,
                 to_kind=plan_row.to_kind,
                 kind=plan_row.kind,
-                superseded=[str(s) for s in payload.get("superseded", [])],
-                conflicts=[str(c) for c in payload.get("conflicts", [])],
+                superseded=superseded,
+                conflicts=conflicts,
             )
         )
     return out

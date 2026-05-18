@@ -357,6 +357,7 @@ async def nsx_e2e_401_canary(
 # ---------------------------------------------------------------------------
 
 _OP_IDS: tuple[str, ...] = tuple(op.op_id for op in NSX_CORE_OPS)
+assert len(_OP_IDS) == 9, f"Expected 9 curated NSX ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -514,15 +515,18 @@ async def test_nsx_e2e_dispatch_writes_audit_row(
     )
 
     async with sessionmaker() as session:
-        rows_result = await session.execute(
-            select(AuditLog).where(
+        row_result = await session.execute(
+            select(AuditLog)
+            .where(
                 AuditLog.method == "DISPATCH",
                 AuditLog.path == op_id,
             )
+            .order_by(AuditLog.id.desc())
+            .limit(1)
         )
-        rows = list(rows_result.scalars().all())
+        row = row_result.scalars().first()
 
-    row = rows[-1]
+    assert row is not None
     assert row.target_id is not None, (
         "AuditLog.target_id must not be None for a targeted dispatch; "
         f"got target_id=None on row {row!r}"

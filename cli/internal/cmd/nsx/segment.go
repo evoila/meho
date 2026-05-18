@@ -82,12 +82,12 @@ func printSegmentList(w io.Writer, r *CallResult) {
 		fmt.Fprintln(w, "  (0 segments)")
 		return
 	}
-	fmt.Fprintf(w, "%-38s %-30s %-50s\n", "id", "display_name", "transport_zone_path")
+	fmt.Fprintf(w, "%-38s %-30s %-30s\n", "id", "display_name", "transport_zone")
 	for _, e := range entries {
-		fmt.Fprintf(w, "%-38s %-30s %-50s\n",
+		fmt.Fprintf(w, "%-38s %-30s %-30s\n",
 			truncate(nsxStringField(e, "id"), 38),
 			truncate(nsxStringField(e, "display_name"), 30),
-			truncate(nsxStringField(e, "transport_zone_path"), 50),
+			truncate(nsxPathBasename(nsxStringField(e, "transport_zone_path")), 30),
 		)
 	}
 }

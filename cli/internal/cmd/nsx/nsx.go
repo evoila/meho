@@ -263,9 +263,13 @@ func doAuthedRequest(
 		}
 	}
 	defer resp.Body.Close()
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	const maxBody = int64(1 << 20) // 1 MiB
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if readErr != nil {
 		return nil, fmt.Errorf("read response: %w", readErr)
+	}
+	if int64(len(raw)) > maxBody {
+		return nil, fmt.Errorf("backplane response body exceeds %d bytes", maxBody)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, &httpError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
@@ -320,6 +324,17 @@ func loadParamsFlag(val string) (map[string]any, error) {
 
 func jsonUnmarshalStrict(raw []byte, out any) error {
 	return json.Unmarshal(raw, out)
+}
+
+// nsxPathBasename returns the last path segment (the part after the final "/").
+// NSX resource paths like /infra/sites/default/.../transport-zones/tz-1 encode
+// the human-readable name as the last segment; displaying just the basename
+// keeps list columns readable without truncating the identifier.
+func nsxPathBasename(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 && i < len(path)-1 {
+		return path[i+1:]
+	}
+	return path
 }
 
 func truncate(s string, maxLen int) string {

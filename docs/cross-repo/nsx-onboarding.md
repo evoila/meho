@@ -165,7 +165,7 @@ meho nsx operation search "firewall rules" --target rdc-nsx
 Dispatches `GET:/api/v1/node` against `connector_id="nsx-rest-4.2"`.
 Human output: `node_version`, `kernel_version`, `hostname`, `node_uuid`.
 
-```
+```text
 $ meho nsx about --target rdc-nsx
 nsx-rest-4.2 — node_version=4.2.1.0.0 (kernel 4.2.1.0.0 build) @ nsxmgr-rdc
   node_uuid: deadbeef-1111-2222-3333-cafebabecafe

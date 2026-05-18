@@ -44,8 +44,20 @@ NULL``) as well as registered targets.
 * :class:`meho_backplane.topology.resolvers.AmbiguousNodeError` —
   re-exported by :mod:`query` for back-compat with pre-G9.2 importers.
 * :class:`meho_backplane.topology.resolvers.NodeNotFoundError`
+
+**Edge listing — Task #596 (G9.2-T4):** the flat tenant-scoped
+filter-composable read helper for ``graph_edge`` rows. The T5 REST
+route ``GET /api/v1/topology/edges``, the T6 CLI
+``meho topology list-edges``, and the T7 MCP
+``query_topology(kind='edges')`` facet all dispatch through it rather
+than re-deriving the tenant boundary or the filter composition.
+
+* :func:`meho_backplane.topology.query.list_edges`
+* :class:`meho_backplane.topology.schemas.TopologyEdge`
+* :class:`meho_backplane.topology.schemas.TopologyEdgeEndpoint`
 """
 
+from meho_backplane.topology.query import list_edges
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.resolvers import (
     AmbiguousNodeError,
@@ -56,11 +68,15 @@ from meho_backplane.topology.scheduler import (
     start_topology_refresh_scheduler,
     stop_topology_refresh_scheduler,
 )
+from meho_backplane.topology.schemas import TopologyEdge, TopologyEdgeEndpoint
 
 __all__ = [
     "AmbiguousNodeError",
     "NodeNotFoundError",
     "RefreshResult",
+    "TopologyEdge",
+    "TopologyEdgeEndpoint",
+    "list_edges",
     "refresh_target_topology",
     "resolve_node",
     "start_topology_refresh_scheduler",

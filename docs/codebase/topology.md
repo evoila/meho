@@ -41,6 +41,32 @@ models that G9.1-T1 (#448, migration `0007`) created.
   unchanged (empty result, not a raise) — only `resolve_node`
   surfaces `NodeNotFoundError`.
 
+**Edge listing — entry point (async, read-only, G9.2-T4 #596):**
+
+- `list_edges(session, tenant_id, *, kind=None, source=None,
+  from_ref=None, to_ref=None, conflicts_only=False, limit=200,
+  offset=0) -> list[TopologyEdge]` — flat tenant-scoped
+  filter-composable edge listing. Joins both endpoint nodes so
+  `from` / `to` carry `(id, kind, name)` without a second round
+  trip. Filters compose: `kind=` restricts to one
+  `GraphEdgeKind`, `source=` selects `'auto'` vs `'curated'`,
+  `from_ref` / `to_ref` resolve via `resolve_node` (a ref that maps
+  to no node yields an empty list, not an error; an ambiguous bare
+  name raises `AmbiguousNodeError`), `conflicts_only=True` returns
+  exactly the edges whose `properties.conflicts_with` JSONB is a
+  non-empty array (the marker G9.2-T3 #595 writes on incompatible-
+  kind conflicts — until #595 lands, the predicate is still safe
+  via the `jsonb_typeof = 'array'` guard). Soft-deleted rows
+  (`last_seen IS NULL`) are excluded by default. Pagination is
+  stable: `ORDER BY last_seen DESC NULLS LAST, id` is a strict
+  total order, so a two-page sweep reassembles to the unpaged set
+  with no gaps or duplicates. Unlike the traversal verbs (which
+  take an `Operator` and open their own session), `list_edges`
+  takes `session` and `tenant_id` directly — same shape as
+  `resolve_node`, so callers can compose the listing inside a
+  larger transactional boundary (e.g. the MCP layer batching
+  reads, the annotation flow asserting an edge exists).
+
 Every read verb returns **one row per reachable node** (a node reachable
 by several converging paths is collapsed to its minimum-depth occurrence
 — `CYCLE` alone only dedupes within a single branch). An anchor
@@ -93,6 +119,32 @@ CLI `refresh` verb renders exactly these as `nodes: +A -R ~U` /
 |---|---|---|
 | `nodes` | `tuple[TopologyNode, ...]` | Ordered from the `from` node (`depth == 0`) to the `to` node (`depth == total_hops`). |
 | `total_hops` | `int` | Number of edges traversed; equals `len(nodes) - 1`. |
+
+### `TopologyEdgeEndpoint` — frozen Pydantic v2 (edge listing, G9.2-T4)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | `UUID` | `graph_node.id`. |
+| `kind` | `str` | `graph_node.kind`. |
+| `name` | `str` | `graph_node.name`. |
+
+Compact node identity carried as `from_endpoint` / `to_endpoint` on
+`TopologyEdge`. The full node `properties` bag is intentionally
+**not** included — an edge listing is a survey of relationships,
+not a node dump; callers that need the bag look the node up
+separately via `resolve_node`.
+
+### `TopologyEdge` — frozen Pydantic v2 (edge listing, G9.2-T4)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | `UUID` | `graph_edge.id`. |
+| `from_endpoint` | `TopologyEdgeEndpoint` | The edge's source node identity. The route layer (T5) applies the `from` / `to` alias on `model_dump(by_alias=True)` for the wire shape — the substrate model itself keeps plain attribute names so mypy/static checkers don't lose the kwarg signature. |
+| `to_endpoint` | `TopologyEdgeEndpoint` | The edge's destination node identity. |
+| `kind` | `str` | One of the ten `GraphEdgeKind` values (closed enum since G9.2-T1 #593). |
+| `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-asserted). |
+| `properties` | `dict` | `graph_edge.properties` JSONB; deep-frozen (same discipline as `TopologyNode.properties`). Carries the conflict markers `conflicts_with` (array, G9.2-T3 #595) and `superseded_by` (UUID, also #595). |
+| `last_seen` | `datetime \| None` | The refresh service's "I observed this edge at" timestamp. NULL after a soft-delete; soft-deleted edges are excluded from `list_edges` by default. Also the stable total-order key the helper paginates against. |
 
 ## Control flow — write half
 

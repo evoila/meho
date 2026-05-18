@@ -38,6 +38,7 @@ scoped and amortised across the two tests in this module.
 from __future__ import annotations
 
 import os
+import shlex
 import tempfile
 import textwrap
 import time
@@ -443,18 +444,34 @@ async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -
     broken probe fails the test instead of false-positive-ing the
     rollback proof.
     """
-    cmd = (
-        "python3 -c '"
-        "import hashlib, pathlib, re; "
-        "soa_re = re.compile(r\"(\\\\bSOA\\\\b\\\\s+\\\\S+\\\\s+\\\\S+\\\\s*\\\\(?\\\\s*(?:;[^\\\\n]*\\\\n\\\\s*)*)(\\\\d+)\", re.IGNORECASE); "
-        "h = hashlib.sha256(); "
-        "files = sorted(p for p in pathlib.Path(\"/etc/bind\").rglob(\"*\") if p.is_file()); "
-        "[(h.update(str(p).encode()+b\"\\\\n\"), "
-        "  h.update(soa_re.sub(lambda m: m.group(1)+\"SERIAL\", p.read_bytes().decode(\"utf-8\",\"replace\"), count=1).encode(\"utf-8\"))) "
-        " for p in files]; "
-        "print(h.hexdigest())"
-        "'"
+    # Use shlex.quote to pass the python script as a single argv element
+    # so backslash escapes survive intact through bash. Constructing the
+    # one-liner inline with manual escape stacking corrupted the SOA
+    # regex on bind9 9.18 / Python 3.11 (the container) -- the regex
+    # engine saw literal backslashes instead of word-boundary metas.
+    probe_script = (
+        "import hashlib, pathlib, re\n"
+        "soa_re = re.compile(\n"
+        "    r'(\\bSOA\\b\\s+\\S+\\s+\\S+\\s*\\(?\\s*(?:;[^\\n]*\\n\\s*)*)(\\d+)',\n"
+        "    re.IGNORECASE,\n"
+        ")\n"
+        "h = hashlib.sha256()\n"
+        "for p in sorted(\n"
+        "    p for p in pathlib.Path('/etc/bind').rglob('*') if p.is_file()\n"
+        "):\n"
+        "    data = p.read_bytes()\n"
+        "    try:\n"
+        "        text = data.decode('utf-8')\n"
+        "        data = soa_re.sub(\n"
+        "            lambda m: m.group(1) + 'SERIAL', text, count=1\n"
+        "        ).encode('utf-8')\n"
+        "    except UnicodeDecodeError:\n"
+        "        pass\n"
+        "    h.update(str(p).encode() + b'\\n')\n"
+        "    h.update(data)\n"
+        "print(h.hexdigest())\n"
     )
+    cmd = f"python3 -c {shlex.quote(probe_script)}"
     proc = await connector._run_command(target, cmd, raw_jwt="")
     exit_status = getattr(proc, "exit_status", 0)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""

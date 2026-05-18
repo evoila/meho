@@ -33,6 +33,19 @@ of ``nsx-4.2/policy.yaml`` + ``nsx-4.2/manager.yaml`` against the
 """
 
 from meho_backplane.connectors.nsx.connector import NsxConnector
+from meho_backplane.connectors.nsx.core_ops import (
+    NSX_CONNECTOR_ID,
+    NSX_CORE_GROUPS,
+    NSX_CORE_OPS,
+    NSX_IMPL_ID,
+    NSX_PATH_RULES,
+    NSX_PRODUCT,
+    NSX_VERSION,
+    NsxCoreGroup,
+    NsxCoreOp,
+    apply_nsx_core_curation,
+    classify_nsx_op,
+)
 from meho_backplane.connectors.nsx.session import (
     NsxSessionLoader,
     NsxTargetLike,
@@ -49,9 +62,20 @@ register_connector_v2(
 )
 
 __all__ = [
+    "NSX_CONNECTOR_ID",
+    "NSX_CORE_GROUPS",
+    "NSX_CORE_OPS",
+    "NSX_IMPL_ID",
+    "NSX_PATH_RULES",
+    "NSX_PRODUCT",
+    "NSX_VERSION",
     "NsxConnector",
+    "NsxCoreGroup",
+    "NsxCoreOp",
     "NsxSessionLoader",
     "NsxTargetLike",
     "SessionCredentials",
+    "apply_nsx_core_curation",
+    "classify_nsx_op",
     "load_session_credentials_from_vault",
 ]

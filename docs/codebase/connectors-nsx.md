@@ -3,13 +3,15 @@
 ## Overview
 
 The `nsx` connector is the hand-rolled `HttpConnector` subclass that
-will dispatch ingested NSX REST operations under the
+dispatches ingested NSX REST operations under the
 `(product="nsx", version="4.2", impl_id="nsx-rest")` registry triple.
-G3.5-T1 (#613) ships only the skeleton -- session-cookie / XSRF auth,
-fingerprint, probe, and the G0.6 dispatch shim. Operations arrive in
-G3.5-T2 (#614) via G0.7 spec ingestion against `nsx-4.2/policy.yaml`
-+ `nsx-4.2/manager.yaml`; CLI verbs + MCP review + recorded-fixture
-E2E arrive in G3.5-T3 (#615).
+G3.5-T1 (#613) shipped the skeleton -- session-cookie / XSRF auth,
+fingerprint, probe, and the G0.6 dispatch shim. G3.5-T2 (#614) adds
+the **operator-review curation substrate**: the 9 read-only core
+ops + per-op `llm_instructions` blobs + group-level `when_to_use`
+hints + the `apply_nsx_core_curation` helper that the operator
+review step calls against the G0.7-ingested connector. CLI verbs +
+MCP review + recorded-fixture E2E arrive in G3.5-T3 (#615).
 
 Source: `backend/src/meho_backplane/connectors/nsx/`.
 
@@ -37,6 +39,26 @@ Source: `backend/src/meho_backplane/connectors/nsx/`.
   operator-context Vault read path. Mirrors the
   `load_session_credentials_from_vault` shape in
   `connectors/vmware_rest/`.
+- **`NSX_CORE_OPS`** (`core_ops.py`) -- frozen tuple of the 9
+  curated read-only NSX core ops (`NsxCoreOp` dataclass:
+  `op_id` + `group_key` + `llm_instructions` blob). The
+  operator-review pass on a G0.7-ingested NSX connector flips
+  exactly these ops to `is_enabled=True`; every other op the
+  spec ingestion produced stays `is_enabled=False`.
+- **`NSX_CORE_GROUPS`** (`core_ops.py`) -- frozen tuple of the 8
+  `NsxCoreGroup` entries (`group_key` + `name` + `when_to_use`)
+  the read-only core spans. One entry per LLM-grouping-pass output
+  group; two ops share the `policy-firewall` group_key.
+- **`NSX_PATH_RULES`** (`core_ops.py`) -- path-prefix to group_key
+  classifier rules, same shape `_PathPrefixStubLlmClient._PATH_RULES`
+  in the G0.7 vSphere canary uses. First match wins; order is
+  most-specific-first so e.g. `/policy/api/v1/infra/tier-0s`
+  doesn't fall into a broader future catch-all.
+- **`apply_nsx_core_curation`** (`core_ops.py`) -- async helper that
+  drives `ReviewService.edit_group` + `enable_group` + `edit_op`
+  (the new `llm_instructions=` keyword from G3.5-T2) against the
+  ingested connector. Idempotent — re-runnable during a rollout
+  or test rerun without duplicate audit rows.
 
 ## Control flow
 
@@ -164,13 +186,50 @@ concern, same posture vSphere takes for proactive refresh.
 - **structlog** -- a single `nsx_session_established` info event per
   successful session create; no other emit points in this skeleton.
 
+## Operator-review curation flow (G3.5-T2)
+
+The `core_ops.py` constants land the operator-review side of the
+G0.7 ingest. After a G0.7 ingest of `nsx-4.2/policy.yaml` +
+`manager.yaml` lands the full NSX descriptor set in the
+`endpoint_descriptor` table (every row `is_enabled=False`,
+`source_kind='ingested'`), the operator runs:
+
+```python
+from meho_backplane.connectors.nsx import apply_nsx_core_curation
+from meho_backplane.operations.ingest import ReviewService
+
+review_service = ReviewService(operator)
+await apply_nsx_core_curation(review_service, tenant_id=None)
+```
+
+The helper drives the substrate through three substrate calls per
+group (`edit_group` for the operator-reviewed `name` /
+`when_to_use`, `enable_group` to flip `review_status='enabled'` and
+cascade child ops to `is_enabled=True`) plus one `edit_op` per
+curated op carrying the `llm_instructions` blob. Every other op
+the spec ingestion produced stays `is_enabled=False`, matching the
+"~9-op read-only core enabled, everything else staged" acceptance
+criterion in #614.
+
+The `ReviewService.edit_op(..., llm_instructions=...)` keyword is
+the G3.5-T2 substrate extension to a method that previously only
+covered `custom_description` / `safety_level` / `requires_approval`
+/ `is_enabled`. The new field is persistent verbatim, audited as a
+`fields_updated` entry without echoing the blob into the payload
+(operator-authored prose belongs out of the audit table, same
+posture `edit_group` takes for `when_to_use`).
+
 ## Known issues
 
-- The connector cannot exercise any operation yet -- `endpoint_descriptor`
-  rows for NSX REST land in #614 via G0.7 spec ingestion. The
-  dispatch shim resolves `connector_id="nsx-rest-4.2"` but
-  `op_id=<anything>` returns the dispatcher's "unknown operation"
-  shape until the rows exist.
+- The full G0.7 ingest of `nsx-4.2/policy.yaml` + `manager.yaml` is
+  operator-driven via `meho connector ingest` (the runbook lives at
+  `docs/cross-repo/g35-nsx-canary.md`). The env-gated canary
+  acceptance test that automates the live two-spec ingest in CI is a
+  follow-up — it requires the NSX spec-shelf wired to the
+  meho-runners pool (same env-gated pattern
+  `tests/acceptance/_vcenter_spec.py` codifies for vSphere). Until
+  then, the dispatch leg is exercised against `NSX_CORE_OPS`-seeded
+  descriptors in `tests/acceptance/_nsx_canary_fixtures.py`.
 - Default session loader raises `NotImplementedError`. Production
   callers must inject `session_loader=...` on construction until
   G0.3 (#224) lands the operator-context Vault read path. Mirrors
@@ -183,10 +242,23 @@ concern, same posture vSphere takes for proactive refresh.
 
 ## References
 
-- Issue: [G3.5-T1 #613](https://github.com/evoila/meho/issues/613).
+- Issues: [G3.5-T1 #613](https://github.com/evoila/meho/issues/613)
+  (skeleton); [G3.5-T2 #614](https://github.com/evoila/meho/issues/614)
+  (core-ops curation + `edit_op(llm_instructions=)` substrate).
 - Parent Initiative: [G3.5 #368](https://github.com/evoila/meho/issues/368).
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
-- Sibling tasks: #614 (spec ingestion), #615 (CLI + MCP review + E2E).
+- Sibling tasks: #615 (CLI + MCP review + E2E).
+- Operator runbook: `docs/cross-repo/g35-nsx-canary.md` — ingest +
+  curate + enable + smoke procedure for an operator standing up
+  NSX against a fresh deploy.
+- Acceptance tests:
+  - `backend/tests/acceptance/test_g35_nsx_dispatch_smoke.py` —
+    dispatch the 9 NSX core ops against a respx-mocked NSX REST
+    surface; one parametrised case per op.
+  - `backend/tests/acceptance/test_g35_nsx_jsonflux_force_handle.py`
+    — install a test-only `ForceHandleReducer`, dispatch the
+    segment-list op, assert `OperationResult.handle` is populated
+    by the dispatcher seam.
 - Precedent: `connectors/vmware_rest/connector.py` (session auth +
   fingerprint + probe + dispatch shim);
   `connectors/vmware_rest/__init__.py` (registration);

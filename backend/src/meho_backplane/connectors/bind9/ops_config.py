@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import io
 import posixpath
+import secrets
 import shlex
 import tarfile
 import time
@@ -638,7 +639,11 @@ async def bind9_config_apply_views(
     via ``primary_path`` (defaults to the first key in *files* sorted
     lexicographically) -- the audit row gets the pre/post-op content
     of that one file, the rest are reconstructable from the staged
-    tar if needed for replay.
+    tar if needed for replay. ``primary_path`` **must** resolve to one
+    of the staged files; an out-of-set value is rejected before any
+    remote write so a successful reload cannot be followed by a
+    cat-the-missing-slice failure that would force the caller to
+    retry an already-applied change.
 
     Returns ``{primary_path, files, op_class, result_state_before,
     result_state_after}``; ``files`` is the sorted list of resolved
@@ -660,11 +665,30 @@ async def bind9_config_apply_views(
     # Compute the resolved absolute paths for the audit row -- the
     # archive's member names are derived from the same filter.
     resolved_paths: list[str] = sorted(ensure_path_under_root(p, bind_root) for p in files)
-    primary_path = (
-        ensure_path_under_root(primary_param, bind_root)
-        if primary_param is not None
-        else resolved_paths[0]
-    )
+    if primary_param is not None:
+        primary_path = ensure_path_under_root(primary_param, bind_root)
+        # Guard against the double-apply trap: the atomic-apply primitive
+        # captures ``state_after`` by ``cat``-ing the audit-slice path on
+        # the success path (step 7). If the operator points
+        # ``primary_path`` at a file NOT in the staged ``files`` mapping,
+        # the post-reload ``cat`` either hits a file the staged tar
+        # didn't touch (informational mismatch -- the audit row reports
+        # an unrelated file) or hits a missing path (cat fails, the
+        # primitive raises after the live reload already succeeded, the
+        # caller retries, and the change is applied twice). Either case
+        # is broken; the only safe contract is "primary_path must
+        # reference one of the staged files". Rejecting at the handler
+        # boundary is cheaper than defending the primitive's success
+        # path and keeps the audit-replay invariant intact (the slice
+        # bytes are always one of the bytes the op shipped).
+        if primary_path not in set(resolved_paths):
+            raise ValueError(
+                f"bind9.config.apply_views: primary_path {primary_param!r} must reference "
+                f"one of the staged files; got resolved={primary_path!r}, "
+                f"staged={resolved_paths!r}"
+            )
+    else:
+        primary_path = resolved_paths[0]
 
     sudo_password = _sudo_password_for_target(target)
 
@@ -727,7 +751,10 @@ BIND9_CONFIG_APPLY_VIEWS_PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional. The fragment whose pre/post-op content the "
                 "audit row should capture. Defaults to the first key "
-                "in ``files`` sorted lexicographically."
+                "in ``files`` sorted lexicographically. **Must** "
+                "reference one of the keys in ``files`` -- a value "
+                "outside the staged set is rejected before any remote "
+                "write to keep the audit-replay invariant intact."
             ),
         },
         "verify_fqdn": {
@@ -860,12 +887,26 @@ async def bind9_config_backup(
 
     # Compose the filename. ``time.strftime`` returns a localtime-zoned
     # timestamp -- but we want UTC so backups across timezones sort
-    # deterministically; ``time.gmtime()`` is the right basis.
+    # deterministically; ``time.gmtime()`` is the right basis. A short
+    # CSPRNG suffix breaks ties when two backups land in the same
+    # second with the same tag (concurrent orchestrator calls, a
+    # tight retry loop, two operators racing): ``secrets.token_hex(3)``
+    # gives 6 hex chars / 24 bits of entropy -- birthday-collision
+    # probability under any realistic same-second burst is negligible,
+    # and the suffix is short enough that the backup ID stays readable.
+    # The ID schema is opaque to callers (the only test assertion is
+    # ``startswith("bind9-")``), so appending the suffix is a backward-
+    # compatible refinement.
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    filename = f"bind9-{timestamp}-{tag}.tar.gz" if tag is not None else f"bind9-{timestamp}.tar.gz"
+    suffix = secrets.token_hex(3)
+    filename = (
+        f"bind9-{timestamp}-{tag}-{suffix}.tar.gz"
+        if tag is not None
+        else f"bind9-{timestamp}-{suffix}.tar.gz"
+    )
     # Backup ID is the bare filename without the extension -- shorter
     # to type, unambiguous against future backups (timestamp is
-    # second-granular and includes the tag if set).
+    # second-granular; the random suffix breaks same-second ties).
     backup_id = filename.removesuffix(".tar.gz")
     backup_path = f"{_BACKUP_DIR}/{filename}"
 

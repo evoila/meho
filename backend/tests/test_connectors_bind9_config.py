@@ -516,6 +516,43 @@ class TestApplyViews:
             )
         assert atomic_mock.await_count == 0
 
+    async def test_primary_path_not_in_files_rejected(self) -> None:
+        """``primary_path`` outside the staged set -> ValueError pre-stage.
+
+        Regression for the double-apply trap (iter-1 B1): if the
+        primitive's success-path ``cat`` hits a file the staged tar
+        didn't touch, the post-reload audit-slice capture either
+        reports an unrelated file or fails outright (missing file ->
+        cat exits non-zero -> the primitive raises after the live
+        reload already succeeded -> the caller retries -> the change
+        is applied twice). Rejecting at the handler boundary keeps
+        the audit-replay invariant intact and removes the retry trap.
+        """
+        connector = Bind9Connector()
+        atomic_mock = AsyncMock()
+        with (
+            patch.object(
+                connector, "fingerprint", AsyncMock(return_value=_fingerprint_debian_default())
+            ),
+            patch(
+                "meho_backplane.connectors.bind9.ops_config.atomic_apply",
+                atomic_mock,
+            ),
+            pytest.raises(ValueError, match="must reference one of the staged files"),
+        ):
+            await bind9_config_apply_views(
+                connector,
+                _TARGET,
+                {
+                    "files": {"named.conf.local": "x\n"},
+                    # Under bind_root but NOT a key in the files mapping.
+                    "primary_path": "named.conf.options",
+                },
+            )
+        # The primitive never ran -- the failure surfaced pre-stage,
+        # so there is no half-applied remote state to roll back.
+        assert atomic_mock.await_count == 0
+
 
 # ---------------------------------------------------------------------------
 # bind9_config_backup -- creates archive + lists existing backups
@@ -586,6 +623,44 @@ class TestConfigBackup:
             pytest.raises(RuntimeError, match="Permission denied"),
         ):
             await bind9_config_backup(connector, _TARGET, {})
+
+    async def test_backup_id_distinct_across_same_second_same_tag(self) -> None:
+        """Two backups in the same second with the same tag must NOT collide.
+
+        Regression for iter-1 M2: the prior schema embedded only a
+        UTC-second timestamp + optional tag, so two concurrent
+        backups (or a tight retry loop) could compute the same
+        ``backup_id`` and overwrite each other's tar silently.
+        ``secrets.token_hex(3)`` appends 24 bits of CSPRNG entropy to
+        the filename; the collision risk under any realistic burst
+        is negligible and the ID schema (``startswith("bind9-")``)
+        stays opaque to existing callers.
+        """
+        connector = Bind9Connector()
+        bash_mock = AsyncMock(return_value=_completed_process(stdout="[]", exit_status=0))
+        with (
+            patch.object(
+                connector, "fingerprint", AsyncMock(return_value=_fingerprint_debian_default())
+            ),
+            patch.object(connector, "_remote_bash_with_sudo", bash_mock),
+            # Freeze the timestamp so the only differentiator left
+            # is the random suffix; if the suffix didn't exist the
+            # two backup IDs would be byte-identical.
+            patch("meho_backplane.connectors.bind9.ops_config.time") as time_mock,
+        ):
+            time_mock.strftime = lambda fmt, tm: "20260518T120000Z"
+            time_mock.gmtime = lambda: None  # value ignored by the lambda above
+            first = await bind9_config_backup(connector, _TARGET, {"tag": "pre-prod"})
+            second = await bind9_config_backup(connector, _TARGET, {"tag": "pre-prod"})
+
+        assert first["backup_id"] != second["backup_id"], (
+            f"same-second same-tag collision: {first['backup_id']!r} == {second['backup_id']!r}"
+        )
+        assert first["path"] != second["path"]
+        # Both still carry the expected prefix and tag.
+        for envelope in (first, second):
+            assert envelope["backup_id"].startswith("bind9-")
+            assert "pre-prod" in envelope["backup_id"]
 
     async def test_emits_op_class_write_with_state_after_only(self) -> None:
         """``backup`` audit envelope: state_after present, state_before absent."""

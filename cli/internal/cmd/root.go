@@ -20,6 +20,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
 	"github.com/evoila/meho/cli/internal/cmd/memory"
+	"github.com/evoila/meho/cli/internal/cmd/migrate"
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
@@ -219,6 +220,14 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())
+
+	// G5.3-T1 (#608) -- laptop-local memory migration verb tree for
+	// Initiative #375. v0.1 ships the skeleton (migrate parent +
+	// memory subcommand with flags); flow logic (scanner, huh picker,
+	// submission, mark-migrated) lands in T2–T5 (#609–#612). Registered
+	// before registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `migrate` parent.
+	root.AddCommand(migrate.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

@@ -54,6 +54,13 @@ names.
   `user-tenant` / `user-target` / `tenant` / `target`. The two
   target-scoped values require `--target NAME`; the CLI rejects a
   missing `--target` client-side before the round-trip.
+- `meho migrate ...` (G5.3-T1 #608) — laptop-local memory migration
+  surface. T1 ships the `migrate` parent + `memory` subcommand skeleton
+  (flags wired, RunE stub). Flow logic (scanner, huh interactive picker,
+  dry-run preview, backplane submit, mark-migrated) lands in T2–T5 of
+  Initiative #375 (#609–#612). The `charm.land/huh/v2` interactive-form
+  library (MIT) is declared as a direct dependency in T1 and used by
+  T2–T5 for the interactive migration UX.
 
 ## Module layout
 
@@ -152,6 +159,9 @@ cli/
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
+    │   ├── migrate/           # G5.3-T1 #608 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
+    │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2 (declares dep; used by T2–T5).
+    │   │   └── memory.go         # `meho migrate memory` skeleton — 5 flags wired, RunE stub.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
@@ -162,6 +172,8 @@ cli/
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
     │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
+    ├── migrate/               # G5.3-T1 #608 — pure-logic helpers for the memory migration flow (Initiative #375).
+    │   └── doc.go                # placeholder package; flow helpers land in T2–T5 (#609–#612).
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.

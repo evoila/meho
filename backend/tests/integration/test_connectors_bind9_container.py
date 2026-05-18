@@ -93,7 +93,7 @@ _DOCKERFILE: str = textwrap.dedent(
     RUN apt-get update \\
      && apt-get install -y --no-install-recommends \\
           bind9 bind9-host bind9utils dnsutils \\
-          openssh-server sudo python3-minimal \\
+          openssh-server sudo python3 \\
      && rm -rf /var/lib/apt/lists/*
 
     # Allow root SSH login with password for the test fixture only;
@@ -701,6 +701,216 @@ async def test_atomic_apply_rollback_on_checkzone_failure_leaves_tree_unchanged(
         after = await _checksum_bind_tree(connector, bind9_container_target)
         assert before == after, (
             f"atomic-apply did NOT roll back cleanly on checkzone failure; "
+            f"checksum before={before!r}, after={after!r}"
+        )
+    finally:
+        await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# T4 config-write group -- bind9.config.apply_file / apply_views / backup /
+# reload against the seeded container. Acceptance criteria:
+#
+# * ``apply_views`` applies a valid multi-file tree; an invalid views file
+#   rolls back to a byte-identical /etc/bind/ (checksum assertion).
+# * ``apply_file`` applies a valid fragment; an invalid fragment rolls back
+#   identically.
+# * Both ``apply_*`` ops invoke T3's ``_atomic.py`` primitive (the
+#   ``op_class=write`` envelope + ``result_state_*`` capture come from the
+#   primitive directly -- a non-primitive implementation would not emit
+#   them).
+# * ``config.backup`` produces a restorable tar.gz and returns a backup
+#   ID + listing.
+# * ``config.reload`` returns a structured success/failure envelope.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_config_reload_against_real_bind9_returns_ok(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.config.reload`` succeeds against the live named."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_config_reload(bind9_container_target, {})
+        assert result["ok"] is True, f"reload failed: {result!r}"
+        assert result["rndc_reload_exit"] == 0
+        assert result["op_class"] == "write"
+        # rndc status output -- the live named's snapshot before/after.
+        # Carries the BIND version and the per-zone status; the exact
+        # text varies by version but the word "server" / "version"
+        # always shows up.
+        assert (
+            "version" in result["result_state_after"].lower()
+            or "server" in result["result_state_after"].lower()
+        )
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_config_backup_against_real_bind9_creates_archive(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.config.backup`` creates a tar.gz under /var/backups/meho-bind9/."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_config_backup(bind9_container_target, {"tag": "ci-smoke"})
+        assert result["op_class"] == "write"
+        assert "ci-smoke" in result["backup_id"]
+        assert result["path"].startswith("/var/backups/meho-bind9/")
+        assert result["path"].endswith(".tar.gz")
+        # The listing must contain at least this backup we just made.
+        ids = {row["id"] for row in result["rows"]}
+        assert result["backup_id"] in ids
+        # Verify the artifact actually exists on disk. ``shlex.quote``
+        # is defence-in-depth -- the backup path is currently composed
+        # from a tag pattern + timestamp + hex suffix, none of which
+        # carries shell metacharacters, but quoting keeps the test
+        # robust if the path schema ever picks up a wider character
+        # class (e.g. tag pattern relaxed in a future op).
+        cmd = f"ls -1 {shlex.quote(result['path'])}"
+        proc = await connector._run_command(bind9_container_target, cmd, raw_jwt="")
+        ls_stderr = getattr(proc, "stderr", "")
+        assert proc.exit_status == 0, (
+            f"backup file missing: ls exit={proc.exit_status} stderr={ls_stderr!r}"
+        )
+        # The state_after carries the backup ID (the audit row's "what
+        # artifact this write produced" signal).
+        assert result["state_after"] == result["backup_id"]
+        # No state_before -- nothing in /etc/bind/ mutated.
+        assert "state_before" not in result
+        assert "result_state_before" not in result
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_config_apply_file_against_real_bind9_lands_and_reloads(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``apply_file`` writes a valid fragment; named-checkconf + reload pass."""
+    connector = Bind9Connector()
+    try:
+        # Append a comment-only fragment via apply_file -- safe to
+        # write because it's not parsed by any other include. The
+        # primitive's validate (named-checkconf -p) must accept it.
+        content = "// meho integration test fragment\n"
+        result = await connector.bind9_config_apply_file(
+            bind9_container_target,
+            {"path": "named.conf.options", "content": content},
+        )
+        assert result["op_class"] == "write"
+        assert result["file"] == "/etc/bind/named.conf.options"
+        # state_after must equal the staged bytes (the primitive
+        # captures it post-write).
+        assert result["result_state_after"] == content
+        # The before / after must differ -- the seeded options file
+        # is not the comment-only version we just wrote.
+        assert result["result_state_after"] != result["result_state_before"]
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_config_apply_file_rollback_on_invalid_fragment_leaves_tree_unchanged(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """An invalid fragment -> rollback; /etc/bind/ byte-identical post-op."""
+    from meho_backplane.connectors.bind9._atomic import AtomicApplyError
+
+    connector = Bind9Connector()
+    try:
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        # Garbage fragment -- named-checkconf -p refuses to parse it.
+        garbage = "this is { not valid bind9 config\n"
+        with pytest.raises(AtomicApplyError) as exc_info:
+            await connector.bind9_config_apply_file(
+                bind9_container_target,
+                {"path": "named.conf.local", "content": garbage},
+            )
+        # Failure must happen at the checkconf step -- the primitive's
+        # validate ran and refused.
+        assert exc_info.value.step == "checkconf"
+
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        assert before == after, (
+            f"apply_file did NOT roll back cleanly on invalid fragment; "
+            f"checksum before={before!r}, after={after!r}"
+        )
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_config_apply_views_against_real_bind9_lands_multi_file_tree(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``apply_views`` writes a multi-file tree; the tree shows up on disk."""
+    connector = Bind9Connector()
+    try:
+        # Stage a new fragment + the existing options file (keep that
+        # one identical so we don't break the live config). The
+        # archive overlays the live tree -- the fragment lands, the
+        # options stay byte-identical.
+        new_fragment = "// apply_views integration smoke fragment\n"
+        result = await connector.bind9_config_apply_views(
+            bind9_container_target,
+            {
+                "files": {
+                    "named.conf.smoke": new_fragment,
+                },
+            },
+        )
+        assert result["op_class"] == "write"
+        assert "/etc/bind/named.conf.smoke" in result["files"]
+        # The fragment we deposited must be on disk -- cat it back.
+        cat_proc = await connector._run_command(
+            bind9_container_target, "cat /etc/bind/named.conf.smoke", raw_jwt=""
+        )
+        assert cat_proc.exit_status == 0
+        assert "smoke fragment" in (cat_proc.stdout or "")
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_config_apply_views_rollback_on_invalid_tree_leaves_tree_unchanged(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """An invalid views file -> rollback; /etc/bind/ byte-identical post-op.
+
+    The load-bearing T4 acceptance criterion: ``apply_views`` reuses
+    the primitive's snapshot-rollback contract for multi-file trees.
+    A bad fragment in the staged archive must NOT leave the bind tree
+    in a half-applied state -- the primitive's
+    ``find $BIND_ROOT -mindepth 1 -delete`` clear-then-extract sequence
+    must clear the orphan fragment introduced by the failed stage.
+    """
+    from meho_backplane.connectors.bind9._atomic import AtomicApplyError
+
+    connector = Bind9Connector()
+    try:
+        before = await _checksum_bind_tree(connector, bind9_container_target)
+        # The staged archive overlays /etc/bind/named.conf.local with
+        # garbage -- the existing valid file is byte-replaced. The
+        # primitive's validate (named-checkconf -p) must refuse it.
+        with pytest.raises(AtomicApplyError) as exc_info:
+            await connector.bind9_config_apply_views(
+                bind9_container_target,
+                {
+                    "files": {
+                        # Overwrite the live named.conf.local with garbage --
+                        # bind9 must refuse to parse this on validate.
+                        "named.conf.local": "this is { not valid bind9 config\n",
+                    },
+                },
+            )
+        assert exc_info.value.step == "checkconf"
+
+        after = await _checksum_bind_tree(connector, bind9_container_target)
+        assert before == after, (
+            f"apply_views did NOT roll back cleanly on invalid tree; "
             f"checksum before={before!r}, after={after!r}"
         )
     finally:

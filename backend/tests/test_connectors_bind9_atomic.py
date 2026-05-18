@@ -259,18 +259,36 @@ class TestPipelineScript:
         assert "'/tmp/snap;evil'" in script
         assert "'/etc/bind/foo;evil'" in script
 
-    def test_script_uses_named_checkzone_not_checkconf(self) -> None:
-        """Step 4 must invoke ``named-checkzone`` (per-zone) not ``named-checkconf -p``."""
+    def test_script_uses_caller_supplied_validate_command(self) -> None:
+        """Step 4 evaluates ``$BIND9_VALIDATE_CMD`` -- caller picks the validator.
+
+        T4 (#590) made the validate command caller-supplied so the
+        primitive serves both record writes (``named-checkzone
+        <zone> <file>``) and config writes (``named-checkconf -p >
+        /dev/null``). The template's step-4 line was previously
+        hardcoded to ``named-checkzone``; now it routes through the
+        env var. The default value is still ``named-checkzone "$ZONE_NAME"
+        "$AUDIT_SLICE_PATH"`` (composed by :func:`atomic_apply` when
+        the caller doesn't override it -- T3 record-write contract
+        stays intact).
+        """
         script = _build_pipeline_script(
             snapshot_path="/tmp/s",
             audit_slice_path="/etc/bind/f",
             zone_name="z",
             bind_root="/etc/bind",
         )
-        assert "named-checkzone" in script
-        # ``named-checkconf -p`` would parse the live config tree --
-        # not what step 4 needs. Pin the negative.
-        assert "named-checkconf -p" not in script
+        # The step-4 evaluation must reference the validate env var.
+        assert "BIND9_VALIDATE_CMD" in script
+        # The executable step-4 line is ``if ! CHECKZONE_OUT=$(eval
+        # "$BIND9_VALIDATE_CMD"...`` -- pin that exact shape so a
+        # refactor cannot accidentally re-hardcode the validator.
+        assert 'eval "$BIND9_VALIDATE_CMD"' in script
+        # No hardcoded ``named-checkzone "$ZONE_NAME"...`` executable
+        # invocation (only docstring / comment mentions remain after
+        # T4 made the validate command caller-supplied). The exact
+        # pre-T4 invocation line is gone.
+        assert 'named-checkzone "$ZONE_NAME" "$AUDIT_SLICE_PATH" 2>&1' not in script
 
     def test_script_calls_rndc_reload(self) -> None:
         script = _build_pipeline_script(
@@ -717,13 +735,57 @@ class TestPipelineScriptStageShape:
         )
         # The shape: a single ``if ! STAGE_OUT=$(...)`` guard around
         # the base64 pipe.
-        assert "if ! STAGE_OUT=$(printf" in script
-        # Rollback must be called from the stage branch.
+        assert "if ! STAGE_OUT=$(" in script
+        # Rollback must be called from the stage branch. Find the
+        # first stage branch in the script (the multi-file tar
+        # branch); the single-file branch follows. Pin rollback +
+        # FAILED_STEP within each.
         stage_branch_start = script.find("if ! STAGE_OUT=")
         stage_branch_end = script.find("fi", stage_branch_start)
         stage_branch = script[stage_branch_start:stage_branch_end]
         assert "rollback" in stage_branch
         assert "===FAILED_STEP===stage" in stage_branch
+
+    def test_single_file_stage_redirects_stderr_to_stage_out_not_target(self) -> None:
+        """The single-file base64 pipe must dupe stderr to STAGE_OUT, not the target file.
+
+        Regression for iter-1 M1 / T3 pre-existing bug: the prior
+        shape ``base64 -d > "$AUDIT_SLICE_PATH" 2>&1`` redirected
+        stdout to the target file FIRST, then duped stderr to the
+        same destination. Net effect: any decode diagnostic
+        (corrupt base64, ENOSPC, EACCES, read-only fs) landed
+        appended into the (already-truncated) audit-slice file and
+        ``FAILED_DETAIL`` arrived empty.
+
+        The fix order is ``2>&1 > "$AUDIT_SLICE_PATH"``: stderr is
+        duped to the command-substitution pipe (captured by
+        ``STAGE_OUT``) before stdout is swapped to the file. The
+        decoded bytes still land in the file; the diagnostic goes
+        to ``FAILED_DETAIL``.
+        """
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/s",
+            audit_slice_path="/etc/bind/db.x",
+            zone_name="x",
+            bind_root="/etc/bind",
+        )
+        # Locate the single-file branch (the second ``if ! STAGE_OUT``
+        # in the script -- the first is the multi-file tar branch).
+        first_idx = script.find("if ! STAGE_OUT=")
+        single_branch_start = script.find("if ! STAGE_OUT=", first_idx + 1)
+        single_branch_end = script.find("fi", single_branch_start)
+        single_branch = script[single_branch_start:single_branch_end]
+        # ``2>&1`` must precede the stdout-to-file redirect; otherwise
+        # the diagnostic ends up in the file. The two forms are
+        # easily confused, so pin the exact ordering tokens.
+        twoone_idx = single_branch.find("2>&1")
+        stdout_redirect_idx = single_branch.find('> "$AUDIT_SLICE_PATH"')
+        assert twoone_idx != -1, "single-file stage branch must dupe stderr"
+        assert stdout_redirect_idx != -1, "single-file stage branch must redirect stdout to file"
+        assert twoone_idx < stdout_redirect_idx, (
+            "stderr dup (2>&1) must precede the stdout-to-file redirect; "
+            "otherwise the decode diagnostic lands in the audit slice file"
+        )
 
 
 class TestAtomicApplyStageFailureBranch:

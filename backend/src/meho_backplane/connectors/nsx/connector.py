@@ -120,9 +120,10 @@ _SESSION_CREATE_PATH = "/api/session/create"
 # either one alone is rejected.
 _XSRF_HEADER = "X-XSRF-TOKEN"
 
-# Form-body keys. Lifted to module constants so the assertion in
-# :meth:`_session_token` and the respx body-shape test in
-# ``tests/test_connectors_nsx_auth.py`` can't drift.
+# Form-body keys NSX's session-create endpoint expects. Lifted to
+# module constants so the call site in :meth:`_session_token` reads
+# as ``data={_FORM_USERNAME_KEY: username, _FORM_PASSWORD_KEY: password}``
+# rather than carrying the magic strings inline.
 _FORM_USERNAME_KEY = "j_username"
 _FORM_PASSWORD_KEY = "j_password"
 

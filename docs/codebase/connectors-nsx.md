@@ -72,7 +72,9 @@ endpoint accepts only form-encoded credentials. The flow:
    `application/x-www-form-urlencoded`.
 4. The response's `Set-Cookie: JSESSIONID=...` header is captured
    into the per-target `httpx.AsyncClient.cookies` jar automatically
-   (`httpx/_client.py:1737` -- `self.cookies.extract_cookies(response)`).
+   -- httpx calls `self.cookies.extract_cookies(response)` on every
+   response, so subsequent requests through the same client carry
+   the cookie without manual plumbing.
 5. The response's `X-XSRF-TOKEN` header is captured into
    `self._session_tokens[target.name]`.
 6. `auth_headers()` returns `{"X-XSRF-TOKEN": <cached>}`. The
@@ -137,9 +139,10 @@ real `Operator` and call `dispatch` themselves.
 client. No `DELETE /api/session/destroy` is issued -- NSX's session
 has a documented idle timeout, and a per-target network call during
 lifespan shutdown is more risk than benefit (a hung DELETE on an
-unreachable target trips Kubernetes' 30-second
-`terminationGracePeriod`). Revoke-on-close is a v0.2.next concern,
-same posture vSphere takes for proactive refresh.
+unreachable target can exceed Kubernetes' default 30 s
+`terminationGracePeriod`, which is configurable per Pod spec but
+typically left at the default). Revoke-on-close is a v0.2.next
+concern, same posture vSphere takes for proactive refresh.
 
 ## Dependencies
 
@@ -190,7 +193,12 @@ same posture vSphere takes for proactive refresh.
   `connectors/adapters/http.py` (`HttpConnector`);
   `connectors/base.py` (`Connector` ABC);
   `connectors/registry.py:108` (`register_connector_v2`).
-- Consumer wrapper this contract mirrors:
-  https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/nsx.sh
-- NSX REST API guide:
-  https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/
+- Consumer wrapper this contract mirrors: `scripts/nsx.sh` in the
+  consumer's `claude-rdc-hetzner-dc` repository (private to the
+  `evoila-bosnia` org; the wrapper is the source of truth for the
+  form-encoded `j_username`/`j_password` + `X-XSRF-TOKEN` flow).
+- NSX REST API reference -- official documentation is hosted under
+  Broadcom's developer portal at `developer.broadcom.com` (the
+  exact version-pinned URL has shifted since the VMware-by-Broadcom
+  domain consolidation; search "NSX REST API guide" from the portal
+  root rather than hard-coding a path here).

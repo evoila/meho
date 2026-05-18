@@ -93,7 +93,7 @@ _DOCKERFILE: str = textwrap.dedent(
     RUN apt-get update \\
      && apt-get install -y --no-install-recommends \\
           bind9 bind9-host bind9utils dnsutils \\
-          openssh-server sudo python3-minimal \\
+          openssh-server sudo python3 \\
      && rm -rf /var/lib/apt/lists/*
 
     # Allow root SSH login with password for the test fixture only;

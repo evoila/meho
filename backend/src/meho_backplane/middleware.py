@@ -96,7 +96,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.auth.jwt import verify_jwt
 from meho_backplane.auth.operator import Operator
+from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.metrics import HTTP_REQUESTS_TOTAL
+from meho_backplane.tenancy import ensure_tenant
 
 __all__ = [
     "SENSITIVE_HEADERS",
@@ -263,6 +265,28 @@ async def verify_jwt_and_bind(
     cheaper and more robust than asymmetric unbind logic that would have
     to run in a finally clause inside the wrapper.
 
+    Tenant just-in-time seeding (G0.8-T1)
+    -------------------------------------
+    Migration ``0002`` ships the ``tenant`` table empty and defers
+    seeding; every tenant-scoped write (``documents``, ``graph_node``,
+    ``graph_edge``, ``broadcast_override``) carries a FK to
+    ``tenant(id)``, so a fresh deploy's first *real* write would fail
+    ``documents_tenant_id_fkey`` until a matching row exists. This
+    wrapper is the single point every authenticated route flows through
+    (via ``require_role``), and the first place ``operator.tenant_id``
+    is available as a verified value — the natural seam for an
+    idempotent get-or-create. The seed runs in its **own** short
+    session (the audit-middleware precedent: a request-path component
+    that owns its session lifecycle via :func:`get_sessionmaker` rather
+    than depending on the per-route ``get_session``), committed before
+    the route runs so the row is visible to the route's own
+    transaction. ``ensure_tenant`` is a single
+    ``INSERT ... ON CONFLICT (id) DO NOTHING`` — cheap and idempotent,
+    so issuing it on every authenticated request (reads included) is
+    acceptable for the v0.2 minimal scope; a process-level cache would
+    be speculative and would risk masking a real empty-table state
+    after a DB reset.
+
     Returns:
         The same :class:`Operator` that ``verify_jwt`` produced — the
         wrapper is transparent to the route handler.
@@ -272,4 +296,6 @@ async def verify_jwt_and_bind(
         tenant_id=str(operator.tenant_id),
         target_id=None,  # slot; resolve_target mutates on success (G0.3-T4)
     )
+    async with get_sessionmaker()() as session, session.begin():
+        await ensure_tenant(operator.tenant_id, session)
     return operator

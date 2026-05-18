@@ -345,6 +345,47 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         reset_engine_for_testing()
 
 
+@pytest.fixture
+async def pg_engine_empty_tenant(
+    integration_env: None,
+    async_pg_url: str,
+) -> AsyncIterator[None]:
+    """Like :func:`pg_engine` but leaves the ``tenant`` table **empty**.
+
+    The G0.8-T1 clean-room condition: a fresh v0.2 deploy whose
+    ``tenant`` table has no rows. ``pg_engine`` re-seeds two pinned
+    tenants so the isolation suite has rows to scope against; that
+    re-seed is exactly what masks the FK wall this Task fixes. This
+    fixture truncates the same chassis-table set in the same single
+    non-cascading statement but **does not** re-insert any tenant —
+    so the first authenticated write must rely on
+    :func:`meho_backplane.tenancy.ensure_tenant` having seeded the row
+    just-in-time, not on a fixture having done it out of band.
+    """
+    reset_engine_for_testing()
+    eng = create_engine_for_url(async_pg_url, pool_size=5, pool_timeout=10.0)
+    engine_module._engine = eng
+
+    async with eng.connect() as conn:
+        # Same single non-cascading TRUNCATE as ``pg_engine`` (see that
+        # fixture for why every real ``REFERENCES tenant(id)`` table
+        # must be listed here). Deliberately no follow-up INSERT —
+        # ``tenant`` stays empty, reproducing the clean-room deploy.
+        await conn.execute(
+            text(
+                "TRUNCATE TABLE audit_log, documents, graph_edge, "
+                "graph_node, broadcast_override, tenant",
+            ),
+        )
+        await conn.commit()
+
+    try:
+        yield
+    finally:
+        await dispose_engine()
+        reset_engine_for_testing()
+
+
 # ---------------------------------------------------------------------------
 # Integration app builder
 # ---------------------------------------------------------------------------

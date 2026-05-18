@@ -440,6 +440,39 @@ Failure modes:
   literal enum value) — both emit the constant snake_case enum the
   backplane expects.
 
+## The `tenant` row is seeded just-in-time — no manual step
+
+There is **no** out-of-band tenant-seed step. You do **not** run a
+`psql "INSERT INTO tenant …"` against a fresh deploy, and you do not
+need a tenant-provisioning API call before the first write.
+
+The backplane provisions the `tenant` row just-in-time from the
+verified `tenant_id` claim: the first authenticated request whose
+JWT carries a given `tenant_id` triggers an idempotent
+`INSERT INTO tenant (id, slug, name) … ON CONFLICT (id) DO NOTHING`
+in the request path (G0.8-T1, #628). The `slug` / `name` default to
+`tenant-<first-8-hex-of-the-uuid>`; that placeholder is cosmetic and
+carries no FK — a future v0.3 tenant-provisioning API can rename it
+without touching any joined data, and the just-in-time path never
+overwrites a row that already exists.
+
+Practical consequences for an operator standing up a v0.2 deploy:
+
+- After the realm recipe above is applied and `meho login` mints a
+  token carrying `tenant_id` / `tenant_role`, the **first real
+  (non-dry-run) write** — e.g. `meho kb ingest <dir>` or
+  `POST /api/v1/kb/ingest` — succeeds without any prior tenant
+  setup. Before #628 it failed with an asyncpg
+  `documents_tenant_id_fkey` violation because the `tenant` table
+  was empty; that failure mode is gone.
+- A `dry_run` ingest classifies without writing and therefore never
+  seeds the tenant. The acceptance smoke uses `dry_run`, so a green
+  smoke does **not** prove the row exists — the first real write is
+  what seeds it (and is now what proves it).
+- Concurrent first writes for the same tenant are safe — the
+  `ON CONFLICT DO NOTHING` means exactly one row lands regardless of
+  how many requests race.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

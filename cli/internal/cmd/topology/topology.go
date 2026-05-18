@@ -38,6 +38,12 @@
 //     [--from N] [--to N] [--conflicts] [--json]` — GET
 //     /api/v1/topology/edges. Flat filterable listing of the
 //     tenant's edges. Role: operator.
+//   - `meho topology bulk-import <file> [--dry-run] [--json]` —
+//     POST /api/v1/topology/edges/bulk. Reads a YAML/JSON file
+//     shaped as `{edges: [...]}` and posts the whole batch in one
+//     transaction. The server runs validation first; a single bad
+//     row aborts the entire batch (no partial apply). Re-running
+//     the same file is a per-row no-op. Role: tenant_admin.
 //
 // The fifth G9.1-T6 verb, `meho targets discover <product>`, lives
 // under `cli/internal/cmd/targets/discover.go` because it sits under
@@ -116,6 +122,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newAnnotateCmd())
 	cmd.AddCommand(newUnannotateCmd())
 	cmd.AddCommand(newListEdgesCmd())
+	cmd.AddCommand(newBulkImportCmd())
 	return cmd
 }
 

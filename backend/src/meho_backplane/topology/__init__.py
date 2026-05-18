@@ -71,6 +71,18 @@ than re-deriving the tenant boundary or the filter composition.
 * :func:`meho_backplane.topology.query.list_edges`
 * :class:`meho_backplane.topology.schemas.TopologyEdge`
 * :class:`meho_backplane.topology.schemas.TopologyEdgeEndpoint`
+
+**Bulk import — Task #600 (G9.2-T8, stretch):** the batch curated-
+edge writer. The CLI ``meho topology bulk-import <file>`` and the
+REST route ``POST /api/v1/topology/edges/bulk`` both call
+:func:`bulk_import_edges`, which runs an all-or-nothing transaction
+over a list of :class:`BulkImportRow` (per-row idempotent annotate
+calls in one transaction) plus a ``--dry-run`` plan-preview path.
+
+* :func:`meho_backplane.topology.bulk_import.bulk_import_edges`
+* :class:`meho_backplane.topology.bulk_import.BulkImportRow`
+* :class:`meho_backplane.topology.bulk_import.BulkImportResult`
+* :class:`meho_backplane.topology.bulk_import.BulkImportValidationError`
 """
 
 from meho_backplane.topology.annotate import (
@@ -80,7 +92,17 @@ from meho_backplane.topology.annotate import (
     NodeRef,
     UnannotateSelectorError,
     annotate_edge,
+    annotate_edge_in_txn,
     unannotate_edge,
+)
+from meho_backplane.topology.bulk_import import (
+    BulkEdgeAction,
+    BulkEdgeResult,
+    BulkImportResult,
+    BulkImportRow,
+    BulkImportRowError,
+    BulkImportValidationError,
+    bulk_import_edges,
 )
 from meho_backplane.topology.query import list_edges
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
@@ -99,6 +121,12 @@ __all__ = [
     "AmbiguousNodeError",
     "AnnotateConflictError",
     "AutoEdgeDeletionError",
+    "BulkEdgeAction",
+    "BulkEdgeResult",
+    "BulkImportResult",
+    "BulkImportRow",
+    "BulkImportRowError",
+    "BulkImportValidationError",
     "InvalidEdgeKindError",
     "NodeNotFoundError",
     "NodeRef",
@@ -107,6 +135,8 @@ __all__ = [
     "TopologyEdgeEndpoint",
     "UnannotateSelectorError",
     "annotate_edge",
+    "annotate_edge_in_txn",
+    "bulk_import_edges",
     "list_edges",
     "refresh_target_topology",
     "resolve_node",

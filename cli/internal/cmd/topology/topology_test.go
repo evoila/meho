@@ -75,6 +75,7 @@ func TestNewRootCmdWiresAllVerbs(t *testing.T) {
 		"annotate":     false,
 		"unannotate":   false,
 		"list-edges":   false,
+		"bulk-import":  false,
 	}
 	for _, c := range root.Commands() {
 		name := strings.Fields(c.Use)[0]

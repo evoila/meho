@@ -83,23 +83,36 @@ Curation application
 --------------------
 
 :func:`apply_nsx_core_curation` is the operator-review-time
-substrate call:
+substrate call that makes exactly the 9 curated ops dispatchable
+and leaves every other ingested op disabled. The substrate has no
+"enable only ops X, Y, Z under group G" verb —
+:meth:`ReviewService.enable_group` cascades ``is_enabled=True`` to
+every child op. The helper threads this needle by using the
+audit-log-driven operator-override exclusion (see
+:func:`~meho_backplane.operations.ingest._internals.operator_disabled_op_ids`):
 
-1. For each entry in :data:`NSX_CORE_GROUPS`, ``edit_group(name,
-   when_to_use)`` on the group then ``enable_group(group_key)`` to
-   flip ``review_status='enabled'`` (cascades child ops to
-   ``is_enabled=True``).
-2. For each entry in :data:`NSX_CORE_OPS`, ``edit_op(
-   llm_instructions=...)`` to land the agent guidance blob. The
-   op's ``is_enabled`` flips ``True`` through the group cascade in
-   step 1; the operator-review override path (``edit_op(
-   is_enabled=False)`` for any explicitly-rejected op) is left as
-   a follow-up for the CLI verb in #615.
+1. Read the current state of each curated group via
+   :meth:`ReviewService.get_review_payload`.
+2. For every non-curated op in a curated group, call
+   :meth:`ReviewService.edit_op` with ``is_enabled=False`` —
+   this writes the operator-override audit row.
+3. For each curated group, :meth:`edit_group` lands the
+   operator-reviewed ``name`` / ``when_to_use``, then
+   :meth:`enable_group` flips ``review_status='enabled'``. The
+   cascade detects the prior override rows from step 2 and skips
+   those ops; only the curated ops get ``is_enabled=True``.
+4. For each entry in :data:`NSX_CORE_OPS`, :meth:`edit_op`
+   lands the curated ``llm_instructions`` blob.
 
-Calling :func:`apply_nsx_core_curation` is idempotent: each
-sub-call uses the existing ``ReviewService`` no-op-on-target-state
-semantics (already-enabled groups don't write audit rows; ops with
-the same ``llm_instructions`` value re-write but the diff is empty).
+Re-running :func:`apply_nsx_core_curation` is **safe** but not
+fully idempotent at the audit layer: :meth:`enable_group` is a
+no-op on a group already in ``review_status='enabled'`` (no audit
+row written), but :meth:`edit_group` and :meth:`edit_op` always
+emit one audit row per call — even when every field already
+carried the incoming value. The intended posture is a one-shot
+curation step after ingest; re-runs during a rollout or test
+rerun produce redundant ``meho.connector.edit_*`` audit rows but
+never corrupt state.
 """
 
 from __future__ import annotations
@@ -553,32 +566,113 @@ async def apply_nsx_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply :data:`NSX_CORE_GROUPS` + :data:`NSX_CORE_OPS` against the ingested connector.
+    """Apply the curated 9-op read core against an ingested NSX connector.
 
-    For every entry in :data:`NSX_CORE_GROUPS`:
+    Drives the substrate so that, after this call returns, exactly
+    the 9 ops in :data:`NSX_CORE_OPS` are dispatchable
+    (``is_enabled=True``) and every other ingested op stays
+    ``is_enabled=False``. The 8 curated groups land
+    ``review_status='enabled'`` so the agent's
+    :func:`~meho_backplane.operations.meta_tools.search_operations`
+    surfaces the core ops; non-curated groups are left untouched
+    (``review_status='staged'`` from the G0.7 ingest default).
 
-    1. :meth:`ReviewService.edit_group` to land the operator-authored
-       ``name`` + ``when_to_use``.
-    2. :meth:`ReviewService.enable_group` to flip
-       ``review_status='enabled'``; cascades child ops to
-       ``is_enabled=True``.
+    The substrate doesn't expose "enable only ops X, Y, Z under
+    group G": :meth:`ReviewService.enable_group`'s cascade flips
+    ``is_enabled=True`` on every child op in the group. The helper
+    works around this via the audit-log-driven operator-override
+    exclusion (see
+    :func:`~meho_backplane.operations.ingest._internals.operator_disabled_op_ids`):
 
-    For every entry in :data:`NSX_CORE_OPS`:
-
-    3. :meth:`ReviewService.edit_op` with ``llm_instructions`` set to
-       the curated blob; the op is already ``is_enabled=True`` from
-       step 2's group cascade.
+    1. :meth:`ReviewService.get_review_payload` loads the current
+       state of every curated group and its child ops.
+    2. For each child op in a curated group that **isn't** in the
+       :data:`NSX_CORE_OPS` allow-list,
+       :meth:`ReviewService.edit_op` with ``is_enabled=False``
+       writes the operator-override audit row. The follow-on
+       :meth:`enable_group` cascade detects these rows and skips
+       them, so non-core ops stay disabled even though their
+       group is being enabled.
+    3. :meth:`ReviewService.edit_group` lands the operator-reviewed
+       ``name`` + ``when_to_use`` on each curated group.
+    4. :meth:`ReviewService.enable_group` flips
+       ``review_status='enabled'`` and cascades ``is_enabled=True``
+       to the curated child ops (operator-overridden non-core ops
+       are skipped).
+    5. :meth:`ReviewService.edit_op` lands the curated
+       ``llm_instructions`` blob per entry in :data:`NSX_CORE_OPS`.
 
     Caller's *review_service* must be constructed against a
     ``tenant_admin``-role operator (matching the substrate's auth
     contract); built-in scope (``tenant_id=None``) is the default
     for NSX content, same convention vSphere uses.
 
-    Idempotent: re-running with the same data writes audit rows
-    only for fields that actually changed (the substrate's
-    no-op-on-target-state behaviour) — the curation step is safe
-    to re-run during a rollout or test rerun.
+    Re-running is safe but not idempotent at the audit layer.
+    :meth:`enable_group` short-circuits on groups already in
+    ``review_status='enabled'`` (no audit row), but
+    :meth:`edit_group` and :meth:`edit_op` always emit one audit
+    row per call — even when the incoming value equals the
+    persisted one. The intended posture is a one-shot curation
+    step after ingest; re-runs produce redundant
+    ``meho.connector.edit_*`` audit rows but never corrupt state.
+
+    Raises :class:`~meho_backplane.operations.ingest.ConnectorNotFoundError`
+    if no groups exist for ``nsx-rest-4.2`` under *tenant_id* (the
+    operator must run ``meho connector ingest`` against the NSX
+    specs before this helper applies).
     """
+    # Step 1 — read the current state so we can compute the
+    # per-group non-core op set.
+    payload = await review_service.get_review_payload(
+        NSX_CONNECTOR_ID,
+        tenant_id,
+    )
+
+    # Build the per-group allow-list from the curated NSX_CORE_OPS.
+    # ``policy-firewall`` carries two entries (security-policy.list
+    # + rule.list); every other curated group carries exactly one.
+    core_op_ids_by_group: dict[str, set[str]] = {}
+    for op in NSX_CORE_OPS:
+        core_op_ids_by_group.setdefault(op.group_key, set()).add(op.op_id)
+
+    # Step 2 — disable non-core ops in each curated group via the
+    # operator-override audit-log path so the subsequent
+    # ``enable_group`` cascade skips them.
+    for group_payload in payload.groups:
+        allow_list = core_op_ids_by_group.get(group_payload.group_key)
+        if allow_list is None:
+            # Non-curated group — left entirely alone; its
+            # review_status stays at whatever the ingest pass set
+            # it to (typically 'staged').
+            continue
+        for review_op in group_payload.ops:
+            if review_op.op_id in allow_list:
+                continue
+            # Always write the override audit row, even when the
+            # op already appears ``is_enabled=False``. The
+            # cascade in :meth:`enable_group` consults the audit
+            # log (see
+            # :func:`~meho_backplane.operations.ingest._internals.operator_disabled_op_ids`),
+            # not the live column value — a freshly-ingested op
+            # is ``is_enabled=False`` by default but carries no
+            # ``edit_op`` audit history, so the cascade would
+            # re-enable it without an explicit override row.
+            await review_service.edit_op(
+                NSX_CONNECTOR_ID,
+                review_op.op_id,
+                tenant_id=tenant_id,
+                is_enabled=False,
+            )
+            _log.info(
+                "nsx_non_core_op_disabled",
+                connector_id=NSX_CONNECTOR_ID,
+                op_id=review_op.op_id,
+                group_key=group_payload.group_key,
+            )
+
+    # Steps 3 + 4 — land the operator-reviewed group metadata, then
+    # enable each curated group. The cascade respects the
+    # operator-override exclusion list built in step 2.
     for group in NSX_CORE_GROUPS:
         await review_service.edit_group(
             NSX_CONNECTOR_ID,
@@ -598,6 +692,7 @@ async def apply_nsx_core_curation(
             group_key=group.group_key,
         )
 
+    # Step 5 — land the curated llm_instructions blob per core op.
     for op in NSX_CORE_OPS:
         await review_service.edit_op(
             NSX_CONNECTOR_ID,

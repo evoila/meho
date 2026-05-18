@@ -275,10 +275,34 @@ async def _insert_nsx_descriptors() -> None:
                 safety_level="safe",
                 requires_approval=False,
                 is_enabled=True,
-                tags=["spec:nsx-4.2/policy.yaml"],
+                tags=[_spec_tag_for(path)],
             )
             session.add(descriptor)
         await session.commit()
+
+
+def _spec_tag_for(path: str) -> str:
+    """Return the ``spec:<source>`` tag matching the path's upstream NSX spec.
+
+    NSX 4.2's OpenAPI corpus is split across two files:
+
+    * ``policy.yaml`` — the modern declarative policy API; every
+      path begins with ``/policy/api/v1/...``.
+    * ``manager.yaml`` — the legacy / lower-level manager API; every
+      path begins with ``/api/v1/...``.
+
+    The G0.7 ingestion pipeline tags every persisted row with
+    ``spec:<source>`` so operators can audit per-spec coverage via
+    ``meho connector review``. The seeded fixture mirrors that
+    contract — the 6 policy-API ops carry ``spec:nsx-4.2/policy.yaml``,
+    the 3 manager-API ops carry ``spec:nsx-4.2/manager.yaml``. A
+    flat single-tag default would misrepresent the corpus split and
+    drift the dispatch-smoke set away from what a real two-spec
+    ingest would land.
+    """
+    if path.startswith("/policy/"):
+        return "spec:nsx-4.2/policy.yaml"
+    return "spec:nsx-4.2/manager.yaml"
 
 
 def _param_schema_for(path: str) -> dict[str, object]:

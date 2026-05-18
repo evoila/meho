@@ -14,6 +14,12 @@ Coverage:
   slug / name.
 * **Idempotent.** Calling it N times for the same ``tenant_id``
   leaves exactly one row.
+* **Slug collision regression.** Two distinct ``tenant_id`` UUIDs
+  sharing an 8-hex prefix both seed without raising. Guards against
+  the truncated-slug regression: ``ON CONFLICT (id) DO NOTHING``
+  does not cover the separate ``UNIQUE`` index on ``tenant.slug``,
+  so a prefix-derived slug would raise an ``IntegrityError`` on the
+  second insert.
 * **Pre-existing row untouched.** A ``tenant`` row that already has
   an operator-chosen ``slug`` / ``name`` (the v0.3 provisioning-API
   case) is not overwritten by a subsequent ``ensure_tenant`` — the
@@ -82,8 +88,8 @@ async def test_ensure_tenant_seeds_row_on_empty_table() -> None:
     async with sessionmaker() as session:
         row = (await session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalars().one()
     assert row.id == tenant_id
-    assert row.slug == f"tenant-{tenant_id.hex[:8]}"
-    assert row.name == f"tenant-{tenant_id.hex[:8]}"
+    assert row.slug == f"tenant-{tenant_id}"
+    assert row.name == f"tenant-{tenant_id}"
 
 
 async def test_ensure_tenant_is_idempotent_across_repeated_calls() -> None:
@@ -115,6 +121,44 @@ async def test_ensure_tenant_is_idempotent_under_concurrent_calls() -> None:
     await asyncio.gather(*(_one_call() for _ in range(8)))
 
     assert await _count(tenant_id) == 1
+
+
+async def test_ensure_tenant_seeds_two_uuids_sharing_an_8hex_prefix() -> None:
+    """Two UUIDs with the same first 8 hex chars both seed cleanly.
+
+    Regression for the truncated-slug bug: the derived slug must be
+    bijective with the ``id`` primary key. ``ON CONFLICT (id) DO
+    NOTHING`` only guards the PK, not the separate ``UNIQUE`` index on
+    ``tenant.slug``. A ``tenant-<first-8-hex>`` slug collides for two
+    distinct UUIDs sharing that prefix and raises an ``IntegrityError``
+    on the second insert; deriving from the full UUID does not.
+    """
+    shared_prefix = uuid.uuid4().hex[:8]
+    tenant_a = uuid.UUID(shared_prefix + uuid.uuid4().hex[8:])
+    tenant_b = uuid.UUID(shared_prefix + uuid.uuid4().hex[8:])
+    assert tenant_a != tenant_b
+    assert tenant_a.hex[:8] == tenant_b.hex[:8]
+
+    sessionmaker = get_sessionmaker()
+    for tenant_id in (tenant_a, tenant_b):
+        # No IntegrityError on the second insert is the assertion.
+        async with sessionmaker() as session, session.begin():
+            await ensure_tenant(tenant_id, session)
+
+    assert await _count(tenant_a) == 1
+    assert await _count(tenant_b) == 1
+
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(Tenant).where(Tenant.id.in_([tenant_a, tenant_b])),
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert {r.slug for r in rows} == {f"tenant-{tenant_a}", f"tenant-{tenant_b}"}
 
 
 async def test_ensure_tenant_does_not_overwrite_existing_row() -> None:

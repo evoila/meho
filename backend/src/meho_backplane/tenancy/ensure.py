@@ -10,16 +10,18 @@ future release). Every tenant-scoped write — ``documents``,
 ``tenant_id`` lifted from the operator's JWT and fails
 ``documents_tenant_id_fkey`` (and its siblings) until a matching
 ``tenant`` row exists. Nothing in the request path or the published
-runbooks seeded it, so the first *real* (non-dry-run) write on a
-runbook-following deploy hit an unhandled asyncpg
-``ForeignKeyViolationError``.
+runbooks seeded it, so the first real write on a runbook-following
+deploy hit an unhandled asyncpg ``ForeignKeyViolationError``.
 
 :func:`ensure_tenant` is the minimal fix: an idempotent get-or-create
-issued once per authenticated-request operator context, keyed to the
-verified ``tenant_id`` claim. ``slug`` and ``name`` derive
-deterministically from the UUID; a future v0.3 tenant-provisioning API
-can rename them out of band (``slug`` carries no FK and the
-get-or-create never overwrites an existing row).
+issued once per authenticated request from the
+``verify_jwt_and_bind`` middleware every authenticated route flows
+through — so the *first authenticated request* of any kind (reads and
+``dry_run`` included), not just the first write, seeds the row.
+``slug`` and ``name`` derive deterministically from the full UUID
+(see :func:`_derive_slug`); a future v0.3 tenant-provisioning API can
+rename them out of band (``slug`` carries no FK and the get-or-create
+never overwrites an existing row).
 
 The statement is a single dialect-native
 ``INSERT ... ON CONFLICT (id) DO NOTHING``. ``ON CONFLICT DO NOTHING``
@@ -57,14 +59,22 @@ _log = structlog.get_logger(__name__)
 def _derive_slug(tenant_id: UUID) -> str:
     """Deterministic placeholder slug for a JIT-seeded tenant.
 
-    ``tenant-<first-8-hex>`` — short enough to be operator-legible in
-    logs and admin queries, deterministic so re-deriving it for the
-    same ``tenant_id`` is stable, and namespaced under ``tenant-`` so
-    a future v0.3 provisioning API can tell auto-seeded rows from
-    operator-named ones at a glance. The slug carries no FK, so a
-    later rename is a single ``UPDATE`` with no cascade.
+    ``tenant-<full-uuid>`` — the canonical hyphenated UUID form, so
+    the slug is bijective with the ``id`` primary key. ``tenant.slug``
+    has its own ``UNIQUE`` index (``tenant_slug_idx``) which the
+    ``ON CONFLICT (id) DO NOTHING`` clause does **not** guard;
+    truncating to a prefix would let two distinct tenant UUIDs share a
+    slug and raise an ``IntegrityError`` on the slug index, 500-ing
+    every authenticated request for the colliding tenant forever
+    (``ensure_tenant`` runs on every authenticated request). The full
+    UUID makes the slug exactly as unique as the conflict target.
+    Still deterministic (re-deriving for the same ``tenant_id`` is
+    stable) and namespaced under ``tenant-`` so a future v0.3
+    provisioning API can tell auto-seeded rows from operator-named
+    ones at a glance. The slug carries no FK, so a later rename is a
+    single ``UPDATE`` with no cascade.
     """
-    return f"tenant-{tenant_id.hex[:8]}"
+    return f"tenant-{tenant_id}"
 
 
 async def ensure_tenant(tenant_id: UUID, session: AsyncSession) -> None:

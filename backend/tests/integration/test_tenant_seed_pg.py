@@ -192,8 +192,8 @@ async def test_first_real_ingest_succeeds_on_empty_tenant_table(
             (await session.execute(select(Tenant).where(Tenant.id == fresh_uuid))).scalars().all()
         )
     assert len(rows) == 1
-    assert rows[0].slug == f"tenant-{fresh_uuid.hex[:8]}"
-    assert rows[0].name == f"tenant-{fresh_uuid.hex[:8]}"
+    assert rows[0].slug == f"tenant-{fresh_uuid}"
+    assert rows[0].name == f"tenant-{fresh_uuid}"
 
 
 @_skip_no_docker

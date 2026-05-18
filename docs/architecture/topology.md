@@ -56,24 +56,40 @@ operator (or an agent, before recommending a destructive op) can ask
   `(tenant_id, kind, name)` unique row.
 - **`query_topology` meta-tool** — the single parametric MCP agent
   tool (`backend/src/meho_backplane/mcp/tools/topology.py`). One `kind`
-  argument (`dependents` / `dependencies` / `path`) selects the read
-  shape. Per CLAUDE.md postulate 5 the three verbs are **not** three
-  tools — that would be the per-op-tool anti-pattern. `list_targets`
-  is the sibling meta-tool that enumerates the operator's targets.
-  `topology.refresh` and `targets discover` are operator CLI verbs, not
-  agent tools (`meho topology refresh|dependents|dependencies|path`,
+  argument (`dependents` / `dependencies` / `path` / `edges`) selects
+  the read shape; G9.2 added the `edges` facet for the flat
+  inventory survey alongside the three traversal shapes. Per
+  CLAUDE.md postulate 5 the four verbs are **not** four tools — that
+  would be the per-op-tool anti-pattern. `list_targets` is the
+  sibling meta-tool that enumerates the operator's targets.
+  `topology.refresh` and `targets discover` are operator CLI verbs,
+  not agent tools (`meho topology refresh|dependents|dependencies|path`,
   `meho targets discover` under `cli/internal/cmd/`).
+- **Curated-edge MCP tools** (`meho.topology.annotate` /
+  `meho.topology.unannotate`, both `tenant_admin` only) — admin
+  meta-tools in the `meho.*` namespace exposing the write half of
+  the G9.2 surface. Not on the daily ~17 meta-tool agent surface;
+  an `operator`-role session never sees them in `tools/list`.
 
 CLI, REST (`/api/v1/topology*`, `/api/v1/targets/discover`), and the
 MCP meta-tools are **sibling fronts on one backplane** — each calls the
 `topology/` substrate directly; none is a thin wrapper of another.
 
-## The 4 v0.2 edge kinds
+## The v0.2 edge-kind vocabulary
 
-G9.1 ships only the **auto-discoverable, high-confidence** subset.
-Probe-derived edges have to be high-confidence — a wrong edge in a
-`dependents` answer misleads the operator on the very op the verb is
-supposed to make safer.
+G9.2 ([#364](https://github.com/evoila/meho/issues/364)) locks the
+edge-kind vocabulary at **ten** members: the four auto-discoverable
+kinds G9.1 ships, plus six operator-curated cross-system kinds that
+no probe can derive. The vocabulary is closed; widening it is a
+coordinated DB + model + decision-row change (migration `0010`
+widens the `graph_edge.kind` CHECK from the G9.1 subset; the
+[`GraphEdgeKind`](../../backend/src/meho_backplane/db/models.py)
+`StrEnum` and the CHECK move in lock-step).
+
+**Four auto-discoverable kinds** — refresh writes these on every
+probe. Probe-derived edges have to be high-confidence — a wrong
+edge in a `dependents` answer misleads the operator on the very op
+the verb is supposed to make safer.
 
 | Edge kind | Meaning | Example |
 |---|---|---|
@@ -82,11 +98,114 @@ supposed to make safer.
 | `routes-through` | network path | VM `routes-through` portgroup; service `routes-through` to pod |
 | `belongs-to` | containment / ownership | cluster `belongs-to` member host; namespace `belongs-to` pod |
 
-G9.2 ([#364](https://github.com/evoila/meho/issues/364)) extends the
-vocabulary with operator-curated cross-system edges
-(`authenticates-via`, `depends-on`, `replicates-to`,
-`backed-up-by`) — those need explicit operator assertion, not probe
-inference.
+**Six curated-only kinds** — operator-asserted via
+`meho topology annotate` (CLI), `POST /api/v1/topology/edges` (REST),
+or `meho.topology.annotate` (MCP, `tenant_admin` only). These cross
+connector boundaries (a Kubernetes ServiceAccount authenticating
+against a Vault role, a service depending on a database in a
+different product) and cannot be derived from any single probe.
+
+| Edge kind | Meaning | Example |
+|---|---|---|
+| `authenticates-via` | principal → identity-provider | k8s SA → Vault role (`k8s-sa-foo` `authenticates-via` `vault-role-bar`) |
+| `depends-on` | cross-system functional dependency | service → database in another product |
+| `replicates-to` | operator-asserted replication | storage / DB node → replica node |
+| `backed-up-by` | operator-asserted backup relationship | resource → backup target |
+| `routes-via` | operator-asserted network path through an intermediary | `vm-A` `routes-via` `firewall-X` to `vm-B` |
+| `policy-binds` | RBAC / policy attachment across connector boundaries | k8s namespace → Vault policy |
+
+The operator-facing recipe for *when* to annotate, the §6 conflict
+rules below, and the CLI walkthrough live in
+[`docs/cross-repo/topology-annotation.md`](../cross-repo/topology-annotation.md).
+
+## G9.2 curated-edge surface
+
+G9.2 lands three operator-facing fronts over a single substrate.
+Each is a sibling of the others; none is a thin wrapper.
+
+- **CLI** — `meho topology annotate <from> <kind> <to>`,
+  `meho topology unannotate <id | from kind to>`, and
+  `meho topology list-edges [--kind ...] [--source ...] [--conflicts]`.
+  Writes require `tenant_admin`; list-edges requires `operator`.
+- **REST** — `POST /api/v1/topology/edges`,
+  `DELETE /api/v1/topology/edges/{edge_id}`, and
+  `GET /api/v1/topology/edges`. The two writes are pinned to
+  `tenant_admin`; the GET to `operator`. The list endpoint accepts
+  `kind`, `source`, `from`, `to`, `conflicts`, `limit`, `offset`
+  query params; `limit` defaults to 200 with a hard ceiling of
+  1000 mirroring the substrate cap.
+- **MCP** — `meho.topology.annotate` and
+  `meho.topology.unannotate` live in the `meho.*` admin namespace
+  (tenant_admin only, not on the daily ~17 meta-tool surface). The
+  read facet is `query_topology { kind: "edges", ... }` on the
+  existing operator-role parametric tool — same primitive, the
+  fourth `kind` value alongside `dependents` / `dependencies` /
+  `path` (Initiative #364 §9 narrow-waist alignment).
+
+All three fronts call the
+[`topology/annotate.py`](../../backend/src/meho_backplane/topology/annotate.py)
+substrate (`annotate_edge` / `unannotate_edge`) and the
+`list_edges` helper in
+[`topology/query.py`](../../backend/src/meho_backplane/topology/query.py)
+directly. Tenant scope is lifted from `operator.tenant_id` (the
+validated JWT subject) on every front — no front accepts a
+`tenant_id` argument.
+
+## §6 conflict-resolution rules
+
+Two recoverable conflict shapes the substrate handles
+deterministically — the recoverable-mistake invariant on which
+G9.2's annotation surface is built.
+
+### Rule 1 — same kind, different endpoint → curated supersedes
+
+A curated edge `(A, kind, B)` displaces any auto edge from the same
+`from_node_id` of the same `kind` to a *different* `to_node_id`. The
+displaced auto edges are marked
+`properties.superseded_by = <curated-id>`; the traversal verbs in
+[`topology/query.py`](../../backend/src/meho_backplane/topology/query.py)
+guard with `properties->>'superseded_by' IS NULL` so superseded
+rows do not contribute to blast-radius answers.
+
+The supersede mark is **sticky** across refresh: the
+[`refresh._reconcile_edges`](../../backend/src/meho_backplane/topology/refresh.py)
+pass preserves it even when the probe re-discovers the auto edge.
+Only an `unannotate_edge` of the curated row clears the mark — at
+which point the auto edge un-supersedes on the next refresh.
+
+### Rule 2 — incompatible kinds, same endpoint pair → coexist with `conflicts_with`
+
+When a curated edge `(A, kind1, B)` is annotated and an existing
+edge (auto or curated) over the same `(from_node_id, to_node_id)`
+has a *different* `kind`, both rows are kept. Each row's
+`properties.conflicts_with` array is appended with the other's id,
+bidirectionally. Traversal verbs include both rows (the
+`superseded_by` guard does not filter `conflicts_with`); the
+downstream policy layer is the consumer that resolves the
+contradiction in v0.2.next.
+
+### Surfacing conflicts
+
+`meho topology list-edges --conflicts` (CLI) /
+`GET /api/v1/topology/edges?conflicts=true` (REST) /
+`query_topology { kind: edges, conflicts: true }` (MCP) returns
+every edge whose `properties.conflicts_with` array is non-empty —
+the §6 recoverability survey. Pair with `--source curated` to
+narrow to operator annotations the probe disagrees with; pair with
+`--source auto` to narrow to probe-discovered edges the operator
+has overridden.
+
+### Recovery
+
+A wrong annotation is one CLI call away from clean:
+
+```bash
+meho topology unannotate <from> <kind> <to>
+```
+
+Removing the curated row clears its supersede + conflict markers
+on neighbours; superseded auto edges un-supersede on the next
+refresh. The mistake is local, recoverable, and audited.
 
 ## Soft-delete semantics
 

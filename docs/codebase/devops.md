@@ -874,12 +874,13 @@ Steps, in order:
 ### Smoke contract (`scripts/ci/pr-smoke.sh`)
 
 The smoke script is deliberately scoped to the **unauthenticated
-operator surface** — three assertions, no Keycloak access token:
+operator surface** — four assertions, no Keycloak access token:
 
 | Endpoint | Assertion | Why |
 | --- | --- | --- |
 | `/healthz` | HTTP 200 | Liveness probe contract; the in-cluster kubelet uses this exact path |
-| `/version` | `git_sha` present and not `"unknown"` | Confirms the deployed image carries build metadata (image.yml stamps it) and isn't a fallback build |
+| `/version` | `git_sha` present and not `"unknown"` | Confirms the deployed image carries build metadata (`image.yml` / `pr-smoke.yml` pass `GIT_SHA` as a Docker `build-arg`, #631) and isn't a fallback build |
+| `/version` | `chart_version` present, not `"unknown"`, non-empty | Confirms the helm-installed chart injected `CHART_VERSION` from `.Chart.Version` (#631) — the deployed-chart provenance the governance backplane exists to answer |
 | `/api/v1/health` | HTTP 401 unauthenticated | Negative auth test — a 200 here would mean auth middleware regressed open OR Keycloak realm is wired wrong; both are PR-blocking regressions Goal #11 considers non-negotiable |
 
 The full authenticated federation-chain smoke

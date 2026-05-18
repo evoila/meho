@@ -426,11 +426,19 @@ tar -czf "$SNAPSHOT_PATH" -C / "$ROOT_NO_SLASH" >/dev/null
 # the Python side can split out the slice content from the rest of the
 # script's progress output. ``cat`` returns 1 on missing; treat that
 # as empty (the slice may be a new zonefile being created in a later
-# variant) by surfacing an empty marker block.
+# variant) by surfacing an empty marker block. The ``printf '\\n'``
+# after cat is a sentinel separator -- ``cat`` doesn't emit a trailing
+# newline if the file lacks one, so without this sentinel the line-
+# based parser would conflate the file's last line with the END marker
+# (for a no-trailing-newline file) or strip the file's real trailing
+# newline (for a file that has one). The Python-side parser's
+# strip-one-terminal-newline rule combined with this always-emitted
+# sentinel makes both cases round-trip byte-exact.
 echo "===STATE_BEFORE_BEGIN==="
 if [ -f "$AUDIT_SLICE_PATH" ]; then
     cat "$AUDIT_SLICE_PATH"
 fi
+printf '\n'
 echo "===STATE_BEFORE_END==="
 
 # Step 3: stage. Two mutually exclusive shapes share this step --
@@ -568,9 +576,12 @@ if ! VERIFY_OUT=$(eval "$BIND9_VERIFY_CMD" 2>&1); then
 fi
 
 # Step 7 (success): capture state_after and emit. Snapshot can be
-# discarded; the rollback path no longer needs it.
+# discarded; the rollback path no longer needs it. The ``printf '\\n'``
+# sentinel after cat parallels the state_before capture above -- see
+# that block's comment for the round-trip rationale.
 echo "===STATE_AFTER_BEGIN==="
 cat "$AUDIT_SLICE_PATH"
+printf '\n'
 echo "===STATE_AFTER_END==="
 
 rm -f "$SNAPSHOT_PATH" || true

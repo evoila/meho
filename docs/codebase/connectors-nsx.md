@@ -244,13 +244,24 @@ posture `edit_group` takes for `when_to_use`).
 
 - Issues: [G3.5-T1 #613](https://github.com/evoila/meho/issues/613)
   (skeleton); [G3.5-T2 #614](https://github.com/evoila/meho/issues/614)
-  (core-ops curation + `edit_op(llm_instructions=)` substrate).
+  (core-ops curation + `edit_op(llm_instructions=)` substrate);
+  [G3.5-T3 #615](https://github.com/evoila/meho/issues/615)
+  (CLI verbs + E2E recorded-fixture tests + operator onboarding doc).
 - Parent Initiative: [G3.5 #368](https://github.com/evoila/meho/issues/368).
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
-- Sibling tasks: #615 (CLI + MCP review + E2E).
-- Operator runbook: `docs/cross-repo/g35-nsx-canary.md` — ingest +
-  curate + enable + smoke procedure for an operator standing up
-  NSX against a fresh deploy.
+- CLI verbs: `cli/internal/cmd/nsx/` — thin Cobra layer over
+  `POST /api/v1/operations/call` for the 9 core ops + `operation
+  search/call` meta-tools; mirrors `cli/internal/cmd/vmware/`.
+- Operator runbooks:
+  - `docs/cross-repo/g35-nsx-canary.md` — ingest + curate + enable +
+    smoke procedure for an operator standing up NSX against a fresh
+    deploy.
+  - `docs/cross-repo/nsx-onboarding.md` — `meho nsx …` verb reference
+    + `scripts/nsx.sh` → `meho nsx` per-ticket wrapper-flip recipe.
+- Integration test: `backend/tests/test_connectors_nsx_e2e.py` —
+  combined E2E covering all 9 ops, session-establish, 401-retry,
+  audit rows, and JSONFlux handle path; runs in the `meho-runners` CI
+  lane with no Docker dependency.
 - Acceptance tests:
   - `backend/tests/acceptance/test_g35_nsx_dispatch_smoke.py` —
     dispatch the 9 NSX core ops against a respx-mocked NSX REST

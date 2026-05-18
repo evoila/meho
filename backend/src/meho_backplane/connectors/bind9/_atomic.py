@@ -61,7 +61,7 @@ state -- either the whole script completed, or nothing about
 Step 6's rollback is the most paranoid case: named has already
 loaded the change; the rollback restores the prior tree and forces
 named back to it by rewriting the restored zonefile's SOA serial
-to ``cached_serial + 1`` before issuing ``rndc reload``. The serial
+to ``staged_serial + 1`` before issuing ``rndc reload``. The serial
 bump bypasses named's SOA-serial cache, which otherwise treats a
 "regression" to the snapshot's lower serial as a no-op and leaves
 the staged in-memory zone in place even though the disk has been
@@ -78,19 +78,38 @@ a real bind9 container caught this -- the canary record survived
 the freeze/reload/thaw rollback because freeze never evicted the
 cached zone.
 
-The current mechanism (SOA-bump) is robust because it makes the
-restored file look like a forward step to named regardless of how
-the zone is configured: we read named's cached serial via
-``dig @localhost <zone> SOA``, set the restored file's serial to
-``cached + 1``, then ``rndc reload``. The zonefile content
-otherwise stays byte-identical to the snapshot -- only the SOA
-serial line changes, by exactly the amount needed to defeat the
-cache. The rollback contract is therefore "disk content
-logically restored; SOA serial may be incremented to force named
-to accept the restoration" -- a one-line departure from
-strict-byte-identity that the operator-visible state explicitly
-tolerates, since the SOA serial number is metadata bind9
-manages on every change anyway.
+The iter-4 attempt tried ``dig @localhost <zone> SOA +short`` to
+read named's cached serial and bump above it. That ALSO failed in
+CI -- the working theories are that dig's output shape varied (the
+``+short`` output for SOA is the full RDATA, the third whitespace
+token of which is the serial, but a fresh-start named that has
+not yet fully published the zone via NOTIFY can momentarily return
+an empty answer), or that the dig query ran before named had
+finished the reload, or that the parse via ``awk '{print $3}'``
+caught a comment line. Either way the mechanism was DNS-dependent
+and fragile.
+
+The current mechanism (iter-5) avoids DNS entirely: we read the
+SOA serial directly from the staged file ON DISK, BEFORE the
+``tar -xzf`` overwrites it. At that point the staged file (just
+successfully validated and reloaded in steps 4 + 5) carries the
+serial named most recently loaded into memory -- by construction,
+since named read this exact file in step 5. We bump that serial
+by one and rewrite the SOA in the restored zonefile after the tar
+extract. No DNS lookup, no race window, no parse fragility. The
+serial-bump regex stays the same because both the staged file
+(written by the caller) and the snapshot file (originally produced
+by a prior write op) may carry either single-line or parenthesised
+SOA grammar.
+
+The zonefile content otherwise stays byte-identical to the
+snapshot -- only the SOA serial line changes, by exactly the
+amount needed to defeat the cache. The rollback contract is
+therefore "disk content logically restored; SOA serial may be
+incremented to force named to accept the restoration" -- a
+one-line departure from strict-byte-identity that the
+operator-visible state explicitly tolerates, since the SOA serial
+number is metadata bind9 manages on every change anyway.
 
 The dig-verify failure mode this guards against is "the staged
 file parses but doesn't actually resolve <fqdn> post-reload" -- a
@@ -251,6 +270,48 @@ BIND_ROOT={bind_root}
 
 rollback() {{
     if [ -f "$SNAPSHOT_PATH" ]; then
+        # Capture the STAGED file's SOA serial directly from disk
+        # BEFORE the tar restore overwrites it. The staged file --
+        # which steps 3 (write) + 4 (named-checkzone) + 5
+        # (rndc reload) have just successfully processed -- carries
+        # the serial named most recently loaded into memory. That is
+        # the value we must bump above to force the restored
+        # zonefile to look like a forward step on the next reload.
+        #
+        # Why disk and not DNS: the iter-4 mechanism queried
+        # ``dig @localhost <zone> SOA +short`` and parsed the third
+        # whitespace token. That failed in CI for reasons we could
+        # not pin down (named may not have published the new serial
+        # via NOTIFY yet, dig output shape variance, awk parse
+        # caught a comment, race against rndc reload's async
+        # propagation). Reading the file is deterministic: no DNS
+        # round-trip, no race window, no protocol layer.
+        #
+        # All steps are best-effort (``|| true``) -- rollback must
+        # never itself raise; the worst-case observable surface is
+        # the same as the freeze-based attempt was (named keeps
+        # the staged zone) plus a fallback whole-server reload.
+        STAGED_SERIAL=""
+        if [ -n "$ZONE_NAME" ] && [ -f "$AUDIT_SLICE_PATH" ]; then
+            STAGED_SERIAL=$(python3 - "$AUDIT_SLICE_PATH" <<'PYEOF' 2>/dev/null || true
+import re
+import sys
+
+try:
+    with open(sys.argv[1]) as f:
+        text = f.read()
+    m = re.search(
+        r"\\bSOA\\b\\s+\\S+\\s+\\S+\\s*\\(?\\s*(?:;[^\\n]*\\n\\s*)*(\\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    print(m.group(1) if m else "", end="")
+except Exception:
+    pass
+PYEOF
+            )
+        fi
+
         # Logically-byte-identical rollback contract: the snapshot
         # tar must restore /etc/bind/ to exactly its pre-op shape,
         # including the absence of any file the stage step (or a
@@ -283,29 +344,19 @@ rollback() {{
         # and does NOT drop named's in-memory state. The reliable
         # mechanism across both static and dynamic zones is to
         # rewrite the restored zonefile's SOA serial to
-        # (cached_serial + 1) so the reload looks like a forward
-        # step. ``dig @localhost <zone> SOA +short`` returns the
-        # serial named currently has in memory; we bump that by
-        # one and Python-rewrite the SOA line in-place. Python is
+        # (staged_serial + 1) so the reload looks like a forward
+        # step. We Python-rewrite the SOA line in-place. Python is
         # the right tool here because the SOA record's grammar has
         # multiple legal forms (single-line, parenthesised
         # multi-line, comments interleaved) and a regex with
-        # IGNORECASE + DOTALL handles them all without the
-        # fragility of an awk state-machine. The restored file
-        # carries the snapshot's content byte-for-byte EXCEPT for
-        # the SOA serial; the rest of the zonefile (every record,
-        # every TTL, every directive) round-trips unchanged.
-        #
-        # All steps are best-effort (``|| true``) -- rollback must
-        # never itself raise; the worst-case observable surface is
-        # the same as the freeze-based attempt was (named keeps
-        # the staged zone) plus a fallback whole-server reload.
-        if [ -n "$ZONE_NAME" ]; then
-            CACHED_SERIAL=$(dig @localhost "$ZONE_NAME" SOA +short 2>/dev/null \\
-                | awk '{{print $3}}' | head -1)
-            if [ -n "$CACHED_SERIAL" ] && [ -f "$AUDIT_SLICE_PATH" ]; then
-                NEW_SERIAL=$((CACHED_SERIAL + 1))
-                python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL" <<'PYEOF' > /dev/null 2>&1 || true
+        # IGNORECASE handles them all without the fragility of an
+        # awk state-machine. The restored file carries the
+        # snapshot's content byte-for-byte EXCEPT for the SOA
+        # serial; the rest of the zonefile (every record, every
+        # TTL, every directive) round-trips unchanged.
+        if [ -n "$ZONE_NAME" ] && [ -n "$STAGED_SERIAL" ] && [ -f "$AUDIT_SLICE_PATH" ]; then
+            NEW_SERIAL=$((STAGED_SERIAL + 1))
+            python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL" <<'PYEOF' > /dev/null 2>&1 || true
 import re
 import sys
 
@@ -334,7 +385,8 @@ if n == 1:
     with open(zone_file, "w") as f:
         f.write(new_text)
 PYEOF
-            fi
+        fi
+        if [ -n "$ZONE_NAME" ]; then
             rndc reload "$ZONE_NAME" > /dev/null 2>&1 || true
         fi
         # Whole-server fallback for cases where the per-zone reload

@@ -406,9 +406,9 @@ class TestPipelineScriptRollbackShape:
     def test_rollback_bumps_soa_serial_before_reload(self) -> None:
         """Rollback must bump the restored zonefile's SOA serial to defeat named's cache.
 
-        Regression for the iter-2 / iter-3 blocker (B4): a plain
-        ``rndc reload`` is a NO-OP for a zone whose on-disk SOA
-        serial has REGRESSED relative to the in-memory version.
+        Regression for the iter-2 / iter-3 / iter-4 blocker (B4):
+        a plain ``rndc reload`` is a NO-OP for a zone whose on-disk
+        SOA serial has REGRESSED relative to the in-memory version.
         After a successful stage + reload, named caches the staged
         zone keyed by its (higher) SOA serial; restoring the
         snapshot zonefile brings back the original (lower) serial,
@@ -420,20 +420,25 @@ class TestPipelineScriptRollbackShape:
         caught this against a real bind9 container.
 
         The iter-3 attempt -- ``rndc freeze`` + ``rndc reload`` +
-        ``rndc thaw`` -- failed in CI because ``rndc freeze`` is a
-        documented no-op on a static (non-DDNS) zone and does NOT
-        drop named's in-memory state. The CI fixture's zone has no
-        ``allow-update`` / ``update-policy`` stanza, so the freeze
-        was effectively absent and the subsequent reload remained
-        gated by the SOA serial.
+        ``rndc thaw`` -- failed because ``rndc freeze`` is a
+        documented no-op on a static (non-DDNS) zone. The iter-4
+        attempt -- ``dig @localhost <zone> SOA +short`` + awk parse
+        -- ALSO failed in CI for reasons we could not pin down
+        (likely an output-shape or timing race). The iter-5
+        mechanism reads the staged file's SOA serial DIRECTLY FROM
+        DISK before the tar restore overwrites it. The staged file
+        carries (by construction) the serial named most recently
+        loaded -- steps 3 + 4 + 5 of the pipeline have just written,
+        validated, and reloaded it. Reading it from disk is
+        deterministic: no DNS round-trip, no race window, no parse
+        fragility.
 
-        The mechanism that works on both static and dynamic zones is
-        to read named's cached SOA serial via ``dig @localhost
-        <zone> SOA +short``, set the restored zonefile's serial to
-        ``cached_serial + 1``, and then ``rndc reload <zone>``. The
-        reload now looks like a forward step and named re-reads the
-        file unconditionally. This test pins the load-bearing
-        sequence inside rollback().
+        This test pins the load-bearing sequence inside rollback():
+            1. STAGED_SERIAL = python read of $AUDIT_SLICE_PATH SOA
+            2. tar -xzf $SNAPSHOT_PATH (overwrites staged file)
+            3. NEW_SERIAL=$((STAGED_SERIAL + 1)); python rewrite SOA
+            4. rndc reload <zone>
+            5. rndc reload (whole-server fallback)
         """
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
@@ -442,22 +447,52 @@ class TestPipelineScriptRollbackShape:
             bind_root="/etc/bind",
         )
 
-        # The cached-serial read via dig must precede the zone reload
-        # so the restored file's SOA can be bumped above it.
-        dig_idx = script.find('dig @localhost "$ZONE_NAME" SOA +short')
-        assert dig_idx != -1, (
-            "rollback() must read named's cached SOA serial via dig "
-            "to know how high to bump the restored zonefile's serial"
+        # STAGED_SERIAL capture must happen via a python3 heredoc
+        # reading $AUDIT_SLICE_PATH (the staged file on disk).
+        staged_capture_idx = script.find('STAGED_SERIAL=$(python3 - "$AUDIT_SLICE_PATH"')
+        assert staged_capture_idx != -1, (
+            "rollback() must capture the staged file's SOA serial via "
+            "an inline python3 read of $AUDIT_SLICE_PATH -- the staged "
+            "file carries the serial named just loaded in step 5"
+        )
+
+        # The capture MUST happen BEFORE the tar restore overwrites
+        # the staged file. This is the load-bearing ordering of
+        # iter-5: reading the staged serial after tar would read the
+        # snapshot's (lower) serial instead and the bump would not
+        # exceed named's in-memory value.
+        tar_extract_idx = script.find('tar -xzf "$SNAPSHOT_PATH" -C /')
+        assert tar_extract_idx != -1, (
+            "rollback() must still extract the snapshot tar to restore /etc/bind/"
+        )
+        assert staged_capture_idx < tar_extract_idx, (
+            "STAGED_SERIAL capture must precede tar -xzf; reading "
+            "after the restore would yield the snapshot's old serial "
+            "instead of the staged (higher) serial named has cached"
         )
 
         # Python-side SOA-bump heredoc must be present and reference
         # the restored zonefile path + new serial.
-        py_heredoc_idx = script.find('python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL"')
-        assert py_heredoc_idx != -1, (
+        py_bump_idx = script.find('python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL"')
+        assert py_bump_idx != -1, (
             "rollback() must invoke an inline python3 SOA-bump on the "
             "restored zonefile -- shell/awk alone cannot reliably handle "
             "the parenthesised / single-line / commented SOA shapes"
         )
+        # The bump must happen AFTER tar -xzf (tar overwrites the
+        # staged file with the snapshot; we then rewrite that
+        # restored file's SOA serial).
+        assert tar_extract_idx < py_bump_idx, (
+            "the SOA-bump must run AFTER tar -xzf; bumping the staged "
+            "file's serial before tar would be wiped out by the restore"
+        )
+        # And NEW_SERIAL must be derived from STAGED_SERIAL via
+        # arithmetic expansion. This is the load-bearing increment.
+        assert "NEW_SERIAL=$((STAGED_SERIAL + 1))" in script, (
+            "NEW_SERIAL must be staged-serial + 1 so the restored "
+            "file's serial strictly exceeds named's cached value"
+        )
+
         # The heredoc body must compile a SOA-targeting regex and
         # write the bumped serial back to the file.
         assert "re.compile" in script, (
@@ -478,22 +513,32 @@ class TestPipelineScriptRollbackShape:
             "rollback() must invoke ``rndc reload <zone>`` after the "
             "SOA-bump so named re-reads the restored zonefile"
         )
-        assert py_heredoc_idx < zone_reload_idx, (
+        assert py_bump_idx < zone_reload_idx, (
             "the SOA-bump must run BEFORE the zone-scoped rndc reload; "
             "reloading first would defeat the bump (named would see "
             "the unbumped serial and skip the reload)"
         )
 
-        # The SOA-bump must be guarded on non-empty $ZONE_NAME so a
-        # primitive invoked before zone resolution doesn't fire dig
-        # against an empty zone argument.
-        guard_idx = script.find('if [ -n "$ZONE_NAME" ]')
-        assert guard_idx != -1, (
-            "the dig/SOA-bump/reload block must be guarded on non-empty $ZONE_NAME"
+        # The STAGED_SERIAL capture must be guarded on non-empty
+        # $ZONE_NAME + existing $AUDIT_SLICE_PATH so a primitive
+        # invoked before zone resolution / staging doesn't fire the
+        # python heredoc against an empty path.
+        assert 'if [ -n "$ZONE_NAME" ] && [ -f "$AUDIT_SLICE_PATH" ]; then' in script, (
+            "STAGED_SERIAL capture must be guarded on non-empty "
+            "$ZONE_NAME AND existing $AUDIT_SLICE_PATH"
         )
-        assert guard_idx < dig_idx, (
-            "the $ZONE_NAME guard must precede the dig call so the rollback "
-            "skips cleanly when invoked before zone resolution"
+
+        # The iter-4 dig-based mechanism MUST be gone -- it was the
+        # DNS-dependent approach that failed in CI. The staged-file
+        # read replaces it entirely.
+        assert 'dig @localhost "$ZONE_NAME" SOA' not in script, (
+            "rollback() must NOT shell out to dig to read named's "
+            "cached serial -- the iter-4 mechanism (B4 failure) is "
+            "replaced by a direct disk read of the staged file"
+        )
+        assert "CACHED_SERIAL=" not in script, (
+            "the iter-4 CACHED_SERIAL variable is removed -- "
+            "iter-5 uses STAGED_SERIAL captured from disk instead"
         )
 
         # The previous attempt's freeze/thaw INVOCATIONS must be
@@ -512,6 +557,77 @@ class TestPipelineScriptRollbackShape:
         assert 'rndc thaw "$ZONE_NAME"' not in script, (
             "rollback() must not invoke ``rndc thaw``: there is no "
             "freeze to undo under the SOA-bump approach"
+        )
+
+    def test_rollback_order_capture_then_tar_then_bump_then_reload(self) -> None:
+        """The five-step rollback order is load-bearing for the iter-5 mechanism.
+
+        Iter-5's correctness hinges on a strict ordering inside
+        rollback(): capture STAGED_SERIAL from disk -> tar restore
+        (overwrites the file) -> bump SOA in the restored file ->
+        rndc reload <zone> -> rndc reload (fallback). Any
+        rearrangement breaks the contract:
+
+        * Capture AFTER tar: would read the snapshot's old serial,
+          NEW_SERIAL would be lower than named's cached value, the
+          reload would be the same no-op iter-4 was.
+        * Bump BEFORE tar: would be wiped out by the subsequent
+          extract.
+        * Per-zone reload BEFORE bump: would see the unbumped
+          serial and skip; the bump would only take effect on the
+          next unrelated reload.
+
+        This test pins all four invariants in one assertion sweep.
+        """
+        script = _build_pipeline_script(
+            snapshot_path="/tmp/snap.tar.gz",
+            audit_slice_path="/etc/bind/db.evba.lab",
+            zone_name="evba.lab",
+            bind_root="/etc/bind",
+        )
+
+        # Locate each landmark in the rendered script. ``find`` returns
+        # the first occurrence; since each marker is unique inside
+        # rollback() this gives the correct slot.
+        capture_idx = script.find('STAGED_SERIAL=$(python3 - "$AUDIT_SLICE_PATH"')
+        tar_idx = script.find('tar -xzf "$SNAPSHOT_PATH" -C /')
+        bump_idx = script.find('python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL"')
+        zone_reload_idx = script.find('rndc reload "$ZONE_NAME"')
+        # The whole-server fallback is the last ``rndc reload`` (no
+        # zone arg) inside rollback(). Find from the END of the
+        # rollback function to anchor on the right occurrence.
+        rollback_end = script.find("}}", capture_idx)
+        if rollback_end == -1:
+            rollback_end = script.find("}", capture_idx)
+        # The fallback line is ``rndc reload > /dev/null 2>&1 || true``.
+        fallback_idx = script.find("rndc reload > /dev/null 2>&1 || true", capture_idx)
+
+        for name, idx in [
+            ("STAGED_SERIAL capture", capture_idx),
+            ("tar -xzf restore", tar_idx),
+            ("python SOA bump", bump_idx),
+            ("zone-scoped rndc reload", zone_reload_idx),
+            ("whole-server rndc reload fallback", fallback_idx),
+        ]:
+            assert idx != -1, f"{name} marker missing from rollback()"
+
+        # The five-step ordering: capture < tar < bump < zone-reload < fallback.
+        assert capture_idx < tar_idx, (
+            "STAGED_SERIAL must be captured from $AUDIT_SLICE_PATH "
+            "BEFORE tar -xzf overwrites it; capture-after-tar would "
+            "read the snapshot's old serial"
+        )
+        assert tar_idx < bump_idx, (
+            "the SOA bump must run AFTER tar -xzf has restored the "
+            "snapshot file; bumping before would be overwritten"
+        )
+        assert bump_idx < zone_reload_idx, (
+            "the SOA bump must precede the per-zone rndc reload; "
+            "reloading first would re-cache the unbumped serial"
+        )
+        assert zone_reload_idx < fallback_idx, (
+            "the per-zone reload must precede the whole-server "
+            "fallback so the zone-scoped path runs first"
         )
 
     def test_rollback_python_soa_regex_matches_both_zonefile_shapes(self) -> None:
@@ -771,18 +887,27 @@ rollback
         zone_file.write_text(zone_text)
 
         # Extract the python3 program body from the rendered script.
-        # The heredoc body is everything between the literal
-        # ``<<'PYEOF'`` and ``PYEOF`` line markers.
+        # As of iter-5 rollback() embeds TWO ``<<'PYEOF'`` heredocs:
+        #   1. STAGED_SERIAL capture (read-only -- prints the serial)
+        #   2. SOA bump (rewrites the file with the new serial)
+        # This test exercises the BUMP heredoc, which is the one that
+        # follows the ``python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL"``
+        # invocation. Anchoring on that invocation locates the
+        # right heredoc unambiguously regardless of how many other
+        # PYEOFs the script grows in the future.
         script = _build_pipeline_script(
             snapshot_path="/tmp/snap.tar.gz",
             audit_slice_path=str(zone_file),
             zone_name="evba.lab",
             bind_root="/etc/bind",
         )
+        bump_invocation = 'python3 - "$AUDIT_SLICE_PATH" "$NEW_SERIAL"'
+        bump_idx = script.find(bump_invocation)
+        assert bump_idx != -1, "SOA-bump python3 invocation missing from rendered script"
         start_marker = "<<'PYEOF'"
         end_marker = "\nPYEOF\n"
-        start = script.find(start_marker)
-        assert start != -1, "PYEOF heredoc start marker missing from rendered script"
+        start = script.find(start_marker, bump_idx)
+        assert start != -1, "PYEOF start marker missing after the SOA-bump python3 invocation"
         body_start = script.find("\n", start) + 1
         body_end = script.find(end_marker, body_start)
         assert body_end != -1, "PYEOF heredoc end marker missing from rendered script"

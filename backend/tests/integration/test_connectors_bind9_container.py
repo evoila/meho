@@ -421,21 +421,40 @@ async def test_config_show_against_real_bind9_refuses_traversal_with_no_content(
 async def _checksum_bind_tree(connector: Bind9Connector, target: _Bind9Target) -> str:
     """Return the SHA256-tree fingerprint of ``/etc/bind/`` on *target*.
 
-    The fingerprint covers every file's content + path so a rollback
-    that leaves the tree byte-identical produces the identical
-    fingerprint. ``find -type f | sort | xargs sha256sum`` is the
-    standard incantation; we add the absolute paths into the digest
-    by hashing the find+sha256sum combined output.
+    Normalises the SOA serial in every zonefile before hashing so a
+    rollback that bumps the restored file's serial (the mechanism
+    the atomic-apply primitive uses to defeat named's serial cache
+    -- see ``_atomic.py`` rollback docstring) is treated as logically
+    byte-identical to the pre-op snapshot. Every other byte (records,
+    TTLs, directives, comments, whitespace) is hashed verbatim, so a
+    rollback that loses or mutates any of those still trips the
+    ``before == after`` assertion.
 
-    Fail-closed on a non-zero exit: a failing probe (find / sha256sum
-    not available, /etc/bind missing, permissions changed mid-test)
-    would otherwise collapse to an empty string, and the rollback
-    assertion ``before == after`` would silently pass on two empty
-    strings -- the load-bearing acceptance criterion this test
-    encodes. Surface the failure explicitly so a broken probe fails
-    the test instead of false-positive-ing the rollback proof.
+    The normalisation pattern mirrors the rollback's SOA-bump regex
+    (``\bSOA\b mname rname ( serial ...``) and replaces the serial
+    digit-run with the literal string ``SERIAL``. count=1 per file --
+    a zonefile has exactly one SOA record by RFC 1035.
+
+    Fail-closed on a non-zero exit: a failing probe (Python missing,
+    /etc/bind missing, permissions changed mid-test) would otherwise
+    collapse to an empty string, and the rollback assertion would
+    silently pass on two empty strings -- the load-bearing acceptance
+    criterion this test encodes. Surface the failure explicitly so a
+    broken probe fails the test instead of false-positive-ing the
+    rollback proof.
     """
-    cmd = "find /etc/bind -type f -printf '%p\\n' | sort | xargs -d '\\n' sha256sum | sha256sum"
+    cmd = (
+        "python3 -c '"
+        "import hashlib, pathlib, re; "
+        "soa_re = re.compile(r\"(\\\\bSOA\\\\b\\\\s+\\\\S+\\\\s+\\\\S+\\\\s*\\\\(?\\\\s*(?:;[^\\\\n]*\\\\n\\\\s*)*)(\\\\d+)\", re.IGNORECASE); "
+        "h = hashlib.sha256(); "
+        "files = sorted(p for p in pathlib.Path(\"/etc/bind\").rglob(\"*\") if p.is_file()); "
+        "[(h.update(str(p).encode()+b\"\\\\n\"), "
+        "  h.update(soa_re.sub(lambda m: m.group(1)+\"SERIAL\", p.read_bytes().decode(\"utf-8\",\"replace\"), count=1).encode(\"utf-8\"))) "
+        " for p in files]; "
+        "print(h.hexdigest())"
+        "'"
+    )
     proc = await connector._run_command(target, cmd, raw_jwt="")
     exit_status = getattr(proc, "exit_status", 0)
     stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""

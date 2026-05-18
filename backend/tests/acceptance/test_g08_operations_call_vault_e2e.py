@@ -175,10 +175,14 @@ def vault_dev_addr() -> Iterator[str]:
         .with_exposed_ports(8200)
         .with_kwargs(cap_add=["IPC_LOCK"])
     )
-    try:
-        container.start()
-    except Exception as exc:  # any boot failure → clean skip, not a red suite
-        pytest.skip(f"vault dev container failed to start ({type(exc).__name__}): {exc}")
+    # No broad ``except`` around ``start()``. The no-Docker condition is
+    # already a clean skip via the ``DOCKER_AVAILABLE`` gate above; any
+    # *other* failure here (image-pull error, Vault boot regression,
+    # daemon refusal) must fail this test, not silently skip it — this
+    # acceptance test is the merge gate for tagging v0.2.1, and a
+    # green-but-skipped gate is exactly the green-but-hollow failure
+    # mode Initiative #634 exists to close.
+    container.start()
 
     try:
         wait_for_logs(container, "Vault server started!", timeout=60)
@@ -255,20 +259,32 @@ async def vault_operations_app(
     )
     await register_vault_typed_operations(embedding_service=stub_embedding_service)
 
+    # Capture the request-scoped operator the seam actually receives so
+    # the test can assert it is the JWT-derived operator
+    # ``verify_jwt_and_bind`` produced — making the #629 raw_jwt-from-
+    # request-context contract a load-bearing assertion rather than an
+    # incidental side effect of the 200 / no-``raw_jwt``-AttributeError
+    # outcome.
+    seen_operator: dict[str, Any] = {}
+
     @asynccontextmanager
-    async def _root_client_cm(_operator: Any) -> AsyncIterator[Any]:
-        # Mirrors the production context manager's contract: yield an
-        # authenticated client. No revoke needed for a root token on a
-        # throwaway in-memory dev Vault. ``_operator`` is the
-        # request-scoped Operator the dispatcher threads — discarded
-        # here only because dev mode has no OIDC method to log in
-        # against, exactly as the integration harness does.
+    async def _root_client_cm(operator: Any) -> AsyncIterator[Any]:
+        # ``operator`` is the request-scoped Operator the dispatcher
+        # threads. Production would OIDC-login with ``operator.raw_jwt``;
+        # dev mode has no OIDC method wired, so only the credential
+        # acquisition is swapped (exactly as the integration harness
+        # does) — but we record the operator's identity first so the
+        # #629 threading contract is verified.
+        seen_operator["sub"] = operator.sub
+        seen_operator["tenant_id"] = str(operator.tenant_id)
+        seen_operator["raw_jwt"] = operator.raw_jwt
         yield _root_client(vault_dev_addr)
 
     monkeypatch.setattr(_auth_vault, "vault_client_for_operator", _root_client_cm)
 
     app = build_integration_app()
     app.include_router(operations_router)
+    app.state.seen_vault_operator = seen_operator
     try:
         yield app
     finally:
@@ -346,6 +362,17 @@ async def test_operations_call_vault_kv_read_through_verify_jwt_and_bind(
     envelope = resp.json()
     assert envelope["status"] == "ok", envelope
     assert envelope["result"] == {"data": _SECRET_DATA, "version": 1}
+
+    # AC 5 / #629 — the operator threaded into vault_client_for_operator
+    # is the one verify_jwt_and_bind produced from the real Bearer
+    # token, not a target. Asserting sub / tenant_id / raw_jwt makes the
+    # operator-JWT-from-request-context contract load-bearing rather
+    # than only incidentally proven by the 200 above.
+    seen = vault_operations_app.state.seen_vault_operator
+    assert seen, "vault_client_for_operator was never invoked"
+    assert seen["sub"] == _OPERATOR_SUB
+    assert seen["tenant_id"] == _FRESH_TENANT_ID
+    assert seen["raw_jwt"] == token
 
     # AC 3 — ensure_tenant seeded exactly one row just-in-time.
     sessionmaker = get_sessionmaker()

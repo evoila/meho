@@ -285,6 +285,202 @@ async def test_annotate_is_idempotent() -> None:
     assert rows[0].properties["note"] == "second"
 
 
+@pytest.mark.asyncio
+async def test_annotate_over_existing_auto_promotes_to_curated() -> None:
+    """Annotating the same triple as an existing auto edge takes ownership.
+
+    The auto-discovery probe found ``runs-on(vm-a → host-x)`` already.
+    The operator then calls :func:`annotate_edge` with the same triple
+    (typical recovery flow: "yes, I want to OWN this edge so I can
+    attach a note and eventually revoke it"). Pre-fix this was a
+    no-op that left ``source='auto'`` — making :func:`unannotate_edge`
+    raise :class:`AutoEdgeDeletionError`, leaving the operator unable
+    to revoke their own annotation. The fix promotes the row to
+    ``source='curated'`` and lets ``note`` / ``evidence_url`` persist.
+    """
+    tenant_id = await _seed_tenant()
+    vm = await _seed_node(tenant_id, kind="vm", name="vm-a")
+    host = await _seed_node(tenant_id, kind="host", name="host-x")
+    auto_edge_id = await _seed_auto_edge(
+        tenant_id,
+        from_id=vm,
+        to_id=host,
+        kind="runs-on",
+        properties={"discovered_port": 22},
+    )
+
+    sessionmaker = get_sessionmaker()
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            edge = await annotate_edge(
+                session,
+                _operator(tenant_id, sub="op-promote"),
+                NodeRef("vm-a", "vm"),
+                "runs-on",
+                NodeRef("host-x", "host"),
+                note="adopted from auto-discovery",
+                evidence_url="https://example.test/inventory#L99",
+            )
+
+    # Same row id — the auto edge was promoted in place, not replaced.
+    assert edge.id == auto_edge_id
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(GraphEdge).where(GraphEdge.id == auto_edge_id))
+        ).scalar_one()
+    assert row.source == "curated"
+    assert row.discovered_by == "op-promote"
+    # Caller-supplied free-text fields persist.
+    assert row.properties["note"] == "adopted from auto-discovery"
+    assert row.properties["evidence_url"] == "https://example.test/inventory#L99"
+    assert row.properties["annotated_by"] == "op-promote"
+    # Pre-existing auto property is not wiped — merge, not replace.
+    assert row.properties.get("discovered_port") == 22
+
+    # Audit row written as for a fresh annotate.
+    async with sessionmaker() as session:
+        audit_rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+    assert len(audit_rows) == 1
+    assert audit_rows[0].path == "topology.annotate"
+    assert audit_rows[0].payload["op_class"] == "write"
+
+
+@pytest.mark.asyncio
+async def test_promoted_edge_survives_subsequent_refresh() -> None:
+    """A refresh after annotate-over-auto must not demote the row.
+
+    Regression guard for the M1 fix: once the operator has claimed
+    ownership via :func:`annotate_edge`, the next probe that re-sees
+    the same triple must merge onto the curated row, not overwrite
+    ``source`` back to ``'auto'`` or wipe the caller-supplied
+    ``note`` / ``evidence_url`` props.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import (
+        clear_registry,
+        register_connector_v2,
+    )
+    from meho_backplane.operations._handler_resolve import (
+        reset_connector_instance_cache,
+    )
+    from meho_backplane.topology.refresh import refresh_target_topology
+
+    clear_registry()
+    reset_connector_instance_cache()
+    try:
+        tenant_id = await _seed_tenant("promote-refresh-tenant")
+        target_id = uuid.uuid4()
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=tenant_id,
+                    name="promote-target",
+                    aliases=[],
+                    product="faketopo-promote",
+                    host="vc.example.test",
+                )
+            )
+            await session.commit()
+
+        promote_hints = TopologyHints(
+            discovered_at=datetime.now(UTC),
+            nodes=(
+                NodeHint(kind="vm", name="vm-a", properties={}),
+                NodeHint(kind="host", name="host-x", properties={}),
+            ),
+            edges=(
+                EdgeHint(
+                    from_kind="vm",
+                    from_name="vm-a",
+                    to_kind="host",
+                    to_name="host-x",
+                    kind="runs-on",
+                    properties={"discovered_port": 22},
+                ),
+            ),
+        )
+
+        class _FakePromoteConnector(Connector):
+            product = "faketopo-promote"
+            hints: TopologyHints = promote_hints
+
+            async def fingerprint(self, target: Any) -> Any:
+                raise NotImplementedError
+
+            async def probe(self, target: Any) -> Any:
+                raise NotImplementedError
+
+            async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:
+                raise NotImplementedError
+
+            async def discover_topology(self, target: Any) -> TopologyHints:
+                return type(self).hints
+
+        register_connector_v2(
+            product="faketopo-promote",
+            version="",
+            impl_id="",
+            cls=_FakePromoteConnector,
+        )
+
+        async with sessionmaker() as session:
+            target_row = (
+                await session.execute(select(Target).where(Target.id == target_id))
+            ).scalar_one()
+
+        # First refresh — seeds the auto edge.
+        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
+            await refresh_target_topology(target_row, _operator(tenant_id))
+
+        # Operator promotes the auto edge to curated via annotate.
+        with patch(_PUBLISH, new=AsyncMock()):
+            async with sessionmaker() as session:
+                curated = await annotate_edge(
+                    session,
+                    _operator(tenant_id, sub="op-promote"),
+                    NodeRef("vm-a", "vm"),
+                    "runs-on",
+                    NodeRef("host-x", "host"),
+                    note="owned by op-promote",
+                )
+
+        # Second refresh — re-sees the same triple. The curated row
+        # must survive, not be demoted back to auto.
+        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
+            await refresh_target_topology(target_row, _operator(tenant_id))
+
+        async with sessionmaker() as session:
+            row = (
+                await session.execute(select(GraphEdge).where(GraphEdge.id == curated.id))
+            ).scalar_one()
+        assert row.source == "curated"
+        assert row.properties["note"] == "owned by op-promote"
+
+        # Triple-form unannotate now succeeds (was raising
+        # AutoEdgeDeletionError before the fix because the post-refresh
+        # row was still source='auto').
+        with patch(_PUBLISH, new=AsyncMock()):
+            async with sessionmaker() as session:
+                removed_id = await unannotate_edge(
+                    session,
+                    _operator(tenant_id, sub="op-promote"),
+                    from_ref=NodeRef("vm-a", "vm"),
+                    kind="runs-on",
+                    to_ref=NodeRef("host-x", "host"),
+                )
+        assert removed_id == curated.id
+    finally:
+        clear_registry()
+        reset_connector_instance_cache()
+
+
 # ---------------------------------------------------------------------------
 # Kind validation
 # ---------------------------------------------------------------------------
@@ -865,3 +1061,150 @@ async def test_reconcile_edges_preserves_superseded_marker() -> None:
 
     clear_registry()
     reset_connector_instance_cache()
+
+
+@pytest.mark.asyncio
+async def test_refresh_strips_reserved_markers_from_connector_hints() -> None:
+    """Reserved §6 markers in an :class:`EdgeHint` are stripped at refresh.
+
+    A buggy or hostile connector that emits ``superseded_by`` /
+    ``conflicts_with`` directly in its hint properties must not be
+    able to smuggle the §6 marker onto an auto edge. The refresh
+    service sanitizes both the *insert* path (fresh auto edge) and
+    the *update* path (re-observed auto edge) through
+    :func:`_strip_reserved_markers`. The operator-only annotate verb
+    is the single legitimate writer of those keys.
+    """
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import (
+        clear_registry,
+        register_connector_v2,
+    )
+    from meho_backplane.operations._handler_resolve import (
+        reset_connector_instance_cache,
+    )
+    from meho_backplane.topology.refresh import refresh_target_topology
+
+    clear_registry()
+    reset_connector_instance_cache()
+    try:
+        tenant_id = await _seed_tenant("strip-marker-tenant")
+        target_id = uuid.uuid4()
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            session.add(
+                Target(
+                    id=target_id,
+                    tenant_id=tenant_id,
+                    name="strip-marker-target",
+                    aliases=[],
+                    product="faketopo-strip",
+                    host="vc.example.test",
+                )
+            )
+            await session.commit()
+
+        hostile_marker_id = str(uuid.uuid4())
+        hostile_conflict_id = str(uuid.uuid4())
+        hostile_hints = TopologyHints(
+            discovered_at=datetime.now(UTC),
+            nodes=(
+                NodeHint(kind="vm", name="vm-a", properties={}),
+                NodeHint(kind="host", name="host-x", properties={}),
+            ),
+            edges=(
+                EdgeHint(
+                    from_kind="vm",
+                    from_name="vm-a",
+                    to_kind="host",
+                    to_name="host-x",
+                    kind="runs-on",
+                    properties={
+                        "port": 22,
+                        "superseded_by": hostile_marker_id,
+                        "conflicts_with": [hostile_conflict_id],
+                    },
+                ),
+            ),
+        )
+
+        class _HostileStripConnector(Connector):
+            product = "faketopo-strip"
+            hints: TopologyHints = hostile_hints
+
+            async def fingerprint(self, target: Any) -> Any:
+                raise NotImplementedError
+
+            async def probe(self, target: Any) -> Any:
+                raise NotImplementedError
+
+            async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:
+                raise NotImplementedError
+
+            async def discover_topology(self, target: Any) -> TopologyHints:
+                return type(self).hints
+
+        register_connector_v2(
+            product="faketopo-strip",
+            version="",
+            impl_id="",
+            cls=_HostileStripConnector,
+        )
+
+        async with sessionmaker() as session:
+            target_row = (
+                await session.execute(select(Target).where(Target.id == target_id))
+            ).scalar_one()
+
+        # First refresh — exercises the *insert* path.
+        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
+            await refresh_target_topology(target_row, _operator(tenant_id))
+
+        async with sessionmaker() as session:
+            edge = (
+                await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id))
+            ).scalar_one()
+        assert edge.source == "auto"
+        # Hostile markers stripped on insert.
+        assert "superseded_by" not in edge.properties
+        assert "conflicts_with" not in edge.properties
+        # Legitimate property survives.
+        assert edge.properties["port"] == 22
+
+        # Second refresh with a different non-reserved property —
+        # exercises the *update* path through
+        # :func:`_merge_edge_properties`. The hostile markers
+        # in the hint must still be dropped, and a stamped
+        # ``superseded_by`` from an annotate must survive (covered
+        # by ``test_reconcile_edges_preserves_superseded_marker``).
+        _HostileStripConnector.hints = TopologyHints(
+            discovered_at=datetime.now(UTC),
+            nodes=hostile_hints.nodes,
+            edges=(
+                EdgeHint(
+                    from_kind="vm",
+                    from_name="vm-a",
+                    to_kind="host",
+                    to_name="host-x",
+                    kind="runs-on",
+                    properties={
+                        "port": 443,
+                        "superseded_by": hostile_marker_id,
+                        "conflicts_with": [hostile_conflict_id],
+                    },
+                ),
+            ),
+        )
+        with patch("meho_backplane.topology.refresh.publish_event", new=AsyncMock()):
+            await refresh_target_topology(target_row, _operator(tenant_id))
+
+        async with sessionmaker() as session:
+            refreshed = (
+                await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id))
+            ).scalar_one()
+        assert "superseded_by" not in refreshed.properties
+        assert "conflicts_with" not in refreshed.properties
+        assert refreshed.properties["port"] == 443
+    finally:
+        clear_registry()
+        reset_connector_instance_cache()

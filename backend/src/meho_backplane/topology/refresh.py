@@ -137,11 +137,27 @@ def _properties_differ(current: Any, incoming: Any) -> bool:
 _RESERVED_MARKER_KEYS: tuple[str, ...] = ("superseded_by", "conflicts_with")
 
 
+def _strip_reserved_markers(properties: Any) -> dict[str, Any]:
+    """Return ``properties`` as a plain dict with §6 markers removed.
+
+    Reserved markers (``superseded_by`` / ``conflicts_with``) are
+    operator-only artefacts — they may only enter ``graph_edge.properties``
+    through :func:`annotate_edge`. A connector that emits them in an
+    :class:`~meho_backplane.connectors.schemas.EdgeHint` (whether through
+    a bug, copy-paste from a different row, or — in the hostile case —
+    deliberate forgery) would otherwise smuggle a supersede / conflict
+    mark onto an auto row and bypass the §6 annotate-only invariant.
+    Stripping at the refresh boundary is fail-closed: even a malformed
+    or untrusted hint cannot create a pre-superseded auto edge.
+    """
+    return {k: v for k, v in dict(properties or {}).items() if k not in _RESERVED_MARKER_KEYS}
+
+
 def _merge_edge_properties(
     current: Any,
     incoming: Any,
 ) -> dict[str, Any]:
-    """Return ``incoming`` merged with the reserved markers from ``current``.
+    """Return sanitized ``incoming`` merged with the reserved markers from ``current``.
 
     A refresh hint owns the connector's view of an edge — everything
     *except* the conflict markers an operator's annotation may have
@@ -157,10 +173,15 @@ def _merge_edge_properties(
 
     The fix is a key-level merge: reserved keys (``superseded_by``,
     ``conflicts_with``) survive from ``current``; everything else is
-    sourced from ``incoming``. Only :func:`unannotate_edge` of the
-    curated row clears the supersede mark (Initiative #364 §6).
+    sourced from ``incoming``. The merge is also one-sided in the
+    other direction — reserved markers in ``incoming`` are dropped
+    via :func:`_strip_reserved_markers` so a buggy or hostile
+    connector cannot inject a supersede mark from the probe path.
+    Only :func:`annotate_edge` may set those keys; only
+    :func:`unannotate_edge` of the curated row clears the supersede
+    mark (Initiative #364 §6).
     """
-    merged = dict(incoming)
+    merged = _strip_reserved_markers(incoming)
     current_dict = dict(current or {})
     for key in _RESERVED_MARKER_KEYS:
         if key in current_dict:
@@ -358,6 +379,10 @@ async def _reconcile_edges(
         from_id = live_node_key_to_id[_node_key(hint.from_kind, hint.from_name)]
         to_id = live_node_key_to_id[_node_key(hint.to_kind, hint.to_name)]
         if existing_edge is None:
+            # Sanitize before insert so a connector emitting a reserved
+            # marker in its hint (buggy or hostile) cannot create a
+            # pre-superseded / pre-conflicting auto edge that bypasses
+            # the §6 annotate-only invariant (Initiative #364).
             session.add(
                 GraphEdge(
                     id=uuid.uuid4(),
@@ -366,7 +391,7 @@ async def _reconcile_edges(
                     to_node_id=to_id,
                     kind=hint.kind,
                     source="auto",
-                    properties=dict(hint.properties),
+                    properties=_strip_reserved_markers(hint.properties),
                     discovered_by=discovered_by,
                     first_seen=now,
                     last_seen=now,
@@ -374,6 +399,21 @@ async def _reconcile_edges(
             )
             added += 1
             continue
+        if existing_edge.source == "curated":
+            # Curated edges are operator-owned: the probe's view of the
+            # row's properties is not authoritative. The refresh only
+            # records that the probe still observes the edge
+            # (``last_seen`` bump); the operator-supplied ``note`` /
+            # ``evidence_url`` / ``annotated_*`` and any §6 markers
+            # stay untouched. Without this branch the next refresh
+            # after :func:`annotate_edge` of a previously-auto edge
+            # would wipe the caller's free-text props
+            # (Initiative #364 §6 — M1 of PR #651 review).
+            if existing_edge.last_seen is None:
+                updated += 1
+            existing_edge.last_seen = now
+            continue
+
         # Merge — not overwrite — so the §6 conflict markers
         # (``superseded_by`` / ``conflicts_with``) an operator's
         # annotation may have stamped on this row survive the refresh.

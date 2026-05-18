@@ -349,10 +349,19 @@ would let a superseded edge be walked backwards into a shortest path).
 The supersede mark is sticky across refresh: `_reconcile_edges` merges
 incoming hint `properties` against the reserved keys (`superseded_by`,
 `conflicts_with`) so a re-observed auto edge keeps the marker that
-`annotate_edge` stamped. Only `unannotate_edge` of the curated row
-clears the marker. The `->>` operator is PG-only (manual §9.16); the
-recursive CTE is itself PG-only, so the guard runs only where the
-column is JSONB.
+`annotate_edge` stamped. The merge is **one-sided**: those reserved
+keys are also *stripped from the incoming hint* via
+`_strip_reserved_markers` so a buggy or hostile connector emitting
+`superseded_by` in its `EdgeHint.properties` cannot smuggle the marker
+onto an auto edge from the probe path. The same sanitizer runs on the
+insert path (fresh auto edge), so the §6 annotate-only invariant holds
+fail-closed regardless of how unrusted the upstream hint is. And for
+edges with `source='curated'`, `_reconcile_edges` skips the property
+merge entirely — only `last_seen` bumps; the operator-supplied `note`
+/ `evidence_url` / `annotated_*` fields are never touched by a refresh.
+Only `unannotate_edge` of the curated row clears the marker. The `->>`
+operator is PG-only (manual §9.16); the recursive CTE is itself PG-only,
+so the guard runs only where the column is JSONB.
 
 ## Annotation control flow (write half — G9.2-T3 #595)
 
@@ -366,7 +375,11 @@ column is JSONB.
    scope; cross-tenant references resolve to `NodeNotFoundError`).
 4. Look up the existing edge for the
    `(tenant_id, from_node_id, to_node_id, kind)` unique tuple. Found
-   → merge `properties` and refresh `last_seen` (idempotent). Absent
+   → merge `properties` and refresh `last_seen` (idempotent). If the
+   existing row's `source` is `'auto'` (operator is claiming an
+   auto-discovered edge), promote it: set `source='curated'` and
+   `discovered_by=operator.sub` so triple-form `unannotate_edge` and
+   the next §6 scan treat the row as operator-owned. Absent
    → `INSERT` a fresh row with `source='curated'`,
    `discovered_by=operator.sub`,
    `properties={note, evidence_url, annotated_by, annotated_at}`.

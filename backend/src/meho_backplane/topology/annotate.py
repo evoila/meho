@@ -669,16 +669,38 @@ async def annotate_edge(
             session.add(edge)
             await session.flush()
         else:
-            # Idempotent: keep ``source='curated'`` (a curated row never
-            # becomes auto) and merge new free-text fields. Existing
-            # ``conflicts_with`` / ``superseded_by`` markers on a
-            # curated row are preserved so a re-annotate does not
-            # silently lose the back-references.
+            # Idempotent path covers two cases:
+            #
+            # 1. **Re-annotate of an already-curated row.** Merge new
+            #    free-text fields onto the existing properties; the
+            #    ``source='curated'`` and any reciprocal ``conflicts_with``
+            #    / ``superseded_by`` markers are preserved so the
+            #    re-annotate does not silently drop the §6 back-references.
+            #
+            # 2. **Annotate over an existing ``source='auto'`` edge with
+            #    the same triple.** The operator's intent is to take
+            #    ownership of that edge going forward — set notes /
+            #    evidence, run §6 conflict detection from it, eventually
+            #    revoke via :func:`unannotate_edge`. Leaving the row as
+            #    ``source='auto'`` would (a) make the triple-form
+            #    unannotate raise :class:`AutoEdgeDeletionError` so the
+            #    operator cannot revoke their own annotation; (b) let the
+            #    next refresh's :func:`_merge_edge_properties` overwrite
+            #    the free-text props (only the reserved markers are
+            #    preserved on the merge path); (c) make
+            #    :func:`_mark_same_kind_different_endpoint_superseded` on
+            #    a future annotate mis-target the row as another auto
+            #    edge. The promotion to ``source='curated'`` and
+            #    ``discovered_by=operator.sub`` makes the operator the
+            #    canonical author from this call onward.
             merged = dict(existing.properties or {})
             for key, value in properties.items():
                 merged[key] = value
             existing.properties = merged
             existing.last_seen = now
+            if existing.source != "curated":
+                existing.source = "curated"
+                existing.discovered_by = operator.sub
             edge = existing
 
         superseded = await _mark_same_kind_different_endpoint_superseded(

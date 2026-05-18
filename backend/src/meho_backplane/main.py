@@ -55,6 +55,7 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
+from meho_backplane.api.v1.memory import router as api_v1_memory_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
@@ -329,6 +330,18 @@ app.include_router(api_v1_connectors_ingest_router)
 # ``kb.delete`` / ``kb.ingest`` -- bound via the ``audit_op_id`` /
 # ``audit_op_class`` contextvar overrides the chassis publisher honours.
 app.include_router(api_v1_kb_router)
+# G5.1-T2 (#422) -- memory REST surface at /api/v1/memory*.
+# Four routes (POST / GET / GET /{scope}/{slug} / DELETE /{scope}/{slug})
+# that expose the T1 :class:`MemoryService` to operators + agents. Tenant-
+# scoped via the JWT's tenant_id claim; cross-tenant + cross-user reads
+# collapse to 404 (not 403) to prevent enumerating other operators via
+# status-code differential. Per-scope RBAC is delegated to the service's
+# :class:`MemoryRbacResolver` (e.g. only ``tenant_admin`` writes
+# ``tenant``-scoped); route-layer dependency is ``require_role(OPERATOR)``.
+# Audit + broadcast op_ids: ``memory.remember`` / ``memory.list`` /
+# ``memory.recall`` / ``memory.forget`` -- bound via the ``audit_op_id`` /
+# ``audit_op_class`` contextvar overrides the chassis publisher honours.
+app.include_router(api_v1_memory_router)
 # G8.1-T2 (#466) -- audit-query REST surface. Four routes (POST /query,
 # GET who-touched / my-recent / show) all dispatching through the T1
 # substrate (`meho_backplane.audit_query.query_audit`). Operator role

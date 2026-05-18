@@ -333,10 +333,11 @@ class ReviewService:
         safety_level: Literal["safe", "caution", "dangerous"] | None = None,
         requires_approval: bool | None = None,
         is_enabled: bool | None = None,
+        llm_instructions: dict[str, object] | None = None,
     ) -> None:
         """Update operator-controlled overrides on one :class:`EndpointDescriptor`.
 
-        Passing none of the four fields raises :class:`ValueError`.
+        Passing none of the five fields raises :class:`ValueError`.
         Out-of-enum ``safety_level`` raises :class:`ValueError`.
 
         ``is_enabled`` override is load-bearing for post-enable
@@ -346,21 +347,39 @@ class ReviewService:
         :meth:`enable_connector` consults the audit log to find
         operator-set False rows and skips them.
 
+        ``llm_instructions`` is the agent-facing per-op guidance blob
+        ingested rows land with as ``NULL``. The typed connectors
+        populate it at ``register_typed_operation`` time
+        (see e.g. :mod:`meho_backplane.connectors.vault.ops` and
+        :mod:`meho_backplane.connectors.bind9.ops_zone`); for
+        ingested connectors the operator-review pass writes the same
+        shape via this method so :func:`search_operations` and the
+        agent's ``call_operation`` see populated guidance once the
+        op is enabled. The argument is a plain ``dict`` (the model's
+        ``llm_instructions`` column is ``JSON``); the helper persists
+        it as-is. Passing ``{}`` clears the column to an empty
+        mapping rather than re-deleting it — operators wanting to
+        un-author the field should disable the op instead.
+
         Writes one audit row with payload
         ``{connector_id, op_id, fields_updated, is_enabled_set_to?}``.
         The ``is_enabled_set_to`` key is included verbatim only
         when ``is_enabled`` was edited — that's the key the cascade
-        query reads.
+        query reads. The ``llm_instructions`` value itself is NOT
+        echoed into the payload (operator-authored blobs are big
+        enough to bloat the audit table without value, same
+        rationale ``edit_group`` uses for ``when_to_use``).
         """
         if (
             custom_description is None
             and safety_level is None
             and requires_approval is None
             and is_enabled is None
+            and llm_instructions is None
         ):
             raise ValueError(
                 "edit_op requires at least one of custom_description, "
-                "safety_level, requires_approval, is_enabled",
+                "safety_level, requires_approval, is_enabled, llm_instructions",
             )
         if safety_level is not None and safety_level not in VALID_SAFETY_LEVELS:
             raise ValueError(
@@ -383,6 +402,9 @@ class ReviewService:
             if is_enabled is not None:
                 op_row.is_enabled = is_enabled
                 fields_updated.append("is_enabled")
+            if llm_instructions is not None:
+                op_row.llm_instructions = llm_instructions
+                fields_updated.append("llm_instructions")
             payload: dict[str, Any] = {
                 "connector_id": connector_id,
                 "op_id": op_id,

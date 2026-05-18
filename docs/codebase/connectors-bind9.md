@@ -42,9 +42,23 @@ Source: `backend/src/meho_backplane/connectors/bind9/`.
   shell-history file, or any local structured-log event.
 - **Op metadata** (`ops.py`) -- the `Bind9Op` dataclass plus the
   `BIND9_OPS` tuple the connector's `register_operations` walks at
-  startup. T1 ships a single-element tuple with `bind9.about`;
-  T2-T4 splat their op groups onto the tuple from their own
-  modules.
+  startup. T1 shipped a single-element tuple with `bind9.about`;
+  T2 added the read op group via a `_bind9_ops()` composition
+  function (mirrors K8s `_kubernetes_ops()`) that splats per-area
+  tuples from `ops_zone.py`, `ops_record.py`, and `ops_config.py`.
+  T3-T4 will follow the same shape.
+- **`ops_zone.py`** -- T2 zone-read ops module. Pure parsers
+  (`parse_named_checkconf_zones`, `parse_zonefile`), bound-method
+  handler functions (`bind9_zone_list`, `bind9_zone_read`), and the
+  `ZONE_OPS` registration table.
+- **`ops_record.py`** -- T2 record-read op module. Pure parser
+  (`parse_dig_answer`), handler (`bind9_record_get`), and the
+  `RECORD_OPS` registration table. T3 will append record-write ops to
+  this module.
+- **`ops_config.py`** -- T2 config-read op module. Pure path-safety
+  filter (`ensure_path_under_root`), handler (`bind9_config_show`),
+  and the `CONFIG_OPS` registration table. T4 will append
+  config-write ops to this module.
 - **`parse_named_version()`** / **`parse_os_release()`**
   (`connector.py`) -- pure helpers. `parse_named_version` recovers
   the `<X.Y.Z>` version triple from a `BIND <X.Y.Z>-<distro-suffix>`
@@ -118,14 +132,86 @@ the most-specific class first (`PermissionDenied` is a subclass of
 `DisconnectError` in asyncssh) so the dispatch maps to the right
 reason.
 
-## Shipped op surface (T1)
+## Shipped op surface (T1 + T2)
 
 | Op id | Handler | Safety | Description |
 | ----- | ------- | ------ | ----------- |
 | `bind9.about` | `Bind9Connector.about` | `safe` | Operator-facing wrapper around fingerprint; returns vendor / product / version / build / os / named_conf_path |
+| `bind9.zone.list` | `Bind9Connector.bind9_zone_list` | `safe` | Parse `named-checkconf -p` into zone rows: `{name, file, type}` per declared zone |
+| `bind9.zone.read` | `Bind9Connector.bind9_zone_read` | `safe` | Resolve zonefile via `named-checkconf -p`, read + parse via dnspython; row per rrset member `{name, ttl, class, type, rdata}` |
+| `bind9.record.get` | `Bind9Connector.bind9_record_get` | `safe` | `dig @localhost <fqdn> <type>` parsed into structured rows; defaults to A; supports A / AAAA / CNAME / MX / TXT |
+| `bind9.config.show` | `Bind9Connector.bind9_config_show` | `safe` | Read named.conf or an included fragment under the bind config root; path-safety filter refuses traversal with no content leaked |
 
-The T2-T4 op surface lands in follow-on PRs against this same
+The T3-T4 op surface lands in follow-on PRs against this same
 `BIND9_OPS`-splat registration shape.
+
+## Read op group (T2 #588)
+
+### Pure parsers vs handler thin layer
+
+Each read handler is a thin SSH-call + parse + shape layer over a
+pure parser that takes captured stdout / file text. The unit suite
+pins the parsers directly without booting an event loop:
+
+| Parser | Source module | Input | Output |
+| ------ | ------------- | ----- | ------ |
+| `parse_named_checkconf_zones` | `ops_zone.py` | `named-checkconf -p` stdout | list of `{name, file, type}` rows |
+| `parse_zonefile` | `ops_zone.py` | zonefile text + origin | list of `{name, ttl, class, type, rdata}` rows via `dns.zone.from_text` |
+| `parse_dig_answer` | `ops_record.py` | `dig` stdout (`+noall +answer` or default) | list of `{name, ttl, class, type, rdata}` rows |
+| `ensure_path_under_root` | `ops_config.py` | requested path + allowed root | canonical absolute path under root, or `ConfigPathRejectedError` |
+
+### JSONFlux handle pattern -- deferred to the reducer
+
+Issue #588's acceptance language ("JSONFlux handle when the parsed
+record list exceeds ~20 rows / 4 KB") was patterned on Issue #322's
+identical clause for the K8s connector. The K8s landing
+(`ops_core.py`) deliberately did **not** implement per-handler
+threshold logic; the bind9 read group adopts the same posture and the
+rationale is documented in
+[`ops_zone.py`'s module docstring](../../backend/src/meho_backplane/connectors/bind9/ops_zone.py):
+
+* `OperationResult.handle` is populated by the dispatcher's reducer
+  slot, not by individual connectors.
+* The G3.1-T4 (#304) `HandleStore` Task was closed as superseded; no
+  shared substrate exists today that per-handler emission could
+  delegate to.
+* Coupling every connector to the reducer's threshold calibration
+  doubles the spill-path implementation and locks the threshold at
+  the connector boundary.
+
+The handlers ship raw row lists plus a `total` count so a future
+JSONFlux reducer has the inlined-sample-size + total-count signals to
+drive its threshold check. The `bind9.zone.read` `llm_instructions`
+mention the future handle-wrapping behaviour so the agent already
+expects a handle when the reducer ships.
+
+### Path-safety filter (`bind9.config.show`)
+
+`ensure_path_under_root` is the load-bearing safety primitive for
+`bind9.config.show`. It encodes the scoping the consumer wrapper's
+hand-coded paths only achieved by convention:
+
+* The handler reads the bind config root from
+  `fingerprint().extras["named_conf_path"]` (the *directory* of the
+  fingerprint's named.conf path -- Debian default `/etc/bind/`).
+* The filter accepts absolute paths lexically under the root, and
+  relative paths that resolve under the root after
+  `posixpath.normpath` collapses `..`/`.` segments.
+* Rejections raise `ConfigPathRejectedError` (a `ValueError`
+  subclass) before any wire IO, so the dispatcher's
+  `connector_error` envelope carries no file content. The
+  integration test asserts this explicitly against a real container.
+* Control characters (`\n`, `\r`, `\x00`) in the requested path are
+  rejected outright -- the path goes through `shlex.quote` before
+  the SSH command line, but a NUL/newline would survive quoting in
+  some shells and is easier to refuse at the API boundary.
+
+The check is lexical, not realpath -- a `realpath` resolution would
+double the wire cost (a second SSH round-trip), and the threat model
+is operator-typed paths in agent prompts (not a hostile operator
+placing a symlink inside `/etc/bind/`). The lexical check rejects
+`../` ladders and absolute paths outside the root, which is the
+right granularity.
 
 ## Registration
 
@@ -147,24 +233,35 @@ removed by G0.6-T11 (#412) and bind9 has never shipped behind it.
 
 ## Tests
 
-- `backend/tests/test_connectors_bind9.py` -- unit suite. Covers the
+- `backend/tests/test_connectors_bind9.py` -- T1 unit suite. Covers the
   registry-v2 class attrs, the package-import registration shape, the
   parse helpers, the safe-sudo primitive's argv / stdin / log-shape
   contracts, the fingerprint version-and-OS parsing, the five probe
   reason values, the register_operations upsert + idempotency loop,
   and the execute() dispatcher shim's unknown / valid / invalid
   branches.
+- `backend/tests/test_connectors_bind9_reads.py` -- T2 unit suite.
+  Pure-parser tests for `parse_named_checkconf_zones`,
+  `parse_zonefile`, `parse_dig_answer` (both shapes), and
+  `ensure_path_under_root` (accepts + rejects matrix); handler-shim
+  tests against mocked `_run_command` covering quoted-path
+  invocations, missing-zone errors, NXDOMAIN-as-empty-rows, and the
+  path-rejection-leaks-no-content invariant through the dispatcher
+  seam.
 - `backend/tests/integration/test_connectors_bind9_container.py` --
   containerised smoke test against a Debian-bookworm image with
-  `bind9 bind9-host bind9utils openssh-server` installed. Builds the
-  image inline from a Dockerfile fixture so the test does not depend
-  on an externally-curated bind9+SSH image. Skip-on-no-Docker
-  matches the rest of `tests/integration/`.
+  `bind9 bind9-host bind9utils dnsutils openssh-server` installed.
+  Builds the image inline from a Dockerfile fixture (T2 extension
+  seeds an `evba.lab` zone with each supported record type so the
+  read-op tests assert against a real container) and exercises the
+  T2 read ops end-to-end. Skip-on-no-Docker matches the rest of
+  `tests/integration/`.
 
 ## References
 
 - Parent Initiative: [#367 G3.4 bind9-9.x typed-SSH connector](https://github.com/evoila/meho/issues/367)
 - Skeleton task: [#587 G3.4-T1 Bind9Connector skeleton](https://github.com/evoila/meho/issues/587)
+- Read op group: [#588 G3.4-T2 bind9 read op group](https://github.com/evoila/meho/issues/588)
 - Adapter inherited: [#243 G0.2-T4 SshConnector adapter](https://github.com/evoila/meho/issues/243)
 - Registration substrate: [#395 G0.6-T4 register_typed_operation()](https://github.com/evoila/meho/issues/395)
 - Sibling skeleton precedent: [#321 G3.2-T1 KubernetesConnector skeleton](https://github.com/evoila/meho/issues/321) + `backend/src/meho_backplane/connectors/kubernetes/connector.py`

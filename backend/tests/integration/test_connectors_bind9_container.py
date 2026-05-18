@@ -91,7 +91,7 @@ _DOCKERFILE: str = textwrap.dedent(
 
     RUN apt-get update \\
      && apt-get install -y --no-install-recommends \\
-          bind9 bind9-host bind9utils \\
+          bind9 bind9-host bind9utils dnsutils \\
           openssh-server \\
      && rm -rf /var/lib/apt/lists/*
 
@@ -102,6 +102,31 @@ _DOCKERFILE: str = textwrap.dedent(
      && echo 'root:testpw' | chpasswd \\
      && sed -i 's/^#\\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \\
      && sed -i 's/^#\\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+    # Seed a test zone -- the read-op tests (bind9.zone.list /
+    # bind9.zone.read / bind9.record.get) assert against this
+    # fixture. The shape is intentionally minimal but covers each
+    # supported record type (A / AAAA / CNAME / MX / TXT) so the
+    # ``bind9.record.get`` test can exercise the type-default + the
+    # type-explicit paths.
+    RUN echo 'zone "evba.lab" { type master; file "/etc/bind/db.evba.lab"; };' \\
+            >> /etc/bind/named.conf.local
+
+    RUN printf '%s\\n' \\
+            '$TTL 3600' \\
+            '@ IN SOA ns1.evba.lab. admin.evba.lab. (' \\
+            '    2026051801 3600 600 604800 86400 )' \\
+            '@   IN NS ns1.evba.lab.' \\
+            'ns1 IN A 10.5.50.1' \\
+            'www IN A 10.5.50.2' \\
+            'mail IN A 10.5.50.3' \\
+            'mail IN AAAA 2001:db8::1' \\
+            'alias IN CNAME ns1.evba.lab.' \\
+            '@   IN MX 10 mail.evba.lab.' \\
+            '@   IN TXT "v=spf1 a -all"' \\
+            > /etc/bind/db.evba.lab \\
+     && chown root:bind /etc/bind/db.evba.lab \\
+     && chmod 644 /etc/bind/db.evba.lab
 
     # Wrapper that starts named in the background and then runs sshd
     # in the foreground so PID 1 stays alive.
@@ -229,3 +254,138 @@ async def test_probe_against_real_bind9_returns_ok(
     assert result.ok is True, f"probe returned not-ok: reason={result.reason!r}"
     assert result.reason is None
     assert result.latency_ms is not None and result.latency_ms >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# T2 read-op group -- bind9.zone.list / bind9.zone.read / bind9.record.get /
+# bind9.config.show against the seeded zonefile.
+#
+# Each test exercises the bound-method handler shim directly against the
+# live container (skipping the dispatcher's DB lookup + JSON Schema
+# validation path -- that's covered by the unit suite). The shape under
+# test here is "the handler talks SSH + parses real output correctly";
+# the dispatch-shim + handler-resolution path is exercised in
+# tests/test_connectors_bind9.py against the SQLite test DB.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_zone_list_against_real_bind9_returns_seeded_zone(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.zone.list`` discovers the seeded ``evba.lab`` zone."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_zone_list(bind9_container_target, {})
+    finally:
+        await connector.aclose()
+
+    rows = result["rows"]
+    zone_names = {row["name"] for row in rows}
+    assert "evba.lab" in zone_names, (
+        f"expected ``evba.lab`` in zone.list result; got {zone_names!r}"
+    )
+    evba_row = next(r for r in rows if r["name"] == "evba.lab")
+    assert evba_row["type"] == "master"
+    assert evba_row["file"] == "/etc/bind/db.evba.lab"
+    assert result["total"] == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_zone_read_against_real_bind9_parses_seeded_records(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.zone.read evba.lab`` parses every seeded record type."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_zone_read(bind9_container_target, {"zone": "evba.lab"})
+    finally:
+        await connector.aclose()
+
+    assert result["zone"] == "evba.lab"
+    assert result["file"] == "/etc/bind/db.evba.lab"
+    rows = result["rows"]
+    # Each seeded record type must appear at least once.
+    types = {row["type"] for row in rows}
+    assert {"SOA", "NS", "A", "AAAA", "CNAME", "MX", "TXT"}.issubset(types), (
+        f"expected each seeded record type in zone.read result; got types={types!r}"
+    )
+    # The www A record specifically -- the integration test's main
+    # anchor for "parsing reaches the right rdata".
+    www_row = next(
+        (r for r in rows if r["name"] == "www.evba.lab." and r["type"] == "A"),
+        None,
+    )
+    assert www_row is not None, f"missing www.evba.lab. A row in {rows!r}"
+    assert www_row["rdata"] == "10.5.50.2"
+
+
+@pytest.mark.asyncio
+async def test_record_get_against_real_bind9_resolves_via_dig(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.record.get www.evba.lab`` resolves through the running daemon."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_record_get(bind9_container_target, {"fqdn": "www.evba.lab"})
+    finally:
+        await connector.aclose()
+
+    assert result["type"] == "A"
+    assert result["total"] >= 1
+    rdatas = {row["rdata"] for row in result["rows"]}
+    assert "10.5.50.2" in rdatas, f"expected 10.5.50.2 in {rdatas!r}"
+
+
+@pytest.mark.asyncio
+async def test_record_get_with_explicit_type_against_real_bind9(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.record.get mail.evba.lab --type AAAA`` returns the IPv6 row."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_record_get(
+            bind9_container_target,
+            {"fqdn": "mail.evba.lab", "type": "AAAA"},
+        )
+    finally:
+        await connector.aclose()
+
+    assert result["type"] == "AAAA"
+    rdatas = {row["rdata"] for row in result["rows"]}
+    assert "2001:db8::1" in rdatas, f"expected 2001:db8::1 in {rdatas!r}"
+
+
+@pytest.mark.asyncio
+async def test_config_show_against_real_bind9_reads_named_conf_local(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """``bind9.config.show named.conf.local`` returns the file content."""
+    connector = Bind9Connector()
+    try:
+        result = await connector.bind9_config_show(
+            bind9_container_target, {"path": "named.conf.local"}
+        )
+    finally:
+        await connector.aclose()
+
+    assert result["file"] == "/etc/bind/named.conf.local"
+    # The seed added ``zone "evba.lab" { ... };`` to named.conf.local;
+    # the content read must contain that signature line.
+    assert 'zone "evba.lab"' in result["content"]
+    assert "/etc/bind/db.evba.lab" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_config_show_against_real_bind9_refuses_traversal_with_no_content(
+    bind9_container_target: _Bind9Target,
+) -> None:
+    """A traversal path raises before any wire IO; no file content leaks."""
+    from meho_backplane.connectors.bind9.ops_config import ConfigPathRejectedError
+
+    connector = Bind9Connector()
+    try:
+        with pytest.raises(ConfigPathRejectedError):
+            await connector.bind9_config_show(bind9_container_target, {"path": "../../etc/passwd"})
+    finally:
+        await connector.aclose()

@@ -185,7 +185,7 @@ SUPPORTED_SURFACES: Final[tuple[str, ...]] = ("kb", "memory", "operations")
 COUNTED_SEARCH_SURFACES: Final[tuple[str, ...]] = tuple(f"mcp:{op_id}" for op_id in SEARCH_OPS)
 
 #: Whether the operator-facing REST ``POST /api/v1/retrieve`` surface
-#: increments this counter. Always ``False`` in v0.2 by design: REST
+#: is excluded from this counter. Always ``True`` in v0.2 by design: REST
 #: ``/retrieve`` audits under its own path, not a counted MCP tool
 #: path, so dogfooding exclusively through REST shows a permanent
 #: silent zero. Counting REST would change audit volume and risk

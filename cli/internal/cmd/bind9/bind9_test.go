@@ -198,6 +198,62 @@ func TestAssembleViewsBundleRejectsMissingZonesDir(t *testing.T) {
 	}
 }
 
+// TestAssembleViewsBundleRejectsSymlinkUnderZonesDir — symlinks under
+// zonesDir would let a caller stage arbitrary host paths into
+// /etc/bind/ on the remote (the handler's path-safety filter gates
+// the destination, but the bundle content is whatever bytes the
+// symlink resolves to). The regular-file-only contract on
+// assembleViewsBundle blocks the exfil shape client-side.
+func TestAssembleViewsBundleRejectsSymlinkUnderZonesDir(t *testing.T) {
+	dir := t.TempDir()
+	viewsConf := filepath.Join(dir, "views.conf")
+	if err := os.WriteFile(viewsConf, []byte("// views\n"), 0o644); err != nil {
+		t.Fatalf("write views: %v", err)
+	}
+	zonesDir := filepath.Join(dir, "zones")
+	if err := os.MkdirAll(zonesDir, 0o755); err != nil {
+		t.Fatalf("mkdir zones: %v", err)
+	}
+	// Real file outside zonesDir; a permissive bundler would stage
+	// its bytes under /etc/bind/db.exfil on the remote.
+	outside := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("secret content"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	link := filepath.Join(zonesDir, "db.exfil")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported on this fs: %v", err)
+	}
+	_, err := assembleViewsBundle(viewsConf, zonesDir)
+	if err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("expected `regular file` rejection for symlink entry; got %v", err)
+	}
+}
+
+// TestAssembleViewsBundleRejectsFifoUnderZonesDir — named pipes /
+// sockets / device nodes are not legitimate zones-dir entries.
+// The Mode().IsRegular() gate rejects all non-regular types
+// uniformly, not just symlinks.
+func TestAssembleViewsBundleRejectsFifoUnderZonesDir(t *testing.T) {
+	dir := t.TempDir()
+	viewsConf := filepath.Join(dir, "views.conf")
+	if err := os.WriteFile(viewsConf, []byte("// views\n"), 0o644); err != nil {
+		t.Fatalf("write views: %v", err)
+	}
+	zonesDir := filepath.Join(dir, "zones")
+	if err := os.MkdirAll(zonesDir, 0o755); err != nil {
+		t.Fatalf("mkdir zones: %v", err)
+	}
+	fifoPath := filepath.Join(zonesDir, "db.fifo")
+	if err := mkFifo(fifoPath, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported on this fs: %v", err)
+	}
+	_, err := assembleViewsBundle(viewsConf, zonesDir)
+	if err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("expected `regular file` rejection for fifo entry; got %v", err)
+	}
+}
+
 // ---------- renderers ----------
 
 // TestPrintAboutHumanFormat — happy-path render with vendor/product/

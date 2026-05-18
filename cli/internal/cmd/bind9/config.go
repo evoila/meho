@@ -230,6 +230,19 @@ func assembleViewsBundle(viewsConfPath, zonesDir string) (map[string]string, err
 		if info.IsDir() {
 			return nil
 		}
+		// Reject anything that is not a regular file. Symlinks (could
+		// resolve to /etc/passwd or any host path the caller cannot
+		// otherwise see), block / char devices, FIFOs, and sockets
+		// must not be stageable. The handler's atomic-apply primitive
+		// runs with `safety_level=dangerous`; a permissive client-side
+		// stager would let a typo'd zones-dir exfil arbitrary files
+		// into /etc/bind/. The check uses Mode().IsRegular() (set
+		// exactly when the file is a normal on-disk file), not just a
+		// symlink-rejection — block / char devices and FIFOs are also
+		// not zones-dir entries any operator legitimately wants here.
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("zones dir entry %q is not a regular file (mode=%s)", path, info.Mode())
+		}
 		rel, err := filepath.Rel(zonesDir, path)
 		if err != nil {
 			return fmt.Errorf("rel %q: %w", path, err)

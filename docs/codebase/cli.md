@@ -137,8 +137,8 @@ cli/
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
-    │   └── topology/          # G9.1-T6 #454 — `meho topology refresh/dependents/dependencies/path` over the T5 REST surface (#453).
-    │                          #   (the 5th T6 verb, `meho targets discover`, lives in targets/discover.go.)
+    │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
+    │                          #   (the 5th G9.1-T6 verb, `meho targets discover`, lives in targets/discover.go.)
     │       ├── vault.go          # NewRootCmd + shared HTTP/auth/render helpers + ConnectorID const.
     │       ├── dispatch.go       # CallResult/callRequestBody + dispatchOp + renderCallResult + generic renderer.
     │       ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops, #545).
@@ -884,16 +884,16 @@ cycle cmd/root.go's graft would otherwise create). Exit codes: `0`
 status=ok, `1` status=error/denied (via the `errOpError` sentinel),
 `2` auth_expired, `3` unreachable, `4` unexpected_response.
 
-## Topology verbs (`meho topology`, G9.1-T6 #454)
+## Topology verbs (`meho topology`, G9.1-T6 #454 + G9.2-T6 #599)
 
-`cli/internal/cmd/topology/` registers the four operator-facing
-topology verbs that wrap the T5 REST surface (#453). The fifth
+`cli/internal/cmd/topology/` registers seven operator-facing topology
+verbs that wrap the T5 REST surface (#453 / #597). The eighth
 G9.1-T6 verb, `meho targets discover`, lives under the `meho targets`
 parent (`cli/internal/cmd/targets/discover.go`) because the backend
 registers `GET /api/v1/targets/discover` on the targets router, under
 the canonical `/api/v1/targets` prefix.
 
-### Subcommands
+### Subcommands (G9.1 read/traversal — #454)
 
 - `meho topology refresh <target>` — `POST
   /api/v1/topology/refresh/<target>`. Rediscovers one target's
@@ -919,6 +919,38 @@ the canonical `/api/v1/targets` prefix.
   the no-path line when unreachable / an endpoint is missing /
   cross-tenant (all the same `null` answer, exit 0, never an error).
 
+### Subcommands (G9.2 curated-edge write + listing — #599)
+
+- `meho topology annotate <from> <kind> <to> [--note "..."]
+  [--evidence-url URL] [--from-kind K] [--to-kind K]` — `POST
+  /api/v1/topology/edges`. Asserts a curated cross-system edge.
+  Idempotent (server-side upsert). `--help` inlines the closed
+  10-kind vocabulary table (§12 of Initiative #364) so operators
+  discover valid `<kind>` values without leaving the CLI.
+  `--evidence-url` is kebab-case on the CLI but maps to the wire
+  field `evidence_url` (snake_case per `_AnnotateEdgeRequest`).
+  Requires `tenant_admin`; a 403 renders the backend's role hint
+  with exit class `insufficient_role`.
+- `meho topology unannotate <edge-id> | <from> <kind> <to>
+  [--from-kind K] [--to-kind K]` — `DELETE
+  /api/v1/topology/edges/<edge_id>`. The tuple form is **client-
+  side**: a `GET /api/v1/topology/edges?from=&kind=&to=&source=
+  curated` resolves the unique curated edge, then `DELETE` removes
+  it by id. T5's DELETE is id-only (no tuple-form route), so the
+  resolution must happen here. The route's typed 409 (auto-row
+  deletion refused; §3 of Initiative #364) is rendered with the
+  server's `detail.message` verbatim — the annotate-over-auto
+  remediation guidance, not a raw HTTP dump. Requires `tenant_admin`.
+- `meho topology list-edges [--kind K] [--source curated|auto]
+  [--from N] [--to N] [--conflicts] [--limit N] [--offset N]` —
+  `GET /api/v1/topology/edges`. Flat filterable listing of the
+  tenant's edges. `--source` maps directly to the `graph_edge.source`
+  column literal; `--conflicts` surfaces the §6 conflict-detector
+  recoverability listing only. Default output is an aligned
+  `KIND / SOURCE / FROM / TO / LAST_SEEN` table; `--json` emits the
+  raw `[]Edge` envelope so consumers can pipe ids into the
+  `unannotate <edge-id>` form. Role: `operator`.
+
 ### Flag → query-param mapping
 
 The route exposes `kind` (anchor `(tenant_id, kind, name)` pin) and
@@ -938,7 +970,10 @@ discipline `meho targets list --limit` applies.
   render. Stable schemas: `refresh` → `RefreshResult`;
   `dependents`/`dependencies` → `[]Node`; `path` →
   `Path` or literal `null` (the unreachable answer, emitted
-  verbatim so jq consumers see one contract).
+  verbatim so jq consumers see one contract); `annotate` →
+  `TopologyEdge` (the 201 response shape); `unannotate` →
+  `{"deleted": "<edge_id>"}` on success; `list-edges` →
+  `[]TopologyEdge`.
 - `--backplane <url>` — override the backplane URL (defaults to the
   URL `meho login` recorded).
 

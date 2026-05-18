@@ -15,6 +15,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
+	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
@@ -188,6 +189,21 @@ func newRootCmd() *cobra.Command {
 	// pods` wrapper. Registered before registerDynamicSubcommands so
 	// the backplane manifest cannot shadow the built-in `k8s` parent.
 	root.AddCommand(k8s.NewRootCmd())
+
+	// G3.4-T5 (#591) -- bind9-ssh-9.x operator alias verbs for Initiative
+	// #367. The verb tree pre-bakes connector_id="bind9-ssh-9.x" on top
+	// of the existing /api/v1/operations/call dispatcher route so
+	// operators don't type the connector ID on every invocation. Ships
+	// the 11 ops (about, zone list/read, record get/add/remove, config
+	// show/apply-views/apply-file/backup/reload) registered by G3.4-
+	// T1..T4 (#587/#588/#589/#590). `meho bind9 record add
+	// esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target
+	// vcf-router-bind9` replaces the consumer's
+	// `bind9-dns.sh --add-a-record` wrapper (the 2026-05-04 / 2026-05-05
+	// credential-leak surface — evoila-bosnia/claude-rdc-hetzner-dc#86).
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `bind9` parent.
+	root.AddCommand(bind9.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

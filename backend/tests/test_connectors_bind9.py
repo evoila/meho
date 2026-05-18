@@ -422,48 +422,59 @@ def test_remote_bash_with_sudo_signature_makes_misordering_unrepresentable() -> 
 
 
 def test_sudo_is_only_referenced_via_the_safe_primitive() -> None:
-    """AC #2: no other sudo-shell-construction path lives in the connector layer.
+    """AC #2: no other sudo-argv-construction path lives in the connector layer.
 
-    Greps the connector tree for the literal substring ``sudo`` and
-    asserts every occurrence is either the safe primitive itself, a
-    docstring or comment, or a reference to it -- never an
-    ``"sudo ..."`` shell-fragment string constructed elsewhere. A
-    failure here means a new sudo path slipped in alongside the
-    safe primitive; the operator must fold it back through
-    :meth:`_remote_bash_with_sudo`.
+    Walks every ``*.py`` under
+    ``backend/src/meho_backplane/connectors/`` and asserts no string
+    literal opens with ``sudo`` as its first token (the universal shape
+    of sudo argv construction: ``"sudo -S ..."`` single-string remote
+    commands, ``["sudo", "-S", ...]`` list-form argv,
+    ``("sudo",)`` tuple-form). The only files allowed to carry such
+    a literal are :mod:`~meho_backplane.connectors.bind9.connector`
+    (the ``_remote_bash_with_sudo`` helper) and
+    :mod:`~meho_backplane.connectors.bind9._atomic` (the atomic-apply
+    primitive that funnels its writes through the helper).
+
+    A failure means a new sudo argv slipped in somewhere; the
+    operator must fold it back through :meth:`_remote_bash_with_sudo`.
+
+    Detection regex — ``(?<=['"])sudo(?=['"\\s\\\\])`` — matches
+    ``sudo`` only when immediately preceded by a quote AND followed
+    by a quote / whitespace / backslash. Rejects prose mentions
+    ("a sudo credential"), docstring narrative, and the identifier
+    ``sudo_password`` (no preceding quote). Covers both
+    ``"sudo -S ..."`` and the list-form ``["sudo", "-S", ...]``;
+    a looser ``\\bsudo\\b`` would false-positive on every docstring
+    mention, a stricter ``\\bsudo\\s+`` would miss the list form.
     """
+    import re
     from pathlib import Path
 
     connectors_root = (
         Path(__file__).resolve().parent.parent / "src" / "meho_backplane" / "connectors"
     )
-    # The only files that should construct any ``sudo ...`` shell
-    # fragment are bind9/connector.py (the safe primitive itself) and
-    # bind9/_atomic.py (the atomic-apply primitive that routes its
-    # remote exec through the safe primitive -- T3 #589). The other
-    # bind9 modules can still reference ``sudo_password`` / ``sudo``
-    # in docstrings / variable names because they layer on top of the
-    # safe primitive; the assertion below is "no sudo path lives
-    # outside the bind9 subtree", which we encode by allowlisting the
-    # whole bind9 package.
-    allowed_files = set((connectors_root / "bind9").glob("*.py"))
+    # Narrow whitelist: only the two files that own the safe-sudo
+    # primitive. ops_*.py files reference sudo only via docstrings /
+    # error messages / the ``"sudo_password"`` dict key — all of which
+    # the detection regex below correctly ignores.
+    allowed_files = {
+        connectors_root / "bind9" / "connector.py",
+        connectors_root / "bind9" / "_atomic.py",
+    }
+    sudo_argv_re = re.compile(r"""(?<=["'])sudo(?=["'\s\\])""")
     offenders: list[str] = []
     for py_file in connectors_root.rglob("*.py"):
         if py_file in allowed_files:
             continue
-        # Skip the test seam itself; this assertion is run from
-        # ``backend/tests/`` which lives outside ``connectors/``, so
-        # the rglob already excludes it. The check is on production
-        # source only.
         content = py_file.read_text(encoding="utf-8")
         for lineno, line in enumerate(content.splitlines(), start=1):
-            # Strip comments; the literal token ``sudo`` in prose docs
-            # / module headers is non-load-bearing.
-            code = line.split("#", 1)[0]
-            if "sudo" in code.lower():
+            if sudo_argv_re.search(line):
                 offenders.append(f"{py_file.relative_to(connectors_root)}:{lineno}: {line!r}")
     assert not offenders, (
-        "Found sudo references outside the bind9 safe-primitive surface:\n" + "\n".join(offenders)
+        "Found sudo-argv construction outside the bind9 safe-primitive surface "
+        "(connector.py + _atomic.py). Every match below re-introduces the "
+        "mis-ordered-payload shape that leaked credentials twice in 2026-05:\n"
+        + "\n".join(offenders)
     )
 
 

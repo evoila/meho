@@ -2,8 +2,10 @@
 // Copyright (c) 2026 evoila Group
 
 // Package topology hosts the cobra commands under `meho topology ...`
-// for G9.1-T6 (#454) of Initiative #363. v0.2 ships four operator-
-// facing verbs that wrap the T5 REST surface (#453) shipped by
+// for G9.1-T6 (#454) of Initiative #363 (read/traversal verbs) and
+// G9.2-T6 (#599) of Initiative #364 (curated-edge write + listing
+// verbs). v0.2 ships seven operator-facing verbs over the T5 REST
+// surface (#453, #597) shipped by
 // `backend/src/meho_backplane/api/v1/topology.py`:
 //
 //   - `meho topology refresh <target> [--json]` —
@@ -23,6 +25,19 @@
 //     GET /api/v1/topology/path?from=A&to=B. Shortest unweighted
 //     path between two named nodes, or the no-path line when
 //     unreachable. Role: operator.
+//   - `meho topology annotate <from> <kind> <to> [--note "..."]
+//     [--evidence-url URL] [--json]` — POST /api/v1/topology/edges.
+//     Operator-curated cross-system edge assertion. Idempotent.
+//     Role: tenant_admin.
+//   - `meho topology unannotate <edge-id> | <from> <kind> <to>` —
+//     DELETE /api/v1/topology/edges/{edge_id}. The tuple form is
+//     client-side: a GET resolves the unique curated edge id, then
+//     DELETE removes it. Auto rows refuse with 409 + remediation
+//     hint. Role: tenant_admin.
+//   - `meho topology list-edges [--kind K] [--source curated|auto]
+//     [--from N] [--to N] [--conflicts] [--json]` — GET
+//     /api/v1/topology/edges. Flat filterable listing of the
+//     tenant's edges. Role: operator.
 //
 // The fifth G9.1-T6 verb, `meho targets discover <product>`, lives
 // under `cli/internal/cmd/targets/discover.go` because it sits under
@@ -80,21 +95,27 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "topology",
-		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path)",
-		Long: "Operate the tenant-scoped topology graph wired by G9.1. " +
-			"Refresh a target's discovered topology, walk what depends " +
-			"on a node (dependents), walk what a node depends on " +
-			"(dependencies), or find the shortest path between two " +
-			"nodes. All verbs are operator-level. Tenant scoping is " +
-			"enforced server-side via the JWT — no surface accepts a " +
-			"tenant id, and cross-tenant traversal returns the same " +
-			"empty/404 shape as a node that does not exist.",
+		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / annotate / unannotate / list-edges)",
+		Long: "Operate the tenant-scoped topology graph wired by G9.1 + " +
+			"G9.2. Refresh a target's discovered topology, walk what " +
+			"depends on a node (dependents), walk what a node depends " +
+			"on (dependencies), find the shortest path between two " +
+			"nodes, assert a curated cross-system edge (annotate), " +
+			"delete a curated edge (unannotate), or list the tenant's " +
+			"edges (list-edges). Read verbs are operator-level; " +
+			"annotate / unannotate require tenant_admin. Tenant " +
+			"scoping is enforced server-side via the JWT — no surface " +
+			"accepts a tenant id, and cross-tenant queries return the " +
+			"same empty/404 shape as a node that does not exist.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newRefreshCmd())
 	cmd.AddCommand(newDependentsCmd())
 	cmd.AddCommand(newDependenciesCmd())
 	cmd.AddCommand(newPathCmd())
+	cmd.AddCommand(newAnnotateCmd())
+	cmd.AddCommand(newUnannotateCmd())
+	cmd.AddCommand(newListEdgesCmd())
 	return cmd
 }
 

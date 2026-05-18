@@ -61,14 +61,20 @@ func newRunCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	return cmd, &stdout, &stderr
 }
 
-// TestNewRootCmdWiresFourVerbs — the parent must expose exactly the
-// four topology verbs (the fifth T6 verb, `targets discover`, lives
-// on the targets parent, not here).
-func TestNewRootCmdWiresFourVerbs(t *testing.T) {
+// TestNewRootCmdWiresAllVerbs — the parent must expose every topology
+// verb: the four G9.1 read/traversal verbs plus the three G9.2 write
+// + listing verbs. The fifth G9.1-T6 verb, `targets discover`, lives
+// on the targets parent (not here).
+func TestNewRootCmdWiresAllVerbs(t *testing.T) {
 	root := NewRootCmd()
 	want := map[string]bool{
-		"refresh": false, "dependents": false,
-		"dependencies": false, "path": false,
+		"refresh":      false,
+		"dependents":   false,
+		"dependencies": false,
+		"path":         false,
+		"annotate":     false,
+		"unannotate":   false,
+		"list-edges":   false,
 	}
 	for _, c := range root.Commands() {
 		name := strings.Fields(c.Use)[0]
@@ -231,6 +237,96 @@ func TestFormatAmbiguousNode(t *testing.T) {
 	}
 	if strings.Contains(strings.ReplaceAll(got, "--node-kind", ""), "--kind") {
 		t.Errorf("formatAmbiguousNode must not point at --kind (edge filter); got %q", got)
+	}
+}
+
+// TestAnnotateHelpEmitsTenKindVocabulary — §12 acceptance criterion
+// for #599: `meho topology annotate --help` must surface every one of
+// the closed 10 GraphEdgeKind values with a one-line description so
+// operators discover the vocabulary without leaving the CLI.
+func TestAnnotateHelpEmitsTenKindVocabulary(t *testing.T) {
+	cmd := newAnnotateCmd()
+	long := cmd.Long
+	// Every kind name must be present.
+	want := []string{
+		"runs-on", "mounts", "routes-through", "belongs-to",
+		"authenticates-via", "depends-on", "replicates-to",
+		"backed-up-by", "routes-via", "policy-binds",
+	}
+	for _, kind := range want {
+		if !strings.Contains(long, kind) {
+			t.Errorf("annotate --help missing kind %q", kind)
+		}
+	}
+	// Sanity: the help block names the table explicitly so the table
+	// header is searchable in shell scrollback.
+	if !strings.Contains(long, "Edge kind vocabulary") {
+		t.Errorf("annotate --help should label the table; got %q", long)
+	}
+}
+
+// TestEdgeKindVocabularyMatchesEnum — the in-help table must stay in
+// lock-step with the closed enum on the backend side. Both lists are
+// declared in source; this test fails noisily when the count drifts
+// (the actual enum lives in backend/src/meho_backplane/db/models.py
+// and is asserted from the Python side; here we lock the CLI mirror).
+func TestEdgeKindVocabularyMatchesEnum(t *testing.T) {
+	if got := len(edgeKindVocabulary); got != 10 {
+		t.Fatalf("edgeKindVocabulary count = %d; want 10 (closed v0.2 enum)", got)
+	}
+	seen := make(map[string]bool, 10)
+	for _, e := range edgeKindVocabulary {
+		if e.Name == "" || e.Desc == "" {
+			t.Errorf("incomplete vocab entry: %+v", e)
+		}
+		if seen[e.Name] {
+			t.Errorf("duplicate vocab kind %q", e.Name)
+		}
+		seen[e.Name] = true
+	}
+}
+
+// TestBuildListEdgesPathOmitsDefaults — empty options send no query
+// string so the server applies its defaults.
+func TestBuildListEdgesPathOmitsDefaults(t *testing.T) {
+	got := buildListEdgesPath(listEdgesOptions{})
+	if got != "/api/v1/topology/edges" {
+		t.Fatalf("default path: got %q", got)
+	}
+}
+
+// TestBuildListEdgesPathMapsFilters — every flag maps to the route's
+// documented query-param name; --conflicts only rides when true.
+func TestBuildListEdgesPathMapsFilters(t *testing.T) {
+	got := buildListEdgesPath(listEdgesOptions{
+		Kind: "depends-on", Source: "curated",
+		From: "svc", To: "db",
+		Conflicts: true, Limit: 25, Offset: 5,
+	})
+	if !strings.HasPrefix(got, "/api/v1/topology/edges?") {
+		t.Fatalf("prefix wrong: %q", got)
+	}
+	for _, want := range []string{"kind=depends-on", "source=curated", "from=svc", "to=db", "conflicts=true", "limit=25", "offset=5"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("buildListEdgesPath missing %q in %q", want, got)
+		}
+	}
+}
+
+// TestFormatAutoEdgeConflictPullsServerMessage — the 409 envelope
+// renders into a line that prefixes the server's `detail.message`
+// (the annotate-over-auto remediation guidance) with the edge id.
+func TestFormatAutoEdgeConflictPullsServerMessage(t *testing.T) {
+	body := `{"detail":{"error":"auto_edge_deletion","edge_id":"abc","message":"go fix it"}}`
+	got := formatAutoEdgeConflict(body)
+	if !strings.Contains(got, "abc") || !strings.Contains(got, "go fix it") {
+		t.Errorf("formatAutoEdgeConflict missing edge_id/message; got %q", got)
+	}
+	// A wrong-error body must return the empty string so the caller
+	// falls back to the generic renderer rather than masking a real
+	// 409 from elsewhere.
+	if got := formatAutoEdgeConflict(`{"detail":{"error":"ambiguous_node"}}`); got != "" {
+		t.Errorf("expected empty fallback for wrong-error body; got %q", got)
 	}
 }
 

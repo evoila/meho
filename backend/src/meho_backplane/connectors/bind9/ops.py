@@ -3,18 +3,29 @@
 
 """Typed operations exposed by :class:`Bind9Connector`.
 
-G3.4-T1 (#587) skeleton ships ``bind9.about`` -- the canary op that
+G3.4-T1 (#587) skeleton shipped ``bind9.about`` -- the canary op that
 proves the ``register_typed_operation()`` -> dispatcher -> handler ->
-result-wrap pipeline end-to-end for an SSH-transport connector. The
-remaining 10 ops (zone / record / config reads + writes) land under
-G3.4-T2..T4 (#588 / #589 / #590) by extending :data:`BIND9_OPS` from
-their own modules; this file holds only the T1 canary so the
-skeleton's surface area stays narrow.
+result-wrap pipeline end-to-end for an SSH-transport connector.
+G3.4-T2 (#588) layers the read op group onto that surface:
+
+* ``bind9.zone.list`` / ``bind9.zone.read`` -- metadata + handlers in
+  :mod:`~meho_backplane.connectors.bind9.ops_zone`.
+* ``bind9.record.get`` -- metadata + handler in
+  :mod:`~meho_backplane.connectors.bind9.ops_record`.
+* ``bind9.config.show`` -- metadata + handler in
+  :mod:`~meho_backplane.connectors.bind9.ops_config`.
+
+The remaining write ops (``bind9.record.add/remove``,
+``bind9.config.apply_*``, ``bind9.config.backup``,
+``bind9.config.reload``) land under T3 / T4 (#589 / #590) by extending
+:data:`BIND9_OPS` from their own modules; the registration walk in
+:meth:`Bind9Connector.register_operations` does not change.
 
 The dataclass + tuple shape mirrors the Kubernetes connector
 (:mod:`~meho_backplane.connectors.kubernetes.ops`) so the registration
-walk in :meth:`Bind9Connector.register_operations` reads identically
-to the k8s sibling.
+walk reads identically to the k8s sibling. The composition pattern
+(``_bind9_ops()`` function that imports per-module op tuples) also
+mirrors K8s ``ops.py``'s ``_kubernetes_ops()`` shape.
 """
 
 from __future__ import annotations
@@ -121,15 +132,44 @@ _BIND9_ABOUT_OP = Bind9Op(
 )
 
 
+def _bind9_ops() -> tuple[Bind9Op, ...]:
+    """Return the merged registration tuple.
+
+    Composition: ``bind9.about`` (T1 canary) + ``ZONE_OPS`` (T2 read:
+    ``bind9.zone.list`` / ``bind9.zone.read``) + ``RECORD_OPS`` (T2
+    read: ``bind9.record.get``) + ``CONFIG_OPS`` (T2 read:
+    ``bind9.config.show``). T3 (#589) will append the record-write
+    group (``bind9.record.add`` / ``bind9.record.remove``); T4 (#590)
+    will append the config-write group (``bind9.config.apply_views`` /
+    ``bind9.config.apply_file`` / ``bind9.config.backup`` /
+    ``bind9.config.reload``).
+
+    Implemented as a function call rather than a literal-and-splat at
+    module level so the import order stays linear: ``ops.py`` defines
+    :class:`Bind9Op` + ``_BIND9_ABOUT_OP``, then imports the per-area
+    op tuples from their modules (each of which only depends on
+    :class:`Bind9Op` plus its own helpers). The arrangement keeps the
+    canary op's metadata co-located with the dataclass definition while
+    letting the larger surfaces live in their own modules next to their
+    helpers. Mirrors :func:`meho_backplane.connectors.kubernetes.ops._kubernetes_ops`.
+    """
+    from meho_backplane.connectors.bind9.ops_config import CONFIG_OPS
+    from meho_backplane.connectors.bind9.ops_record import RECORD_OPS
+    from meho_backplane.connectors.bind9.ops_zone import ZONE_OPS
+
+    return (_BIND9_ABOUT_OP, *ZONE_OPS, *RECORD_OPS, *CONFIG_OPS)
+
+
 #: The ops :class:`Bind9Connector` registers at lifespan startup.
 #:
-#: T1 ships only ``bind9.about``; T2 (#588) appends the read op group
+#: T1 shipped ``bind9.about``; T2 (#588) adds the read op group
 #: (``bind9.zone.list/read``, ``bind9.record.get``,
-#: ``bind9.config.show``); T3 (#589) appends the record-write group
-#: (``bind9.record.add/remove``); T4 (#590) appends the config-write
+#: ``bind9.config.show``); T3 (#589) will add the record-write group
+#: (``bind9.record.add/remove``); T4 (#590) will add the config-write
 #: group (``bind9.config.apply_views``, ``bind9.config.apply_file``,
 #: ``bind9.config.backup``, ``bind9.config.reload``). The shape of
 #: each follow-on PR is "import a new module-level tuple and splat it
-#: into :data:`BIND9_OPS`" -- the registration walk in
-#: :meth:`Bind9Connector.register_operations` does not need to change.
-BIND9_OPS: tuple[Bind9Op, ...] = (_BIND9_ABOUT_OP,)
+#: into :data:`BIND9_OPS` via :func:`_bind9_ops`" -- the registration
+#: walk in :meth:`Bind9Connector.register_operations` does not need to
+#: change.
+BIND9_OPS: tuple[Bind9Op, ...] = _bind9_ops()

@@ -457,6 +457,66 @@ class Bind9Connector(SshConnector):
             "named_conf_path": result.extras.get("named_conf_path"),
         }
 
+    async def bind9_zone_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``bind9.zone.list`` op (G3.4-T2 #588).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.bind9.ops_zone.bind9_zone_list`.
+        The bound-method shim shape mirrors the K8s connector's
+        ``k8s_pod_list`` / ``k8s_pod_info`` / ``k8s_deployment_list`` /
+        ``k8s_deployment_info`` pattern: the per-op module owns the
+        handler logic and the registration metadata, the connector
+        class exposes a thin shim so the descriptor's ``handler_ref``
+        round-trips through the dispatcher's
+        :func:`~meho_backplane.operations._handler_resolve.import_handler`
+        walk against a ``module.ClassName.method`` dotted path.
+        """
+        from meho_backplane.connectors.bind9.ops_zone import (
+            bind9_zone_list as _bind9_zone_list,
+        )
+
+        return await _bind9_zone_list(self, target, params)
+
+    async def bind9_zone_read(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``bind9.zone.read`` op (G3.4-T2 #588)."""
+        from meho_backplane.connectors.bind9.ops_zone import (
+            bind9_zone_read as _bind9_zone_read,
+        )
+
+        return await _bind9_zone_read(self, target, params)
+
+    async def bind9_record_get(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``bind9.record.get`` op (G3.4-T2 #588)."""
+        from meho_backplane.connectors.bind9.ops_record import (
+            bind9_record_get as _bind9_record_get,
+        )
+
+        return await _bind9_record_get(self, target, params)
+
+    async def bind9_config_show(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``bind9.config.show`` op (G3.4-T2 #588)."""
+        from meho_backplane.connectors.bind9.ops_config import (
+            bind9_config_show as _bind9_config_show,
+        )
+
+        return await _bind9_config_show(self, target, params)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`BIND9_OPS` into ``endpoint_descriptor``.

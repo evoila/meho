@@ -207,7 +207,7 @@ jobs:
         # source/filename) misses the cache and the model re-downloads
         # exactly once, then re-saves. restore-keys lets an unrelated
         # lock change still reuse the prior model blob.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: ${{ github.workspace }}/.fastembed-cache
           key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}

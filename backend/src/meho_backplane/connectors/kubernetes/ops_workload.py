@@ -86,7 +86,7 @@ References
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from kubernetes_asyncio import client
 
@@ -594,7 +594,7 @@ async def resolve_pod_name(v1: client.CoreV1Api, namespace: str, pod_name: str) 
     docstring's prefix-resolution note).
     """
     pod_list = await v1.list_namespaced_pod(namespace=namespace)
-    return _resolve_from_items(list(pod_list.items or []), pod_name, "pod")
+    return cast("V1Pod", _resolve_from_items(list(pod_list.items or []), pod_name, "pod"))
 
 
 async def resolve_deployment_name(
@@ -602,7 +602,10 @@ async def resolve_deployment_name(
 ) -> V1Deployment:
     """Resolve a deployment name + namespace pair to a :class:`V1Deployment`."""
     deployment_list = await apps_v1.list_namespaced_deployment(namespace=namespace)
-    return _resolve_from_items(list(deployment_list.items or []), deployment_name, "deployment")
+    return cast(
+        "V1Deployment",
+        _resolve_from_items(list(deployment_list.items or []), deployment_name, "deployment"),
+    )
 
 
 # ---------------------------------------------------------------------------

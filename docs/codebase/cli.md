@@ -155,8 +155,10 @@ cli/
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
     │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
-    ├── migrate/               # G5.3-T1 #608 — pure-logic helpers for the memory migration flow (Initiative #375).
-    │   └── doc.go                # placeholder package; flow helpers land in T2–T5 (#609–#612).
+    ├── migrate/               # G5.3 Initiative #375 — pure-logic helpers for the memory migration flow.
+    │   ├── doc.go                # package declaration + overview comment.
+    │   ├── machinelocal.go       # DetectMachineLocal — heuristic detector for laptop-local content (#610).
+    │   └── machinelocal_test.go  # table-driven per-Category tests + truncation + seam coverage (#610).
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.

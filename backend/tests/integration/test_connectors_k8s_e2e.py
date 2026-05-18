@@ -65,8 +65,10 @@ in the ``Python (integration testcontainers)`` job.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -770,19 +772,61 @@ async def test_dispatch_event_list_against_k3s(k8s_e2e: _K3sTarget) -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_logs_against_running_pod(k8s_e2e: _K3sTarget) -> None:
-    """``k8s.logs`` against any kube-system pod returns a (possibly empty) lines list."""
+    """``k8s.logs`` against a Running kube-system pod with a Ready container
+    returns a (possibly empty) lines list.
+
+    Selecting ``rows[0]`` blindly is non-deterministic on a freshly-booted
+    k3s container: the first pod is frequently still Pending /
+    ContainerCreating, and ``k8s.logs`` then raises a generic kube
+    ``ApiException`` ("container ... is waiting to start: ContainerCreating")
+    which is neither the ok branch nor the structured
+    multi-container-ambiguity branch this test asserts. k3s always brings
+    up coredns / metrics-server / local-path-provisioner, but they take
+    time to become Ready after the container boots, so poll ``k8s.pod.list``
+    (through the same dispatch path, registered op only -- the row already
+    carries ``status`` (phase) and ``ready`` ("<ready>/<total>")) until a
+    pod is Running with every container Ready (and at least one container).
+    """
     operator = _make_operator(sub="op-logs-list")
-    listing = await dispatch(
-        operator=operator,
-        connector_id="k8s-1.x",
-        op_id="k8s.pod.list",
-        target=k8s_e2e,
-        params={"namespace": "kube-system"},
-    )
-    assert listing.status == "ok"
-    if not listing.result["rows"]:
-        pytest.skip("k3s shipped no kube-system pods to pull logs from")
-    pod_name = listing.result["rows"][0]["name"]
+
+    def _running_ready_pod(rows: list[dict[str, Any]]) -> str | None:
+        """First pod that is phase==Running with all containers Ready
+        (ready column ``X/Y`` where ``X == Y`` and ``X >= 1``)."""
+        for row in rows:
+            if row.get("status") != "Running":
+                continue
+            ready = row.get("ready")
+            if not isinstance(ready, str) or "/" not in ready:
+                continue
+            ready_n, _, total_n = ready.partition("/")
+            if not (ready_n.isdigit() and total_n.isdigit()):
+                continue
+            if int(ready_n) >= 1 and int(ready_n) == int(total_n):
+                name = row.get("name")
+                if isinstance(name, str) and name:
+                    return name
+        return None
+
+    pod_name: str | None = None
+    deadline = time.monotonic() + 90.0
+    while True:
+        listing = await dispatch(
+            operator=operator,
+            connector_id="k8s-1.x",
+            op_id="k8s.pod.list",
+            target=k8s_e2e,
+            params={"namespace": "kube-system"},
+        )
+        assert listing.status == "ok", listing.error
+        pod_name = _running_ready_pod(listing.result["rows"])
+        if pod_name is not None:
+            break
+        if time.monotonic() >= deadline:
+            pytest.skip(
+                "no Running kube-system pod with a Ready container appeared "
+                "within 90s -- cannot deterministically exercise k8s.logs"
+            )
+        await asyncio.sleep(3.0)
 
     operator2 = _make_operator(sub="op-logs")
     result = await dispatch(

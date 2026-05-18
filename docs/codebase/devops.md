@@ -243,7 +243,7 @@ implementation of that decision.
 | Auth | None (no `requirepass`) | v0.1 single-tenant; gated at the network layer by the umbrella chart's NetworkPolicy |
 | Update strategy | `Recreate` | Single-replica + port-bind constraint makes RollingUpdate worse |
 | Probes | TCP `connect` on 6379 | Minimal — avoids coupling to `redis-cli` / `valkey-cli` binary naming variance |
-| Service | ClusterIP `<release>-broadcast:6379` (port name `redis`) | In-cluster only; backplane consumes via the operator-facing `REDIS_URL` env |
+| Service | ClusterIP `<release>-broadcast:6379` (port name `redis`) | In-cluster only; backplane consumes via the operator-facing `BROADCAST_REDIS_URL` env |
 
 The subchart lives unpacked at `deploy/charts/meho/charts/broadcast/`.
 The parent `Chart.yaml` declares it as a dependency with
@@ -267,13 +267,17 @@ subchart's own values.yaml shape is also enforced by Helm independently —
 this parent block is the surface visible to the umbrella's `--set` flags.
 
 **Backplane wiring.** When `broadcast.enabled: true` (the default), the
-backplane Deployment renders a `REDIS_URL` env var pointing at
+backplane Deployment renders a `BROADCAST_REDIS_URL` env var pointing at
 `redis://{{ .Release.Name }}-broadcast:{{ .Values.broadcast.service.port }}/0`.
-The full broadcast feature is v0.2 work; the env var is forward-prepared
-in v0.1 so the chassis discovers the endpoint as soon as the broadcast
-code uses it. ADR 0005 locked `redis-py` as the driver — it parses
-`redis://` schemes against a Valkey endpoint unchanged (wire-protocol
-compatibility carries from Redis 7.2.4).
+The env-var name is load-bearing: `Settings.broadcast_redis_url`
+(`backend/src/meho_backplane/settings.py`) resolves from
+`BROADCAST_REDIS_URL` and falls back to `redis://localhost:6379` when it
+is unset, so a chart that injects any other name (the v0.2 `REDIS_URL`
+mismatch fixed in #583) leaves the readiness probe's broadcast leg
+dialing localhost while the healthy Service is never contacted. ADR 0005
+locked `redis-py` as the driver — it parses `redis://` schemes against a
+Valkey endpoint unchanged (wire-protocol compatibility carries from
+Redis 7.2.4).
 
 **Operator-supplied secrets.** The Job + the backplane both consume
 `DATABASE_URL` from a Kubernetes Secret named by

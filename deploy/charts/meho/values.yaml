@@ -240,8 +240,8 @@ audit:
 # running Valkey OSS as a single-replica Deployment with ephemeral streams.
 # Subchart slug is `broadcast` rather than `redis` because the protocol
 # contract matters more than the brand. The backplane connects via the
-# `REDIS_URL` env var (operator-facing) rendered against the Service name
-# `<release>-broadcast`.
+# `BROADCAST_REDIS_URL` env var (operator-facing) rendered against the
+# Service name `<release>-broadcast`.
 #
 # Operators on clusters running an external Valkey/Redis can flip
 # `broadcast.enabled: false` and (in v0.2+) point the backplane at the
@@ -444,7 +444,7 @@ extraVolumeMounts: []
 # (accepts `value` OR `valueFrom`). Most common use: `SSL_CERT_FILE`
 # pointing at a mounted trust bundle's path, so Python's default ssl
 # context honours internal CAs. The list is appended after the chart's
-# own env (DATABASE_URL, REDIS_URL); operator values win on collisions
+# own env (DATABASE_URL, BROADCAST_REDIS_URL); operator values win on collisions
 # only if Kubernetes' duplicate-EnvVar resolution rule (last-write-wins)
 # applies to your runtime. Don't rely on overrides — pick a name that
 # doesn't clash.

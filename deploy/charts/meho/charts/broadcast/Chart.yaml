@@ -6,7 +6,7 @@ description: |
   — as a single-replica Deployment with ephemeral streams. Subchart slug is
   `broadcast` rather than `redis` because the protocol contract matters more
   than the brand (ADR 0005). The Service name (`<release>-broadcast`) is the
-  endpoint the backplane connects to via `REDIS_URL`.
+  endpoint the backplane connects to via `BROADCAST_REDIS_URL`.
 
 # Subchart version is independent of the parent chart's calver. Bump on
 # breaking subchart-values changes; rev the patch level on image-tag bumps.

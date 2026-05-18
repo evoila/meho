@@ -566,7 +566,7 @@
     },
     "extraEnv": {
       "type": "array",
-      "description": "Extra Kubernetes EnvVar objects (value or valueFrom) appended to the backplane container env AND the migration Job container env. Most common use: pointing `SSL_CERT_FILE` at a mounted trust-bundle path so Python's default ssl context trusts internal-CA-signed Vault / Keycloak / Postgres endpoints (Issue #209). Don't collide with the chart's own keys (DATABASE_URL, REDIS_URL).",
+      "description": "Extra Kubernetes EnvVar objects (value or valueFrom) appended to the backplane container env AND the migration Job container env. Most common use: pointing `SSL_CERT_FILE` at a mounted trust-bundle path so Python's default ssl context trusts internal-CA-signed Vault / Keycloak / Postgres endpoints (Issue #209). Don't collide with the chart's own keys (DATABASE_URL, BROADCAST_REDIS_URL).",
       "items": { "type": "object" }
     },
     "retrieval": {

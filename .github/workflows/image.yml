@@ -177,6 +177,18 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Build-identity stamps surfaced via GET /version (#631). The
+          # Dockerfile already declares `ARG GIT_SHA` / `ARG BUILD_DATE`
+          # and re-exports them as ENV; without these build-args the ARGs
+          # keep their `unknown` defaults and the shipped image cannot
+          # self-report which commit it was built from. BUILD_DATE reuses
+          # docker/metadata-action's `org.opencontainers.image.created`
+          # label (RFC3339, UTC) so the /version build_date and the OCI
+          # `created` annotation are the same single value — no second
+          # `date -u` step that could drift between the two.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           # GHA-backed remote cache. The first build cold-fills it; subsequent
           # builds reuse layers across branches.
           cache-from: type=gha

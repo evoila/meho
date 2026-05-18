@@ -55,6 +55,20 @@ Every statement filters ``graph_node.tenant_id`` *and*
 anchor and the recursive term. A node with the same ``(kind, name)``
 in another tenant is invisible to this tenant's traversal.
 
+Superseded-edge exclusion (Initiative #364 §6, Task #595)
+---------------------------------------------------------
+
+The recursive term of every traversal verb filters
+``graph_edge.properties->>'superseded_by' IS NULL`` — auto edges that
+an operator's curated annotation has marked superseded drop out of
+every closure. The mark is sticky across refresh (preserved by
+:func:`meho_backplane.topology.refresh._reconcile_edges`) and only
+cleared by :func:`meho_backplane.topology.annotate.unannotate_edge` of
+the curated row. The guard fires on all four edge-pulling sites: the
+forward and reverse recursive terms here, and **both legs** of the
+``bi_edge`` CTE in :data:`_PATH_SQL` (missing the reversed leg would
+let a superseded edge be walked backwards into a shortest path).
+
 Anchor disambiguation
 ---------------------
 
@@ -89,38 +103,38 @@ from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.engine import Row
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.topology.schemas import TopologyNode, TopologyPath
+from meho_backplane.topology.resolvers import (
+    AmbiguousNodeError,
+    NodeNotFoundError,
+    _collect_distinct_kinds,
+    resolve_node,
+)
+from meho_backplane.topology.schemas import (
+    TopologyEdge,
+    TopologyEdgeEndpoint,
+    TopologyNode,
+    TopologyPath,
+)
 
+# ``AmbiguousNodeError`` was historically defined in this module and is
+# part of the G9.1 read-half public surface; Task #594 (G9.2-T2) moved
+# the canonical definition into :mod:`meho_backplane.topology.resolvers`
+# so the ambiguity rule is owned by the resolver (the surface that also
+# carries :func:`resolve_node` / :class:`NodeNotFoundError`). The
+# re-import preserves every pre-existing
+# ``from meho_backplane.topology.query import AmbiguousNodeError`` call
+# site without churn.
 __all__ = [
     "AmbiguousNodeError",
     "find_dependencies",
     "find_dependents",
     "find_path",
+    "list_edges",
 ]
-
-
-class AmbiguousNodeError(ValueError):
-    """A node name resolved to more than one ``kind`` and no ``kind`` was given.
-
-    ``graph_node`` uniqueness is ``(tenant_id, kind, name)``. When a
-    traversal root (or a :func:`find_path` endpoint) is requested by
-    ``name`` alone and the tenant holds multiple kinds with that name,
-    anchoring on all of them would merge unrelated closures. The query
-    refuses instead of returning silently-wrong data; the caller must
-    re-issue with an explicit ``kind`` (or, later, an alias resolved by
-    the T5/T6 router).
-    """
-
-    def __init__(self, name: str, kinds: list[str]) -> None:
-        self.name = name
-        self.kinds = kinds
-        super().__init__(
-            f"node name {name!r} is ambiguous in this tenant — it exists "
-            f"as kinds {sorted(kinds)!r}; pass kind= to disambiguate"
-        )
 
 
 #: Default traversal depth. Matches the Task #451 contract; deep enough
@@ -164,6 +178,16 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
 # Two fully-literal statements (rather than one f-string) keep the
 # Semgrep avoid-sqlalchemy-text rule from firing: nothing is
 # interpolated, every value is a :named bind.
+#
+# Traversal exclusion (§6 of Initiative #364, Task #595): the recursive
+# term filters ``e.properties->>'superseded_by' IS NULL`` so an auto
+# edge an operator's curated annotation has marked superseded is
+# invisible to the closure. ``->>`` is PG's text-extract JSON operator
+# (PG 16 manual §9.16); the column is JSONB on PG (and JSON on the
+# unit-test SQLite engine, which never runs this CTE — recursive CYCLE
+# is PG-only, per the docstring above). A row with no
+# ``superseded_by`` key reads ``NULL`` from ``->>`` and passes the
+# filter, so the guard does not affect non-superseded edges.
 _TRAVERSAL_SQL_REVERSE = text(
     """
     WITH RECURSIVE walk AS (
@@ -193,6 +217,7 @@ _TRAVERSAL_SQL_REVERSE = text(
           AND n.tenant_id = :tenant_id
           AND w.depth < :depth
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND e.properties->>'superseded_by' IS NULL
     ) CYCLE id SET is_cycle USING path
     SELECT id, kind, name, properties, depth, via_edge_kind
     FROM (
@@ -211,7 +236,8 @@ _TRAVERSAL_SQL_REVERSE = text(
 # join edges *out of* the frontier node and step to their target. Only
 # the two join columns differ from the reverse statement; everything
 # else (tenant scoping, kind pin, kind filter, depth bound, CYCLE
-# guard, closure-wide DISTINCT ON dedupe, ordering) is identical.
+# guard, closure-wide DISTINCT ON dedupe, ordering, §6 superseded-edge
+# exclusion) is identical.
 _TRAVERSAL_SQL_FORWARD = text(
     """
     WITH RECURSIVE walk AS (
@@ -241,6 +267,7 @@ _TRAVERSAL_SQL_FORWARD = text(
           AND n.tenant_id = :tenant_id
           AND w.depth < :depth
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
+          AND e.properties->>'superseded_by' IS NULL
     ) CYCLE id SET is_cycle USING path
     SELECT id, kind, name, properties, depth, via_edge_kind
     FROM (
@@ -252,18 +279,6 @@ _TRAVERSAL_SQL_FORWARD = text(
         ORDER BY id, depth, name
     ) deduped
     ORDER BY depth, name
-    """
-)
-
-# Anchor-ambiguity probe. Returns the distinct kinds a (tenant, name)
-# pair resolves to so the caller can refuse a merged-closure traversal
-# when more than one kind matches and no kind was pinned.
-_ANCHOR_KINDS_SQL = text(
-    """
-    SELECT DISTINCT kind
-    FROM graph_node
-    WHERE tenant_id = :tenant_id
-      AND name = :name
     """
 )
 
@@ -282,14 +297,19 @@ async def _assert_anchor_unambiguous(
     resolves to at most one kind in the tenant. Only when ``kind`` is
     omitted *and* the name spans multiple kinds does the traversal
     refuse — anchoring on all of them would merge unrelated closures.
+
+    Delegates the kind-collection query to
+    :func:`meho_backplane.topology.resolvers._collect_distinct_kinds`
+    so the ambiguity-probe SQL is single-sourced between the
+    traversal verbs and :func:`resolve_node`. The not-found
+    behavior intentionally stays unchanged here: a name that maps to
+    zero kinds is a silent no-op for traversal (G9.1 contract — an
+    empty result rather than an exception), only ``resolve_node``
+    surfaces :class:`NodeNotFoundError`.
     """
     if kind is not None:
         return
-    result = await session.execute(
-        _ANCHOR_KINDS_SQL,
-        {"tenant_id": tenant_id, "name": name},
-    )
-    kinds = [r._mapping["kind"] for r in result.fetchall()]
+    kinds = await _collect_distinct_kinds(session, tenant_id=tenant_id, name=name)
     if len(kinds) > 1:
         raise AmbiguousNodeError(name, kinds)
 
@@ -416,10 +436,12 @@ _PATH_SQL = text(
         SELECT from_node_id AS src, to_node_id AS dst, kind
         FROM graph_edge
         WHERE tenant_id = :tenant_id
+          AND properties->>'superseded_by' IS NULL
         UNION ALL
         SELECT to_node_id AS src, from_node_id AS dst, kind
         FROM graph_edge
         WHERE tenant_id = :tenant_id
+          AND properties->>'superseded_by' IS NULL
     ),
     walk AS (
         SELECT
@@ -561,3 +583,271 @@ async def find_path(
 
     nodes = _build_path_nodes(node_ids, edge_kinds, by_id)
     return TopologyPath(nodes=nodes, total_hops=total_hops)
+
+
+# Default page size for :func:`list_edges`. Picked to fit the typical
+# inventory survey ("show me the curated edges in this tenant") into one
+# screenful without the operator paging, but small enough that an
+# unbounded list cannot exhaust the asyncpg connection's buffer on a
+# large tenant. The route layer (T5) caps it tighter at the HTTP
+# boundary; the service primitive enforces only the practical upper
+# limit below.
+_DEFAULT_EDGE_LIMIT = 200
+
+#: Hard ceiling on the per-call edge page size. The route layer caps
+#: tighter (Initiative #364 §4 specifies the HTTP cap); this is the
+#: substrate-level guard that prevents a non-route caller (e.g. the MCP
+#: front in T7, or a developer at the REPL) from accidentally asking for
+#: an unbounded result. Bumping it requires a coordinated review with the
+#: HTTP cap because the recursive-CTE indexes assume tenant-bounded
+#: result sets.
+_MAX_EDGE_LIMIT = 1000
+
+# Flat edge listing with tenant scoping and composable filters. The
+# statement joins both endpoint nodes so the result carries the
+# human-readable ``from`` / ``to`` ``kind`` + ``name`` an operator
+# survey needs without a second round trip. Pagination orders by
+# ``last_seen DESC NULLS LAST, id`` — a strict total order (``id`` is
+# the UUID primary key) so ``LIMIT`` / ``OFFSET`` partition the result
+# set deterministically and a two-page sweep reassembles to the unpaged
+# set with no gaps or duplicates.
+#
+# Soft-deleted edges (``e.last_seen IS NULL``) are excluded by default —
+# same default as traversal, which filters them out implicitly via the
+# ``last_seen`` column not appearing in its projection. Including them
+# would surface stale relationships in an inventory view.
+#
+# The ``conflicts_only`` predicate guards against the
+# ``jsonb_array_length`` non-array raise: the
+# ``jsonb_typeof(...) = 'array'`` check short-circuits if the key is
+# absent (``->`` yields SQL NULL → ``jsonb_typeof`` yields NULL → not
+# equal to ``'array'``) or carries a non-array value (a stringly-typed
+# write would land as ``'string'`` / ``'object'``). The
+# ``jsonb_array_length`` call only runs on a confirmed array.
+#
+# Every optional filter uses the ``CAST(:x AS <type>) IS NULL OR ...``
+# idiom the traversal verbs established so one literal statement serves
+# every combination of filters without string interpolation — keeps the
+# ``avoid-sqlalchemy-text`` SAST rule clean.
+_LIST_EDGES_SQL = text(
+    """
+    SELECT
+        e.id                AS id,
+        e.kind              AS kind,
+        e.source            AS source,
+        e.properties        AS properties,
+        e.last_seen         AS last_seen,
+        f.id                AS from_id,
+        f.kind              AS from_kind,
+        f.name              AS from_name,
+        t.id                AS to_id,
+        t.kind              AS to_kind,
+        t.name              AS to_name
+    FROM graph_edge e
+    JOIN graph_node f ON f.id = e.from_node_id
+    JOIN graph_node t ON t.id = e.to_node_id
+    WHERE e.tenant_id = :tenant_id
+      AND e.last_seen IS NOT NULL
+      AND (CAST(:kind AS text) IS NULL OR e.kind = :kind)
+      AND (CAST(:source AS text) IS NULL OR e.source = :source)
+      AND (CAST(:from_node_id AS uuid) IS NULL OR e.from_node_id = :from_node_id)
+      AND (CAST(:to_node_id AS uuid) IS NULL OR e.to_node_id = :to_node_id)
+      AND (
+          NOT :conflicts_only
+          OR (
+              jsonb_typeof(e.properties -> 'conflicts_with') = 'array'
+              AND jsonb_array_length(e.properties -> 'conflicts_with') > 0
+          )
+      )
+    ORDER BY e.last_seen DESC NULLS LAST, e.id
+    LIMIT :limit
+    OFFSET :offset
+    """
+)
+
+
+def _row_to_edge(row: Row[Any]) -> TopologyEdge:
+    """Map one :data:`_LIST_EDGES_SQL` row to a :class:`TopologyEdge`.
+
+    The row carries the edge's own columns plus the two endpoints'
+    ``(id, kind, name)`` projected from the joins. ``properties``
+    arrives as a ``dict`` from JSONB on asyncpg and is deep-frozen by
+    the :class:`TopologyEdge` model validator.
+    """
+    m = row._mapping
+    return TopologyEdge(
+        id=m["id"],
+        from_endpoint=TopologyEdgeEndpoint(
+            id=m["from_id"], kind=m["from_kind"], name=m["from_name"]
+        ),
+        to_endpoint=TopologyEdgeEndpoint(id=m["to_id"], kind=m["to_kind"], name=m["to_name"]),
+        kind=m["kind"],
+        source=m["source"],
+        properties=m["properties"] or {},
+        last_seen=m["last_seen"],
+    )
+
+
+async def _resolve_ref_or_empty(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    name: str,
+) -> UUID | None:
+    """Resolve a ``from_ref`` / ``to_ref`` name to a ``graph_node.id``.
+
+    Returns the node's ``id`` when the name resolves to exactly one
+    row in the tenant. Returns the sentinel ``None`` for the
+    "no node by this name" case so the caller can short-circuit to
+    an empty result without running the main query — the acceptance
+    criterion is that a ref pointing at nothing yields an empty list,
+    not an error.
+
+    Ambiguity (a bare name that resolves to multiple kinds in the
+    tenant) propagates as :class:`AmbiguousNodeError` — the same
+    contract :func:`find_dependents` / :func:`find_dependencies` /
+    :func:`find_path` use. Callers that want to pin a kind issue the
+    ref against the kind-qualified resolver directly (or, at the
+    route / CLI layer, surface the kind disambiguation up to the
+    operator).
+    """
+    try:
+        node = await resolve_node(session, tenant_id, name)
+    except NodeNotFoundError:
+        return None
+    return node.id
+
+
+async def list_edges(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+    conflicts_only: bool = False,
+    limit: int = _DEFAULT_EDGE_LIMIT,
+    offset: int = 0,
+) -> list[TopologyEdge]:
+    """Tenant-scoped, filter-composable flat listing of ``graph_edge`` rows.
+
+    Task #596 (G9.2-T4). The service primitive every front consuming a
+    list of curated and auto edges goes through — the REST route
+    ``GET /api/v1/topology/edges`` (T5), the CLI verb
+    ``meho topology list-edges`` (T6), and the MCP
+    ``query_topology(kind='edges')`` facet (T7) all call this helper
+    rather than re-deriving the tenant boundary and the filter
+    composition.
+
+    Unlike the traversal verbs in this module — which take an
+    :class:`Operator` and open their own session per call — this helper
+    accepts the ``session`` and the ``tenant_id`` directly. That mirrors
+    the shape of :func:`meho_backplane.topology.resolvers.resolve_node`
+    and lets callers compose the listing inside a larger transactional
+    boundary (e.g. the annotation flow asserting an edge exists, the
+    MCP layer batching reads). The tenant boundary is enforced
+    unconditionally against ``tenant_id`` in the SQL — no filter
+    combination, including a crafted ``from_ref``/``to_ref``, can leak
+    a row from another tenant.
+
+    Args:
+        session: An open :class:`AsyncSession`. Caller owns the
+            transaction. The helper performs only read statements; no
+            commits, no flushes.
+        tenant_id: The tenant scope. Mandatory and non-optional — there
+            is no "list every edge across tenants" mode by construction.
+        kind: Optional :class:`~meho_backplane.db.models.GraphEdgeKind`
+            filter (one of the ten v0.2 vocabulary values). The CHECK
+            constraint already restricts the column; this filter
+            narrows the listing.
+        source: Optional ``graph_edge.source`` filter (``'auto'`` for
+            probe-derived edges, ``'curated'`` for operator-asserted
+            ones — see :class:`~meho_backplane.db.models.GraphEdge`).
+        from_ref: Optional ``graph_node.name`` to restrict the listing
+            to edges originating at this node. Resolved via
+            :func:`resolve_node`; an ambiguous bare name (multiple
+            kinds in the tenant) raises :class:`AmbiguousNodeError`
+            (caller passes a kind-qualified ref to disambiguate at the
+            front layer). A name that does not resolve to any node
+            yields an empty result rather than an error — consistent
+            with the traversal verbs' "missing anchor → empty list"
+            shape.
+        to_ref: Same contract as ``from_ref`` but restricting on the
+            edge's destination node.
+        conflicts_only: When ``True``, restrict the listing to edges
+            whose ``properties.conflicts_with`` JSONB key is a
+            non-empty array. This is the recoverability surface for a
+            wrong annotation — G9.2-T3 (#595) writes these markers on
+            edges that conflict with an annotation. When the marker
+            surface lands, this filter immediately becomes useful
+            without further changes here; until then the predicate is
+            still safe (an absent key, a NULL value, or any non-array
+            value yields ``false`` via the ``jsonb_typeof`` guard).
+        limit: Maximum rows to return per call (1..``1000``). Defaults
+            to ``200``. The route layer (T5) caps this further at the
+            HTTP boundary.
+        offset: Rows to skip before the first returned row, for
+            pagination. Combined with the strict total order
+            (``last_seen DESC NULLS LAST, id``), paging a result set is
+            deterministic — a two-page sweep over an unchanging
+            dataset reassembles to the unpaged result with no gaps or
+            duplicates.
+
+    Returns:
+        A list of :class:`TopologyEdge` rows in
+        ``(last_seen DESC NULLS LAST, id)`` order, capped at
+        ``limit``. Soft-deleted edges (``last_seen IS NULL``) are
+        excluded — an inventory view should not surface stale
+        relationships. Empty list when no edge matches in the
+        tenant.
+
+    Raises:
+        AmbiguousNodeError: ``from_ref`` or ``to_ref`` is a bare name
+            that resolves to multiple kinds in the tenant. The caller
+            re-issues with a kind-qualified ref through the front
+            layer.
+        ValueError: ``limit`` is out of range (``< 1`` or
+            ``> _MAX_EDGE_LIMIT``) or ``offset`` is negative — caught
+            client-side at the route layer too, but the substrate
+            refuses defensively because a non-route caller (CLI/MCP/
+            REPL) may not have the same validation.
+    """
+    if limit < 1 or limit > _MAX_EDGE_LIMIT:
+        raise ValueError(f"limit must be in 1..{_MAX_EDGE_LIMIT}; got {limit}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0; got {offset}")
+
+    from_node_id: UUID | None = None
+    to_node_id: UUID | None = None
+    if from_ref is not None:
+        from_node_id = await _resolve_ref_or_empty(session, tenant_id=tenant_id, name=from_ref)
+        if from_node_id is None:
+            # The ref points at no row in this tenant — the listing is
+            # empty by construction. Short-circuit to skip the main
+            # query (and, importantly, avoid passing a NULL through the
+            # ``e.from_node_id = :from_node_id`` filter, which the
+            # ``CAST IS NULL OR ...`` guard would otherwise read as
+            # "no filter" — a correctness bug that would broaden the
+            # listing across the *entire* tenant when the operator
+            # asked to scope it to one node).
+            return []
+    if to_ref is not None:
+        to_node_id = await _resolve_ref_or_empty(session, tenant_id=tenant_id, name=to_ref)
+        if to_node_id is None:
+            return []
+
+    result = await session.execute(
+        _LIST_EDGES_SQL,
+        {
+            "tenant_id": str(tenant_id),
+            "kind": kind,
+            "source": source,
+            "from_node_id": str(from_node_id) if from_node_id is not None else None,
+            "to_node_id": str(to_node_id) if to_node_id is not None else None,
+            "conflicts_only": conflicts_only,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+    return [_row_to_edge(row) for row in result.fetchall()]

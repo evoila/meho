@@ -115,7 +115,7 @@ from datetime import date as date_type
 from typing import Any, Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -124,8 +124,10 @@ from meho_backplane.db.models import AuditLog
 __all__ = [
     "ADD_OPS",
     "CONVERSION_WINDOW",
+    "COUNTED_SEARCH_SURFACES",
     "DEFAULT_SINCE",
     "MCP_TOOL_PATH_PREFIX",
+    "REST_RETRIEVE_EXCLUDED",
     "SEARCH_OPS",
     "SUPPORTED_SURFACES",
     "DailyUsageBucket",
@@ -167,6 +169,29 @@ ADD_OPS: Final[Mapping[str, str]] = {
 #: validate ``surface=`` query strings and to construct the bucket
 #: cross-product when the surface had zero searches.
 SUPPORTED_SURFACES: Final[tuple[str, ...]] = ("kb", "memory", "operations")
+
+#: The fully-qualified labels of the surfaces this counter actually
+#: counts. Derived from :data:`SEARCH_OPS` (the single source of truth
+#: for which audit_log paths feed the aggregation) so the documented
+#: contract cannot drift from the query filter. Only the audited MCP
+#: search meta-tools tick the counter: a row lands in ``audit_log`` with
+#: ``path = f"{MCP_TOOL_PATH_PREFIX}{tool}"`` only when the tool is
+#: invoked over the ``/mcp`` surface. ``POST /api/v1/retrieve`` runs the
+#: same retrieval substrate but audits under ``/api/v1/retrieve`` — not
+#: a counted path — so it is deliberately excluded (see
+#: :data:`REST_RETRIEVE_EXCLUDED`). Surfaced verbatim on
+#: :class:`UsageReport` so a ``total_searches=0`` reads as "REST is not
+#: counted", not "no usage".
+COUNTED_SEARCH_SURFACES: Final[tuple[str, ...]] = tuple(f"mcp:{op_id}" for op_id in SEARCH_OPS)
+
+#: Whether the operator-facing REST ``POST /api/v1/retrieve`` surface
+#: is excluded from this counter. Always ``True`` in v0.2 by design: REST
+#: ``/retrieve`` audits under its own path, not a counted MCP tool
+#: path, so dogfooding exclusively through REST shows a permanent
+#: silent zero. Counting REST would change audit volume and risk
+#: double-counting against the MCP path — a separate scoped change if
+#: ever wanted. This flag exists so the zero is self-explaining.
+REST_RETRIEVE_EXCLUDED: Final[bool] = True
 
 #: Conversion window — a search "converts" if the same operator emits
 #: any subsequent audit_log row within this window. Five minutes is the
@@ -301,6 +326,25 @@ class UsageReport(BaseModel):
     tenant_id: UUID | None
     buckets: list[DailyUsageBucket]
     total_searches: int
+
+    #: The fully-qualified surface labels that actually feed
+    #: ``total_searches`` (``["mcp:search_knowledge", …]``). De-silences
+    #: a zero: an operator who dogfoods exclusively via REST
+    #: ``POST /api/v1/retrieve`` sees ``total_searches=0`` with this
+    #: list present, so the zero reads as "REST is not counted" instead
+    #: of "no retrieval activity". Defaulted from
+    #: :data:`COUNTED_SEARCH_SURFACES` so the response cannot drift from
+    #: the query filter.
+    counted_surfaces: list[str] = Field(
+        default_factory=lambda: list(COUNTED_SEARCH_SURFACES),
+    )
+
+    #: ``True`` whenever REST ``POST /api/v1/retrieve`` is excluded from
+    #: the counter (always, in v0.2 — see :data:`REST_RETRIEVE_EXCLUDED`).
+    #: The machine-readable companion to ``counted_surfaces`` for
+    #: consumers (T6 retire-checklist, dashboards) that want a boolean
+    #: rather than to diff the surface list.
+    rest_excluded: bool = Field(default=REST_RETRIEVE_EXCLUDED)
 
 
 def _search_paths_for(surfaces: Iterable[str]) -> tuple[list[str], dict[str, str]]:

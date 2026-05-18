@@ -76,7 +76,10 @@ from meho_backplane.retrieval.retire import (
     _worst_band,
     compute_retire_checklist,
 )
-from meho_backplane.retrieval.usage import MCP_TOOL_PATH_PREFIX
+from meho_backplane.retrieval.usage import (
+    COUNTED_SEARCH_SURFACES,
+    MCP_TOOL_PATH_PREFIX,
+)
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
@@ -539,6 +542,17 @@ async def test_compute_retire_empty_audit_log_returns_not_yet() -> None:
     assert report.surfaces[0].verdict == "NOT YET"
     daily_use = next(c for c in report.surfaces[0].criteria if c.name == "daily_use_duration")
     assert daily_use.verdict == "red"
+    # #632 de-silencing: a REST-only dogfood produces exactly this
+    # all-red, no-audit-rows state. The report now states *why* the
+    # clock is stuck — the counted surfaces are the audited MCP search
+    # tools, not REST /retrieve.
+    assert report.counted_surfaces == list(COUNTED_SEARCH_SURFACES)
+    assert report.counted_surfaces == [
+        "mcp:search_knowledge",
+        "mcp:search_memory",
+        "mcp:search_operations",
+    ]
+    assert report.rest_excluded is True
 
 
 @pytest.mark.asyncio
@@ -837,7 +851,13 @@ def test_report_json_shape_is_stable() -> None:
         "until",
         "surfaces",
         "overall_verdict",
+        "counted_surfaces",
+        "rest_excluded",
     }
+    # #632: the counted-surface signal ships defaulted from the single
+    # source of truth and is part of the CLI-consumer contract.
+    assert blob["counted_surfaces"] == list(COUNTED_SEARCH_SURFACES)
+    assert blob["rest_excluded"] is True
     assert set(blob["surfaces"][0].keys()) == {"surface", "verdict", "criteria"}
     assert set(blob["surfaces"][0]["criteria"][0].keys()) == {
         "name",

@@ -440,6 +440,45 @@ Failure modes:
   literal enum value) — both emit the constant snake_case enum the
   backplane expects.
 
+## The `tenant` row is seeded just-in-time — no manual step
+
+There is **no** out-of-band tenant-seed step. You do **not** run a
+`psql "INSERT INTO tenant …"` against a fresh deploy, and you do not
+need a tenant-provisioning API call before the first write.
+
+The backplane provisions the `tenant` row just-in-time from the
+verified `tenant_id` claim. The seed runs in the
+`verify_jwt_and_bind` middleware that **every** authenticated route
+flows through (via `require_role`), so the **first authenticated
+request** whose JWT carries a given `tenant_id` — any verb, reads
+and `dry_run` included — triggers an idempotent
+`INSERT INTO tenant (id, slug, name) … ON CONFLICT (id) DO NOTHING`
+committed before the route runs (G0.8-T1, #628). The `slug` / `name`
+default to `tenant-<full-uuid>` (the canonical hyphenated UUID, so
+the slug is as unique as the primary key — `tenant.slug` has its own
+`UNIQUE` index that `ON CONFLICT (id)` does not guard); that
+placeholder is cosmetic and carries no FK — a future v0.3
+tenant-provisioning API can rename it without touching any joined
+data, and the just-in-time path never overwrites a row that already
+exists.
+
+Practical consequences for an operator standing up a v0.2 deploy:
+
+- After the realm recipe above is applied and `meho login` mints a
+  token carrying `tenant_id` / `tenant_role`, the **first
+  authenticated request** of any kind — a read, a `dry_run` ingest,
+  or a real write — seeds the tenant in middleware before the route
+  runs. Before #628 the first real write failed with an asyncpg
+  `documents_tenant_id_fkey` violation because the `tenant` table
+  was empty; that failure mode is gone.
+- Because the seed is in middleware, a `dry_run` ingest seeds the
+  tenant just like any other authenticated request. A green
+  acceptance smoke — even one that only exercises `dry_run` or a
+  read endpoint — therefore **does** prove the row exists.
+- Concurrent first requests for the same tenant are safe — the
+  `ON CONFLICT DO NOTHING` means exactly one row lands regardless of
+  how many requests race.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |

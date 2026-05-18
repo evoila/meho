@@ -42,8 +42,11 @@ search-quality contract lives in the canary.
 
 from __future__ import annotations
 
+import pytest
+
 from meho_backplane.operations.ingest import list_ingested_connectors
 from meho_backplane.operations.meta_tools import (
+    UnknownConnectorError,
     call_operation,
     list_operation_groups,
     search_operations,
@@ -147,26 +150,26 @@ async def test_agent_flow_end_to_end_against_vcsim(
     )
 
 
-async def test_search_operations_unknown_connector_returns_no_hits(
+async def test_search_operations_unknown_connector_raises(
     prewarmed_embeddings: None,
     ingested_canary_vcsim: IngestedCanaryVcsim,
 ) -> None:
-    """An unknown connector_id returns an empty hit list, not an error.
+    """An unknown connector_id raises UnknownConnectorError (REST → 404).
 
-    Same shape the canary's
-    ``test_canary_search_operations_unknown_connector_returns_empty``
-    asserts — the meta-tool's contract is "unknown connector → empty
-    hits" rather than "→ error". Keeping the assertion here makes
-    the agent-flow surface self-contained: any tester running this
-    file alone sees both the happy path and the empty-input path.
+    G0.8-T5 (#630) reversed the prior "unknown connector → empty hits"
+    contract: an empty success was indistinguishable from a known
+    connector with no matching ops, so a mis-shaped connector_id read
+    as an empty catalog. The meta-tool now fails loud; the REST route
+    maps it to a 404. This file stays self-contained — any tester
+    running it alone sees both the happy path and the fail-loud path.
     """
     operator = ingested_canary_vcsim.operator
-    response = await search_operations(
-        operator,
-        {
-            "connector_id": "no-such-connector-9.99",
-            "query": "anything",
-            "limit": 3,
-        },
-    )
-    assert response["hits"] == [], f"expected empty hits for unknown connector; got {response!r}"
+    with pytest.raises(UnknownConnectorError):
+        await search_operations(
+            operator,
+            {
+                "connector_id": "no-such-connector-9.99",
+                "query": "anything",
+                "limit": 3,
+            },
+        )

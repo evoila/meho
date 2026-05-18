@@ -20,6 +20,7 @@ The entry count is a moving target — the canary acceptance test asserts the bo
 - **Roles.** `meho kb ingest` / `add` / `delete` require `tenant_admin`. `meho kb search` / `list` / `show` are `operator`-level. `read_only` callers get HTTP 403 (CLI exit code 5). Tenant scoping is enforced server-side from the JWT — no surface accepts a tenant id.
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>`.
 - **A local checkout of the consumer repo.** `meho kb ingest <dir>` is a server-side bulk import: the path is interpreted on the **backplane host's** filesystem. Run it where the backplane can see the directory (the operator's deploy host with the consumer repo checked out, or a CI runner). The architecture doc's [REST section](../architecture/kb.md#rest-t2-416--five-routes-under-apiv1kb) explains the `tenant_admin` gate.
+- **No manual tenant seed.** You do **not** run a `psql "INSERT INTO tenant …"` before the first ingest, and there is no tenant-provisioning API call to make first. The backplane seeds the `tenant` row just-in-time from the verified `tenant_id` JWT claim in the `verify_jwt_and_bind` middleware every authenticated route flows through (G0.8-T1, #628), so the **first authenticated request** of any kind — including the `--dry-run` in step 2 below — triggers the seed; concurrent first requests are safe (`ON CONFLICT DO NOTHING`).
 
 ## Step-by-step ingestion
 
@@ -47,6 +48,8 @@ meho kb ingest ./kb --json
 ```
 
 Expected: a `KbIngestionResult` with `inserted_count == <file count>` on the first real run. Any per-file failure (binary file masquerading as `.md`, malformed front-matter, invalid slug) is counted in `error_count` and described in `errors[]` — the run continues; one bad file does not abort the corpus.
+
+The `tenant` row was already seeded by the **first authenticated request** of this session — including the `--dry-run` in step 2. The seed runs in the `verify_jwt_and_bind` middleware that every authenticated route flows through (G0.8-T1, #628), so any authenticated call (a read, a `--dry-run`, or this real ingest) provisions the row idempotently before the route runs. Before #628 this step failed with an asyncpg `documents_tenant_id_fkey` violation on a fresh deploy because the `tenant` table was empty; that failure mode is gone.
 
 Slug derivation: the slug is the filename stem (`vcenter-9.0-snapshot-revert.md` → slug `vcenter-9.0-snapshot-revert`) unless the file's YAML front-matter carries a `slug:` override. The consumer's kb has no front-matter today; the override is future-compat. Slugs must match `^[a-z](?:[a-z0-9.\-]*[a-z0-9])?$` — lowercase, start with a letter, end with a letter or digit, with hyphens and **dots** allowed (dots carry the version numbers, e.g. `vcenter-9.0-...`). A filename that does not produce a valid slug surfaces as a per-file error rather than aborting the run.
 
@@ -97,6 +100,12 @@ meho retrieval retire-checklist --json
 ```
 
 It combines the eval results with the open-blocker count (GitHub issues labelled `retrieval-migration-blocker`) into a per-surface GREEN / YELLOW / RED verdict over five criteria. When the **kb** surface is GREEN on all five and the team agrees daily use has shifted:
+
+> **Which surface feeds the overlap clock — read this before you start dogfooding.** The daily-use criteria (criterion 1 "days since first daily use" and criterion 2 "operator breadth") are fed **only by the audited MCP search meta-tools**: `search_knowledge` (kb), `search_memory` (memory), `search_operations` (operations). Those land in `audit_log` under `/mcp/tools/call/<tool>` and are the surfaces named in the `counted_surfaces` field of both `meho retrieval usage --json` and `meho retrieval retire-checklist --json` (e.g. `["mcp:search_knowledge", "mcp:search_memory", "mcp:search_operations"]`).
+>
+> **REST `POST /api/v1/retrieve` is deliberately excluded** (`rest_excluded: true` in the same responses). It runs the identical retrieval substrate but audits under `/api/v1/retrieve`, which is not a counted path — so a `search_knowledge` call ticks the clock while a REST `/retrieve` call does not. Counting REST too is intentionally out of scope for v0.2 (it would change audit volume and risk double-counting against the MCP path).
+>
+> **Practical consequence:** if you dogfood the ≥1-month overlap exclusively through REST `/retrieve` (or before `/mcp` is configured at all), `total_searches` stays `0` and the retire checklist stays RED on criteria 1 + 2 for the entire window — not because the migration failed, but because the counted surface saw no traffic. Dogfood through the MCP `search_knowledge` tool (the agent-facing surface) so the overlap clock actually ticks. The zero is no longer silent: `counted_surfaces` + `rest_excluded` on every `usage` / `retire-checklist` response tell you exactly why a zero is a zero.
 
 1. Open a PR in `evoila-bosnia/claude-rdc-hetzner-dc` removing `kb/`.
 2. Update the consumer's `CLAUDE.md` to drop "grep `kb/`" patterns in favour of "use `meho kb search`".

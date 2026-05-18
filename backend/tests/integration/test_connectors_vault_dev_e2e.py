@@ -138,12 +138,14 @@ _BULK_KEY_COUNT: int = 60
 
 @dataclass
 class _VaultTarget:
-    """Minimal duck-typed target the dispatcher / handlers read.
+    """Minimal duck-typed target the dispatcher / resolver / audit read.
 
-    The connector handlers only touch ``raw_jwt`` (forwarded to the
-    OIDC login, here short-circuited by the seam). ``id`` / ``name`` /
-    ``product`` / ``host`` / ``port`` / ``auth_model`` cover what the
-    resolver and audit row read.
+    The vault handlers read the operator JWT from the request-scoped
+    :class:`~meho_backplane.auth.operator.Operator` the dispatcher
+    threads (G0.8-T3 #629), **not** from the target — so this stub
+    carries no ``raw_jwt``. ``id`` / ``name`` / ``product`` / ``host``
+    / ``port`` / ``auth_model`` cover what the resolver and audit row
+    read.
     """
 
     product: str = "vault"
@@ -151,7 +153,6 @@ class _VaultTarget:
     host: str = "127.0.0.1"
     port: int = 8200
     auth_model: str = "shared_service_account"
-    raw_jwt: str | None = "<dev-test-jwt>"
 
     def __post_init__(self) -> None:
         import uuid

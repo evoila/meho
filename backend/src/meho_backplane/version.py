@@ -9,8 +9,11 @@ is running in the cluster:
 * ``git_sha`` — full commit hash injected by CI at ``docker build`` time
   via ``--build-arg GIT_SHA``.
 * ``build_date`` — ISO-8601 UTC timestamp injected the same way.
-* ``chart_version`` — populated in G2.5 once the helm chart owns the
-  release-version concept; intentionally ``null`` at the chassis stage.
+* ``chart_version`` — the deployed helm chart's ``.Chart.Version``,
+  injected as the ``CHART_VERSION`` env var by the chart's Deployment
+  template. ``null`` when unset (local ``uvicorn`` runs, bare-image
+  starts) so the field never pretends an unknown release is a known
+  one.
 
 Reading the values from environment variables (rather than baking them
 into a generated ``_version.py``) keeps the runtime image generic and
@@ -43,5 +46,5 @@ async def version() -> dict[str, str | None]:
     return {
         "git_sha": os.environ.get("GIT_SHA") or _UNKNOWN,
         "build_date": os.environ.get("BUILD_DATE") or _UNKNOWN,
-        "chart_version": None,
+        "chart_version": os.environ.get("CHART_VERSION") or None,
     }

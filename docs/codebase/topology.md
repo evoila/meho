@@ -25,6 +25,72 @@ models that G9.1-T1 (#448, migration `0007`) created.
 - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
   — shortest unweighted path, or `None` if unreachable.
 
+**Annotation — entry points (async, write half, G9.2-T3 #595):**
+
+- `annotate_edge(session, operator, from_ref, kind, to_ref, *, note=None, evidence_url=None) -> GraphEdge`
+  — create or refresh a curated edge. Resolves both endpoints via
+  `resolve_node`, validates `kind` against `GraphEdgeKind`,
+  idempotent on `(tenant_id, from_node_id, to_node_id, kind)`. Runs
+  §6 conflict detection (sticky `superseded_by` for
+  same-kind/different-endpoint auto edges; bidirectional
+  `conflicts_with` for incompatible kinds over the same endpoint
+  pair). Writes one audit row (`op_id="topology.annotate"`,
+  `op_class="write"`) and publishes one broadcast event.
+- `unannotate_edge(session, operator, *, edge_id=None, from_ref=None, kind=None, to_ref=None) -> UUID`
+  — hard-delete a curated edge (selector is either `edge_id` or the
+  full triple; both/neither → `UnannotateSelectorError`). Refuses
+  `source='auto'` rows with `AutoEdgeDeletionError` (auto edges
+  resurrect on next refresh). Clears reciprocal `superseded_by` /
+  `conflicts_with` markers the deleted edge left on auto rows.
+  Writes one audit row + one broadcast event.
+
+Both service functions own a `session.begin()` block internally and
+publish broadcast events after commit (fail-open per the refresh
+pattern). The REST routes (T5), CLI verbs (T6), and MCP tools (T7)
+funnel through these primitives.
+
+**Resolver — entry point (async, read-only, G9.2-T2 #594):**
+
+- `resolve_node(session, tenant_id, name, kind=None) -> GraphNode` —
+  name → row resolver the G9.2 annotation flow (T3 / T4 in
+  Initiative #364) calls before writing or reading an edge endpoint.
+  Returns the unique `GraphNode` row, or raises
+  `AmbiguousNodeError` (bare name maps to multiple kinds in the
+  tenant) / `NodeNotFoundError` (no match — including names that
+  exist only in another tenant). Works for non-target nodes
+  (`target_id IS NULL`) as well as registered targets. The
+  ambiguity-probe SQL is shared with the traversal verbs'
+  `_assert_anchor_unambiguous`, so the "name → multiple kinds"
+  surface is single-sourced; traversal's not-found behavior is
+  unchanged (empty result, not a raise) — only `resolve_node`
+  surfaces `NodeNotFoundError`.
+
+**Edge listing — entry point (async, read-only, G9.2-T4 #596):**
+
+- `list_edges(session, tenant_id, *, kind=None, source=None,
+  from_ref=None, to_ref=None, conflicts_only=False, limit=200,
+  offset=0) -> list[TopologyEdge]` — flat tenant-scoped
+  filter-composable edge listing. Joins both endpoint nodes so
+  `from` / `to` carry `(id, kind, name)` without a second round
+  trip. Filters compose: `kind=` restricts to one
+  `GraphEdgeKind`, `source=` selects `'auto'` vs `'curated'`,
+  `from_ref` / `to_ref` resolve via `resolve_node` (a ref that maps
+  to no node yields an empty list, not an error; an ambiguous bare
+  name raises `AmbiguousNodeError`), `conflicts_only=True` returns
+  exactly the edges whose `properties.conflicts_with` JSONB is a
+  non-empty array (the marker G9.2-T3 #595 writes on incompatible-
+  kind conflicts — until #595 lands, the predicate is still safe
+  via the `jsonb_typeof = 'array'` guard). Soft-deleted rows
+  (`last_seen IS NULL`) are excluded by default. Pagination is
+  stable: `ORDER BY last_seen DESC NULLS LAST, id` is a strict
+  total order, so a two-page sweep reassembles to the unpaged set
+  with no gaps or duplicates. Unlike the traversal verbs (which
+  take an `Operator` and open their own session), `list_edges`
+  takes `session` and `tenant_id` directly — same shape as
+  `resolve_node`, so callers can compose the listing inside a
+  larger transactional boundary (e.g. the MCP layer batching
+  reads, the annotation flow asserting an edge exists).
+
 Every read verb returns **one row per reachable node** (a node reachable
 by several converging paths is collapsed to its minimum-depth occurrence
 — `CYCLE` alone only dedupes within a single branch). An anchor
@@ -77,6 +143,32 @@ CLI `refresh` verb renders exactly these as `nodes: +A -R ~U` /
 |---|---|---|
 | `nodes` | `tuple[TopologyNode, ...]` | Ordered from the `from` node (`depth == 0`) to the `to` node (`depth == total_hops`). |
 | `total_hops` | `int` | Number of edges traversed; equals `len(nodes) - 1`. |
+
+### `TopologyEdgeEndpoint` — frozen Pydantic v2 (edge listing, G9.2-T4)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | `UUID` | `graph_node.id`. |
+| `kind` | `str` | `graph_node.kind`. |
+| `name` | `str` | `graph_node.name`. |
+
+Compact node identity carried as `from_endpoint` / `to_endpoint` on
+`TopologyEdge`. The full node `properties` bag is intentionally
+**not** included — an edge listing is a survey of relationships,
+not a node dump; callers that need the bag look the node up
+separately via `resolve_node`.
+
+### `TopologyEdge` — frozen Pydantic v2 (edge listing, G9.2-T4)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | `UUID` | `graph_edge.id`. |
+| `from_endpoint` | `TopologyEdgeEndpoint` | The edge's source node identity. The route layer (T5) applies the `from` / `to` alias on `model_dump(by_alias=True)` for the wire shape — the substrate model itself keeps plain attribute names so mypy/static checkers don't lose the kwarg signature. |
+| `to_endpoint` | `TopologyEdgeEndpoint` | The edge's destination node identity. |
+| `kind` | `str` | One of the ten `GraphEdgeKind` values (closed enum since G9.2-T1 #593). |
+| `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-asserted). |
+| `properties` | `dict` | `graph_edge.properties` JSONB; deep-frozen (same discipline as `TopologyNode.properties`). Carries the conflict markers `conflicts_with` (array, G9.2-T3 #595) and `superseded_by` (UUID, also #595). |
+| `last_seen` | `datetime \| None` | The refresh service's "I observed this edge at" timestamp. NULL after a soft-delete; soft-deleted edges are excluded from `list_edges` by default. Also the stable total-order key the helper paginates against. |
 
 ## Control flow — write half
 
@@ -205,6 +297,20 @@ kinds. `find_path` applies the same probe independently to each
 endpoint. Alias → name resolution remains the T5/T6 router's job; this
 substrate matches `graph_node.name` directly.
 
+As of G9.2-T2 (#594), `AmbiguousNodeError` is defined in
+`meho_backplane.topology.resolvers` (alongside `resolve_node` and the
+new `NodeNotFoundError`) and re-exported by
+`meho_backplane.topology.query` for back-compat with pre-G9.2
+importers. The kind-collection SQL is single-sourced in the resolver
+module; the traversal's `_assert_anchor_unambiguous` and
+`resolve_node` call into the same helper, so the "name → multiple
+kinds in this tenant" surface stays consistent across the two
+call paths. The not-found behavior intentionally differs between the
+two surfaces: `resolve_node` raises `NodeNotFoundError`; the
+traversal verbs keep G9.1's silent-on-miss contract (empty result,
+not an exception) — opting traversal into the stricter raise-on-miss
+contract is explicitly out of scope for G9.2-T2.
+
 The root is always included at depth 0, so callers distinguish "node
 exists but has no dependents" (one-element list) from "node does not
 exist in this tenant" (empty list).
@@ -228,10 +334,102 @@ repeat row `is_cycle = true` (filtered out). An `A → B → A` graph
 terminates instead of recursing forever. The `depth` / `max_hops`
 bound is an independent second guard against acyclic-but-deep graphs.
 
-## REST API surface (T5, #453)
+### Superseded-edge exclusion (G9.2-T3 #595)
+
+Every traversal CTE filters
+`graph_edge.properties->>'superseded_by' IS NULL` in its recursive
+term — an auto edge an operator's curated annotation has marked
+superseded drops out of every closure. The guard fires on **four**
+edge-pulling sites: the recursive term of both
+`_TRAVERSAL_SQL_REVERSE` and `_TRAVERSAL_SQL_FORWARD`, and **both
+legs** of the `bi_edge` CTE in `_PATH_SQL` (the forward leg
+`from→to` and the reversed leg `to→from`; missing the reversed leg
+would let a superseded edge be walked backwards into a shortest path).
+
+The supersede mark is sticky across refresh: `_reconcile_edges` merges
+incoming hint `properties` against the reserved keys (`superseded_by`,
+`conflicts_with`) so a re-observed auto edge keeps the marker that
+`annotate_edge` stamped. The merge is **one-sided**: those reserved
+keys are also *stripped from the incoming hint* via
+`_strip_reserved_markers` so a buggy or hostile connector emitting
+`superseded_by` in its `EdgeHint.properties` cannot smuggle the marker
+onto an auto edge from the probe path. The same sanitizer runs on the
+insert path (fresh auto edge), so the §6 annotate-only invariant holds
+fail-closed regardless of how unrusted the upstream hint is. And for
+edges with `source='curated'`, `_reconcile_edges` skips the property
+merge entirely — only `last_seen` bumps; the operator-supplied `note`
+/ `evidence_url` / `annotated_*` fields are never touched by a refresh.
+Only `unannotate_edge` of the curated row clears the marker. The `->>`
+operator is PG-only (manual §9.16); the recursive CTE is itself PG-only,
+so the guard runs only where the column is JSONB.
+
+## Annotation control flow (write half — G9.2-T3 #595)
+
+### `annotate_edge`
+
+1. Validate `kind` against `GraphEdgeKind` (raise
+   `InvalidEdgeKindError` *before* any DB read).
+2. `async with session.begin()` — one transaction wraps the whole
+   resolve + write + conflict-scan + audit-row.
+3. `resolve_node` for both endpoints (`operator.tenant_id` is the
+   scope; cross-tenant references resolve to `NodeNotFoundError`).
+4. Look up the existing edge for the
+   `(tenant_id, from_node_id, to_node_id, kind)` unique tuple. Found
+   → merge `properties` and refresh `last_seen` (idempotent). If the
+   existing row's `source` is `'auto'` (operator is claiming an
+   auto-discovered edge), promote it: set `source='curated'` and
+   `discovered_by=operator.sub` so triple-form `unannotate_edge` and
+   the next §6 scan treat the row as operator-owned. Absent
+   → `INSERT` a fresh row with `source='curated'`,
+   `discovered_by=operator.sub`,
+   `properties={note, evidence_url, annotated_by, annotated_at}`.
+5. **§6 conflict detection.** Same-kind / different-endpoint: scan
+   auto edges sharing `from_node_id` + `kind` + `source='auto'` and
+   a *different* `to_node_id`; stamp their `properties.superseded_by
+   = <curated-id>`. Incompatible-kind: scan edges on the same
+   `(from_node_id, to_node_id)` of any *other* kind; append the
+   curated id to each row's `properties.conflicts_with` (deduped)
+   and reciprocally append each conflicting edge's id to the
+   curated row.
+6. Add one `audit_log` row in the same session
+   (`method="ANNOTATE"`, `path="topology.annotate"`,
+   `payload={op_id, op_class:"write", edge_id, from, to, kind, note,
+   evidence_url, superseded[], conflicts[]}`, `target_id` =
+   from-node's `target_id` when non-null).
+7. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
+   set explicitly because the `.annotate` suffix is not in
+   `_WRITE_SUFFIXES`; §10 of #364 locks the *write* classification
+   so annotations broadcast in full per the G6.1 default classifier).
+   Publish is fail-open: a publish exception is logged, never raised.
+
+### `unannotate_edge`
+
+1. Validate the selector — exactly one of `edge_id` or the full
+   `(from_ref, kind, to_ref)` triple. Both / neither / partial triple
+   → `UnannotateSelectorError`.
+2. `async with session.begin()`.
+3. Resolve the target row. `edge_id` path: `session.get` + tenant
+   check (a row in another tenant looks "not found" — the tenant
+   boundary holds). Triple path: `resolve_node` for each endpoint
+   + the unique-tuple lookup.
+4. Refuse if `edge.source != "curated"` — auto edges resurrect on
+   next refresh, so manual deletion is meaningless;
+   `AutoEdgeDeletionError`. The API layer maps this to HTTP 409.
+5. Scan every edge in the tenant whose `properties.superseded_by` or
+   `properties.conflicts_with` references the removed edge id;
+   clear the back-references so a superseded auto edge reappears in
+   traversal and dangling ids do not linger.
+6. `session.delete(edge)` (hard delete — curated history lives on
+   via G9.3).
+7. Add one `audit_log` row in the same session
+   (`method="UNANNOTATE"`, `path="topology.unannotate"`,
+   `op_class="write"`). Commit. Publish one broadcast event
+   (fail-open).
+
+## REST API surface (T5, #453 + G9.2-T5 #597)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Five routes total — four on the topology
+the read + write halves. Eight routes total — seven on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -240,6 +438,9 @@ router, one on the targets router:
 | `GET /api/v1/topology/dependencies/{name}` | `find_dependencies` | `topology.dependencies` | operator |
 | `GET /api/v1/topology/path?from=A&to=B` | `find_path` | `topology.path` | operator |
 | `POST /api/v1/topology/refresh/{target_name}` | `refresh_target_topology` | `topology.refresh` | operator |
+| `POST /api/v1/topology/edges` | `annotate_edge` (T3 #595) | `topology.annotate` | **tenant_admin** |
+| `DELETE /api/v1/topology/edges/{edge_id}` | `unannotate_edge` (T3 #595) | `topology.unannotate` | **tenant_admin** |
+| `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
 | `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
 
 Load-bearing details:
@@ -255,7 +456,8 @@ Load-bearing details:
 - **Ambiguous anchor.** `AmbiguousNodeError` (a `ValueError` from the
   query layer) is mapped to HTTP 409 `ambiguous_node` with the
   candidate kinds echoed in `detail` so the caller can re-issue with
-  an explicit `kind`.
+  an explicit `kind`. Used by the four read verbs and by `POST /edges`
+  / `GET /edges` when an endpoint name is ambiguous.
 - **Depth/hop ceilings.** The route caps `depth` at 64 and `max_hops`
   at 32 at the HTTP boundary (over the service defaults of 16 / 8) so
   a hostile query param cannot ask the recursive CTE to walk an
@@ -266,6 +468,49 @@ Load-bearing details:
   + one broadcast event with the per-target counts. The two rows are
   intentional — same shape as the operations dispatcher writing a
   domain row alongside the middleware's HTTP row.
+- **Curated-edge writes are `tenant_admin`.** `POST /edges` and
+  `DELETE /edges/{id}` sit behind `require_role(TenantRole.TENANT_ADMIN)`
+  — Initiative #364 §5: annotation is a policy-layer assertion, so an
+  operator-level member must not be able to add a `depends-on` edge
+  that shrinks the auto-flagged blast radius of an op they then run.
+  Same gate the canonical `POST /api/v1/targets` precedent (G0.3)
+  uses. `GET /edges` stays at `operator` (a tenant inventory view).
+- **§3 auto-edge deletion → 409.** `AutoEdgeDeletionError` (raised when
+  `DELETE /edges/{id}` resolves a `source='auto'` row) maps to HTTP 409
+  `auto_edge_deletion` with the edge id and a message naming the
+  auto-vs-curated rule. Auto edges resurrect on the next refresh, so a
+  hard delete is meaningless — the CLI / MCP fronts can prompt the
+  operator to annotate-over-auto instead. Missing or cross-tenant ids
+  collapse to 404 `edge_not_found` (the tenant boundary is opaque to
+  the caller; leaking "exists in another tenant" would violate it).
+- **Curated-edge write audit class.** `POST` / `DELETE` bind
+  `audit_op_class="write"` explicitly — `.annotate` / `.unannotate`
+  are not in the broadcast classifier's `_WRITE_SUFFIXES` so the
+  default classifier would fall through to `op_class="other"` and the
+  broadcast event would under-emit per §10. `GET /edges` binds
+  `op_class="read"`.
+- **`POST /edges` body shape.** The request body is
+  `{"from": {"name": ..., "kind"?}, "kind": <GraphEdgeKind>,
+    "to": {"name": ..., "kind"?}, "note"?, "evidence_url"?}` —
+  `from` / `to` are nested `_EdgeEndpoint` objects (mirrors the
+  service-layer `NodeRef` dataclass on the wire). `kind` is typed
+  against `GraphEdgeKind` so Pydantic rejects unknown kinds at the
+  boundary with 422 before the service runs. `extra="forbid"` rejects
+  typo'd keys at the boundary too.
+- **`GET /edges` query params** are forwarded straight through to
+  `list_edges` (`kind?`, `source?` constrained to `auto|curated` by a
+  regex pattern, `from?` / `to?` aliased because `from` is a Python
+  keyword, `conflicts?` bool, `limit?` capped at 1000, `offset?`). A
+  bare `from` / `to` that resolves to multiple kinds surfaces as 409
+  `ambiguous_node` — the caller re-issues with an explicit kind. A
+  name that resolves to no node yields an empty list, not a 404 —
+  consistent with the helper's "missing anchor → empty result" shape.
+- **`TopologyEdge` wire alias.** The Pydantic model attributes are
+  `from_endpoint` / `to_endpoint` (Python keywords forbid the bare
+  forms); `Field(serialization_alias="from"|"to")` restores the wire
+  shape Initiative #364 §8 specifies. FastAPI's default
+  `response_model_by_alias=True` honours the alias so every response
+  body lands as `{from, to, ...}` without manual `model_dump` calls.
 - **`targets/discover`.** Iterates every connector implementation
   registered for the product (the v2 registry, which subsumes v1
   registrations; deduped by connector class), calls `list_candidates`
@@ -277,15 +522,17 @@ Load-bearing details:
 - **Tenant scoping.** No route accepts a `tenant_id` from the path,
   query string, or body. The query verbs filter on
   `operator.tenant_id`; `refresh` / `discover` resolve targets
-  tenant-scoped via `resolve_target`. Cross-tenant traversal *and*
-  cross-tenant refresh are impossible by construction (proven by the
-  two-tenant integration test).
+  tenant-scoped via `resolve_target`; `annotate_edge` /
+  `unannotate_edge` / `list_edges` resolve endpoints + filter on
+  `operator.tenant_id`. Cross-tenant traversal, refresh, annotation,
+  and listing are all impossible by construction.
 
 Tests: `backend/tests/test_api_v1_topology.py` +
 `backend/tests/test_api_v1_targets_discover.py` (service layer patched,
-SQLite); `backend/tests/integration/test_topology_api.py` (all 5 routes
+SQLite); `backend/tests/integration/test_topology_api.py` (read + refresh
 end-to-end + the cross-tenant boundary against a real
-`pgvector/pgvector:pg16` container).
+`pgvector/pgvector:pg16` container). Curated-edge end-to-end coverage
+is the T9 integration sweep (#601).
 
 ## CLI front (T6, #454)
 

@@ -82,7 +82,7 @@ func newListEdgesCmd() *cobra.Command {
 			"emits the raw response array.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runListEdges(cmd, listEdgesOptions{
 				Kind:              kindFilter,
 				Source:            sourceFilter,

@@ -69,6 +69,7 @@ import contextlib
 import os
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -76,7 +77,7 @@ from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 import meho_backplane.operations._handler_resolve as _handler_resolve_module
 from meho_backplane.connectors.kubernetes import (
@@ -92,6 +93,7 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.meta_tools import call_operation, search_operations
@@ -111,6 +113,20 @@ DOCKER_AVAILABLE: bool = _docker_socket_present()
 SKIP_REASON: str = (
     "Docker socket unavailable in this sandbox; runs in CI where containers are provisioned."
 )
+
+#: Tenant the test operators run under. Must equal the
+#: ``_make_operator`` default tenant_id so the seeded ``Target`` ORM
+#: row and the operator built by every ``call_operation`` test are
+#: tenant-consistent — :func:`resolve_target` is tenant-scoped
+#: (``WHERE tenant_id = ? AND name = ?``) and is the meta-tool's
+#: tenant-isolation boundary, so a mismatch surfaces as
+#: ``TargetNotFoundError`` (404), not a silent cross-tenant read.
+_OPERATOR_TENANT_ID: UUID = UUID("00000000-0000-0000-0000-00000000a0a0")
+
+#: Name the meta-tool ``call_operation`` test resolves via
+#: ``{"target": {"name": _TARGET_NAME}}`` → :func:`resolve_target`.
+#: Matches the ``_K3sTarget`` stub the direct-``dispatch`` tests pass.
+_TARGET_NAME: str = "k3s-e2e"
 
 #: Every op id this harness exercises. Pinned here (rather than
 #: re-derived from ``KUBERNETES_OPS``) so a registration regression
@@ -261,6 +277,24 @@ async def k8s_e2e(
     5. Set the pass-through reducer so set-shaped op results land
        verbatim in ``OperationResult.result`` (v0.2 default; G3.3-T4's
        JSONFlux reducer is a separate test concern).
+    6. Insert a tenant-scoped :class:`~meho_backplane.db.models.Target`
+       ORM row (``name="k3s-e2e"``, ``tenant_id=_OPERATOR_TENANT_ID``,
+       ``product="k8s"``, ``fingerprint={"version": "1.32.0"}``) so the
+       ``call_operation`` meta-tool path — which resolves
+       ``arguments["target"]={"name": ...}`` through the tenant-scoped
+       :func:`~meho_backplane.targets.resolver.resolve_target` (the
+       meta-tool's tenant-isolation boundary) — exercises the real
+       contract instead of being handed an already-resolved object.
+       host/port/secret_ref mirror the ``_K3sTarget`` stub; they never
+       reach a real cluster because phase 3 preseeded the connector
+       instance cache (the dispatcher resolves the class, the seeded
+       instance's injected loader returns the k3s kubeconfig directly).
+       The ``targets`` table is a soft-FK column the ``pg_engine``
+       fixture does not truncate, so the row is deleted on teardown to
+       keep per-test isolation (a leftover ``k3s-e2e`` row would make a
+       subsequent resolve raise ``AmbiguousTargetError`` only if a
+       duplicate alias existed, but the explicit delete keeps the
+       ``targets`` table empty between tests regardless).
     """
     kubeconfig, target = k3s_kubeconfig_and_target
 
@@ -282,6 +316,41 @@ async def k8s_e2e(
 
     await register_kubernetes_typed_operations(embedding_service=stub_embedding_service)
 
+    # Phase 6: seed the tenant-scoped Target ORM row the meta-tool
+    # contract resolves by name. The ORM model structurally satisfies
+    # KubernetesTargetLike (name/host/port/secret_ref) and the resolver
+    # reads product + fingerprint["version"] + preferred_impl_id off it
+    # exactly as a production probed target. fingerprint is a JSON dict
+    # (the probe route persists FingerprintResult.model_dump(mode="json")
+    # to this column), so resolve_connector's _resolve_target_version
+    # reads it via .get("version"); the K8s connector advertises
+    # supported_version_range=None so the version is not filtered on,
+    # only echoed into the audit payload — same as the _K3sTarget stub.
+    now = datetime.now(UTC)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(
+            TargetORM(
+                id=uuid4(),
+                tenant_id=_OPERATOR_TENANT_ID,
+                name=_TARGET_NAME,
+                aliases=[],
+                product="k8s",
+                host=target.host,
+                port=target.port,
+                fqdn=None,
+                secret_ref=target.secret_ref,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                notes=None,
+                fingerprint={"version": "1.32.0"},
+                preferred_impl_id=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
     try:
         yield target
     finally:
@@ -289,6 +358,17 @@ async def k8s_e2e(
         # mask the test's own assertion failures.
         with contextlib.suppress(Exception):
             await seeded_connector.aclose()
+        # Delete the seeded Target row — pg_engine does not truncate
+        # `targets` (soft-FK column), so without this a leftover row
+        # leaks across tests in the same container session.
+        with contextlib.suppress(Exception):
+            async with sessionmaker() as session, session.begin():
+                await session.execute(
+                    delete(TargetORM).where(
+                        TargetORM.tenant_id == _OPERATOR_TENANT_ID,
+                        TargetORM.name == _TARGET_NAME,
+                    )
+                )
         reset_dispatcher_caches()
         clear_registry()
 
@@ -393,14 +473,27 @@ async def test_search_operations_returns_hits_for_each_op(
 async def test_call_operation_about_dispatches_through_meta_tool(
     k8s_e2e: _K3sTarget,
 ) -> None:
-    """``call_operation(k8s.about)`` round-trips dispatcher -> handler -> k3s."""
-    operator = _make_operator(sub="op-meta-about")
+    """``call_operation(k8s.about)`` round-trips dispatcher -> handler -> k3s.
+
+    Exercises the real meta-tool target contract: ``call_operation``
+    requires ``arguments["target"]`` to be ``{"name": <str>}`` and runs
+    it through the tenant-scoped :func:`resolve_target` (the meta-tool's
+    tenant-isolation boundary, since #438 G0.6-T8) before dispatch — it
+    does NOT accept an already-resolved target object. The ``k8s_e2e``
+    fixture seeds the matching tenant-scoped ``Target`` ORM row; the
+    operator built here uses the same default tenant
+    (``_OPERATOR_TENANT_ID``) so resolution succeeds. The other suites
+    call :func:`dispatch` directly with the duck-typed ``_K3sTarget``;
+    that low-level path legitimately accepts the object — only the
+    meta-tool enforces the name→resolve_target contract.
+    """
+    operator = _make_operator(sub="op-meta-about", tenant_id=_OPERATOR_TENANT_ID)
     result = await call_operation(
         operator,
         {
             "connector_id": "k8s-1.x",
             "op_id": "k8s.about",
-            "target": k8s_e2e,
+            "target": {"name": _TARGET_NAME},
             "params": {},
         },
     )

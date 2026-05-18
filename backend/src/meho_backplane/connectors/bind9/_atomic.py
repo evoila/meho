@@ -481,7 +481,24 @@ if [ -n "${{BIND9_STAGED_TAR_B64:-}}" ]; then
     fi
 else
     # Single-file mode: write the staged bytes to the audit slice.
-    if ! STAGE_OUT=$(printf '%s' "$BIND9_STAGED_B64" | base64 -d > "$AUDIT_SLICE_PATH" 2>&1); then
+    # Redirection order matters: ``2>&1 > "$AUDIT_SLICE_PATH"`` dupes
+    # stderr to the still-current stdout (the command-substitution
+    # pipe captured by ``STAGE_OUT``) FIRST, then swaps stdout to the
+    # target file. Net effect: the decoded bytes land in the file
+    # (where they belong), and any decoder diagnostic (corrupt base64,
+    # ENOSPC, EACCES, read-only fs) lands in ``STAGE_OUT`` so the
+    # ``FAILED_DETAIL`` section carries the real reason. The earlier
+    # shape ``> "$AUDIT_SLICE_PATH" 2>&1`` is the inverse: stdout points
+    # at the file first, then stderr is duped to where stdout now
+    # points -- so a base64 error message would be appended into the
+    # (already-truncated) target file and ``FAILED_DETAIL`` would
+    # arrive empty. The pipeline splits across lines (bash command
+    # substitution accepts newlines inside ``$(...)``) so the rendered
+    # script stays under the linter's column cap.
+    if ! STAGE_OUT=$(
+        printf '%s' "$BIND9_STAGED_B64" | base64 -d \
+            2>&1 > "$AUDIT_SLICE_PATH"
+    ); then
         rollback
         echo "===FAILED_STEP===stage"
         echo "===FAILED_DETAIL_BEGIN==="

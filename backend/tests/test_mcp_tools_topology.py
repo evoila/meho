@@ -146,16 +146,22 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     schema = tools["query_topology"]["inputSchema"]
     assert schema["required"] == ["kind"]
     assert schema["additionalProperties"] is False
+    # G9.2-T7 (#598) widened the enum with the `edges` facet (replaces a
+    # standalone list_edges meta-tool); the closure / path branches and
+    # their conditional requireds stay unchanged.
     assert schema["properties"]["kind"]["enum"] == [
         "dependents",
         "dependencies",
         "path",
+        "edges",
     ]
     conditionals = schema["allOf"]
     by_kind = {c["if"]["properties"]["kind"]["const"]: c["then"]["required"] for c in conditionals}
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     assert sorted(by_kind["path"]) == ["from_name", "to_name"]
+    # `edges` has no required field — all filters are optional.
+    assert "edges" not in by_kind
     # MEHO-internal fields stripped from the wire shape.
     assert "required_role" not in tools["query_topology"]
     assert "op_class" not in tools["query_topology"]

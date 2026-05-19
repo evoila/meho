@@ -10,26 +10,28 @@ account ``{"username": ..., "password": ...}`` dict) is split out behind a
 narrow :class:`VsphereSessionLoader` callable so:
 
 * Production deploys can override the default loader at construction time
-  once G0.3 (#224) lands the operator-context Vault read path.
+  with the operator-context Vault read path.
 * Unit tests inject their own (mock) loader that returns a pre-built dict.
 * Integration tests against vcsim pass a loader that yields the
   simulator's hard-coded ``user``/``pass`` credentials.
 
-The default loader, :func:`load_session_credentials_from_vault`, raises
-:exc:`NotImplementedError` until G0.3 (#224) merges. Mirrors the
+The default loader, :func:`load_session_credentials_from_vault`, is a
+deliberate stub: the operator-context per-target Vault credential read
+is not yet wired for the vmware-rest connector, so it raises
+:exc:`NotImplementedError`. It mirrors the
 shape :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubeconfig_from_vault`
-already established for :class:`KubernetesConnector` — once the Target
-model + operator-context Vault reads land, both loaders pick up the
-concrete implementation in a single follow-up commit.
+already established for :class:`KubernetesConnector`. The live read is
+tracked under the open
+`Goal #214 (Connector parity) <https://github.com/evoila/meho/issues/214>`_.
 
 The :class:`VsphereTargetLike` Protocol captures the minimum target shape
 the connector reads: ``name`` (for the per-target session cache key),
 ``host``, ``port`` (forwarded to :meth:`HttpConnector._base_url`),
 ``secret_ref`` (the Vault path the loader resolves), and ``auth_model``
 (checked by :meth:`VmwareRestConnector.auth_headers` to reject
-``per_user`` / ``impersonation`` targets at the boundary). Once G0.3 ships
-its concrete ``Target`` model in :mod:`meho_backplane.targets`, the
-model satisfies this Protocol structurally — no edits here.
+``per_user`` / ``impersonation`` targets at the boundary). Any concrete
+``Target`` model in :mod:`meho_backplane.targets` that exposes these
+attributes satisfies this Protocol structurally — no edits here.
 """
 
 from __future__ import annotations
@@ -62,9 +64,9 @@ class SessionCredentials(Protocol):
 class VsphereTargetLike(Protocol):
     """Minimum target shape :class:`VmwareRestConnector` reads.
 
-    Structural Protocol — once G0.3 (#224) lands the concrete ``Target``
-    model in :mod:`meho_backplane.targets`, that model satisfies this
-    Protocol unchanged. ``auth_model`` is checked at the boundary so a
+    Structural Protocol — any concrete ``Target`` model in
+    :mod:`meho_backplane.targets` that exposes these attributes
+    satisfies it unchanged. ``auth_model`` is checked at the boundary so a
     target tagged ``per_user`` or ``impersonation`` raises a clear error
     rather than silently authenticating as the shared service account.
 
@@ -99,22 +101,26 @@ async def load_session_credentials_from_vault(
 ) -> dict[str, str]:
     """Default credential loader — Vault read by ``target.secret_ref``.
 
-    Stubbed until G0.3 (#224) lands the ``Target`` model and the
-    operator-context Vault read path. Mirrors
+    Deliberate stub: the operator-context per-target Vault credential
+    read is not yet wired for the vmware-rest connector. Mirrors
     :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubeconfig_from_vault`'s
     NotImplementedError stub so the wiring shape is stable: a production
     caller without an explicit loader override receives a clear error
     rather than a silent fallback or a hallucinated credential pair.
 
-    Once G0.3 lands, this function becomes the live implementation that
-    reads the ``vsphere/<target.name>`` Vault path and returns the
-    parsed ``{"username": ..., "password": ...}`` dict. Until then,
-    tests and any acceptance harness inject a custom
-    :class:`VsphereSessionLoader` on connector construction.
+    The supported workaround is to inject a custom
+    :class:`VsphereSessionLoader` (``session_loader``) on
+    ``VmwareRestConnector`` at construction time; tests and acceptance
+    harnesses do exactly that. The live read — which will read the
+    ``vsphere/<target.name>`` Vault path and return the parsed
+    ``{"username": ..., "password": ...}`` dict — is tracked under the
+    open Goal #214 (Connector parity).
     """
     raise NotImplementedError(
-        "load_session_credentials_from_vault requires G0.3 Target model + "
-        f"operator-context Vault read; target={target.name!r} "
-        f"secret_ref={target.secret_ref!r}. Inject a custom session_loader "
-        "on VmwareRestConnector until G0.3 lands."
+        "load_session_credentials_from_vault is a deliberate stub: the "
+        "operator-context per-target Vault credential read is not yet wired "
+        f"for the vmware-rest connector; target={target.name!r} "
+        f"secret_ref={target.secret_ref!r}. Workaround: inject a custom "
+        "session_loader on VmwareRestConnector. Tracked under open "
+        "Goal #214 (Connector parity): https://github.com/evoila/meho/issues/214"
     )

@@ -184,23 +184,22 @@ async def test_no_header_uses_default_detail(
 
 
 @pytest.mark.asyncio
-async def test_full_header_records_request_override_origin(
+async def test_full_header_keeps_default_origin_for_non_sensitive_route(
     isolated_audit_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``X-Broadcast-Detail: full`` on a sensitive op flips origin to ``request_override``.
+    """``X-Broadcast-Detail: full`` is a no-op on a non-sensitive op.
 
     The chassis ``GET /api/v1/health`` route classifies as ``other``
     op_class, so the default detail is already ``"full"`` and the
-    request_override branch is a no-op (header value isn't honored
-    for non-sensitive classes per resolver logic). Use the route
-    anyway to assert the middleware *binds* the contextvar; the
-    resolver's no-op-on-non-sensitive guard is exercised by
-    :mod:`tests.test_broadcast_overrides_resolver`.
+    resolver's request_override branch is gated to sensitive classes
+    only (per resolver logic). The middleware still *binds* the
+    contextvar; the resolver simply doesn't honor it for this op
+    class. Origin therefore stays ``"default"``.
 
-    Pins: when the header is ``full`` and the op is non-sensitive,
-    origin stays ``"default"`` (the request_override branch never
-    fires).
+    The resolver's "request_override upgrades sensitive class" path
+    is exercised by :mod:`tests.test_broadcast_overrides_resolver`
+    (which calls the resolver directly).
     """
     captured = _capture_publish(monkeypatch)
     response = _hit_health(monkeypatch, **{"X-Broadcast-Detail": "full"})
@@ -275,6 +274,7 @@ async def test_case_insensitive_header_value(
     # of an ``broadcast_detail_invalid_header`` log line (would be
     # asserted via caplog in a full structlog harness).
     assert rows[0].payload["broadcast_detail_origin"] == "default"
+    assert rows[0].payload["broadcast_detail_effective"] == "full"
     assert len(captured) == 1
 
 
@@ -304,10 +304,7 @@ def test_middleware_unbinds_contextvar_after_request() -> None:
 
     async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
         # During the inner app's execution, the contextvar IS bound.
-        assert (
-            structlog.contextvars.get_contextvars().get("broadcast_detail_override")
-            == "full"
-        )
+        assert structlog.contextvars.get_contextvars().get("broadcast_detail_override") == "full"
 
     middleware = BroadcastDetailMiddleware(_inner_app)
     scope = {
@@ -317,6 +314,4 @@ def test_middleware_unbinds_contextvar_after_request() -> None:
     structlog.contextvars.clear_contextvars()
     asyncio.run(middleware(scope, lambda: None, lambda _msg: None))  # type: ignore[arg-type]
     # After the middleware returns, the slot is gone.
-    assert (
-        structlog.contextvars.get_contextvars().get("broadcast_detail_override") is None
-    )
+    assert structlog.contextvars.get_contextvars().get("broadcast_detail_override") is None

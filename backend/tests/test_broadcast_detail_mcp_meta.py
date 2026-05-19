@@ -195,3 +195,4 @@ async def test_mcp_tools_call_with_malformed_meta_does_not_crash(
     mcp_rows = [r for r in rows if r.method == "MCP"]
     assert len(mcp_rows) == 1
     assert mcp_rows[0].payload["broadcast_detail_origin"] == "default"
+    assert mcp_rows[0].payload["broadcast_detail_effective"] == "full"

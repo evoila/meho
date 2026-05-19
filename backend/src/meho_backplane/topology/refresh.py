@@ -45,7 +45,7 @@ from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import false, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -99,7 +99,18 @@ class RefreshResult(BaseModel):
 
 
 def _node_key(kind: str, name: str) -> tuple[str, str]:
-    """Natural key for a node within a ``(tenant_id, target scope)``."""
+    """Natural key for a node within a tenant.
+
+    ``graph_node`` is unique on ``(tenant_id, kind, name)`` — the
+    ``graph_node_tenant_kind_name_idx`` index is **target-independent**.
+    A node can therefore already exist in the tenant under a different
+    ``target_id`` (discovered by another target) or under
+    ``target_id IS NULL`` (a manually-annotated node — see
+    :func:`meho_backplane.topology.resolvers.resolve_node`). The
+    reconcile must key its upsert decision on this tenant-wide grain,
+    not on the per-target scope, or a node the snapshot re-asserts
+    collides with the existing row on the unique index.
+    """
     return (kind, name)
 
 
@@ -189,6 +200,54 @@ def _merge_edge_properties(
     return merged
 
 
+async def _load_reconcile_candidate_nodes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    nodes: tuple[NodeHint, ...],
+) -> list[GraphNode]:
+    """Load every node a node-reconcile pass might touch, by natural key.
+
+    ``graph_node`` is unique on ``(tenant_id, kind, name)``
+    (target-independent), so the upsert decision must consider rows
+    under *any* ``target_id`` — a node discovered by this target may
+    already exist because another target discovered it, or because an
+    operator annotated it (``target_id IS NULL``). The query unions two
+    row sets within the tenant:
+
+    * rows whose ``(kind, name)`` is in the current snapshot — the
+      upsert candidates (the set the old ``target_id``-only filter
+      missed, which is the #673 collision: a re-INSERT of a row that
+      already exists under a different / NULL ``target_id`` blew the
+      unique index mid-reconcile under autoflush);
+    * rows already owned by *this* target — needed for the soft-delete
+      pass, which must stay scoped to this target so a refresh never
+      soft-deletes another target's node or a manual annotation.
+    """
+    discovered_pairs = {(n.kind, n.name) for n in nodes}
+    snapshot_predicate = (
+        tuple_(GraphNode.kind, GraphNode.name).in_(sorted(discovered_pairs))
+        if discovered_pairs
+        else false()
+    )
+    return list(
+        (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    or_(
+                        snapshot_predicate,
+                        GraphNode.target_id == target_id,
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 async def _reconcile_nodes(
     session: AsyncSession,
     *,
@@ -210,23 +269,15 @@ async def _reconcile_nodes(
       (inserted or kept). The edge pass resolves *discovered* edge
       endpoints through this map; an edge pointing at a node the
       current discovery dropped is itself dropped (soft-deleted).
-    * ``all_key_to_id`` — every node in the ``(tenant, target)`` scope,
-      including ones soft-deleted this refresh or on a prior one. The
-      edge pass needs this to map an *existing* edge's ``from/to`` node
-      ids back to keys so it can decide whether that edge is still
-      discovered (and to soft-delete it when it is not).
+    * ``all_key_to_id`` — every loaded node (see
+      :func:`_load_reconcile_candidate_nodes`), including ones
+      soft-deleted this refresh or on a prior one. The edge pass needs
+      this to map an *existing* edge's ``from/to`` node ids back to keys
+      so it can decide whether that edge is still discovered (and to
+      soft-delete it when it is not).
     """
-    existing_rows = (
-        (
-            await session.execute(
-                select(GraphNode).where(
-                    GraphNode.tenant_id == tenant_id,
-                    GraphNode.target_id == target_id,
-                )
-            )
-        )
-        .scalars()
-        .all()
+    existing_rows = await _load_reconcile_candidate_nodes(
+        session, tenant_id=tenant_id, target_id=target_id, nodes=nodes
     )
     existing_by_key = {_node_key(r.kind, r.name): r for r in existing_rows}
 
@@ -261,15 +312,30 @@ async def _reconcile_nodes(
             all_key_to_id[key] = new_id
             added += 1
             continue
-        # Present in both — refresh last_seen, and properties when changed.
-        if row.last_seen is None or _properties_differ(row.properties, hint.properties):
+        # Present in both — refresh last_seen, and properties when
+        # changed. Also adopt the row onto this target: a node first
+        # seen as a manual annotation (``target_id IS NULL``) or
+        # discovered by another target is now observed by *this*
+        # target's probe, so this target owns its lifecycle (and its
+        # future soft-delete) going forward.
+        if (
+            row.last_seen is None
+            or row.target_id != target_id
+            or _properties_differ(row.properties, hint.properties)
+        ):
             updated += 1
         row.properties = dict(hint.properties)
+        row.target_id = target_id
         row.last_seen = now
         live_key_to_id[key] = row.id
 
     for key, row in existing_by_key.items():
         if key in discovered_by_key:
+            continue
+        if row.target_id != target_id:
+            # Owned by another target (or a manual annotation): not in
+            # this target's snapshot is expected, not a removal. The
+            # owning target's own refresh decides its fate.
             continue
         if row.last_seen is None:
             # Already soft-deleted on a prior refresh; not a fresh removal.

@@ -44,6 +44,16 @@ names.
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
   `/api/v1/retrieve` route (G0.4-T5 #262, `source="kb"` scoped)
   for the search verb.
+- `meho remember / recall / forget / list` (G5.1-T4 #424) — memory
+  operator surface, registered as **top-level** verbs (no `memory`
+  parent — per consumer-needs.md §G5's ergonomic shape:
+  `meho remember "note"` rather than `meho memory remember "note"`).
+  Wraps the four `/api/v1/memory*` routes shipped by G5.1-T2 (#422)
+  plus the `/api/v1/retrieve` route (G0.4-T5 #262, `source="memory"`
+  scoped) for `meho recall --query`. Five scopes: `user` /
+  `user-tenant` / `user-target` / `tenant` / `target`. The two
+  target-scoped values require `--target NAME`; the CLI rejects a
+  missing `--target` client-side before the round-trip.
 
 ## Module layout
 
@@ -111,6 +121,13 @@ cli/
     │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.
     │   │   ├── add_test.go       # body-from-file / @- / inline + metadata parse + 422 surface tests.
     │   │   └── delete_test.go    # confirm-prompt + idempotent-204 + --json envelope tests.
+    │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list` (no parent).
+    │   │   ├── memory.go         # Scope enum + Entry/ListResponse/RetrievalHit + shared HTTP/auth helpers + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
+    │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --json]` (POST /api/v1/memory).
+    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
+    │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
+    │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).
+    │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
     │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree.
     │   │   ├── connector.go      # NewRootCmd + shared HTTP/auth helpers.
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest).

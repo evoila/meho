@@ -19,6 +19,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
+	"github.com/evoila/meho/cli/internal/cmd/memory"
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
@@ -129,6 +130,20 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `kb` parent.
 	root.AddCommand(kb.NewRootCmd())
+
+	// G5.1-T4 (#424) -- top-level memory verbs (remember / recall /
+	// forget / list) for Initiative #332. Each verb is registered
+	// onto the root directly (not under a `memory` parent) per the
+	// consumer-needs.md §G5 ergonomic shape (`meho remember "..."`
+	// rather than `meho memory remember "..."`). Wraps the four
+	// /api/v1/memory* routes shipped by G5.1-T2 (#422) plus the
+	// /api/v1/retrieve route for the `recall --query` retrieval form.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in verbs.
+	root.AddCommand(memory.NewRememberCmd())
+	root.AddCommand(memory.NewRecallCmd())
+	root.AddCommand(memory.NewForgetCmd())
+	root.AddCommand(memory.NewListCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=

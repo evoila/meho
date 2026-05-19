@@ -102,6 +102,7 @@ from meho_backplane.tenancy import ensure_tenant
 
 __all__ = [
     "SENSITIVE_HEADERS",
+    "BroadcastDetailMiddleware",
     "RequestContextMiddleware",
     "verify_jwt_and_bind",
 ]
@@ -115,6 +116,15 @@ SENSITIVE_HEADERS: Final[frozenset[bytes]] = frozenset(
 )
 
 _REQUEST_ID_HEADER: Final[bytes] = b"x-request-id"
+_BROADCAST_DETAIL_HEADER: Final[bytes] = b"x-broadcast-detail"
+
+#: structlog contextvar key the broadcast resolver reads via
+#: :func:`meho_backplane.broadcast.overrides.read_request_override`.
+#: Kept as a module-level constant in this module (the binder) and as
+#: a separately-documented constant in the reader's module; the two
+#: must agree. Linting would not catch a drift, so the string literal
+#: is intentionally short and greppable.
+_BROADCAST_DETAIL_CONTEXTVAR_KEY: Final[str] = "broadcast_detail_override"
 
 
 def _extract_request_id(scope: Scope) -> str:
@@ -216,6 +226,120 @@ class RequestContextMiddleware:
             status=status_code,
             duration_ms=duration_ms,
         )
+
+
+def _extract_broadcast_detail(scope: Scope) -> str | None:
+    """Return the lower-cased ``X-Broadcast-Detail`` header value, or ``None``.
+
+    Walks ``scope["headers"]`` rather than constructing a Starlette
+    :class:`~starlette.datastructures.Headers` object -- mirrors
+    :func:`_extract_request_id`'s pattern in this module and keeps the
+    middleware free of any starlette.datastructures import. Values are
+    lower-cased for the comparison so callers don't have to: HTTP
+    header values are case-insensitive in general, and the operator-
+    facing contract is ``"full"`` (not ``"Full"``).
+    """
+    for name, value in scope.get("headers", ()):
+        if name.lower() == _BROADCAST_DETAIL_HEADER:
+            decoded: str = value.decode("latin-1").strip().lower()
+            return decoded
+    return None
+
+
+class BroadcastDetailMiddleware:
+    """Pure-ASGI middleware that parses ``X-Broadcast-Detail`` into structlog contextvars.
+
+    Per Initiative #376 (G6.3) and Task #380 (G6.3-T3): an operator can
+    upgrade a sensitive-class broadcast event (``credential_read`` /
+    ``audit_query``) to full detail for one call by sending
+    ``X-Broadcast-Detail: full``. The resolver in
+    :mod:`meho_backplane.broadcast.overrides` reads the bound contextvar
+    via :func:`~meho_backplane.broadcast.overrides.read_request_override`
+    at publish time; this middleware is the HTTP-side binder.
+
+    Chain placement
+    ===============
+
+    Registered inside :class:`RequestContextMiddleware` and outside
+    :class:`~meho_backplane.audit.AuditMiddleware`. The required ordering
+    is:
+
+    1. ``RequestContextMiddleware`` (outermost) clears + binds
+       ``request_id``.
+    2. ``BroadcastDetailMiddleware`` (this) binds
+       ``broadcast_detail_override`` if the header is present and valid.
+    3. ``AuditMiddleware`` (innermost) reads
+       ``broadcast_detail_override`` on the response side when computing
+       the broadcast detail via the resolver.
+
+    Co-locating with :class:`RequestContextMiddleware` (same module)
+    keeps the contextvar lifecycle auditable from one file -- the
+    outer middleware clears the slate at request entry and binds
+    ``request_id``; this one binds (and symmetrically unbinds) the
+    ``broadcast_detail_override`` slot.
+
+    Opt-in only
+    ===========
+
+    Per Initiative #376 DoD, ``"full"`` is the only honored value: it
+    upgrades a sensitive-class broadcast event. Any other value
+    (including ``"aggregate"``, which would be a "weaken via header"
+    request) is logged at ``info`` level under
+    ``broadcast_detail_invalid_header`` and dropped silently -- the
+    request still succeeds with a 2xx and the broadcast uses the
+    default detail. A 4xx response would convert a benign client
+    mistake into a request failure; the Initiative explicitly bans
+    that shape.
+
+    Lifecycle
+    =========
+
+    The bind is symmetric: :func:`structlog.contextvars.bind_contextvars`
+    at entry, :func:`structlog.contextvars.unbind_contextvars` in a
+    ``finally`` block at exit. The bracketing belt-and-suspenders the
+    ``clear_contextvars`` call in :class:`RequestContextMiddleware` --
+    which wipes the slate on the NEXT request's entry -- so a
+    pathological reuse of an asyncio task that skipped the outer
+    middleware would still see a clean slot.
+
+    Non-HTTP scopes (lifespan, websocket) pass through unchanged --
+    the ``X-Broadcast-Detail`` header is HTTP-only, and reading scope
+    headers on a non-HTTP scope would either error or no-op depending
+    on the ASGI server.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        raw = _extract_broadcast_detail(scope)
+        if raw == "full":
+            structlog.contextvars.bind_contextvars(
+                **{_BROADCAST_DETAIL_CONTEXTVAR_KEY: "full"},
+            )
+            try:
+                await self.app(scope, receive, send)
+                return
+            finally:
+                structlog.contextvars.unbind_contextvars(
+                    _BROADCAST_DETAIL_CONTEXTVAR_KEY,
+                )
+
+        if raw is not None:
+            # Any value other than "full" -- the operator may have sent
+            # "aggregate" hoping to downgrade a read op (rejected by
+            # design) or a typo'd value. Logged at info so a forensic
+            # query can find it; never raises 4xx.
+            structlog.get_logger().info(
+                "broadcast_detail_invalid_header",
+                value=raw,
+            )
+
+        await self.app(scope, receive, send)
 
 
 async def verify_jwt_and_bind(

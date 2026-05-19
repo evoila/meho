@@ -635,6 +635,13 @@ class AuditMiddleware:
             )
             broadcast_payload = dict(payload)
             payload["broadcast_detail_origin"] = broadcast_decision[2]
+            # G6.3-T3 (#380): record the resolver's effective detail
+            # alongside the origin so ``meho audit query`` can answer
+            # both "who/what decided" and "what detail did they get".
+            # Audit-only -- the broadcast event renders ``detail`` via
+            # ``redact_payload``'s shape; this key on the audit row is
+            # for forensic queries, not for subscribers.
+            payload["broadcast_detail_effective"] = broadcast_decision[1]
 
         try:
             await _write_audit_row(

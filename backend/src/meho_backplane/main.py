@@ -85,7 +85,7 @@ from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
 from meho_backplane.mcp.auth import mcp_resource_uri
 from meho_backplane.metrics import render_metrics
-from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.settings import parse_bool_env
@@ -265,27 +265,34 @@ app: FastAPI = FastAPI(
 # Middleware registration order matters for ASGI: ``add_middleware``
 # wraps the existing app, so the *last* middleware added becomes the
 # outermost layer (its ``__call__`` runs first on the request side and
-# last on the response side). The required runtime order for v0.1 is:
+# last on the response side). The required runtime order for v0.2 is:
 #
-#   client → RequestContextMiddleware → AuditMiddleware → router → handler
+#   client → RequestContextMiddleware → BroadcastDetailMiddleware
+#          → AuditMiddleware → router → handler
 #
 # - ``RequestContextMiddleware`` outermost so ``request_id`` is bound
 #   before any inner middleware reads it; the
 #   :func:`~meho_backplane.middleware.verify_jwt_and_bind` dependency
 #   binds ``operator_sub`` deeper still, inside the handler invocation.
-# - ``AuditMiddleware`` directly inside it so the audit row sees both
-#   contextvars on the response side, and so its fail-closed 500
-#   replacement still passes through ``RequestContextMiddleware``'s
-#   header injection (the operator gets ``X-Request-Id`` even on the
-#   audit-failure path).
+# - ``BroadcastDetailMiddleware`` (G6.3-T3 #380) sits between
+#   ``RequestContextMiddleware`` and ``AuditMiddleware`` so the
+#   ``broadcast_detail_override`` contextvar is bound BEFORE
+#   ``AuditMiddleware``'s broadcast resolver consults it on the
+#   response side.
+# - ``AuditMiddleware`` directly inside ``BroadcastDetailMiddleware``
+#   so the audit row sees both contextvars on the response side, and
+#   so its fail-closed 500 replacement still passes through the outer
+#   middlewares' header injection / cleanup.
 #
 # To achieve that with ``add_middleware``'s last-added-is-outermost
 # rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
-# then ``RequestContextMiddleware`` (becomes outermost). Middleware is
-# registered before routers so every endpoint (including the Task #19
-# health/version/ready surfaces and the Task #20 ``/metrics`` route)
-# inherits the request-id binding and the http_requests_total counter.
+# then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``
+# (becomes outermost). Middleware is registered before routers so
+# every endpoint (including the Task #19 health/version/ready
+# surfaces and the Task #20 ``/metrics`` route) inherits the
+# request-id binding and the http_requests_total counter.
 app.add_middleware(AuditMiddleware)
+app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health_router)

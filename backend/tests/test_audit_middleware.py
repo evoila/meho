@@ -233,11 +233,16 @@ async def test_authenticated_request_writes_one_audit_row(
     assert str(row.request_id).replace("-", "") == response_request_id
     assert row.duration_ms is not None
     assert row.duration_ms >= 0
-    # G6.3-T2 (#379): every authenticated audit row gains a
-    # ``broadcast_detail_origin`` key recording which precedence step
-    # the resolver chose. Chassis-era routes with no tenant rules in
-    # the DB land on ``"default"``.
-    assert row.payload == {"broadcast_detail_origin": "default"}
+    # G6.3-T2 (#379) + T3 (#380): every authenticated audit row gains
+    # ``broadcast_detail_origin`` (which precedence step decided) and
+    # ``broadcast_detail_effective`` (the chosen detail enum).
+    # Chassis-era routes with no tenant rules + no per-call override
+    # land on ``"default"`` origin; ``GET /api/v1/health`` classifies
+    # as ``other`` op_class so the default detail is ``"full"``.
+    assert row.payload == {
+        "broadcast_detail_origin": "default",
+        "broadcast_detail_effective": "full",
+    }
     # G0.1-T3: tenant_id from the JWT claim lands on the audit row.
     # The default helper-minted token carries DEFAULT_TENANT_ID, which
     # ``verify_jwt_and_bind`` binds into contextvars and the audit
@@ -291,19 +296,24 @@ async def test_broadcast_event_payload_omits_audit_only_origin_key(
         )
     assert response.status_code == 200
 
-    # Audit row carries the origin.
+    # Audit row carries the origin AND effective (T3 #380).
     rows = await _fetch_audit_rows(isolated_audit_engine)
     assert len(rows) == 1
-    assert rows[0].payload == {"broadcast_detail_origin": "default"}
+    assert rows[0].payload == {
+        "broadcast_detail_origin": "default",
+        "broadcast_detail_effective": "full",
+    }
 
-    # Broadcast event must NOT carry the origin -- not at the top
-    # level, not inside ``params``.
+    # Broadcast event must NOT carry either audit-only key -- not at
+    # the top level, not inside ``params``.
     assert len(captured) == 1
     event_payload = captured[0].payload
-    assert "broadcast_detail_origin" not in event_payload
+    for forbidden in ("broadcast_detail_origin", "broadcast_detail_effective"):
+        assert forbidden not in event_payload
     nested_params = event_payload.get("params")
     if isinstance(nested_params, dict):
-        assert "broadcast_detail_origin" not in nested_params
+        for forbidden in ("broadcast_detail_origin", "broadcast_detail_effective"):
+            assert forbidden not in nested_params
 
 
 # ---------------------------------------------------------------------------

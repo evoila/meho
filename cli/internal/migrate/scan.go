@@ -254,17 +254,20 @@ func hasMachineLocalComment(s string) bool {
 			return false
 		}
 		start += idx
-		end := strings.Index(s[start:], close)
-		if end == -1 {
+		// Search for close strictly after the open delimiter so that a
+		// degenerate comment like <!--> or <!--->, whose --> shares
+		// characters with the opening <!--, cannot produce a negative
+		// inner slice range and panic.
+		innerStart := start + len(open)
+		rel := strings.Index(s[innerStart:], close)
+		if rel == -1 {
 			return false
 		}
-		end += start + len(close)
-
-		inner := s[start+len(open) : end-len(close)]
-		if strings.TrimSpace(inner) == tag {
+		innerEnd := innerStart + rel
+		if strings.TrimSpace(s[innerStart:innerEnd]) == tag {
 			return true
 		}
-		idx = end
+		idx = innerEnd + len(close)
 	}
 }
 

@@ -225,6 +225,39 @@ func TestParseMemoryFile(t *testing.T) {
 }
 
 // --------------------------------------------------------------------
+// hasMachineLocalComment degenerate-comment regression tests
+// --------------------------------------------------------------------
+
+// TestHasMachineLocalComment_DegenerateComments guards against the
+// slice-bounds panic that arises when --> shares characters with the
+// opening <!-- (e.g. <!-->  or <!-->). The fix anchors the close
+// search to start strictly after the four-byte <!-- so the inner
+// range [innerStart:innerEnd] can never be negative.
+func TestHasMachineLocalComment_DegenerateComments(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"bare <!-->"                  , "<!-->"                        , false},
+		{"bare <!--->"                 , "<!--->"                       , false},
+		{"inline x <!---> y"          , "x <!---> y"                   , false},
+		{"empty proper comment <!---->", "<!---->"                      , false},
+		{"valid opt-out"              , "<!-- meho:machine-local -->"   , true},
+		{"valid with extra whitespace", "<!--  meho:machine-local  -->" , true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasMachineLocalComment(tc.input)
+			if got != tc.want {
+				t.Errorf("hasMachineLocalComment(%q) = %v; want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------
 // BodySHA256 stability tests
 // --------------------------------------------------------------------
 

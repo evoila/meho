@@ -26,6 +26,7 @@ Two related concerns the dispatcher needs but that don't belong in
 from __future__ import annotations
 
 import importlib
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -138,17 +139,39 @@ def get_or_create_connector_instance(cls: type[Connector]) -> Connector:
 
 
 def is_unbound_method(handler: Any, connector_cls: type[Connector]) -> bool:
-    """True when *handler* is an unbound function defined on *connector_cls*.
+    """True when *handler* is an unbound function defined anywhere on *connector_cls*'s MRO.
 
     :func:`import_handler` walks the dotted path with :func:`getattr`,
     which returns the **unbound** function for class-attribute lookups
     in Python 3 (no descriptor binding without an instance). The
-    dispatcher needs to bind to the connector instance the resolver
-    chose so bound-method handlers register against the right
-    transport. Heuristic: the handler's ``__qualname__`` starts with
-    ``ConnectorCls.``; that pattern is what
-    :func:`~meho_backplane.operations.typed_register.derive_handler_ref`
-    serialises for bound-method registrations.
+    dispatcher rebinds these against the connector instance the resolver
+    chose so bound-method handlers hit the right transport.
+
+    Identity-based, not a string heuristic. The previous implementation
+    tested ``handler.__qualname__.startswith(f"{connector_cls.__name__}.")``,
+    which silently returned ``False`` — leaving the handler **unbound** and
+    surfacing a misleading ``handler_unreachable`` (#697) — in two real
+    cases:
+
+    * The resolved connector instance is a **subclass** of the class that
+      defines the handler. E.g. the bind9 E2E harness seeds a
+      ``_SeededBind9Connector`` instance under the ``Bind9Connector``
+      registry key (the documented test pattern):
+      ``"Bind9Connector.about"`` does not start with
+      ``"_SeededBind9Connector."``.
+    * The handler is defined on a base / mixin, so ``__qualname__``
+      carries the base's name rather than the concrete connector's.
+
+    Walking ``connector_cls.__mro__`` and matching the exact function
+    object stored in a class ``__dict__`` is subclass- and mixin-correct.
+    Already-bound methods (``inspect.ismethod``) are not unbound — return
+    ``False`` so they are not double-bound. Module-level function handlers
+    are not in any connector's MRO, so they correctly return ``False`` and
+    are dispatched as ``handler(operator, target, params)`` unchanged.
     """
-    qualname = getattr(handler, "__qualname__", "")
-    return qualname.startswith(f"{connector_cls.__name__}.")
+    if inspect.ismethod(handler):
+        return False
+    name = getattr(handler, "__name__", None)
+    if name is None:
+        return False
+    return any(klass.__dict__.get(name) is handler for klass in connector_cls.__mro__)

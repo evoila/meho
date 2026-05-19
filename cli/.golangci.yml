@@ -16,7 +16,10 @@ run:
   timeout: 5m
   # The CLI module is self-contained; the linter doesn't need to
   # see the Python backplane.
-  go: "1.22"
+  # Bumped 1.22 → 1.25 because charm.land/huh/v2 v2.0.3's transitive
+  # deps raise the go.mod minimum to 1.25.8; golangci-lint typecheck
+  # must match or "package requires newer Go version" errors fire.
+  go: "1.25"
 
 linters:
   disable-all: true

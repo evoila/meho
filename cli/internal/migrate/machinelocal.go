@@ -2,7 +2,6 @@
 // Copyright (c) 2026 evoila Group
 
 // Package migrate — see doc.go for the package overview.
-
 package migrate
 
 import (

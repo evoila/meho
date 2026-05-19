@@ -233,7 +233,11 @@ async def test_authenticated_request_writes_one_audit_row(
     assert str(row.request_id).replace("-", "") == response_request_id
     assert row.duration_ms is not None
     assert row.duration_ms >= 0
-    assert row.payload == {}
+    # G6.3-T2 (#379): every authenticated audit row gains a
+    # ``broadcast_detail_origin`` key recording which precedence step
+    # the resolver chose. Chassis-era routes with no tenant rules in
+    # the DB land on ``"default"``.
+    assert row.payload == {"broadcast_detail_origin": "default"}
     # G0.1-T3: tenant_id from the JWT claim lands on the audit row.
     # The default helper-minted token carries DEFAULT_TENANT_ID, which
     # ``verify_jwt_and_bind`` binds into contextvars and the audit

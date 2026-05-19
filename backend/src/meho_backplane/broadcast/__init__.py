@@ -19,6 +19,12 @@ from meho_backplane.broadcast.events import (
     classify_op,
     redact_payload,
 )
+from meho_backplane.broadcast.overrides import (
+    compute_effective_broadcast_detail,
+    invalidate_tenant_cache,
+    read_request_override,
+    reset_overrides_cache_for_testing,
+)
 from meho_backplane.broadcast.probe import broadcast_readiness_probe
 from meho_backplane.broadcast.publisher import (
     BROADCAST_EVENTS_PUBLISHED_TOTAL,
@@ -34,9 +40,13 @@ __all__ = [
     "BroadcastEvent",
     "broadcast_readiness_probe",
     "classify_op",
+    "compute_effective_broadcast_detail",
     "dispose_broadcast_client",
     "get_broadcast_client",
+    "invalidate_tenant_cache",
     "publish_event",
+    "read_request_override",
     "redact_payload",
     "reset_broadcast_client_for_testing",
+    "reset_overrides_cache_for_testing",
 ]

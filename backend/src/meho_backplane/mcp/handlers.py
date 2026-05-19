@@ -73,7 +73,7 @@ import json
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import jsonschema
 import structlog
@@ -81,8 +81,9 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import (
     BroadcastEvent,
-    classify_op,
+    compute_effective_broadcast_detail,
     publish_event,
+    read_request_override,
     redact_payload,
 )
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
@@ -271,6 +272,24 @@ async def handle_tools_call(
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()
+        # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
+        # row commits so ``broadcast_detail_origin`` lands on the
+        # row's payload. The op_id is the tool name verbatim so
+        # :func:`classify_op` matches credential / audit / read /
+        # write suffixes correctly (e.g. ``vault.kv.read`` →
+        # ``credential_read`` → aggregate-only redacted payload by
+        # default).
+        (
+            broadcast_op_class,
+            broadcast_detail,
+            broadcast_origin,
+        ) = await compute_effective_broadcast_detail(
+            op_id=audit_name,
+            tenant_id=operator.tenant_id,
+            raw_params=audit_payload,
+            request_override=read_request_override(),
+        )
+        audit_payload["broadcast_detail_origin"] = broadcast_origin
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,
@@ -299,14 +318,13 @@ async def handle_tools_call(
         # commit succeeds. ``publish_event`` is fail-open by contract,
         # so a Valkey wobble never converts an OK tool call into a
         # JSON-RPC -32603. Audit row is the canonical record; broadcast
-        # is the real-time view. The op_id is the tool name verbatim
-        # so :func:`classify_op` matches credential / audit / read /
-        # write suffixes correctly (e.g. ``vault.kv.read`` →
-        # ``credential_read`` → aggregate-only redacted payload).
+        # is the real-time view.
         await _publish_mcp_event(
             audit_id=audit_id,
             operator=operator,
             op_id=audit_name,
+            op_class=broadcast_op_class,
+            detail=broadcast_detail,
             audit_path=f"/mcp/tools/call/{audit_name}",
             status_code=status_code,
             audit_payload=audit_payload,
@@ -457,6 +475,23 @@ async def handle_resources_read(
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()
+        # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
+        # row commits. The broadcast op_id is the generic
+        # ``mcp.resource.read`` (resource URIs are per-request unique
+        # and would explode the metric cardinality) so the resolver
+        # falls through to ``other`` op_class by default; tenant rules
+        # can still match via ``op_id_pattern="mcp.resource.*"``.
+        (
+            broadcast_op_class,
+            broadcast_detail,
+            broadcast_origin,
+        ) = await compute_effective_broadcast_detail(
+            op_id="mcp.resource.read",
+            tenant_id=operator.tenant_id,
+            raw_params=audit_payload,
+            request_override=read_request_override(),
+        )
+        audit_payload["broadcast_detail_origin"] = broadcast_origin
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,
@@ -476,16 +511,12 @@ async def handle_resources_read(
             )
             raise
         # G6.1-T3 publish-on-write hook for the resources/read path.
-        # Resource URIs are per-request unique (e.g. they embed
-        # tenant_id), so the broadcast op_id is the generic
-        # ``mcp.resource.read`` — :func:`classify_op` falls through
-        # to ``other`` (full-detail) which is correct: resources are
-        # not credential reads nor audit queries, just operator-facing
-        # GET-shape calls.
         await _publish_mcp_event(
             audit_id=audit_id,
             operator=operator,
             op_id="mcp.resource.read",
+            op_class=broadcast_op_class,
+            detail=broadcast_detail,
             audit_path=f"/mcp/resources/read/{audit_uri}",
             status_code=status_code,
             audit_payload=audit_payload,
@@ -518,6 +549,8 @@ async def _publish_mcp_event(
     audit_id: uuid.UUID,
     operator: Operator,
     op_id: str,
+    op_class: str,
+    detail: Literal["full", "aggregate"],
     audit_path: str,
     status_code: int,
     audit_payload: dict[str, Any],
@@ -540,12 +573,17 @@ async def _publish_mcp_event(
     keeps the per-URI path for forensic queries, while the broadcast
     event uses the tool-name (tools/call) or a stable
     ``mcp.resource.read`` constant (resources/read) so
-    :func:`classify_op` matches the sensitivity-class taxonomy
-    correctly without per-URI cardinality blowup on the
-    ``broadcast_events_published_total`` metric.
+    :func:`~meho_backplane.broadcast.events.classify_op` matches the
+    sensitivity-class taxonomy correctly without per-URI cardinality
+    blowup on the ``broadcast_events_published_total`` metric.
+
+    As of G6.3-T2 (#379) the *(op_class, detail)* pair is resolved
+    upstream by :func:`compute_effective_broadcast_detail`; this helper
+    no longer calls :func:`classify_op` or decides the redaction
+    branch. The split lets the resolver inject its decision-origin
+    into the audit row's payload *before* the audit write commits.
     """
     result_status = _classify_mcp_status(status_code)
-    op_class = classify_op(op_id)
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=datetime.now(UTC),
@@ -556,7 +594,7 @@ async def _publish_mcp_event(
         op_class=op_class,
         result_status=result_status,
         audit_id=audit_id,
-        payload=redact_payload(op_class, audit_payload, result_status),
+        payload=redact_payload(op_class, audit_payload, result_status, detail=detail),
     )
     # publish_event is itself fail-open; the wrap here is belt-and-
     # suspenders against an exception in BroadcastEvent construction

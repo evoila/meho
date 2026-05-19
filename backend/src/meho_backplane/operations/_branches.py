@@ -224,9 +224,21 @@ async def dispatch_typed(
     """
     sig = inspect.signature(handler)
     param_names = list(sig.parameters.keys())
-    # Drop ``self`` if present (unbound-method shape that wasn't rebound).
+    # A handler still carrying ``self`` here is an unbound connector
+    # method the dispatcher failed to bind to an instance (resolver
+    # miss / instance-cache miss). The previous code silently dropped
+    # ``self`` and then called ``handler(target=, params=)`` anyway —
+    # which always TypeErrors and was masked upstream as the misleading
+    # ``handler_unreachable`` (#697, the green-but-hollow class). Fail
+    # loud and accurately instead of mis-calling.
     if param_names and param_names[0] == "self":
-        param_names = param_names[1:]
+        raise RuntimeError(
+            f"typed handler {getattr(handler, '__qualname__', handler)!r} reached "
+            f"dispatch still unbound (first parameter 'self'): the dispatcher could "
+            f"not bind it to a connector instance. This is a connector-resolution / "
+            f"instance-cache fault, not a missing handler — do not mask it as "
+            f"handler_unreachable."
+        )
     if "operator" in param_names:
         return await handler(operator=operator, target=target, params=params)
     return await handler(target=target, params=params)

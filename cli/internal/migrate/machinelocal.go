@@ -120,22 +120,35 @@ func detectUsername(body string, homeFn HomeDirFunc) []MachineLocalMatch {
 		return nil
 	}
 
-	pattern := fmt.Sprintf(`(?i)\b%s\b`, regexp.QuoteMeta(username))
+	// Use Unicode-aware boundaries instead of \b / \w which are ASCII-only
+	// in Go's RE2 engine. \b would silently never match a username that
+	// contains non-ASCII letters (e.g. "josé", "müller") because RE2's
+	// \w == [0-9A-Za-z_], so the boundary test between é and a following
+	// space sees two non-\w characters and no \w/\W transition.
+	// (?:^|[^\pL\pN_]) matches either start-of-string or a Unicode
+	// non-word character (not a Unicode letter, digit, or underscore).
+	pattern := fmt.Sprintf(
+		`(?i)(?:^|[^\pL\pN_])(%s)(?:[^\pL\pN_]|$)`,
+		regexp.QuoteMeta(username),
+	)
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil
 	}
 
-	hits := re.FindAllString(body, -1)
+	hits := re.FindAllStringSubmatch(body, -1)
 	if len(hits) < 3 {
 		return nil
 	}
 
 	matches := make([]MachineLocalMatch, 0, len(hits))
 	for _, h := range hits {
+		if len(h) < 2 || h[1] == "" {
+			continue
+		}
 		matches = append(matches, MachineLocalMatch{
 			Category: "operator-username",
-			Sample:   truncate(h, 80),
+			Sample:   truncate(h[1], 80),
 		})
 	}
 	return matches

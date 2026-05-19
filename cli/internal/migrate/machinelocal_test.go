@@ -179,6 +179,22 @@ func TestOperatorUsername(t *testing.T) {
 			homeFn: nil, // nil triggers os.UserHomeDir — must not panic
 			match:  false,
 		},
+		{
+			// Non-ASCII username: Go's \b is ASCII-only (\w == [0-9A-Za-z_]),
+			// so a username containing accented letters has no \w/\W boundary
+			// transition and \b silently never matches. The Unicode-aware
+			// boundary (?:^|[^\pL\pN_]) must fire instead.
+			name:   "non_ascii_username_three_occurrences_hit",
+			body:   "josé mentored josé and later advised josé on the project",
+			homeFn: fakeHome("/Users/josé"),
+			match:  true,
+		},
+		{
+			name:   "non_ascii_username_two_occurrences_miss",
+			body:   "müller reviewed müller's work",
+			homeFn: fakeHome("/home/müller"),
+			match:  false,
+		},
 	}
 	for _, tc := range cases {
 		tc := tc

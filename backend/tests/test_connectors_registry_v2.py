@@ -247,3 +247,30 @@ def test_all_connectors_v2_returns_copy() -> None:
     snapshot = all_connectors_v2()
     snapshot[("injected", "", "")] = _FakeConnector
     assert ("injected", "", "") not in all_connectors_v2()
+
+
+# ---------------------------------------------------------------------------
+# Shipped connector triples — assert each hand-rolled connector resolves
+# ---------------------------------------------------------------------------
+
+
+def test_sddc_manager_connector_registered_under_v2_triple() -> None:
+    """SddcManagerConnector package registers under (sddc-manager, 9.0, sddc-rest) at import.
+
+    The autouse _clean_registry fixture clears the registry before this test,
+    so we re-import the package (which is a no-op if already imported) and
+    then manually re-register to assert the triple resolves correctly. Mirrors
+    the pattern in test_connectors_nsx_auth.py.
+    """
+    from meho_backplane.connectors.sddc_manager import SddcManagerConnector
+
+    register_connector_v2(
+        product=SddcManagerConnector.product,
+        version=SddcManagerConnector.version,
+        impl_id=SddcManagerConnector.impl_id,
+        cls=SddcManagerConnector,
+    )
+    snapshot = all_connectors_v2()
+    key = ("sddc-manager", "9.0", "sddc-rest")
+    assert key in snapshot
+    assert snapshot[key] is SddcManagerConnector

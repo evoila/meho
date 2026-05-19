@@ -193,16 +193,22 @@ func splitFrontmatter(raw []byte) (fm []byte, body []byte, ok bool, warning stri
 	const delim = "---\n"
 	const delimEnd = "---"
 
-	if !bytes.HasPrefix(raw, []byte(delim)) {
-		// Also accept bare "---" at start of file (no trailing newline
-		// edge case seen on some editors).
-		if !bytes.HasPrefix(raw, []byte(delimEnd)) {
-			return nil, nil, false, "no frontmatter delimiter found"
+	var stripLen int
+	if bytes.HasPrefix(raw, []byte(delim)) {
+		stripLen = len(delim)
+	} else if bytes.HasPrefix(raw, []byte(delimEnd)) {
+		// Bare "---" at start of file (no trailing newline — edge case).
+		// A 3-byte input that is exactly "---" has no closing delimiter.
+		stripLen = len(delimEnd)
+		if len(raw) <= stripLen {
+			return nil, nil, false, "no closing '---'"
 		}
+	} else {
+		return nil, nil, false, "no frontmatter delimiter found"
 	}
 
-	// Strip the opening "---\n".
-	rest := raw[len(delim):]
+	// Strip the opening delimiter.
+	rest := raw[stripLen:]
 
 	// Find the closing "---" on its own line.
 	closeIdx := bytes.Index(rest, []byte("\n---\n"))

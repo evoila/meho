@@ -56,7 +56,7 @@ References
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -268,37 +268,63 @@ def redact_payload(
     op_class: str,
     raw_params: dict[str, Any],
     result_status: str,
+    *,
+    detail: Literal["full", "aggregate"] | None = None,
 ) -> dict[str, Any]:
     """Return the broadcast-safe payload view for *op_class*.
 
-    Three branches, locked by decision #3:
+    Three shapes -- selected by the *effective* detail rather than the
+    op_class alone:
 
-    * ``credential_read`` → ``{op_class, result_status}``. No path, no
-      key names, no values. The mere fact that an operator read a
-      credential is broadcast; the *what* never leaves the audit row.
-    * ``audit_query`` → ``{op_class, result_status, row_count}``. The
-      filter is the most damaging field to broadcast (encodes the
-      investigation target), and the response rows inherit every other
-      op's sensitivity. Aggregate-only collapses to "X ran an audit
-      query that matched N rows".
-    * everything else → ``{op_class, params=raw_params, result_status}``.
-      Full request detail; nested objects pass through verbatim.
+    * **Aggregate**, sensitive class (``audit_query``) →
+      ``{op_class, result_status, row_count}``. The audit-query
+      aggregate retains the response row-count -- a useful
+      team-coordination signal -- but never the filter or matched rows.
+    * **Aggregate**, any other class →
+      ``{op_class, result_status}``. The same shape G6.1's
+      ``credential_read`` default used; pulled out as the universal
+      aggregate when a tenant rule downgrades a normally-full op
+      (e.g. ``k8s.configmap.info`` scoped to ``kube-system``).
+    * **Full** →
+      ``{op_class, params=raw_params, result_status}``. Full request
+      detail; nested objects pass through verbatim. Used by the
+      everything-else default and also by the G6.3 ``request_override``
+      branch that upgrades a sensitive class to full detail per
+      operator opt-in.
+
+    *detail* is the G6.3-T2 (#379) extension. When ``None`` (the
+    pre-G6.3 default), the function falls back to decision #3 of
+    ``docs/planning/v0.2-decisions.md`` -- aggregate for sensitive
+    classes (``credential_read`` / ``audit_query``), full for
+    everything else. When ``"aggregate"`` or ``"full"`` is passed
+    explicitly, the resolver (:func:`compute_effective_broadcast_detail`)
+    has already decided the effective detail and this function just
+    renders it. Callers that don't go through the resolver
+    (:func:`meho_backplane.operations._audit.publish_broadcast`) keep
+    the ``detail=None`` default and the existing per-class behaviour.
 
     Forward-compatibility note: the return shape is a plain ``dict``
     rather than a typed model because the downstream
     :attr:`BroadcastEvent.payload` field is already ``dict[str, Any]``.
     Promoting either side to a structured model would require a
-    coordinated change to all of T3 / T4 / T6 and is out of scope for
-    T2.
+    coordinated change to all of T3 / T4 / T6 and is out of scope.
     """
-    if op_class == "credential_read":
+    if detail is None:
+        effective_detail: Literal["full", "aggregate"] = (
+            "aggregate" if op_class in {"credential_read", "audit_query"} else "full"
+        )
+    else:
+        effective_detail = detail
+
+    if effective_detail == "aggregate":
+        if op_class == "audit_query":
+            return {
+                "op_class": op_class,
+                "result_status": result_status,
+                "row_count": _maybe_row_count(raw_params),
+            }
         return {"op_class": op_class, "result_status": result_status}
-    if op_class == "audit_query":
-        return {
-            "op_class": op_class,
-            "result_status": result_status,
-            "row_count": _maybe_row_count(raw_params),
-        }
+
     return {
         "op_class": op_class,
         "params": raw_params,

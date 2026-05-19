@@ -180,6 +180,33 @@ this stage it exposes:
   so the audit row at session end records a clean 200 close.
   Subscribers (T5 CLI watch #311, T6 MCP resource #312, future
   Slack mirror G6.2) consume the same SSE wire shape.
+* Broadcast override resolution (G6.3-T2 #379) —
+  `src/meho_backplane/broadcast/overrides.py` ships
+  `compute_effective_broadcast_detail` and the per-tenant override
+  cache. Both publish hooks (HTTP `AuditMiddleware`, MCP `tools/call`
+  and `resources/read`) consult the resolver *before* the audit row
+  commits so the decision-origin (`request_override` /
+  `tenant_rule:<id>` / `default`) lands in `audit_log.payload` under
+  `broadcast_detail_origin` — the forensic signal that lets
+  `meho audit query` answer "who flipped this credential read to
+  full detail and when". Precedence ladder: per-call
+  `request_override="full"` upgrades a sensitive class (opt-in only —
+  a request to downgrade is filtered at `read_request_override`);
+  most-specific matching `BroadcastOverride` row from the cache wins
+  next; the static `classify_op` default is the fallback. Glob
+  matching via `fnmatch.fnmatchcase` (case-sensitive, no regex). The
+  cache is a module-level `dict[UUID, (rules, expires_at)]` with a
+  60s TTL that mirrors the `broadcast.client` singleton precedent;
+  `invalidate_tenant_cache(tenant_id)` is the hook T4's CRUD verbs
+  (#381) call after every mutation. Fail-open by contract: a DB
+  failure during cache load logs `broadcast_override_cache_load_failed`,
+  returns an empty rule set (not cached — caching a degraded read
+  would extend a transient failure into a 60s window), and the
+  resolver drops to the default branch. `request_override` plumbing
+  reads `structlog.contextvars.get_contextvars().get("broadcast_detail_override")`
+  (returns `None` when unset);
+  T3 (#380) binds the contextvar from the `X-Broadcast-Detail` header
+  and MCP `_meta.broadcast_detail` field, T2 ships the read shim only.
 * Operation dispatch (G0.6-T8 #399) —
   `src/meho_backplane/api/v1/operations.py` exposes
   `POST /api/v1/operations/call` plus the discovery routes

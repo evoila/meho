@@ -322,7 +322,7 @@ func ConvertOAuthToken(tok *oauth2.Token, backplaneURL, issuer, clientID string)
 	return st
 }
 
-// keyForBackplane is the (service, user) addressing the store uses
+// KeyForBackplane returns the (service, user) addressing the store uses
 // for a given backplane URL. Centralised here so login and (future)
 // status agree on the layout without copy-pasting the string format.
 // Service stays at DefaultService; user is the backplane URL so

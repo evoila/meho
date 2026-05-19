@@ -54,6 +54,15 @@ linters:
 
   # v2: linter settings live under linters.settings (not top-level linters-settings).
   settings:
+    errcheck:
+      # fmt.Fprintf/Fprintln/Fprint write to an io.Writer — in a CLI
+      # (stdout/stderr), unhandled write errors are conventional and
+      # not actionable. Exclude them to avoid noise on the ~400 call
+      # sites spread across the existing codebase.
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
     revive:
       # Default rules are noisy by themselves; pin an explicit ruleset
       # so future revive releases don't surprise CI with new findings.

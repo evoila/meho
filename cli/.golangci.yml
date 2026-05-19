@@ -21,7 +21,9 @@
 #   - `gosimple` removed (merged into `staticcheck` in v2)
 #   - `linters-settings:` → `linters.settings:` (nested under linters)
 #   - `goimports.local-prefixes` → list (was a bare string in v1)
-#   - `issues.exclude-rules:` → `issues.exclusions.rules:`
+#   - `issues.exclude-rules:` → `linters.exclusions.rules:`
+#   - `gofmt`, `goimports` → `formatters.enable` (not `linters.enable`)
+#   - `goimports` settings → `formatters.settings` (not `linters.settings`)
 
 version: "2"
 
@@ -47,21 +49,11 @@ linters:
     - ineffassign
     - staticcheck
     - unused
-    # Formatters — fail-closed so CI catches what `gofmt -d` would.
-    - gofmt
-    - goimports
     # Style/best-practices supplement to go vet.
     - revive
 
   # v2: linter settings live under linters.settings (not top-level linters-settings).
   settings:
-    goimports:
-      # Group local imports separately from third-party — matches the
-      # convention the backplane (Python isort) and the cobra codebase
-      # both use, and makes diff review easier when imports churn.
-      # v2: local-prefixes is a list (bare string in v1).
-      local-prefixes:
-        - github.com/evoila/meho/cli
     revive:
       # Default rules are noisy by themselves; pin an explicit ruleset
       # so future revive releases don't surprise CI with new findings.
@@ -92,13 +84,7 @@ linters:
         - name: unreachable-code
         - name: redefines-builtin-id
 
-issues:
-  # Don't hide legitimate findings behind golangci-lint's default
-  # max-issues-per-linter / max-same-issues caps — once CI is wired
-  # (G2.7) we want every finding visible.
-  max-issues-per-linter: 0
-  max-same-issues: 0
-  # v2: exclude-rules moved to issues.exclusions.rules.
+  # v2: exclusion rules live under linters.exclusions.rules (was issues.exclude-rules in v1).
   exclusions:
     rules:
       # Test files routinely use blank identifiers, dot imports, and
@@ -108,3 +94,25 @@ issues:
         linters:
           - errcheck
           - revive
+
+formatters:
+  # v2: gofmt and goimports moved from linters.enable to formatters.enable.
+  # Fail-closed so CI catches what `gofmt -d` would.
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # Group local imports separately from third-party — matches the
+      # convention the backplane (Python isort) and the cobra codebase
+      # both use, and makes diff review easier when imports churn.
+      # v2: local-prefixes is a list (bare string in v1).
+      local-prefixes:
+        - github.com/evoila/meho/cli
+
+issues:
+  # Don't hide legitimate findings behind golangci-lint's default
+  # max-issues-per-linter / max-same-issues caps — once CI is wired
+  # (G2.7) we want every finding visible.
+  max-issues-per-linter: 0
+  max-same-issues: 0

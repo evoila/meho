@@ -89,6 +89,15 @@ func TestSplitFrontmatter_EmptyBody(t *testing.T) {
 	}
 }
 
+func TestSplitFrontmatter_BareDelimiterNoPanic(t *testing.T) {
+	// A bare "---" (3 bytes, no newline, no closing delimiter) must not
+	// panic and must return ok=false. Regression for the stripLen bug.
+	_, _, ok, _ := splitFrontmatter([]byte("---"))
+	if ok {
+		t.Fatal("expected ok=false for bare 3-byte '---' input")
+	}
+}
+
 // --------------------------------------------------------------------
 // parseMemoryFile table-driven tests
 // --------------------------------------------------------------------

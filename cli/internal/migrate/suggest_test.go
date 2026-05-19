@@ -53,7 +53,7 @@ func TestSuggestScope(t *testing.T) {
 }
 
 // TestScopeConstantsAreDistinct guards against accidental equal values.
-func TestScopeCostantsAreDistinct(t *testing.T) {
+func TestScopeConstantsAreDistinct(t *testing.T) {
 	all := []string{ScopeUser, ScopeUserTenant, ScopeUserTarget, ScopeTenant, ScopeTarget}
 	seen := map[string]bool{}
 	for _, s := range all {

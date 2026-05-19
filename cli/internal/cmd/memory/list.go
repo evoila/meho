@@ -116,10 +116,19 @@ type listOptions struct {
 
 func runList(cmd *cobra.Command, opts listOptions) error {
 	if opts.ScopeArg != "" {
-		if _, err := parseScope(opts.ScopeArg); err != nil {
+		scope, err := parseScope(opts.ScopeArg)
+		if err != nil {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(err.Error()), opts.JSONOut)
 		}
+		// Write the trimmed Scope value back so buildListPath
+		// forwards the normalised form. Without this, a padded
+		// input like `--scope " user "` passes the preflight (the
+		// validScopes lookup trims) and then 422s on the backend
+		// when the raw query string reaches FastAPI's enum check.
+		// Mirrors the recall.go:191-203 pattern where parseScope's
+		// return value is propagated through kindFilter.
+		opts.ScopeArg = string(scope)
 	}
 	// Mirror the kb list helper's bound check: server clamps with
 	// Query(ge=1, le=500). Surface the constraint string locally so

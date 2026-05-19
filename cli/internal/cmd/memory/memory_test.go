@@ -1207,6 +1207,42 @@ func TestRunListForwardsFilters(t *testing.T) {
 	}
 }
 
+func TestRunListNormalisesScopeWhitespace(t *testing.T) {
+	// Whitespace-padded --scope must reach the backend trimmed.
+	// Without normalisation runList passed parseScope's preflight
+	// (validScopes lookup trims internally) and then forwarded the
+	// raw " user " back into the query string, producing a 422 on
+	// the FastAPI enum check. Mirrors the recall.go fix shape that
+	// already propagates parseScope's typed return value.
+	var capturedQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(ListResponse{})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, _ := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runList(cmd, listOptions{
+		ScopeArg:          " user ",
+		BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	if !strings.Contains(capturedQuery, "scope=user") {
+		t.Errorf("expected trimmed scope in query; got %q", capturedQuery)
+	}
+	// Defensive: no URL-encoded space should leak through.
+	for _, bad := range []string{"scope=%20user", "scope=user%20", "scope=+user", "scope=user+"} {
+		if strings.Contains(capturedQuery, bad) {
+			t.Errorf("query string %q still carries un-trimmed scope (%q)", capturedQuery, bad)
+		}
+	}
+}
+
 func TestRunListRejectsBadLimit(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	cmd.SetIn(bytes.NewBufferString(""))

@@ -187,15 +187,36 @@ separately via `resolve_node`.
    snapshot (nodes + edges, each with `properties`).
 3. Open one transactional session (`sessionmaker() ... session.begin()`).
 4. `_reconcile_nodes` — diff the snapshot nodes against existing
-   `graph_node` rows for `(tenant_id, target_id)`:
-   - INSERT nodes in the snapshot but not the DB.
-   - For nodes in both: refresh `last_seen`, and `properties` when they
-     changed (a no-change refresh only touches `last_seen`, so the
-     `unchanged` path reports zero `updated`).
-   - Soft-delete (set `last_seen = NULL`) nodes in the DB but absent
-     from the snapshot. A node already soft-deleted is not re-counted.
+   `graph_node` rows. The upsert decision is keyed on the **tenant-wide
+   natural key** `(tenant_id, kind, name)` — the same grain as the
+   `graph_node_tenant_kind_name_idx` unique index, which is
+   target-independent. The existing-node lookup therefore unions, within
+   the tenant, every row whose `(kind, name)` is in the snapshot **or**
+   whose `target_id` is the refreshing target's id:
+   - INSERT nodes in the snapshot with no existing `(tenant, kind, name)`
+     row.
+   - For a node already present under *any* `target_id` (another
+     target's discovery, or a manual annotation with `target_id IS
+     NULL`): refresh `last_seen`, apply the probe `properties`, and
+     **adopt** the row onto the refreshing target (`target_id` claimed)
+     so this target owns its lifecycle going forward. A no-change
+     refresh of an already-owned node only touches `last_seen`, so the
+     `unchanged` path reports zero `updated`.
+   - Soft-delete (set `last_seen = NULL`) only nodes **owned by the
+     refreshing target** (`target_id == target_id`) that are absent
+     from the snapshot. Rows owned by another target — or a manual
+     annotation — are never soft-deleted by a refresh that does not own
+     them. A node already soft-deleted is not re-counted.
    Returns two key→id maps: `live` (snapshot-present nodes only) and
-   `all` (every node in the target scope, including soft-deleted).
+   `all` (every loaded node, including soft-deleted ones owned by this
+   target).
+
+   Keying the lookup on `(tenant_id, target_id)` only was a defect
+   (#673): a snapshot node that already existed under a different /
+   `NULL` `target_id` was missed, re-INSERTed, and collided with the
+   unique index mid-reconcile (the violation surfaced as an
+   `IntegrityError` via query-invoked autoflush inside
+   `_reconcile_edges`).
 5. `_reconcile_edges` — same diff for edges, keyed by
    `(from_kind, from_name, to_kind, to_name, kind)`. Existing edges are
    loaded by `from_node_id` over the **`all`** node-id set so an edge

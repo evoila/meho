@@ -172,8 +172,12 @@ cli/
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
     │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
-    ├── migrate/               # G5.3-T1 #608 — pure-logic helpers for the memory migration flow (Initiative #375).
-    │   └── doc.go                # placeholder package; flow helpers land in T2–T5 (#609–#612).
+    ├── migrate/               # G5.3 — pure-logic helpers for the memory migration flow (Initiative #375).
+    │   ├── doc.go                # package doc; flow helpers land in T2–T5 (#609–#612).
+    │   ├── scan.go               # G5.3-T2 #609 — ResolveSourceDir + ScanDir + MemoryFile (frontmatter parser + BodySHA256 + MachineLocalOptOut).
+    │   ├── scan_test.go          # table-driven: well-formed/missing/malformed frontmatter, machine-local comment, BodySHA256 stability, ScanDir, ResolveSourceDir.
+    │   ├── suggest.go            # G5.3-T2 #609 — SuggestScope table + exported Scope* constants.
+    │   └── suggest_test.go       # full mapping table including tenantConfigured branch and unknown-type fallback.
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.

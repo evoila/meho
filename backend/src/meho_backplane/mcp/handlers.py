@@ -83,7 +83,6 @@ from meho_backplane.broadcast import (
     BroadcastEvent,
     compute_effective_broadcast_detail,
     publish_event,
-    read_request_override,
     redact_payload,
 )
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
@@ -116,6 +115,54 @@ _log = structlog.get_logger(__name__)
 #: this code to distinguish "I tried to read a resource that doesn't
 #: exist" from "I called a method the server doesn't support".
 _RESOURCE_NOT_FOUND: int = -32002
+
+
+def _read_mcp_broadcast_detail(raw_params: dict[str, Any]) -> Literal["full"] | None:
+    """Pull ``_meta.broadcast_detail`` out of an MCP method's ``params``.
+
+    G6.3-T3 (#380): MCP spec §Common/Utilities/_meta blesses ``_meta``
+    as the per-call metadata envelope. An operator opts into full
+    detail on a sensitive-class tool call (e.g. ``vault.kv.read``) by
+    sending::
+
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "vault.kv.read",
+            "arguments": {"path": "secret/foo"},
+            "_meta": {"broadcast_detail": "full"}
+          }
+        }
+
+    Opt-in only -- per Initiative #376 DoD, only ``"full"`` is honored.
+    Any other value (including ``"aggregate"``, which would be a
+    "weaken via channel" request) is logged at ``info`` level under
+    ``mcp_broadcast_detail_invalid_meta`` and dropped silently -- the
+    request still succeeds and the broadcast uses the default detail.
+
+    Defensive accessors: a malformed ``_meta`` (not a dict, missing
+    entirely, contains the key with a wrong-type value) returns
+    ``None`` without raising. The fail-open contract is the same as
+    :func:`~meho_backplane.broadcast.publisher.publish_event` -- the
+    broadcast layer never converts a benign client mistake into an
+    operation failure.
+
+    Returns ``"full"`` when the operator opted in to full detail,
+    ``None`` otherwise. MCP path passes this value directly to
+    :func:`compute_effective_broadcast_detail` rather than threading
+    it through a contextvar -- handlers already pass :class:`Operator`
+    explicitly, so a parameter is more idiomatic than the structlog
+    contextvar shim the HTTP path uses.
+    """
+    meta = raw_params.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("broadcast_detail")
+    if raw == "full":
+        return "full"
+    if raw is not None:
+        _log.info("mcp_broadcast_detail_invalid_meta", value=raw)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +242,7 @@ async def handle_tools_call(
     raw_params = params or {}
     name = raw_params.get("name")
     arguments = raw_params.get("arguments", {})
+    request_override = _read_mcp_broadcast_detail(raw_params)
     start = time.monotonic()
     audit_payload: dict[str, Any] = {
         "op_id": name if isinstance(name, str) else "",
@@ -302,16 +350,22 @@ async def handle_tools_call(
             op_id=audit_name,
             tenant_id=operator.tenant_id,
             raw_params=resolver_params,
-            request_override=read_request_override(),
+            request_override=request_override,
         )
         # Snapshot the broadcast-visible params BEFORE injecting the
-        # audit-only ``broadcast_detail_origin`` key. The audit row gets
-        # the augmented ``audit_payload``; the broadcast event reads
-        # ``broadcast_params`` so audit-internal metadata
-        # (origin, ``tenant_rule:<uuid>``) never reaches the
-        # broadcast feed.
+        # audit-only ``broadcast_detail_origin`` /
+        # ``broadcast_detail_effective`` keys. The audit row gets the
+        # augmented ``audit_payload``; the broadcast event reads
+        # ``broadcast_params`` so audit-internal metadata (origin,
+        # ``tenant_rule:<uuid>``, effective-detail enum) never reaches
+        # the broadcast feed.
         broadcast_params = dict(resolver_params)
         audit_payload["broadcast_detail_origin"] = broadcast_origin
+        # G6.3-T3 (#380): effective detail joins origin as an audit-
+        # only forensic field. Subscribers see ``detail`` through the
+        # rendered ``redact_payload`` shape; the audit row needs the
+        # raw enum for ``meho audit query`` filtering.
+        audit_payload["broadcast_detail_effective"] = broadcast_detail
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,
@@ -443,6 +497,7 @@ async def handle_resources_read(
     """
     raw_params = params or {}
     uri = raw_params.get("uri")
+    request_override = _read_mcp_broadcast_detail(raw_params)
     start = time.monotonic()
     audit_uri = uri if isinstance(uri, str) and uri else "<empty>"
     audit_payload: dict[str, Any] = {
@@ -511,14 +566,16 @@ async def handle_resources_read(
             op_id="mcp.resource.read",
             tenant_id=operator.tenant_id,
             raw_params=audit_payload,
-            request_override=read_request_override(),
+            request_override=request_override,
         )
         # Snapshot the broadcast-visible params BEFORE injecting the
-        # audit-only ``broadcast_detail_origin`` key -- same separation
-        # of audit-row and broadcast-event payloads as the tools/call
+        # audit-only ``broadcast_detail_origin`` /
+        # ``broadcast_detail_effective`` keys -- same separation of
+        # audit-row and broadcast-event payloads as the tools/call
         # path above.
         broadcast_params = dict(audit_payload)
         audit_payload["broadcast_detail_origin"] = broadcast_origin
+        audit_payload["broadcast_detail_effective"] = broadcast_detail
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,

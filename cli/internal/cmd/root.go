@@ -16,6 +16,7 @@ import (
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
+	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
@@ -123,6 +124,14 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest
 	// cannot shadow the built-in `audit` parent.
 	root.AddCommand(audit.NewRootCmd())
+
+	// G6.3-T4 (#381) -- broadcast-detail override management verbs
+	// (overrides list / set / remove) for Initiative #376. Wraps the
+	// three /api/v1/broadcast/overrides routes shipped by the same
+	// task. tenant_admin-only; non-admin callers see 403. Registered
+	// before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `broadcast` parent.
+	root.AddCommand(broadcast.NewRootCmd())
 
 	// G4.1-T4 (#418) -- kb verbs (ingest / search / list / show /
 	// add / delete) for Initiative #331. Wraps the five /api/v1/kb*

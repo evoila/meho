@@ -466,3 +466,135 @@ async def test_refresh_is_tenant_scoped() -> None:
     assert len(a_nodes) == 3
     assert b_nodes == []
     assert all(n.tenant_id == tenant_a for n in a_nodes)
+
+
+# ---------------------------------------------------------------------------
+# Cross-target / manual-annotation collision (#673 regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refresh_adopts_pre_existing_target_null_node_without_collision() -> None:
+    """A snapshot node that already exists under ``target_id IS NULL``.
+
+    ``graph_node`` is unique on ``(tenant_id, kind, name)`` — the index
+    is target-independent. A node first created as a manual annotation
+    (``target_id IS NULL``, the documented :func:`resolve_node` shape)
+    or by another target can be re-asserted by *this* target's probe.
+    The pre-#673 reconcile scoped its existing-node lookup by
+    ``target_id`` only, missed the row, issued a second INSERT for the
+    same ``(tenant, kind, name)`` and blew the unique index mid-reconcile
+    (``UniqueViolationError`` surfaced via query-invoked autoflush in
+    ``_reconcile_edges``). The fix keys the upsert on the tenant-wide
+    natural key: the existing row is **adopted** (``last_seen`` bumped,
+    ``target_id`` claimed) instead of duplicated.
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    op = _operator(tenant_id)
+
+    # Pre-seed ``vm-a`` as a manual annotation: same (tenant, kind, name)
+    # the snapshot below re-asserts, but unowned by any target.
+    sessionmaker = get_sessionmaker()
+    annotated_id = uuid.uuid4()
+    async with sessionmaker() as session:
+        session.add(
+            GraphNode(
+                id=annotated_id,
+                tenant_id=tenant_id,
+                kind="vm",
+                name="vm-a",
+                target_id=None,
+                properties={},
+                discovered_by="curated",
+                first_seen=datetime.now(UTC),
+                last_seen=None,
+            )
+        )
+        await session.commit()
+
+    _FakeConnector.hints = _hints_3n2e()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(target, op)
+
+    # vm-a is adopted (updated, not added); vm-b + ds-1 are genuinely new.
+    assert result.added_nodes == 2
+    assert result.updated_nodes == 1
+    assert result.removed_nodes == 0
+    assert result.added_edges == 2
+
+    async with sessionmaker() as session:
+        rows = (
+            (await session.execute(select(GraphNode).where(GraphNode.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+    by_name = {n.name: n for n in rows}
+    # Exactly three rows — no duplicate vm-a.
+    assert sorted(by_name) == ["ds-1", "vm-a", "vm-b"]
+    # The annotated row was adopted in place: same id, now owned by the
+    # discovering target, last_seen stamped, probe properties applied.
+    vm_a = by_name["vm-a"]
+    assert vm_a.id == annotated_id
+    assert vm_a.target_id == target.id
+    assert vm_a.last_seen is not None
+    assert vm_a.properties == {"power": "on"}
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_soft_delete_other_targets_nodes() -> None:
+    """The soft-delete pass stays scoped to the refreshing target.
+
+    Two targets in the same tenant. Target A discovers ``vm-a``; a later
+    refresh of target B (whose snapshot does not contain ``vm-a``) must
+    not soft-delete A's row — the widened upsert lookup must not widen
+    the removal pass.
+    """
+    _register_fake()
+    tenant_id, target_a = await _seed_tenant_and_target("tenant-x")
+    op = _operator(tenant_id)
+
+    # Second target in the same tenant.
+    sessionmaker = get_sessionmaker()
+    target_b = Target(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        name="vcenter-b",
+        aliases=[],
+        product="faketopo",
+        host="vc-b.example.test",
+    )
+    async with sessionmaker() as session:
+        session.add(target_b)
+        await session.commit()
+        await session.refresh(target_b)
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        # Target A discovers the 3n/2e snapshot.
+        _FakeConnector.hints = _hints_3n2e()
+        await refresh_target_topology(target_a, op)
+        # Target B discovers a disjoint single node.
+        _FakeConnector.hints = TopologyHints(
+            discovered_at=datetime.now(UTC),
+            nodes=(NodeHint(kind="vm", name="vm-z"),),
+            edges=(),
+        )
+        result_b = await refresh_target_topology(target_b, op)
+
+    # B added its own node and removed nothing — A's nodes are off-limits.
+    assert result_b.added_nodes == 1
+    assert result_b.removed_nodes == 0
+
+    async with sessionmaker() as session:
+        a_vm_a = (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    GraphNode.kind == "vm",
+                    GraphNode.name == "vm-a",
+                )
+            )
+        ).scalar_one()
+    assert a_vm_a.target_id == target_a.id
+    assert a_vm_a.last_seen is not None, "target B's refresh must not soft-delete target A's node"

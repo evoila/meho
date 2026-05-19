@@ -14,6 +14,22 @@ Source: `backend/src/meho_backplane/connectors/sddc_manager/`.
 
 ## Key types
 
+- **`SddcCoreGroup`** (`core_ops.py`) — frozen dataclass carrying `group_key`,
+  `name`, and `when_to_use` for one operator-reviewed LLM-grouping output group.
+  8 entries in `SDDC_CORE_GROUPS` span the 8 SDDC Manager path families.
+- **`SddcCoreOp`** (`core_ops.py`) — frozen dataclass carrying `op_id`,
+  `group_key`, and `llm_instructions` for one curated read op. 9 entries in
+  `SDDC_CORE_OPS` (2 in the `sddc-domains` group; 1 in every other group).
+- **`SDDC_PATH_RULES`** (`core_ops.py`) — ordered tuple of `(path_prefix,
+  group_key)` pairs used by `classify_sddc_op` to assign a VCF API path to its
+  curated group. First match wins; covers the 8 top-level resource families
+  (`releases`, `sddc-managers`, `domains`, `clusters`, `hosts`, `network-pools`,
+  `bundles`, `tasks`).
+- **`SDDC_PRODUCT`** (`core_ops.py`) — `"sddc"`, the value
+  `parse_connector_id("sddc-rest-9.0")` extracts (first hyphen-segment of
+  `impl_id="sddc-rest"`). This is the `product` stored in `endpoint_descriptor`
+  and `operation_group` rows — **distinct** from `SddcManagerConnector.product`
+  (`"sddc-manager"`), which is the v2 registry key and resolver target.
 - **`SddcManagerConnector`** (`connector.py`) — `HttpConnector` subclass.
   Class attributes: `product="sddc-manager"`, `version="9.0"`,
   `impl_id="sddc-rest"`, `supported_version_range=">=9.0,<10.0"`,
@@ -126,6 +142,54 @@ client.
   shape without a network call.
 - **structlog** — a single `sddc_manager_credentials_loaded` info event per
   successful first-use credential load; no other emit points in this skeleton.
+
+## `core_ops.py` — curation module
+
+`core_ops.py` is the operator-review metadata store for the curated 9-op read
+core. It mirrors the pattern `connectors/nsx/core_ops.py` established for NSX.
+
+### `classify_sddc_op(op_id) -> str`
+
+Strips the `METHOD:` prefix and walks `SDDC_PATH_RULES` in order, returning
+the first matching `group_key` or `"none"` for uncurated paths. Used during
+operator review to assign new ingested ops to groups without manual
+classification.
+
+### `apply_sddc_core_curation(review_service, *, tenant_id)`
+
+The operator-review-time substrate call. After this call:
+
+- All 8 curated groups land `review_status='enabled'`.
+- Exactly the 9 ops in `SDDC_CORE_OPS` are `is_enabled=True`.
+- Every other op in a curated group carries an operator-override audit row
+  (`is_enabled=False`) that the `enable_group` cascade respects.
+- Each curated op carries the reviewed `llm_instructions` blob.
+
+The helper uses `ReviewService.get_review_payload` + `edit_op(is_enabled=False)`
+(for non-core ops) + `edit_group` + `enable_group` + `edit_op(llm_instructions=...)`
+in that order, exactly matching the `apply_nsx_core_curation` pattern.
+
+Re-running is safe: `enable_group` short-circuits on already-enabled groups
+(no audit row), but `edit_group` and `edit_op` always emit one audit row per
+call even on no-op values. Intended posture is a one-shot curation after ingest.
+
+### The 9 curated ops
+
+| op_id | group | cli alias |
+|---|---|---|
+| `GET:/v1/releases/system` | `sddc-releases` | `sddc.about` |
+| `GET:/v1/sddc-managers` | `sddc-managers` | `sddc.manager.list` |
+| `GET:/v1/domains` | `sddc-domains` | `sddc.domain.list` |
+| `GET:/v1/domains/{id}` | `sddc-domains` | `sddc.domain.info` |
+| `GET:/v1/clusters` | `sddc-clusters` | `sddc.cluster.list` |
+| `GET:/v1/hosts` | `sddc-hosts` | `sddc.host.list` |
+| `GET:/v1/network-pools` | `sddc-network-pools` | `sddc.network_pool.list` |
+| `GET:/v1/bundles` | `sddc-bundles` | `sddc.bundle.list` |
+| `GET:/v1/tasks` | `sddc-tasks` | `sddc.workflow.list` |
+
+Lifecycle-write ops (`workflow start`, `domain create`, `cluster expand`,
+`host commission`) remain `staged` (never enabled) per Initiative #368 v0.2
+scope.
 
 ## Known issues
 

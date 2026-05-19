@@ -102,6 +102,23 @@ func TestRunOverridesSetOpWideOmitsScopeFields(t *testing.T) {
 	}
 }
 
+// TestRunOverridesSetInvalidDetailRejectedClientSide -- mirrors the
+// scope-pair check: --detail outside the {full, aggregate} set is
+// rejected client-side before the HTTP call, so the operator gets
+// an immediate error message rather than a 422 round-trip.
+func TestRunOverridesSetInvalidDetailRejectedClientSide(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runOverridesSet(cmd, overridesSetOptions{
+		OpIDPattern:       "vault.kv.*",
+		Detail:            "verbose",
+		BackplaneOverride: "http://unreached.test",
+	})
+	_ = err
+	if !strings.Contains(stderr.String(), "--detail must be one of: full, aggregate") {
+		t.Errorf("stderr should reject invalid --detail value: %q", stderr.String())
+	}
+}
+
 // TestRunOverridesSetHalfSetScopeRejectedClientSide -- the CLI
 // validates the scope pair before issuing the HTTP request so the
 // operator gets an immediate, clear error message rather than a 422

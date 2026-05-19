@@ -247,13 +247,18 @@ this stage it exposes:
   422). Every successful mutation calls
   `invalidate_tenant_cache(operator.tenant_id)` so the resolver
   picks up the change on the next publish without waiting for the
-  60s TTL. Both mutations bind `audit_op_id` /
-  `audit_op_class="write"` plus an override-diff fragment
-  (`audit_override_op` / `audit_override_id` /
-  `audit_override_pattern` / `audit_override_detail`) so the audit
-  middleware writes a forensic row carrying operator + rule diff,
-  and the broadcast event ships under `op_class=write` -- "operator
-  X created override Y" lands in the SSE feed and the Slack mirror.
+  60s TTL. Both mutations bind `audit_op_id`
+  (`meho.broadcast.overrides.set` / `.remove`) and
+  `audit_op_class="write"`; POST additionally binds the full
+  override diff (`audit_override_op="set"` / `audit_override_id` /
+  `audit_override_pattern` / `audit_override_detail`) while DELETE
+  binds only `audit_override_op="remove"` and `audit_override_id`
+  (the route doesn't read the row before deleting, so the pattern +
+  detail aren't available without an extra SELECT). Either way the
+  audit middleware writes a forensic row carrying operator + rule
+  diff, and the broadcast event ships under `op_class=write` --
+  "operator X created override Y" lands in the SSE feed and the
+  Slack mirror.
   The Go CLI under `cli/internal/cmd/broadcast/` ships three
   matching verbs (`meho broadcast overrides list|set|remove`) with
   `--json` output, `--op-id-pattern` filter on list, and the same

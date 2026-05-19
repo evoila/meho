@@ -11,10 +11,14 @@ import (
 )
 
 // TestBuildRemovePathEscapesID -- the override id path-segment is
-// URL-encoded so unusual characters survive the round-trip.
+// URL-encoded so reserved characters survive the round-trip. Uses
+// an ID with `/`, ` `, `?` so a regression that dropped
+// `url.PathEscape` from `buildRemovePath` would actually fail the
+// test (the pre-fixup UUID-only fixture would have passed even
+// with no escaping).
 func TestBuildRemovePathEscapesID(t *testing.T) {
-	got := buildRemovePath("11111111-1111-1111-1111-111111111111")
-	want := "/api/v1/broadcast/overrides/11111111-1111-1111-1111-111111111111"
+	got := buildRemovePath("abc/def ghi?")
+	want := "/api/v1/broadcast/overrides/abc%2Fdef%20ghi%3F"
 	if got != want {
 		t.Errorf("buildRemovePath: got %q; want %q", got, want)
 	}
@@ -47,11 +51,14 @@ func TestRunOverridesRemoveSilentOn204(t *testing.T) {
 	}
 }
 
-// TestRunOverridesRemove404RendersNotFound -- 404 from the backend
-// surfaces as "broadcast override not found". Cross-tenant probes
-// land here too (the backend conflates "doesn't exist" with "belongs
-// to another tenant" so existence is not leaked).
-func TestRunOverridesRemove404RendersNotFound(t *testing.T) {
+// TestRunOverridesRemove404RendersBackendDetail -- 404 surfaces the
+// backend's own `detail` string (post-fixup behavior). The remove
+// verb's 404 carries `broadcast_override_not_found`; list/set on
+// an older backplane (route missing) would return a different
+// detail and the same surface flows through. The pre-fixup
+// behavior hard-coded "broadcast override not found" regardless of
+// the actual response.
+func TestRunOverridesRemove404RendersBackendDetail(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/broadcast/overrides/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -67,13 +74,9 @@ func TestRunOverridesRemove404RendersNotFound(t *testing.T) {
 		OverrideID:        "11111111-1111-1111-1111-111111111111",
 		BackplaneOverride: srv.URL,
 	})
-	// renderRequestError returns the StructuredError via
-	// output.RenderError; the function's return value may be the
-	// rendered error or nil depending on the env. Stderr is the
-	// load-bearing contract.
 	_ = err
-	if !strings.Contains(stderr.String(), "broadcast override not found") {
-		t.Errorf("stderr should report 'broadcast override not found': %q", stderr.String())
+	if !strings.Contains(stderr.String(), "broadcast_override_not_found") {
+		t.Errorf("stderr should report the backend's detail string: %q", stderr.String())
 	}
 }
 

@@ -300,10 +300,26 @@ async def create_override(
     try:
         await session.flush()
     except IntegrityError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="broadcast_override_already_exists",
-        ) from exc
+        # Narrow the 409 to actual composite-unique-index violations.
+        # Other IntegrityError shapes (FK violation -- impossible in
+        # practice thanks to ``ensure_tenant``, but defensively
+        # handled here; future NOT NULL or CHECK constraint adds)
+        # propagate so a genuine corruption surfaces as a 500 rather
+        # than a misleading "already exists" message.
+        #
+        # PG: ``UniqueViolation`` carries ``pgcode == "23505"`` (per
+        # PEP 249's psycopg shape). SQLite: the
+        # ``UNIQUE constraint failed`` substring is the documented
+        # form (sqlite.org/lang_conflict.html). Both dialects covered.
+        pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
+        orig_msg = str(getattr(exc, "orig", exc))
+        is_unique_violation = pgcode == "23505" or "UNIQUE constraint failed" in orig_msg
+        if is_unique_violation:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="broadcast_override_already_exists",
+            ) from exc
+        raise
     # Refresh so the DB-side defaults (created_at, updated_at) are
     # visible on the returned row; the SQLAlchemy session would
     # otherwise hand back stale Python-default values.

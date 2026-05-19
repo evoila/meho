@@ -225,8 +225,16 @@ func renderHTTPError(
 			jsonOut,
 		)
 	case http.StatusNotFound:
+		// Surface the backend's own `detail` instead of hard-coding
+		// "broadcast override not found": for `list` / `set` (which
+		// don't carry an id in the path), a 404 means "route doesn't
+		// exist on this backplane" -- typically because the operator
+		// is talking to an older deploy that hasn't shipped T4 yet.
+		// `remove`'s 404 carries `broadcast_override_not_found`
+		// detail; both shapes round-trip cleanly through
+		// `decodeDetailString`.
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected("broadcast override not found"),
+			output.Unexpected(decodeDetailString(he.Body)),
 			jsonOut,
 		)
 	case http.StatusConflict:

@@ -73,6 +73,16 @@ type overridesSetOptions struct {
 }
 
 func runOverridesSet(cmd *cobra.Command, opts overridesSetOptions) error {
+	// CLI-side --detail validation: mirrors the backend's Pydantic
+	// Literal["full", "aggregate"] so the operator gets an immediate
+	// rejection rather than a remote 422.
+	if opts.Detail != "full" && opts.Detail != "aggregate" {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("--detail must be one of: full, aggregate"),
+			opts.JSONOut,
+		)
+	}
+
 	// CLI-side scope-pair check: both empty → op-wide rule (omit
 	// scope_field / scope_value from the request entirely); both
 	// set → scoped rule. A half-set pair is rejected at the CLI so

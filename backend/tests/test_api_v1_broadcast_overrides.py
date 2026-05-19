@@ -432,11 +432,15 @@ async def test_get_does_not_leak_cross_tenant(client: TestClient) -> None:
             "keys": [public_jwks(key_a)["keys"][0], public_jwks(key_b)["keys"][0]],
         }
         mock_discovery_and_jwks(r, combined_jwks)
-        client.post(
+        # Assert the seed POST landed -- without this the test could
+        # pass on a 500 with `[]` from the subsequent GET, masking a
+        # regression in the create path.
+        create_resp = client.post(
             "/api/v1/broadcast/overrides",
             json={"op_id_pattern": "vault.kv.*", "detail": "aggregate"},
             headers={"Authorization": f"Bearer {token_a}"},
         )
+        assert create_resp.status_code == 201, create_resp.text
         resp = client.get(
             "/api/v1/broadcast/overrides",
             headers={"Authorization": f"Bearer {token_b}"},

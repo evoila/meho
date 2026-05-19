@@ -3,17 +3,20 @@
 
 """Kubeconfig loading for the Kubernetes connector.
 
-The skeleton lands ahead of the Target model (G0.3 / #224) and the
-operator-context Vault read path. Both surfaces are stubbed via a
-narrow :class:`KubernetesTargetLike` Protocol plus an injectable
-``kubeconfig_loader`` callable — once G0.3 lands its concrete ``Target``
-model, the structural shape here will satisfy the Protocol unchanged.
+The connector reads its target through a narrow
+:class:`KubernetesTargetLike` Protocol and resolves a kubeconfig via an
+injectable ``kubeconfig_loader`` callable. A concrete target model that
+exposes ``name``/``host``/``port``/``secret_ref`` satisfies the Protocol
+structurally with no edits here.
 
-The default loader, :func:`load_kubeconfig_from_vault`, raises
-:exc:`NotImplementedError` until G0.3 + the operator-context Vault
-connector reads land. T2+ tasks under #320 wire the live read by
-overriding the loader at connector construction time; unit and
-integration tests inject their own (mock) loader the same way.
+The default loader, :func:`load_kubeconfig_from_vault`, is a deliberate
+stub: the operator-context per-target Vault credential read is not yet
+wired for the Kubernetes connector, so it raises
+:exc:`NotImplementedError`. The supported workaround is to inject a
+custom ``kubeconfig_loader`` on ``KubernetesConnector`` at construction
+time; unit and integration tests inject their own (mock) loader the
+same way. The live read is tracked under the open
+`Goal #214 (Connector parity) <https://github.com/evoila/meho/issues/214>`_.
 """
 
 from collections.abc import Awaitable, Callable
@@ -33,9 +36,9 @@ __all__ = [
 class KubernetesTargetLike(Protocol):
     """Minimum target shape :class:`KubernetesConnector` reads.
 
-    Structural Protocol — once G0.3 (#224) lands a concrete ``Target``
-    model in :mod:`meho_backplane.targets`, the model satisfies this
-    Protocol without code changes here. ``secret_ref`` is the Vault
+    Structural Protocol — any concrete ``Target`` model in
+    :mod:`meho_backplane.targets` that exposes these attributes
+    satisfies it without code changes here. ``secret_ref`` is the Vault
     path the operator-context Vault read resolves to a kubeconfig YAML
     string under the ``kubeconfig`` field (consumer's ``targets.yaml``
     convention, locked in decision #8).
@@ -83,15 +86,20 @@ def parse_kubeconfig_yaml(kubeconfig_text: str) -> dict[str, Any]:
 async def load_kubeconfig_from_vault(target: KubernetesTargetLike) -> dict[str, Any]:
     """Default kubeconfig loader — Vault read by ``target.secret_ref``.
 
-    Stub until G0.3 (#224) lands the ``Target`` model and the
-    operator-context Vault read path. T2+ tasks under #320 override
-    this loader with the live implementation. Raising
-    :exc:`NotImplementedError` here keeps the wiring shape stable: a
-    production caller without an override receives a clear error
-    rather than a silent fallback or a hallucinated kubeconfig.
+    Deliberate stub: the operator-context per-target Vault credential
+    read is not yet wired for the Kubernetes connector. Raising
+    :exc:`NotImplementedError` here keeps the wiring shape stable — a
+    production caller without an override receives a clear error rather
+    than a silent fallback or a hallucinated kubeconfig. The supported
+    workaround is to inject a custom ``kubeconfig_loader`` on
+    ``KubernetesConnector`` at construction time. The live read is
+    tracked under the open Goal #214 (Connector parity).
     """
     raise NotImplementedError(
-        "load_kubeconfig_from_vault requires G0.3 Target model + operator-context "
-        f"Vault read; target={target.name!r} secret_ref={target.secret_ref!r}. "
-        "Inject a custom kubeconfig_loader on KubernetesConnector until G0.3 lands."
+        "load_kubeconfig_from_vault is a deliberate stub: the operator-context "
+        "per-target Vault credential read is not yet wired for the Kubernetes "
+        f"connector; target={target.name!r} secret_ref={target.secret_ref!r}. "
+        "Workaround: inject a custom kubeconfig_loader on KubernetesConnector. "
+        "Tracked under open Goal #214 (Connector parity): "
+        "https://github.com/evoila/meho/issues/214"
     )

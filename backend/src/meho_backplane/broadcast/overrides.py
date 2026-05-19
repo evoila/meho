@@ -220,6 +220,13 @@ async def _load_tenant_rules(tenant_id: UUID) -> list[BroadcastOverride]:
         rules, expires_at = entry
         if expires_at > now:
             return rules
+        # Expired -- evict the slot explicitly so a tenant that stops
+        # sending traffic doesn't keep a stale entry alive for the
+        # lifetime of the worker. The successful DB pull below
+        # re-populates the slot with a fresh expiry; a DB failure
+        # leaves it empty (no degraded read cached), forcing the
+        # default branch on subsequent calls until the DB recovers.
+        del _TENANT_CACHE[tenant_id]
     try:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:

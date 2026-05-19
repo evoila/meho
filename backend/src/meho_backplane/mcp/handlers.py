@@ -279,6 +279,21 @@ async def handle_tools_call(
         # write suffixes correctly (e.g. ``vault.kv.read`` →
         # ``credential_read`` → aggregate-only redacted payload by
         # default).
+        #
+        # ``resolver_params`` merges the raw tool ``arguments`` on top
+        # of ``audit_payload`` so scope-matched override rules
+        # (``scope_field="namespace"`` keys into ``raw_params["namespace"]``,
+        # ``scope_field="target_name"`` keys into ``raw_params["target"]``)
+        # can match against the actual MCP call. The hashed
+        # ``audit_payload`` (``params_hash``) stays the persistence
+        # shape; the resolver-visible view also carries the unhashed
+        # arguments. Arguments win on key collision -- if a tool
+        # happens to define an ``op_class`` argument, the operator
+        # value would take precedence, but that overlap is a tool-
+        # naming bug T4's API layer can warn on later.
+        resolver_params: dict[str, Any] = dict(audit_payload)
+        if isinstance(arguments, dict):
+            resolver_params.update(arguments)
         (
             broadcast_op_class,
             broadcast_detail,
@@ -286,9 +301,16 @@ async def handle_tools_call(
         ) = await compute_effective_broadcast_detail(
             op_id=audit_name,
             tenant_id=operator.tenant_id,
-            raw_params=audit_payload,
+            raw_params=resolver_params,
             request_override=read_request_override(),
         )
+        # Snapshot the broadcast-visible params BEFORE injecting the
+        # audit-only ``broadcast_detail_origin`` key. The audit row gets
+        # the augmented ``audit_payload``; the broadcast event reads
+        # ``broadcast_params`` so audit-internal metadata
+        # (origin, ``tenant_rule:<uuid>``) never reaches the
+        # broadcast feed.
+        broadcast_params = dict(resolver_params)
         audit_payload["broadcast_detail_origin"] = broadcast_origin
         try:
             await write_mcp_audit_row(
@@ -327,7 +349,7 @@ async def handle_tools_call(
             detail=broadcast_detail,
             audit_path=f"/mcp/tools/call/{audit_name}",
             status_code=status_code,
-            audit_payload=audit_payload,
+            audit_payload=broadcast_params,
         )
 
 
@@ -491,6 +513,11 @@ async def handle_resources_read(
             raw_params=audit_payload,
             request_override=read_request_override(),
         )
+        # Snapshot the broadcast-visible params BEFORE injecting the
+        # audit-only ``broadcast_detail_origin`` key -- same separation
+        # of audit-row and broadcast-event payloads as the tools/call
+        # path above.
+        broadcast_params = dict(audit_payload)
         audit_payload["broadcast_detail_origin"] = broadcast_origin
         try:
             await write_mcp_audit_row(
@@ -519,7 +546,7 @@ async def handle_resources_read(
             detail=broadcast_detail,
             audit_path=f"/mcp/resources/read/{audit_uri}",
             status_code=status_code,
-            audit_payload=audit_payload,
+            audit_payload=broadcast_params,
         )
 
 

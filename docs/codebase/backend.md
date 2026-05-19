@@ -203,7 +203,8 @@ this stage it exposes:
   returns an empty rule set (not cached — caching a degraded read
   would extend a transient failure into a 60s window), and the
   resolver drops to the default branch. `request_override` plumbing
-  reads `structlog.contextvars.get_contextvars()["broadcast_detail_override"]`;
+  reads `structlog.contextvars.get_contextvars().get("broadcast_detail_override")`
+  (returns `None` when unset);
   T3 (#380) binds the contextvar from the `X-Broadcast-Detail` header
   and MCP `_meta.broadcast_detail` field, T2 ships the read shim only.
 * Operation dispatch (G0.6-T8 #399) —

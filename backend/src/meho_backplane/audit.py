@@ -617,6 +617,14 @@ class AuditMiddleware:
             payload=payload,
         )
         broadcast_decision: tuple[str, Literal["full", "aggregate"], str] | None = None
+        # Snapshot of the resolver's raw_params view that the broadcast
+        # event will render through :func:`redact_payload`. Kept distinct
+        # from ``payload`` so the ``broadcast_detail_origin`` we inject
+        # into the audit row below never reaches the broadcast feed --
+        # the origin (especially ``tenant_rule:<uuid>``) is internal
+        # audit-trail metadata that SSE / Slack / MCP-resource
+        # subscribers must not see.
+        broadcast_payload = payload
         if tenant_id is not None:
             broadcast_decision = await compute_effective_broadcast_detail(
                 op_id=broadcast_op_id,
@@ -625,6 +633,7 @@ class AuditMiddleware:
                 request_override=read_request_override(),
                 op_class_override=broadcast_op_class_override,
             )
+            broadcast_payload = dict(payload)
             payload["broadcast_detail_origin"] = broadcast_decision[2]
 
         try:
@@ -691,7 +700,7 @@ class AuditMiddleware:
                 op_class=broadcast_op_class,
                 detail=broadcast_detail,
                 status_code=status_code,
-                payload=payload,
+                payload=broadcast_payload,
                 handler_exc=handler_exc,
             )
 

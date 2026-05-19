@@ -353,32 +353,30 @@ jobs:
         # the tree today.
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.23.0` directive. golangci-lint
+          # Tracks `cli/go.mod`'s `go 1.25.8` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
-          go-version: '1.23'
+          # Bumped from 1.23 → 1.25 because charm.land/huh/v2 v2.0.3's
+          # transitive deps raised the minimum to go 1.25.8 (PR #640).
+          go-version: '1.25'
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
-        # v6 (NOT v7+ / v8+ / v9+) because the in-tree cli/.golangci.yml
-        # is written in the golangci-lint v1 config schema (disable-all +
-        # explicit enable list, v1 linter names like `gosimple` /
-        # `errcheck`). golangci-lint-action v7.x+ refuses to install any
-        # v1.x binary at all — fails with `invalid version string
-        # 'v1.64.8', golangci-lint v1 is not supported`. PR #198
-        # (Dependabot) attempted the major bump from v6.5.2 -> v9.2.0
-        # without the corresponding v2 config migration and broke every
-        # Go CI run on main between #198's merge and this revert. To
-        # prevent the same problem recurring, the action's major-version
-        # bumps are now in Dependabot's ignore list (see
-        # `.github/dependabot.yml`); minor / patch bumps within v6 still
-        # come through normally. Migrating cli/.golangci.yml to the v2
-        # schema is tracked as a separate follow-up — when that lands,
-        # the action major and the binary version flip together.
-        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84  # v6.5.2
+        # v9.2.0: cli/.golangci.yml was migrated from v1 to v2 schema in
+        # PR #640 (alongside the go 1.25 bump) so the action major upgrade
+        # is now safe. golangci-lint v2.12.2 is compiled with Go 1.25,
+        # resolving the "go language version used to build golangci-lint
+        # is lower than the targeted Go version" failure that v1.64.8
+        # (built with Go 1.24) produced once go-version was bumped to 1.25.
+        # golangci-lint-action v7+ refuses v1.x binaries; v9.2.0 requires
+        # golangci-lint >= v2.x and fully supports the v2 config schema.
+        # SHA pinned to v9.2.0 commit (devops_best_practices: pin to
+        # immutable SHA). Dependabot ignore list updated to track v9.x
+        # minor/patch bumps rather than the now-retired v6 pin.
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
         with:
-          version: v1.64.8
+          version: v2.12.2
           working-directory: cli
 
       - name: Go build

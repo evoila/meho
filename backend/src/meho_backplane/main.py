@@ -49,6 +49,9 @@ from fastapi import FastAPI, Response
 from meho_backplane import __version__
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
+from meho_backplane.api.v1.broadcast_overrides import (
+    router as api_v1_broadcast_overrides_router,
+)
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -406,6 +409,15 @@ app.include_router(api_v1_memory_router)
 # row this surface writes carries the canonical `meho.audit.query`
 # identity and broadcasts as aggregate-only per decision #3.
 app.include_router(api_v1_audit_router)
+# G6.3-T4 (#381) -- tenant-admin CRUD verbs for BroadcastOverride
+# rules (list / create / delete). Wraps the substrate ORM model T1
+# (#378) ships and the resolver-cache invalidation hook T2 (#379)
+# ships. RBAC: tenant_admin-only (operator + read_only get 403).
+# Tenant-scoped via the JWT's tenant_id claim; cross-tenant probes
+# return 404 (never 403) so existence is not leaked across tenant
+# boundaries. Every mutation writes an audit row and broadcasts
+# under op_class=write.
+app.include_router(api_v1_broadcast_overrides_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

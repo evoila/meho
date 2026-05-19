@@ -11,6 +11,19 @@
 # err113) because the scaffold genuinely needs package-level vars for
 # ldflags injection and unwrapped sentinel errors are idiomatic for
 # CLI exit-status handling.
+#
+# Schema version: v2 (migrated from v1 alongside PR #640 golangci-lint
+# v2.x upgrade; golangci-lint-action v7+ refuses v1.x binaries so v1
+# config schema is no longer usable on the supported action versions).
+# Key v1→v2 diffs applied here:
+#   - `version: "2"` required at root
+#   - `linters.disable-all: true` → `linters.default: none`
+#   - `gosimple` removed (merged into `staticcheck` in v2)
+#   - `linters-settings:` → `linters.settings:` (nested under linters)
+#   - `goimports.local-prefixes` → list (was a bare string in v1)
+#   - `issues.exclude-rules:` → `issues.exclusions.rules:`
+
+version: "2"
 
 run:
   timeout: 5m
@@ -22,11 +35,14 @@ run:
   go: "1.25"
 
 linters:
-  disable-all: true
+  # v2 equivalent of the v1 `disable-all: true` — start from an empty
+  # set and opt in only the linters we've explicitly vetted.
+  default: none
   enable:
     # Default set (golangci-lint runs these unless told otherwise).
     - errcheck
-    - gosimple
+    # gosimple was merged into staticcheck in golangci-lint v2; no
+    # separate enable needed — staticcheck below covers it.
     - govet
     - ineffassign
     - staticcheck
@@ -37,41 +53,44 @@ linters:
     # Style/best-practices supplement to go vet.
     - revive
 
-linters-settings:
-  goimports:
-    # Group local imports separately from third-party — matches the
-    # convention the backplane (Python isort) and the cobra codebase
-    # both use, and makes diff review easier when imports churn.
-    local-prefixes: github.com/evoila/meho/cli
-  revive:
-    # Default rules are noisy by themselves; pin an explicit ruleset
-    # so future revive releases don't surprise CI with new findings.
-    # Keep this list pragmatic — every rule here has paid for itself
-    # in production Go CLIs (gh, argocd, flux all enable equivalents).
-    rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: increment-decrement
-      - name: var-naming
-      - name: var-declaration
-      - name: package-comments
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unused-parameter
-      - name: unreachable-code
-      - name: redefines-builtin-id
+  # v2: linter settings live under linters.settings (not top-level linters-settings).
+  settings:
+    goimports:
+      # Group local imports separately from third-party — matches the
+      # convention the backplane (Python isort) and the cobra codebase
+      # both use, and makes diff review easier when imports churn.
+      # v2: local-prefixes is a list (bare string in v1).
+      local-prefixes:
+        - github.com/evoila/meho/cli
+    revive:
+      # Default rules are noisy by themselves; pin an explicit ruleset
+      # so future revive releases don't surprise CI with new findings.
+      # Keep this list pragmatic — every rule here has paid for itself
+      # in production Go CLIs (gh, argocd, flux all enable equivalents).
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
 
 issues:
   # Don't hide legitimate findings behind golangci-lint's default
@@ -79,11 +98,13 @@ issues:
   # (G2.7) we want every finding visible.
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Test files routinely use blank identifiers, dot imports, and
-    # global state in ways production code shouldn't; relax the
-    # strictest rules there without disabling them wholesale.
-    - path: _test\.go
-      linters:
-        - errcheck
-        - revive
+  # v2: exclude-rules moved to issues.exclusions.rules.
+  exclusions:
+    rules:
+      # Test files routinely use blank identifiers, dot imports, and
+      # global state in ways production code shouldn't; relax the
+      # strictest rules there without disabling them wholesale.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive

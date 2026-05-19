@@ -207,6 +207,30 @@ this stage it exposes:
   (returns `None` when unset);
   T3 (#380) binds the contextvar from the `X-Broadcast-Detail` header
   and MCP `_meta.broadcast_detail` field, T2 ships the read shim only.
+* Broadcast per-call opt-in transport (G6.3-T3 #380) — two surfaces
+  feed the resolver's `request_override` parameter:
+  `BroadcastDetailMiddleware` in
+  `src/meho_backplane/middleware.py` is a pure-ASGI middleware
+  registered between `RequestContextMiddleware` (outer) and
+  `AuditMiddleware` (inner). It parses the `X-Broadcast-Detail`
+  HTTP header, accepts only the value `"full"` (case-insensitive),
+  and binds the structlog contextvar `broadcast_detail_override`
+  symmetrically (`bind_contextvars` on entry,
+  `unbind_contextvars` in `finally`) for the duration of one
+  request. Non-`"full"` values are logged at info under
+  `broadcast_detail_invalid_header` and dropped silently — the
+  request still succeeds with the default detail (the "weaken via
+  header" path is forbidden by Initiative #376 DoD). The MCP path
+  bypasses the contextvar: `handle_tools_call` and
+  `handle_resources_read` extract `params["_meta"]["broadcast_detail"]`
+  defensively via `_read_mcp_broadcast_detail` (malformed `_meta`
+  → graceful `None`, no crash) and pass the value directly to
+  `compute_effective_broadcast_detail`. Both publish sites also
+  record `broadcast_detail_effective` on the audit row alongside
+  the existing `broadcast_detail_origin`, so `meho audit query`
+  (G8.1 #334) can answer both "who/what decided" and "what detail
+  did they get". Both audit-only keys stay out of the broadcast
+  event payload (the snapshot pattern T2 established).
 * Operation dispatch (G0.6-T8 #399) —
   `src/meho_backplane/api/v1/operations.py` exposes
   `POST /api/v1/operations/call` plus the discovery routes

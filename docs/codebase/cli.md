@@ -54,14 +54,15 @@ names.
   `user-tenant` / `user-target` / `tenant` / `target`. The two
   target-scoped values require `--target NAME`; the CLI rejects a
   missing `--target` client-side before the round-trip.
-- `meho migrate ...` (G5.3 #608–#611) — laptop-local memory migration
+- `meho migrate ...` (G5.3 #608–#612) — laptop-local memory migration
   surface. T1 (#608) ships the `migrate` parent + `memory` subcommand
   skeleton. T2 (#609) adds the frontmatter scanner + scope-suggestion
   table. T3 (#610) adds the machine-local detector. T4 (#611) wires the
   interactive `huh` picker, `--dry-run` (JSON envelopes), and
-  `--non-interactive` (user/feedback only) paths. Submission (POST
-  `/api/v1/memory`), post-login nudge, and marker file land in T5
-  (#612). Depends on `charm.land/huh/v2` (MIT).
+  `--non-interactive` (user/feedback only) paths. T5 (#612) adds the
+  real HTTP submission layer (POST `/api/v1/memory`), post-login nudge,
+  marker file, and `docs/cli/memory-migration.md`. Depends on
+  `charm.land/huh/v2` (MIT).
 
 ## Module layout
 
@@ -97,8 +98,8 @@ cli/
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
-    │   ├── login.go           # `meho login` subcommand + auth-config discovery + config persistence.
-    │   ├── login_test.go      # override-resolution + help-flag tests.
+    │   ├── login.go           # `meho login` subcommand + auth-config discovery + config persistence + post-login memory-migration nudge (T5 #612).
+    │   ├── login_test.go      # override-resolution + help-flag + post-login nudge tests.
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
@@ -160,10 +161,12 @@ cli/
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
-    │   ├── migrate/           # G5.3 #608–#611 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
+    │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
     │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2.
-    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; submitFn seam for T5 (#612).
-    │   │   └── memory_test.go    # --dry-run envelope + source_id, --non-interactive filter, machine-local skip, empty-dir guard.
+    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; real submitFn wired in T5 (#612).
+    │   │   ├── memory_test.go    # --dry-run envelope + source_id, --non-interactive filter, machine-local skip, empty-dir guard.
+    │   │   ├── submit.go         # G5.3-T5 #612 — doSubmit (spinner + POST /api/v1/memory), in-package HTTP helper trio, isTransient retry logic.
+    │   │   └── submit_test.go    # POST body shape, source_id stability, upsert rerun, transient retry, summary line, --mark-migrated.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
@@ -178,8 +181,9 @@ cli/
     │   ├── doc.go                # package doc.
     │   ├── machinelocal.go       # DetectMachineLocal — heuristic detector for laptop-local content (#610).
     │   ├── machinelocal_test.go  # table-driven per-Category tests + truncation + seam coverage (#610).
-    │   ├── marker.go             # TouchMarker / MarkerExists — migration-complete marker file (T5 stub in T4, #611; full impl #612).
-    │   ├── picker.go             # G5.3-T4 #611 — BuildForm (huh), SubmitPlan, FinalizeSkip, DefaultPlan, slugFromPath, scope/action option builders.
+    │   ├── marker.go             # G5.3-T5 #612 — TouchMarker / MarkerExists — XDG migration-complete marker file; full implementation.
+    │   ├── marker_test.go        # touch + exists + idempotent + delete-re-enables + sanitizeDirName.
+    │   ├── picker.go             # G5.3-T4 #611 — BuildForm (huh), SubmitPlan, FinalizeSkip, DefaultPlan, slugFromPath, SourceIDPrefix, scope/action builders.
     │   ├── picker_test.go        # slug, validateSlug, BuildForm structure, role-filtered scope options, FinalizeSkip, DefaultPlan.
     │   ├── scan.go               # G5.3-T2 #609 — ResolveSourceDir + ScanDir + MemoryFile (frontmatter parser + BodySHA256 + MachineLocalOptOut).
     │   ├── scan_test.go          # table-driven: well-formed/missing/malformed frontmatter, machine-local comment, BodySHA256 stability, ScanDir, ResolveSourceDir.

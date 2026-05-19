@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -16,9 +15,8 @@ import (
 	"github.com/evoila/meho/cli/internal/migrate"
 )
 
-// SubmitFn is the seam T5 replaces with the real backplane POST.
-// T4 wires a no-op stub so the command tree compiles and the dry-run
-// path works end-to-end without a network call.
+// SubmitFn is the seam tests replace with a mock; production code uses
+// the real doSubmit wired in newMemoryCmd.
 type SubmitFn func(plans []migrate.SubmitPlan) error
 
 // dryRunEnvelope is the machine-readable shape emitted by --dry-run
@@ -31,14 +29,10 @@ type dryRunEnvelope struct {
 	SourceID string         `json:"source_id"`
 }
 
-// SourceIDPrefix is the number of hex chars taken from the SHA-256 body
-// hash to build a source_id. Shared constant between T4 dry-run output
-// and T5 POST (keeping them bit-for-bit identical ensures --dry-run
-// preview = exactly what would be sent).
-const SourceIDPrefix = 12
-
 func newMemoryCmd() *cobra.Command {
-	return newMemoryCmdWithSubmit(stubSubmitFn)
+	// Real submit fn is wired inside RunE via newMemoryCmdWithSubmit(nil):
+	// a nil submitFn causes RunE to call doSubmit (the real HTTP POST path).
+	return newMemoryCmdWithSubmit(nil)
 }
 
 // newMemoryCmdWithSubmit is the testable variant: callers inject a submitFn.
@@ -59,6 +53,16 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 			nonInteractive, _ := flags.GetBool("non-interactive")
 			includeML, _ := flags.GetBool("include-machine-local")
 			markMigrated, _ := flags.GetBool("mark-migrated")
+			backplaneOverride, _ := flags.GetString("backplane")
+
+			// Resolve the effective submit function: injected for tests,
+			// real HTTP POST for production (nil submitFn).
+			eff := submitFn
+			if eff == nil {
+				eff = func(plans []migrate.SubmitPlan) error {
+					return doSubmit(cmd, backplaneOverride, plans)
+				}
+			}
 
 			// ── Resolve source directory ──────────────────────────────
 			dir, err := migrate.ResolveSourceDir(source)
@@ -78,8 +82,6 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 
 			opts := migrate.BuildFormOpts{
 				IncludeMachineLocal: includeML,
-				// TenantConfigured / IsTenantAdmin resolved from auth in T5;
-				// T4 leaves these at their zero values (conservative defaults).
 			}
 
 			// ── --dry-run path ────────────────────────────────────────
@@ -98,7 +100,7 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 						)
 					}
 				}
-				if err := submitFn(plans); err != nil {
+				if err := eff(plans); err != nil {
 					return err
 				}
 				if len(refused) > 0 {
@@ -133,7 +135,7 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 				return nil
 			}
 
-			if err := submitFn(toSubmit); err != nil {
+			if err := eff(toSubmit); err != nil {
 				return err
 			}
 			if markMigrated {
@@ -148,6 +150,7 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 	cmd.Flags().Bool("non-interactive", false, "skip the interactive picker; migrates only user/feedback entries")
 	cmd.Flags().Bool("include-machine-local", false, "include machine-local entries (default: skip them)")
 	cmd.Flags().Bool("mark-migrated", false, "touch the migration-complete marker after successful submission")
+	cmd.Flags().String("backplane", "", "backplane URL override (default: from meho login config)")
 
 	return cmd
 }
@@ -215,25 +218,11 @@ func filterMigrate(plans []migrate.SubmitPlan) []migrate.SubmitPlan {
 }
 
 // sourceID builds the stable source_id string from a plan's BodySHA256.
-// Uses the first SourceIDPrefix hex chars of the SHA-256 hash.
 func sourceID(plan migrate.SubmitPlan) string {
 	prefix := plan.File.BodySHA256
-	if len(prefix) > SourceIDPrefix {
-		prefix = prefix[:SourceIDPrefix]
+	if len(prefix) > migrate.SourceIDPrefix {
+		prefix = prefix[:migrate.SourceIDPrefix]
 	}
 	return "laptop-migration/" + prefix
 }
 
-// stubSubmitFn is the T4 no-op seam. T5 replaces it with the real
-// backplane POST implementation.
-func stubSubmitFn(plans []migrate.SubmitPlan) error {
-	if len(plans) == 0 {
-		return nil
-	}
-	scopes := make([]string, 0, len(plans))
-	for _, p := range plans {
-		scopes = append(scopes, fmt.Sprintf("%s (%s)", p.Slug, p.Scope))
-	}
-	return fmt.Errorf("meho migrate memory: submit not yet implemented (T5); would send: %s",
-		strings.Join(scopes, ", "))
-}

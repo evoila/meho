@@ -26,12 +26,25 @@ because this module has already registered the hand-rolled class. Until then,
 this module is the only registration path.
 
 Operations for this connector arrive in #617 via G0.7 spec ingestion of
-the SDDC Manager VCF API against the ``endpoint_descriptor`` table. This
-Task ships only the skeleton.
+the SDDC Manager VCF API against the ``endpoint_descriptor`` table.
+The curated 9-op read-only v0.2 core ships in :mod:`.core_ops`.
 """
 
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.sddc_manager.connector import SddcManagerConnector
+from meho_backplane.connectors.sddc_manager.core_ops import (
+    SDDC_CONNECTOR_ID,
+    SDDC_CORE_GROUPS,
+    SDDC_CORE_OPS,
+    SDDC_IMPL_ID,
+    SDDC_PATH_RULES,
+    SDDC_PRODUCT,
+    SDDC_VERSION,
+    SddcCoreGroup,
+    SddcCoreOp,
+    apply_sddc_core_curation,
+    classify_sddc_op,
+)
 from meho_backplane.connectors.sddc_manager.session import (
     SddcCredentialsLoader,
     SddcTargetLike,
@@ -47,9 +60,20 @@ register_connector_v2(
 )
 
 __all__ = [
+    "SDDC_CONNECTOR_ID",
+    "SDDC_CORE_GROUPS",
+    "SDDC_CORE_OPS",
+    "SDDC_IMPL_ID",
+    "SDDC_PATH_RULES",
+    "SDDC_PRODUCT",
+    "SDDC_VERSION",
+    "SddcCoreGroup",
+    "SddcCoreOp",
     "SddcCredentialsLoader",
     "SddcManagerConnector",
     "SddcTargetLike",
     "SessionCredentials",
+    "apply_sddc_core_curation",
+    "classify_sddc_op",
     "load_credentials_from_vault",
 ]

@@ -54,15 +54,6 @@ linters:
 
   # v2: linter settings live under linters.settings (not top-level linters-settings).
   settings:
-    errcheck:
-      # fmt.Fprintf/Fprintln/Fprint write to an io.Writer — in a CLI
-      # (stdout/stderr), unhandled write errors are conventional and
-      # not actionable. Exclude them to avoid noise on the ~400 call
-      # sites spread across the existing codebase.
-      exclude-functions:
-        - fmt.Fprintf
-        - fmt.Fprintln
-        - fmt.Fprint
     revive:
       # Default rules are noisy by themselves; pin an explicit ruleset
       # so future revive releases don't surprise CI with new findings.
@@ -95,6 +86,12 @@ linters:
 
   # v2: exclusion rules live under linters.exclusions.rules (was issues.exclude-rules in v1).
   exclusions:
+    # v2 has no `exclude-use-default`; the EXC0001-style defaults v1
+    # applied implicitly (errcheck on resp.Body.Close, fmt.Print*, etc.)
+    # are now opt-in via presets. Restore them so pre-existing call sites
+    # don't turn this scaffold PR into a tree-wide errcheck cleanup.
+    presets:
+      - std-error-handling
     rules:
       # Test files routinely use blank identifiers, dot imports, and
       # global state in ways production code shouldn't; relax the

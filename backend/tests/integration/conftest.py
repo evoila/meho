@@ -232,35 +232,89 @@ def async_pg_url() -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 
+# Single source of truth for the non-PG chassis env vars every
+# integration test needs. Lives at module scope so the autouse
+# ``_integration_default_env`` fixture below and the opt-in
+# ``integration_env`` fixture (which adds the PG-URL override) both
+# read from the same dict — preventing the copy-paste drift the
+# previous shape had.
+_CHASSIS_ENV: dict[str, str] = {
+    "KEYCLOAK_ISSUER_URL": _ISSUER,
+    "KEYCLOAK_AUDIENCE": _AUDIENCE,
+    "KEYCLOAK_JWKS_CACHE_TTL_SECONDS": "300",
+    "KEYCLOAK_JWT_LEEWAY_SECONDS": "30",
+    "VAULT_ADDR": "https://vault.test",
+    "VAULT_OIDC_ROLE": "meho-mcp",
+    "VAULT_OIDC_MOUNT_PATH": "jwt",
+    "VAULT_TIMEOUT_SECONDS": "5.0",
+}
+
+
+@pytest.fixture(autouse=True)
+def _integration_default_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Pin chassis env vars Settings() requires at construction time.
+
+    Autouse for every integration test so any code path that
+    transitively loads :class:`Settings` (audit middleware, connector
+    dispatch chain forwarding through the dispatcher, etc.) does not
+    die with ``KeyError: 'KEYCLOAK_ISSUER_URL'`` at
+    ``settings.py:391``'s eager ``os.environ["..."]`` access.
+
+    Deliberately does NOT depend on ``async_pg_url`` — fixtures that
+    don't need PostgreSQL (k3d / bind9 connector integration tests
+    that talk to their own testcontainer) get the chassis env vars
+    for free without paying the ~3-second pgvector boot. The opt-in
+    ``integration_env`` fixture below stays the way to layer the
+    PG-URL override on top for tests that DO need the real DB.
+
+    Mirrors the autouse-for-invariants discipline the
+    :mod:`tests.conftest` ``_default_database_url`` fixture sets at
+    the unit level. The ``get_settings.cache_clear()`` /
+    ``clear_jwks_cache()`` calls bracket the yield so neither cache
+    bleeds between tests.
+    """
+    for key, value in _CHASSIS_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    clear_jwks_cache()
+
+    yield
+
+    get_settings.cache_clear()
+    clear_jwks_cache()
+
+
 @pytest.fixture
 def integration_env(
     async_pg_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[None]:
-    """Pin every chassis env var + redirect ``DATABASE_URL`` at the PG container.
+    """Override ``DATABASE_URL`` to the PG testcontainer's asyncpg URL.
+
+    Composes with the autouse ``_integration_default_env`` fixture
+    above — that one pins the non-PG chassis env vars (KEYCLOAK_* /
+    VAULT_*); this one layers the testcontainer's PG URL on top for
+    tests that actually need the real DB. Tests that don't need PG
+    simply don't request this fixture and pay zero pgvector-boot
+    cost.
 
     The autouse ``_default_database_url`` fixture in
-    :mod:`tests.conftest` set ``DATABASE_URL`` at a tmp-path SQLite
-    file *and* ran ``alembic upgrade head`` against that file. This
-    fixture overrides the env var to the testcontainer's asyncpg URL,
-    clears the cached :class:`Settings` and engine, and yields. The
-    autouse fixture's SQLite migration is harmless extra work — the
-    PG fixture replaces it before any audit row is written.
+    :mod:`tests.conftest` had already set ``DATABASE_URL`` at a
+    tmp-path SQLite file *and* run ``alembic upgrade head`` against
+    that file. This fixture overrides the env var to the
+    testcontainer's asyncpg URL, clears the cached :class:`Settings`
+    and engine, and yields. The autouse fixture's SQLite migration
+    is harmless extra work — the PG fixture replaces it before any
+    audit row is written.
 
     The JWKS cache is reset around the yield so the JWT mocking in
     each test can pin its own key without inheriting a sibling test's
     cached JWKS.
     """
     monkeypatch.setenv("DATABASE_URL", async_pg_url)
-    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", _ISSUER)
-    monkeypatch.setenv("KEYCLOAK_AUDIENCE", _AUDIENCE)
-    monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
-    monkeypatch.setenv("KEYCLOAK_JWT_LEEWAY_SECONDS", "30")
-    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
-    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
-    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
-    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
-    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
     get_settings.cache_clear()
     clear_jwks_cache()
 

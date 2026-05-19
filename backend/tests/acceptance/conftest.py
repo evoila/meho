@@ -48,12 +48,14 @@ from collections.abc import AsyncIterator, Iterator
 import pytest
 from sqlalchemy import text
 
+from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
     create_engine_for_url,
     dispose_engine,
     reset_engine_for_testing,
 )
+from meho_backplane.settings import get_settings
 from tests.acceptance._canary_fixtures import (
     CANARY_CONNECTOR_ID,
     CANARY_OPERATOR_TENANT,
@@ -83,6 +85,7 @@ from tests.acceptance._vcsim import (
 from tests.integration.conftest import (
     DOCKER_AVAILABLE,
     SKIP_REASON,
+    _CHASSIS_ENV,
     async_pg_url,
     integration_env,
 )
@@ -112,6 +115,32 @@ __all__ = [
     "sddc_acceptance_operator",
     "vcsim_endpoint",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _acceptance_default_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Pin chassis env vars for every acceptance test.
+
+    Mirrors :func:`tests.integration.conftest._integration_default_env`.
+    pytest's autouse scoping is directory-bound: the integration
+    conftest's autouse only fires for tests under ``tests/integration/``.
+    Acceptance tests re-import ``integration_env`` (which after #679
+    only overrides ``DATABASE_URL``) but get no ``KEYCLOAK_ISSUER_URL``
+    unless this fixture runs. Without it Settings() raises
+    ``KeyError: 'KEYCLOAK_ISSUER_URL'`` at settings.py:391.
+    """
+    for key, value in _CHASSIS_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    clear_jwks_cache()
+
+    yield
+
+    get_settings.cache_clear()
+    clear_jwks_cache()
 
 
 #: Tables that hold tenant-scoped rows (FK to ``tenant(id)`` or a soft

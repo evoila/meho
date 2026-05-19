@@ -231,6 +231,34 @@ this stage it exposes:
   (G8.1 #334) can answer both "who/what decided" and "what detail
   did they get". Both audit-only keys stay out of the broadcast
   event payload (the snapshot pattern T2 established).
+* Broadcast override CRUD (G6.3-T4 #381) —
+  `src/meho_backplane/api/v1/broadcast_overrides.py` exposes three
+  `tenant_admin`-only routes under `/api/v1/broadcast/overrides`:
+  GET lists the operator's tenant's rules (optional exact-match
+  `op_id_pattern` filter); POST creates a rule and returns 201,
+  mapping `IntegrityError` on the composite-unique index → 409;
+  DELETE removes a rule and returns 204, returning 404 (NOT 403)
+  when the id belongs to another tenant -- existence is not leaked
+  across tenant boundaries. Pydantic `BroadcastOverrideCreate` is
+  `extra="forbid"` and runs two `model_validator(mode="after")`
+  steps: the scope-pair invariant (`scope_field` and `scope_value`
+  must both be set or both NULL) and the glob-not-regex blacklist
+  on `op_id_pattern` (`[`, `(`, `\`, `+`, `?` etc. rejected with
+  422). Every successful mutation calls
+  `invalidate_tenant_cache(operator.tenant_id)` so the resolver
+  picks up the change on the next publish without waiting for the
+  60s TTL. Both mutations bind `audit_op_id` /
+  `audit_op_class="write"` plus an override-diff fragment
+  (`audit_override_op` / `audit_override_id` /
+  `audit_override_pattern` / `audit_override_detail`) so the audit
+  middleware writes a forensic row carrying operator + rule diff,
+  and the broadcast event ships under `op_class=write` -- "operator
+  X created override Y" lands in the SSE feed and the Slack mirror.
+  The Go CLI under `cli/internal/cmd/broadcast/` ships three
+  matching verbs (`meho broadcast overrides list|set|remove`) with
+  `--json` output, `--op-id-pattern` filter on list, and the same
+  scope-pair check applied client-side so operators get an
+  immediate error rather than a remote 422 round-trip.
 * Operation dispatch (G0.6-T8 #399) —
   `src/meho_backplane/api/v1/operations.py` exposes
   `POST /api/v1/operations/call` plus the discovery routes

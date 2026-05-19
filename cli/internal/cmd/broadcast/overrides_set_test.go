@@ -126,8 +126,8 @@ func TestRunOverridesSetInvalidDetailRejectedClientSide(t *testing.T) {
 func TestRunOverridesSetHalfSetScopeRejectedClientSide(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runOverridesSet(cmd, overridesSetOptions{
-		OpIDPattern:       "vault.kv.*",
-		ScopeField:        "namespace",
+		OpIDPattern: "vault.kv.*",
+		ScopeField:  "namespace",
 		// ScopeValue intentionally empty
 		Detail:            "aggregate",
 		BackplaneOverride: "http://unreached.test",

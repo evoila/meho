@@ -88,15 +88,15 @@ func newOverridesCmd() *cobra.Command {
 // preserves the explicit-null wire shape (an op-wide rule has both
 // fields null).
 type Entry struct {
-	ID            string  `json:"id"`
-	TenantID      string  `json:"tenant_id"`
-	OpIDPattern   string  `json:"op_id_pattern"`
-	ScopeField    *string `json:"scope_field"`
-	ScopeValue    *string `json:"scope_value"`
-	Detail        string  `json:"detail"`
-	CreatedBySub  string  `json:"created_by_sub"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
+	ID           string  `json:"id"`
+	TenantID     string  `json:"tenant_id"`
+	OpIDPattern  string  `json:"op_id_pattern"`
+	ScopeField   *string `json:"scope_field"`
+	ScopeValue   *string `json:"scope_value"`
+	Detail       string  `json:"detail"`
+	CreatedBySub string  `json:"created_by_sub"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
 }
 
 // CreateRequest mirrors the backend `BroadcastOverrideCreate` Pydantic

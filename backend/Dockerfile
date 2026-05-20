@@ -182,4 +182,27 @@ EXPOSE 8000
 #    handles retries.
 #
 # Exec form forwards SIGTERM cleanly to uvicorn (k8s pod-shutdown contract).
-CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000"]
+#
+# ``--proxy-headers`` tells uvicorn to honour ``X-Forwarded-Proto`` and
+# ``X-Forwarded-For`` from upstream proxies when populating the ASGI
+# scope. Without it, FastAPI's ``redirect_slashes`` 307 reflects the
+# on-the-wire scheme (``http://`` once TLS terminates at the cluster
+# Ingress) into the ``Location`` header, downgrading the client's
+# second hop and creating a MITM window — surfaced by the 2026-05-20
+# RDC dogfood (Signal #3, Issue #730).
+#
+# ``--proxy-headers`` alone trusts *any* connecting peer's
+# ``X-Forwarded-*`` headers, which is unsafe in a cluster where pods
+# can reach each other directly. uvicorn's
+# :class:`ProxyHeadersMiddleware` restricts trust to the IPs / CIDRs
+# listed in ``--forwarded-allow-ips`` (equivalently the
+# ``FORWARDED_ALLOW_IPS`` env var); when unset, the default is the
+# loopback-only ``127.0.0.1``, which fails-closed in-cluster (the
+# Ingress controller's pod IP is never the loopback). The Helm chart
+# wires this knob via ``config.forwardedAllowIps`` →
+# ``FORWARDED_ALLOW_IPS`` env var (see
+# ``deploy/charts/meho/values.yaml`` and the operator-side contract
+# at ``docs/cross-repo/reverse-proxy-contract.md``); operators pin
+# the value to their Ingress controller's pod CIDR for production
+# deploys.
+CMD ["uvicorn", "meho_backplane.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

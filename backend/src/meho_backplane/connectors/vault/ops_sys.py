@@ -474,8 +474,8 @@ async def register_vault_sys_typed_operations(
         "(sys.auth.list). Read-only; returns mount metadata, never "
         "secret values. The right group when triaging connectivity "
         "or mapping mountpoints before drilling into a path with "
-        "the 'kv' group, or before configuring a backend via the "
-        "'auth' group."
+        "the 'kv' group, or before drilling into per-backend role "
+        "config (read-only) via the 'auth' group."
     )
     await register_typed_operation(
         product="vault",

@@ -131,9 +131,12 @@ flow is the only auth_model; loader is live; consumer confirmed
 | `harbor-2.x` | 0.5 | Class-side registered, no ops yet, loader stubbed | ❌ |
 | `kubernetes-asyncio-1.x` | 1 (shadow) | Same as `k8s-1.x` | ❌ |
 
-State 0.5 = `register_connector_v2` called but no ops registered yet
-(visible to internal code, invisible to `GET /api/v1/connectors`).
-Asymmetry tracked under [T5 #733](https://github.com/evoila/meho/issues/733).
+State 0.5 = `register_connector_v2` called but no ops registered yet.
+Since [T5 #733](https://github.com/evoila/meho/issues/733), these
+connectors surface in `GET /api/v1/connectors` with
+`group_count: 0, operation_count: 0` (built-in, `tenant_id: null`)
+so operators see `connector registered ⇒ visible in list` rather
+than waiting for the first ingested or typed op to land.
 
 ## Why this is hard to get right
 

@@ -18,6 +18,19 @@ operator; tenant-curated connectors are visible only when
 ``tenant_id == operator.tenant_id``. Cross-tenant rows never appear
 in the result.
 
+Class-side registrations from the v2 connector registry (entries
+registered via
+:func:`~meho_backplane.connectors.registry.register_connector_v2`
+that have no rows in ``endpoint_descriptor`` / ``operation_group``
+yet) are unioned into the response with ``group_count: 0,
+operation_count: 0``. This surfaces "State 0.5" connectors
+(harbor, sddc-manager during pre-G3.5 windows) so operators see
+``connector registered ⇒ visible in list`` rather than silent
+invisibility until the first op lands. v1-compat shim entries
+(``(product, "", "")`` rows the v1 :func:`register_connector` writes
+into the v2 table) are excluded — they're an internal compat
+detail, not separately registered connectors.
+
 Status filter semantics
 -----------------------
 
@@ -40,12 +53,14 @@ clauses (PG-only) so the same query runs against SQLite in tests.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from uuid import UUID
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
@@ -217,6 +232,19 @@ async def list_ingested_connectors(
     sub-selects with correlated aggregation are dialect-finicky on
     SQLite; the two queries together stay cheap relative to the
     per-row JSON projection.
+
+    The response is the union of two sources:
+
+    * DB-backed rows from ``operation_group`` / ``endpoint_descriptor``
+      — the connectors that have made it through (or are mid-way
+      through) the review pipeline. These sort first.
+    * Class-side registrations from the v2 connector registry that
+      have no DB rows yet ("State 0.5"). These append with
+      ``group_count: 0, operation_count: 0`` so an operator sees
+      every registered connector. Class-only entries are always
+      built-in (``tenant_id IS NULL``); they're filtered out under
+      an explicit ``status`` narrowing (no groups ⇒ nothing to
+      review).
     """
     sm = sessionmaker if sessionmaker is not None else get_sessionmaker()
     async with sm() as session:
@@ -249,4 +277,54 @@ async def list_ingested_connectors(
                 operation_count=op_counts_by_connector.get(key, 0),
             ),
         )
+    items.extend(_class_side_only_items(groups_by_connector.keys(), status=status))
     return items
+
+
+def _class_side_only_items(
+    db_keys: Iterable[tuple[UUID | None, str, str, str]],
+    *,
+    status: ConnectorStatusFilter | None,
+) -> list[ConnectorListItem]:
+    """Return rows for v2-registered connectors with no DB-side state.
+
+    Walks :func:`all_connectors_v2` and yields a
+    ``group_count: 0, operation_count: 0`` row for every triple that
+    isn't already represented in *db_keys*. The v1-compat shims the
+    registry writes as ``(product, "", "")`` are skipped — they're a
+    resolver-internal compatibility detail, not separately registered
+    connectors, and surfacing them would double-list every v1
+    connector (e.g. ``k8s`` already lands as
+    ``("k8s", "1.x", "k8s")`` via its dedicated v2 call).
+
+    Class-side registrations are always built-in (``tenant_id IS NULL``)
+    — there is no per-tenant class registration path. Under an explicit
+    ``status`` narrowing (``staged`` / ``enabled`` / ``disabled``) the
+    rows are excluded: zero groups means nothing to review and would
+    otherwise pollute the review-queue view.
+    """
+    if status not in (None, "all"):
+        return []
+    db_triples = {(product, version, impl_id) for (_, product, version, impl_id) in db_keys}
+    rows: list[ConnectorListItem] = []
+    for product, version, impl_id in sorted(all_connectors_v2().keys()):
+        if not version or not impl_id:
+            # v1-compat shim — see docstring.
+            continue
+        if (product, version, impl_id) in db_triples:
+            continue
+        rows.append(
+            ConnectorListItem(
+                connector_id=build_connector_id(product, version, impl_id),
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                tenant_id=None,
+                group_count=0,
+                staged_group_count=0,
+                enabled_group_count=0,
+                disabled_group_count=0,
+                operation_count=0,
+            ),
+        )
+    return rows

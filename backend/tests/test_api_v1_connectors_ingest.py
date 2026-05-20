@@ -437,13 +437,22 @@ def test_edit_op_operator_role_returns_403(client: TestClient) -> None:
 
 
 def test_list_operator_role_returns_200(client: TestClient) -> None:
-    """``operator`` role can call GET / (operator minimum)."""
+    """``operator`` role can call GET / (operator minimum).
+
+    Asserts the RBAC contract only: response payload shape varies
+    with whatever v2-registered connectors are present at test time
+    (T5 #733 unions the class-side registry into the response), so
+    the test pins the wire shape (``{"connectors": [...]}``) and the
+    200 status code rather than the exact row set.
+    """
     key, token = _operator_token()
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    assert response.json() == {"connectors": []}
+    body = response.json()
+    assert "connectors" in body
+    assert isinstance(body["connectors"], list)
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +477,10 @@ async def test_list_returns_operator_tenant_and_builtins(
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
     connectors = response.json()["connectors"]
-    seen_ids = {c["connector_id"] for c in connectors}
+    # T5 #733: filter to DB-backed rows; class-only v2 registrations
+    # (``group_count == 0``) leak into the response from other tests'
+    # lifespan boots and aren't the subject of this assertion.
+    seen_ids = {c["connector_id"] for c in connectors if c["group_count"] > 0}
     assert seen_ids == {"vmware-rest-9.0", "nsx-9.0"}
     # tenant_b's harbor must not surface.
     assert "harbor-9.0" not in seen_ids
@@ -588,6 +600,125 @@ async def test_list_operation_count_includes_typed_and_composite(
     assert by_id["vmware-rest-9.0"]["operation_count"] == 3
     assert by_id["bind9-ssh-9.0"]["operation_count"] == 4
     assert by_id["vmware-composite-9.0"]["operation_count"] == 2
+
+
+@pytest.fixture
+def _registered_class_only_connectors() -> Iterator[None]:
+    """Ensure harbor + sddc-manager are registered against the v2 registry.
+
+    The autouse ``_isolate_global_registries`` fixture in conftest
+    snapshots the registry before each test and restores after, so the
+    direct ``register_connector_v2`` calls here are scoped to the
+    enclosing test. We bypass the connector subpackages'
+    ``__init__.py`` (whose import-time registration only fires once
+    per process, after which subsequent tests would see an empty
+    registry post-snapshot-restore) and call ``register_connector_v2``
+    directly so every test that uses this fixture gets a deterministic
+    registration. The ``key in registry`` guards make the fixture
+    idempotent against the case where an earlier test in the same
+    process already imported the subpackage and the snapshot kept
+    the entry alive — without the guard the second call would raise
+    ``RuntimeError: connector already registered``.
+    """
+    from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.connectors.registry import (
+        all_connectors_v2,
+        register_connector_v2,
+    )
+    from meho_backplane.connectors.sddc_manager.connector import (
+        SddcManagerConnector,
+    )
+
+    existing = all_connectors_v2()
+    if ("harbor", "2.x", "harbor-rest") not in existing:
+        register_connector_v2(
+            product="harbor",
+            version="2.x",
+            impl_id="harbor-rest",
+            cls=HarborConnector,
+        )
+    if ("sddc-manager", "9.0", "sddc-rest") not in existing:
+        register_connector_v2(
+            product="sddc-manager",
+            version="9.0",
+            impl_id="sddc-rest",
+            cls=SddcManagerConnector,
+        )
+    yield
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_register_connector_v2_only_entries(
+    client: TestClient,
+    _registered_class_only_connectors: None,
+) -> None:
+    """``register_connector_v2``-only connectors appear with zero counts.
+
+    T5 (#733): connectors registered against the v2 registry but
+    without any rows in ``operation_group`` / ``endpoint_descriptor``
+    yet should surface in ``GET /api/v1/connectors`` so operators
+    see "connector registered ⇒ visible in list". Built-in
+    (``tenant_id IS NULL``); ``group_count`` / ``operation_count``
+    both ``0``.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    connectors = response.json()["connectors"]
+    by_id = {c["connector_id"]: c for c in connectors}
+
+    assert "harbor-rest-2.x" in by_id
+    harbor = by_id["harbor-rest-2.x"]
+    assert harbor["product"] == "harbor"
+    assert harbor["version"] == "2.x"
+    assert harbor["impl_id"] == "harbor-rest"
+    assert harbor["tenant_id"] is None
+    assert harbor["group_count"] == 0
+    assert harbor["staged_group_count"] == 0
+    assert harbor["enabled_group_count"] == 0
+    assert harbor["disabled_group_count"] == 0
+    assert harbor["operation_count"] == 0
+
+    assert "sddc-rest-9.0" in by_id
+    sddc = by_id["sddc-rest-9.0"]
+    assert sddc["product"] == "sddc-manager"
+    assert sddc["operation_count"] == 0
+    assert sddc["group_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_class_only_entries_excluded_under_status_narrowing(
+    client: TestClient,
+    _registered_class_only_connectors: None,
+) -> None:
+    """Class-only v2 entries are excluded under ``?status=staged``.
+
+    A connector with zero groups has nothing to review; surfacing it
+    under the review-queue filter would dilute the queue view. The
+    union is for the default / ``?status=all`` listing only.
+    """
+    tenant_a = uuid.uuid4()
+    # Seed one staged DB-backed connector so the result isn't empty.
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        impl_id="vmware-rest",
+        review_status="staged",
+    )
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/connectors?status=staged",
+            headers=_authed(token),
+        )
+    assert response.status_code == 200
+    seen_ids = {c["connector_id"] for c in response.json()["connectors"]}
+    assert "vmware-rest-9.0" in seen_ids
+    assert "harbor-rest-2.x" not in seen_ids
 
 
 # ---------------------------------------------------------------------------

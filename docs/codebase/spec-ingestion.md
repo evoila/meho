@@ -326,6 +326,18 @@ The renamer "list_*ingested*_connectors" is now misleading and is a
 follow-up cleanup; the function lists every connector with at least
 one visible :class:`OperationGroup` row.
 
+Class-side registrations from the v2 connector registry that have
+no DB-side state yet (T5 #733 — "State 0.5" connectors registered
+via `register_connector_v2` but without any rows in
+`operation_group` / `endpoint_descriptor`) are unioned into the
+response with `group_count: 0, operation_count: 0` so operators
+see `connector registered ⇒ visible in list`. Class-only rows are
+always built-in (`tenant_id IS NULL`); under an explicit `status`
+narrowing they're filtered out (no groups ⇒ nothing to review).
+v1-compat shim entries (`(product, "", "")` rows the v1
+`register_connector` writes into the v2 table) are excluded — they
+double-list every v1 connector and aren't separately registered.
+
 ### API request / response models (`ingest/api_schemas.py`)
 
 The shared Pydantic-v2 surface T5 (CLI), T6 (REST), and T7 (MCP) all

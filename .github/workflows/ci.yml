@@ -276,9 +276,24 @@ jobs:
         # quiet (the new-code coverage widget shows "no data" on PRs).
         # --cov-report=term dropped regardless — purely cosmetic and
         # serializes through xdist workers.
+        # COVERAGE_CORE=sysmon swaps coverage.py's default C tracer
+        # (per-line `sys.settrace` callbacks) for the PEP 669
+        # `sys.monitoring` backend introduced in Python 3.12 and
+        # supported by coverage.py 7.4+ (lock pins 7.14). sysmon's
+        # event-driven model halves coverage's wall-time tax in typical
+        # suites; locally on a small xdist run the line counts matched
+        # ctrace exactly (2913/11832 in both), which is what we need
+        # for SonarCloud parity. Scoped to the push branch where --cov
+        # actually runs — setting the env var on the PR branch would
+        # be a harmless no-op (no `--cov` flag), but inlining it next
+        # to the only command that reads it keeps intent local.
+        # Branch-coverage is OFF in this project (no `--cov-branch`,
+        # no `[tool.coverage.run] branch=true`), so the sysmon branch-
+        # coverage caveat (requires `env.PYBEHAVIOR.branch_right_left`,
+        # not yet on the CI's Python) does not apply.
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration \
+            COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration \
               --cov=meho_backplane --cov-report=xml tests/
           else
             uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration tests/

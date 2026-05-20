@@ -882,6 +882,22 @@ class KubernetesConnector(Connector):
             bindings.append((op, handler))
 
         for op, handler in bindings:
+            when_to_use: str | None
+            if op.group_key is None:
+                when_to_use = None
+            else:
+                when_to_use = _WHEN_TO_USE_BY_GROUP.get(op.group_key)
+                if when_to_use is None:
+                    raise ValueError(
+                        f"KubernetesConnector op {op.op_id!r} declares "
+                        f"group_key={op.group_key!r} but no curated "
+                        f"when_to_use exists for that key. Add an entry "
+                        f"to _WHEN_TO_USE_BY_GROUP in "
+                        f"meho_backplane.connectors.kubernetes.connector "
+                        f"so list_operation_groups surfaces a real "
+                        f"selection signal instead of the auto-derive "
+                        f"template."
+                    )
             await register_typed_operation(
                 product=cls.product,
                 version=cls.version,
@@ -893,9 +909,7 @@ class KubernetesConnector(Connector):
                 parameter_schema=op.parameter_schema,
                 response_schema=op.response_schema,
                 group_key=op.group_key,
-                when_to_use=(
-                    _WHEN_TO_USE_BY_GROUP[op.group_key] if op.group_key is not None else None
-                ),
+                when_to_use=when_to_use,
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,

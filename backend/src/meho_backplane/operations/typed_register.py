@@ -551,7 +551,7 @@ def _validate_safety_level(safety_level: str) -> str:
     return safety_level
 
 
-def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None) -> None:
+def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None) -> str | None:
     """Validate the ``group_key`` / ``when_to_use`` pairing at the boundary.
 
     Pairing rules (G0.9-T4a #731):
@@ -564,18 +564,24 @@ def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None
       missing-blurb call as a generic ``"Operations grouped under …"``
       placeholder; killing the default at this boundary makes a
       missing curation impossible to ship silently.
-    * ``group_key`` is ``None`` -> ``when_to_use`` MUST be ``None``.
-      An ungrouped op has no :class:`OperationGroup` row to attach a
-      blurb to; passing a ``when_to_use`` for one is a programmer
-      error (the prose would be persisted nowhere) and is rejected so
-      the failure surfaces at registration rather than as silent
-      drop. Empty strings are normalised to ``None`` here to keep the
-      contract symmetrical: callers cycling through
-      ``spec.when_to_use or None`` see the same shape.
+    * ``group_key`` is ``None`` -> ``when_to_use`` MUST be ``None`` or
+      an empty / whitespace-only string. Empty strings are normalised
+      to ``None`` here (returned by this helper) to keep the contract
+      symmetrical: callers cycling through ``spec.when_to_use or None``
+      see the same shape, and any meaningful blurb on an ungrouped op
+      is rejected (the prose would be persisted nowhere since no
+      :class:`OperationGroup` row exists to attach it to).
 
     The signature-level contract (the public helpers' kwarg-required
     shape) raises :class:`TypeError` on entirely-omitted kwargs;
     this helper covers the runtime-paired case.
+
+    Returns
+    -------
+    str | None
+        The validated (and, when ``group_key is None``, normalised)
+        ``when_to_use`` value. Callers should reassign:
+        ``when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)``.
     """
     if group_key is not None:
         if not isinstance(when_to_use, str) or not when_to_use.strip():
@@ -584,14 +590,25 @@ def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None
                 f"group_key is set (group_key={group_key!r}, "
                 f"when_to_use={when_to_use!r})"
             )
-        return
-    # group_key is None
-    if when_to_use is not None and (not isinstance(when_to_use, str) or when_to_use.strip()):
+        return when_to_use
+    # group_key is None: normalise empty / whitespace-only strings to None
+    # so the contract stays symmetric with the spec.when_to_use or None
+    # idiom; reject any meaningful non-empty blurb.
+    if when_to_use is None:
+        return None
+    if not isinstance(when_to_use, str):
         raise ValueError(
             "when_to_use must be None when group_key is None (no operation "
             f"group row exists to attach the blurb to; received "
             f"when_to_use={when_to_use!r})"
         )
+    if not when_to_use.strip():
+        return None
+    raise ValueError(
+        "when_to_use must be None when group_key is None (no operation "
+        f"group row exists to attach the blurb to; received "
+        f"when_to_use={when_to_use!r})"
+    )
 
 
 async def _resolve_or_create_group(
@@ -839,7 +856,7 @@ async def register_typed_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
-    _validate_when_to_use_pairing(group_key, when_to_use)
+    when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
     _assert_handler_ref_resolvable(
@@ -1034,7 +1051,7 @@ async def register_composite_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
-    _validate_when_to_use_pairing(group_key, when_to_use)
+    when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     validate_composite_handler_signature(handler)
     handler_ref = derive_handler_ref(handler)
     _assert_handler_ref_resolvable(

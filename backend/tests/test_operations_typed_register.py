@@ -658,6 +658,7 @@ async def test_register_rejects_unreachable_handler_ref_via_import_round_trip(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -696,6 +697,7 @@ async def test_register_accepts_module_level_handler_via_import_round_trip(
         summary="x",
         description="x",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -737,6 +739,7 @@ async def test_register_accepts_bound_method_handler_via_import_round_trip(
         summary="x",
         description="x",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -1011,6 +1014,46 @@ async def test_register_without_group_key_but_with_when_to_use_raises_valueerror
             when_to_use="A blurb that has no home.",
             embedding_service=stub_embedding_service,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when_to_use", ["", "   ", "\t\n"])
+async def test_register_without_group_key_normalises_empty_when_to_use_to_none(
+    stub_embedding_service: AsyncMock, when_to_use: str
+) -> None:
+    """``group_key=None`` + empty / whitespace ``when_to_use`` is normalised silently.
+
+    The docstring promise on
+    :func:`_validate_when_to_use_pairing`: empty / whitespace-only
+    strings on the ungrouped path are treated as equivalent to
+    ``None``. Keeps the contract symmetric with the
+    ``spec.when_to_use or None`` idiom callers use to bridge their
+    spec dataclasses into the helper without re-checking emptiness.
+    Non-empty blurbs still raise (pinned by
+    ``test_register_without_group_key_but_with_when_to_use_raises_valueerror``).
+    """
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.health",
+        handler=sample_module_level_handler,
+        summary="x",
+        description="x",
+        parameter_schema={"type": "object"},
+        group_key=None,
+        when_to_use=when_to_use,
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.health")
+            )
+        ).scalar_one()
+        assert row.group_id is None
 
 
 @pytest.mark.asyncio

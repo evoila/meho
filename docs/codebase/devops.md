@@ -504,8 +504,10 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "addition
 ## Publish workflow (`.github/workflows/chart.yml`)
 
 The chart is packaged, pushed to OCI, and cosign-signed by
-`.github/workflows/chart.yml`. The workflow targets `meho-runners` (the
-project's self-hosted runner pool, per #160 + #167) and shares the
+`.github/workflows/chart.yml`. The workflow targets `meho-runners-ci` (the
+project's self-hosted runner pool on the dedicated rke2-ci cluster,
+introduced by #160 + #167 on rke2-meho and migrated to rke2-ci via
+claude-rdc-hetzner-dc#610 / #715) and shares the
 hardening conventions of `image.yml` (Task #33): job-level fork-PR guard,
 SHA-pinned actions with `# vX.Y.Z` comments, minimum `permissions:` block
 (`contents: read`, `packages: write`, `id-token: write`), per-job
@@ -606,7 +608,7 @@ incidents #634 / #697).
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-Each job runs on its own `meho-runners` runner. `python-lint-test`,
+Each job runs on its own `meho-runners-ci` runner. `python-lint-test`,
 `go-lint-test`, and `helm-lint-template` carry a 10-minute
 `timeout-minutes`; `python-integration` carries 60 minutes for the
 container-pull + DinD spin-up + testcontainers sweep (xdist
@@ -669,7 +671,7 @@ if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.f
 ```
 
 This is defence in depth on top of branch protection — the
-`meho-runners` self-hosted runner pool is internal infrastructure, so
+`meho-runners-ci` self-hosted runner pool is internal infrastructure, so
 arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
 short-circuits on `push` events so main-branch CI is unaffected.
@@ -747,7 +749,7 @@ merge, not against mocks.
 | Property | Value |
 | --- | --- |
 | Event | `pull_request_target` against `main` (`opened`, `synchronize`, `reopened`) |
-| Runner | `meho-runners` (self-hosted) |
+| Runner | `meho-runners-ci` (self-hosted) |
 | Concurrency group | `pr-smoke-${{ github.event.pull_request.number }}` with `cancel-in-progress: true` |
 | Permissions | `contents: read`, `packages: write`, `id-token: write`, `pull-requests: write` |
 | Job timeout | 12 min (8 min smoke budget + cold-cache headroom — Task #50 AC #5) |

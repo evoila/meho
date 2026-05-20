@@ -85,7 +85,7 @@ jobs:
     # so fork PRs are skipped entirely. push events (main, v*) short-circuit
     # the OR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -104,7 +104,7 @@ jobs:
         # linux-amd64 tarball of v0.6.7.
         #
         # Install target is `$HOME/.local/bin` — a runner-owned directory —
-        # rather than `/usr/local/bin`, because the self-hosted `meho-runners`
+        # rather than `/usr/local/bin`, because the self-hosted `meho-runners-ci`
         # pool runs as a non-root user that cannot write to system paths
         # (writing /usr/local/bin returned `Permission denied` in CI run
         # 25644668781). Appending the directory to `$GITHUB_PATH` is the
@@ -259,7 +259,7 @@ jobs:
     # follow-up issue lands the hardening pass that removes
     # continue-on-error once we have ~10 green runs (per G6.1-T8 AC).
     #
-    # Runs on ``ubuntu-latest`` (NOT ``meho-runners``) because kind
+    # Runs on ``ubuntu-latest`` (NOT ``meho-runners-ci``) because kind
     # needs Docker-in-Docker support that the self-hosted runner
     # pool isn't configured for; the GitHub-hosted runners ship
     # Docker pre-installed and helm/kind-action works out of the box.
@@ -761,7 +761,7 @@ jobs:
     # but the explicit `if` makes intent visible.
     if: github.event_name != 'pull_request'
     needs: validate
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 15
     permissions:
       # Per-job scope: only `publish` needs to push to GHCR and mint an OIDC
@@ -985,7 +985,7 @@ jobs:
     # successful `helm pull` here can only mean the GHCR package is public.
     if: github.event_name != 'pull_request'
     needs: publish
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Install Helm (no checkout — keeps env scrubbed of repo state)
@@ -1002,7 +1002,7 @@ jobs:
         run: |
           set -euo pipefail
           # Isolate Helm from any persisted runner-local auth/config.
-          # The self-hosted `meho-runners` pool does not guarantee a clean
+          # The self-hosted `meho-runners-ci` pool does not guarantee a clean
           # HOME between jobs (https://docs.github.com/en/actions/hosting-your-own-runners);
           # Helm 3.8+ falls back to ~/.docker/config.json for OCI creds when
           # HELM_REGISTRY_CONFIG isn't set (helm/helm#7776), so deleting only

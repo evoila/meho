@@ -40,7 +40,7 @@ permissions:
 jobs:
   semgrep:
     name: Semgrep SAST
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 15
     # Pulled through the in-cluster Harbor proxy cache
     # (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` is public,

@@ -114,7 +114,7 @@ jobs:
     #   1. Fork-PR guard. `pull_request_target`'s `pull_request` payload
     #      carries `head.repo.full_name`; for fork PRs this !=
     #      github.repository, so the AND short-circuits to false. Same as
-    #      ci.yml / image.yml / chart.yml — `meho-runners` is internal
+    #      ci.yml / image.yml / chart.yml — `meho-runners-ci` is internal
     #      infrastructure and fork-PR code never executes on it.
     #
     #   2. Consumer-side enable knob. GitHub Actions does NOT expose the
@@ -132,7 +132,7 @@ jobs:
     if: |
       (github.event.pull_request.head.repo.full_name == github.repository) &&
       (vars.RKE2_SMOKE_ENABLED == 'true')
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     environment: rke2-ci  # consumer-side env-scoped approval + secret store
     timeout-minutes: 12   # 8min smoke budget (Task #50 AC #5) + headroom for cold buildx cache
     env:

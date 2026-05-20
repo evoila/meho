@@ -67,7 +67,7 @@ jobs:
     # Fork-PR guard: never execute project code from a fork on the
     # self-hosted runner pool. Mirrors ci.yml's stance.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 5
     defaults:
       run:

@@ -909,7 +909,8 @@ because the builder would be installing wheels for the wrong arch
 (or recompiling Rust crates without a cross toolchain configured).
 The CI pipeline (G2.4-T2) runs amd64 and arm64 in parallel jobs so
 wall-clock time is bounded by the slower job, not the sum; the
-self-hosted `meho-runners` pool (introduced in PR #160) can provision
+self-hosted `meho-runners-ci` pool (introduced in PR #160 on rke2-meho;
+migrated to rke2-ci via #715) can provision
 arm64 nodes natively when the team is ready to skip QEMU entirely
 for the arm64 leg.
 

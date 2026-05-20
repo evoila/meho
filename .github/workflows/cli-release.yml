@@ -69,7 +69,7 @@ jobs:
     # The OR short-circuits on push events; the `pull_request.head.repo`
     # property is irrelevant when github.event_name != 'pull_request'.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 30
     permissions:
       # `contents: write` is required for GoReleaser to create the

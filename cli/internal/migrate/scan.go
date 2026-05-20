@@ -245,7 +245,7 @@ func splitFrontmatter(raw []byte) (fm []byte, body []byte, ok bool, warning stri
 func hasMachineLocalComment(s string) bool {
 	const open = "<!--"
 	const tag = "meho:machine-local"
-	const close = "-->"
+	const closeDelim = "-->"
 
 	idx := 0
 	for {
@@ -254,12 +254,12 @@ func hasMachineLocalComment(s string) bool {
 			return false
 		}
 		start += idx
-		// Search for close strictly after the open delimiter so that a
+		// Search for closeDelim strictly after the open delimiter so that a
 		// degenerate comment like <!--> or <!--->, whose --> shares
 		// characters with the opening <!--, cannot produce a negative
 		// inner slice range and panic.
 		innerStart := start + len(open)
-		rel := strings.Index(s[innerStart:], close)
+		rel := strings.Index(s[innerStart:], closeDelim)
 		if rel == -1 {
 			return false
 		}
@@ -267,7 +267,7 @@ func hasMachineLocalComment(s string) bool {
 		if strings.TrimSpace(s[innerStart:innerEnd]) == tag {
 			return true
 		}
-		idx = innerEnd + len(close)
+		idx = innerEnd + len(closeDelim)
 	}
 }
 

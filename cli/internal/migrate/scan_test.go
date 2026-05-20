@@ -4,7 +4,6 @@
 package migrate
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -239,12 +238,12 @@ func TestHasMachineLocalComment_DegenerateComments(t *testing.T) {
 		input string
 		want  bool
 	}{
-		{"bare <!-->"                  , "<!-->"                        , false},
-		{"bare <!--->"                 , "<!--->"                       , false},
-		{"inline x <!---> y"          , "x <!---> y"                   , false},
-		{"empty proper comment <!---->", "<!---->"                      , false},
-		{"valid opt-out"              , "<!-- meho:machine-local -->"   , true},
-		{"valid with extra whitespace", "<!--  meho:machine-local  -->" , true},
+		{"bare <!-->", "<!-->", false},
+		{"bare <!--->", "<!--->", false},
+		{"inline x <!---> y", "x <!---> y", false},
+		{"empty proper comment <!---->", "<!---->", false},
+		{"valid opt-out", "<!-- meho:machine-local -->", true},
+		{"valid with extra whitespace", "<!--  meho:machine-local  -->", true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -287,7 +286,7 @@ func TestBodySHA256_IsHex(t *testing.T) {
 	content := "---\ntype: user\n---\nbody\n"
 	mf := parseMemoryFile("/tmp/a.md", []byte(content))
 	for _, c := range mf.BodySHA256 {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("BodySHA256 is not lowercase hex: %q", mf.BodySHA256)
 			return
 		}
@@ -417,7 +416,7 @@ func TestResolveSourceDir_LeadingDashRetained(t *testing.T) {
 	if sanitized[0] != '-' {
 		t.Errorf("leading '/' must become leading '-'; got %q", sanitized)
 	}
-	want := fmt.Sprintf("-a-b-c")
+	want := "-a-b-c"
 	if sanitized != want {
 		t.Errorf("sanitized: got %q want %q", sanitized, want)
 	}

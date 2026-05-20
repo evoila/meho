@@ -272,16 +272,6 @@ func buildScopeOptions(opts BuildFormOpts) []huh.Option[string] {
 	return options
 }
 
-func countMigrate(plans []SubmitPlan) int {
-	n := 0
-	for _, p := range plans {
-		if !p.Skip {
-			n++
-		}
-	}
-	return n
-}
-
 func countMigrateFromPlans(plans []SubmitPlan) int {
 	n := 0
 	for _, p := range plans {

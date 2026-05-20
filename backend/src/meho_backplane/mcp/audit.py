@@ -59,6 +59,7 @@ from typing import Any
 
 import structlog
 
+from meho_backplane.audit import _resolve_audit_payload
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
@@ -105,6 +106,21 @@ async def write_mcp_audit_row(
     explicitly keeps the audit row's tenant attribution auditable at
     the call site rather than buried in a contextvar resolver.
 
+    The final ``payload`` written to the row is the caller's explicit
+    payload **merged on top of** any ``audit_*`` contextvars routed
+    through :func:`~meho_backplane.audit._resolve_audit_payload`. This
+    matches the REST middleware's behaviour
+    (:func:`~meho_backplane.audit.AuditMiddleware.dispatch` reads the
+    same helper at audit-write time) and lets MCP-side handlers enrich
+    the row by binding ``audit_*`` contextvars without the envelope
+    having to know about every per-handler field. Caller-supplied
+    keys win on collision (``op_id`` / ``op_class`` / ``params_hash``
+    / ``broadcast_detail_*`` are load-bearing identity and must not
+    be overwritten by stale contextvars from an earlier call on the
+    same task). #710's ``meho.broadcast.overrides.set`` (REST + MCP
+    parity) is the v0.2 caller; future MCP meta-tools that bind
+    ``audit_*`` contextvars inherit the same surfacing automatically.
+
     Raises any DB-side exception verbatim — the caller's ``finally``
     block converts it into a JSON-RPC ``-32603`` so the client sees
     the operation as failed and the audit-write failure is the
@@ -122,6 +138,15 @@ async def write_mcp_audit_row(
     audit id used for the row so the dispatch call site can plumb it
     through to ``publish_event`` either way.
     """
+    # Merge ``audit_*`` contextvars into the row payload — same
+    # surfacing the REST middleware does. Caller's payload wins on
+    # collision so the MCP envelope's load-bearing identity keys
+    # (``op_id`` / ``op_class`` / ``params_hash``) are never
+    # overwritten by stale contextvars.
+    contextvar_payload = _resolve_audit_payload()
+    if contextvar_payload:
+        payload = {**contextvar_payload, **payload}
+
     log = structlog.get_logger(__name__)
     if audit_id is None:
         audit_id = uuid.uuid4()

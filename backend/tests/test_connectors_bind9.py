@@ -263,7 +263,7 @@ def _mock_ssh_conn() -> MagicMock:
     return conn
 
 
-async def test_remote_bash_with_sudo_argv_carries_only_script_byte_count_and_streams_password_via_stdin(
+async def test_remote_bash_with_sudo_argv_holds_byte_count_streams_password_via_stdin(
     _mock_ssh_conn: MagicMock,
 ) -> None:
     """argv is boilerplate + script byte count; password is on stdin, never argv."""

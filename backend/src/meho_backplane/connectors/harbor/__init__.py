@@ -5,11 +5,22 @@
 
 Importing this package registers :class:`HarborConnector` against the
 v2 connector registry under
-``(product="harbor", version="2.x", impl_id="harbor-rest")``. The
-chassis lifespan calls
-:func:`~meho_backplane.connectors.registry._eager_import_connectors`
-which walks every ``connectors/<product>/`` subpackage at startup, so the
-registration lands before any dispatch can occur.
+``(product="harbor", version="2.x", impl_id="harbor-rest")``, and
+queues the robot lifecycle typed-op upserts onto the lifespan-driven
+registrar list so ``endpoint_descriptor`` rows land before the first
+dispatch.
+
+Registration is split between two phases (mirroring the Vault precedent
+in :mod:`meho_backplane.connectors.vault`):
+
+* **Synchronous (import time)** — the v2 registry entry lands via
+  :func:`~meho_backplane.connectors.registry.register_connector_v2`.
+
+* **Asynchronous (lifespan startup)** —
+  :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+  invokes :func:`~meho_backplane.connectors.harbor.ops.register_harbor_robot_operations`,
+  which upserts the ``endpoint_descriptor`` rows for ``harbor.robot.create``
+  and ``harbor.robot.delete``.
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called. The connector advertises an explicit
@@ -26,9 +37,11 @@ check there will no-op on the
 because this module has already registered the hand-rolled class. Until then,
 this module is the only registration path.
 
-Operations for this connector arrive in #620 via G0.7 spec ingestion of
-the Harbor 2.x OpenAPI spec against the ``endpoint_descriptor`` table.
-The robot lifecycle ops (create/delete) ship in #621.
+Spec-ingested read ops (#620) arrive via G0.7 ingestion of the Harbor 2.x
+OpenAPI spec. The robot lifecycle ops (create/delete) ship here in #621 as
+hand-registered typed ops — the redaction contract (``credential_mint``
+classification) is load-bearing and must not depend on spec-derived
+``op_class`` heuristics.
 """
 
 from meho_backplane.connectors.harbor.connector import HarborConnector
@@ -45,6 +58,7 @@ from meho_backplane.connectors.harbor.core_ops import (
     apply_harbor_core_curation,
     classify_harbor_op,
 )
+from meho_backplane.connectors.harbor.ops import register_harbor_robot_operations
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
     HarborTargetLike,
@@ -52,6 +66,7 @@ from meho_backplane.connectors.harbor.session import (
     load_credentials_from_vault,
 )
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 register_connector_v2(
     product="harbor",
@@ -59,6 +74,12 @@ register_connector_v2(
     impl_id="harbor-rest",
     cls=HarborConnector,
 )
+
+# Queue the robot lifecycle typed-op upsert onto the lifespan-driven
+# registrar list. harbor.robot.create is classified credential_mint —
+# the broadcast collapses to aggregate-only so the minted secret never
+# appears in the SSE feed.
+register_typed_op_registrar(register_harbor_robot_operations)
 
 __all__ = [
     "HARBOR_CONNECTOR_ID",
@@ -77,4 +98,5 @@ __all__ = [
     "apply_harbor_core_curation",
     "classify_harbor_op",
     "load_credentials_from_vault",
+    "register_harbor_robot_operations",
 ]

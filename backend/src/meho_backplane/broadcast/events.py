@@ -81,6 +81,19 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Op-ids that classify as ``credential_mint``. Like
+#: :data:`_CREDENTIAL_READ_OPS`, the explicit allowlist comes before
+#: the write-suffix check so ``harbor.robot.create`` (which ends with
+#: ``.create``) isn't misclassified as plain ``write``. Every op that
+#: returns a freshly-minted secret credential in its response payload
+#: belongs here — the broadcast collapses to aggregate-only so the
+#: secret never reaches the SSE stream or any Slack mirror channel.
+_CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "harbor.robot.create",
+    }
+)
+
 #: Op-id suffixes that imply mutation. Append to this tuple when a new
 #: write-shaped verb spelling lands. ``.put`` is the KV-v2 write verb
 #: (``vault.kv.put`` — G3.3-T1 #545); without it a secret write would
@@ -176,8 +189,8 @@ class BroadcastEvent(BaseModel):
     target_name: str | None = None
     op_id: str
     #: One of ``"read"`` / ``"write"`` / ``"credential_read"`` /
-    #: ``"audit_query"`` / ``"other"``. Derived from
-    #: :func:`classify_op` at publish time.
+    #: ``"credential_mint"`` / ``"audit_query"`` / ``"other"``.
+    #: Derived from :func:`classify_op` at publish time.
     op_class: str
     #: One of ``"ok"`` / ``"error"`` / ``"denied"``. The handler
     #: produces it; the broadcast publisher does not re-classify.
@@ -188,31 +201,32 @@ class BroadcastEvent(BaseModel):
     #: queries audit_log by this id.
     audit_id: UUID
     #: Redacted view per :func:`redact_payload`. NEVER raw params for
-    #: ``credential_read`` or ``audit_query`` classes — the redaction
-    #: contract is upstream of this field.
+    #: ``credential_read``, ``credential_mint``, or ``audit_query`` classes —
+    #: the redaction contract is upstream of this field.
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
 def classify_op(op_id: str) -> str:
-    """Map an op-id to one of the five sensitivity classes.
+    """Map an op-id to one of the sensitivity classes.
 
     Match order is policy-significant:
 
-    1. ``credential_read`` — the explicit allowlist comes first so a
-       hypothetical future ``vault.kv.audit-list`` (read of audit
-       metadata, not secret content) could opt out of the credential
-       class by being absent from :data:`_CREDENTIAL_READ_OPS` and
-       falling through to the suffix check.
-    2. ``audit_query`` — every op-id with the ``audit.`` prefix
-       classifies as audit_query regardless of the verb suffix. Audit
-       responses carry rows that inherit every other op's sensitivity,
-       so the whole namespace is aggregate-only.
-    3. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch``). Same break-when-first-matches rule
-       as ``.endswith`` on a tuple.
-    4. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
+    1. ``credential_read`` — explicit allowlist first so a hypothetical
+       future ``vault.kv.audit-list`` (audit metadata, not secret
+       content) could opt out by being absent from
+       :data:`_CREDENTIAL_READ_OPS` and falling through to the suffix
+       check.
+    2. ``credential_mint`` — explicit allowlist for ops that return a
+       freshly-minted secret in their response payload (e.g.
+       ``harbor.robot.create``). Checked before the ``.create`` suffix
+       so the allowlist wins over the mutation-suffix branch.
+    3. ``audit_query`` — every op-id with the ``audit.`` prefix
+       classifies as audit_query regardless of the verb suffix.
+    4. ``write`` — mutation suffixes (``.create`` / ``.update`` /
+       ``.delete`` / ``.patch``).
+    5. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls``).
-    5. ``other`` — everything else. Falls through to full-detail
+    6. ``other`` — everything else. Falls through to full-detail
        broadcast per decision #3.
 
     Examples
@@ -220,6 +234,8 @@ def classify_op(op_id: str) -> str:
 
     >>> classify_op("vault.kv.read")
     'credential_read'
+    >>> classify_op("harbor.robot.create")
+    'credential_mint'
     >>> classify_op("audit.query")
     'audit_query'
     >>> classify_op("vsphere.vm.list")
@@ -231,6 +247,8 @@ def classify_op(op_id: str) -> str:
     """
     if op_id in _CREDENTIAL_READ_OPS:
         return "credential_read"
+    if op_id in _CREDENTIAL_MINT_OPS:
+        return "credential_mint"
     if op_id.startswith("audit."):
         return "audit_query"
     if op_id.endswith(_WRITE_SUFFIXES):
@@ -295,8 +313,8 @@ def redact_payload(
     *detail* is the G6.3-T2 (#379) extension. When ``None`` (the
     pre-G6.3 default), the function falls back to decision #3 of
     ``docs/planning/v0.2-decisions.md`` -- aggregate for sensitive
-    classes (``credential_read`` / ``audit_query``), full for
-    everything else. When ``"aggregate"`` or ``"full"`` is passed
+    classes (``credential_read`` / ``credential_mint`` /
+    ``audit_query``), full for everything else. When ``"aggregate"`` or ``"full"`` is passed
     explicitly, the resolver (:func:`compute_effective_broadcast_detail`)
     has already decided the effective detail and this function just
     renders it. Callers that don't go through the resolver
@@ -311,7 +329,9 @@ def redact_payload(
     """
     if detail is None:
         effective_detail: Literal["full", "aggregate"] = (
-            "aggregate" if op_class in {"credential_read", "audit_query"} else "full"
+            "aggregate"
+            if op_class in {"credential_read", "credential_mint", "audit_query"}
+            else "full"
         )
     else:
         effective_detail = detail

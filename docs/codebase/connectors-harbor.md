@@ -8,8 +8,9 @@ dispatches Harbor REST operations under the
 G3.5-T7 (#619) shipped the skeleton — HTTP Basic auth, fingerprint, probe, and
 the G0.6 dispatch shim. G3.5-T8 (#620) ships `core_ops.py` with the 9
 operator-reviewed read-only ops, the curated group/op metadata, and the
-acceptance test suite (dispatch smoke + JSONFlux force-handle). Robot lifecycle
-(create/delete) + G6 credential_mint classifier arrive in G3.5-T9 (#621).
+acceptance test suite (dispatch smoke + JSONFlux force-handle). G3.5-T9 (#621)
+adds robot lifecycle typed ops (`harbor.robot.create` / `harbor.robot.delete`)
+and the `credential_mint` G6 broadcast classifier.
 CLI verbs + MCP review + real-container E2E arrive in G3.5-T10 (#622).
 
 Source: `backend/src/meho_backplane/connectors/harbor/`.
@@ -21,7 +22,9 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   `impl_id="harbor-rest"`, `supported_version_range=">=2.0,<3.0"`,
   `priority=1`. The priority outranks a future `GenericRestConnector`
   auto-shim (priority=0) defensively if both somehow register for the same
-  triple.
+  triple. Handler methods `robot_create` / `robot_delete` are bound-method
+  handlers the dispatcher resolves and binds to the per-process connector
+  instance at dispatch time.
 - **`HarborTargetLike`** (`session.py`) — runtime-checkable Protocol capturing
   the minimum target shape the connector reads: `name`, `host`, `port`,
   `secret_ref`, and `auth_model`. No `sso_realm` field — Harbor sends
@@ -53,6 +56,10 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   — operator-review-time substrate call; enables the 9 core ops, disables
   non-core ops in curated groups via the audit-log-driven override exclusion,
   and lands the reviewed `when_to_use` / `llm_instructions` metadata.
+- **`register_harbor_robot_operations`** (`ops.py`) — async lifespan registrar
+  that upserts `harbor.robot.create` and `harbor.robot.delete` into
+  `endpoint_descriptor`. Called by the lifespan via `run_typed_op_registrars`.
+  Idempotent.
 
 ## Control flow
 
@@ -113,6 +120,34 @@ This differs from the SDDC Manager / NSX precedents that delegate to
 checks and covers subsystem state (DB, redis, registry, jobservice) that
 `systeminfo` does not expose.
 
+### robot_create(target, params)
+
+Typed op handler for `harbor.robot.create`. Classified `credential_mint` by
+`classify_op` in `broadcast/events.py` — the broadcast collapses to aggregate-only
+so the minted secret never appears in the SSE stream.
+
+1. Validates `name`, `project`, `duration` from `params`.
+2. Calls `_post_json(target, "/api/v2.0/projects/{project}/robots", json=body)`.
+   Non-retried — Harbor's create endpoint is non-idempotent.
+3. Returns `{id, name, secret}` extracted from Harbor's 201 response.
+   The `secret` is the minted credential, returned only on creation.
+
+The `permissions` body grants push + pull access on the named project
+(`level="project"`). System-level robot creation is out of scope for this Task.
+
+### robot_delete(target, params)
+
+Typed op handler for `harbor.robot.delete`. Classified `write` (suffix-based).
+No secret material in the response.
+
+1. Validates `project`, `id` from `params`.
+2. Acquires the pooled httpx client via `_http_client(target)` and calls
+   `client.request("DELETE", "/api/v2.0/projects/{project}/robots/{id}", headers=auth_headers)`.
+   Direct client call (no `_delete_json` helper on `HttpConnector`) — non-retried.
+3. Calls `resp.raise_for_status()` — propagates `httpx.HTTPStatusError` on 4xx/5xx.
+4. Returns `{id, deleted: True}` (Harbor returns HTTP 200 with empty body;
+   the `id` echo is synthesized for a useful agent-facing result).
+
 ### execute() shim
 
 `execute()` synthesises a system `Operator` with `sub="system:harbor-rest-connector-shim"`
@@ -123,13 +158,19 @@ construct a real `Operator` and call `dispatch` directly — they bypass this sh
 ## Dependencies
 
 - **httpx 0.28.1** — async HTTP client with per-target pooling and retry decorator.
+  `_post_json` is used for `robot_create` (non-retried POST);
+  `_http_client` + `client.request("DELETE", ...)` for `robot_delete`.
 - **tenacity 9.1.4** — retry logic for idempotent GET requests (3 retries,
-  exponential backoff, 5xx + connection errors only).
+  exponential backoff, 5xx + connection errors only). Robot lifecycle ops bypass
+  tenacity intentionally — write endpoints are non-idempotent.
 - **structlog** — structured logging for credential load events.
 - **`meho_backplane.connectors.adapters.http.HttpConnector`** — base class
   providing `_get_json`, `_post_json`, `_http_client`, and `aclose`.
 - **`meho_backplane.connectors.schemas`** — `FingerprintResult`, `ProbeResult`,
   `OperationResult`, `AuthModel`.
+- **`meho_backplane.broadcast.events`** — `classify_op` returns `credential_mint`
+  for `harbor.robot.create`; `redact_payload` treats `credential_mint` as
+  aggregate-only (same branch as `credential_read`).
 
 ## The 9 read-only v0.2 core ops
 
@@ -170,18 +211,25 @@ acceptance fixtures and unit tests assert this invariant explicitly.
 - `load_credentials_from_vault` is a `NotImplementedError` stub until G0.3
   (#224) lands the operator-context Vault read path. Tests inject a custom
   loader.
+- `harbor.robot.create` grants push + pull access on the named project only.
+  System-level robot creation (`POST /api/v2.0/robots`) is out of scope for this Task.
+- Robot secret rotation / refresh is out of scope — tracked as a follow-up.
 - Real-container integration tests (against `goharbor/harbor-core:v2.11`) are
-  out of scope for this Task; they arrive in #622.
+  out of scope for this Task; they arrive in #622 (CLI/MCP/E2E).
 - Full G0.7 spec-canary ingest (live Harbor OpenAPI spec through
   `IngestionPipelineService`) is deferred to #622 when the spec-shelf is
   wired to the meho-runners pool.
 
 ## References
 
-- Issues: #619 (G3.5-T7 skeleton), #620 (G3.5-T8 read-ops, this task)
-- Successor tasks: #621 (robot lifecycle), #622 (CLI/MCP/E2E)
+- Issues: #619 (G3.5-T7 skeleton), #620 (G3.5-T8 read-ops curation),
+  #621 (G3.5-T9 robot lifecycle + credential_mint classifier)
+- Successor task: #622 (G3.5-T10 CLI/MCP/E2E)
 - Initiative: #368 (G3.5 tier-2 batch)
 - HttpConnector base: `backend/src/meho_backplane/connectors/adapters/http.py`
+- Broadcast classifier: `backend/src/meho_backplane/broadcast/events.py` (`classify_op`, `redact_payload`)
 - Harbor 2.x API: https://goharbor.io/docs/2.11.0/build-customize-contribute/configure-swagger/
 - Precedents: `connectors/sddc_manager/` (Basic auth + core_ops pattern),
-  `connectors/nsx/` (probe pattern + acceptance fixtures)
+  `connectors/nsx/` (probe pattern + acceptance fixtures),
+  `connectors/vault/ops.py` (typed op registration),
+  `connectors/bind9/` (bound-method handlers)

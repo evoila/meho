@@ -772,6 +772,20 @@ async def register_typed_operation(
         Resolved to an existing :class:`OperationGroup` row or a new
         one created with ``review_status='enabled'``. ``None`` leaves
         ``group_id`` NULL (ungrouped op).
+    when_to_use
+        Optional curated agent-actionable prose explaining *when to
+        pick this group* over the other groups the same connector
+        exposes -- the question an LLM client tries to answer before
+        calling ``search_operations`` for a specific op. Surfaced
+        verbatim by ``list_operation_groups`` (T8). When supplied on
+        the first registration into a group, it's written to the new
+        :class:`OperationGroup` row's ``when_to_use`` column; on
+        subsequent registrations into an existing group, the helper
+        UPDATEs the row only when the string differs (so curation
+        edits in a code-only PR like T4b #732 land on restart).
+        ``None`` falls back to the auto-derive default the row's
+        first writer used (kept during the T4b → T4a #731 transition;
+        T4a removes the fallback and makes the kwarg required).
     tags
         Optional list of short keyword tags (e.g.
         ``["read-only", "cluster"]``). Part of the embedding text;
@@ -976,7 +990,7 @@ async def register_composite_operation(
         callable in by keyword. Handlers missing the parameter raise
         :class:`HandlerSignatureError` at registration time -- not
         first dispatch -- so the failure surfaces in lifespan.
-    summary, description, parameter_schema, response_schema, group_key, tags
+    summary, description, parameter_schema, response_schema, group_key, when_to_use, tags
         Identical to :func:`register_typed_operation`.
     when_to_use
         Identical to :func:`register_typed_operation` -- **required**

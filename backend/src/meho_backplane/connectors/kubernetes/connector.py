@@ -89,6 +89,87 @@ _PROBE_TIMEOUT_SECONDS = 5.0
 _PROBE_OK_STATUSES = frozenset({200, 401})
 
 
+#: Curated agent-actionable group selectors. Surfaced verbatim by
+#: ``list_operation_groups`` (G0.6-T8 #399) so the LLM client can pick
+#: a group before drilling into ``search_operations``. The strings
+#: differentiate groups from one another -- each entry explicitly
+#: names the *kind of question* that routes here and the cross-group
+#: pairing pattern with the rest of the K8s surface. T4b (#732)
+#: curated; T4a (#731) is the structural sibling that makes the
+#: ``when_to_use`` kwarg required on
+#: :func:`~meho_backplane.operations.typed_register.register_typed_operation`.
+_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    "cluster": (
+        "Use for cluster-identity questions before any per-resource "
+        "drill-in: 'which K8s flavour / distribution / version is this "
+        "target running?' The single ``k8s.about`` op returns the "
+        "product slug (rke2 / k3s / eks / gke / aks / vanilla) plus "
+        "git_version. Call this first when the agent needs to pick a "
+        "version-flavoured doc page from the knowledge base or to "
+        "decide whether RKE2-specific vs vanilla-K8s behaviour applies "
+        "to a downstream op."
+    ),
+    "inventory": (
+        "Use for cluster-wide 'what is in this cluster?' questions -- "
+        "namespace and node enumeration plus the namespace-scoped "
+        "``k8s.ls`` walker. The right group when the agent doesn't yet "
+        "know which namespace to target. Pair with the 'workload' "
+        "group once a namespace is identified (``k8s.ls /<ns>`` "
+        "returns kind -> count summaries; drill into per-pod / per-"
+        "deployment detail via workload-group ops)."
+    ),
+    "workload": (
+        "Use for per-namespace pod and deployment drill-in: "
+        "``k8s.pod.list`` / ``k8s.pod.info`` / ``k8s.deployment.list`` "
+        "/ ``k8s.deployment.info``. The right group once the operator "
+        "knows the namespace (typically picked from the 'inventory' "
+        "group first). Pair with the 'logs' group when investigating "
+        "a CrashLoopBackOff pod, with 'events' when the failure is "
+        "scheduler- or admission-controller-driven, and with 'network' "
+        "to map a workload's Services and Ingresses."
+    ),
+    "network": (
+        "Use for service-routing and ingress questions: "
+        "``k8s.service.list`` (ClusterIP / NodePort / LoadBalancer "
+        "with endpoint counts) and ``k8s.ingress.list`` (hostname + "
+        "path -> backend mappings). The right group for 'how is this "
+        "workload exposed?' or 'which hostname routes to which "
+        "service?'. Pair with the 'workload' group to map back to "
+        "the pods behind each Service via label selectors."
+    ),
+    "config": (
+        "Use for ConfigMap data inspection: ``k8s.configmap.list`` "
+        "(keys-only -- one row per ConfigMap with its data keys but "
+        "no values) and ``k8s.configmap.info`` (full data payload for "
+        "one named ConfigMap). The right group for 'what config is "
+        "this workload reading?' or 'which env var lives in which "
+        "ConfigMap?'. The list / info split is deliberate -- the "
+        "agent surveys keys cheaply via list, then fetches values "
+        "only for the specific ConfigMap it needs."
+    ),
+    "events": (
+        "Use for cluster-event observability and troubleshooting: "
+        "``k8s.event.list`` returns the recent Event stream "
+        "(scheduler decisions, admission-controller rejections, "
+        "image-pull failures, OOMKilled signals, FailedMount, "
+        "BackOff). The right group when a workload's status looks "
+        "wrong and the agent needs the *why*. Pair with the 'workload' "
+        "group to scope events to one pod / deployment, and with the "
+        "'logs' group when the event points at a container-internal "
+        "failure rather than a K8s-control-plane one."
+    ),
+    "logs": (
+        "Use for container stdout / stderr inspection: ``k8s.logs`` "
+        "fetches a non-streaming chunk (kubectl-style --tail / "
+        "--container / --since / --previous knobs). The right group "
+        "once the agent has identified a specific pod (typically from "
+        "'workload' or 'events') and needs the application's own log "
+        "output. Streaming follow-mode ('kubectl logs -f') is "
+        "deliberately out of scope -- request bounded chunks."
+    ),
+}
+
+
 #: Plural kind labels (kubectl-style) -> singular op_id segment. Only
 #: the irregulars need an entry; everything else (``pods``, ``services``,
 #: ``configmaps``, ``nodes``) takes the strip-trailing-s default branch
@@ -812,13 +893,9 @@ class KubernetesConnector(Connector):
                 parameter_schema=op.parameter_schema,
                 response_schema=op.response_schema,
                 group_key=op.group_key,
-                # G0.9-T4a #731 placeholder paired with ``group_key``;
-                # T4b #732 replaces with a curated blurb per group
-                # (``cluster`` / ``core`` / ``workloads`` / ``network`` /
-                # ``config`` / ``events`` / ``logs``). When the op has
-                # no ``group_key`` (``None``), pass ``None`` so the
-                # pairing validator stays happy.
-                when_to_use=("TODO: curate (T4b #732)" if op.group_key is not None else None),
+                when_to_use=(
+                    _WHEN_TO_USE_BY_GROUP[op.group_key] if op.group_key is not None else None
+                ),
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,

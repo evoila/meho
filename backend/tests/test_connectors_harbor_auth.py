@@ -1,0 +1,486 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Unit tests for :class:`HarborConnector` auth + fingerprint/probe (G3.5-T7 #619).
+
+Exercises HTTP Basic auth with admin and robot-account username forms,
+per-target credential isolation, the auth_model boundary gate, and the
+fingerprint/probe shapes against mocked Harbor 2.x endpoints.
+
+Auth: no session token — HTTP Basic sent on every request. Credentials
+cached per target so Vault is only queried once per target per connector
+instance lifetime. No sso_realm suffix; username passed as-is from Vault
+(supports both ``"admin"`` and robot forms like ``"robot$project+name"``).
+"""
+
+from __future__ import annotations
+
+import base64
+from collections.abc import Iterator
+from dataclasses import dataclass
+
+import pytest
+import respx
+
+from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.harbor import (
+    HarborConnector,
+    HarborTargetLike,
+)
+from meho_backplane.connectors.registry import (
+    clear_registry,
+    register_connector_v2,
+)
+from meho_backplane.connectors.schemas import AuthModel
+
+
+@pytest.fixture(autouse=True)
+def _clean_harbor_registry() -> Iterator[None]:
+    """Re-register HarborConnector after sibling tests clear the registry.
+
+    ``test_connectors_registry_v2.py`` installs an autouse fixture that
+    calls :func:`clear_registry` between tests. Re-register before every
+    test in this module and clear after — same pattern
+    :mod:`tests.test_connectors_sddc_manager_auth` established.
+    """
+    clear_registry()
+    register_connector_v2(
+        product=HarborConnector.product,
+        version=HarborConnector.version,
+        impl_id=HarborConnector.impl_id,
+        cls=HarborConnector,
+    )
+    yield
+    clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# Target stub — satisfies HarborTargetLike Protocol structurally.
+# Replaced by the real Target model when G0.3 (#224) lands.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubTarget:
+    name: str
+    host: str
+    port: int | None
+    secret_ref: str
+    auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+
+
+_TARGET_A = _StubTarget(
+    name="harbor-a",
+    host="harbor-a.test.invalid",
+    port=443,
+    secret_ref="kv/data/harbor/harbor-a",
+)
+_TARGET_B = _StubTarget(
+    name="harbor-b",
+    host="harbor-b.test.invalid",
+    port=443,
+    secret_ref="kv/data/harbor/harbor-b",
+)
+
+
+async def _stub_loader(_target: HarborTargetLike) -> dict[str, str]:
+    """Return canned admin credentials regardless of the target."""
+    return {"username": "admin", "password": "stub-password"}
+
+
+async def _stub_robot_loader(_target: HarborTargetLike) -> dict[str, str]:
+    """Return canned robot-account credentials."""
+    return {"username": "robot$myproject+myrobot", "password": "robot-secret"}
+
+
+def _make_connector() -> HarborConnector:
+    return HarborConnector(credentials_loader=_stub_loader)
+
+
+def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
+    """Decode an ``Authorization: Basic <b64>`` header into (username, password)."""
+    assert authorization_header.startswith("Basic ")
+    decoded = base64.b64decode(authorization_header[6:]).decode()
+    username, _, password = decoded.partition(":")
+    return username, password
+
+
+# ---------------------------------------------------------------------------
+# ABC + registration plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_harbor_connector_subclasses_http_connector() -> None:
+    assert issubclass(HarborConnector, HttpConnector)
+    assert HarborConnector.product == "harbor"
+    assert HarborConnector.version == "2.x"
+    assert HarborConnector.impl_id == "harbor-rest"
+    assert HarborConnector.supported_version_range == ">=2.0,<3.0"
+    assert HarborConnector.priority == 1
+
+
+def test_importing_package_registers_against_v2_registry() -> None:
+    from meho_backplane.connectors.registry import all_connectors_v2
+
+    registry = all_connectors_v2()
+    key = ("harbor", "2.x", "harbor-rest")
+    assert key in registry
+    assert registry[key] is HarborConnector
+
+
+def test_default_credentials_loader_raises_until_g03_lands() -> None:
+    import asyncio
+
+    from meho_backplane.connectors.harbor.session import load_credentials_from_vault
+
+    async def _check() -> None:
+        with pytest.raises(NotImplementedError, match=r"G0\.3"):
+            await load_credentials_from_vault(_TARGET_A)
+
+    asyncio.run(_check())
+
+
+# ---------------------------------------------------------------------------
+# HTTP Basic auth — admin account
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_sends_basic_auth_for_admin_account() -> None:
+    """auth_headers() produces Authorization: Basic with plain admin username."""
+    connector = _make_connector()
+    headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert "Authorization" in headers
+    assert headers["Authorization"].startswith("Basic ")
+    username, password = _decode_basic_auth(headers["Authorization"])
+    assert username == "admin"
+    assert password == "stub-password"
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# HTTP Basic auth — robot account username form
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_sends_basic_auth_for_robot_account_username_form() -> None:
+    """robot$project+name username is passed as-is in the Basic auth header."""
+    connector = HarborConnector(credentials_loader=_stub_robot_loader)
+    headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    username, password = _decode_basic_auth(headers["Authorization"])
+    assert username == "robot$myproject+myrobot"
+    assert password == "robot-secret"
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Credential caching
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
+    """Second auth_headers call against the same target does NOT re-invoke the loader."""
+    call_count = 0
+
+    async def _counting_loader(_target: HarborTargetLike) -> dict[str, str]:
+        nonlocal call_count
+        call_count += 1
+        return {"username": "admin", "password": "stub-password"}
+
+    connector = HarborConnector(credentials_loader=_counting_loader)
+    h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert h1 == h2
+    assert call_count == 1
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Per-target isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_per_target_isolation_keeps_credentials_separate() -> None:
+    """Two targets get two distinct credential cache entries; no cross-target leakage."""
+    call_log: list[str] = []
+
+    async def _tracking_loader(target: HarborTargetLike) -> dict[str, str]:
+        call_log.append(target.name)
+        return {"username": f"svc-{target.name}", "password": "pass"}
+
+    connector = HarborConnector(credentials_loader=_tracking_loader)
+    h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+
+    username_a, _ = _decode_basic_auth(h_a["Authorization"])
+    username_b, _ = _decode_basic_auth(h_b["Authorization"])
+    assert username_a == "svc-harbor-a"
+    assert username_b == "svc-harbor-b"
+    assert call_log == ["harbor-a", "harbor-b"]
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Credential loading failure modes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loader_missing_password_key_raises_runtime_error_naming_target() -> None:
+    async def _bad_loader(_target: HarborTargetLike) -> dict[str, str]:
+        return {"username": "admin"}  # type: ignore[return-value]
+
+    connector = HarborConnector(credentials_loader=_bad_loader)
+    with pytest.raises(RuntimeError, match=r"password") as exc_info:
+        await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert "harbor-a" in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_loader_missing_username_key_raises_runtime_error_naming_target() -> None:
+    async def _bad_loader(_target: HarborTargetLike) -> dict[str, str]:
+        return {"password": "stub-password"}  # type: ignore[return-value]
+
+    connector = HarborConnector(credentials_loader=_bad_loader)
+    with pytest.raises(RuntimeError, match=r"username") as exc_info:
+        await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert "harbor-a" in str(exc_info.value)
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Auth model gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "auth_model",
+    [AuthModel.PER_USER.value, AuthModel.IMPERSONATION.value, "unknown-mode"],
+)
+async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model: str) -> None:
+    """Per-user / impersonation modes raise NotImplementedError naming the target + mode."""
+    target = _StubTarget(
+        name="harbor-per-user",
+        host="harbor.test.invalid",
+        port=443,
+        secret_ref="kv/data/harbor/per-user",
+        auth_model=auth_model,
+    )
+    connector = _make_connector()
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        await connector.auth_headers(target, raw_jwt="")
+
+    assert "harbor-per-user" in str(exc_info.value)
+    assert auth_model in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> None:
+    """auth_model=None (pre-G0.3 column-not-yet-populated) is accepted."""
+    target = _StubTarget(
+        name="harbor-pre-g03",
+        host="harbor.test.invalid",
+        port=443,
+        secret_ref="kv/data/harbor/pre-g03",
+        auth_model=None,
+    )
+    connector = _make_connector()
+    headers = await connector.auth_headers(target, raw_jwt="")
+    assert headers["Authorization"].startswith("Basic ")
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
+    """An AuthModel enum member (not just its string value) is accepted."""
+    target = _StubTarget(
+        name="harbor-enum",
+        host="harbor.test.invalid",
+        port=443,
+        secret_ref="kv/data/harbor/enum",
+    )
+    target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
+    connector = _make_connector()
+    headers = await connector.auth_headers(target, raw_jwt="")
+    assert headers["Authorization"].startswith("Basic ")
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# fingerprint()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
+    """fingerprint() against mocked GET /api/v2.0/systeminfo returns canonical shape."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://harbor-a.test.invalid") as mock:
+        mock.get("/api/v2.0/systeminfo").respond(
+            200,
+            json={
+                "harbor_version": "v2.11.0-abc1234def",
+                "auth_mode": "db_auth",
+                "registry_url": "harbor-a.test.invalid",
+                "external_url": "https://harbor-a.test.invalid",
+                "self_registration": False,
+                "has_ca_root": False,
+                "with_notary": False,
+            },
+        )
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.vendor == "vmware"
+    assert fp.product == "harbor"
+    assert fp.version == "v2.11.0"
+    assert fp.build == "abc1234def"
+    assert fp.reachable is True
+    assert fp.probe_method == "GET /api/v2.0/systeminfo"
+    assert fp.extras["auth_mode"] == "db_auth"
+    assert fp.extras["registry_url"] == "harbor-a.test.invalid"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_version_without_build_hash() -> None:
+    """A bare harbor_version string (no - separator) leaves build=None."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://harbor-a.test.invalid") as mock:
+        mock.get("/api/v2.0/systeminfo").respond(
+            200,
+            json={"harbor_version": "v2.11.0", "auth_mode": "ldap_auth"},
+        )
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.version == "v2.11.0"
+    assert fp.build is None
+    assert fp.reachable is True
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_unreachable_returns_reachable_false_with_structured_error() -> None:
+    """Transport/status failure returns reachable=False with extras['error']."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://harbor-a.test.invalid") as mock:
+        mock.get("/api/v2.0/systeminfo").respond(401, json={"errors": [{"code": "UNAUTHORIZED"}]})
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.vendor == "vmware"
+    assert fp.product == "harbor"
+    assert fp.reachable is False
+    assert fp.probe_method == "GET /api/v2.0/systeminfo"
+    error = fp.extras["error"]
+    assert "HTTPStatusError" in error or "401" in error
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# probe()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_probe_returns_ok_true_when_all_components_healthy() -> None:
+    """probe() returns ok=True when Harbor's health endpoint reports all healthy."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://harbor-a.test.invalid") as mock:
+        mock.get("/api/v2.0/health").respond(
+            200,
+            json={
+                "status": "healthy",
+                "components": [
+                    {"name": "database", "status": "healthy"},
+                    {"name": "jobservice", "status": "healthy"},
+                    {"name": "redis", "status": "healthy"},
+                    {"name": "registry", "status": "healthy"},
+                ],
+            },
+        )
+        result = await connector.probe(_TARGET_A)
+
+    assert result.ok is True
+    assert result.reason is None
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_returns_ok_false_with_reason_for_unhealthy_component() -> None:
+    """probe() returns ok=False with reason listing unhealthy component names."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://harbor-a.test.invalid") as mock:
+        mock.get("/api/v2.0/health").respond(
+            200,
+            json={
+                "status": "unhealthy",
+                "components": [
+                    {"name": "database", "status": "healthy"},
+                    {"name": "jobservice", "status": "unhealthy", "error": "connection refused"},
+                    {"name": "redis", "status": "unhealthy", "error": "timeout"},
+                    {"name": "registry", "status": "healthy"},
+                ],
+            },
+        )
+        result = await connector.probe(_TARGET_A)
+
+    assert result.ok is False
+    assert result.reason is not None
+    assert "jobservice" in result.reason
+    assert "redis" in result.reason
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_returns_ok_false_on_transport_error() -> None:
+    """probe() returns ok=False + reason on transport failure."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://harbor-a.test.invalid") as mock:
+        mock.get("/api/v2.0/health").respond(503)
+        result = await connector.probe(_TARGET_A)
+
+    assert result.ok is False
+    assert result.reason is not None
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# aclose
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aclose_clears_credential_cache_and_pool() -> None:
+    """aclose() clears the in-memory credential cache and tears down the httpx pool."""
+    connector = _make_connector()
+    await connector.auth_headers(_TARGET_A, raw_jwt="")
+    assert "harbor-a" in connector._creds_cache
+    await connector.aclose()
+    assert connector._creds_cache == {}
+    assert connector._clients == {}
+
+
+@pytest.mark.asyncio
+async def test_aclose_with_no_cached_credentials_is_a_noop() -> None:
+    """A fresh connector with no credentials established closes cleanly."""
+    connector = _make_connector()
+    await connector.aclose()
+    assert connector._clients == {}
+    assert connector._creds_cache == {}

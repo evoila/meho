@@ -251,6 +251,9 @@ async def register_harbor_robot_operations(
         parameter_schema=_HARBOR_ROBOT_CREATE_PARAMETER_SCHEMA,
         response_schema=_HARBOR_ROBOT_CREATE_RESPONSE_SCHEMA,
         group_key="robot",
+        # G0.9-T4a #731 placeholder paired with ``group_key``; T4b #732
+        # replaces with a curated blurb for the harbor 'robot' group.
+        when_to_use="TODO: curate (T4b #732)",
         tags=["write", "credential-mint"],
         safety_level="caution",
         requires_approval=False,
@@ -274,6 +277,9 @@ async def register_harbor_robot_operations(
         parameter_schema=_HARBOR_ROBOT_DELETE_PARAMETER_SCHEMA,
         response_schema=_HARBOR_ROBOT_DELETE_RESPONSE_SCHEMA,
         group_key="robot",
+        # G0.9-T4a #731 placeholder paired with ``group_key``; T4b #732
+        # replaces with a curated blurb for the harbor 'robot' group.
+        when_to_use="TODO: curate (T4b #732)",
         tags=["write", "destructive"],
         safety_level="caution",
         requires_approval=False,

@@ -551,6 +551,66 @@ def _validate_safety_level(safety_level: str) -> str:
     return safety_level
 
 
+def _validate_when_to_use_pairing(group_key: str | None, when_to_use: str | None) -> str | None:
+    """Validate the ``group_key`` / ``when_to_use`` pairing at the boundary.
+
+    Pairing rules (G0.9-T4a #731):
+
+    * ``group_key`` is set -> ``when_to_use`` MUST be a non-empty,
+      non-whitespace string. Empty / whitespace-only / ``None`` raises
+      :class:`ValueError`. This catches the original Signal #5 failure
+      mode: the auto-derive default at the
+      ``operation_group.when_to_use`` column used to swallow any
+      missing-blurb call as a generic ``"Operations grouped under …"``
+      placeholder; killing the default at this boundary makes a
+      missing curation impossible to ship silently.
+    * ``group_key`` is ``None`` -> ``when_to_use`` MUST be ``None`` or
+      an empty / whitespace-only string. Empty strings are normalised
+      to ``None`` here (returned by this helper) to keep the contract
+      symmetrical: callers cycling through ``spec.when_to_use or None``
+      see the same shape, and any meaningful blurb on an ungrouped op
+      is rejected (the prose would be persisted nowhere since no
+      :class:`OperationGroup` row exists to attach it to).
+
+    The signature-level contract (the public helpers' kwarg-required
+    shape) raises :class:`TypeError` on entirely-omitted kwargs;
+    this helper covers the runtime-paired case.
+
+    Returns
+    -------
+    str | None
+        The validated (and, when ``group_key is None``, normalised)
+        ``when_to_use`` value. Callers should reassign:
+        ``when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)``.
+    """
+    if group_key is not None:
+        if not isinstance(when_to_use, str) or not when_to_use.strip():
+            raise ValueError(
+                "when_to_use must be a non-empty, non-whitespace string when "
+                f"group_key is set (group_key={group_key!r}, "
+                f"when_to_use={when_to_use!r})"
+            )
+        return when_to_use
+    # group_key is None: normalise empty / whitespace-only strings to None
+    # so the contract stays symmetric with the spec.when_to_use or None
+    # idiom; reject any meaningful non-empty blurb.
+    if when_to_use is None:
+        return None
+    if not isinstance(when_to_use, str):
+        raise ValueError(
+            "when_to_use must be None when group_key is None (no operation "
+            f"group row exists to attach the blurb to; received "
+            f"when_to_use={when_to_use!r})"
+        )
+    if not when_to_use.strip():
+        return None
+    raise ValueError(
+        "when_to_use must be None when group_key is None (no operation "
+        f"group row exists to attach the blurb to; received "
+        f"when_to_use={when_to_use!r})"
+    )
+
+
 async def _resolve_or_create_group(
     session: AsyncSession,
     *,
@@ -558,6 +618,7 @@ async def _resolve_or_create_group(
     version: str,
     impl_id: str,
     group_key: str,
+    when_to_use: str,
     now: datetime,
 ) -> uuid.UUID:
     """Look up or create an :class:`OperationGroup` row for a built-in/global group.
@@ -569,15 +630,16 @@ async def _resolve_or_create_group(
     the typed connector author already vouched for the group at code
     review time.
 
-    Auto-derivation of ``name`` + ``when_to_use`` from ``group_key`` is
-    intentionally minimal -- a humanised title-case of the dotted key
-    plus a generic placeholder blurb. Connectors that want a richer
-    blurb should pre-create the group row at app startup via a
-    separate seeding helper (a v0.2.next concern, not blocking T4).
-    The placeholder is good enough for the v0.2 dispatcher path
-    because ``list_operation_groups`` (T8) renders the blurb verbatim
-    and a typed-connector author updates the row when ergonomics
-    matter.
+    Auto-derivation of ``name`` from ``group_key`` is intentionally
+    minimal -- a humanised title-case of the dotted key. ``when_to_use``
+    is **caller-supplied** (G0.9-T4a #731): every connector must hand
+    in a curated blurb so the operator-facing
+    ``list_operation_groups`` (T8) surface never shows the legacy
+    auto-derive placeholder. The previous default
+    (``"Operations grouped under '<key>' for <product> <impl>."``) was
+    the Signal #5 cause from the 2026-05-20 RDC dogfood; killing the
+    default at this boundary makes the structural gap impossible to
+    silently re-introduce.
 
     Concurrency note: two concurrent connectors registering against
     the same ``group_key`` race here. The partial unique index
@@ -588,6 +650,14 @@ async def _resolve_or_create_group(
     is a theoretical concern rather than an observed one -- the
     retry shim lives at the caller (G3 connector packages can wrap
     their init in their own retry) rather than here.
+
+    First-register vs. existing-row update: on a row that already
+    exists, the helper returns the persisted id unchanged. The
+    caller-supplied ``when_to_use`` is **not** written back to an
+    existing row -- updating curated copy belongs to a separate
+    seeding/admin path, not the per-op registration loop. The
+    same-process re-register case (lifespan restart) sees the
+    existing row and skips the write.
     """
     result = await session.execute(
         select(OperationGroup).where(
@@ -615,7 +685,7 @@ async def _resolve_or_create_group(
         impl_id=impl_id,
         group_key=group_key,
         name=name,
-        when_to_use=f"Operations grouped under {group_key!r} for {product} {impl_id}.",
+        when_to_use=when_to_use,
         review_status="enabled",
         created_at=now,
         updated_at=now,
@@ -626,6 +696,11 @@ async def _resolve_or_create_group(
     return group.id
 
 
+# Pre-existing G0.6-T4 #395 public-API helper; G0.9-T4a #731 adds only the
+# ``when_to_use`` kwarg + docstring section + one pairing-validator call.
+# Splitting kwargs validation / session-owned vs. caller-owned dispatch
+# into helpers is deferred so this signature-only change stays minimally
+# invasive. code-quality-allow: pre-existing pre-G0.9 function length
 async def register_typed_operation(
     *,
     product: str,
@@ -636,6 +711,7 @@ async def register_typed_operation(
     summary: str,
     description: str,
     parameter_schema: dict[str, Any],
+    when_to_use: str | None,
     response_schema: dict[str, Any] | None = None,
     group_key: str | None = None,
     tags: list[str] | None = None,
@@ -673,6 +749,24 @@ async def register_typed_operation(
         JSON Schema 2020-12 documents. The dispatcher (T5) validates
         inbound params against ``parameter_schema`` before routing;
         ``response_schema`` is informational in v0.2.
+    when_to_use
+        **Required** kwarg (no default, since G0.9-T4a #731). Curated
+        prose answering *"which group should I search for the
+        question I have?"*; persisted onto the
+        :class:`OperationGroup` row when the helper has to create one.
+        Pairing rules:
+
+        * ``group_key`` set -> ``when_to_use`` must be a non-empty,
+          non-whitespace string.
+        * ``group_key=None`` -> ``when_to_use`` must be ``None`` (no
+          group row exists to attach the blurb to).
+
+        The previous auto-derive default
+        (``"Operations grouped under '<key>' for <product> <impl>."``)
+        was Signal #5 from the 2026-05-20 RDC dogfood -- removing it
+        forces every connector author to ship a real blurb. T4b #732
+        replaces the placeholder strings T4a inserts at the existing
+        call sites with curated content.
     group_key
         Optional grouping handle (e.g. ``"vm-lifecycle"``, ``"kv"``).
         Resolved to an existing :class:`OperationGroup` row or a new
@@ -721,9 +815,14 @@ async def register_typed_operation(
 
     Raises
     ------
+    TypeError
+        ``when_to_use`` omitted entirely (signature-level required
+        kwarg; the no-default contract is the structural fix from
+        G0.9-T4a #731).
     ValueError
-        ``op_id`` empty / whitespace, or ``safety_level`` not in the
-        bounded enum.
+        ``op_id`` empty / whitespace, ``safety_level`` not in the
+        bounded enum, or the ``group_key`` / ``when_to_use`` pairing
+        contract is violated (see ``when_to_use`` param description).
     HandlerRefError
         Handler is a closure, lambda, partial, or non-coroutine
         function. Subclass of :class:`ValueError`.
@@ -757,6 +856,7 @@ async def register_typed_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
+    when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
     _assert_handler_ref_resolvable(
@@ -783,6 +883,7 @@ async def register_typed_operation(
             parameter_schema=parameter_schema,
             response_schema=response_schema,
             group_key=group_key,
+            when_to_use=when_to_use,
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
@@ -808,6 +909,7 @@ async def register_typed_operation(
             parameter_schema=parameter_schema,
             response_schema=response_schema,
             group_key=group_key,
+            when_to_use=when_to_use,
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
@@ -818,6 +920,10 @@ async def register_typed_operation(
         )
 
 
+# Pre-existing G3.1-T4 #504 public-API helper; G0.9-T4a #731 mirrors the
+# typed-helper change (``when_to_use`` kwarg + docstring section + one
+# pairing-validator call). Refactor is the same scope-deferred call as
+# :func:`register_typed_operation` above. code-quality-allow: pre-G0.9 length
 async def register_composite_operation(
     *,
     product: str,
@@ -828,6 +934,7 @@ async def register_composite_operation(
     summary: str,
     description: str,
     parameter_schema: dict[str, Any],
+    when_to_use: str | None,
     response_schema: dict[str, Any] | None = None,
     group_key: str | None = None,
     tags: list[str] | None = None,
@@ -871,6 +978,10 @@ async def register_composite_operation(
         first dispatch -- so the failure surfaces in lifespan.
     summary, description, parameter_schema, response_schema, group_key, tags
         Identical to :func:`register_typed_operation`.
+    when_to_use
+        Identical to :func:`register_typed_operation` -- **required**
+        kwarg (no default, since G0.9-T4a #731), paired with
+        ``group_key`` (set both or pass both as ``None``).
     safety_level
         Defaults to ``"dangerous"`` (vs. typed's ``"safe"`` default).
         Composites typically orchestrate write ops -- VM lifecycle,
@@ -896,9 +1007,13 @@ async def register_composite_operation(
 
     Raises
     ------
+    TypeError
+        ``when_to_use`` omitted entirely (signature-level required
+        kwarg from G0.9-T4a #731).
     ValueError
-        ``op_id`` empty / whitespace, or ``safety_level`` not in the
-        bounded enum.
+        ``op_id`` empty / whitespace, ``safety_level`` not in the
+        bounded enum, or the ``group_key`` / ``when_to_use`` pairing
+        contract is violated (see :func:`register_typed_operation`).
     HandlerSignatureError
         Handler does not accept a ``dispatch_child`` parameter, **or**
         the natural key is already registered with
@@ -936,6 +1051,7 @@ async def register_composite_operation(
     """
     _validate_op_id(op_id)
     _validate_safety_level(safety_level)
+    when_to_use = _validate_when_to_use_pairing(group_key, when_to_use)
     validate_composite_handler_signature(handler)
     handler_ref = derive_handler_ref(handler)
     _assert_handler_ref_resolvable(
@@ -962,6 +1078,7 @@ async def register_composite_operation(
             parameter_schema=parameter_schema,
             response_schema=response_schema,
             group_key=group_key,
+            when_to_use=when_to_use,
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
@@ -987,6 +1104,7 @@ async def register_composite_operation(
             parameter_schema=parameter_schema,
             response_schema=response_schema,
             group_key=group_key,
+            when_to_use=when_to_use,
             tags_list=tags_list,
             safety_level=safety_level,
             requires_approval=requires_approval,
@@ -997,6 +1115,11 @@ async def register_composite_operation(
         )
 
 
+# Pre-existing G0.6-T4 #395 shared upsert path (typed + composite branches
+# converge here); G0.9-T4a #731 threads one ``when_to_use`` kwarg into the
+# group-resolve call. Refactor of the first-register / skip-re-embed /
+# re-embed branches into helpers is a separate Task.
+# code-quality-allow: pre-G0.9 function length
 async def _register_in_session(
     session: AsyncSession,
     *,
@@ -1011,6 +1134,7 @@ async def _register_in_session(
     parameter_schema: dict[str, Any],
     response_schema: dict[str, Any] | None,
     group_key: str | None,
+    when_to_use: str | None,
     tags_list: list[str],
     safety_level: str,
     requires_approval: bool,
@@ -1051,12 +1175,19 @@ async def _register_in_session(
     # admin UI can group it later.
     group_id: uuid.UUID | None = None
     if group_key is not None:
+        # Pairing was validated at the public-helper boundary
+        # (:func:`_validate_when_to_use_pairing`); ``when_to_use`` is a
+        # non-empty string here. The runtime ``assert`` documents the
+        # contract for ``mypy`` (which can't narrow the kwarg type from
+        # the upstream validator) without re-raising.
+        assert when_to_use is not None
         group_id = await _resolve_or_create_group(
             session,
             product=product,
             version=version,
             impl_id=impl_id,
             group_key=group_key,
+            when_to_use=when_to_use,
             now=now,
         )
 

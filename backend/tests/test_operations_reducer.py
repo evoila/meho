@@ -453,6 +453,7 @@ async def test_dispatch_default_reducer_leaves_handle_none(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -512,6 +513,7 @@ async def test_dispatch_propagates_reducer_handle_onto_operation_result(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -577,6 +579,7 @@ async def test_dispatch_passes_context_to_reducer(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -644,6 +647,7 @@ async def test_dispatch_returns_connector_error_when_reducer_raises(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 

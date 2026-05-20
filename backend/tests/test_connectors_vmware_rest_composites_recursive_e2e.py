@@ -321,6 +321,7 @@ async def _register_leaf_typed_ops(stub_embedding_service: AsyncMock) -> None:
             summary=description,
             description=description,
             parameter_schema=permissive_schema,
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 

@@ -229,6 +229,7 @@ async def test_register_first_call_inserts_row_with_composite_source_kind(
         },
         response_schema={"type": "object"},
         group_key="vm-lifecycle-composites",
+        when_to_use="VM-lifecycle composites: orchestrated create/delete/clone flows.",
         tags=["vm", "lifecycle"],
         llm_instructions={"when_to_call": "for fully orchestrated VM creation"},
         embedding_service=stub_embedding_service,
@@ -290,6 +291,7 @@ async def test_register_composite_per_op_safety_override(
         parameter_schema={"type": "object"},
         safety_level="safe",
         requires_approval=False,
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -326,6 +328,7 @@ async def test_register_composite_same_args_twice_skips_reembed(
         "summary": "Create a VM.",
         "description": "Composite orchestrating VM creation.",
         "parameter_schema": {"type": "object"},
+        "when_to_use": None,
         "tags": ["vm"],
         "embedding_service": stub_embedding_service,
     }
@@ -377,6 +380,7 @@ async def test_register_composite_changed_embedding_text_triggers_reembed(
         "summary": "Create a VM.",
         "description": "Composite orchestrating VM creation.",
         "parameter_schema": {"type": "object"},
+        "when_to_use": None,
         "tags": ["vm"],
         "embedding_service": stub_embedding_service,
     }
@@ -411,6 +415,7 @@ async def test_register_composite_rejects_typed_shaped_handler(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
     # Message names the handler's dotted path so the operator can find it.
@@ -432,6 +437,7 @@ async def test_register_typed_rejects_composite_shaped_handler(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
     assert "composite_module_level_handler" in str(excinfo.value)
@@ -473,6 +479,7 @@ async def test_register_composite_rejects_cross_kind_over_existing_typed_row(
         summary="typed first",
         description="initial typed registration",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -487,6 +494,7 @@ async def test_register_composite_rejects_cross_kind_over_existing_typed_row(
             summary="composite second",
             description="attempted composite re-registration",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -526,6 +534,7 @@ async def test_register_typed_rejects_cross_kind_over_existing_composite_row(
         summary="composite first",
         description="initial composite registration",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -540,6 +549,7 @@ async def test_register_typed_rejects_cross_kind_over_existing_composite_row(
             summary="typed second",
             description="attempted typed re-registration",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -581,6 +591,7 @@ async def test_register_composite_idempotent_same_kind_after_guard(
         summary="initial",
         description="initial",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -594,6 +605,7 @@ async def test_register_composite_idempotent_same_kind_after_guard(
         summary="initial",
         description="initial",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -643,6 +655,7 @@ async def test_register_composite_signature_validation_runs_before_handler_ref(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -674,6 +687,7 @@ async def test_register_composite_rejects_closure_with_dispatch_child(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -694,6 +708,7 @@ async def test_register_composite_rejects_lambda(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -717,6 +732,7 @@ async def test_register_composite_rejects_functools_partial(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -746,6 +762,7 @@ async def test_register_composite_bound_method_handler_ref(
         summary="x",
         description="x",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -780,6 +797,7 @@ async def test_register_composite_rejects_typed_bound_method(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -805,6 +823,7 @@ async def test_register_composite_caller_session_does_not_commit(
         description="x",
         parameter_schema={"type": "object"},
         session=session,
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -864,6 +883,7 @@ async def test_register_composite_dispatches_end_to_end_with_parent_audit(
         summary="Read a secret.",
         description="Read a secret.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -883,6 +903,7 @@ async def test_register_composite_dispatches_end_to_end_with_parent_audit(
         parameter_schema={"type": "object"},
         safety_level="safe",
         requires_approval=False,
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 

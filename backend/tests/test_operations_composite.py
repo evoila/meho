@@ -497,6 +497,7 @@ async def test_dispatch_composite_two_children_produces_audit_tree(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     await _insert_composite_descriptor(
@@ -587,6 +588,7 @@ async def test_dispatch_composite_nested_inside_composite(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     await _insert_composite_descriptor(
@@ -760,6 +762,7 @@ async def test_dispatch_composite_child_inherits_target_unless_overridden(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     await _insert_composite_descriptor(

@@ -448,6 +448,12 @@ async def register_vmware_composite_operations(
             parameter_schema=spec.parameter_schema,
             response_schema=spec.response_schema,
             group_key=spec.group_key,
+            # G0.9-T4a #731 placeholder paired with ``group_key``;
+            # T4b #732 replaces with curated blurbs per composite
+            # group (vm / vm-lifecycle / cluster / network / storage /
+            # performance / inventory). Ungrouped composites pass
+            # ``None`` so the pairing validator stays happy.
+            when_to_use=("TODO: curate (T4b #732)" if spec.group_key is not None else None),
             tags=spec.tags,
             safety_level=spec.safety_level,
             requires_approval=spec.requires_approval,

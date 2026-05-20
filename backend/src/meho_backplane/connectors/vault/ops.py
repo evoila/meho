@@ -826,6 +826,9 @@ async def register_vault_typed_operations(
             version="1.x",
             impl_id="vault",
             group_key="kv",
+            # G0.9-T4a #731 placeholder; T4b #732 replaces with a
+            # curated blurb for the ``kv`` group.
+            when_to_use="TODO: curate (T4b #732)",
             requires_approval=False,
             embedding_service=embedding_service,
             **spec,

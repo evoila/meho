@@ -437,6 +437,9 @@ async def register_vault_auth_operations(
             parameter_schema=spec["parameter_schema"],
             response_schema=spec["response_schema"],
             group_key="auth",
+            # G0.9-T4a #731 placeholder; T4b #732 replaces with a
+            # curated blurb for the ``auth`` group.
+            when_to_use="TODO: curate (T4b #732)",
             tags=["read-only", "auth", "identity"],
             safety_level="safe",
             requires_approval=False,

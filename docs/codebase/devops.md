@@ -603,7 +603,7 @@ incidents #634 / #697).
 
 | Job | Surface | Steps |
 | --- | --- | --- |
-| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -x --cov` (excludes `tests/integration/`) -> upload `python-coverage` artefact |
+| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 3 --dist loadscope` (excludes `tests/integration/`; `--cov=meho_backplane --cov-report=xml` only on push-to-main via `COVERAGE_CORE=sysmon`, PEP 669 backend; PRs skip `--cov` to stay fast — #726, #739) -> upload `python-coverage` artefact |
 | `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
 | `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
 | `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
@@ -652,8 +652,9 @@ in their dedicated workflows.
 
 ### Coverage handoff to SonarCloud
 
-The Python job runs `pytest --cov-report=xml` and uploads
-`backend/coverage.xml` as the `python-coverage` artefact.
+On pushes to `main`, the Python job runs
+`COVERAGE_CORE=sysmon uv run pytest ... --cov=meho_backplane --cov-report=xml tests/`
+and uploads `backend/coverage.xml` as the `python-coverage` artefact.
 [`quality-gate.yml`](../../.github/workflows/quality-gate.yml) listens
 on `workflow_run: workflows: ["CI"]`, downloads that exact artefact
 name via `actions/download-artifact@v4`, and feeds the XML into the
@@ -661,6 +662,18 @@ SonarCloud scan. The workflow name (`CI`) and the artefact name
 (`python-coverage`) are the load-bearing contract between the two
 workflows — changing either side without the other would silently lose
 coverage reporting in SonarCloud.
+
+`--cov` is gated to push events only (#726): on PRs, the merge gate
+stays fast and SonarCloud's new-code coverage widget shows "no data"
+until the branch lands on `main`. The Clean-as-You-Code model tolerates
+the one-merge delay because `main` always carries fresh data and
+`quality-gate.yml` is whole-job `continue-on-error`. `COVERAGE_CORE=sysmon`
+(#739) swaps coverage.py's default C tracer for the PEP 669
+`sys.monitoring` backend (Python 3.12+, supported by coverage.py 7.4+;
+the lockfile pins 7.14). Sysmon's event-driven model removes most of
+the per-line tracing tax; line/branch counts are identical to the
+ctrace baseline within ±1% by construction, so the SonarCloud signal
+is unaffected.
 
 ### Fork-PR guard
 
@@ -692,6 +705,9 @@ in the correct subdir on its own.
 (cd backend && uv run ruff format --check src/ tests/)
 (cd backend && uv run mypy src/)
 (cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
+# To mirror the push-mode CI coverage run (Python 3.12+):
+# (cd backend && COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 \
+#     --ignore=tests/integration --cov=meho_backplane --cov-report=xml tests/)
 
 # Go
 # CGO_ENABLED=1 is required for `go test -race` — same reason ci.yml

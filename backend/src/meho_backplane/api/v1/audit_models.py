@@ -18,13 +18,14 @@ surfaces them under the audit-query tag without duplicating the schema.
 Tenant scoping by construction
 ==============================
 
-:class:`AuditQueryRequest` deliberately has **no** ``tenant_id`` field.
-Pydantic v2's default ``extra="ignore"`` policy means a client that
-puts ``tenant_id`` in the body has the value silently dropped; the
-router never reads from the body for the tenant boundary — it injects
-``operator.tenant_id`` from the JWT into the T1 handler call. The
-substrate's mandatory keyword-only ``tenant_id`` argument enforces the
-invariant on its side.
+:class:`AuditQueryRequest` deliberately has **no** ``tenant_id`` field
+and sets ``extra="forbid"`` (G0.9-T2 / #729) so a client that puts
+``tenant_id`` in the body fails 422 ``extra_forbidden`` instead of
+having the value silently dropped. The router never reads from the
+body for the tenant boundary — it injects ``operator.tenant_id`` from
+the JWT into the T1 handler call. The substrate's mandatory
+keyword-only ``tenant_id`` argument enforces the invariant on its side.
+The fail-loud posture matches every other public v1 request schema.
 """
 
 from __future__ import annotations
@@ -51,9 +52,14 @@ class AuditQueryRequest(BaseModel):
     layer. All other fields pass through to the substrate filter
     object unchanged. The empty body shape ``{}`` is the no-filter
     case — every field defaults to None or the substrate-side default.
+
+    ``extra="forbid"`` rejects unknown fields with 422
+    ``extra_forbidden`` so a typo or a client passing ``tenant_id``
+    in the body fails loud at the framework boundary — the route
+    always uses ``operator.tenant_id`` from the JWT, never the body.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     target: str | None = Field(default=None, max_length=256)
     principal: str | None = Field(default=None, max_length=256)

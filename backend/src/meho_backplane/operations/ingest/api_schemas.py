@@ -15,6 +15,15 @@ The shapes are deliberately conservative:
 * ``frozen=True`` on every model — responses flow read-only and any
   in-place mutation surfaces as a Pydantic error rather than a
   silently-modified payload.
+* ``extra="forbid"`` on every **request** body (G0.9-T2 / #729):
+  :class:`IngestRequest`, :class:`SpecSource`, :class:`EditGroupBody`,
+  :class:`EditOpBody`. Unknown fields fail 422 ``extra_forbidden`` at
+  the framework boundary instead of being silently dropped, so a v0.2.1
+  client mis-spelling ``impl_id`` as ``implementation_id`` (or the
+  RDC-team-style ``q`` / ``top_k`` carryover) hears about it
+  immediately rather than seeing a confusing required-field error or
+  silent default. Response models keep the pydantic default
+  (``extra="ignore"``) — they aren't validated against client input.
 * ``IngestRequest.specs`` is a list of :class:`SpecSource` objects with
   one ``uri`` field so future per-spec knobs (auth headers, dialect
   pinning) can land without breaking the wire contract.
@@ -88,10 +97,13 @@ class SpecSource(BaseModel):
 
     Wrapped in its own model so future per-spec knobs (auth headers,
     dialect pinning, content-type override) can land without
-    reshaping :class:`IngestRequest`.
+    reshaping :class:`IngestRequest`. ``extra="forbid"`` rejects
+    unknown fields (per the request-schema-strictness rule) so a
+    typo in a nested ``specs[*]`` entry fails 422 at the body parse
+    instead of being silently dropped.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     uri: str = Field(min_length=1, max_length=2048)
 
@@ -116,9 +128,14 @@ class IngestRequest(BaseModel):
     registered :class:`GenericRestConnector` shim; ``None`` leaves
     the shim unconfigured (the connector's eventual hand-coded
     subclass at G3.x will set its own base URL).
+
+    ``extra="forbid"`` rejects unknown body fields with 422
+    ``extra_forbidden`` (G0.9-T2 / #729) — silent-drop on a typo
+    would otherwise mean the pipeline runs with the wrong impl_id
+    and the operator only finds out at review-time.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     product: str = Field(min_length=1, max_length=64)
     version: str = Field(min_length=1, max_length=64)
@@ -245,9 +262,15 @@ class EditGroupBody(BaseModel):
     :class:`OperationGroup.name` columns. Empty strings are
     rejected — operators that want to "clear" the field should
     re-run grouping rather than blank it.
+
+    ``extra="forbid"`` (G0.9-T2 / #729) means an unknown field —
+    e.g. a client mis-spelling ``when_to_use`` as ``whentouse`` —
+    fails 422 instead of being silently dropped (which would
+    surface as a confusing 400 "at least one field must be set"
+    from the route layer).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     when_to_use: str | None = Field(default=None, min_length=1, max_length=2048)
     name: str | None = Field(default=None, min_length=1, max_length=128)
@@ -274,9 +297,13 @@ class EditOpBody(BaseModel):
     that the agent surfaces in place of the upstream spec's
     ``description`` field; capped at 4096 chars to keep audit-log
     payloads bounded.
+
+    ``extra="forbid"`` (G0.9-T2 / #729) rejects unknown fields with
+    422 ``extra_forbidden`` — same fail-loud posture as every other
+    public v1 request schema.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     custom_description: str | None = Field(default=None, min_length=1, max_length=4096)
     safety_level: Literal["safe", "caution", "dangerous"] | None = None

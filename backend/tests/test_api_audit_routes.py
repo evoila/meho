@@ -270,8 +270,22 @@ def test_post_query_since_24h_parses_to_datetime(client: TestClient) -> None:
     assert filters.since <= (after - timedelta(hours=24) + timedelta(seconds=1))
 
 
-def test_post_query_body_tenant_id_is_silently_dropped(client: TestClient) -> None:
-    """AC7: a tenant-A operator with ``tenant_id=<B>`` in the body still gets tenant-A scoping."""
+def test_post_query_body_tenant_id_is_rejected_with_extra_forbidden(
+    client: TestClient,
+) -> None:
+    """AC7 (G0.9-T2 / #729): ``tenant_id`` in the body is rejected at 422.
+
+    Pre-#729 the value was silently dropped (Pydantic v2's default
+    ``extra="ignore"``) and the route still ran under
+    ``operator.tenant_id`` from the JWT — the test asserted "JWT
+    wins". With ``extra="forbid"`` on :class:`AuditQueryRequest`,
+    the framework now rejects the field at 422 with
+    ``extra_forbidden``, making the cross-tenant-attempt visible to
+    the caller and to the audit log instead of silently mapping it
+    to own-tenant. The tenant boundary is still enforced — by
+    construction the substrate is never reached for a body that
+    fails validation.
+    """
     key = make_rsa_keypair("kid-A")
     token = _token(key, tenant_id=_TENANT_A)
     mock_query = AsyncMock(return_value=_empty_result())
@@ -285,9 +299,13 @@ def test_post_query_body_tenant_id_is_silently_dropped(client: TestClient) -> No
             json={"tenant_id": str(_TENANT_B)},
             headers={"Authorization": f"Bearer {token}"},
         )
-    assert resp.status_code == 200
-    kwargs = mock_query.await_args.kwargs
-    assert kwargs["tenant_id"] == _TENANT_A  # JWT wins
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert any(
+        d.get("type") == "extra_forbidden" and tuple(d.get("loc", ())) == ("body", "tenant_id")
+        for d in detail
+    ), detail
+    mock_query.assert_not_awaited()  # Substrate never reached.
 
 
 def test_post_query_bad_duration_returns_400(client: TestClient) -> None:

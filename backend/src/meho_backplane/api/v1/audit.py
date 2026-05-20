@@ -173,9 +173,10 @@ async def query(
 
     Body fields mirror :class:`AuditQueryFilters` except ``since`` /
     ``until`` are duration strings (``"24h"`` / ``"7d"`` / ISO-8601)
-    parsed at the router layer. Client-supplied ``tenant_id`` in the
-    body is silently dropped per Pydantic v2's default
-    ``extra="ignore"``; the route always passes
+    parsed at the router layer. Client-supplied ``tenant_id`` (or any
+    other unknown field) in the body is rejected at 422
+    ``extra_forbidden`` per :class:`AuditQueryRequest`'s
+    ``extra="forbid"`` config; the route always passes
     ``operator.tenant_id`` to the substrate.
     """
     _bind_audit_overrides()

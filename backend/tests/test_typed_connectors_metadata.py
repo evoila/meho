@@ -45,6 +45,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.connectors.bind9 import Bind9Connector
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.connectors.vault.ops import register_vault_typed_operations
@@ -69,6 +70,7 @@ _VAULT_GROUPS: Final[frozenset[str]] = frozenset({"auth", "kv", "sys"})
 _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
     {"cluster", "events", "performance", "storage", "networking", "vm", "host"}
 )
+_BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})
 
 #: The substring that signals the auto-derive default in
 #: :func:`~meho_backplane.operations.typed_register._resolve_or_create_group`.
@@ -186,6 +188,45 @@ async def test_kubernetes_groups_have_curated_when_to_use(
         assert row.when_to_use.strip(), f"k8s group {key!r} has empty when_to_use"
         assert _PLACEHOLDER_SUBSTRING not in row.when_to_use, (
             f"k8s group {key!r} regressed to the auto-derive template: {row.when_to_use!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bind9_groups_have_curated_when_to_use(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+) -> None:
+    """Every bind9 group registers with a curated ``when_to_use`` string.
+
+    Asserts the four expected group_keys (identity / zone / record /
+    config) land and none of them carry the auto-derive template-
+    literal shape. Mirrors the k8s test's embedding-stub pattern
+    because :meth:`Bind9Connector.register_operations` shares the
+    same registrar signature.
+    """
+    from meho_backplane.operations import typed_register as tr
+
+    original = tr.encode_endpoint_text
+
+    async def _stub_encode(text: str, *, service: object | None = None) -> list[float]:
+        return await stub_embedding_service.encode_one(text)
+
+    tr.encode_endpoint_text = _stub_encode  # type: ignore[assignment]
+    try:
+        await Bind9Connector.register_operations()
+    finally:
+        tr.encode_endpoint_text = original  # type: ignore[assignment]
+
+    groups = await _operation_groups_for(
+        session, product="bind9", version="9.x", impl_id="bind9-ssh"
+    )
+    assert set(groups) == _BIND9_GROUPS, (
+        f"bind9 groups in DB {set(groups)!r} != expected {_BIND9_GROUPS!r}"
+    )
+    for key, row in groups.items():
+        assert row.when_to_use.strip(), f"bind9 group {key!r} has empty when_to_use"
+        assert _PLACEHOLDER_SUBSTRING not in row.when_to_use, (
+            f"bind9 group {key!r} regressed to the auto-derive template: {row.when_to_use!r}"
         )
 
 

@@ -110,9 +110,15 @@ class RetrieveRequest(BaseModel):
     free-form operator queries; operators with longer payloads
     should use the embedding pipeline directly via G4 / G5 ingestion
     paths.
+
+    ``extra="forbid"`` rejects unknown fields at 422 with
+    ``extra_forbidden`` detail so a v0.2.1 client still sending the
+    pre-rename ``q`` / ``top_k`` keys fails loud instead of silently
+    running with the defaults (Signal #2 from the 2026-05-20 RDC
+    dogfood). Same posture as every public v1 request schema.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     query: str = Field(min_length=1, max_length=2000)
     source: str | None = Field(default=None, max_length=64)

@@ -222,7 +222,18 @@ class CallOperationBody(BaseModel):
     :func:`~meho_backplane.targets.resolver.resolve_target`; ``None``
     means the operation does not need a target (typed handlers that
     don't read it; composite handlers that do their own resolution).
+
+    ``extra="forbid"`` (G0.9-T2 / #729) rejects unknown fields with
+    422 ``extra_forbidden`` — a v0.2.1 client still sending ``target:
+    str`` (the pre-rename single-name shape) or a typo in
+    ``connector_id`` now fails loud at the framework boundary instead
+    of silently dispatching with the defaults. ``params`` itself is a
+    free-form ``dict`` because per-op parameter shape is enforced by
+    the descriptor's ``parameter_schema`` further down the dispatch
+    path; only the meta-tool body's own fields are constrained here.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     connector_id: str = Field(min_length=1)
     op_id: str = Field(min_length=1)

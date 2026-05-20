@@ -141,6 +141,7 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
         audit,
+        broadcast_overrides,
         connector_admin,
         knowledge,
         meho_status,
@@ -154,6 +155,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(operations)
     importlib.reload(connector_admin)
     importlib.reload(audit)
+    importlib.reload(broadcast_overrides)
     importlib.reload(knowledge)
     importlib.reload(topology)
     importlib.reload(memory_tools)

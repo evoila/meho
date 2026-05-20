@@ -393,6 +393,7 @@ async def test_search_operations_ranks_lexical_match_first(
         summary="Read a KV v2 secret from a path.",
         description="Reads a secret stored in the KV v2 mount.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     await register_typed_operation(
@@ -404,6 +405,7 @@ async def test_search_operations_ranks_lexical_match_first(
         summary="Check the cluster health.",
         description="Reports the seal status and leader info.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -543,6 +545,7 @@ async def test_search_operations_unknown_group_returns_empty_hits(
         summary="Read.",
         description="read.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     operator = _make_operator()
@@ -622,6 +625,7 @@ async def test_search_operations_clamps_limit_to_max(
         summary="Read a secret.",
         description="read.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     operator = _make_operator()
@@ -658,6 +662,7 @@ async def test_call_operation_with_target_resolves_and_dispatches(
         summary="Read a secret.",
         description="reads.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     # Seed a target row that resolve_target() can find by name.
@@ -722,6 +727,7 @@ async def test_call_operation_without_target_uses_none(
         summary="Read.",
         description="reads.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -804,6 +810,7 @@ async def test_search_then_call_end_to_end(
         summary="Read a secret from Vault KV v2.",
         description="Reads a secret from the KV v2 mount.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 

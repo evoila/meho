@@ -60,6 +60,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations.typed_register import (
     HandlerRefError,
     derive_handler_ref,
+    register_composite_operation,
     register_typed_operation,
 )
 from meho_backplane.settings import get_settings
@@ -203,6 +204,7 @@ async def test_register_first_call_inserts_descriptor_with_every_field(
         parameter_schema={"type": "object", "properties": {"path": {"type": "string"}}},
         response_schema={"type": "object"},
         group_key="kv",
+        when_to_use="KV v2 read/write -- fetch and persist secrets at /secret/data/<path>.",
         tags=["read-only", "secrets"],
         safety_level="safe",
         requires_approval=False,
@@ -275,6 +277,7 @@ async def test_register_first_call_without_group_leaves_group_id_null(
         summary="Vault health probe.",
         description="Hit Vault's /sys/health endpoint.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -311,6 +314,7 @@ async def test_register_same_args_twice_skips_reembed(
         "description": "Read a secret from Vault's KV v2 mount.",
         "parameter_schema": {"type": "object"},
         "group_key": "kv",
+        "when_to_use": "KV v2 read/write group.",
         "tags": ["read-only"],
         "embedding_service": stub_embedding_service,
     }
@@ -361,6 +365,7 @@ async def test_register_changed_embedding_text_triggers_reembed(
         "summary": "Read a KV v2 secret.",
         "description": "Read a secret from Vault's KV v2 mount.",
         "parameter_schema": {"type": "object"},
+        "when_to_use": None,
         "tags": ["read-only"],
         "embedding_service": stub_embedding_service,
     }
@@ -407,6 +412,7 @@ async def test_register_changed_non_embedding_field_skips_reembed(
         "summary": "Read a KV v2 secret.",
         "description": "Read a secret from Vault's KV v2 mount.",
         "parameter_schema": {"type": "object"},
+        "when_to_use": None,
         "tags": ["read-only"],
         "embedding_service": stub_embedding_service,
     }
@@ -467,6 +473,7 @@ async def test_register_reuses_existing_operation_group(
         description="Read.",
         parameter_schema={"type": "object"},
         group_key="kv",
+        when_to_use="KV v2 read/write group.",
         embedding_service=stub_embedding_service,
     )
 
@@ -510,6 +517,7 @@ async def test_register_creates_operation_group_when_absent(
         description="List every pod in a namespace.",
         parameter_schema={"type": "object"},
         group_key="workloads",
+        when_to_use="Pod/Deployment workload inventory + per-namespace drill-in.",
         embedding_service=stub_embedding_service,
     )
 
@@ -548,6 +556,7 @@ async def test_register_rejects_invalid_op_id(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -567,6 +576,7 @@ async def test_register_rejects_invalid_safety_level(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             safety_level="extremely-dangerous",  # type: ignore[arg-type]
             embedding_service=stub_embedding_service,
         )
@@ -595,6 +605,7 @@ async def test_register_rejects_closure_handler(
             summary="x",
             description="x",
             parameter_schema={"type": "object"},
+            when_to_use=None,
             embedding_service=stub_embedding_service,
         )
 
@@ -623,6 +634,7 @@ async def test_register_caller_session_does_not_commit(
         summary="x",
         description="x",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         session=session,
         embedding_service=stub_embedding_service,
     )
@@ -658,6 +670,7 @@ async def test_register_caller_session_rollback_discards_insert(
         summary="x",
         description="x",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         session=session,
         embedding_service=stub_embedding_service,
     )
@@ -692,6 +705,7 @@ async def test_register_bound_method_handler_ref(
         summary="x",
         description="x",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -704,3 +718,194 @@ async def test_register_bound_method_handler_ref(
     assert row.handler_ref == (
         "tests.test_operations_typed_register.SampleHandlerClass.bound_method_handler"
     )
+
+
+# ---------------------------------------------------------------------------
+# ``when_to_use`` signature contract (G0.9-T4a #731)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_typed_operation_omitted_when_to_use_raises_typeerror(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Omitting ``when_to_use`` entirely is a signature-level :class:`TypeError`.
+
+    The structural fix from Signal #5 (#731): the public
+    :func:`register_typed_operation` API exposes ``when_to_use`` as a
+    required keyword (no default). The interpreter raises before any
+    of the helper's own validation runs, so the failure mode is the
+    Python-boundary signature error rather than a runtime-validation
+    surprise downstream. The auto-derive default
+    (``"Operations grouped under '<key>' for <product> <impl>."``)
+    that used to silently fill the gap is gone -- and this test is
+    the regression guard.
+    """
+    with pytest.raises(TypeError, match="when_to_use"):
+        # Type-checker correctly flags the missing kwarg; the runtime
+        # ``TypeError`` is what we're asserting on, so the ignore is
+        # local to this single line.
+        await register_typed_operation(  # type: ignore[call-arg]
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id="vault.kv.read",
+            handler=sample_module_level_handler,
+            summary="x",
+            description="x",
+            parameter_schema={"type": "object"},
+            embedding_service=stub_embedding_service,
+        )
+
+
+@pytest.mark.asyncio
+async def test_register_composite_operation_omitted_when_to_use_raises_typeerror(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Symmetric guard on :func:`register_composite_operation`.
+
+    The composite helper shares the no-default ``when_to_use``
+    contract -- a missing kwarg surfaces as :class:`TypeError` from
+    the Python interpreter before any of the helper body runs.
+    """
+    from tests.fixtures.composites.handlers import composite_module_level_handler
+
+    with pytest.raises(TypeError, match="when_to_use"):
+        await register_composite_operation(  # type: ignore[call-arg]
+            product="vmware",
+            version="9.0",
+            impl_id="vmware-rest",
+            op_id="vmware.composite.x",
+            handler=composite_module_level_handler,
+            summary="x",
+            description="x",
+            parameter_schema={"type": "object"},
+            embedding_service=stub_embedding_service,
+        )
+
+
+@pytest.mark.asyncio
+async def test_register_with_group_key_but_empty_when_to_use_raises_valueerror(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``group_key`` set + ``when_to_use`` empty / whitespace -> :class:`ValueError`.
+
+    The pairing-contract complement to the signature-level guard:
+    an empty placeholder still defeats the purpose of removing the
+    auto-derive default (the operator-facing
+    ``list_operation_groups`` would show a blank blurb). Reject
+    empty / whitespace at the boundary so the failure surfaces at
+    registration time, not when the operator first asks the meta-
+    tool about the group.
+    """
+    for bad in ["", "   ", "\t\n"]:
+        with pytest.raises(ValueError, match="when_to_use"):
+            await register_typed_operation(
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id="vault.kv.read",
+                handler=sample_module_level_handler,
+                summary="x",
+                description="x",
+                parameter_schema={"type": "object"},
+                group_key="kv",
+                when_to_use=bad,
+                embedding_service=stub_embedding_service,
+            )
+
+
+@pytest.mark.asyncio
+async def test_register_with_group_key_but_none_when_to_use_raises_valueerror(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``group_key`` set + ``when_to_use=None`` -> :class:`ValueError`.
+
+    The boundary contract: passing the kwarg as ``None`` while a
+    group is being created is a programmer error (the
+    :class:`OperationGroup` row's ``when_to_use`` column is NOT
+    NULL); reject it explicitly rather than letting it propagate to
+    a downstream :class:`IntegrityError`.
+    """
+    with pytest.raises(ValueError, match="when_to_use"):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id="vault.kv.read",
+            handler=sample_module_level_handler,
+            summary="x",
+            description="x",
+            parameter_schema={"type": "object"},
+            group_key="kv",
+            when_to_use=None,
+            embedding_service=stub_embedding_service,
+        )
+
+
+@pytest.mark.asyncio
+async def test_register_without_group_key_but_with_when_to_use_raises_valueerror(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """``group_key=None`` + ``when_to_use`` set -> :class:`ValueError`.
+
+    Symmetric inverse of the previous test: an ungrouped op has no
+    :class:`OperationGroup` row to attach the blurb to, so accepting
+    a curated string would silently drop it on the floor. Reject at
+    the boundary instead.
+    """
+    with pytest.raises(ValueError, match="when_to_use"):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id="vault.health",
+            handler=sample_module_level_handler,
+            summary="x",
+            description="x",
+            parameter_schema={"type": "object"},
+            group_key=None,
+            when_to_use="A blurb that has no home.",
+            embedding_service=stub_embedding_service,
+        )
+
+
+@pytest.mark.asyncio
+async def test_register_persists_caller_supplied_when_to_use_on_group_creation(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The caller-supplied blurb lands on the newly-created group row verbatim.
+
+    The previous auto-derive default
+    (``"Operations grouped under '<key>' for <product> <impl>."``)
+    is gone -- the persisted column carries exactly the string the
+    caller passed. Regression guard for the structural fix from
+    Signal #5 (#731): even on a fresh group-create, no string starts
+    with the legacy template literal.
+    """
+    blurb = (
+        "Read/write KV v2 secrets at /secret/data/<path>; pair with the "
+        "'sys' group for mount inspection before reading."
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=sample_module_level_handler,
+        summary="x",
+        description="x",
+        parameter_schema={"type": "object"},
+        group_key="kv",
+        when_to_use=blurb,
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        group = (
+            await fresh.execute(select(OperationGroup).where(OperationGroup.group_key == "kv"))
+        ).scalar_one()
+    assert group.when_to_use == blurb
+    # The legacy auto-derive template literal must not appear.
+    assert "Operations grouped under" not in group.when_to_use

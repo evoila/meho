@@ -360,6 +360,7 @@ async def test_dispatch_returns_invalid_params_when_schema_violated(
             "required": ["path"],
             "additionalProperties": False,
         },
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -431,6 +432,7 @@ async def test_dispatch_typed_invokes_handler_and_returns_result(
         summary="Read a KV v2 secret.",
         description="Read a secret.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -504,6 +506,7 @@ async def test_dispatch_typed_handler_without_operator_param(
         summary="Ping.",
         description="Ping.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -747,6 +750,7 @@ async def test_dispatch_composite_receives_dispatch_and_emits_child_row(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     # Composite descriptor: inserted directly because T4's register
@@ -857,6 +861,7 @@ async def test_dispatch_invokes_reducer_pass_through_by_default(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
     operator = _make_operator()
@@ -910,6 +915,7 @@ async def test_dispatch_uses_swapped_reducer(
         summary="List secrets.",
         description="List secrets.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -1020,6 +1026,7 @@ async def test_dispatch_returns_connector_error_when_handler_raises(
         summary="Boom.",
         description="Always raises.",
         parameter_schema={"type": "object"},
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 
@@ -1080,6 +1087,7 @@ async def test_dispatch_denies_when_requires_approval_set(
         description="Requires approval.",
         parameter_schema={"type": "object"},
         requires_approval=True,
+        when_to_use=None,
         embedding_service=stub_embedding_service,
     )
 

@@ -426,6 +426,10 @@ async def vault_sys_auth_list(target: Any, params: dict[str, Any]) -> dict[str, 
         return {"auth_methods": auth_methods}
 
 
+# Pre-existing G3.3 vault sys-read registrar; G0.9-T4a #731 adds the
+# ``when_to_use`` kwarg to the four existing ``register_typed_operation``
+# calls. Each call is already a self-contained block; splitting them into
+# a per-op helper buys nothing. code-quality-allow: per-op block layout
 async def register_vault_sys_typed_operations(
     *,
     embedding_service: EmbeddingService | None = None,
@@ -461,6 +465,9 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_HEALTH_RESPONSE_SCHEMA,
         group_key="sys",
+        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
+        # blurb for the ``sys`` group.
+        when_to_use="TODO: curate (T4b #732)",
         tags=["read-only", "diagnostics", "health"],
         safety_level="safe",
         requires_approval=False,
@@ -484,6 +491,9 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_SEAL_STATUS_RESPONSE_SCHEMA,
         group_key="sys",
+        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
+        # blurb for the ``sys`` group.
+        when_to_use="TODO: curate (T4b #732)",
         tags=["read-only", "diagnostics", "seal"],
         safety_level="safe",
         requires_approval=False,
@@ -506,6 +516,9 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_MOUNTS_LIST_RESPONSE_SCHEMA,
         group_key="sys",
+        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
+        # blurb for the ``sys`` group.
+        when_to_use="TODO: curate (T4b #732)",
         tags=["read-only", "diagnostics", "mounts"],
         safety_level="safe",
         requires_approval=False,
@@ -528,6 +541,9 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_AUTH_LIST_RESPONSE_SCHEMA,
         group_key="sys",
+        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
+        # blurb for the ``sys`` group.
+        when_to_use="TODO: curate (T4b #732)",
         tags=["read-only", "diagnostics", "auth-methods"],
         safety_level="safe",
         requires_approval=False,

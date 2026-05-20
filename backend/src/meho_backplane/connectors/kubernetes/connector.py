@@ -804,6 +804,13 @@ class KubernetesConnector(Connector):
                 parameter_schema=op.parameter_schema,
                 response_schema=op.response_schema,
                 group_key=op.group_key,
+                # G0.9-T4a #731 placeholder paired with ``group_key``;
+                # T4b #732 replaces with a curated blurb per group
+                # (``cluster`` / ``core`` / ``workloads`` / ``network`` /
+                # ``config`` / ``events`` / ``logs``). When the op has
+                # no ``group_key`` (``None``), pass ``None`` so the
+                # pairing validator stays happy.
+                when_to_use=("TODO: curate (T4b #732)" if op.group_key is not None else None),
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,

@@ -11,9 +11,11 @@ Coverage matrix (per Task #587 acceptance criteria):
   registry under that triple (and does **not** dual-write to v1).
 * :meth:`Bind9Connector._remote_bash_with_sudo` is the only sudo
   shell-construction path in the connector layer; the constructed
-  remote argv is the fixed ``"sudo -S -p '' bash -s"`` string and
-  the sudo password is streamed via ``input=``, never appearing in
-  the argv, the bound log fields, or any other observable.
+  remote argv is the shape rendered by
+  :func:`_build_sudo_bash_remote_cmd` — boilerplate parameterised
+  only by the script's UTF-8 byte count (an integer) — and the sudo
+  password is streamed via ``input=``, never appearing in the argv,
+  the bound log fields, or any other observable.
 * :func:`parse_named_version` recovers the ``<X.Y.Z>`` triple from
   the ``named -v`` banner shapes ISC ships on Debian + RHEL.
 * :meth:`Bind9Connector.fingerprint` returns the canonical
@@ -44,7 +46,7 @@ import meho_backplane.connectors.bind9  # noqa: F401 -- import for registry side
 from meho_backplane.connectors import all_connectors_v2
 from meho_backplane.connectors.bind9 import BIND9_OPS, Bind9Connector
 from meho_backplane.connectors.bind9.connector import (
-    _SUDO_BASH_REMOTE_CMD,
+    _build_sudo_bash_remote_cmd,
     parse_named_version,
     parse_os_release,
 )
@@ -261,38 +263,47 @@ def _mock_ssh_conn() -> MagicMock:
     return conn
 
 
-async def test_remote_bash_with_sudo_uses_fixed_argv_and_streams_password_via_stdin(
+async def test_remote_bash_with_sudo_argv_carries_only_script_byte_count_and_streams_password_via_stdin(
     _mock_ssh_conn: MagicMock,
 ) -> None:
-    """The constructed argv is the constant string; the password is on stdin."""
+    """argv is boilerplate + script byte count; password is on stdin, never argv."""
     connector = Bind9Connector()
+    script = "echo body-of-script"
     with patch.object(connector, "_connect", AsyncMock(return_value=_mock_ssh_conn)):
         result = await connector._remote_bash_with_sudo(
             _TARGET,
-            "echo body-of-script",
+            script,
             raw_jwt="jwt",
             sudo_password="super-secret-password",  # NOSONAR
         )
     assert result.exit_status == 0
 
-    # ``conn.run`` was called with the fixed argv string -- no
-    # caller-supplied substring lives in the remote command.
+    # ``conn.run`` was called with the rendered cmd — the only caller-
+    # derived interpolation is ``len(script.encode("utf-8"))``, an
+    # integer; ``script`` and ``sudo_password`` are not interpolated.
     args, kwargs = _mock_ssh_conn.run.call_args
-    assert args[0] == _SUDO_BASH_REMOTE_CMD
-    assert args[0] == "sudo -S -p '' bash -s"
+    expected_cmd = _build_sudo_bash_remote_cmd(len(script.encode("utf-8")))
+    assert args[0] == expected_cmd
+    # Spot-check the safety-critical fragments of the rendered shape.
+    assert args[0].startswith("set -e; umask 077; f=$(mktemp); ")
+    assert f"head -c {len(script.encode('utf-8'))} > " in args[0]
+    assert args[0].endswith('sudo -S -p "" bash "$f"')
 
     # The password must not appear anywhere in the constructed argv.
     assert "super-secret-password" not in args[0]
     # The script body must not appear in the argv either.
     assert "echo body-of-script" not in args[0]
 
-    # The stdin payload streams the password as line 1 and the script
-    # as line 2. The fixed-line-position contract is what makes the
-    # caller unable to mis-order the payload.
+    # The stdin payload — script bytes first (so ``head -c N`` reads
+    # exactly the script, unbuffered), then the password line. EOF
+    # immediately after the password's newline so sudo's stdio buffer
+    # has nothing past the password line to swallow (#697 fix).
     stdin_payload = kwargs["input"]
-    lines = stdin_payload.split("\n")
-    assert lines[0] == "super-secret-password"  # password is line 1
-    assert lines[1] == "echo body-of-script"  # script body is line 2
+    assert stdin_payload == "echo body-of-scriptsuper-secret-password\n"
+    # Reassert by region: first N bytes == script, remainder == password\n.
+    n = len(script.encode("utf-8"))
+    assert stdin_payload[:n] == script
+    assert stdin_payload[n:] == "super-secret-password\n"
 
     # ``check=False`` -- the helper never raises ProcessError on
     # non-zero exit; callers decide.

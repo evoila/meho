@@ -62,6 +62,11 @@ The service-layer exceptions map to HTTP status codes uniformly:
 
 * :class:`ConnectorNotFoundError` → 404.
 * :class:`InvalidStateTransitionError` → 409 Conflict.
+* :class:`UncoveredVersionLabel` (G0.9-T9 #741 ingest pre-flight:
+  the ``version`` label is outside every registered class's
+  ``supported_version_range``) → 422 Unprocessable Entity. Caught
+  before the generic ValueError-family below so the more-specific
+  status code wins.
 * :class:`InvalidSpecError` / :class:`UnsupportedSpecError` /
   :class:`InvalidSchemaError` / :class:`OpIdCollision` /
   :class:`LlmOutputInvalid` → 400 Bad Request (with the structured
@@ -133,6 +138,7 @@ from meho_backplane.operations.ingest import (
     LlmOutputInvalid,
     OpIdCollision,
     ReviewService,
+    UncoveredVersionLabel,
     UnsupportedSpecError,
     VersionMismatchError,
     default_llm_client_factory,
@@ -286,13 +292,26 @@ async def _run_ingest_with_http_mapping(
             detail=str(exc),
         ) from exc
     except VersionMismatchError as exc:
-        # 422 (not 400) because the request was syntactically valid
-        # but semantically refuses the spec-vs-label cross-check.
-        # The structured detail names both versions so the operator's
-        # error message tells them exactly what to fix.
+        # G0.9-T8 (#740). 422 (not 400) because the request was
+        # syntactically valid but semantically refuses the spec-vs-label
+        # cross-check. The structured detail names both versions so the
+        # operator's error message tells them exactly what to fix.
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=_version_mismatch_detail(exc),
+        ) from exc
+    except UncoveredVersionLabel as exc:
+        # G0.9-T9 (#741). The request body parsed fine (Pydantic
+        # accepted shape + length bounds), but the operator's
+        # ``version`` label is semantically outside every registered
+        # connector class's ``supported_version_range`` for the
+        # ``(product, impl_id)`` pair — orphan-at-ingest. 422
+        # Unprocessable Entity is the right code: structurally valid,
+        # semantically rejected. Listed BEFORE the generic ValueError-
+        # family catch below so the more-specific exception wins.
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
         ) from exc
     except (
         InvalidSpecError,

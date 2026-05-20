@@ -85,6 +85,9 @@ from meho_backplane.operations.ingest.api_schemas import (
     IngestionResultModel,
     SpecSource,
 )
+from meho_backplane.operations.ingest.connector_registration import (
+    check_version_covered_by_registered_class,
+)
 from meho_backplane.operations.ingest.exceptions import VersionMismatchError
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
@@ -538,6 +541,18 @@ class IngestionPipelineService:
 
         if dry_run:
             log.info("ingestion_pipeline_dry_run_start")
+            # G0.9-T9 (#741) — pre-flight runs in dry-run too so the
+            # operator validating a spec sees the same 422 they would
+            # see on the real path; the check is cheap (one v2-registry
+            # snapshot walk) and parallels the dispatcher's resolver
+            # contract. ``register_ingested_operations`` (the real-path
+            # caller) re-invokes the same helper before the auto-shim
+            # is synthesised; the duplicate call is idempotent.
+            check_version_covered_by_registered_class(
+                product=product,
+                version=version,
+                impl_id=impl_id,
+            )
             return await self._run_dry_run(
                 product=product,
                 version=version,

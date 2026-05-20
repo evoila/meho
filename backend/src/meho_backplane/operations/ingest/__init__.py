@@ -30,6 +30,7 @@ from meho_backplane.operations.ingest.api_schemas import (
 )
 from meho_backplane.operations.ingest.connector_registration import (
     GenericRestConnector,
+    check_version_covered_by_registered_class,
     ensure_connector_class_registered,
 )
 from meho_backplane.operations.ingest.exceptions import (
@@ -39,6 +40,7 @@ from meho_backplane.operations.ingest.exceptions import (
     InvalidStateTransitionError,
     LlmOutputInvalid,
     OpIdCollision,
+    UncoveredVersionLabel,
     UnsupportedSpecError,
     VersionMismatchError,
 )
@@ -113,8 +115,10 @@ __all__ = [
     "ReviewService",
     "SafetyLevel",
     "SpecSource",
+    "UncoveredVersionLabel",
     "UnsupportedSpecError",
     "VersionMismatchError",
+    "check_version_covered_by_registered_class",
     "default_llm_client_factory",
     "detect_spec_format",
     "ensure_connector_class_registered",

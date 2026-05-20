@@ -3,10 +3,13 @@
 
 # actionlint configuration.
 # Declares custom self-hosted runner labels used by this repo so actionlint
-# stops emitting unknown-label warnings on `runs-on: [self-hosted, meho-runners]`
-# (and the bare `runs-on: meho-runners` in runner-smoke.yml).
+# stops emitting unknown-label warnings on the bare `runs-on: meho-runners-ci`
+# (and the legacy `meho-runners` form during the migration window — see
+# #715 cutover and claude-rdc-hetzner-dc#611 retirement of the rke2-meho
+# pool). Drop `meho-runners` here when #611 retires that pool.
 #
 # Reference: https://github.com/rhysd/actionlint/blob/main/docs/config.md
 self-hosted-runner:
   labels:
     - meho-runners
+    - meho-runners-ci

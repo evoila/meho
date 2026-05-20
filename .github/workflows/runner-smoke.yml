@@ -1,20 +1,19 @@
 name: meho-runners smoke
-# Verifies BOTH the meho-runners self-hosted runner pools can:
+# Verifies the meho-runners-ci self-hosted runner pool can:
 #   1. Pick up + run a job (original scope, claude-rdc-hetzner-dc#262 +
-#      claude-rdc-hetzner-dc#610 for the rke2-ci-side meho-runners-ci pool).
+#      claude-rdc-hetzner-dc#610 for the rke2-ci-side pool).
 #   2. Pull Docker Hub images through the Harbor pull-through cache at
 #      harbor.evba.lab/dockerhub-proxy via the explicit project-prefixed
 #      URL form (the Harbor-supported pull pattern — see
 #      evoila-bosnia/meho-internal#75 + MEHO.HelmCharts#20 for the
 #      "transparent-mirror doesn't work with Harbor" finding).
 #
-# Runs on every push to main + workflow_dispatch. Matrix over both pools:
-#   - meho-runners        (rke2-meho cluster; chart gha-runner-scale-set@0.9.3)
-#   - meho-runners-ci     (rke2-ci  cluster; chart gha-runner-scale-set@0.14.1)
-# Both pools coexist during the migration window (claude-rdc-hetzner-dc#604
-# Initiative / ADR 0001). The rke2-meho-side `meho-runners` pool retires
-# in claude-rdc-hetzner-dc#611 after 5+ green PRs on the rke2-ci pool —
-# at which point this matrix collapses back to a single pool.
+# Runs on every push to main + workflow_dispatch on the
+# meho-runners-ci pool (rke2-ci cluster; chart
+# gha-runner-scale-set@0.14.1). The matrix-over-both-pools shape from
+# #714 collapsed to single-pool when #715 cut the real CI workflows
+# over to meho-runners-ci; the rke2-meho-side `meho-runners` pool
+# retires in claude-rdc-hetzner-dc#611.
 #
 # After a week of green runs, the cleanup follow-up on the meho-internal#67
 # Initiative rewrites the workflows that currently pull `library/<image>`
@@ -35,19 +34,11 @@ env:
 
 jobs:
   smoke:
-    name: smoke (${{ matrix.pool }})
-    strategy:
-      fail-fast: false
-      matrix:
-        pool:
-          - meho-runners      # rke2-meho; retired in claude-rdc-hetzner-dc#611
-          - meho-runners-ci   # rke2-ci; added in claude-rdc-hetzner-dc#610
-    runs-on: ${{ matrix.pool }}
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Identify the runner
         run: |
-          echo "pool: ${{ matrix.pool }}"
           echo "host: $(hostname)"
           echo "uname: $(uname -a)"
           echo "os:"
@@ -109,7 +100,7 @@ jobs:
             # only as defence-in-depth: if it is reached, the runner-side
             # CA wiring regressed (chart drift) — the pull step below still
             # exercises dockerd's TLS path as a last-resort signal.
-            echo "Note: runner-side CA bundle check did not match; relying on the pull step below for TLS validation (investigate ${{ matrix.pool }}'s runner-container CA mount — meho-internal#80)."
+            echo "Note: runner-side CA bundle check did not match; relying on the pull step below for TLS validation (investigate meho-runners-ci's runner-container CA mount — meho-internal#80)."
           fi
           echo "✓ Bundle check complete."
 

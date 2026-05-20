@@ -226,7 +226,7 @@ posture `edit_group` takes for `when_to_use`).
   `docs/cross-repo/g35-nsx-canary.md`). The env-gated canary
   acceptance test that automates the live two-spec ingest in CI is a
   follow-up — it requires the NSX spec-shelf wired to the
-  meho-runners pool (same env-gated pattern
+  meho-runners-ci pool (same env-gated pattern
   `tests/acceptance/_vcenter_spec.py` codifies for vSphere). Until
   then, the dispatch leg is exercised against `NSX_CORE_OPS`-seeded
   descriptors in `tests/acceptance/_nsx_canary_fixtures.py`.
@@ -260,7 +260,7 @@ posture `edit_group` takes for `when_to_use`).
     + `scripts/nsx.sh` → `meho nsx` per-ticket wrapper-flip recipe.
 - Integration test: `backend/tests/test_connectors_nsx_e2e.py` —
   combined E2E covering all 9 ops, session-establish, 401-retry,
-  audit rows, and JSONFlux handle path; runs in the `meho-runners` CI
+  audit rows, and JSONFlux handle path; runs in the `meho-runners-ci` CI
   lane with no Docker dependency.
 - Acceptance tests:
   - `backend/tests/acceptance/test_g35_nsx_dispatch_smoke.py` —

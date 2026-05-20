@@ -38,7 +38,7 @@ concurrency:
 jobs:
   check:
     name: Backward-compat migration guard
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 5
     steps:
       - name: Checkout

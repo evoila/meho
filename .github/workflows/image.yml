@@ -114,7 +114,7 @@ jobs:
     # The OR short-circuits on push events, so the missing pull_request context
     # on push is irrelevant. Job-level (not step-level) so no step ever starts.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 45  # arm64 emulation under QEMU is 3-5x slower than native
     env:
       # Surfaced at the job level so the `Notify claude-rdc-hetzner-dc` step

@@ -11,7 +11,7 @@
 #   go-lint-test      : golangci-lint + go build + go test on cli/
 #   helm-lint-template: helm lint + helm template + kubeconform on deploy/charts/meho/
 #
-# Each job runs on its own meho-runners runner in parallel; total wall
+# Each job runs on its own meho-runners-ci runner in parallel; total wall
 # clock for a green PR is well below the 10-minute Goal #11 budget
 # because the three jobs never block each other. Per-job
 # `timeout-minutes` caps a runaway gate at twice its observed cost.
@@ -82,12 +82,12 @@ jobs:
     name: Python (ruff + mypy + pytest)
     # Fork-PR guard: never execute project code from a fork on the
     # self-hosted runner pool. Mirrors image.yml + chart.yml's stance —
-    # `runs-on: meho-runners` is internal infra, so fork PRs skip
+    # `runs-on: meho-runners-ci` is internal infra, so fork PRs skip
     # entirely. Push events (main) short-circuit the OR via
     # github.event_name != 'pull_request'. Job-level (not step-level)
     # so no step ever starts on a fork PR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     # 50-min cap: this job is the deterministic required gate — ruff
     # + ruff-format + mypy + the unit pytest sweep with
     # tests/integration/ EXCLUDED (--ignore=tests/integration). The
@@ -291,7 +291,7 @@ jobs:
     # integration sweep. pytest-xdist loadgroup parallelization to
     # bring this well under cap is tracked in #564.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 60
     env:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
@@ -345,7 +345,7 @@ jobs:
     name: Go (golangci-lint + go test)
     # Fork-PR guard mirrors the Python job — same rationale.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -394,7 +394,7 @@ jobs:
       - name: Ensure C toolchain is available (for cgo race runtime)
         # `go test -race` links the cgo-based race runtime, which needs
         # a working C toolchain — both `gcc` (or any cc) AND libc
-        # development headers (`<stdlib.h>` etc.). The `meho-runners`
+        # development headers (`<stdlib.h>` etc.). The `meho-runners-ci`
         # self-hosted pool ships a minimal image without either, so
         # the race test would fail with one of:
         #   - `cgo: C compiler "gcc" not found` (no gcc), or
@@ -414,7 +414,7 @@ jobs:
         # later `cgo:` error. `--no-install-recommends` keeps the
         # install fast and minimal: gcc + libc6-dev only, no
         # editors/manpages/etc. The proper long-term fix is to bake
-        # the C toolchain into the meho-runners base image; until
+        # the C toolchain into the meho-runners-ci base image; until
         # then this step keeps PR CI green without expanding the
         # workflow's blast radius.
         if: runner.os == 'Linux'
@@ -445,7 +445,7 @@ jobs:
         # CGO_ENABLED=1 is required: `go test -race` is implemented in
         # the cgo-based race runtime and refuses to run otherwise
         # (`go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`).
-        # The `meho-runners` self-hosted pool defaults to CGO_ENABLED=0,
+        # The `meho-runners-ci` self-hosted pool defaults to CGO_ENABLED=0,
         # so the flag must be set explicitly here. The preceding step
         # ensures `gcc` is on PATH so the race runtime can actually
         # link. Scoped to this step only — the build/lint steps work
@@ -459,7 +459,7 @@ jobs:
     name: Helm (lint + template + kubeconform)
     # Fork-PR guard mirrors the other jobs.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -479,7 +479,7 @@ jobs:
         # JSON Schemas offline. Pin to v0.6.7 by SHA256 — same shape
         # chart.yml uses (devops_best_practices: no `curl|sh` of
         # unpinned binaries). Install to $HOME/.local/bin because the
-        # self-hosted meho-runners pool runs as a non-root user that
+        # self-hosted meho-runners-ci pool runs as a non-root user that
         # cannot write to /usr/local/bin (regression caught in PR #173
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install

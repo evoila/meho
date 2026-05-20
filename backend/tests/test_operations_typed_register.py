@@ -695,9 +695,7 @@ async def test_register_accepts_module_level_handler_via_import_round_trip(
                 select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.kv.read")
             )
         ).scalar_one()
-        assert (
-            row.handler_ref == "tests.test_operations_typed_register.sample_module_level_handler"
-        )
+        assert row.handler_ref == "tests.test_operations_typed_register.sample_module_level_handler"
 
 
 @pytest.mark.asyncio

@@ -366,6 +366,23 @@ async def handle_tools_call(
         # rendered ``redact_payload`` shape; the audit row needs the
         # raw enum for ``meho audit query`` filtering.
         audit_payload["broadcast_detail_effective"] = broadcast_detail
+        # #704 strip-and-merge, applied to MCP path. Per-tool handlers
+        # bind ``audit_*`` contextvars (e.g. ``audit_override_op`` from
+        # G6.3-T5's broadcast-overrides verbs); the chassis HTTP route
+        # path merges them via :func:`audit._resolve_audit_payload` and
+        # the typed-op dispatcher path via
+        # :func:`operations._audit._build_audit_payload`. MCP was the
+        # third audit-write path missing the merge — the test
+        # ``test_set_via_mcp_writes_audit_row_with_override_diff``
+        # expects ``override_op``/``override_id``/``override_pattern``/
+        # ``override_detail`` to land on the row's payload.
+        _audit_prefix = "audit_"
+        for _k, _v in structlog.contextvars.get_contextvars().items():
+            if not _k.startswith(_audit_prefix) or _v is None:
+                continue
+            _stripped = _k[len(_audit_prefix) :]
+            if _stripped:
+                audit_payload.setdefault(_stripped, _v)
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,

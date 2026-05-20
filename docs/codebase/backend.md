@@ -291,6 +291,29 @@ this stage it exposes:
   deliberately outside the narrow-waist agent surface per
   CLAUDE.md postulate 5; pattern matches the existing
   `connector_admin.py` admin-namespace precedent.
+* Broadcast-override E2E acceptance + resolver load test
+  (G6.3-T6 #383) — the meta-task closing Initiative #376. Two
+  test modules under `backend/tests/integration/`:
+  `test_broadcast_overrides_e2e.py` drives the production
+  `main:app` middleware stack against a real Postgres + a real
+  Valkey 8 testcontainer, covering all seven Initiative-DoD
+  scenarios (per-call header opt-in upgrading `audit_query` to
+  full; tenant-rule downgrading a read op to aggregate;
+  scoped-rule scope-miss falling through to default; DELETE
+  invalidating the resolver cache end-to-end; origin tagging
+  recording all three `broadcast_detail_origin` branches; RBAC
+  blocking non-admin on REST + MCP; tenant A's rule not affecting
+  tenant B). `test_broadcast_overrides_load.py` is the
+  `@pytest.mark.load` resolver microbenchmark — seeds 100 rules
+  under one tenant, warms the per-tenant cache, times 10 000
+  `compute_effective_broadcast_detail` calls and asserts p99 <
+  1 ms per the Initiative's DoD. The `load` marker is registered
+  in `pyproject.toml` and the default `addopts = ["-m", "not load"]`
+  excludes the harness from the always-on lane; `pytest -m load`
+  (with `MEHO_RUN_LOAD_TESTS=1`) runs it. Operator + admin recipe
+  ships as `docs/cross-repo/broadcast-overrides.md`; the same
+  doc carries the `mcp-inspector --cli` one-liner for verifying
+  the three admin tools end-to-end against a running backplane.
 * Operation dispatch (G0.6-T8 #399) —
   `src/meho_backplane/api/v1/operations.py` exposes
   `POST /api/v1/operations/call` plus the discovery routes

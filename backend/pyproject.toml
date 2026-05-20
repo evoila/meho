@@ -229,14 +229,26 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Default-exclude the ``load`` marker so the always-on lane never
+# spends the resolver-microbenchmark wall-clock budget. CLI ``-m
+# load`` overrides this -- pytest's argparse takes the last ``-m``
+# wins. The load suite also self-skips when ``MEHO_RUN_LOAD_TESTS``
+# is unset, so a bare ``pytest -m load`` reports the gating contract
+# instead of running the timing loop.
+addopts = ["-m", "not load"]
 # Custom markers — registered so ``pytest --strict-markers`` (when CI
 # flips it on) does not warn. Currently:
 # * ``slow`` — opt-in only via ``MEHO_RUN_SLOW_TESTS=1``. Used by
 #   tests that load the real fastembed ONNX model (~120 MB weight
 #   download on cold cache; ~1–2 s load on warm cache). CI's slow
 #   lane sets the env var; the always-on lane skips.
+# * ``load`` — opt-in only via ``MEHO_RUN_LOAD_TESTS=1`` AND
+#   ``pytest -m load`` (default ``addopts`` excludes the marker).
+#   Used by G6.3-T6's resolver-cache microbenchmark (#383); a
+#   10 000-call timing loop pins the publish-path p99 below 1 ms.
 markers = [
     "slow: opt-in network/IO-heavy tests; gate via MEHO_RUN_SLOW_TESTS=1.",
+    "load: opt-in resolver/cache microbenchmarks; gate via MEHO_RUN_LOAD_TESTS=1.",
 ]
 # Note: ``authlib.deprecate`` calls ``warnings.simplefilter("always",
 # AuthlibDeprecationWarning)`` at import time, so the

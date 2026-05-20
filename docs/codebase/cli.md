@@ -54,13 +54,14 @@ names.
   `user-tenant` / `user-target` / `tenant` / `target`. The two
   target-scoped values require `--target NAME`; the CLI rejects a
   missing `--target` client-side before the round-trip.
-- `meho migrate ...` (G5.3-T1 #608) — laptop-local memory migration
-  surface. T1 ships the `migrate` parent + `memory` subcommand skeleton
-  (flags wired, RunE stub). Flow logic (scanner, huh interactive picker,
-  dry-run preview, backplane submit, mark-migrated) lands in T2–T5 of
-  Initiative #375 (#609–#612). The `charm.land/huh/v2` interactive-form
-  library (MIT) is declared as a direct dependency in T1 and used by
-  T2–T5 for the interactive migration UX.
+- `meho migrate ...` (G5.3 #608–#611) — laptop-local memory migration
+  surface. T1 (#608) ships the `migrate` parent + `memory` subcommand
+  skeleton. T2 (#609) adds the frontmatter scanner + scope-suggestion
+  table. T3 (#610) adds the machine-local detector. T4 (#611) wires the
+  interactive `huh` picker, `--dry-run` (JSON envelopes), and
+  `--non-interactive` (user/feedback only) paths. Submission (POST
+  `/api/v1/memory`), post-login nudge, and marker file land in T5
+  (#612). Depends on `charm.land/huh/v2` (MIT).
 
 ## Module layout
 
@@ -159,9 +160,10 @@ cli/
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
-    │   ├── migrate/           # G5.3-T1 #608 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
-    │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2 (declares dep; used by T2–T5).
-    │   │   └── memory.go         # `meho migrate memory` skeleton — 5 flags wired, RunE stub.
+    │   ├── migrate/           # G5.3 #608–#611 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
+    │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2.
+    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; submitFn seam for T5 (#612).
+    │   │   └── memory_test.go    # --dry-run envelope + source_id, --non-interactive filter, machine-local skip, empty-dir guard.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
     │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
@@ -172,10 +174,17 @@ cli/
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
     │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
-    ├── migrate/               # G5.3 Initiative #375 — pure-logic helpers for the memory migration flow.
-    │   ├── doc.go                # package declaration + overview comment.
+    ├── migrate/               # G5.3 — pure-logic helpers for the memory migration flow (Initiative #375).
+    │   ├── doc.go                # package doc.
     │   ├── machinelocal.go       # DetectMachineLocal — heuristic detector for laptop-local content (#610).
-    │   └── machinelocal_test.go  # table-driven per-Category tests + truncation + seam coverage (#610).
+    │   ├── machinelocal_test.go  # table-driven per-Category tests + truncation + seam coverage (#610).
+    │   ├── marker.go             # TouchMarker / MarkerExists — migration-complete marker file (T5 stub in T4, #611; full impl #612).
+    │   ├── picker.go             # G5.3-T4 #611 — BuildForm (huh), SubmitPlan, FinalizeSkip, DefaultPlan, slugFromPath, scope/action option builders.
+    │   ├── picker_test.go        # slug, validateSlug, BuildForm structure, role-filtered scope options, FinalizeSkip, DefaultPlan.
+    │   ├── scan.go               # G5.3-T2 #609 — ResolveSourceDir + ScanDir + MemoryFile (frontmatter parser + BodySHA256 + MachineLocalOptOut).
+    │   ├── scan_test.go          # table-driven: well-formed/missing/malformed frontmatter, machine-local comment, BodySHA256 stability, ScanDir, ResolveSourceDir.
+    │   ├── suggest.go            # G5.3-T2 #609 — SuggestScope table + exported Scope* constants.
+    │   └── suggest_test.go       # full mapping table including tenantConfigured branch and unknown-type fallback.
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.

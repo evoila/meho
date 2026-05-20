@@ -35,7 +35,7 @@ func newDomainListCmd() *cobra.Command {
 		Short: "List VCF domains (management + workload)",
 		Long: "list dispatches GET:/v1/domains against connector_id=\"sddc-rest-9.0\".\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager domain list --target rdc-sddc-manager",
+		Example:       "  meho sddc-manager domain list --target rdc-sddc-manager",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -95,7 +95,7 @@ func newDomainInfoCmd() *cobra.Command {
 		Long: "info dispatches GET:/v1/domains/{id} against connector_id=\"sddc-rest-9.0\".\n" +
 			"Requires a domain id from `sddc-manager domain list`.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho sddc-manager domain info domain-mgmt --target rdc-sddc-manager",
+		Example:       "  meho sddc-manager domain info domain-mgmt --target rdc-sddc-manager",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -129,15 +129,15 @@ func printDomainInfo(w io.Writer, r *CallResult) {
 		return
 	}
 	var d struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Type string `json:"type"`
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Type     string `json:"type"`
 		VCenters []struct {
 			ID   string `json:"id"`
 			FQDN string `json:"fqdn"`
 		} `json:"vcenters"`
 		NsxtCluster *struct {
-			ID     string `json:"id"`
+			ID      string `json:"id"`
 			VipFQDN string `json:"vipFqdn"`
 		} `json:"nsxtCluster"`
 		Clusters []struct {

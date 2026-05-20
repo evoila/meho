@@ -6,9 +6,9 @@ The `sddc-manager` connector is the hand-rolled `HttpConnector` subclass that
 dispatches SDDC Manager REST operations under the
 `(product="sddc-manager", version="9.0", impl_id="sddc-rest")` registry triple.
 G3.5-T4 (#616) shipped the skeleton — HTTP Basic auth, fingerprint, probe, and
-the G0.6 dispatch shim. G3.5-T5 (#617) adds spec ingestion + operator-review
-curation + ~8 read-only core ops. CLI verbs + MCP review + recorded-fixture E2E
-arrive in G3.5-T6 (#618).
+the G0.6 dispatch shim. G3.5-T5 (#617) added spec ingestion + operator-review
+curation + 9 read-only core ops. G3.5-T6 (#618) shipped the CLI verb tree
+(`meho sddc-manager …`) + recorded-fixture E2E integration test.
 
 Source: `backend/src/meho_backplane/connectors/sddc_manager/`.
 
@@ -116,9 +116,9 @@ expired session.
 (nil-UUID tenant_id + `sub="system:sddc-rest-connector-shim"`) and delegates
 to `meho_backplane.operations.dispatch` with `connector_id="sddc-rest-9.0"`.
 Pre-G0.6 chassis routes reach the dispatcher through this shim; post-G0.6
-callers (the `/api/v1/operations/call` route, MCP `call_operation`, the CLI
-verbs once #618 lands) construct a real `Operator` and call `dispatch`
-themselves.
+callers (the `/api/v1/operations/call` route, MCP `call_operation`, and the
+`meho sddc-manager …` CLI verbs added in #618) construct a real `Operator` and
+call `dispatch` themselves.
 
 ### Shutdown
 
@@ -191,6 +191,60 @@ Lifecycle-write ops (`workflow start`, `domain create`, `cluster expand`,
 `host commission`) remain `staged` (never enabled) per Initiative #368 v0.2
 scope.
 
+## CLI verbs (`cli/internal/cmd/sddc-manager/`)
+
+The `meho sddc-manager` verb tree (added in #618) is a thin Cobra-over-HTTP
+layer that POSTs to `/api/v1/operations/call` with `connector_id="sddc-rest-9.0"`
+pre-baked. It is operator ergonomics, not a separate data path; the MCP
+surface is unchanged (CLAUDE.md postulate 5).
+
+Go package: `sddcmanager` (`cli/internal/cmd/sddc-manager/`).
+Root entry point: `sddcmanager.NewRootCmd()` (called from `cli/internal/cmd/root.go`).
+
+### Response envelope
+
+SDDC Manager paginates list responses under an `elements[]` key
+(`{"elements": [...], "pageMetadata": {...}}`). This differs from NSX's
+`{"results": [...]}` envelope. The `decodeElementsResult` helper in
+`sddc_manager.go` unwraps `elements[]` or falls back to a bare JSON array,
+so all list-verb printers share the same decode path.
+
+### Verb tree
+
+| File | Command | `op_id` dispatched |
+|---|---|---|
+| `about.go` | `meho sddc-manager about` | `GET:/v1/releases/system` |
+| `manager.go` | `meho sddc-manager manager list` | `GET:/v1/sddc-managers` |
+| `domain.go` | `meho sddc-manager domain list` | `GET:/v1/domains` |
+| `domain.go` | `meho sddc-manager domain info <id>` | `GET:/v1/domains/{id}` |
+| `cluster.go` | `meho sddc-manager cluster list [--domain <id>]` | `GET:/v1/clusters` |
+| `host.go` | `meho sddc-manager host list [--domain <id>] [--cluster <id>]` | `GET:/v1/hosts` |
+| `network_pool.go` | `meho sddc-manager network-pool list` | `GET:/v1/network-pools` |
+| `bundle.go` | `meho sddc-manager bundle list` | `GET:/v1/bundles` |
+| `workflow.go` | `meho sddc-manager workflow list [--status <state>]` | `GET:/v1/tasks` |
+| `operation.go` | `meho sddc-manager operation search <query>` | `GET /api/v1/operations/search` |
+| `operation.go` | `meho sddc-manager operation call <op_id>` | `POST /api/v1/operations/call` |
+
+All verbs share `--target`, `--json`, and `--backplane` flags. The
+`--backplane` flag defaults to the URL written by the most recent `meho login`.
+
+### `domain info` path parameter
+
+`GET:/v1/domains/{id}` requires `{"id": "<domain-id>"}` in the params map for
+the dispatcher's path substitution. The CLI verb passes this as
+`params = map[string]any{"id": domainID}` before calling `dispatchOp`.
+
+### Tests
+
+`cli/internal/cmd/sddc-manager/sddc_manager_test.go` covers:
+- `ConnectorID` constant pinned to `"sddc-rest-9.0"`.
+- All 9 top-level verbs assembled by `NewRootCmd`.
+- `decodeElementsResult` with `elements[]`-wrapped and bare-array payloads.
+- Wire-level dispatch: `connector_id` baked, empty target → null, domain info
+  sends id param, workflow list sends status filter, operation search sends
+  connector_id.
+- All verb printer renderers (table output, JSON path).
+
 ## Known issues
 
 - Default credentials loader raises `NotImplementedError`. Production callers
@@ -198,9 +252,6 @@ scope.
   lands the operator-context Vault read path. Mirrors the `vmware_rest` and
   `nsx` precedents; both connectors pick up the live implementation in a
   single follow-up commit once G0.3 merges.
-- Operations are not yet available. `execute(target, op_id, ...)` resolves to
-  "unknown operation" at the dispatcher layer until #617 lands the spec
-  ingestion + endpoint_descriptor rows.
 - HTTP Basic auth for VCF 9.x: the consumer wrapper (`scripts/sddc-manager.sh`)
   uses HTTP Basic with `username@sso_realm` format, and this connector mirrors
   that shape. Broadcom deprecated Basic Auth in VCF 4.x in favour of Bearer
@@ -212,9 +263,12 @@ scope.
 - Issues: [G3.5-T4 #616](https://github.com/evoila/meho/issues/616)
   (skeleton); [G3.5-T5 #617](https://github.com/evoila/meho/issues/617)
   (spec ingestion + read ops); [G3.5-T6 #618](https://github.com/evoila/meho/issues/618)
-  (CLI + MCP review + E2E + onboarding doc).
+  (CLI verbs + E2E + this doc update).
 - Parent Initiative: [G3.5 #368](https://github.com/evoila/meho/issues/368).
 - Parent Goal: [G3 #214](https://github.com/evoila/meho/issues/214).
+- Operator onboarding: [`docs/cross-repo/sddc-manager-onboarding.md`](../cross-repo/sddc-manager-onboarding.md) — wrapper-flip recipe.
+- CLI source: [`cli/internal/cmd/sddc-manager/`](../../cli/internal/cmd/sddc-manager/).
+- E2E integration test: [`backend/tests/test_connectors_sddc_manager_e2e.py`](../../backend/tests/test_connectors_sddc_manager_e2e.py).
 - Precedent: `connectors/nsx/connector.py` (session auth + fingerprint +
   probe + dispatch shim); `connectors/vmware_rest/connector.py` (session auth);
   `connectors/adapters/http.py` (`HttpConnector`);

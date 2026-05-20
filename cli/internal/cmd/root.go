@@ -24,6 +24,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/migrate"
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
+	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
@@ -179,6 +180,17 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `nsx` parent.
 	root.AddCommand(nsx.NewRootCmd())
+
+	// G3.5-T6 (#618) -- sddc-rest-9.0 operator alias verbs for
+	// Initiative #368. The verb tree pre-bakes connector_id=
+	// "sddc-rest-9.0" on top of the existing /api/v1/operations/call
+	// dispatcher route. Ships the 9 read-only SDDC Manager core verbs
+	// (about, manager list, domain list/info, cluster list, host list,
+	// network-pool list, bundle list, workflow list) plus operation
+	// search/call meta-tool wrappers. Replaces ./scripts/sddc-manager.sh.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `sddc-manager` parent.
+	root.AddCommand(sddcmanager.NewRootCmd())
 
 	// G3.3-T6 (#550) -- vault-1.x operator alias verbs for Initiative
 	// #366. The verb tree pre-bakes connector_id="vault-1.x" on top of

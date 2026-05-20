@@ -98,7 +98,7 @@ func TestDryRun_EmitsJSONEnvelopes(t *testing.T) {
 			t.Errorf("source_id = %q; want prefix laptop-migration/", sid)
 		}
 		// prefix length check: 17 ("laptop-migration/") + SourceIDPrefix hex chars
-		wantLen := 17 + SourceIDPrefix
+		wantLen := 17 + migrate.SourceIDPrefix
 		if len(sid) != wantLen {
 			t.Errorf("source_id len = %d; want %d", len(sid), wantLen)
 		}

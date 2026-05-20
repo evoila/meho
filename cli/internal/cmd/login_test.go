@@ -4,12 +4,17 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/evoila/meho/cli/internal/migrate"
 )
 
 // TestResolveAuthConfigUsesOverrides skips backplane discovery when
@@ -133,4 +138,89 @@ func TestLoginCommandRejectsMissingArg(t *testing.T) {
 	if err := root.Execute(); err == nil {
 		t.Fatalf("expected error for missing positional arg")
 	}
+}
+
+// ── Post-login nudge ──────────────────────────────────────────────────────────
+
+func writeMemoryFixture(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+const testMemoryFile = `---
+name: foo
+description: foo desc
+type: user
+---
+Some user memory.
+`
+
+// seedNudgeDir creates a CLAUDE_PROJECT_DIR + /memory subdir, sets
+// XDG_CONFIG_HOME, and returns the memory dir path.
+func seedNudgeDir(t *testing.T) (projectDir, memDir string) {
+	t.Helper()
+	projectDir = t.TempDir()
+	memDir = filepath.Join(projectDir, "memory")
+	if err := os.MkdirAll(memDir, 0o700); err != nil {
+		t.Fatalf("mkdir memory: %v", err)
+	}
+	t.Setenv("CLAUDE_PROJECT_DIR", projectDir)
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	return projectDir, memDir
+}
+
+func TestPrintMigrationNudge_PrintsWhenFilesExistAndMarkerAbsent(t *testing.T) {
+	_, memDir := seedNudgeDir(t)
+	writeMemoryFixture(t, memDir, "foo.md", testMemoryFile)
+
+	var buf bytes.Buffer
+	printMigrationNudge(&buf)
+
+	out := buf.String()
+	if !strings.Contains(out, "meho migrate memory") {
+		t.Errorf("expected nudge with 'meho migrate memory'; got: %q", out)
+	}
+	if !strings.Contains(out, "1") {
+		t.Errorf("expected nudge to mention file count; got: %q", out)
+	}
+}
+
+func TestPrintMigrationNudge_SilentWhenMarkerExists(t *testing.T) {
+	_, memDir := seedNudgeDir(t)
+	writeMemoryFixture(t, memDir, "foo.md", testMemoryFile)
+
+	if err := migrate.TouchMarker(memDir); err != nil {
+		t.Fatalf("TouchMarker: %v", err)
+	}
+
+	var buf bytes.Buffer
+	printMigrationNudge(&buf)
+
+	if buf.Len() > 0 {
+		t.Errorf("expected no nudge when marker exists; got: %q", buf.String())
+	}
+}
+
+func TestPrintMigrationNudge_SilentWhenDirEmpty(t *testing.T) {
+	seedNudgeDir(t) // creates empty memory dir
+	// No files written.
+
+	var buf bytes.Buffer
+	printMigrationNudge(&buf)
+
+	if buf.Len() > 0 {
+		t.Errorf("expected no nudge when dir is empty; got: %q", buf.String())
+	}
+}
+
+func TestPrintMigrationNudge_SilentOnDirResolutionError(t *testing.T) {
+	// With no CLAUDE_PROJECT_DIR and a non-writable env, ResolveSourceDir
+	// falls back to $HOME/.claude/... — just ensure it doesn't panic.
+	t.Setenv("CLAUDE_PROJECT_DIR", "")
+	var buf bytes.Buffer
+	printMigrationNudge(&buf)
+	// No assertion — just must not panic.
 }

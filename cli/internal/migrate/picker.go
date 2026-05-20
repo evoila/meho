@@ -13,6 +13,12 @@ import (
 	"charm.land/huh/v2"
 )
 
+// SourceIDPrefix is the number of hex chars taken from the SHA-256 body hash
+// to form the source_id deduplication key. Shared between the --dry-run
+// envelope output (T4) and the live POST body (T5) so both are bit-for-bit
+// identical.
+const SourceIDPrefix = 12
+
 // Action tokens for the per-file action select field.
 const (
 	// ActionMigrateSuggested uses the scope SuggestScope returned.

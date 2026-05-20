@@ -293,11 +293,16 @@ uniform), or `all` (no filter). The implementation uses portable
 only `FILTER` clauses so the same query runs against SQLite in
 tests.
 
-Source-kind filter excludes typed-connector rows from the operation
-count — this endpoint lists *ingested* connectors only, per the
-G0.7 review-queue contract; typed connectors live in the v2
-registry and operators don't drive them through the review state
-machine.
+The op-count rollup counts every `source_kind` (`ingested`,
+`typed`, `composite`) — the visibility driver is the paired groups
+query, which has never filtered on `source_kind`. The earlier
+filter that excluded typed/composite rows from the count (G0.7-era
+artefact) was the cause of Signal #4 in the 2026-05-20 RDC dogfood:
+typed connectors surfaced with `group_count > 0` but
+`operation_count: 0`, the asymmetry between the two paired queries.
+The renamer "list_*ingested*_connectors" is now misleading and is a
+follow-up cleanup; the function lists every connector with at least
+one visible :class:`OperationGroup` row.
 
 ### API request / response models (`ingest/api_schemas.py`)
 

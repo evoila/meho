@@ -101,7 +101,7 @@ is the single source of truth for the safe-URL alphabet so a typo
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import structlog
@@ -119,6 +119,7 @@ from meho_backplane.memory import (
     PermissionDeniedError,
 )
 from meho_backplane.memory.schemas import SLUG_PATTERN
+from meho_backplane.settings import get_settings
 
 __all__ = ["MemoryListResponse", "RememberBody", "router"]
 
@@ -169,6 +170,59 @@ _SLUG_MAX_LENGTH: Final[int] = 256
 #: 200)``); capping at 500 at the API surface keeps a single page
 #: from materialising more than ~2000 rows server-side.
 _LIST_LIMIT_MAX: Final[int] = 500
+
+
+def _resolve_default_ttl(body: RememberBody) -> datetime | None:
+    """Return the effective ``expires_at`` for a ``remember`` write.
+
+    G5.2-T2 (#624). Implements the default-TTL injection contract for
+    ``POST /api/v1/memory``:
+
+    * :attr:`MemoryScope.USER` scope **and** ``expires_at`` field
+      absent from the request body → ``now(UTC) +
+      Settings.memory_user_default_ttl_days``.
+    * Any other scope (``user-tenant`` / ``user-target`` / ``tenant``
+      / ``target``) → :attr:`RememberBody.expires_at` unchanged
+      (which is ``None`` when omitted, mirroring G5.1 behaviour).
+    * Explicit ``"expires_at": null`` on ``user`` scope → ``None``
+      (the CLI ``--persist`` opt-out shape: persist forever).
+    * Explicit ``"expires_at": "<ISO-8601>"`` on ``user`` scope → that
+      datetime verbatim (the caller picked a cutoff; no override).
+
+    The "field absent" vs "explicit null" discrimination uses
+    :attr:`BaseModel.model_fields_set` (pydantic v2): the set carries
+    every field name the constructor saw in the input, regardless of
+    its value. Without this discrimination, an explicit
+    ``"expires_at": null`` would round-trip to ``body.expires_at is
+    None`` and be indistinguishable from the field being missing --
+    which would collapse the ``--persist`` opt-out into the default
+    path. Verified against the installed pydantic 2.13.4 (`uv run
+    python -c "from pydantic import BaseModel; ..."` -- explicit
+    ``b=None`` is in ``model_fields_set``, absent ``b`` is not).
+
+    Why only ``MemoryScope.USER``: consumer-needs.md §G5's
+    "session-scoped hints expire by default" rule targets the per-
+    operator-only scope (``kind="memory-user"``); ``user-tenant`` and
+    ``user-target`` rows are team-shared coordinates the consumer
+    spec leaves operator-controlled. The Task body pins this to
+    ``kind == "memory-user"`` -- not the broader "any user-* scope"
+    -- so the surface stays narrow until a future Task widens it
+    with an explicit hierarchy decision.
+    """
+    if "expires_at" in body.model_fields_set:
+        # Caller supplied the field (either an ISO timestamp or
+        # explicit null); honour their intent verbatim. This branch
+        # is the CLI ``--persist`` opt-out path when the value is
+        # ``None``.
+        return body.expires_at
+    if body.scope is not MemoryScope.USER:
+        # Default only fires on the ``memory-user`` kind per #624.
+        # Other scopes fall through to the G5.1 baseline (no auto-TTL,
+        # row persists until an operator deletes it or G5.2's
+        # promote/expire verbs touch it).
+        return None
+    settings = get_settings()
+    return datetime.now(UTC) + timedelta(days=settings.memory_user_default_ttl_days)
 
 
 class RememberBody(BaseModel):
@@ -264,12 +318,48 @@ async def remember(
     omits it -- binding before would leave ``audit_slug=None`` in
     that path; the post-call rebind carries the actually-persisted
     slug.
+
+    Default-TTL injection (G5.2-T2 #624)
+    ------------------------------------
+
+    When ``body.scope`` is :attr:`MemoryScope.USER` *and* the request
+    omitted ``expires_at`` entirely, the handler injects
+    ``expires_at = now(UTC) + Settings.memory_user_default_ttl_days``
+    so session-scoped hints expire by default (consumer-needs.md §G5:
+    "session-scoped hints expire after 7 days unless re-pinned").
+    The G5.2-T1 expiry sweeper (#623) reaps these rows once
+    ``expires_at`` passes.
+
+    Two opt-outs are deliberately distinguished from "field omitted":
+
+    * Explicit ``"expires_at": null`` in the JSON body → no default;
+      the row persists forever. The CLI's ``--persist`` flag emits
+      this shape.
+    * Explicit ``"expires_at": "<ISO-8601>"`` → that value is honoured
+      verbatim (no override).
+
+    The discrimination uses :attr:`BaseModel.model_fields_set`
+    (pydantic v2) rather than ``body.expires_at is None``: the former
+    distinguishes "field absent from JSON" from "field present with
+    value null", which is the load-bearing semantics for the CLI's
+    ``--persist`` opt-out. The default is applied *only* to the
+    user-only :attr:`MemoryScope.USER` kind (the one consumer-needs
+    targets); ``user-tenant`` / ``user-target`` are not in scope per
+    the issue ("``kind == 'memory-user'``").
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_MEMORY_OP_IDS["remember"],
         audit_op_class="write",
         audit_scope=body.scope.value,
     )
+    # Resolve the effective ``expires_at`` *before* calling the service
+    # so the audit row, the broadcast payload, and the persisted
+    # ``doc_metadata.expires_at`` all see the same value. ``service``
+    # itself is the storage substrate; the default-TTL contract is a
+    # surface-layer policy (G5.2-T2 #624) bolted onto the
+    # ``/api/v1/memory`` route, not :class:`MemoryService` proper --
+    # MCP / direct callers stay unaffected.
+    expires_at = _resolve_default_ttl(body)
     service = MemoryService()
     try:
         entry = await service.remember(
@@ -278,7 +368,7 @@ async def remember(
             body=body.body,
             slug=body.slug,
             metadata=body.metadata,
-            expires_at=body.expires_at,
+            expires_at=expires_at,
             target_name=body.target_name,
         )
     except PermissionDeniedError as exc:

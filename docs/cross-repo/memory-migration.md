@@ -110,16 +110,17 @@ meho recall user/kubectl-preference                              # exact natural
 
 A `meho recall user/missing-slug` returns 404 (CLI exit code 4) by design — the route deliberately conflates "not found" and "no access" so an operator can't probe for slugs they shouldn't see.
 
-## Default TTL behavior (when G5.2 ships)
+## Default TTL behavior
 
-[#374 G5.2](https://github.com/evoila/meho/issues/374) ships a default 7-day TTL injection on `memory-user` writes that omit `expires_at`. When G5.2 lands:
+[#624 G5.2-T2](https://github.com/evoila/meho/issues/624) ships the default 7-day TTL injection on `memory-user` writes that omit `expires_at`. Concretely:
 
-- Every `meho remember --scope user "..."` without `--ttl` will land with `expires_at = now + 7d`. The entry is invisible to reads after the cutoff (read-side filter on `expires_at`) and physically deleted by the daily reap.
+- Every `meho remember --scope user "..."` without `--ttl` lands with `expires_at = now + Settings.memory_user_default_ttl_days` (default 7, range 1-365 via the `MEMORY_USER_DEFAULT_TTL_DAYS` env var / Helm `memory.userDefaultTtlDays`). The entry is invisible to reads after the cutoff (read-side filter on `expires_at`) and physically deleted by the G5.2-T1 [#623](https://github.com/evoila/meho/issues/623) daily reap.
 - Pass `--ttl 30d` (or `--ttl 12h`, `--ttl 36m`) to set a specific lifetime. The shorthand accepts `s` / `m` / `h` / `d` suffixes.
-- Pass `--persist` to opt out of the default TTL (the entry never expires until you `meho forget` it). Use this for memories you intentionally want to retain across the 7-day window — typically the durable preferences (`kubectl-preference`, `editor-preference`).
+- Pass `--persist` to opt out of the default TTL (the entry never expires until you `meho forget` it). Use this for memories you intentionally want to retain across the 7-day window — typically the durable preferences (`kubectl-preference`, `editor-preference`). `--persist` is mutually exclusive with `--ttl`: passing both surfaces a CLI-side error before the HTTP round-trip.
 - `user-tenant`, `user-target`, `tenant`, `target` scopes do **not** receive the default TTL — only `user` does. Tenant / target memories are intentionally long-lived; user-scoped is the "what I'm investigating today" cadence.
+- Direct REST callers (not `meho remember`) can opt out by sending `"expires_at": null` in the JSON body. The handler distinguishes "field omitted" from "field present with value null" via Pydantic v2's `BaseModel.model_fields_set` — the former triggers the default, the latter is the explicit-persist shape `--persist` emits.
 
-Until G5.2 ships, every memory written without `--ttl` is persistent (G5.1 stores `None` in `metadata.expires_at` and the read-side filter treats it as "never expires"). Plan migration accordingly: bulk-migrating an old laptop directory under G5.1 means everything is persistent until you `meho forget` it; under G5.2 the user-scoped subset will start expiring on a rolling 7-day window.
+Plan migration accordingly: under G5.2 the user-scoped subset of a bulk migration starts expiring on a rolling 7-day window unless you pass `--persist` per row. Pre-existing rows written under G5.1 (before #624 landed) keep their stored value — only **new** writes go through the default-injection path.
 
 ## Rollback
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,7 +18,7 @@ import (
 
 // NewRememberCmd returns the top-level `meho remember` command.
 //
-// CLI shape (per issue #424):
+// CLI shape (per issue #424; --persist added by G5.2-T2 #624):
 //
 //	meho remember "body text" \
 //	  [--scope user|user-tenant|user-target|tenant|target] \
@@ -25,6 +26,7 @@ import (
 //	  [--target TARGET_NAME] \
 //	  [--tag T] \
 //	  [--ttl 7d] \
+//	  [--persist] \
 //	  [--json] \
 //	  [--backplane <url>]
 //
@@ -37,6 +39,15 @@ import (
 // a flag there because the slug is the positional. Here the body is
 // the positional and `--slug` is a flag, so we use `-` as the
 // in-band stdin marker.)
+//
+// `--persist` opts out of the G5.2-T2 (#624) backend default-TTL
+// injection: the verb emits “"expires_at": null“ on the wire so
+// the backend's :func:`_resolve_default_ttl` sees the field as
+// explicitly present-and-null and refuses to inject the default 7-
+// day cutoff. Mutually exclusive with `--ttl`: passing both surfaces
+// a CLI-side error before the HTTP round-trip (`--ttl` already
+// computes an absolute cutoff; emitting `null` alongside it would
+// be self-contradictory).
 //
 // Role: any authenticated operator (`read_only` excluded at the
 // FastAPI gate). The service-layer MemoryRbacResolver further
@@ -56,6 +67,7 @@ func NewRememberCmd() *cobra.Command {
 		targetFlag        string
 		tagsFlag          []string
 		ttlFlag           string
+		persistFlag       bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -96,6 +108,7 @@ func NewRememberCmd() *cobra.Command {
 				TargetArg:         targetFlag,
 				TagsArg:           tagsFlag,
 				TTLArg:            ttlFlag,
+				Persist:           persistFlag,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -111,6 +124,8 @@ func NewRememberCmd() *cobra.Command {
 		"tag to attach to the memory; repeat for multiple tags")
 	cmd.Flags().StringVar(&ttlFlag, "ttl", "",
 		"time-to-live shorthand (e.g. `7d`, `36h`, `30m`) — set expires_at")
+	cmd.Flags().BoolVar(&persistFlag, "persist", false,
+		"persist forever — opt out of the backend's default-7-day TTL on memory-user writes (sends expires_at=null)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw Entry JSON instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -119,12 +134,17 @@ func NewRememberCmd() *cobra.Command {
 }
 
 type rememberOptions struct {
-	BodyArg           string
-	ScopeArg          string
-	SlugArg           string
-	TargetArg         string
-	TagsArg           []string
-	TTLArg            string
+	BodyArg   string
+	ScopeArg  string
+	SlugArg   string
+	TargetArg string
+	TagsArg   []string
+	TTLArg    string
+	// Persist is the wire-shape flag for the G5.2-T2 (#624) backend
+	// default-TTL opt-out: when true and TTLArg is empty, the
+	// request emits ``"expires_at": null`` so the backend skips
+	// the default 7-day injection and the memory persists forever.
+	Persist           bool
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -138,6 +158,16 @@ func runRemember(cmd *cobra.Command, opts rememberOptions) error {
 	if err := requireTargetForScope(scope, opts.TargetArg); err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(err.Error()), opts.JSONOut)
+	}
+	// `--persist` opts out of the backend default TTL; `--ttl` sets
+	// an explicit cutoff. Both at once is self-contradictory (the
+	// operator wants "never expire" and "expire on X" simultaneously),
+	// so refuse client-side rather than letting the JSON marshaler
+	// silently let ExpiresAt win and discard --persist's intent.
+	if opts.Persist && strings.TrimSpace(opts.TTLArg) != "" {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("--persist and --ttl are mutually exclusive: --persist means \"never expire\", --ttl sets a finite cutoff"),
+			opts.JSONOut)
 	}
 	body, err := loadBody(cmd, opts.BodyArg)
 	if err != nil {
@@ -160,6 +190,7 @@ func runRemember(cmd *cobra.Command, opts rememberOptions) error {
 		Slug:       opts.SlugArg,
 		ExpiresAt:  expiresAt,
 		TargetName: opts.TargetArg,
+		Persist:    opts.Persist,
 	}
 	if tags := parseTagsFlag(opts.TagsArg); tags != nil {
 		// `tags` lands under `metadata.tags` per consumer-needs.md

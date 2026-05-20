@@ -132,7 +132,7 @@ cli/
     │   │   └── delete_test.go    # confirm-prompt + idempotent-204 + --json envelope tests.
     │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list` (no parent).
     │   │   ├── memory.go         # Scope enum + Entry/ListResponse/RetrievalHit + shared HTTP/auth helpers + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
-    │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --json]` (POST /api/v1/memory).
+    │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.
     │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
     │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
     │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).

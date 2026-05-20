@@ -646,6 +646,172 @@ func TestRunRememberSendsExpiresAtFromTTL(t *testing.T) {
 	}
 }
 
+// G5.2-T2 (#624): --persist flag tests.
+//
+// The wire contract this verb must satisfy:
+//
+//   - --persist alone → request body carries explicit "expires_at":
+//     null (so the backend's _resolve_default_ttl sees the field in
+//     model_fields_set and skips the default-7-day injection).
+//   - --persist absent + no --ttl → "expires_at" key OMITTED entirely
+//     (backend's model_fields_set is empty, default fires on user
+//     scope).
+//   - --persist + --ttl → CLI-side error (mutually exclusive).
+//
+// The "explicit null vs absent" assertion uses json.RawMessage so the
+// test sees the literal wire bytes, not the decoded map (which would
+// collapse both shapes to a Go nil interface).
+
+func TestRunRememberPersistEmitsExplicitNullExpiresAt(t *testing.T) {
+	var rawBody json.RawMessage
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rawBody = json.RawMessage(b)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "persisted"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, _ := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runRemember(cmd, rememberOptions{
+		BodyArg: "pin-forever", ScopeArg: "user",
+		Persist: true, BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runRemember --persist: %v", err)
+	}
+	// Decode into a map[string]json.RawMessage so we can see whether
+	// "expires_at" was present at all (key in map) and, if so,
+	// whether its value was the four bytes `null`.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &fields); err != nil {
+		t.Fatalf("decode raw body: %v; body=%s", err, rawBody)
+	}
+	raw, present := fields["expires_at"]
+	if !present {
+		t.Fatalf("expected expires_at to be present (as JSON null) when --persist is set; body=%s", rawBody)
+	}
+	if string(raw) != "null" {
+		t.Errorf("expected expires_at to be literal JSON null; got %q (body=%s)", raw, rawBody)
+	}
+}
+
+func TestRunRememberOmitsExpiresAtWhenNoPersistAndNoTTL(t *testing.T) {
+	var rawBody json.RawMessage
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/memory", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rawBody = json.RawMessage(b)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Entry{Scope: ScopeUser, Slug: "auto"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, _ := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	if err := runRemember(cmd, rememberOptions{
+		BodyArg: "y", ScopeArg: "user", BackplaneOverride: srv.URL,
+	}); err != nil {
+		t.Fatalf("runRemember: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &fields); err != nil {
+		t.Fatalf("decode raw body: %v", err)
+	}
+	if _, present := fields["expires_at"]; present {
+		t.Errorf("expected expires_at absent when neither --persist nor --ttl is set; body=%s", rawBody)
+	}
+}
+
+func TestRunRememberPersistAndTTLAreMutuallyExclusive(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	cmd.SetIn(bytes.NewBufferString(""))
+	err := runRemember(cmd, rememberOptions{
+		BodyArg: "y", ScopeArg: "user", TTLArg: "1d", Persist: true,
+		BackplaneOverride: "https://meho.test",
+	})
+	if err == nil {
+		t.Fatalf("expected error when --persist and --ttl are both set")
+	}
+	if !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Errorf("expected mutually-exclusive message; got %q", stderr.String())
+	}
+}
+
+func TestRememberRequestMarshalPersistTriState(t *testing.T) {
+	// Direct unit test of the MarshalJSON tri-state contract; the
+	// higher-level runRemember tests above pin the wire shape end-to-
+	// end, but the struct-level test is what a future refactor would
+	// touch first.
+	cases := []struct {
+		name        string
+		req         rememberRequest
+		wantPresent bool
+		wantNull    bool
+		wantString  string
+	}{
+		{
+			name:        "absent when neither set",
+			req:         rememberRequest{Scope: ScopeUser, Body: "x"},
+			wantPresent: false,
+		},
+		{
+			name:        "null when persist=true",
+			req:         rememberRequest{Scope: ScopeUser, Body: "x", Persist: true},
+			wantPresent: true,
+			wantNull:    true,
+		},
+		{
+			name:        "string when ExpiresAt set",
+			req:         rememberRequest{Scope: ScopeUser, Body: "x", ExpiresAt: "2027-01-01T00:00:00Z"},
+			wantPresent: true,
+			wantString:  "2027-01-01T00:00:00Z",
+		},
+		{
+			name:        "ExpiresAt wins over Persist when both set",
+			req:         rememberRequest{Scope: ScopeUser, Body: "x", ExpiresAt: "2027-01-01T00:00:00Z", Persist: true},
+			wantPresent: true,
+			wantString:  "2027-01-01T00:00:00Z",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.req)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(b, &fields); err != nil {
+				t.Fatalf("re-decode: %v", err)
+			}
+			raw, present := fields["expires_at"]
+			if present != tc.wantPresent {
+				t.Errorf("expires_at presence: got %v want %v (body=%s)", present, tc.wantPresent, b)
+			}
+			if !present {
+				return
+			}
+			if tc.wantNull && string(raw) != "null" {
+				t.Errorf("expected literal null; got %s", raw)
+			}
+			if tc.wantString != "" {
+				var s string
+				if err := json.Unmarshal(raw, &s); err != nil {
+					t.Fatalf("decode string: %v (raw=%s)", err, raw)
+				}
+				if s != tc.wantString {
+					t.Errorf("expires_at string: got %q want %q", s, tc.wantString)
+				}
+			}
+		})
+	}
+}
+
 func TestRunRememberTargetScopeRequiresTargetFlag(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	cmd.SetIn(bytes.NewBufferString(""))

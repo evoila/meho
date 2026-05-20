@@ -278,10 +278,15 @@ jobs:
     # testcontainers) that made the combined serial sweep blow every
     # timeout cap (see python-lint-test comment). Separated so the
     # required lint+mypy+unit gate stays fast and deterministic while
-    # integration still runs on every PR. This job is NOT yet in the
-    # branch-protection required-check set — promoting it requires a
-    # repo-admin settings change (documented in the PR). Until then it
-    # is a visible, fail-loud signal but not merge-blocking.
+    # integration runs on every PR.
+    # **Required merge gate as of 2026-05-20 (#698).** This job's
+    # context ("Python (integration testcontainers)") is in
+    # ``branches/main/protection.required_status_checks.contexts``;
+    # promoting it was the structural corrective to the v0.2 / G3.4
+    # green-but-hollow incidents (#634 / #697) — the lane that
+    # exercises real connector dispatch, k3d / bind9-container /
+    # vcsim / federated-write acceptance, must be merge-blocking so
+    # red integration cannot ship to ``main`` again.
     # 60-min cap: container pulls + DinD spin-up + the serial
     # integration sweep. pytest-xdist loadgroup parallelization to
     # bring this well under cap is tracked in #564.

@@ -589,22 +589,32 @@ into `GITHUB_STEP_SUMMARY` on every successful publish.
 ## PR-level CI (`.github/workflows/ci.yml`)
 
 `ci.yml` is the central per-PR test harness. Every PR targeting `main`
-runs three jobs in parallel, one per in-tree toolchain, and every push
-to `main` re-runs the same matrix as a regression catch. Branch
-protection consumes the workflow's overall status as a required check.
+runs four jobs in parallel and every push to `main` re-runs the same
+matrix as a regression catch. Branch protection consumes each job's
+status as a required check (per
+`branches/main/protection.required_status_checks.contexts` —
+re-verified after the 2026-05-20 #698 promotion of the integration
+lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
+incidents #634 / #697).
 
 ### Matrix
 
 | Job | Surface | Steps |
 | --- | --- | --- |
-| `python-lint-test` | `backend/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -x --cov` -> upload `python-coverage` artefact |
-| `go-lint-test` | `cli/` | `golangci-lint` (v6 action, v1.64.8 binary) -> `go build ./...` -> `go test -race -cover ./...` |
-| `helm-lint-template` | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
+| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -x --cov` (excludes `tests/integration/`) -> upload `python-coverage` artefact |
+| `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
+| `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
+| `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-Each job runs on its own `meho-runners` runner with a 10-minute
-`timeout-minutes`. Wall-clock for a green PR comes in well under the
-Goal #11 10-minute budget because the three jobs never block each other
-— the slowest job is the workflow's elapsed time.
+Each job runs on its own `meho-runners` runner. `python-lint-test`,
+`go-lint-test`, and `helm-lint-template` carry a 10-minute
+`timeout-minutes`; `python-integration` carries 60 minutes for the
+container-pull + DinD spin-up + testcontainers sweep (xdist
+loadgroup parallelisation to bring it well under cap tracked in #564).
+Wall-clock for a green PR is the slowest job's elapsed time because
+the four jobs never block each other — `python-integration` typically
+dominates and is the dispatch surface for the Goal #11 budget
+conversation.
 
 ### Fail-loud posture
 

@@ -14,26 +14,27 @@ dict) is split out behind a narrow :class:`SddcCredentialsLoader` callable
 so:
 
 * Production deploys override the default loader at construction time once
-  G0.3 (#224) lands the operator-context Vault read path.
+  the operator-context per-target Vault credential read is wired for this
+  connector (tracked under the open
+  `Goal #214 (Connector parity) <https://github.com/evoila/meho/issues/214>`_).
 * Unit tests inject their own (mock) loader returning a pre-built dict.
 * Integration tests pass a loader that yields the appropriate service-account
   credentials.
 
 The default loader, :func:`load_credentials_from_vault`, raises
-:exc:`NotImplementedError` until G0.3 (#224) merges. Mirrors the shape
+:exc:`NotImplementedError` until the live read lands. Mirrors the shape
 :func:`~meho_backplane.connectors.vmware_rest.session.load_session_credentials_from_vault`
-established for :class:`VmwareRestConnector` — once the Target model +
-operator-context Vault reads land, all loaders pick up the concrete
-implementation in a single follow-up commit.
+established for :class:`VmwareRestConnector` — both stubs are tracked
+under the open Goal #214 and switch over together.
 
 The :class:`SddcTargetLike` Protocol captures the minimum target shape the
 connector reads: ``name`` (for the per-target credential cache key), ``host``,
 ``port`` (forwarded to :meth:`HttpConnector._base_url`), ``secret_ref`` (the
 Vault path the loader resolves), ``auth_model`` (checked at the boundary),
 and ``sso_realm`` (the SSO domain appended to the username in the Basic auth
-header, defaulting to ``"vsphere.local"``). Once G0.3 ships its concrete
-``Target`` model in :mod:`meho_backplane.targets`, the model satisfies this
-Protocol structurally — no edits here.
+header, defaulting to ``"vsphere.local"``). The concrete ``Target`` model in
+:mod:`meho_backplane.targets` (G0.3 #224 — closed) satisfies this Protocol
+structurally; no edits here.
 """
 
 from __future__ import annotations
@@ -66,8 +67,8 @@ class SessionCredentials(Protocol):
 class SddcTargetLike(Protocol):
     """Minimum target shape :class:`SddcManagerConnector` reads.
 
-    Structural Protocol — once G0.3 (#224) lands the concrete ``Target``
-    model in :mod:`meho_backplane.targets`, that model satisfies this
+    Structural Protocol — the concrete ``Target`` model in
+    :mod:`meho_backplane.targets` (G0.3 #224 — closed) satisfies this
     Protocol unchanged. ``auth_model`` is checked at the boundary so a
     target tagged ``per_user`` or ``impersonation`` raises a clear error
     rather than silently authenticating as the shared service account.
@@ -109,22 +110,24 @@ async def load_credentials_from_vault(
 ) -> dict[str, str]:
     """Default credential loader — Vault read by ``target.secret_ref``.
 
-    Stubbed until G0.3 (#224) lands the ``Target`` model and the
-    operator-context Vault read path. Mirrors
-    :func:`~meho_backplane.connectors.vmware_rest.session.load_session_credentials_from_vault`'s
-    ``NotImplementedError`` stub so the wiring shape is stable: a production
-    caller without an explicit loader override receives a clear error rather
-    than a silent fallback or a hallucinated credential pair.
+    Deliberate stub: the operator-context per-target Vault credential read
+    is not yet wired for the SDDC Manager connector. Raising
+    :exc:`NotImplementedError` here keeps the wiring shape stable — a
+    production caller without an override receives a clear error rather
+    than a silent fallback or a hallucinated credential pair. The supported
+    workaround is to inject a custom ``credentials_loader`` on
+    ``SddcManagerConnector`` at construction time. The live read is
+    tracked under the open Goal #214 (Connector parity).
 
-    Once G0.3 lands, this function becomes the live implementation that reads
-    the ``sddc-manager/<target.name>`` Vault path and returns the parsed
-    ``{"username": ..., "password": ...}`` dict. Until then, tests and any
-    acceptance harness inject a custom :class:`SddcCredentialsLoader` on
-    connector construction.
+    Once the read lands, this function becomes the live implementation that
+    reads the ``sddc-manager/<target.name>`` Vault path and returns the
+    parsed ``{"username": ..., "password": ...}`` dict.
     """
     raise NotImplementedError(
-        "load_credentials_from_vault requires G0.3 Target model + "
-        f"operator-context Vault read; target={target.name!r} "
-        f"secret_ref={target.secret_ref!r}. Inject a custom credentials_loader "
-        "on SddcManagerConnector until G0.3 lands."
+        "load_credentials_from_vault is a deliberate stub: the operator-context "
+        "per-target Vault credential read is not yet wired for the SDDC Manager "
+        f"connector; target={target.name!r} secret_ref={target.secret_ref!r}. "
+        "Workaround: inject a custom credentials_loader on SddcManagerConnector. "
+        "Tracked under open Goal #214 (Connector parity): "
+        "https://github.com/evoila/meho/issues/214"
     )

@@ -64,9 +64,11 @@ exercised. Useful for operators validating a spec before committing.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import Literal
 from uuid import UUID
 
 import structlog
+from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -83,11 +85,15 @@ from meho_backplane.operations.ingest.api_schemas import (
     IngestionResultModel,
     SpecSource,
 )
+from meho_backplane.operations.ingest.exceptions import VersionMismatchError
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
     run_llm_grouping,
 )
-from meho_backplane.operations.ingest.openapi import parse_openapi
+from meho_backplane.operations.ingest.openapi import (
+    parse_openapi,
+    read_spec_info_version,
+)
 from meho_backplane.operations.ingest.register_ingested import (
     IngestionResult,
     register_ingested_operations,
@@ -140,6 +146,137 @@ def default_llm_client_factory() -> LlmClient:
         "Tests inject a deterministic stub via "
         "IngestionPipelineService(..., llm_client_factory=...).",
     )
+
+
+#: Outcome of one :func:`_classify_version_match` call.
+#:
+#: * ``"exact"`` — the operator's label is the spec's ``info.version``
+#:   verbatim, normalises to the same PEP 440 :class:`Version`, or is a
+#:   release-tuple prefix of the spec's version (``spec=9.0.3``,
+#:   ``label=9.0`` / ``9`` all qualify). Proceed without comment.
+#: * ``"compatible"`` — the two share a major version but differ
+#:   inside it (``spec=9.0.3``, ``label=9.1``). The resolver's tie-
+#:   break math (``>=N.0,<N+1.0`` per major) treats both as the same
+#:   compatibility band; ingest proceeds and emits a structured
+#:   ``connector_ingest_version_drift`` log event.
+#: * ``"incompatible"`` — different major versions (``spec=7.0.x``,
+#:   ``label=9.0``), or one of the two strings is non-PEP-440 and
+#:   doesn't match verbatim. Fail-closed with
+#:   :class:`VersionMismatchError`.
+_VersionMatch = Literal["exact", "compatible", "incompatible"]
+
+
+def _classify_version_match(spec_version: str, label_version: str) -> _VersionMatch:
+    """Compare a spec's ``info.version`` against an operator-supplied label.
+
+    The semantics mirror the runtime resolver in
+    :mod:`meho_backplane.connectors.resolver` — a spec's ``9.0.3``
+    belongs to the ``>=9.0,<10.0`` band, so any label that
+    parses to a :class:`packaging.version.Version` in that band is
+    "compatible" enough to proceed; mismatched major versions never
+    are. Verbatim string equality is checked first so non-PEP-440
+    strings (vendor product codenames like ``"acme-2024Q3"``) still
+    pass when the operator types them identically.
+
+    Args:
+        spec_version: ``info.version`` from the parsed OpenAPI spec.
+        label_version: The operator-supplied
+            :attr:`IngestRequest.version` label.
+
+    Returns:
+        ``"exact"`` / ``"compatible"`` / ``"incompatible"`` per the
+        :class:`_VersionMatch` table.
+    """
+    if spec_version == label_version:
+        return "exact"
+    try:
+        spec_v = Version(spec_version)
+        label_v = Version(label_version)
+    except InvalidVersion:
+        # At least one side is non-PEP-440. We already ruled out a
+        # verbatim string match above, so the label cannot be
+        # confidently classified as compatible — fail-closed and let
+        # the operator either correct the label or downgrade the spec.
+        return "incompatible"
+    if spec_v == label_v:
+        # PEP 440 normalisation: e.g. Version("1") == Version("1.0").
+        return "exact"
+    # Release-tuple prefix match: spec=9.0.3, label=9.0 → ("9", "0")
+    # is a prefix of ("9", "0", "3"). Order matters — the label is
+    # the operator's coarser label, so its release tuple must be a
+    # prefix of the spec's. The reverse (label=9.0.3, spec=9.0)
+    # falls through to the compatible / incompatible bands.
+    if spec_v.release[: len(label_v.release)] == label_v.release:
+        return "exact"
+    # Same major version → compatible band.
+    if spec_v.release and label_v.release and spec_v.release[0] == label_v.release[0]:
+        return "compatible"
+    return "incompatible"
+
+
+def _build_spec_label_mismatch(
+    *,
+    requested_version: str,
+    mismatches: list[tuple[str, str | None]],
+) -> VersionMismatchError:
+    """Construct the ``spec_label_mismatch`` exception with an operator-facing suggestion.
+
+    Picks the first mismatching spec's ``info.version`` as the
+    suggested correction — for the common single-spec case it's the
+    exact value the operator should re-ingest under; for the multi-
+    spec case it nudges them toward inspection of the listed bundle.
+    """
+    _, primary_spec_version = mismatches[0]
+    suggestion = (
+        f"either re-ingest under version={primary_spec_version!r} "
+        f"to match the spec, or supply specs whose info.version "
+        f"matches version={requested_version!r}"
+        if primary_spec_version is not None
+        else None
+    )
+    return VersionMismatchError(
+        kind="spec_label_mismatch",
+        requested_version=requested_version,
+        spec_info_versions=mismatches,
+        suggestion=suggestion,
+    )
+
+
+def _check_multi_spec_consistency(
+    *,
+    per_spec: list[tuple[str, str | None]],
+    requested_version: str,
+) -> None:
+    """Verify every supplied spec declares a compatible major version.
+
+    Only meaningful when at least two specs declare an
+    ``info.version``; single-spec ingests and ingests where most
+    specs omit ``info.version`` slip past without comment.
+
+    Specs whose ``info.version`` isn't PEP 440 parseable contribute
+    a ``hash(version)`` sentinel to the majors set so two identical
+    vendor codenames cluster together; the rare hash collision is
+    harmless because the operator-facing message lists both raw
+    values for diagnosis regardless of which branch fired.
+    """
+    declared = [(uri, version) for uri, version in per_spec if version is not None]
+    if len(declared) < 2:
+        return
+    majors: set[int] = set()
+    for _, version in declared:
+        try:
+            parsed = Version(version)
+        except InvalidVersion:
+            majors.add(hash(version))
+            continue
+        if parsed.release:
+            majors.add(parsed.release[0])
+    if len(majors) > 1:
+        raise VersionMismatchError(
+            kind="multi_spec_inconsistent",
+            requested_version=requested_version,
+            spec_info_versions=declared,
+        )
 
 
 class IngestionPipelineResult:
@@ -264,6 +401,100 @@ class IngestionPipelineService:
                 f"tenant_id={tenant_id}",
             )
 
+    def _validate_spec_versions(
+        self,
+        *,
+        specs: Sequence[SpecSource],
+        requested_version: str,
+        log: structlog.stdlib.BoundLogger,
+    ) -> None:
+        """Cross-check operator-supplied ``version`` against every spec's ``info.version``.
+
+        Three guards in one pass:
+
+        1. Each spec's ``info.version`` is parsed via the lightweight
+           :func:`read_spec_info_version` helper (no DB hits, no full
+           parse — just enough to read the ``info`` block).
+        2. Each parsed ``info.version`` is classified against the
+           operator's label via :func:`_classify_version_match`. An
+           ``incompatible`` outcome raises
+           :class:`VersionMismatchError` with ``kind="spec_label_mismatch"``;
+           a ``compatible`` outcome emits a structured
+           ``connector_ingest_version_drift`` event and proceeds.
+        3. After collecting every spec's ``info.version``, the bundle
+           is checked for internal consistency: two specs sharing a
+           major version are fine (same connector triple); two specs
+           disagreeing on the major version are not, and raise
+           :class:`VersionMismatchError` with
+           ``kind="multi_spec_inconsistent"``.
+
+        Specs missing ``info.version`` entirely contribute ``None`` to
+        the collected list; they're skipped for the cross-check
+        (older specs without ``info.version`` can still be ingested
+        under whatever label).
+
+        The cross-check runs early — before the parser does the full
+        operation walk — so an obviously-misclassified ingest fails
+        in milliseconds rather than after we've spent CPU parsing a
+        2,000-op spec.
+        """
+        per_spec, mismatches = self._classify_per_spec(
+            specs=specs, requested_version=requested_version, log=log
+        )
+        if mismatches:
+            raise _build_spec_label_mismatch(
+                requested_version=requested_version, mismatches=mismatches
+            )
+        _check_multi_spec_consistency(per_spec=per_spec, requested_version=requested_version)
+
+    @staticmethod
+    def _classify_per_spec(
+        *,
+        specs: Sequence[SpecSource],
+        requested_version: str,
+        log: structlog.stdlib.BoundLogger,
+    ) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+        """Read each spec's ``info.version`` and bucket the outcome.
+
+        Returns ``(per_spec, mismatches)``: every spec contributes one
+        ``(uri, info_version_or_none)`` row to ``per_spec`` (used by
+        the multi-spec consistency pass); ``mismatches`` lists only
+        the rows whose ``info.version`` was incompatible with the
+        operator's label.
+        """
+        per_spec: list[tuple[str, str | None]] = []
+        mismatches: list[tuple[str, str | None]] = []
+        for spec in specs:
+            info_version = read_spec_info_version(spec.uri)
+            per_spec.append((spec.uri, info_version))
+            if info_version is None:
+                # No info.version → no cross-check possible. Operators
+                # ingesting older specs without ``info.version`` keep
+                # working; document this loudly so the audit trail
+                # shows we skipped a check rather than passed one.
+                log.info(
+                    "connector_ingest_version_check_skipped",
+                    spec_uri=spec.uri,
+                    reason="spec_info_version_missing",
+                )
+                continue
+            match = _classify_version_match(info_version, requested_version)
+            if match == "incompatible":
+                mismatches.append((spec.uri, info_version))
+            elif match == "compatible":
+                # Same major, different minor — warn and proceed per the
+                # G0.9-T8 contract. The structured event names both
+                # values so the operator can decide whether to re-ingest
+                # under the corrected label after the fact.
+                log.warning(
+                    "connector_ingest_version_drift",
+                    spec_uri=spec.uri,
+                    spec_info_version=info_version,
+                    requested_version=requested_version,
+                    match="compatible",
+                )
+        return per_spec, mismatches
+
     async def ingest(
         self,
         *,
@@ -297,6 +528,13 @@ class IngestionPipelineService:
             tenant_id=str(tenant_id) if tenant_id is not None else None,
             operator_sub=self._operator.sub,
         )
+
+        # Spec-vs-label cross-check runs before either path: even the
+        # dry-run path benefits from catching the mistake at the validate
+        # boundary rather than letting an operator dry-run a spec that
+        # belongs under a different version label and convince themselves
+        # the real ingest will work.
+        self._validate_spec_versions(specs=specs, requested_version=version, log=log)
 
         if dry_run:
             log.info("ingestion_pipeline_dry_run_start")

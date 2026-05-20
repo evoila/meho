@@ -1006,6 +1006,114 @@ def test_ingest_bad_spec_returns_400(client: TestClient, tmp_path: Any) -> None:
     assert response.status_code == 400
 
 
+def test_ingest_vcenter_9_under_label_8_returns_422(client: TestClient, tmp_path: Any) -> None:
+    """G0.9-T8 regression — operator labels a vCenter-9 spec as ``version=8.0``.
+
+    The spec-vs-label cross-check fires before the parser does its
+    full operation walk and returns ``422 Unprocessable Entity`` with
+    a structured detail naming both ``spec_info_versions`` (with the
+    spec's ``9.0.3``) and ``requested_version`` (the operator's
+    ``8.0``) so the error message tells the operator exactly what to
+    fix.
+    """
+    spec_path = tmp_path / "vcenter.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: vCenter
+  version: '9.0.3'
+paths:
+  /vcenter/vm:
+    get:
+      summary: list VMs
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "vmware",
+                "version": "8.0",
+                "impl_id": "vmware-rest",
+                "specs": [{"uri": str(spec_path)}],
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["kind"] == "spec_label_mismatch"
+    assert detail["requested_version"] == "8.0"
+    assert detail["spec_info_versions"] == [{"spec_uri": str(spec_path), "info_version": "9.0.3"}]
+    # The operator-facing message must mention both versions.
+    assert "9.0.3" in detail["message"]
+    assert "8.0" in detail["message"]
+
+
+def test_ingest_compatible_drift_succeeds(
+    client: TestClient,
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Spec ``info.version=9.0.3`` + label ``9.1`` → inexact-compatible.
+
+    The cross-check classifies this as ``compatible`` (same major,
+    different minor) and proceeds — only the cross-major mismatches
+    raise 422.
+    """
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '9.0.3'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    propose_json = (
+        '[{"group_key": "items", "name": "Items", '
+        '"when_to_use": "Use these operations to manage items."}]'
+    )
+    assign_json = '{"GET:/items": "items"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "drift-test",
+                "version": "9.1",
+                "impl_id": "drift-impl",
+                "specs": [{"uri": str(spec_path)}],
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+
+
 # ---------------------------------------------------------------------------
 # set_llm_client_factory contract
 # ---------------------------------------------------------------------------

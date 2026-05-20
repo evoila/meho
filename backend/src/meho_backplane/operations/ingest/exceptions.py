@@ -3,9 +3,10 @@
 
 """Domain exceptions for the G0.7 spec-ingestion pipeline.
 
-Three unrelated families of failure modes share this module so T1
-(OpenAPI parser, #401), T2 (registration helper, #403), and T4
-(review-queue state machine, #402) agree on an import path:
+Four unrelated families of failure modes share this module so T1
+(OpenAPI parser, #401), T2 (registration helper, #403), T4
+(review-queue state machine, #402), and the G0.9-T8 spec-vs-label
+cross-check agree on an import path:
 
 Parser failures (T1 #401) — raised from
 :func:`~meho_backplane.operations.ingest.parse_openapi`:
@@ -66,8 +67,17 @@ Review-queue failures (T4 #402) — raised from
   enumerate another tenant's connectors by probing for ``HTTP 404``
   vs ``HTTP 403`` boundaries.
 
-The parser and registration classes inherit from :class:`ValueError`
-so callers that already catch parsing errors via
+Ingest-pipeline failures (G0.9-T8) — raised from
+:meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`:
+
+* :class:`VersionMismatchError` — the operator-supplied ``version``
+  label is incompatible with at least one supplied spec's
+  ``info.version``, or two specs in the same bundle declare
+  incompatible ``info.version`` strings. Mapped onto HTTP 422 at the
+  route layer to distinguish it from generic ``400`` parser failures.
+
+The parser, registration, and ingest-pipeline classes inherit from
+:class:`ValueError` so callers that already catch parsing errors via
 ``except ValueError`` keep working; the review-queue classes inherit
 from :class:`Exception` directly so callers can ``except`` them
 precisely without catching unrelated runtime faults.
@@ -75,6 +85,7 @@ precisely without catching unrelated runtime faults.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
 __all__ = [
@@ -85,6 +96,7 @@ __all__ = [
     "LlmOutputInvalid",
     "OpIdCollision",
     "UnsupportedSpecError",
+    "VersionMismatchError",
 ]
 
 
@@ -322,3 +334,86 @@ class ConnectorNotFoundError(Exception):
         self.tenant_id = tenant_id
         scope = "built-in" if tenant_id is None else f"tenant={tenant_id}"
         super().__init__(f"connector {connector_id!r} not found ({scope})")
+
+
+class VersionMismatchError(ValueError):
+    """Raised when ingest specs disagree with the operator-supplied version label.
+
+    Two raise sites under one exception type so the route layer maps
+    both onto a single ``HTTP 422 Unprocessable Entity`` response with
+    a structured detail an operator can act on:
+
+    * **Spec/label mismatch** — the operator labelled the ingest
+      ``version=X`` but at least one supplied spec declares
+      ``info.version=Y`` whose major component disagrees with ``X``.
+      Per the G0.9-T8 contract the resolver's tie-break math
+      (``packaging.version.Version`` parsed as ``>=N.0,<N+1.0``) is
+      the source of truth for "compatible"; cross-major drift always
+      fails. Inexact-but-compatible drift (same major, different
+      minor) is logged via the ``connector_ingest_version_drift``
+      structured event and ingests through — *not* raised — so this
+      exception only covers the hard-fail case.
+
+    * **Multi-spec inconsistency** — two or more specs in the same
+      ingest declare ``info.version`` strings that don't share a
+      major version. The bundle is internally inconsistent; the
+      operator either supplied the wrong specs together or labelled
+      them wrong, and no single connector triple can house them
+      faithfully.
+
+    The exception's ``kind`` attribute distinguishes the two raise
+    sites for tests / structured logs / operator-facing messaging.
+
+    Attributes
+    ----------
+    kind:
+        ``"spec_label_mismatch"`` or ``"multi_spec_inconsistent"``.
+    requested_version:
+        The operator-supplied ``IngestRequest.version`` label.
+    spec_info_versions:
+        Sorted list of ``(spec_uri, info_version)`` pairs for the
+        specs participating in the failure. For ``spec_label_mismatch``
+        only the mismatching specs are listed; for
+        ``multi_spec_inconsistent`` every spec in the bundle is
+        listed so the operator can see the conflict at a glance.
+
+    Inherits from :class:`ValueError` so callers that already catch
+    parser-shaped errors via ``except ValueError`` keep working. The
+    targeted class still exists so the route layer can map it onto
+    ``422`` specifically (validation-shaped client error) rather than
+    the ``400`` other ValueError children land on.
+    """
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        requested_version: str,
+        spec_info_versions: Sequence[tuple[str, str | None]],
+        suggestion: str | None = None,
+    ) -> None:
+        self.kind = kind
+        self.requested_version = requested_version
+        self.spec_info_versions = sorted(spec_info_versions, key=lambda pair: pair[0])
+        self.suggestion = suggestion
+        rendered_specs = ", ".join(
+            f"{uri!r} -> info.version={version!r}" for uri, version in self.spec_info_versions
+        )
+        if kind == "spec_label_mismatch":
+            base = (
+                f"spec/label version mismatch: requested_version={requested_version!r} "
+                f"is incompatible with [{rendered_specs}]"
+            )
+        elif kind == "multi_spec_inconsistent":
+            base = (
+                f"multi-spec ingest is internally inconsistent under "
+                f"requested_version={requested_version!r}: [{rendered_specs}]"
+            )
+        else:  # pragma: no cover -- defensive; constructor is called with a fixed kind set
+            base = (
+                f"version mismatch ({kind}): requested_version={requested_version!r}, "
+                f"specs=[{rendered_specs}]"
+            )
+        if suggestion is not None:
+            base = f"{base}; {suggestion}"
+        super().__init__(base)

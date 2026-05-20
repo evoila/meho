@@ -281,6 +281,28 @@ connector triple with the spec's URI as the `spec_source` tag, so
 operators can distinguish "this op came from vcenter.yaml" vs "this
 op came from vi-json.yaml" during review.
 
+**Spec-vs-label cross-check (G0.9-T8).** Before parse/register/group
+runs, `_validate_spec_versions` reads each spec's `info.version` via
+the lightweight `read_spec_info_version` helper and compares it
+against the operator-supplied `IngestRequest.version` label using the
+same `packaging.version.Version` semantics the resolver uses at
+dispatch time. Three outcomes:
+
+* **Exact** (`spec=9.0.3`, `label=9.0.3` / `9.0` / `9`) — proceed.
+* **Compatible** (same major, different minor, e.g. `spec=9.0.3`,
+  `label=9.1`) — proceed and emit a structured
+  `connector_ingest_version_drift` log event naming both values.
+* **Incompatible** (different major) — raise `VersionMismatchError`,
+  mapped to HTTP 422 with a structured detail naming both
+  `spec_info_versions` and `requested_version` so the operator-
+  facing error message tells them exactly what to fix.
+
+Multi-spec ingests (vcenter.yaml + vi-json.yaml) are additionally
+cross-checked for internal consistency: two specs disagreeing on
+the major version surface as `VersionMismatchError` with
+`kind="multi_spec_inconsistent"`. Specs missing `info.version`
+entirely skip the check (older spec dialects keep ingesting).
+
 ### `list_ingested_connectors()` (`ingest/list_connectors.py`)
 
 Aggregate query for `GET /api/v1/connectors`. Returns one
@@ -341,14 +363,21 @@ inject deterministic stubs.
 
 ### `parse_openapi(spec_path_or_uri, *, spec_source=None)` (`ingest/openapi.py`)
 
-The only public entry point. Resolves the input (file path or
-`http(s)://` URL via `httpx`), sniffs YAML vs JSON via
+The only public entry point for the full walk. Resolves the input
+(file path or `http(s)://` URL via `httpx`), sniffs YAML vs JSON via
 `detect_spec_format`, decodes, validates the OpenAPI version
 (3.0.x / 3.1.x), and walks `paths`. Returns a list.
 
 The function is synchronous because callers are CLI / one-shot
 ingestion endpoints that have no in-flight event loop concern. It
 also keeps the surface trivially testable.
+
+`read_spec_info_version(spec_path_or_uri)` is the companion helper
+the G0.9-T8 cross-check uses. It runs the same load / decode /
+version-gate steps but returns the spec's `info.version` string
+(or `None` when absent) without walking `paths` — so the
+pipeline can fail the spec-vs-label check in milliseconds rather
+than after spending CPU on a 2,000-op spec walk.
 
 ## Control flow
 

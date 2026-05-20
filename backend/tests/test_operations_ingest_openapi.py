@@ -26,6 +26,7 @@ from meho_backplane.operations.ingest import (
     UnsupportedSpecError,
     detect_spec_format,
     parse_openapi,
+    read_spec_info_version,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
@@ -630,3 +631,55 @@ def test_http_fetch_404_raises() -> None:
         )
         with pytest.raises(httpx.HTTPStatusError):
             parse_openapi("https://example.test/missing.yaml")
+
+
+# -- read_spec_info_version ------------------------------------------------
+
+
+def test_read_spec_info_version_returns_string(tmp_path: Path) -> None:
+    """Happy path — the spec's ``info.version`` is returned verbatim."""
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("openapi: '3.0.3'\ninfo: {title: t, version: '9.0.3'}\npaths: {}\n")
+    assert read_spec_info_version(str(spec)) == "9.0.3"
+
+
+def test_read_spec_info_version_missing_info_returns_none(tmp_path: Path) -> None:
+    """Specs without an ``info`` block return ``None`` — the cross-check skips."""
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("openapi: '3.0.3'\npaths: {}\n")
+    assert read_spec_info_version(str(spec)) is None
+
+
+def test_read_spec_info_version_missing_version_field_returns_none(tmp_path: Path) -> None:
+    """``info`` present but no ``version`` field → ``None``."""
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("openapi: '3.0.3'\ninfo: {title: t}\npaths: {}\n")
+    assert read_spec_info_version(str(spec)) is None
+
+
+def test_read_spec_info_version_non_string_version_returns_none(tmp_path: Path) -> None:
+    """A non-string ``info.version`` (e.g. an integer) → ``None``."""
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("openapi: '3.0.3'\ninfo: {title: t, version: 1}\npaths: {}\n")
+    assert read_spec_info_version(str(spec)) is None
+
+
+def test_read_spec_info_version_empty_version_returns_none(tmp_path: Path) -> None:
+    """An empty ``info.version`` string is treated as missing."""
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("openapi: '3.0.3'\ninfo: {title: t, version: ''}\npaths: {}\n")
+    assert read_spec_info_version(str(spec)) is None
+
+
+def test_read_spec_info_version_rejects_swagger_2(tmp_path: Path) -> None:
+    """Swagger 2.0 specs surface the same gate :func:`parse_openapi` enforces."""
+    spec = tmp_path / "spec.yaml"
+    spec.write_text("swagger: '2.0'\ninfo: {title: t, version: '9.0.3'}\npaths: {}\n")
+    with pytest.raises(UnsupportedSpecError, match=r"Swagger 2\.0"):
+        read_spec_info_version(str(spec))
+
+
+def test_read_spec_info_version_missing_file_raises_invalid_spec(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.yaml"
+    with pytest.raises(InvalidSpecError, match="could not read spec"):
+        read_spec_info_version(str(missing))

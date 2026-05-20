@@ -387,7 +387,16 @@ async def _seed_incompatible_kinds_fixture(
     persist with bidirectional ``conflicts_with`` markers.
     """
     svc = await _seed_node(tenant_id=tenant_id, kind="service", name="svc")
-    db = await _seed_node(tenant_id=tenant_id, kind="database", name="db")
+    # ``volume`` is the closest in-vocabulary kind to "stateful storage
+    # node" for this scenario; the closed v0.2 ``_GRAPH_NODE_KINDS``
+    # (mirrored in migration 0007's ``_NODE_KINDS``) does not include
+    # ``database``. Widening the vocabulary is a coordinated DB + model
+    # migration scoped to G9.2's curated extensions, not a test-only
+    # change. The variable name stays ``db`` because the test scenario
+    # narrates "service routes through the database-shaped node" — the
+    # *kind* slot just needs an in-vocab member; the conflict logic
+    # under test is edge-kind-driven, not node-kind-driven.
+    db = await _seed_node(tenant_id=tenant_id, kind="volume", name="db")
     auto_edge = await _seed_auto_edge(
         tenant_id=tenant_id,
         from_id=svc,
@@ -627,7 +636,10 @@ async def test_conflict_incompatible_kinds_persists_both_rows_with_bidirectional
                 json={
                     "from": {"name": "svc", "kind": "service"},
                     "kind": "depends-on",
-                    "to": {"name": "db", "kind": "database"},
+                    # ``volume`` matches the seed in
+                    # :func:`_seed_incompatible_kinds_fixture`; ``database``
+                    # is not in the closed v0.2 ``_GRAPH_NODE_KINDS``.
+                    "to": {"name": "db", "kind": "volume"},
                 },
                 headers=_authed(token),
             )

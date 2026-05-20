@@ -66,6 +66,12 @@ The service-layer exceptions map to HTTP status codes uniformly:
   :class:`InvalidSchemaError` / :class:`OpIdCollision` /
   :class:`LlmOutputInvalid` → 400 Bad Request (with the structured
   detail message from the exception).
+* :class:`VersionMismatchError` → 422 Unprocessable Entity. The
+  request is syntactically valid but the spec's ``info.version``
+  disagrees with the operator-supplied ``version`` label, or two
+  specs in the same bundle disagree on the major version. The
+  structured detail names both versions so the operator's error
+  message tells them exactly what to fix.
 * :class:`PermissionError` (raised by
   :meth:`IngestionPipelineService._authorize` when a service-layer
   caller bypasses the route gate) → 403.
@@ -115,6 +121,7 @@ from meho_backplane.operations.ingest import (
     ConnectorReviewPayload,
     EditGroupBody,
     EditOpBody,
+    IngestionPipelineResult,
     IngestionPipelineService,
     IngestRequest,
     IngestResponse,
@@ -127,6 +134,7 @@ from meho_backplane.operations.ingest import (
     OpIdCollision,
     ReviewService,
     UnsupportedSpecError,
+    VersionMismatchError,
     default_llm_client_factory,
     list_ingested_connectors,
 )
@@ -219,8 +227,43 @@ async def ingest_endpoint(
         operator=operator,
         llm_client_factory=llm_client_factory,
     )
+    result = await _run_ingest_with_http_mapping(service=service, body=body, operator=operator)
+    ingestion_model, grouping_model = result.to_api_models()
+    return IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
+
+
+def _version_mismatch_detail(exc: VersionMismatchError) -> dict[str, object]:
+    """Structured 422 body for :class:`VersionMismatchError`.
+
+    Named so the route handler stays readable; the body contract is
+    load-bearing for the CLI's operator-facing error message (which
+    parses the structured detail rather than the rendered string).
+    """
+    return {
+        "kind": exc.kind,
+        "requested_version": exc.requested_version,
+        "spec_info_versions": [
+            {"spec_uri": uri, "info_version": version} for uri, version in exc.spec_info_versions
+        ],
+        "message": str(exc),
+    }
+
+
+async def _run_ingest_with_http_mapping(
+    *,
+    service: IngestionPipelineService,
+    body: IngestRequest,
+    operator: Operator,
+) -> IngestionPipelineResult:
+    """Drive :meth:`IngestionPipelineService.ingest` and map domain errors to HTTP.
+
+    Extracted from :func:`ingest_endpoint` so the handler body stays
+    under the code-quality function-size threshold; the mapping
+    table itself is the load-bearing contract documented at the top
+    of the module.
+    """
     try:
-        result = await service.ingest(
+        return await service.ingest(
             product=body.product,
             version=body.version,
             impl_id=body.impl_id,
@@ -241,6 +284,15 @@ async def ingest_endpoint(
         raise HTTPException(
             status_code=http_status.HTTP_403_FORBIDDEN,
             detail=str(exc),
+        ) from exc
+    except VersionMismatchError as exc:
+        # 422 (not 400) because the request was syntactically valid
+        # but semantically refuses the spec-vs-label cross-check.
+        # The structured detail names both versions so the operator's
+        # error message tells them exactly what to fix.
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_version_mismatch_detail(exc),
         ) from exc
     except (
         InvalidSpecError,
@@ -271,9 +323,6 @@ async def ingest_endpoint(
             status_code=http_status.HTTP_502_BAD_GATEWAY,
             detail=f"upstream spec fetch failed: {exc}",
         ) from exc
-
-    ingestion_model, grouping_model = result.to_api_models()
-    return IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
 
 
 @router.get("")

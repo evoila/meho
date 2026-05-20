@@ -40,6 +40,7 @@ from meho_backplane.operations.ingest.exceptions import (
     LlmOutputInvalid,
     OpIdCollision,
     UnsupportedSpecError,
+    VersionMismatchError,
 )
 from meho_backplane.operations.ingest.list_connectors import (
     list_ingested_connectors,
@@ -54,6 +55,7 @@ from meho_backplane.operations.ingest.llm_groups import (
 from meho_backplane.operations.ingest.openapi import (
     detect_spec_format,
     parse_openapi,
+    read_spec_info_version,
 )
 from meho_backplane.operations.ingest.parser import parse_connector_id
 from meho_backplane.operations.ingest.payload import (
@@ -112,12 +114,14 @@ __all__ = [
     "SafetyLevel",
     "SpecSource",
     "UnsupportedSpecError",
+    "VersionMismatchError",
     "default_llm_client_factory",
     "detect_spec_format",
     "ensure_connector_class_registered",
     "list_ingested_connectors",
     "parse_connector_id",
     "parse_openapi",
+    "read_spec_info_version",
     "register_ingested_operations",
     "run_llm_grouping",
 ]

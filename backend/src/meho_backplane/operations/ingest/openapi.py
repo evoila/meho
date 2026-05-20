@@ -80,6 +80,7 @@ __all__ = [
     "UnsupportedSpecError",
     "detect_spec_format",
     "parse_openapi",
+    "read_spec_info_version",
 ]
 
 
@@ -208,6 +209,55 @@ def parse_openapi(
             spec_source=spec_source,
         )
     )
+
+
+def read_spec_info_version(spec_path_or_uri: str) -> str | None:
+    """Return the spec's ``info.version`` string, or ``None`` if absent.
+
+    Lightweight companion to :func:`parse_openapi` for the ingest
+    pipeline's spec-vs-label cross-check (G0.9-T8). Loads the spec
+    bytes the same way :func:`parse_openapi` does, decodes them, runs
+    the supported-OpenAPI-version gate so callers don't need to
+    re-validate, and returns ``info.version`` verbatim.
+
+    Returning the raw string (rather than a parsed
+    :class:`packaging.version.Version`) keeps this function spec-only;
+    the pipeline layer handles PEP 440 parsing and the
+    classification ladder against the operator-supplied label.
+
+    Args:
+        spec_path_or_uri: Local file path or ``http(s)://`` URL —
+            same shapes accepted by :func:`parse_openapi`.
+
+    Returns:
+        The ``info.version`` string when present; ``None`` when
+        ``info`` or ``info.version`` is missing or not a string. The
+        cross-check at the pipeline layer treats ``None`` as "no
+        cross-check possible" rather than as a mismatch, so older
+        specs missing ``info.version`` keep ingesting under whatever
+        operator label.
+
+    Raises:
+        InvalidSpecError: Document is not a mapping, or the file
+            referenced by ``spec_path_or_uri`` cannot be read. Same
+            shape :func:`parse_openapi` raises.
+        UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x — the
+            same gate the parser enforces; surfaced here so callers
+            can fail fast before touching ``info.version``.
+        yaml.YAMLError: Malformed YAML — bubbles up from the loader.
+        json.JSONDecodeError: Malformed JSON — bubbles up.
+        httpx.HTTPError: HTTP fetch failure for URL inputs.
+    """
+    content = _load_spec_bytes(spec_path_or_uri)
+    spec = _decode_spec(content)
+    _validate_openapi_version(spec)
+    info = spec.get("info")
+    if not isinstance(info, dict):
+        return None
+    version = info.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    return version
 
 
 def _load_spec_bytes(spec_path_or_uri: str) -> bytes:

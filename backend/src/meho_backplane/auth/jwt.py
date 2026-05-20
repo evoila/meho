@@ -88,13 +88,20 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.health import ProbeResult
 from meho_backplane.settings import Settings, get_settings
 
-#: Module-level structlog logger. Used for the tenant-claim-extraction
-#: failure paths so operators staring at a 401 in production can grep
-#: for a specific event name (``missing_tenant_claim`` /
-#: ``malformed_tenant_claim`` / ``missing_tenant_role_claim`` /
-#: ``unknown_tenant_role``) and tell at a glance whether they're chasing
-#: a Keycloak protocol-mapper config bug or a token-tampering attempt.
-_log = structlog.get_logger(__name__)
+# NOTE: structlog logger is resolved per-call inside the helpers below
+# rather than held as a module-level proxy. Production sets
+# ``cache_logger_on_first_use=True`` in
+# ``meho_backplane.logging.configure_logging``; a cached BoundLogger
+# pins a reference to the ``_CONFIG.default_processors`` list it was
+# built with, and later ``structlog.configure(...)`` calls *replace*
+# (not mutate) that reference — so test fixtures that swap the
+# processor chain (``structlog.testing.capture_logs``, per-test
+# ``configure`` + ``reset_defaults``) cannot reach the orphaned
+# reference the cached logger still holds. Same precedent + rationale
+# as ``meho_backplane.retrieval.embedding.EmbeddingService`` (see
+# ``docs/codebase/backend.md``). Per-call cost is a few microseconds;
+# acceptable on these 401 paths which are not latency-critical.
+# Originally exposed by the ``-n 3 --dist loadscope`` flake in #738.
 
 __all__ = [
     "AUDIENCE_NOT_CONFIGURED_REMEDIATION",
@@ -387,15 +394,16 @@ def _extract_tenant_id(claims: Any, settings: Settings) -> UUID:
     always logged so operators with non-default ``JWT_TENANT_CLAIM_NAME``
     can grep their settings without re-deriving the contract.
     """
+    log = structlog.get_logger(__name__)
     claim_name = settings.jwt_tenant_claim_name
     raw = claims.get(claim_name)
     if raw is None:
-        _log.warning("missing_tenant_claim", claim_name=claim_name)
+        log.warning("missing_tenant_claim", claim_name=claim_name)
         raise _http_401("missing_tenant_claim")
     try:
         return UUID(raw) if isinstance(raw, str) else UUID(str(raw))
     except (ValueError, TypeError, AttributeError) as exc:
-        _log.warning(
+        log.warning(
             "malformed_tenant_claim",
             claim_name=claim_name,
             value=raw,
@@ -414,15 +422,16 @@ def _extract_tenant_role(claims: Any, settings: Settings) -> TenantRole:
     is emitting a role string outside the closed v0.2 enum (likely a
     typo or a future role that needs the enum widened first).
     """
+    log = structlog.get_logger(__name__)
     claim_name = settings.jwt_tenant_role_claim_name
     raw = claims.get(claim_name)
     if raw is None:
-        _log.warning("missing_tenant_role_claim", claim_name=claim_name)
+        log.warning("missing_tenant_role_claim", claim_name=claim_name)
         raise _http_401("missing_tenant_role_claim")
     try:
         return TenantRole(raw)
     except ValueError as exc:
-        _log.warning(
+        log.warning(
             "unknown_tenant_role",
             claim_name=claim_name,
             value=raw,

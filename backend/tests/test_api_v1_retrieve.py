@@ -318,19 +318,14 @@ def test_read_only_role_returns_403_with_log(
     actual and required role values per :func:`require_role`'s
     docstring.
 
-    Uses :func:`structlog.testing.capture_logs` rather than a module-
-    local ``PrintLoggerFactory(file=buf)`` swap. The structured logger
-    in :mod:`meho_backplane.auth.rbac` is a module-level lazy proxy
-    that materialises into a cached ``BoundLogger`` on first use
-    (production sets ``cache_logger_on_first_use=True``), so once
-    materialised it pins the factory it was built with and ignores
-    later ``structlog.configure`` calls swapping the factory. Under
-    pytest-xdist, that materialisation can happen in any test
-    triggering ``require_role`` before this test's fixture runs
-    (#738 flake under ``-n 3``). ``capture_logs`` mutates the
-    configured-processors list in place, so cached BoundLoggers
-    holding a reference to that same list still pick up the
-    ``LogCapture`` processor.
+    Uses :func:`structlog.testing.capture_logs` — works because
+    :func:`meho_backplane.auth.rbac.require_role` resolves the logger
+    per-call (``structlog.get_logger(__name__)`` inside ``_checker``)
+    rather than holding a cached module-level proxy. See the
+    extended comment at that call site for the cached-BoundLogger /
+    orphan-processor-list mechanism that makes the per-call shape
+    necessary under ``cache_logger_on_first_use=True`` + xdist
+    fixture interleaving (#738).
     """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key, sub="op-ro", tenant_role=TenantRole.READ_ONLY.value)

@@ -262,7 +262,27 @@ jobs:
         # the container-heavy subtree runs in the sibling
         # `python-integration` job. Coverage is the unit sweep only;
         # combined cov is #564.
-        run: uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration --cov=meho_backplane --cov-report=xml --cov-report=term tests/
+        # Coverage gated to push events only (push-to-main): pytest-cov
+        # instrumentation is the unit job's dominant cost — run
+        # 26164020459 clocked ~27min on 2678 items, and coverage tracing
+        # adds an empirical 30-60% wall-time tax on xdist suites. PRs
+        # skip --cov entirely so the merge gate stays fast; main pushes
+        # still produce coverage.xml for quality-gate.yml's SonarCloud
+        # workflow_run consumer. SonarCloud's Clean-as-You-Code semantics
+        # tolerate coverage updating one merge later — main always
+        # carries fresh data, and quality-gate.yml is whole-job
+        # continue-on-error so missing PR coverage never blocks merge.
+        # Trade-off accepted: PR-level Sonar coverage decoration goes
+        # quiet (the new-code coverage widget shows "no data" on PRs).
+        # --cov-report=term dropped regardless — purely cosmetic and
+        # serializes through xdist workers.
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration \
+              --cov=meho_backplane --cov-report=xml tests/
+          else
+            uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
+          fi
 
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).

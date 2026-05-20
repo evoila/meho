@@ -49,14 +49,6 @@ from meho_backplane.middleware import verify_jwt_and_bind
 
 __all__ = ["require_role"]
 
-#: Module-level structlog logger. Used for the ``insufficient_role``
-#: warning event so on-call telemetry can grep for a specific event
-#: name and tell at a glance whether a 403 is an honest authz denial
-#: (operator using a route they shouldn't reach) or a configuration
-#: drift (a route mis-gated to a higher minimum than its handler
-#: needs).
-_log = structlog.get_logger(__name__)
-
 #: Linear role ordering. Index = rank; ``read_only`` is rank 0,
 #: ``tenant_admin`` is rank 2. The dependency compares the actual
 #: operator's rank to the required minimum's rank.
@@ -134,10 +126,28 @@ def require_role(min_role: TenantRole) -> Callable[[Operator], Operator]:
     def _checker(operator: Operator = Depends(verify_jwt_and_bind)) -> Operator:
         actual_rank = _ROLE_ORDER.index(operator.tenant_role)
         if actual_rank < min_rank:
+            # Resolve the logger per-call rather than from a module-
+            # level proxy. The module-level shape interacts badly with
+            # `cache_logger_on_first_use=True` (the production default
+            # in `meho_backplane.logging.configure_logging`): the
+            # cached BoundLogger pins a reference to the
+            # `_CONFIG.default_processors` list it was built with, and
+            # later `structlog.configure(...)` calls *replace* (not
+            # mutate) that reference — so test fixtures that swap the
+            # processor chain (`structlog.testing.capture_logs`,
+            # per-test `configure` + `reset_defaults`) cannot reach
+            # the orphaned reference the cached logger still holds.
+            # Same precedent + rationale as
+            # `meho_backplane.retrieval.embedding.EmbeddingService`
+            # (see ``docs/codebase/backend.md``). Per-call cost is a
+            # few microseconds; acceptable on the 403 path which is
+            # not latency-critical. Originally exposed by the
+            # `-n 3 --dist loadscope` flake in #738.
+            #
             # Bind the structured fields explicitly rather than
             # relying on the enum's StrEnum __str__ — keeps the log
             # line shape stable if the enum representation changes.
-            _log.warning(
+            structlog.get_logger(__name__).warning(
                 "insufficient_role",
                 operator_sub=operator.sub,
                 actual_role=operator.tenant_role.value,

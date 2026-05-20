@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: load-bearing registration surface. The three
+# helpers (register_typed_operation, register_composite_operation,
+# _register_in_session) are sequential phase pipelines — validate,
+# derive handler_ref, fail-closed checks, resolve group, body-hash
+# skip, embed, upsert. They share a 17-19-arg natural key + per-op
+# metadata surface that the dispatcher and search_operations meta-tool
+# read. Splitting them by phase forces every caller to thread the
+# same args through a coordinator + four sub-helpers, which makes the
+# upsert state machine harder to read, not easier. The two public
+# helpers + the private upsert path stay colocated for that reason.
 
 """``register_typed_operation()`` / ``register_composite_operation()`` -- async upsert helpers.
 
@@ -128,6 +138,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
+from meho_backplane.operations._handler_resolve import import_handler
 from meho_backplane.operations.embed import (
     build_embedding_text,
     compute_embedding_text_hash,
@@ -424,6 +435,64 @@ def validate_composite_handler_signature(handler: Any) -> None:
         )
 
 
+def _assert_handler_ref_resolvable(
+    handler_ref: str,
+    *,
+    op_id: str,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> None:
+    """Fail-closed: ``handler_ref`` MUST resolve via the dispatcher's import walk.
+
+    The dispatcher resolves ``handler_ref`` at dispatch time via
+    :func:`~meho_backplane.operations._handler_resolve.import_handler`
+    (``importlib.import_module`` + chained :func:`getattr`). A connector
+    that registers an op whose ``handler_ref`` cannot resolve produces
+    a ``handler_unreachable`` error at first dispatch -- which closed
+    the bind9 G3.4 Initiative #367 green-but-hollow (#697): the
+    integration lane was advisory, the per-op meta-tool test failed,
+    and the Initiative closed anyway. #699 fixed the *binding* layer
+    (MRO-aware :func:`is_unbound_method`); this guard fills the
+    parallel #697 AC #3 line at the *resolvability* layer so a future
+    connector cannot ship green with an unreachable handler_ref.
+
+    Catches at registration time:
+
+    * Typos / stale entries -- handler removed but registrar entry
+      still references the dotted path.
+    * Module path changes ``derive_handler_ref``'s ``{module}.{qualname}``
+      shape doesn't anticipate (submodule re-exports, decorator wrapping).
+    * Non-callable resolution -- e.g. a refactor that replaces an
+      ``async def`` with a class attribute.
+
+    Does **not** catch the precise #697 root cause (the resolver's
+    MRO-aware unbound-method binding -- that's a runtime-binding
+    question upstream of resolution). #699 fixed that at the binding
+    layer; this guard is the parallel registration-time backstop.
+
+    Raises
+    ------
+    HandlerRefError
+        ``handler_ref`` does not resolve to a callable via
+        :func:`import_handler`. Subclass of :class:`ValueError`; the
+        registrar surfaces the original :exc:`ImportError` /
+        :exc:`TypeError` as ``__cause__``.
+    """
+    try:
+        import_handler(handler_ref)
+    except (ImportError, TypeError) as exc:
+        raise HandlerRefError(
+            f"register_typed_operation: handler_ref {handler_ref!r} "
+            f"(op_id={op_id!r}, product={product!r}, version={version!r}, "
+            f"impl_id={impl_id!r}) does not resolve to a callable via "
+            f"import_handler -- the dispatcher would surface this as "
+            f"handler_unreachable at dispatch. Fail-closed at "
+            f"registration so the connector cannot ship green with an "
+            f"unreachable handler (#697 / #699)."
+        ) from exc
+
+
 def _reject_composite_handler(handler: Any) -> None:
     """Symmetric: typed registrations reject composite-shaped handlers.
 
@@ -690,6 +759,13 @@ async def register_typed_operation(
     _validate_safety_level(safety_level)
     _reject_composite_handler(handler)
     handler_ref = derive_handler_ref(handler)
+    _assert_handler_ref_resolvable(
+        handler_ref,
+        op_id=op_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    )
 
     tags_list = list(tags) if tags is not None else []
 
@@ -862,6 +938,13 @@ async def register_composite_operation(
     _validate_safety_level(safety_level)
     validate_composite_handler_signature(handler)
     handler_ref = derive_handler_ref(handler)
+    _assert_handler_ref_resolvable(
+        handler_ref,
+        op_id=op_id,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    )
 
     tags_list = list(tags) if tags is not None else []
 

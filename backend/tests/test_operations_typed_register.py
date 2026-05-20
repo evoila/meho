@@ -600,6 +600,149 @@ async def test_register_rejects_closure_handler(
 
 
 # ---------------------------------------------------------------------------
+# Registration-time handler_ref resolvability guard (#697 AC #3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_unreachable_handler_ref_via_import_round_trip(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handler whose derived ``handler_ref`` does not import-walk is rejected.
+
+    Fail-closed at registration. Simulates the green-but-hollow case
+    that #697 caught after the fact (#367 bind9 ``about`` op closed
+    green with a handler unreachable through ``call_operation``):
+    after ``derive_handler_ref`` succeeds on the in-memory callable,
+    point the handler's ``__module__`` at a non-existent module so the
+    dispatcher's :func:`import_handler` walk fails. Without the guard,
+    the row would commit and the connector would close green; with
+    the guard, registration raises :class:`HandlerRefError` and the
+    upsert never runs.
+    """
+    from meho_backplane.operations import _handler_resolve
+
+    _handler_resolve.reset_handler_cache()
+
+    # Use a module-level handler so ``derive_handler_ref`` (which
+    # rejects ``<locals>``-bearing qualnames before any other check)
+    # accepts it; then point ``__module__`` at a non-existent module
+    # so :func:`import_handler`'s walk fails. That isolates this test
+    # to the resolution-time guard, not the closure-rejection path
+    # exercised separately above.
+    monkeypatch.setattr(
+        sample_module_level_handler,
+        "__module__",
+        "definitely_not_a_real_module_xyzzy",
+    )
+
+    with pytest.raises(HandlerRefError, match="handler_unreachable at dispatch"):
+        await register_typed_operation(
+            product="vault",
+            version="1.x",
+            impl_id="vault",
+            op_id="vault.kv.read",
+            handler=sample_module_level_handler,
+            summary="x",
+            description="x",
+            parameter_schema={"type": "object"},
+            embedding_service=stub_embedding_service,
+        )
+
+    # No row committed: the guard fires before _register_in_session.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        result = await fresh.execute(
+            select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.kv.read")
+        )
+        assert result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_register_accepts_module_level_handler_via_import_round_trip(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A real module-level handler imports cleanly and registers.
+
+    Pairs with the rejection test above so the guard's positive path
+    is also pinned: ``sample_module_level_handler`` lives in this test
+    module, ``derive_handler_ref`` produces the dotted path
+    ``tests.test_operations_typed_register.sample_module_level_handler``,
+    and :func:`import_handler` round-trips that ref to the same
+    callable -- the registration proceeds normally.
+    """
+    from meho_backplane.operations import _handler_resolve
+
+    _handler_resolve.reset_handler_cache()
+
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=sample_module_level_handler,
+        summary="x",
+        description="x",
+        parameter_schema={"type": "object"},
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.kv.read")
+            )
+        ).scalar_one()
+        assert row.handler_ref == "tests.test_operations_typed_register.sample_module_level_handler"
+
+
+@pytest.mark.asyncio
+async def test_register_accepts_bound_method_handler_via_import_round_trip(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Bound-method handlers (the typed-connector shape) round-trip too.
+
+    The bind9 / vault / kubernetes connectors all register ops via
+    ``register_typed_operation(handler=self.<method>, ...)``. The
+    dispatcher's resolver returns the *unbound* function for those
+    refs (``getattr(Cls, 'method')`` is unbound in Py3); the guard's
+    :func:`import_handler` call MUST accept that same shape so the
+    typed-connector pattern keeps working. Pins the binding contract
+    for #699 (MRO-aware ``is_unbound_method``).
+    """
+    from meho_backplane.operations import _handler_resolve
+
+    _handler_resolve.reset_handler_cache()
+    instance = SampleHandlerClass()
+
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=instance.bound_method_handler,
+        summary="x",
+        description="x",
+        parameter_schema={"type": "object"},
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.kv.read")
+            )
+        ).scalar_one()
+        assert (
+            row.handler_ref
+            == "tests.test_operations_typed_register.SampleHandlerClass.bound_method_handler"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Caller-owned session
 # ---------------------------------------------------------------------------
 

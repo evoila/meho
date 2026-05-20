@@ -35,11 +35,8 @@ the persisted ``audit_log`` row -- the same path
 
 from __future__ import annotations
 
-import io
 import json
-import logging
 from collections.abc import Iterator
-from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
@@ -99,39 +96,6 @@ def _isolated_jwks_cache() -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# Log capture (mirrors test_auth_rbac.py)
-# ---------------------------------------------------------------------------
-
-
-def _configure_capture(buf: io.StringIO) -> None:
-    structlog.reset_defaults()
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.dict_tracebacks,
-            structlog.processors.JSONRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-        logger_factory=structlog.PrintLoggerFactory(file=buf),
-        cache_logger_on_first_use=False,
-    )
-
-
-@pytest.fixture
-def log_buffer() -> Iterator[io.StringIO]:
-    buf = io.StringIO()
-    _configure_capture(buf)
-    yield buf
-    structlog.reset_defaults()
-
-
-def _read_log_lines(buf: io.StringIO) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
-
-
-# ---------------------------------------------------------------------------
 # App construction with the retrieve route + audit middleware
 # ---------------------------------------------------------------------------
 
@@ -153,8 +117,8 @@ def _build_app_with_retrieve_route() -> FastAPI:
 
 
 @pytest.fixture
-def retrieve_client(log_buffer: io.StringIO) -> Iterator[TestClient]:
-    """``TestClient`` driving a fresh app + log capture rebound first."""
+def retrieve_client() -> Iterator[TestClient]:
+    """``TestClient`` driving a fresh app per test."""
     yield TestClient(_build_app_with_retrieve_route())
 
 
@@ -344,7 +308,6 @@ def test_unauthenticated_request_returns_401(retrieve_client: TestClient) -> Non
 
 def test_read_only_role_returns_403_with_log(
     retrieve_client: TestClient,
-    log_buffer: io.StringIO,
 ) -> None:
     """``read_only`` JWT → 403 + ``insufficient_role`` log event.
 
@@ -354,10 +317,24 @@ def test_read_only_role_returns_403_with_log(
     ``insufficient_role`` event includes the operator sub + both
     actual and required role values per :func:`require_role`'s
     docstring.
+
+    Uses :func:`structlog.testing.capture_logs` rather than a module-
+    local ``PrintLoggerFactory(file=buf)`` swap. The structured logger
+    in :mod:`meho_backplane.auth.rbac` is a module-level lazy proxy
+    that materialises into a cached ``BoundLogger`` on first use
+    (production sets ``cache_logger_on_first_use=True``), so once
+    materialised it pins the factory it was built with and ignores
+    later ``structlog.configure`` calls swapping the factory. Under
+    pytest-xdist, that materialisation can happen in any test
+    triggering ``require_role`` before this test's fixture runs
+    (#738 flake under ``-n 3``). ``capture_logs`` mutates the
+    configured-processors list in place, so cached BoundLoggers
+    holding a reference to that same list still pick up the
+    ``LogCapture`` processor.
     """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key, sub="op-ro", tenant_role=TenantRole.READ_ONLY.value)
-    with respx.mock as mock_router:
+    with respx.mock as mock_router, structlog.testing.capture_logs() as cap_logs:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = retrieve_client.post(
             "/api/v1/retrieve",
@@ -368,9 +345,7 @@ def test_read_only_role_returns_403_with_log(
     assert response.status_code == 403
     assert response.json() == {"detail": "insufficient_role"}
 
-    insufficient = [
-        line for line in _read_log_lines(log_buffer) if line.get("event") == "insufficient_role"
-    ]
+    insufficient = [entry for entry in cap_logs if entry.get("event") == "insufficient_role"]
     assert len(insufficient) == 1
     assert insufficient[0]["operator_sub"] == "op-ro"
     assert insufficient[0]["actual_role"] == "read_only"

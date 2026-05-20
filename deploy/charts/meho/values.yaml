@@ -202,6 +202,34 @@ config:
   retrievalEmbeddingModel: "BAAI/bge-small-en-v1.5"
   retrievalModelCacheDir: "/opt/meho/model-cache"
 
+# Memory layer (G5.2 #374). The backplane ships an in-process
+# memory-expiry sweeper that runs in the FastAPI lifespan and removes
+# `source="memory"` rows whose `metadata.expires_at` has passed. The
+# defaults here track the consumer-needs.md §G5 contract (7-day TTL,
+# 24-hour sweep cadence). Disable `expiryEnabled` only when an external
+# cleanup mechanism (k8s CronJob etc.) reaps expired rows instead;
+# expired rows remain soft-hidden via the read-side filter until the
+# external job runs.
+memory:
+  # -- Default time-to-live for user-scoped memory entries, in days.
+  # G5.2-T2 (#624) consumes this on `POST /api/v1/memory` to inject
+  # `expires_at = now() + userDefaultTtlDays` when the caller omits an
+  # explicit value. Operators wanting permanent memories pass
+  # `expires_at: null` on the write or set this to a year-class value.
+  # Range [1, 365]. Default 7 matches consumer-needs.md §G5
+  # ("session-scoped hints expire after 7 days unless re-pinned").
+  userDefaultTtlDays: 7
+  # -- Cadence of the in-process memory-expiry sweeper, in seconds.
+  # Default 86400 (24h) matches Initiative #374's stated cadence.
+  # Range [60, 86400]: below one minute competes with request load;
+  # above one day risks accumulating soft-hidden rows.
+  expiryTickIntervalSeconds: 86400
+  # -- Whether to start the in-process memory-expiry sweeper. Set
+  # false when an external cleanup mechanism reaps expired rows
+  # instead; the read-side filter still hides expired rows from
+  # consumers until the external job runs.
+  expiryEnabled: true
+
 postgres:
   # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
   # explicitly excludes a bundled PG subchart); typically reached over the

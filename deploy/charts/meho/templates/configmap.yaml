@@ -77,3 +77,13 @@ data:
   {{- if $mcpResourceUri }}
   MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
   {{- end }}
+  # G5.2-T1 (#623) — memory layer knobs. `userDefaultTtlDays` is consumed
+  # by G5.2-T2 (#624) on `POST /api/v1/memory`; `expiryTickIntervalSeconds`
+  # + `expiryEnabled` gate the in-process memory-expiry sweeper started
+  # by the FastAPI lifespan. The env-var names are the backplane's
+  # contract (`backend/src/meho_backplane/settings.py`); the chart
+  # converts the YAML values to strings via `quote` (booleans included)
+  # so the ConfigMap stays string-typed end-to-end.
+  MEMORY_USER_DEFAULT_TTL_DAYS: {{ .Values.memory.userDefaultTtlDays | quote }}
+  MEMORY_EXPIRY_TICK_INTERVAL_SECONDS: {{ .Values.memory.expiryTickIntervalSeconds | quote }}
+  MEMORY_EXPIRY_ENABLED: {{ .Values.memory.expiryEnabled | quote }}

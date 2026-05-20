@@ -23,6 +23,11 @@ build on top of :class:`MemoryService`; the auto-expiry executor
 metadata field this module honours on read.
 """
 
+from meho_backplane.memory.audit import write_internal_audit_row
+from meho_backplane.memory.expiry import (
+    start_memory_expiry_sweeper,
+    stop_memory_expiry_sweeper,
+)
 from meho_backplane.memory.rbac import MemoryRbacResolver, PermissionDeniedError
 from meho_backplane.memory.schemas import (
     MemoryEntry,
@@ -40,4 +45,7 @@ __all__ = [
     "MemoryScope",
     "MemoryService",
     "PermissionDeniedError",
+    "start_memory_expiry_sweeper",
+    "stop_memory_expiry_sweeper",
+    "write_internal_audit_row",
 ]

@@ -38,6 +38,7 @@ v0.2 adds:
   ~1-2 s ONNX model load cost.
 """
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -87,11 +88,15 @@ from meho_backplane.logging import configure_logging
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
 from meho_backplane.mcp.auth import mcp_resource_uri
+from meho_backplane.memory import (
+    start_memory_expiry_sweeper,
+    stop_memory_expiry_sweeper,
+)
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars
 from meho_backplane.retrieval.embedding import get_embedding_service
-from meho_backplane.settings import parse_bool_env
+from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
     start_topology_refresh_scheduler,
     stop_topology_refresh_scheduler,
@@ -208,6 +213,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     and the lifespan crashes so the operator sees CrashLoopBackOff
     instead of a quietly-broken dispatch.
 
+    The G5.2-T1 memory-expiry sweeper (#623) starts last among
+    background tasks and stops first on shutdown so its session-borrow
+    can never outlive the engine pool teardown. The sweeper is
+    enabled by ``MEMORY_EXPIRY_ENABLED`` (default ``True``); operators
+    using an external cleanup mechanism (k8s CronJob, etc.) flip the
+    env var off and the task handle stays ``None``, which the
+    ``finally`` branch tolerates.
+
     On shutdown :func:`_run_lifespan_shutdown` releases the
     SQLAlchemy + Valkey pools with per-disposer try/except so a
     single failure can't leak a sibling pool.
@@ -251,9 +264,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # so shutdown can cancel + await its unwind before the DB/redis
     # pools are disposed (a sweep mid-flight must not race pool teardown).
     topology_scheduler_task = start_topology_refresh_scheduler()
+    # Scheduled memory-expiry sweeper (G5.2-T1 #623). Gated on
+    # ``MEMORY_EXPIRY_ENABLED`` so operators relying on an external
+    # cleanup mechanism (k8s CronJob, etc.) can disable the in-process
+    # loop without forking the chassis. ``None`` when disabled; the
+    # finally branch tolerates that shape so disable-and-shutdown does
+    # not raise.
+    memory_expiry_task: asyncio.Task[None] | None = None
+    if get_settings().memory_expiry_enabled:
+        memory_expiry_task = start_memory_expiry_sweeper()
     try:
         yield
     finally:
+        if memory_expiry_task is not None:
+            await stop_memory_expiry_sweeper(memory_expiry_task)
         await stop_topology_refresh_scheduler(topology_scheduler_task)
         await _run_lifespan_shutdown()
 

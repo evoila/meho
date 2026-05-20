@@ -97,6 +97,92 @@ _VERSION = "9.0"
 _IMPL_ID = "vmware-rest"
 
 
+#: Curated agent-actionable group selectors for the vmware-rest
+#: composite surface (T4b #732). Surfaced verbatim by
+#: ``list_operation_groups`` so the LLM client picks the right
+#: composite group before drilling into ``search_operations``. Each
+#: string differentiates against the other six composite groups *and*
+#: against the ~3,470 ingested raw-REST ops that share the same
+#: ``(vmware, 9.0, vmware-rest)`` connector key -- a curated composite
+#: is the right route when one operator question maps to N raw REST
+#: calls plus rollback / polling / aggregation logic.
+_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    "cluster": (
+        "Use for cluster-level reads and orchestrated cluster ops "
+        "that aggregate across hosts: DRS state + active "
+        "recommendations (read), and sequential cluster patch (write, "
+        "approval-gated). The right group when the question is "
+        "'what is DRS suggesting?' or 'patch every host in this "
+        "cluster in order'. Pair with the 'host' group when the "
+        "follow-up drills into one host's lifecycle (evacuate, "
+        "maintenance), and with 'vm' when DRS recommendations need "
+        "to translate into actual VM migrations."
+    ),
+    "events": (
+        "Use for vCenter event-stream questions: 'what changed in "
+        "the last N events?' tail via EventManager.QueryEvents. "
+        "Read-only. The right group for live incident triage when "
+        "the operator doesn't yet know which entity to drill into. "
+        "Pair with 'vm' or 'host' once the event names a target "
+        "moid to inspect."
+    ),
+    "performance": (
+        "Use for performance-counter inspection on a single entity "
+        "(VM, host, cluster, datastore): discover available counters "
+        "via QueryAvailablePerfMetric, sample values via QueryPerf, "
+        "return both in one call. Read-only. The right group for "
+        "'is this VM hot?' / 'what does the last hour of CPU look "
+        "like?' questions. Pair with 'vm' / 'host' to convert "
+        "moids the operator already knows into one-shot perf "
+        "snapshots."
+    ),
+    "storage": (
+        "Use for datastore usage and VM-to-datastore placement: "
+        "capacity / free space / type per datastore plus the "
+        "vm_count + vm_names enrichment via the placement filter. "
+        "Read-only. The right group for 'where is this VM stored?', "
+        "'which datastores are running low?', or 'how many VMs live "
+        "on this datastore?'. Pair with 'vm' when the question moves "
+        "from 'which datastore?' to acting on a specific VM."
+    ),
+    "networking": (
+        "Use for distributed-switch and portgroup audits: enumerate "
+        "DVS + portgroups, then enrich each portgroup with parent "
+        "DVS and connected VM names. Read-only. The right group for "
+        "'what's connected to this portgroup?' / 'which DVS does "
+        "this VM live on?' questions, and a prerequisite read before "
+        "the 'host' group's host_detach_from_vds composite write. "
+        "Pair with 'vm' for the post-audit drill-in into one VM's "
+        "NICs."
+    ),
+    "vm": (
+        "Use for VM-lifecycle write composites: create with NIC "
+        "attach + optional power-on (rollback on partial failure), "
+        "clone from a content-library template (long-running task "
+        "polling), revert to a named snapshot (ambiguity-rejecting), "
+        "migrate via DRS or explicit host, bulk power across a "
+        "filter. Every op is dangerous / approval-required. The "
+        "right group for any operator workflow that would otherwise "
+        "be a ``govc vm.*`` invocation orchestrating multiple raw "
+        "REST calls. Pair with 'storage' / 'networking' / 'cluster' "
+        "for the pre-flight reads that shape the create / migrate "
+        "parameters."
+    ),
+    "host": (
+        "Use for host-lifecycle write composites: evacuate every "
+        "VM off a host (recursive composite call into vm.migrate) "
+        "then enter maintenance, or detach a host from a DVS after "
+        "migrating its VM NICs off. Dangerous / approval-required; "
+        "the host_evacuate composite is the first production "
+        "composite that calls another composite. The right group "
+        "for 'safely take this host offline' workflows. Pair with "
+        "'networking' for the DVS-audit prerequisite to "
+        "host_detach_from_vds, and with 'cluster' / 'vm' for the "
+        "pre-flight reads."
+    ),
+}
+
+
 class _CompositeSpec(NamedTuple):
     """Per-composite registration arguments.
 
@@ -448,12 +534,7 @@ async def register_vmware_composite_operations(
             parameter_schema=spec.parameter_schema,
             response_schema=spec.response_schema,
             group_key=spec.group_key,
-            # G0.9-T4a #731 placeholder paired with ``group_key``;
-            # T4b #732 replaces with curated blurbs per composite
-            # group (vm / vm-lifecycle / cluster / network / storage /
-            # performance / inventory). Ungrouped composites pass
-            # ``None`` so the pairing validator stays happy.
-            when_to_use=("TODO: curate (T4b #732)" if spec.group_key is not None else None),
+            when_to_use=_WHEN_TO_USE_BY_GROUP[spec.group_key],
             tags=spec.tags,
             safety_level=spec.safety_level,
             requires_approval=spec.requires_approval,

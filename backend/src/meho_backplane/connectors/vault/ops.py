@@ -820,15 +820,31 @@ async def register_vault_typed_operations(
     ``kv.put``, ``dangerous`` for ``kv.delete``) is the load-bearing
     signal the future policy gate keys on.
     """
+    # Curated by T4b (#732); surfaced verbatim by
+    # ``list_operation_groups``. Differentiates the KV-v2 read/write
+    # surface from the sibling ``auth`` (identity inspection) and
+    # ``sys`` (diagnostics) groups so the agent routes secret-CRUD
+    # questions here.
+    kv_when_to_use = (
+        "Use for HashiCorp Vault KV-v2 secret CRUD: read a secret, "
+        "write a new version, list child paths under a folder, "
+        "enumerate version history, soft-delete a version. The right "
+        "group when the question names a specific secret path "
+        "(``kubeconfig/<cluster>``, ``oidc/clients/<id>``, etc.) and "
+        "the operator wants the value, the existence, or the "
+        "version trail. Pair with the 'auth' group when 'can this "
+        "identity reach that path?' precedes the actual read, and "
+        "with the 'sys' group when the question is 'which KV "
+        "mountpoint is this secret stored at?' rather than the "
+        "value itself."
+    )
     for spec in _KV_OP_SPECS:
         await register_typed_operation(
             product="vault",
             version="1.x",
             impl_id="vault",
             group_key="kv",
-            # G0.9-T4a #731 placeholder; T4b #732 replaces with a
-            # curated blurb for the ``kv`` group.
-            when_to_use="TODO: curate (T4b #732)",
+            when_to_use=kv_when_to_use,
             requires_approval=False,
             embedding_service=embedding_service,
             **spec,

@@ -459,6 +459,24 @@ async def register_vault_sys_typed_operations(
     The ``embedding_service`` test seam matches the KV-v2 registrar so
     chassis tests can inject a stub instead of loading the ONNX model.
     """
+    # Curated by T4b (#732); surfaced verbatim by
+    # ``list_operation_groups``. Differentiates this diagnostic group
+    # from the sibling ``kv`` (secret CRUD) and ``auth`` (identity
+    # inspection) groups so the agent routes 'is Vault up?' / 'where
+    # are things mounted?' questions here.
+    sys_when_to_use = (
+        "Use for Vault target diagnostics and mount-surface "
+        "introspection: 'is this Vault reachable / unsealed / "
+        "serving traffic?' (sys.health), 'is it sealed and how "
+        "many key shares are needed?' (sys.seal_status), 'which "
+        "secret engines are mounted at which paths?' "
+        "(sys.mounts.list), 'which auth methods are mounted?' "
+        "(sys.auth.list). Read-only; returns mount metadata, never "
+        "secret values. The right group when triaging connectivity "
+        "or mapping mountpoints before drilling into a path with "
+        "the 'kv' group, or before drilling into per-backend role "
+        "config (read-only) via the 'auth' group."
+    )
     await register_typed_operation(
         product="vault",
         version="1.x",
@@ -478,9 +496,7 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_HEALTH_RESPONSE_SCHEMA,
         group_key="sys",
-        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
-        # blurb for the ``sys`` group.
-        when_to_use="TODO: curate (T4b #732)",
+        when_to_use=sys_when_to_use,
         tags=["read-only", "diagnostics", "health"],
         safety_level="safe",
         requires_approval=False,
@@ -504,9 +520,7 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_SEAL_STATUS_RESPONSE_SCHEMA,
         group_key="sys",
-        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
-        # blurb for the ``sys`` group.
-        when_to_use="TODO: curate (T4b #732)",
+        when_to_use=sys_when_to_use,
         tags=["read-only", "diagnostics", "seal"],
         safety_level="safe",
         requires_approval=False,
@@ -529,9 +543,7 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_MOUNTS_LIST_RESPONSE_SCHEMA,
         group_key="sys",
-        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
-        # blurb for the ``sys`` group.
-        when_to_use="TODO: curate (T4b #732)",
+        when_to_use=sys_when_to_use,
         tags=["read-only", "diagnostics", "mounts"],
         safety_level="safe",
         requires_approval=False,
@@ -554,9 +566,7 @@ async def register_vault_sys_typed_operations(
         parameter_schema=_NO_PARAMS_SCHEMA,
         response_schema=_VAULT_SYS_AUTH_LIST_RESPONSE_SCHEMA,
         group_key="sys",
-        # G0.9-T4a #731 placeholder; T4b #732 replaces with a curated
-        # blurb for the ``sys`` group.
-        when_to_use="TODO: curate (T4b #732)",
+        when_to_use=sys_when_to_use,
         tags=["read-only", "diagnostics", "auth-methods"],
         safety_level="safe",
         requires_approval=False,

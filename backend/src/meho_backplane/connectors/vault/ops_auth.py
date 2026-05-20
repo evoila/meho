@@ -425,6 +425,26 @@ async def register_vault_auth_operations(
     ``safety_level="safe"``, ``group_key="auth"`` and
     ``requires_approval=False`` -- read-only identity inspection.
     """
+    # Curated by T4b (#732); surfaced verbatim by
+    # ``list_operation_groups``. Differentiates against the sibling
+    # ``kv`` and ``sys`` groups so the agent routes identity questions
+    # here rather than mistakenly searching ``sys`` for an auth-method
+    # listing.
+    auth_when_to_use = (
+        "Use for per-role inspection of two specific Vault auth "
+        "backends, ``userpass`` and ``approle``: list the roles "
+        "defined on each backend and read one named role's config "
+        "(``vault.auth.userpass.{list,read}`` / "
+        "``vault.auth.approle.{list,read}``). Read-only; never "
+        "creates, edits, or rotates roles. Route token-identity "
+        "questions ('who am I in this Vault?'), auth-backend mount "
+        "listings ('which auth methods are mounted at which "
+        "paths?'), and any JWT / OIDC / kubernetes-backend role "
+        "inspection to the 'sys' group (``sys.auth.list``) -- the "
+        "auth group only covers the two backends named above. Pair "
+        "with the 'kv' group for the post-auth 'what can this "
+        "identity read?' follow-up."
+    )
     for spec in _AUTH_OP_SPECS:
         await register_typed_operation(
             product="vault",
@@ -437,9 +457,7 @@ async def register_vault_auth_operations(
             parameter_schema=spec["parameter_schema"],
             response_schema=spec["response_schema"],
             group_key="auth",
-            # G0.9-T4a #731 placeholder; T4b #732 replaces with a
-            # curated blurb for the ``auth`` group.
-            when_to_use="TODO: curate (T4b #732)",
+            when_to_use=auth_when_to_use,
             tags=["read-only", "auth", "identity"],
             safety_level="safe",
             requires_approval=False,

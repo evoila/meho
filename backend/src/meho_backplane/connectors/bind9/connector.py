@@ -165,6 +165,77 @@ def parse_os_release(content: str) -> str | None:
     return os_id
 
 
+#: Curated ``when_to_use`` strings -- one per ``group_key`` declared by
+#: :data:`~meho_backplane.connectors.bind9.ops.BIND9_OPS`. Surfaced
+#: verbatim by ``list_operation_groups`` (T8) so an agent picking
+#: between the connector's four groups gets agent-actionable selection
+#: signal rather than the auto-derive template
+#: (``"Operations grouped under 'zone' for bind9 bind9-ssh."``). Each
+#: entry explicitly names the *kind of question* that routes here and
+#: the cross-group pairing pattern with the rest of the bind9 surface.
+#: T4b (#732) curated; mirrors the
+#: :data:`~meho_backplane.connectors.kubernetes.connector._WHEN_TO_USE_BY_GROUP`
+#: shape so the registration loop reads identically.
+_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    "identity": (
+        "Use for bind9 nameserver-identity questions before any per-"
+        "zone or per-record drill-in: 'which BIND version is this "
+        "target running and on which host OS?'. The single "
+        "``bind9.about`` op returns vendor / product / version "
+        "(parsed BIND <X.Y.Z>), full named banner, and the host OS "
+        "identifier from ``/etc/os-release``. Call this first when "
+        "the agent needs to pick a version-flavoured doc page from "
+        "the knowledge base, or to confirm the nameserver is "
+        "reachable before issuing higher-level DNS ops."
+    ),
+    "zone": (
+        "Use for zone-level inventory and metadata reads: list every "
+        "zone the nameserver serves (``bind9.zone.list``) and read "
+        "one named zone's metadata + SOA (``bind9.zone.read``). "
+        "Read-only; never mutates zone state. The right group when "
+        "the agent doesn't yet know which zone to target ('what "
+        "zones does this nameserver host?') or needs the zone-level "
+        "context (type / file / view binding / SOA serial) before "
+        "drilling into records. Pair with the 'record' group once a "
+        "zone is identified to query / add / remove RRs inside it, "
+        "and with the 'config' group when the question is about "
+        "named.conf-level wiring (views, zone clauses) rather than "
+        "the zone's own contents."
+    ),
+    "record": (
+        "Use for record-level RR reads and mutations inside a known "
+        "zone: query a specific name+type (``bind9.record.get``), "
+        "add an RR atomically (``bind9.record.add``), or remove one "
+        "(``bind9.record.remove``). Writes route through the atomic-"
+        "apply primitive (rndc freeze / journal-sync / journal swap "
+        "/ rndc thaw) so a failed apply leaves the zone untouched. "
+        "``add`` / ``remove`` are mutating ops -- the future policy "
+        "gate keys on their ``caution`` / ``dangerous`` safety_level. "
+        "Typically reached after the 'zone' group identifies the "
+        "target zone. Pair with the 'config' group when the change "
+        "needs a view / zone-clause edit rather than an in-zone RR "
+        "edit."
+    ),
+    "config": (
+        "Use for nameserver configuration reads and atomic config "
+        "writes: dump the running named.conf "
+        "(``bind9.config.show``), apply a single named.conf file "
+        "(``bind9.config.apply_file``), apply a multi-file views "
+        "bundle (``bind9.config.apply_views``), snapshot the current "
+        "config + zones (``bind9.config.backup``), or reload via "
+        "rndc (``bind9.config.reload``). ``apply_file`` and "
+        "``apply_views`` route through the atomic-apply primitive "
+        "(staged write + named-checkconf validation + rollback on "
+        "failure); ``backup`` and ``reload`` do not (additive / "
+        "single-rndc respectively). The right group for view-level "
+        "or server-level changes -- per-RR edits live in the "
+        "'record' group, zone-inventory questions in the 'zone' "
+        "group. Mutating ops carry ``caution`` / ``dangerous`` "
+        "safety_level."
+    ),
+}
+
+
 class Bind9Connector(SshConnector):
     """ISC bind9 9.x connector built on the :class:`SshConnector` adapter.
 
@@ -699,6 +770,22 @@ class Bind9Connector(SshConnector):
             bindings.append((op, handler))
 
         for op, handler in bindings:
+            when_to_use: str | None
+            if op.group_key is None:
+                when_to_use = None
+            else:
+                when_to_use = _WHEN_TO_USE_BY_GROUP.get(op.group_key)
+                if when_to_use is None:
+                    raise ValueError(
+                        f"Bind9Connector op {op.op_id!r} declares "
+                        f"group_key={op.group_key!r} but no curated "
+                        f"when_to_use exists for that key. Add an entry "
+                        f"to _WHEN_TO_USE_BY_GROUP in "
+                        f"meho_backplane.connectors.bind9.connector so "
+                        f"list_operation_groups surfaces a real "
+                        f"selection signal instead of the auto-derive "
+                        f"template."
+                    )
             await register_typed_operation(
                 product=cls.product,
                 version=cls.version,
@@ -710,11 +797,7 @@ class Bind9Connector(SshConnector):
                 parameter_schema=op.parameter_schema,
                 response_schema=op.response_schema,
                 group_key=op.group_key,
-                # G0.9-T4a #731 placeholder paired with ``group_key``;
-                # T4b #732 replaces with a curated blurb per group.
-                # When the op has no ``group_key`` (``None``), pass
-                # ``None`` so the pairing validator stays happy.
-                when_to_use=("TODO: curate (T4b #732)" if op.group_key is not None else None),
+                when_to_use=when_to_use,
                 tags=list(op.tags),
                 safety_level=op.safety_level,
                 requires_approval=op.requires_approval,

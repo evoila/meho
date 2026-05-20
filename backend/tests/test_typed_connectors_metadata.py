@@ -77,9 +77,7 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
 _PLACEHOLDER_SUBSTRING: Final[str] = "Operations grouped under"
 
 
-async def _sample_curation_handler(
-    target: object, params: dict[str, object]
-) -> dict[str, object]:
+async def _sample_curation_handler(target: object, params: dict[str, object]) -> dict[str, object]:
     """Module-level async handler so ``derive_handler_ref`` accepts it.
 
     Lives at module scope (not nested inside the test body) because

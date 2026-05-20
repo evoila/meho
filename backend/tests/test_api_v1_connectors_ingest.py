@@ -232,9 +232,19 @@ async def _seed_connector(
     ops_per_group: int = 3,
     review_status: str = "staged",
     op_is_enabled: bool = False,
+    source_kind: str = "ingested",
 ) -> list[uuid.UUID]:
-    """Seed an ingested connector with *group_count* groups + ops per group."""
+    """Seed a connector with *group_count* groups + ops per group.
+
+    ``source_kind`` defaults to ``"ingested"`` (the G0.7 spec-driven
+    path the bulk of these tests exercise); pass ``"typed"`` or
+    ``"composite"`` to seed a G3.x typed / composite connector. For
+    typed/composite rows ``method`` / ``path`` are left ``None`` (per
+    the dispatcher contract -- those columns are populated for ingested
+    rows only).
+    """
     sessionmaker = get_sessionmaker()
+    is_ingested = source_kind == "ingested"
     group_ids: list[uuid.UUID] = []
     async with sessionmaker() as session:
         for g_index in range(group_count):
@@ -262,9 +272,9 @@ async def _seed_connector(
                         version=version,
                         impl_id=impl_id,
                         op_id=f"GET:/api/v1/{group_key}/{o_index}",
-                        source_kind="ingested",
-                        method="GET",
-                        path=f"/api/v1/{group_key}/{o_index}",
+                        source_kind=source_kind,
+                        method="GET" if is_ingested else None,
+                        path=f"/api/v1/{group_key}/{o_index}" if is_ingested else None,
                         group_id=group_id,
                         summary=f"Operation {o_index} in {group_key}",
                         is_enabled=op_is_enabled,
@@ -523,6 +533,61 @@ async def test_list_status_enabled_requires_uniform_state(
     assert item["connector_id"] == "vmware-rest-9.0"
     assert item["enabled_group_count"] == item["group_count"]
     assert item["operation_count"] == 6  # 2 groups x 3 ops
+
+
+@pytest.mark.asyncio
+async def test_list_operation_count_includes_typed_and_composite(
+    client: TestClient,
+) -> None:
+    """The ``operation_count`` rollup counts typed + composite rows, not only ingested.
+
+    Regression for Signal #4 in the 2026-05-20 RDC v0.3.0 dogfood (#728):
+    ``_operation_count_by_connector`` used to filter ``source_kind ==
+    "ingested"``, so typed connectors like ``bind9-ssh-9.x`` /
+    ``k8s-1.x`` / ``vault-1.x`` -- whose groups surface (the groups
+    aggregator has no source-kind filter) -- rolled up to
+    ``operation_count: 0`` while their groups reported the real op
+    counts. The paired queries must count the same universe of rows.
+
+    Seeds one connector per ``source_kind`` value -- ingested (3 ops),
+    typed (4 ops), composite (2 ops) -- and asserts each connector's
+    ``operation_count`` matches the seeded total.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        impl_id="vmware-rest",
+        group_count=1,
+        ops_per_group=3,
+        source_kind="ingested",
+    )
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="bind9",
+        impl_id="bind9-ssh",
+        group_count=2,
+        ops_per_group=2,
+        source_kind="typed",
+    )
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        impl_id="vmware-composite",
+        group_count=1,
+        ops_per_group=2,
+        source_kind="composite",
+    )
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    assert by_id["vmware-rest-9.0"]["operation_count"] == 3
+    assert by_id["bind9-ssh-9.0"]["operation_count"] == 4
+    assert by_id["vmware-composite-9.0"]["operation_count"] == 2
 
 
 # ---------------------------------------------------------------------------

@@ -152,11 +152,21 @@ async def _operation_count_by_connector(
 ) -> dict[tuple[UUID | None, str, str, str], int]:
     """Aggregate :class:`EndpointDescriptor` rows by connector triple.
 
-    Source-kind filter excludes typed-connector rows (G3.x hand-
-    coded ops) -- this endpoint lists *ingested* connectors only,
-    per the G0.7 review-queue contract; typed connectors live in
-    the v2 registry and operators don't drive them through the
-    review state machine.
+    Counts every ``source_kind`` -- ``"ingested"`` (G0.7 spec-driven),
+    ``"typed"`` (G3.x hand-coded via :func:`register_typed_operation`),
+    and ``"composite"`` (G3.x orchestration via
+    :func:`register_composite_operation`). The visibility driver for
+    this endpoint is :func:`_aggregate_groups_by_connector`, which has
+    never carried a source-kind filter -- a typed connector (e.g.
+    ``bind9-ssh-9.x`` with 11 typed ops) surfaces because its
+    :class:`OperationGroup` rows are visible. The op-count rollup
+    used to filter ``source_kind == "ingested"`` (an artefact of the
+    G0.7-only era when this endpoint only listed ingested
+    connectors), which left typed-connector rows visible with
+    ``operation_count: 0`` -- the asymmetry between the two paired
+    queries was the bug (Signal #4 in the v0.3.0 RDC dogfood), fixed
+    by dropping the filter so both queries count the same universe
+    of rows.
     """
     stmt = (
         select(
@@ -167,7 +177,6 @@ async def _operation_count_by_connector(
             func.count(EndpointDescriptor.id).label("op_count"),
         )
         .where(
-            EndpointDescriptor.source_kind == "ingested",
             (EndpointDescriptor.tenant_id.is_(None))
             | (EndpointDescriptor.tenant_id == operator_tenant_id),
         )

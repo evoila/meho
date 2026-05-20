@@ -109,6 +109,7 @@ from meho_backplane.operations.ingest._upsert import (
     upsert_one_operation,
 )
 from meho_backplane.operations.ingest.connector_registration import (
+    check_version_covered_by_registered_class,
     ensure_connector_class_registered,
 )
 from meho_backplane.operations.ingest.exceptions import OpIdCollision
@@ -302,6 +303,20 @@ async def register_ingested_operations(
     """
     _detect_op_id_collisions(
         operations,
+        product=product,
+        version=version,
+        impl_id=impl_id,
+    )
+    # G0.9-T9 (#741) — pre-flight that the operator's ``version`` label
+    # is dispatchable against at least one already-registered class for
+    # ``(product, impl_id)``. Runs **before** the auto-shim is
+    # synthesised: the shim's ``supported_version_range`` is derived
+    # from the operator's own ``version`` so a post-shim check would
+    # always pass vacuously. Raises :exc:`UncoveredVersionLabel` (mapped
+    # to HTTP 422 by the REST router) when a class is registered but
+    # none accepts the label; logs ``connector_ingest_orphaned_class``
+    # and proceeds when no class is registered yet (v0.4-staging path).
+    check_version_covered_by_registered_class(
         product=product,
         version=version,
         impl_id=impl_id,

@@ -254,6 +254,33 @@ subclass that adds the auth path. The shim makes the connector
 resolvable through the v2 registry so spec ingestion can proceed
 before the per-product Initiative work lands.
 
+### `check_version_covered_by_registered_class()` (`ingest/connector_registration.py`)
+
+G0.9-T9 (#741) pre-flight that the operator's `version` label is
+dispatchable against at least one already-registered class for
+`(product, impl_id)`. Mirrors the
+`resolver.resolve_connector` PEP 440 `SpecifierSet` check at ingest
+time so orphan-at-ingest is caught at the operator's call site,
+not at the first `call_operation` against the resulting orphan
+rows. Two branches:
+
+* **At least one class registered** for `(product, impl_id)` but
+  none accepts the label → raise `UncoveredVersionLabel` (mapped
+  to HTTP 422 in the REST router). The exception names every
+  candidate class and its advertised range so the operator-facing
+  detail tells them exactly what to fix.
+* **No class registered** for `(product, impl_id)` → log
+  `connector_ingest_orphaned_class` at info level and proceed.
+  This is the v0.4-staging path where ops land before the class
+  exists; the dispatcher will surface the gap at the first
+  `call_operation` and the ingest-time warning is the upstream
+  signal.
+
+Called from `register_ingested_operations` (real path) and from
+`IngestionPipelineService._run_dry_run` (dry-run path) so an
+operator's `dry_run=True` validation sees the same 422 the real
+path would.
+
 ### `IngestionPipelineService` (`ingest/pipeline.py`)
 
 End-to-end orchestrator that bundles the parse → register_ingested →
@@ -425,6 +452,13 @@ dispatcher's concern (G0.6-T5 + T2's tracking of `components.schemas`).
 ```text
 register_ingested_operations
 ├─ _detect_op_id_collisions    # set scan; raise OpIdCollision (within-batch) before DB writes
+├─ check_version_covered_by_registered_class    # G0.9-T9 (#741) pre-flight
+│  ├─ all_connectors_v2()       # snapshot v2 registry
+│  ├─ filter by (product, impl_id) # version label is the thing being checked
+│  ├─ for each class: Version(label) in SpecifierSet(supported_version_range)?
+│  ├─ no class for (product, impl_id) → log connector_ingest_orphaned_class, proceed
+│  ├─ class(es) exist but none accepts label → raise UncoveredVersionLabel (→ HTTP 422)
+│  └─ at least one accepts → return
 ├─ ensure_connector_class_registered
 │  ├─ all_connectors_v2()       # check v2 registry for (product, version, impl_id)
 │  ├─ type(cls_name, ...)       # synthesise GenericRestConnector subclass
@@ -441,6 +475,14 @@ register_ingested_operations
       ├─ re-embed path          # row exists, embedding text changed
       └─ first-register path    # brand-new row, embedding computed
 ```
+
+The pre-flight runs **before** `ensure_connector_class_registered`
+on purpose: the auto-shim's `supported_version_range` is derived
+from the operator's own `version` label (via
+`derive_supported_version_range`), so a post-shim check would
+always pass vacuously. The dry-run path in `IngestionPipelineService`
+calls the same helper so an operator validating a spec sees the
+422 they would see on the real path.
 
 The skip-re-embed path is the operationally critical branch on spec
 re-ingest: an unchanged 3,000-op vCenter spec must not re-embed

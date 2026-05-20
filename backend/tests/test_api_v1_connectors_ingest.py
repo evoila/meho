@@ -54,6 +54,7 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.connectors.base import Connector
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
     AuditLog,
@@ -1327,6 +1328,152 @@ def test_set_llm_client_factory_returns_previous_and_restores(
     assert previous is default_llm_client_factory
     restored = set_llm_client_factory(previous)
     assert restored is custom_factory
+
+
+# ---------------------------------------------------------------------------
+# G0.9-T9 (#741) — version label coverage pre-flight at the HTTP layer
+# ---------------------------------------------------------------------------
+
+
+class _RangedTestConnector(Connector):
+    """Hand-rolled :class:`Connector` for the 422 pre-flight HTTP tests.
+
+    Pinned ``supported_version_range`` mirrors the real
+    ``VmwareRestConnector`` shape so the operator-facing 422 detail
+    looks like what a real misconfigured ingest produces.
+    """
+
+    product = "t9-vmware"
+    version = "9.0"
+    impl_id = "t9-vmware-rest"
+    supported_version_range = ">=8.5,<10.0"
+    priority = 1
+
+    async def fingerprint(self, target: Any) -> Any:
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> Any:
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:
+        raise NotImplementedError
+
+
+@pytest.fixture
+def _registered_ranged_connector() -> Iterator[None]:
+    """Register :class:`_RangedTestConnector` for the duration of the test.
+
+    The v2 registry has no per-entry unregister API; this fixture
+    inspects the underlying dict and pops the entry on teardown so
+    the registration is scoped to the test rather than leaking into
+    later cases. The product / impl_id are namespaced (``t9-…``) to
+    avoid colliding with any prior auto-shim a happy-path ingest
+    test may have left behind.
+    """
+    from meho_backplane.connectors import registry as _registry_mod
+    from meho_backplane.connectors.registry import register_connector_v2
+
+    register_connector_v2(
+        product="t9-vmware",
+        version="9.0",
+        impl_id="t9-vmware-rest",
+        cls=_RangedTestConnector,
+    )
+    try:
+        yield
+    finally:
+        _registry_mod._REGISTRY_V2.pop(("t9-vmware", "9.0", "t9-vmware-rest"), None)
+
+
+def test_ingest_returns_422_when_version_outside_registered_class_range(
+    client: TestClient,
+    tmp_path: Any,
+    stub_embedding_service: AsyncMock,
+    _registered_ranged_connector: None,
+) -> None:
+    """A registered class with ``">=8.5,<10.0"`` + label ``"7.0"`` → 422.
+
+    The pre-flight raises :exc:`UncoveredVersionLabel` (mapped to
+    422); the response detail names the existing class so the
+    operator can see exactly which range the label fell outside of.
+    """
+    spec_path = tmp_path / "vcenter.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: vcenter
+  version: '7.0'
+paths:
+  /api/vcenter/cluster:
+    get:
+      summary: list clusters
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "t9-vmware",
+                "version": "7.0",
+                "impl_id": "t9-vmware-rest",
+                "specs": [{"uri": str(spec_path)}],
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert "version='7.0'" in detail
+    assert ">=8.5,<10.0" in detail
+    assert "_RangedTestConnector" in detail
+
+
+def test_ingest_dry_run_returns_422_when_version_outside_registered_class_range(
+    client: TestClient,
+    tmp_path: Any,
+    _registered_ranged_connector: None,
+) -> None:
+    """``dry_run=true`` runs the same pre-flight → 422.
+
+    Catches the orphan-at-ingest mistake during validation so
+    operators don't ship a misconfigured ingest by trusting a
+    successful dry-run.
+    """
+    spec_path = tmp_path / "vcenter.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: vcenter
+  version: '7.0'
+paths:
+  /api/vcenter/cluster:
+    get:
+      summary: list clusters
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "t9-vmware",
+                "version": "7.0",
+                "impl_id": "t9-vmware-rest",
+                "specs": [{"uri": str(spec_path)}],
+                "dry_run": True,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 422, response.text
+    assert "version='7.0'" in response.json()["detail"]
 
 
 # Silence unused-import lints on test seams reserved for sibling tasks.

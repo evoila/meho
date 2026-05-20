@@ -50,10 +50,16 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import structlog.testing
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.connectors.registry import all_connectors_v2, clear_registry
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import (
+    all_connectors_v2,
+    clear_registry,
+    register_connector_v2,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations.ingest import (
@@ -61,6 +67,8 @@ from meho_backplane.operations.ingest import (
     GenericRestConnector,
     IngestionResult,
     OpIdCollision,
+    UncoveredVersionLabel,
+    check_version_covered_by_registered_class,
     parse_openapi,
     register_ingested_operations,
 )
@@ -763,3 +771,221 @@ async def test_caller_owned_session_defers_commit(
             )
         ).scalar_one_or_none()
     assert post_rollback is None
+
+
+# ---------------------------------------------------------------------------
+# G0.9-T9 (#741) — version label coverage pre-flight
+# ---------------------------------------------------------------------------
+
+
+class _FakeRangedConnector(Connector):
+    """Hand-rolled connector class for pre-flight tests.
+
+    Stands in for the kind of subclass an operator would register at
+    G3.x — pinned ``supported_version_range`` mirrors the real
+    :class:`VmwareRestConnector` shape (``">=8.5,<10.0"``) and the
+    methods are no-op stubs so the ABC is concrete.
+    """
+
+    product = "vmware"
+    version = "9.0"
+    impl_id = "vmware-rest"
+    supported_version_range = ">=8.5,<10.0"
+    priority = 1
+
+    async def fingerprint(self, target: Any) -> Any:
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> Any:
+        raise NotImplementedError
+
+    async def execute(self, target: Any, op_id: str, params: dict[str, Any]) -> Any:
+        raise NotImplementedError
+
+
+def test_check_version_covered_passes_when_label_inside_range() -> None:
+    """A class advertising ``">=8.5,<10.0"`` accepts label ``"8.6"`` — no raise."""
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeRangedConnector,
+    )
+    # Inside the range → silent pass.
+    check_version_covered_by_registered_class(
+        product="vmware",
+        version="8.6",
+        impl_id="vmware-rest",
+    )
+
+
+def test_check_version_covered_raises_when_label_outside_range() -> None:
+    """A class with non-matching range → :exc:`UncoveredVersionLabel` with detail."""
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeRangedConnector,
+    )
+    with pytest.raises(UncoveredVersionLabel) as excinfo:
+        check_version_covered_by_registered_class(
+            product="vmware",
+            version="7.0",
+            impl_id="vmware-rest",
+        )
+    err = excinfo.value
+    assert err.product == "vmware"
+    assert err.version == "7.0"
+    assert err.impl_id == "vmware-rest"
+    # The exception names the existing class + its range so the
+    # operator can see what to fix.
+    assert err.candidates == [("9.0", "vmware-rest", "_FakeRangedConnector", ">=8.5,<10.0")]
+    detail = str(err)
+    assert "version='7.0'" in detail
+    assert ">=8.5,<10.0" in detail
+    assert "_FakeRangedConnector" in detail
+
+
+def test_check_version_covered_logs_orphan_when_no_class_registered() -> None:
+    """No class for ``(product, impl_id)`` → log ``connector_ingest_orphaned_class``; no raise."""
+    # Registry is empty (autouse fixture cleared it).
+    with structlog.testing.capture_logs() as captured:
+        check_version_covered_by_registered_class(
+            product="brand-new-vendor",
+            version="1.0",
+            impl_id="brand-new-impl",
+        )
+    events = [
+        entry for entry in captured if entry.get("event") == "connector_ingest_orphaned_class"
+    ]
+    assert len(events) == 1
+    assert events[0]["product"] == "brand-new-vendor"
+    assert events[0]["version"] == "1.0"
+    assert events[0]["impl_id"] == "brand-new-impl"
+
+
+def test_check_version_covered_ignores_other_impls_of_same_product() -> None:
+    """Class for ``(product, impl_id_A)`` does not constrain ingest under ``impl_id_B``.
+
+    The pre-flight filters by the full ``(product, impl_id)`` pair, so
+    a coexisting class on the same product but a different impl
+    (``vmware-pyvmomi`` vs ``vmware-rest``) leaves the ``impl_id_B``
+    pre-flight in the no-class-registered branch and proceeds with
+    the orphan warning.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeRangedConnector,
+    )
+    with structlog.testing.capture_logs() as captured:
+        check_version_covered_by_registered_class(
+            product="vmware",
+            version="7.0",
+            impl_id="vmware-pyvmomi",
+        )
+    orphan_events = [
+        entry for entry in captured if entry.get("event") == "connector_ingest_orphaned_class"
+    ]
+    assert len(orphan_events) == 1
+    assert orphan_events[0]["impl_id"] == "vmware-pyvmomi"
+
+
+@pytest.mark.asyncio
+async def test_register_ingested_blocks_when_version_outside_existing_class_range(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """End-to-end: ingest under ``(vmware, 7.0, vmware-rest)`` with a
+    registered ``VmwareRestConnector``-shaped class → 422-mapped
+    :exc:`UncoveredVersionLabel`; no rows persisted.
+    """
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeRangedConnector,
+    )
+    with pytest.raises(UncoveredVersionLabel):
+        await register_ingested_operations(
+            product="vmware",
+            version="7.0",
+            impl_id="vmware-rest",
+            spec_source="vcenter.yaml",
+            operations=[_proto("GET:/api/vcenter/cluster", path="/api/vcenter/cluster")],
+            embedding_service=stub_embedding_service,
+        )
+    # No rows persisted — the pre-flight raised before any upsert.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == "vmware")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
+    # The embedding pipeline was not invoked.
+    assert stub_embedding_service.encode_one.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_register_ingested_warns_and_proceeds_when_no_class_registered(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """No class for ``(product, impl_id)`` → ingest proceeds and emits
+    ``connector_ingest_orphaned_class``.
+    """
+    # Registry empty for ``(unknown-vendor, brand-new-impl)``.
+    with structlog.testing.capture_logs() as captured:
+        result = await register_ingested_operations(
+            product="unknown-vendor",
+            version="1.0",
+            impl_id="brand-new-impl",
+            spec_source="vendor.yaml",
+            operations=[_proto("GET:/things", path="/things")],
+            embedding_service=stub_embedding_service,
+        )
+    assert result.inserted_count == 1
+    # The orphan event is logged with the full triple.
+    orphan_events = [
+        entry for entry in captured if entry.get("event") == "connector_ingest_orphaned_class"
+    ]
+    assert len(orphan_events) == 1
+    event = orphan_events[0]
+    assert event["product"] == "unknown-vendor"
+    assert event["version"] == "1.0"
+    assert event["impl_id"] == "brand-new-impl"
+    # The auto-shim is registered after the orphan log (the ingest
+    # proceeded — that's the warn-but-proceed semantics).
+    assert ("unknown-vendor", "1.0", "brand-new-impl") in all_connectors_v2()
+
+
+@pytest.mark.asyncio
+async def test_register_ingested_passes_pre_flight_for_compatible_version(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Operator-supplied version inside a registered class's range → success path."""
+    register_connector_v2(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        cls=_FakeRangedConnector,
+    )
+    result = await register_ingested_operations(
+        # Inside the ``>=8.5,<10.0`` range advertised by the existing class.
+        product="vmware",
+        version="9.0.3",
+        impl_id="vmware-rest",
+        spec_source="vcenter.yaml",
+        operations=[_proto("GET:/api/vcenter/cluster", path="/api/vcenter/cluster")],
+        embedding_service=stub_embedding_service,
+    )
+    assert result.inserted_count == 1
+    # A NEW auto-shim is registered under the (vmware, 9.0.3, vmware-rest) triple
+    # alongside the pre-existing (vmware, 9.0, vmware-rest) entry — the pre-flight
+    # checks coverage, it does not require the triple to already exist.
+    assert ("vmware", "9.0.3", "vmware-rest") in all_connectors_v2()

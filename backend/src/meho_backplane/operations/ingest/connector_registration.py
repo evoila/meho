@@ -54,6 +54,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.base import Connector
@@ -63,9 +65,11 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+from meho_backplane.operations.ingest.exceptions import UncoveredVersionLabel
 
 __all__ = [
     "GenericRestConnector",
+    "check_version_covered_by_registered_class",
     "derive_supported_version_range",
     "ensure_connector_class_registered",
 ]
@@ -351,3 +355,157 @@ def ensure_connector_class_registered(
         base_url=base_url,
     )
     return True
+
+
+def check_version_covered_by_registered_class(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+) -> None:
+    """Pre-flight check that the ``version`` label is dispatchable.
+
+    G0.9-T9 (#741). The dispatch resolver
+    (:func:`~meho_backplane.connectors.resolver.resolve_connector`)
+    walks :func:`~meho_backplane.connectors.registry.all_connectors_v2`
+    and matches a target's fingerprinted version against each class's
+    PEP 440 ``supported_version_range``. The ingest pipeline keys
+    its rows on ``(product, version, impl_id)`` as a free-form
+    natural-key triple. Without a pre-flight, an operator can ingest
+    under ``(vmware, "7.0", vmware-rest)`` even though the only
+    registered class (``VmwareRestConnector`` with
+    ``supported_version_range=">=8.5,<10.0"``) cannot dispatch a 7.x
+    target — the catalog shows the ops but every call fails with
+    :exc:`NoMatchingConnector` at runtime, far from the ingest call
+    site.
+
+    This helper runs at ingest time **before**
+    :func:`ensure_connector_class_registered` synthesises the auto-
+    shim (the auto-shim's ``supported_version_range`` is derived
+    from the operator's own ``version`` label so it would always
+    "match" and make the check vacuous).
+
+    Behaviour by registry state:
+
+    * **At least one class registered for ``(product, impl_id)``** —
+      every such class is checked. If **none** advertises a range
+      that accepts the operator's ``version``, raise
+      :exc:`UncoveredVersionLabel`. The exception carries every
+      candidate class so the operator-facing 422 detail names
+      exactly which advertised ranges the label fell outside of.
+
+    * **No class registered for ``(product, impl_id)``** — log
+      ``connector_ingest_orphaned_class`` at info level and return.
+      This is the v0.4-staging path where ops land before the
+      hand-coded subclass exists; the dispatcher will surface the
+      gap clearly at the first ``call_operation`` and the warning
+      log is the upstream signal at ingest time.
+
+    The check intentionally filters by ``(product, impl_id)`` and
+    not the full triple — the goal is to confirm the operator's
+    ``version`` label is dispatchable against at least one of the
+    classes already known for that ``impl_id``, not to require a
+    class registered under the same triple. A real subclass at
+    ``(vmware, "9.0", vmware-rest)`` advertising
+    ``">=8.5,<10.0"`` accepts an ingest at
+    ``(vmware, "8.5.1", vmware-rest)`` because the subclass already
+    advertises support for the 8.5.x line; the auto-shim then
+    registers under the new triple to give the ingest its
+    resolvable identity.
+
+    Args:
+        product, version, impl_id: The connector triple the operator
+            submitted. The triple matches the natural-key shape on
+            :class:`~meho_backplane.db.models.EndpointDescriptor`.
+
+    Raises:
+        UncoveredVersionLabel: At least one registered class exists
+            for ``(product, impl_id)`` but none accepts ``version``.
+    """
+    # Local import — the v2 registry helper lives in a sibling
+    # package; deferring import to call-time mirrors
+    # :func:`ensure_connector_class_registered` and avoids a
+    # top-of-module dependency that would also be loaded at every
+    # import of this subpackage.
+    from meho_backplane.connectors.registry import all_connectors_v2
+
+    try:
+        parsed_version = Version(version)
+    except InvalidVersion:
+        # PEP 440 cannot parse the operator's label. We cannot
+        # decide range membership — log + proceed so the operator
+        # is not blocked by a label-parsing quirk the resolver
+        # itself tolerates (the resolver also catches
+        # InvalidVersion and falls through). T8 (#740) validates
+        # the label format against the spec's info.version; this
+        # pre-flight is specifically about range coverage and
+        # should not over-reach into label-shape validation.
+        _log.info(
+            "connector_ingest_version_unparseable",
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        return
+
+    candidates: list[tuple[str, str, str, str]] = []
+    accepted_by: tuple[str, str, str, str] | None = None
+    for (entry_product, entry_version, entry_impl_id), cls in all_connectors_v2().items():
+        if entry_product != product or entry_impl_id != impl_id:
+            continue
+        spec_str = cls.supported_version_range
+        candidate = (entry_version, entry_impl_id, cls.__name__, spec_str or "")
+        candidates.append(candidate)
+        if not spec_str:
+            # ``None`` / empty range = "accepts any version" per the
+            # resolver's conventions (v1-style entries register here
+            # with ``version=""`` and no range). One such class is
+            # enough to cover any label.
+            accepted_by = candidate
+            break
+        try:
+            if parsed_version in SpecifierSet(spec_str):
+                accepted_by = candidate
+                break
+        except InvalidSpecifier:
+            # An unparseable advertisement is the connector author's
+            # bug, not the operator's. The resolver logs it at
+            # dispatch time and skips that class; mirror the
+            # behaviour here so a typo in one class does not block
+            # an ingest the other classes would have accepted.
+            _log.warning(
+                "connector_specifier_invalid_at_ingest_preflight",
+                product=entry_product,
+                version=entry_version,
+                impl_id=entry_impl_id,
+                cls=cls.__name__,
+                supported_version_range=spec_str,
+            )
+            continue
+
+    if not candidates:
+        # v0.4-staging path: ops land before the class exists.
+        _log.info(
+            "connector_ingest_orphaned_class",
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        return
+
+    if accepted_by is None:
+        raise UncoveredVersionLabel(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            candidates=candidates,
+        )
+
+    _log.debug(
+        "connector_ingest_version_covered",
+        product=product,
+        version=version,
+        impl_id=impl_id,
+        accepted_by_cls=accepted_by[2],
+        accepted_by_range=accepted_by[3],
+    )

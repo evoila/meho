@@ -95,6 +95,7 @@ __all__ = [
     "InvalidStateTransitionError",
     "LlmOutputInvalid",
     "OpIdCollision",
+    "UncoveredVersionLabel",
     "UnsupportedSpecError",
     "VersionMismatchError",
 ]
@@ -304,6 +305,79 @@ class LlmOutputInvalid(Exception):  # noqa: N818 -- Task #404 API contract pins 
         super().__init__(
             f"LLM output failed validation in pass {pass_name!r}: "
             f"{parse_error!r}; raw_output={preview!r}",
+        )
+
+
+class UncoveredVersionLabel(ValueError):  # noqa: N818 -- Task #741 names this verbatim
+    """The operator's ``version`` label is outside every registered class's range.
+
+    Raised by the ingest pre-flight check (G0.9-T9, #741) before any
+    DB write when at least one connector class for the
+    ``(product, impl_id)`` pair is already registered against the v2
+    registry but none advertises a ``supported_version_range`` that
+    accepts the operator-supplied ``version``. Dispatch would later
+    raise :exc:`~meho_backplane.connectors.resolver.NoMatchingConnector`
+    on the first ``call_operation`` against the orphan rows — the
+    pre-flight catches the misconfiguration at the ingest call site
+    where the operator can correct it immediately.
+
+    Conditions for raising:
+
+    * **At least one** class with matching ``(product, impl_id)`` is
+      registered against the v2 registry.
+    * **None** of those classes accepts the operator's ``version``
+      label per its PEP 440 ``supported_version_range``.
+
+    The "no class registered for ``(product, impl_id)``" case is the
+    v0.4-staging path (ops land before the class exists); the pre-
+    flight logs ``connector_ingest_orphaned_class`` and proceeds
+    rather than raising — the dispatcher will surface the orphan
+    clearly later, and the warning is the upstream signal.
+
+    Attributes
+    ----------
+    product, version, impl_id:
+        The connector triple the operator submitted; surfaced on the
+        exception so the CLI / REST layer can render a complete
+        operator-facing error without re-threading them from the
+        call site.
+    candidates:
+        Sorted list of ``(version, impl_id, class_name, supported_version_range)``
+        tuples — one per existing registered class for the
+        ``(product, impl_id)`` pair. Surfaces in the exception
+        message so the operator sees exactly which advertised ranges
+        the label fell outside of.
+
+    Inherits from :class:`ValueError` so callers that already catch
+    ingest-shaped errors via ``except ValueError`` keep working. The
+    REST router maps this exception onto HTTP 422 Unprocessable
+    Entity — the request body is structurally valid (Pydantic
+    accepted it) but semantically rejected at the service layer.
+    """
+
+    def __init__(
+        self,
+        *,
+        product: str,
+        version: str,
+        impl_id: str,
+        candidates: list[tuple[str, str, str, str]],
+    ) -> None:
+        self.product = product
+        self.version = version
+        self.impl_id = impl_id
+        self.candidates = sorted(candidates)
+        rendered_candidates = ", ".join(
+            f"{cls_name} (version={cand_version!r}, impl_id={cand_impl_id!r}, "
+            f"supported_version_range={spec!r})"
+            for cand_version, cand_impl_id, cls_name, spec in self.candidates
+        )
+        super().__init__(
+            f"version={version!r} is not covered by any registered "
+            f"connector class for product={product!r}, impl_id={impl_id!r}; "
+            f"registered: [{rendered_candidates}]. Either register a class "
+            f"with a compatible supported_version_range or pick a version "
+            f"inside an existing class's range."
         )
 
 

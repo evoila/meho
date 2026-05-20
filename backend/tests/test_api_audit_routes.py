@@ -20,8 +20,12 @@ Coverage matrix (#466 acceptance criteria):
   rows (the cross-tenant probe case — the substrate's tenant WHERE
   clause produces zero rows for a row in another tenant, and the
   route surfaces 404, not 403, so existence is never leaked).
-* AC7 — Body-supplied ``tenant_id`` is silently dropped; the route
-  always passes ``operator.tenant_id`` to the substrate.
+* AC7 — Body-supplied ``tenant_id`` (or any unknown field) is
+  rejected with 422 ``extra_forbidden`` per
+  :class:`AuditQueryRequest`'s ``extra="forbid"`` config (G0.9-T2 /
+  #729); the substrate is never reached on validation failure. The
+  route always passes ``operator.tenant_id`` from the JWT to the
+  substrate for the valid-body branch.
 * AC8 — Every call binds ``audit_op_id="meho.audit.query"`` +
   ``audit_op_class="audit_query"`` contextvars before the substrate
   call, so the audit row written by :class:`AuditMiddleware` carries

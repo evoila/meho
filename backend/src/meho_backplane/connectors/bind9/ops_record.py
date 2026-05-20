@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: per-op modules colocate handler + parameter_schema +
+# LLM_INSTRUCTIONS + Bind9Op metadata so all of `bind9.record.*`'s
+# operator/agent surface is grep-able in one file; splitting would
+# scatter the load-bearing G3.4-T3 atomic-apply audit-payload binding
+# across multiple translation units. Function-size warnings on
+# bind9_record_add / bind9_record_remove accepted: each is a linear
+# "resolve zone → read zonefile → transform → atomic_apply" sequence
+# whose readability would degrade if split for cosmetics.
 
 """bind9 record ops -- read (``record.get``) + writes (``record.add`` / ``record.remove``).
 
@@ -63,6 +71,7 @@ import dns.rdata
 import dns.rdataclass
 import dns.rdatatype
 import dns.zone
+import structlog.contextvars
 
 from meho_backplane.connectors.bind9._atomic import atomic_apply
 from meho_backplane.connectors.bind9.ops import Bind9Op
@@ -782,6 +791,16 @@ async def bind9_record_add(
         verify_command=verify_cmd,
     )
 
+    # Chassis-shape audit enrichment: bind ``audit_state_before`` /
+    # ``audit_state_after`` so the dispatcher's audit-row payload
+    # carries the zonefile-slice snapshots the G8.2 audit-replay
+    # consumer reads. Mirrors the FastAPI middleware's ``audit_*``
+    # contextvar pattern (see _resolve_audit_extras_from_contextvars
+    # in operations/_audit.py).
+    structlog.contextvars.bind_contextvars(
+        audit_state_before=apply_result.state_before,
+        audit_state_after=apply_result.state_after,
+    )
     return {
         "fqdn": fqdn,
         "ip": ip,
@@ -848,6 +867,11 @@ async def bind9_record_remove(
         verify_command=verify_cmd,
     )
 
+    # Chassis audit enrichment — see bind9_record_add for rationale.
+    structlog.contextvars.bind_contextvars(
+        audit_state_before=apply_result.state_before,
+        audit_state_after=apply_result.state_after,
+    )
     return {
         "fqdn": fqdn,
         "zone": zone_name,

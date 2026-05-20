@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: per-op modules colocate handler + parameter_schema +
+# LLM_INSTRUCTIONS + Bind9Op metadata for all of `bind9.config.*`'s
+# operator/agent surface; splitting would scatter the load-bearing
+# atomic-apply + audit-payload bindings across multiple translation
+# units. Function-size warnings on the config-write handlers accepted:
+# each is the linear "resolve path → atomic_apply → bind audit
+# contextvars → return" sequence the docstrings spell out.
 
 """bind9 config-read + config-write op group.
 
@@ -99,6 +106,8 @@ import shlex
 import tarfile
 import time
 from typing import TYPE_CHECKING, Any
+
+import structlog.contextvars
 
 from meho_backplane.connectors.bind9._atomic import atomic_apply
 from meho_backplane.connectors.bind9.ops import Bind9Op
@@ -517,6 +526,15 @@ async def bind9_config_apply_file(
         bind_root=bind_root,
     )
 
+    # Chassis audit enrichment — bind ``audit_state_before`` /
+    # ``audit_state_after`` so the dispatcher's audit-row payload
+    # carries the config-slice snapshots (mirrors the FastAPI
+    # middleware's ``audit_*`` contextvar pattern; the merger lives
+    # in operations/_audit.py:_resolve_audit_extras_from_contextvars).
+    structlog.contextvars.bind_contextvars(
+        audit_state_before=apply_result.state_before,
+        audit_state_after=apply_result.state_after,
+    )
     return {
         "file": resolved_path,
         "op_class": "write",
@@ -717,6 +735,11 @@ async def bind9_config_apply_views(
         bind_root=bind_root,
     )
 
+    # Chassis audit enrichment — see bind9_config_apply_file for rationale.
+    structlog.contextvars.bind_contextvars(
+        audit_state_before=apply_result.state_before,
+        audit_state_after=apply_result.state_after,
+    )
     return {
         "primary_path": primary_path,
         "files": resolved_paths,
@@ -995,15 +1018,19 @@ async def bind9_config_backup(
         else:
             break
 
+    # Chassis audit enrichment — only ``state_after`` (no
+    # state_before: nothing in /etc/bind/ mutated). The backup_id is
+    # the audit row's view of "the artifact this write produced",
+    # which the G8.2 audit-replay consumer cross-references with the
+    # archive store. See bind9_config_apply_file for the binding
+    # rationale.
+    structlog.contextvars.bind_contextvars(audit_state_after=backup_id)
     return {
         "backup_id": backup_id,
         "path": backup_path,
         "rows": rows,
         "total": len(rows),
         "op_class": "write",
-        # No state_before: nothing in /etc/bind/ mutated. state_after
-        # is the backup ID -- the audit row's view of "the artifact
-        # this write produced".
         "state_after": backup_id,
     }
 
@@ -1172,6 +1199,13 @@ async def bind9_config_reload(
 
     sections = _parse_reload_output(stdout_text)
     reload_rc = int(sections.get("RELOAD_RC", "1"))
+    # Chassis audit enrichment — rndc-status snapshots before and
+    # after the reload land on the audit row's payload. See
+    # bind9_config_apply_file for the binding rationale.
+    structlog.contextvars.bind_contextvars(
+        audit_state_before=sections.get("STATE_BEFORE", ""),
+        audit_state_after=sections.get("STATE_AFTER", ""),
+    )
     return {
         "ok": reload_rc == 0,
         "rndc_reload_exit": reload_rc,

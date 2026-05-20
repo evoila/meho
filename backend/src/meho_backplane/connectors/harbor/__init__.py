@@ -32,6 +32,19 @@ The robot lifecycle ops (create/delete) ship in #621.
 """
 
 from meho_backplane.connectors.harbor.connector import HarborConnector
+from meho_backplane.connectors.harbor.core_ops import (
+    HARBOR_CONNECTOR_ID,
+    HARBOR_CORE_GROUPS,
+    HARBOR_CORE_OPS,
+    HARBOR_IMPL_ID,
+    HARBOR_PATH_RULES,
+    HARBOR_PRODUCT,
+    HARBOR_VERSION,
+    HarborCoreGroup,
+    HarborCoreOp,
+    apply_harbor_core_curation,
+    classify_harbor_op,
+)
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
     HarborTargetLike,
@@ -48,9 +61,20 @@ register_connector_v2(
 )
 
 __all__ = [
+    "HARBOR_CONNECTOR_ID",
+    "HARBOR_CORE_GROUPS",
+    "HARBOR_CORE_OPS",
+    "HARBOR_IMPL_ID",
+    "HARBOR_PATH_RULES",
+    "HARBOR_PRODUCT",
+    "HARBOR_VERSION",
     "HarborConnector",
+    "HarborCoreGroup",
+    "HarborCoreOp",
     "HarborCredentialsLoader",
     "HarborTargetLike",
     "SessionCredentials",
+    "apply_harbor_core_curation",
+    "classify_harbor_op",
     "load_credentials_from_vault",
 ]

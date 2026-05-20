@@ -424,17 +424,30 @@ async def _restore_etc_bind(host: str, port: int, creds: _ContainerCreds, snapsh
         # explicit (rm -rf /etc/bind/*) so any files added by the
         # test that the snapshot didn't carry are removed before the
         # restore lays down the original tree.
+        #
+        # **Do not use ``sudo -S``** here. ``-S`` reads the password
+        # line from stdin via buffered stdio, which consumes not only
+        # the leading newline but also adjacent buffered bytes from the
+        # same read — silently corrupting the tar archive that follows.
+        # With the testcontainer's ``NOPASSWD: ALL`` sudoers line, sudo
+        # doesn't need stdin at all; the clean shape is to drop ``-S``
+        # and pipe the archive to bash's stdin unaltered. The prior
+        # ``-S -p ''`` + leading ``\n`` shape silently broke restore:
+        # ``rm -rf /etc/bind/*`` ran, ``tar -xf -`` exited 2 on the
+        # corrupted input, and ``/etc/bind/`` was left empty between
+        # tests — making every test after the first one (the only one
+        # that ran against the fresh container) fail with
+        # ``open: /etc/bind/named.conf: file not found`` against
+        # ``named-checkconf -p``. The first test in the file passed;
+        # every subsequent zone.list / zone.read / config.show / etc.
+        # was hollow.
         process = await conn.create_process(
-            "sudo -S -p '' bash -c 'rm -rf /etc/bind/* && tar -C / -xf -'",
+            "sudo bash -c 'rm -rf /etc/bind/* && tar -C / -xf -'",
             stdin=asyncssh.PIPE,
             stdout=asyncssh.PIPE,
             stderr=asyncssh.PIPE,
             encoding=None,
         )
-        # The sudoers line is NOPASSWD, but sudo -S still consumes
-        # a leading newline as the "password" before reading the
-        # archive bytes off stdin.
-        process.stdin.write(b"\n")
         process.stdin.write(snapshot)
         process.stdin.write_eof()
         await process.wait()

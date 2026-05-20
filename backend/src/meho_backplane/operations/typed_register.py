@@ -641,6 +641,16 @@ async def _resolve_or_create_group(
     default at this boundary makes the structural gap impossible to
     silently re-introduce.
 
+    First-write-wins on the existing-row branch: a caller-supplied
+    ``when_to_use`` is **not** written back to a row that already
+    exists. Curation iteration in normal flow happens during code
+    review (the string lives in source; the row is recreated on a
+    fresh database, which #731's required-kwarg gate ensures every
+    new deployment hits). The earlier UPDATE-on-different-string
+    branch this helper carried was dropped in T4b iter-2 to match
+    sibling PR #757 (T4a)'s explicitly-documented first-write-wins
+    contract -- the two designs cannot both ship.
+
     Concurrency note: two concurrent connectors registering against
     the same ``group_key`` race here. The partial unique index
     ``operation_group_global_idx`` (migration ``0005``) catches the
@@ -650,14 +660,6 @@ async def _resolve_or_create_group(
     is a theoretical concern rather than an observed one -- the
     retry shim lives at the caller (G3 connector packages can wrap
     their init in their own retry) rather than here.
-
-    First-register vs. existing-row update: on a row that already
-    exists, the helper returns the persisted id unchanged. The
-    caller-supplied ``when_to_use`` is **not** written back to an
-    existing row -- updating curated copy belongs to a separate
-    seeding/admin path, not the per-op registration loop. The
-    same-process re-register case (lifespan restart) sees the
-    existing row and skips the write.
     """
     result = await session.execute(
         select(OperationGroup).where(
@@ -670,6 +672,10 @@ async def _resolve_or_create_group(
     )
     existing = result.scalar_one_or_none()
     if existing is not None:
+        # First-write-wins: a caller-supplied ``when_to_use`` is not
+        # written back to an existing row (see docstring). Curation
+        # iteration happens through code review + redeploy on a fresh
+        # database, not by re-running registrations on a live DB.
         return existing.id
 
     # Title-case the dotted key for the default name -- ``"vm-lifecycle"``

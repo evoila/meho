@@ -21,10 +21,13 @@ Coverage matrix:
 * Every row's ``when_to_use`` column is non-empty and does **not**
   contain the substring ``"Operations grouped under"`` -- the
   template-literal shape T4a is killing.
-* Re-running the same registrar with a different curated string
-  iterates the existing row (curation is not first-write-wins);
-  asserted against an in-memory tweak so the test doesn't depend on
-  curating happening across multiple PRs.
+
+First-write-wins on the existing-row branch is contractual (see
+:func:`~meho_backplane.operations.typed_register._resolve_or_create_group`
++ sibling PR #757): curation iteration is a code-review + redeploy
+flow, not a re-register-against-live-DB flow. No test exercises the
+post-restart curation update path because that path no longer
+exists.
 
 The tests reuse the project's autouse SQLite engine plus a per-test
 embedding-service stub so neither the real ONNX model nor a network
@@ -52,10 +55,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
-from meho_backplane.operations.typed_register import (
-    _TYPED_OP_REGISTRARS,
-    register_typed_operation,
-)
+from meho_backplane.operations.typed_register import _TYPED_OP_REGISTRARS
 from meho_backplane.settings import get_settings
 
 # Expected group_key sets per shipped typed connector. Updating this
@@ -75,21 +75,6 @@ _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
 #: Any group row carrying this substring proves a connector regressed
 #: to the auto-derive path.
 _PLACEHOLDER_SUBSTRING: Final[str] = "Operations grouped under"
-
-
-async def _sample_curation_handler(target: object, params: dict[str, object]) -> dict[str, object]:
-    """Module-level async handler so ``derive_handler_ref`` accepts it.
-
-    Lives at module scope (not nested inside the test body) because
-    :func:`~meho_backplane.operations.typed_register.register_typed_operation`
-    rejects closures / lambdas / partials via
-    :func:`~meho_backplane.operations.typed_register.derive_handler_ref`
-    -- the dispatcher resolves handler_ref via importlib + getattr at
-    dispatch time and that round-trip only works for module-level
-    callables.
-    """
-    del target, params
-    return {}
 
 
 @pytest.fixture(autouse=True)
@@ -193,9 +178,7 @@ async def test_kubernetes_groups_have_curated_when_to_use(
     finally:
         tr.encode_endpoint_text = original  # type: ignore[assignment]
 
-    groups = await _operation_groups_for(
-        session, product="k8s", version="1.x", impl_id="kubernetes-asyncio"
-    )
+    groups = await _operation_groups_for(session, product="k8s", version="1.x", impl_id="k8s")
     assert set(groups) == _K8S_GROUPS, (
         f"k8s groups in DB {set(groups)!r} != expected {_K8S_GROUPS!r}"
     )
@@ -246,51 +229,3 @@ async def test_vmware_composite_groups_have_curated_when_to_use(
             f"vmware composite group {key!r} regressed to the auto-derive "
             f"template: {row.when_to_use!r}"
         )
-
-
-@pytest.mark.asyncio
-async def test_when_to_use_updates_when_text_changes(
-    stub_embedding_service: AsyncMock,
-    session: AsyncSession,
-) -> None:
-    """Re-registering with a different ``when_to_use`` updates the row.
-
-    Without this behaviour curation can never iterate -- a per-group
-    string edit in code never reaches the DB row that
-    ``list_operation_groups`` reads. The
-    :func:`~meho_backplane.operations.typed_register._resolve_or_create_group`
-    body's existing-row branch is the load-bearing check.
-    """
-
-    await register_typed_operation(
-        product="meho-test",
-        version="0.0",
-        impl_id="curation",
-        op_id="meho-test.curation.op",
-        handler=_sample_curation_handler,
-        summary="Test op for curation iteration.",
-        description="Test op for curation iteration.",
-        parameter_schema={"type": "object", "additionalProperties": False},
-        group_key="probe",
-        when_to_use="First-write string.",
-        embedding_service=stub_embedding_service,
-    )
-    await register_typed_operation(
-        product="meho-test",
-        version="0.0",
-        impl_id="curation",
-        op_id="meho-test.curation.op",
-        handler=_sample_curation_handler,
-        summary="Test op for curation iteration.",
-        description="Test op for curation iteration.",
-        parameter_schema={"type": "object", "additionalProperties": False},
-        group_key="probe",
-        when_to_use="Second-write string (curated follow-up).",
-        embedding_service=stub_embedding_service,
-    )
-
-    groups = await _operation_groups_for(
-        session, product="meho-test", version="0.0", impl_id="curation"
-    )
-    assert set(groups) == {"probe"}
-    assert groups["probe"].when_to_use == "Second-write string (curated follow-up)."

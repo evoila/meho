@@ -4,6 +4,7 @@
 package migrate
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -58,13 +59,28 @@ func TestBuildForm_GroupCount(t *testing.T) {
 	if form == nil {
 		t.Fatal("BuildForm returned nil form")
 	}
-	// 4 groups per file + 1 confirm group
-	want := len(files)*4 + 1
-	got := len(plans) // plans length equals len(files)
-	if got != len(files) {
-		t.Errorf("plans length = %d; want %d", got, len(files))
+	if len(plans) != len(files) {
+		t.Errorf("plans length = %d; want %d", len(plans), len(files))
 	}
-	_ = want // form.Groups() is not exported; we verify via plans length
+	// Structural: default action is migrate:suggested, so scope and edit
+	// groups should be hidden, slug group should be visible.
+	for i := range plans {
+		if plans[i].Action != ActionMigrateSuggested {
+			t.Errorf("plans[%d].Action = %q; want %q", i, plans[i].Action, ActionMigrateSuggested)
+		}
+		// scope group hidden unless migrate:different
+		if plans[i].Action == ActionMigrateDifferent {
+			t.Errorf("plans[%d]: unexpected ActionMigrateDifferent at default", i)
+		}
+		// slug group visible (not skip:*)
+		if strings.HasPrefix(plans[i].Action, "skip:") {
+			t.Errorf("plans[%d]: slug group should be visible for Action=%q", i, plans[i].Action)
+		}
+		// edit group hidden unless migrate:edit
+		if plans[i].Action == ActionMigrateEdit {
+			t.Errorf("plans[%d]: unexpected ActionMigrateEdit at default", i)
+		}
+	}
 }
 
 func TestBuildForm_DefaultActions(t *testing.T) {

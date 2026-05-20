@@ -77,10 +77,6 @@ type BuildFormOpts struct {
 // --dry-run and --non-interactive paths use DefaultPlan / NonInteractivePlans.
 func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan) {
 	plans := make([]SubmitPlan, len(files))
-	// One action string per file — kept outside SubmitPlan so we can
-	// take its address for the Select binding without the struct escaping
-	// to heap unintentionally.
-	actions := make([]string, len(files))
 
 	var groups []*huh.Group
 
@@ -98,7 +94,6 @@ func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan)
 			Body:   ff.Body,
 			Action: defaultAction(isMachineLocal, opts.IncludeMachineLocal),
 		}
-		actions[fi] = plans[fi].Action
 
 		// ── Group 1: note header + action select ──────────────────────
 		noteDesc := buildNoteDescription(ff, isMachineLocal)
@@ -109,7 +104,7 @@ func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan)
 			huh.NewSelect[string]().
 				Title("Action").
 				Options(buildActionOptions(plans[fi].Scope, isMachineLocal)...).
-				Value(&actions[fi]),
+				Value(&plans[fi].Action),
 		)
 		groups = append(groups, mainGroup)
 
@@ -122,7 +117,7 @@ func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan)
 				}, nil).
 				Value(&plans[fi].Scope),
 		).WithHideFunc(func() bool {
-			return actions[fi] != ActionMigrateDifferent
+			return plans[fi].Action != ActionMigrateDifferent
 		})
 		groups = append(groups, scopeGroup)
 
@@ -134,7 +129,7 @@ func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan)
 				Value(&plans[fi].Slug).
 				Validate(validateSlug),
 		).WithHideFunc(func() bool {
-			return strings.HasPrefix(actions[fi], "skip:")
+			return strings.HasPrefix(plans[fi].Action, "skip:")
 		})
 		groups = append(groups, slugGroup)
 
@@ -145,24 +140,21 @@ func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan)
 				Description("Strip machine-local snippets before sending.").
 				Value(&plans[fi].Body),
 		).WithHideFunc(func() bool {
-			return actions[fi] != ActionMigrateEdit
+			return plans[fi].Action != ActionMigrateEdit
 		})
 		groups = append(groups, editGroup)
 	}
 
 	// ── Final confirm group ────────────────────────────────────────────
-	migrateCount := countMigrate(plans)
 	var confirmed bool
 	confirmGroup := huh.NewGroup(
 		huh.NewConfirm().
 			TitleFunc(func() string {
-				mc := countMigrateFromActions(actions)
-				sc := len(actions) - mc
-				return fmt.Sprintf("Migrate %d entries (%d skipped). Proceed?", mc, sc)
-			}, &actions).
+				mc := countMigrateFromPlans(plans)
+				return fmt.Sprintf("Migrate %d entries (%d skipped). Proceed?", mc, len(plans)-mc)
+			}, nil).
 			Value(&confirmed),
 	)
-	_ = migrateCount // used via TitleFunc closure
 	groups = append(groups, confirmGroup)
 
 	return huh.NewForm(groups...), plans
@@ -173,11 +165,6 @@ func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan)
 func FinalizeSkip(plans []SubmitPlan) {
 	for i := range plans {
 		plans[i].Skip = strings.HasPrefix(plans[i].Action, "skip:")
-		if plans[i].Action == ActionMigrateSuggested {
-			// Re-derive suggested scope in case opts changed after form
-			// construction; for well-formed calls this is a no-op.
-			// (plans[i].Scope was already set to SuggestScope at build time.)
-		}
 	}
 }
 
@@ -295,10 +282,10 @@ func countMigrate(plans []SubmitPlan) int {
 	return n
 }
 
-func countMigrateFromActions(actions []string) int {
+func countMigrateFromPlans(plans []SubmitPlan) int {
 	n := 0
-	for _, a := range actions {
-		if !strings.HasPrefix(a, "skip:") {
+	for _, p := range plans {
+		if !strings.HasPrefix(p.Action, "skip:") {
 			n++
 		}
 	}

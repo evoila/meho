@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
-	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/migrate"
@@ -156,11 +154,15 @@ func runDryRun(cmd *cobra.Command, files []migrate.MemoryFile, opts migrate.Buil
 		if plan.Skip {
 			continue
 		}
+		md := plan.File.Metadata
+		if md == nil {
+			md = map[string]any{}
+		}
 		env := dryRunEnvelope{
 			Scope:    plan.Scope,
 			Slug:     plan.Slug,
 			Body:     plan.Body,
-			Metadata: map[string]any{"tags": []string{}},
+			Metadata: md,
 			SourceID: sourceID(plan),
 		}
 		if err := enc.Encode(env); err != nil {
@@ -217,7 +219,6 @@ func sourceID(plan migrate.SubmitPlan) string {
 // stubSubmitFn is the T4 no-op seam. T5 replaces it with the real
 // backplane POST implementation.
 func stubSubmitFn(plans []migrate.SubmitPlan) error {
-	_ = time.Now() // suppress unused import if huh brings in time
 	if len(plans) == 0 {
 		return nil
 	}
@@ -228,6 +229,3 @@ func stubSubmitFn(plans []migrate.SubmitPlan) error {
 	return fmt.Errorf("meho migrate memory: submit not yet implemented (T5); would send: %s",
 		strings.Join(scopes, ", "))
 }
-
-// withHuhForm is used in tests to replace the form runner.
-var withHuhForm = func(form *huh.Form) error { return form.Run() }

@@ -185,17 +185,33 @@ async def broadcast_runtime(
     valkey_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[str]:
-    """Pin ``BROADCAST_REDIS_URL``, reset the per-process client cache.
+    """Pin ``BROADCAST_REDIS_URL``, reset the per-process client cache,
+    flush Valkey to a clean slate.
 
     The production app reads the URL once per worker on the first
     :func:`get_broadcast_client` call; tests must clear the cache so
     the testcontainer's URL replaces whatever the autouse env fixture
     pinned. Yielding the URL lets the test issue ``XRANGE`` directly
     against the same stream the app's ``publish_event`` XADD-ed into.
+
+    The module-scoped ``valkey_url`` fixture boots one container for
+    every test in the file. Without an explicit per-test wipe the
+    stream entries from scenario N persist into scenario N+1, and any
+    scenario that asserts ``len(events) == X`` becomes order-dependent.
+    ``FLUSHDB`` is the smallest hammer that guarantees ``XRANGE`` on
+    every per-tenant ``meho:feed:<tenant>`` key returns only what the
+    *current* test published -- it drops the broadcast-event key
+    space along with anything else that might land in DB 0, which the
+    backplane only uses for the feed streams.
     """
     monkeypatch.setenv("BROADCAST_REDIS_URL", valkey_url)
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
+    flush_client = redis_async.from_url(valkey_url, decode_responses=True)
+    try:
+        await flush_client.flushdb()
+    finally:
+        await flush_client.aclose()
     try:
         yield valkey_url
     finally:

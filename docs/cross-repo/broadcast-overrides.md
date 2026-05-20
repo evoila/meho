@@ -61,15 +61,22 @@ applications; colleagues need real-time visibility into *which*
 paths are being touched so nobody steps on the in-flight work or
 double-rotates a secret.
 
-```console
-$ meho vault kv list secret/prod/svc-payments \
-    --broadcast-detail full
-$ meho vault kv read secret/prod/svc-payments/db-password \
-    --broadcast-detail full
-```
+The `meho` CLI does not yet expose a per-call broadcast-detail
+flag (tracked as a future enhancement). Until that lands, attach
+the `X-Broadcast-Detail: full` header directly via `curl` or any
+programmatic HTTP client:
 
-(`meho` CLI threads the flag into the chassis as the
-`X-Broadcast-Detail: full` header on the underlying HTTP call.)
+```console
+$ curl -sS -X GET https://meho.example.com/api/v1/vault/kv/list \
+    -H "Authorization: Bearer $MEHO_TOKEN" \
+    -H "X-Broadcast-Detail: full" \
+    --get --data-urlencode 'path=secret/prod/svc-payments'
+
+$ curl -sS -X GET https://meho.example.com/api/v1/vault/kv/read \
+    -H "Authorization: Bearer $MEHO_TOKEN" \
+    -H "X-Broadcast-Detail: full" \
+    --get --data-urlencode 'path=secret/prod/svc-payments/db-password'
+```
 
 The SSE feed for the tenant now shows:
 
@@ -140,25 +147,35 @@ rule UUID's lexicographic order.
 
 ## Operator-side recipes
 
-The operator-facing surface is one CLI flag (`--broadcast-detail`)
-that toggles the header on a single request. No state, no rules to
-remember. The flag lives on every CLI verb that emits a sensitive
-broadcast:
+The operator-facing surface for the per-call upgrade is the
+`X-Broadcast-Detail: full` HTTP header (or, on the MCP transport,
+the `_meta.broadcast_detail = "full"` field on `tools/call` per the
+[MCP `_meta` envelope spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/_meta)).
+The `meho` CLI does not yet thread either through as a flag —
+adding one is tracked as a future enhancement. Today operators
+attach the header directly from `curl` or any programmatic client
+when they need the upgrade:
 
 ```console
-$ meho vault kv read secret/prod/db --broadcast-detail full
-$ meho vault kv list secret/prod/      --broadcast-detail full
-$ meho audit query --since 24h         --broadcast-detail full
+# Audit-query against a backplane, asking for full detail on the broadcast event.
+$ curl -sS -X POST https://meho.example.com/api/v1/audit/query \
+    -H "Authorization: Bearer $MEHO_TOKEN" \
+    -H "Content-Type: application/json" \
+    -H "X-Broadcast-Detail: full" \
+    -d '{"since": "24h", "limit": 50}'
+
+# Vault KV read with full-detail opt-in.
+$ curl -sS -X GET https://meho.example.com/api/v1/vault/kv/read \
+    -H "Authorization: Bearer $MEHO_TOKEN" \
+    -H "X-Broadcast-Detail: full" \
+    --get --data-urlencode 'path=secret/prod/svc-payments/db-password'
 ```
 
-The CLI's `--help` for each verb documents the flag in-line.
-
-Verifying the header lands on the request:
-
-```console
-$ meho audit query --since 24h --broadcast-detail full -v
-# -v emits one line: "broadcast detail: full (header attached)"
-```
+Verifying the header landed: after the call, the row's audit
+payload carries `broadcast_detail_origin = "request_override"`
+(see [Forensics](#forensics) below) and the published broadcast
+event payload includes the `params` field instead of the default
+aggregate-only `{op_class, result_status}` shape.
 
 ## Admin-side recipes — CLI, REST, MCP
 
@@ -320,7 +337,7 @@ in the last 24 h":
 
 ```console
 $ meho audit query --since 24h --op-class credential_read --json | \
-    jq '.entries[] | select(.payload.broadcast_detail_origin == "request_override")'
+    jq '.rows[] | select(.payload.broadcast_detail_origin == "request_override")'
 ```
 
 See [`audit-query.md`](./audit-query.md) for the full query surface
@@ -406,7 +423,7 @@ with JSON-RPC `-32602` `forbidden:`.
 
 ```console
 $ meho audit query --since 1h --json | \
-    jq '.entries[] | {ts:.occurred_at, op:.op_id, who:.operator_sub,
+    jq '.rows[] | {ts:.ts, op:.op_id, who:.principal_sub,
        origin:.payload.broadcast_detail_origin,
        effective:.payload.broadcast_detail_effective}' | \
     head -10

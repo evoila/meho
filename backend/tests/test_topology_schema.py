@@ -62,7 +62,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import GraphEdge, GraphNode, Target, Tenant
+from meho_backplane.db.models import (
+    _GRAPH_EDGE_KINDS,
+    GraphEdge,
+    GraphEdgeKind,
+    GraphNode,
+    Target,
+    Tenant,
+)
 from meho_backplane.settings import get_settings
 
 
@@ -535,7 +542,13 @@ async def test_graph_edge_different_kind_between_same_endpoints_allowed() -> Non
 
 @pytest.mark.asyncio
 async def test_graph_edge_kind_check_constraint_rejects_unknown() -> None:
-    """A ``graph_edge.kind`` outside the v0.2 enum raises :class:`IntegrityError`."""
+    """A ``graph_edge.kind`` outside the closed v0.2 enum raises :class:`IntegrityError`.
+
+    Post-G9.2 (#364 / migration ``0010``), the closed v0.2 vocabulary is
+    the ten-kind set on :class:`GraphEdgeKind`. The CHECK constraint
+    rejects anything outside that set; widening requires a new
+    migration that updates the constraint and the enum in lock-step.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         tenant_id = await _seed_tenant(session)
@@ -545,7 +558,7 @@ async def test_graph_edge_kind_check_constraint_rejects_unknown() -> None:
                 tenant_id=tenant_id,
                 from_node_id=from_id,
                 to_node_id=to_id,
-                kind="authenticates-via",  # v0.2: G9.2 vocab, not yet allowed
+                kind="not-a-real-edge-kind",  # outside the v0.2 ten-kind vocabulary
                 source="auto",
                 discovered_by="curated",
             )
@@ -932,5 +945,399 @@ def test_migration_upgrade_then_downgrade_is_reversible(
             tables = set(inspector.get_table_names())
             assert "graph_node" in tables
             assert "graph_edge" in tables
+    finally:
+        sync_eng.dispose()
+
+
+# ---------------------------------------------------------------------------
+# G9.2-T1 (#593): closed 10-kind v0.2 vocabulary -- migration 0010 + enum
+# ---------------------------------------------------------------------------
+
+
+#: The six curated-only kinds migration ``0010`` adds on top of G9.1's
+#: four auto-discoverable kinds. Used by the parametrised
+#: post-migration accept tests below.
+_G9_2_CURATED_KINDS: tuple[str, ...] = (
+    "authenticates-via",
+    "depends-on",
+    "replicates-to",
+    "backed-up-by",
+    "routes-via",
+    "policy-binds",
+)
+
+
+def test_graph_edge_kind_enum_has_exactly_ten_members() -> None:
+    """:class:`GraphEdgeKind` has the ten members the v0.2 vocabulary lock requires.
+
+    Decision #6 in :file:`docs/planning/v0.2-decisions.md` fixes the
+    closed-vocabulary set at ten kinds for v0.2 -- four
+    auto-discoverable (G9.1) plus six curated-only (G9.2). A
+    regression that drops or adds a member without a coordinated
+    migration would fragment the v0.2.next policy-engine grammar; the
+    explicit member count is the regression guard.
+    """
+    assert len(GraphEdgeKind) == 10
+    assert {k.value for k in GraphEdgeKind} == {
+        "runs-on",
+        "mounts",
+        "routes-through",
+        "belongs-to",
+        "authenticates-via",
+        "depends-on",
+        "replicates-to",
+        "backed-up-by",
+        "routes-via",
+        "policy-binds",
+    }
+
+
+def test_graph_edge_kind_enum_matches_ck_constraint_tuple() -> None:
+    """:data:`_GRAPH_EDGE_KINDS` mirrors :class:`GraphEdgeKind`; equality is the drift guard.
+
+    The Python type-level enum and the DB-layer ``CHECK kind IN (...)``
+    constraint must move in lock-step -- a v0.2.next addition that
+    updated the enum without a corresponding migration (or vice
+    versa) would let agents emit an enum value the DB rejects, or let
+    the DB accept a value the agent's type checker forbids. The
+    equality assertion is what makes the closed-vocabulary contract
+    enforceable at unit-test time.
+    """
+    assert set(_GRAPH_EDGE_KINDS) == {k.value for k in GraphEdgeKind}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", _G9_2_CURATED_KINDS)
+async def test_graph_edge_post_migration_accepts_curated_kind(kind: str) -> None:
+    """Post-migration: each of the six G9.2 curated kinds inserts without error.
+
+    Migration ``0010`` widens ``ck_graph_edge_kind`` from G9.1's four
+    auto-discoverable kinds to the ten-kind v0.2 set. The autouse
+    ``_default_database_url`` fixture in :mod:`tests.conftest` runs
+    ``alembic upgrade head`` before each test, so by the time this
+    body runs the constraint is already widened. Inserting an edge
+    with any of the six curated-only kinds must succeed; the row
+    round-trips with the kind preserved.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        from_id, to_id = await _seed_two_nodes(session, tenant_id)
+        edge_id = uuid.uuid4()
+        session.add(
+            GraphEdge(
+                id=edge_id,
+                tenant_id=tenant_id,
+                from_node_id=from_id,
+                to_node_id=to_id,
+                kind=kind,
+                source="curated",
+                discovered_by="annotator-test",
+            )
+        )
+        # Must not raise -- the new vocabulary member is in the
+        # post-0010 CHECK set.
+        await session.commit()
+
+    async with sessionmaker() as session:
+        result = await session.execute(select(GraphEdge).where(GraphEdge.id == edge_id))
+        row = result.scalar_one()
+
+    assert row.kind == kind
+    assert row.source == "curated"
+
+
+def test_migration_0010_pre_upgrade_rejects_curated_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pre-0010 (at revision 0009): the six curated kinds are rejected by the CHECK.
+
+    Migrate up to ``0009`` (one revision before this task's migration),
+    then attempt a direct INSERT for each of the six curated-only
+    kinds. Every insert must raise :class:`IntegrityError` because
+    revision ``0009``'s ``ck_graph_edge_kind`` still encodes the
+    four-kind subset.
+
+    Uses the sync :func:`sa_create_engine` rather than the async
+    sessionmaker so the per-test SQLite file the autouse fixture
+    created (which has already been upgraded to head) is not the one
+    under test -- this test pins its own fresh SQLite file and stops
+    the upgrade at ``0009`` so we can prove the pre-migration
+    behaviour.
+    """
+    from alembic import command
+
+    from meho_backplane.db.migrations import alembic_config
+
+    db_path = tmp_path / "g92-rejects.db"
+    async_url = f"sqlite+aiosqlite:///{db_path}"
+    sync_url = f"sqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", async_url)
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    reset_engine_for_testing()
+
+    cfg = alembic_config()
+    cfg.set_main_option("sqlalchemy.url", async_url)
+    # Stop at 0009 -- one revision before this task's migration.
+    command.upgrade(cfg, "0009")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        from sqlalchemy.exc import IntegrityError as SyncIntegrityError
+
+        with sync_eng.begin() as conn:
+            # PRAGMA fk on so the node FKs would trip if they were the
+            # blocker -- we want to prove the kind CHECK is what
+            # rejects, not a missing parent row.
+            conn.execute(text("PRAGMA foreign_keys = ON"))
+
+            tenant_id = str(uuid.uuid4())
+            conn.execute(
+                text(
+                    "INSERT INTO tenant (id, slug, name, created_at) "
+                    "VALUES (:id, :slug, :name, :created_at)"
+                ),
+                {
+                    "id": tenant_id,
+                    "slug": "pre-upgrade-tenant",
+                    "name": "Pre Upgrade Tenant",
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            from_id = str(uuid.uuid4())
+            to_id = str(uuid.uuid4())
+            for node_id, kind, name in (
+                (from_id, "vm", "vm-pre-upgrade"),
+                (to_id, "host", "host-pre-upgrade"),
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO graph_node "
+                        "(id, tenant_id, kind, name, properties, "
+                        "discovered_by, first_seen) "
+                        "VALUES (:id, :tenant_id, :kind, :name, '{}', "
+                        ":discovered_by, :first_seen)"
+                    ),
+                    {
+                        "id": node_id,
+                        "tenant_id": tenant_id,
+                        "kind": kind,
+                        "name": name,
+                        "discovered_by": "vmware",
+                        "first_seen": datetime.now(UTC).isoformat(),
+                    },
+                )
+
+        for kind in _G9_2_CURATED_KINDS:
+            with sync_eng.begin() as conn:
+                stmt = text(
+                    "INSERT INTO graph_edge "
+                    "(id, tenant_id, from_node_id, to_node_id, kind, "
+                    "source, properties, discovered_by, first_seen) "
+                    "VALUES (:id, :tenant_id, :from_id, :to_id, :kind, "
+                    ":source, '{}', :discovered_by, :first_seen)"
+                )
+                params = {
+                    "id": str(uuid.uuid4()),
+                    "tenant_id": tenant_id,
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "kind": kind,
+                    "source": "curated",
+                    "discovered_by": "annotator-test",
+                    "first_seen": datetime.now(UTC).isoformat(),
+                }
+                with pytest.raises(SyncIntegrityError):
+                    conn.execute(stmt, params)
+    finally:
+        sync_eng.dispose()
+
+
+def test_migration_0010_upgrade_downgrade_upgrade_cycle_clean(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``alembic upgrade head`` -> ``downgrade 0009`` -> ``upgrade head`` is reversible.
+
+    Proves migration ``0010`` is fully reversible against an empty
+    ``graph_edge`` (no curated-kind rows that would block the
+    downgrade pre-check). After the cycle, the constraint is back to
+    the widened ten-kind tuple -- verified by attempting to insert a
+    curated-kind row through the sync engine.
+    """
+    from alembic import command
+
+    sync_url, cfg = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "g92-cycle.db")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        # Downgrade by one revision (back to 0009).
+        command.downgrade(cfg, "0009")
+        # Re-upgrade to head -- must restore the widened constraint.
+        command.upgrade(cfg, "head")
+
+        # Prove the widened constraint is in effect by inserting a
+        # curated-kind row directly through the sync engine.
+        with sync_eng.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys = ON"))
+
+            tenant_id = str(uuid.uuid4())
+            conn.execute(
+                text(
+                    "INSERT INTO tenant (id, slug, name, created_at) "
+                    "VALUES (:id, :slug, :name, :created_at)"
+                ),
+                {
+                    "id": tenant_id,
+                    "slug": "cycle-tenant",
+                    "name": "Cycle Tenant",
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            from_id = str(uuid.uuid4())
+            to_id = str(uuid.uuid4())
+            for node_id, kind, name in (
+                (from_id, "principal", "k8s-sa-cycle"),
+                (to_id, "vault-role", "vault-role-cycle"),
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO graph_node "
+                        "(id, tenant_id, kind, name, properties, "
+                        "discovered_by, first_seen) "
+                        "VALUES (:id, :tenant_id, :kind, :name, '{}', "
+                        ":discovered_by, :first_seen)"
+                    ),
+                    {
+                        "id": node_id,
+                        "tenant_id": tenant_id,
+                        "kind": kind,
+                        "name": name,
+                        "discovered_by": "curated",
+                        "first_seen": datetime.now(UTC).isoformat(),
+                    },
+                )
+            # Insert a row with one of the six new kinds; must succeed.
+            conn.execute(
+                text(
+                    "INSERT INTO graph_edge "
+                    "(id, tenant_id, from_node_id, to_node_id, kind, "
+                    "source, properties, discovered_by, first_seen) "
+                    "VALUES (:id, :tenant_id, :from_id, :to_id, "
+                    "'authenticates-via', 'curated', '{}', "
+                    ":discovered_by, :first_seen)"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "tenant_id": tenant_id,
+                    "from_id": from_id,
+                    "to_id": to_id,
+                    "discovered_by": "annotator-test",
+                    "first_seen": datetime.now(UTC).isoformat(),
+                },
+            )
+    finally:
+        sync_eng.dispose()
+
+
+def test_migration_0010_downgrade_refuses_when_curated_rows_exist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``downgrade 0009`` raises :class:`RuntimeError` if any curated-kind row exists.
+
+    Acceptance criterion: narrowing the CHECK back to the four-kind
+    subset must refuse loudly when rows whose ``kind`` is in the six
+    removed kinds still exist -- silently violating the narrowed
+    constraint (and crashing inside the DDL halfway through) is the
+    failure mode the explicit pre-check guards against.
+
+    The error message must name a row count and the affected kinds so
+    operators can write the targeted cleanup before retrying the
+    downgrade.
+    """
+    from alembic import command
+
+    sync_url, cfg = _alembic_upgrade_against_fresh_sqlite(monkeypatch, tmp_path, "g92-refuse.db")
+
+    sync_eng = sa_create_engine(sync_url)
+    try:
+        # Seed one row with each of two curated kinds so the error
+        # message must aggregate counts by kind (not just a flat total).
+        with sync_eng.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys = ON"))
+
+            tenant_id = str(uuid.uuid4())
+            conn.execute(
+                text(
+                    "INSERT INTO tenant (id, slug, name, created_at) "
+                    "VALUES (:id, :slug, :name, :created_at)"
+                ),
+                {
+                    "id": tenant_id,
+                    "slug": "refuse-tenant",
+                    "name": "Refuse Tenant",
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            from_id = str(uuid.uuid4())
+            to_id = str(uuid.uuid4())
+            for node_id, kind, name in (
+                (from_id, "principal", "k8s-sa-refuse"),
+                (to_id, "vault-role", "vault-role-refuse"),
+            ):
+                conn.execute(
+                    text(
+                        "INSERT INTO graph_node "
+                        "(id, tenant_id, kind, name, properties, "
+                        "discovered_by, first_seen) "
+                        "VALUES (:id, :tenant_id, :kind, :name, '{}', "
+                        ":discovered_by, :first_seen)"
+                    ),
+                    {
+                        "id": node_id,
+                        "tenant_id": tenant_id,
+                        "kind": kind,
+                        "name": name,
+                        "discovered_by": "curated",
+                        "first_seen": datetime.now(UTC).isoformat(),
+                    },
+                )
+            for kind in ("authenticates-via", "depends-on"):
+                conn.execute(
+                    text(
+                        "INSERT INTO graph_edge "
+                        "(id, tenant_id, from_node_id, to_node_id, "
+                        "kind, source, properties, discovered_by, "
+                        "first_seen) VALUES (:id, :tenant_id, :from_id, "
+                        ":to_id, :kind, 'curated', '{}', "
+                        ":discovered_by, :first_seen)"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "tenant_id": tenant_id,
+                        "from_id": from_id,
+                        "to_id": to_id,
+                        "kind": kind,
+                        "discovered_by": "annotator-test",
+                        "first_seen": datetime.now(UTC).isoformat(),
+                    },
+                )
+
+        # The downgrade must refuse and surface the row count + kinds.
+        with pytest.raises(RuntimeError) as exc_info:
+            command.downgrade(cfg, "0009")
+
+        message = str(exc_info.value)
+        assert "Cannot downgrade migration 0010" in message
+        assert "authenticates-via" in message
+        assert "depends-on" in message
+        # Each kind has count=1 in the message ("kind=N" aggregation).
+        assert "authenticates-via=1" in message
+        assert "depends-on=1" in message
     finally:
         sync_eng.dispose()

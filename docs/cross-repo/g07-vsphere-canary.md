@@ -223,7 +223,7 @@ session-scoped fixture and three acceptance modules
 [`test_vmware_rest_jsonflux_force_handle.py`](../../backend/tests/acceptance/test_vmware_rest_jsonflux_force_handle.py),
 [`test_vmware_rest_agent_flow_e2e.py`](../../backend/tests/acceptance/test_vmware_rest_agent_flow_e2e.py))
 that dispatch against the simulator on every PR, on the
-meho-runners pool where Docker is provisioned. The
+meho-runners-ci pool where Docker is provisioned. The
 [`vcsim integration testing`](../architecture/vcsim-integration-testing.md)
 doc explains the fixture pattern and how future G3.x connectors
 can mirror it (Vault → testcontainers' `vault`, K8s → k3d,

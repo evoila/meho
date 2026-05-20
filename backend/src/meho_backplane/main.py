@@ -38,6 +38,7 @@ v0.2 adds:
   ~1-2 s ONNX model load cost.
 """
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -49,12 +50,16 @@ from fastapi import FastAPI, Response
 from meho_backplane import __version__
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
+from meho_backplane.api.v1.broadcast_overrides import (
+    router as api_v1_broadcast_overrides_router,
+)
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
+from meho_backplane.api.v1.memory import router as api_v1_memory_router
 from meho_backplane.api.v1.operations import router as api_v1_operations_router
 from meho_backplane.api.v1.retrieve import router as api_v1_retrieve_router
 from meho_backplane.api.v1.retrieve_eval import router as api_v1_retrieve_eval_router
@@ -64,7 +69,10 @@ from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
 from meho_backplane.audit import AuditMiddleware
-from meho_backplane.auth.jwt import keycloak_readiness_probe
+from meho_backplane.auth.jwt import (
+    AUDIENCE_NOT_CONFIGURED_REMEDIATION,
+    keycloak_readiness_probe,
+)
 from meho_backplane.auth.vault import vault_readiness_probe
 from meho_backplane.broadcast import (
     broadcast_readiness_probe,
@@ -79,11 +87,16 @@ from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
 from meho_backplane.mcp import eager_import_mcp_modules
 from meho_backplane.mcp import router as mcp_router
+from meho_backplane.mcp.auth import mcp_resource_uri
+from meho_backplane.memory import (
+    start_memory_expiry_sweeper,
+    stop_memory_expiry_sweeper,
+)
 from meho_backplane.metrics import render_metrics
-from meho_backplane.middleware import RequestContextMiddleware
+from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars
 from meho_backplane.retrieval.embedding import get_embedding_service
-from meho_backplane.settings import parse_bool_env
+from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
     start_topology_refresh_scheduler,
     stop_topology_refresh_scheduler,
@@ -113,6 +126,39 @@ async def _preload_embedding_model() -> None:
             error_class=type(exc).__name__,
             error_message=str(exc),
         )
+
+
+def _assert_mcp_resource_uri_configured() -> None:
+    """Fail loudly at startup when the MCP audience can't be resolved.
+
+    The ``/mcp`` router is mounted unconditionally (no enable flag), so
+    a deploy that sets neither ``MCP_RESOURCE_URI`` nor ``BACKPLANE_URL``
+    leaves the resolved audience empty and **every** ``/mcp`` request
+    fails closed with a 401 — the MCP surface is dark with no signal
+    pointing at the cause (consumer dogfood signal #633). Per-request
+    fail-closed is correct security posture but a context-free 401 is a
+    terrible operability posture: an operator following the published
+    runbooks cannot tell the surface is misconfigured rather than down.
+
+    Resolving the same way :func:`meho_backplane.mcp.auth.mcp_resource_uri`
+    does and aborting startup converts that silent dark surface into a
+    CrashLoopBackOff carrying the actionable remediation — the same
+    fail-fast-on-missing-security-config posture the
+    :class:`~meho_backplane.settings.Settings` field validators already
+    take for ``DATABASE_URL`` / ``BROADCAST_REDIS_URL``, and the same
+    crash-loud posture :func:`run_typed_op_registrars` takes for an
+    unpopulated dispatch table. The chart now derives a default from
+    ``ingress.host`` for the common ingress-fronted deploy, so this
+    guard only fires on a genuinely unresolvable config (no ingress,
+    nothing set).
+
+    Raises :class:`RuntimeError` with
+    :data:`~meho_backplane.auth.jwt.AUDIENCE_NOT_CONFIGURED_REMEDIATION`
+    so the lifespan crashes and the operator sees the fix in the pod
+    logs, not buried in a per-request 401 body.
+    """
+    if not mcp_resource_uri():
+        raise RuntimeError(AUDIENCE_NOT_CONFIGURED_REMEDIATION)
 
 
 async def _run_lifespan_shutdown() -> None:
@@ -167,6 +213,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     and the lifespan crashes so the operator sees CrashLoopBackOff
     instead of a quietly-broken dispatch.
 
+    The G5.2-T1 memory-expiry sweeper (#623) starts last among
+    background tasks and stops first on shutdown so its session-borrow
+    can never outlive the engine pool teardown. The sweeper is
+    enabled by ``MEMORY_EXPIRY_ENABLED`` (default ``True``); operators
+    using an external cleanup mechanism (k8s CronJob, etc.) flip the
+    env var off and the task handle stays ``None``, which the
+    ``finally`` branch tolerates.
+
     On shutdown :func:`_run_lifespan_shutdown` releases the
     SQLAlchemy + Valkey pools with per-disposer try/except so a
     single failure can't leak a sibling pool.
@@ -196,6 +250,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.
     eager_import_mcp_modules()
+    # MCP audience guard (G0.8-T4 #633). The /mcp router is mounted
+    # unconditionally; a deploy with neither MCP_RESOURCE_URI nor
+    # BACKPLANE_URL leaves the audience empty and every /mcp request
+    # 401s with no signal. Crash loudly here with the remediation
+    # instead of serving a dark, silent surface.
+    _assert_mcp_resource_uri_configured()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
     # Scheduled topology refresh (G9.1-T3 #450). Started after connector
@@ -204,9 +264,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # so shutdown can cancel + await its unwind before the DB/redis
     # pools are disposed (a sweep mid-flight must not race pool teardown).
     topology_scheduler_task = start_topology_refresh_scheduler()
+    # Scheduled memory-expiry sweeper (G5.2-T1 #623). Gated on
+    # ``MEMORY_EXPIRY_ENABLED`` so operators relying on an external
+    # cleanup mechanism (k8s CronJob, etc.) can disable the in-process
+    # loop without forking the chassis. ``None`` when disabled; the
+    # finally branch tolerates that shape so disable-and-shutdown does
+    # not raise.
+    memory_expiry_task: asyncio.Task[None] | None = None
+    if get_settings().memory_expiry_enabled:
+        memory_expiry_task = start_memory_expiry_sweeper()
     try:
         yield
     finally:
+        if memory_expiry_task is not None:
+            await stop_memory_expiry_sweeper(memory_expiry_task)
         await stop_topology_refresh_scheduler(topology_scheduler_task)
         await _run_lifespan_shutdown()
 
@@ -221,27 +292,34 @@ app: FastAPI = FastAPI(
 # Middleware registration order matters for ASGI: ``add_middleware``
 # wraps the existing app, so the *last* middleware added becomes the
 # outermost layer (its ``__call__`` runs first on the request side and
-# last on the response side). The required runtime order for v0.1 is:
+# last on the response side). The required runtime order for v0.2 is:
 #
-#   client → RequestContextMiddleware → AuditMiddleware → router → handler
+#   client → RequestContextMiddleware → BroadcastDetailMiddleware
+#          → AuditMiddleware → router → handler
 #
 # - ``RequestContextMiddleware`` outermost so ``request_id`` is bound
 #   before any inner middleware reads it; the
 #   :func:`~meho_backplane.middleware.verify_jwt_and_bind` dependency
 #   binds ``operator_sub`` deeper still, inside the handler invocation.
-# - ``AuditMiddleware`` directly inside it so the audit row sees both
-#   contextvars on the response side, and so its fail-closed 500
-#   replacement still passes through ``RequestContextMiddleware``'s
-#   header injection (the operator gets ``X-Request-Id`` even on the
-#   audit-failure path).
+# - ``BroadcastDetailMiddleware`` (G6.3-T3 #380) sits between
+#   ``RequestContextMiddleware`` and ``AuditMiddleware`` so the
+#   ``broadcast_detail_override`` contextvar is bound BEFORE
+#   ``AuditMiddleware``'s broadcast resolver consults it on the
+#   response side.
+# - ``AuditMiddleware`` directly inside ``BroadcastDetailMiddleware``
+#   so the audit row sees both contextvars on the response side, and
+#   so its fail-closed 500 replacement still passes through the outer
+#   middlewares' header injection / cleanup.
 #
 # To achieve that with ``add_middleware``'s last-added-is-outermost
 # rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
-# then ``RequestContextMiddleware`` (becomes outermost). Middleware is
-# registered before routers so every endpoint (including the Task #19
-# health/version/ready surfaces and the Task #20 ``/metrics`` route)
-# inherits the request-id binding and the http_requests_total counter.
+# then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``
+# (becomes outermost). Middleware is registered before routers so
+# every endpoint (including the Task #19 health/version/ready
+# surfaces and the Task #20 ``/metrics`` route) inherits the
+# request-id binding and the http_requests_total counter.
 app.add_middleware(AuditMiddleware)
+app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health_router)
@@ -329,6 +407,24 @@ app.include_router(api_v1_connectors_ingest_router)
 # ``kb.delete`` / ``kb.ingest`` -- bound via the ``audit_op_id`` /
 # ``audit_op_class`` contextvar overrides the chassis publisher honours.
 app.include_router(api_v1_kb_router)
+# G5.1-T2 (#422) -- memory REST surface at /api/v1/memory*.
+# Four routes (POST / GET / GET /{scope}/{slug} / DELETE /{scope}/{slug})
+# that expose the T1 :class:`MemoryService` to operators + agents. Tenant-
+# scoped via the JWT's tenant_id claim; cross-tenant + cross-user reads
+# collapse to 404 (not 403) to prevent enumerating other operators via
+# status-code differential. Per-scope RBAC is delegated to the service's
+# :class:`MemoryRbacResolver` (e.g. only ``tenant_admin`` writes
+# ``tenant``-scoped). Route-layer dependency is split: reads gated by
+# ``require_role(READ_ONLY)`` (``GET /api/v1/memory`` +
+# ``GET /api/v1/memory/{scope}/{slug}``), writes by ``require_role(OPERATOR)``
+# (``POST /api/v1/memory`` + ``DELETE /api/v1/memory/{scope}/{slug}``) --
+# the split is load-bearing because :class:`MemoryRbacResolver`
+# explicitly allows ``read_only`` operators to read ``tenant`` /
+# ``target`` scopes per consumer-needs §G5 L131.
+# Audit + broadcast op_ids: ``memory.remember`` / ``memory.list`` /
+# ``memory.recall`` / ``memory.forget`` -- bound via the ``audit_op_id`` /
+# ``audit_op_class`` contextvar overrides the chassis publisher honours.
+app.include_router(api_v1_memory_router)
 # G8.1-T2 (#466) -- audit-query REST surface. Four routes (POST /query,
 # GET who-touched / my-recent / show) all dispatching through the T1
 # substrate (`meho_backplane.audit_query.query_audit`). Operator role
@@ -337,6 +433,15 @@ app.include_router(api_v1_kb_router)
 # row this surface writes carries the canonical `meho.audit.query`
 # identity and broadcasts as aggregate-only per decision #3.
 app.include_router(api_v1_audit_router)
+# G6.3-T4 (#381) -- tenant-admin CRUD verbs for BroadcastOverride
+# rules (list / create / delete). Wraps the substrate ORM model T1
+# (#378) ships and the resolver-cache invalidation hook T2 (#379)
+# ships. RBAC: tenant_admin-only (operator + read_only get 403).
+# Tenant-scoped via the JWT's tenant_id claim; cross-tenant probes
+# return 404 (never 403) so existence is not leaked across tenant
+# boundaries. Every mutation writes an audit row and broadcasts
+# under op_class=write.
+app.include_router(api_v1_broadcast_overrides_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

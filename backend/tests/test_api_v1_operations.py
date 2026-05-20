@@ -245,8 +245,13 @@ async def test_get_groups_returns_meta_tool_payload(
     assert any(g["group_key"] == "kv" for g in body["groups"])
 
 
-def test_get_groups_unknown_connector_returns_empty_list(client: TestClient) -> None:
-    """Unknown connector -> 200 with empty groups (not 404)."""
+def test_get_groups_unknown_connector_returns_404(client: TestClient) -> None:
+    """G0.8-T5: an unknown connector_id is a 404 (was a misleading 200 []).
+
+    The empty-200 conflated "unknown connector" with "known connector,
+    no enabled groups" — a real dogfood evaluator concluded the catalog
+    was empty when 40 descriptors existed; the id was just mis-shaped.
+    """
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
@@ -254,8 +259,54 @@ def test_get_groups_unknown_connector_returns_empty_list(client: TestClient) -> 
             "/api/v1/operations/groups?connector_id=ghost-9.9",
             headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "ghost-9.9" in detail
+    assert "<impl_id>-<version>" in detail
+
+
+def test_get_groups_bare_product_name_returns_404(client: TestClient) -> None:
+    """AC: a bare product slug (`vault`) names no connector -> 404, not 200 []."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/groups?connector_id=vault",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    assert "vault" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_groups_known_connector_zero_enabled_returns_empty_200(
+    client: TestClient,
+) -> None:
+    """Regression guard: a KNOWN connector with no *enabled* groups still
+    returns 200 [] — the "meaningful empty" case must be preserved."""
+    # A staged (not enabled) group makes the connector known-as-data
+    # while leaving zero enabled groups for the operator to see.
+    await _seed_group(group_key="staged")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        # Flip the seeded group to a non-enabled review status so the
+        # connector exists but exposes no enabled groups.
+        from sqlalchemy import update
+
+        await s.execute(
+            update(OperationGroup)
+            .where(OperationGroup.group_key == "staged")
+            .values(review_status="staged")
+        )
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/groups?connector_id=vault-1.x",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
     assert response.status_code == 200
-    assert response.json() == {"connector_id": "ghost-9.9", "groups": []}
+    assert response.json() == {"connector_id": "vault-1.x", "groups": []}
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +333,40 @@ async def test_get_search_returns_hits(
     assert len(body["hits"]) == 1
     assert body["hits"][0]["op_id"] == "vault.kv.read"
     assert "query_duration_ms" in body
+
+
+def test_get_search_unknown_connector_returns_404(client: TestClient) -> None:
+    """AC: /search behaves identically to /groups for an unknown connector."""
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=ghost-9.9&query=read",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 404
+    assert "ghost-9.9" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_search_known_connector_no_match_returns_empty_200(
+    client: TestClient,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """AC: a KNOWN connector with no matching ops returns 200 with [] hits
+    (the known-empty case, distinct from unknown→404)."""
+    # Connector is known-as-data (a seeded group) but has no descriptors,
+    # so the query matches nothing.
+    await _seed_group(group_key="kv")
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.get(
+            "/api/v1/operations/search?connector_id=vault-1.x&query=nonexistent",
+            headers={"Authorization": f"Bearer {_operator_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["hits"] == []
 
 
 def test_get_search_rejects_limit_over_50(client: TestClient) -> None:

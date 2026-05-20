@@ -11,7 +11,10 @@ the G0.6 dispatcher substrate:
 
 * :attr:`KubernetesConnector.version` /
   :attr:`KubernetesConnector.impl_id` advertise the registry v2 key
-  ``("k8s", "1.x", "kubernetes-asyncio")``. The shipped v1 entry
+  ``("k8s", "1.x", "k8s")``. The single-impl ``impl_id == product``
+  shape mirrors the Vault sibling and round-trips through
+  :func:`~meho_backplane.operations._lookup.parse_connector_id` for
+  the canonical ``connector_id="k8s-1.x"`` shape. The shipped v1 entry
   (``register_connector("k8s", ...)``) is retained for
   ``get_connector("k8s")`` callers (resolver tests, ``/api/v1/health``
   Vault federation probe shape). The chassis dispatch route that
@@ -154,16 +157,21 @@ def product_from_git_version(git_version: str) -> str:
 class KubernetesConnector(Connector):
     """Kubernetes connector -- reads kubeconfig per target, caches the client."""
 
-    # Registry v2 metadata (G0.6-T3 #394 + #391 refactor). The product
-    # slug ``"k8s"`` is the v2 canonical form aligned with the
-    # ``connector_id="k8s-1.x"`` shape the dispatcher's parser produces
-    # (:func:`~meho_backplane.operations._lookup.parse_connector_id`).
-    # The v1 entry registered in :mod:`__init__` uses ``"kubernetes"``
-    # for chassis-route backward compat -- both keys resolve to the
-    # same connector class via the registry's two-layer storage.
+    # Registry v2 metadata. The single-impl ``impl_id == product``
+    # shape mirrors the Vault sibling (decision #8 -- the library name
+    # ``kubernetes_asyncio`` lives in the package layout +
+    # ``pyproject.toml`` dependency, not the registry triple). The
+    # triple ``("k8s", "1.x", "k8s")`` round-trips through
+    # :func:`~meho_backplane.operations._lookup.parse_connector_id`
+    # for the canonical ``connector_id="k8s-1.x"`` shape every
+    # operator surface (CLI alias verbs / meta-tool dispatch) bakes.
+    # A future EKS-specific transport lands as a sibling row under
+    # ``("k8s", "1.x", "<impl-id>")`` and selects via
+    # ``target.preferred_impl_id`` -- the same shape vmware-rest's
+    # multi-impl-ready substrate already supports.
     product = "k8s"
     version = "1.x"
-    impl_id = "kubernetes-asyncio"
+    impl_id = "k8s"
 
     def __init__(
         self,

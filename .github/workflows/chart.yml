@@ -85,7 +85,7 @@ jobs:
     # so fork PRs are skipped entirely. push events (main, v*) short-circuit
     # the OR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -104,7 +104,7 @@ jobs:
         # linux-amd64 tarball of v0.6.7.
         #
         # Install target is `$HOME/.local/bin` — a runner-owned directory —
-        # rather than `/usr/local/bin`, because the self-hosted `meho-runners`
+        # rather than `/usr/local/bin`, because the self-hosted `meho-runners-ci`
         # pool runs as a non-root user that cannot write to system paths
         # (writing /usr/local/bin returned `Permission denied` in CI run
         # 25644668781). Appending the directory to `$GITHUB_PATH` is the
@@ -195,6 +195,37 @@ jobs:
             -summary \
             /tmp/rendered.yaml
 
+          # G0.8-T4 (#633): with no config.backplaneUrl / config.mcpResourceUri
+          # set, the chart MUST derive MCP_RESOURCE_URI from the Ingress host
+          # so the documented `${BACKPLANE_URL}/mcp` default actually
+          # materialises for the common ingress-fronted deploy. The override
+          # set above pins ingress.host=meho.test + ingress.tls — so the
+          # derived value is https://meho.test/mcp. A regression here
+          # silently re-darkens the /mcp surface.
+          grep -Eq '^[[:space:]]*MCP_RESOURCE_URI:[[:space:]]*"https://meho\.test/mcp"[[:space:]]*$' /tmp/rendered.yaml \
+            || { echo "::error::chart did not derive MCP_RESOURCE_URI from ingress.host (G0.8-T4 #633 regression)"; exit 1; }
+          grep -Eq '^[[:space:]]*BACKPLANE_URL:[[:space:]]*"https://meho\.test"[[:space:]]*$' /tmp/rendered.yaml \
+            || { echo "::error::chart did not derive BACKPLANE_URL from ingress.host (G0.8-T4 #633 regression)"; exit 1; }
+
+      - name: Assert Deployment carries CHART_VERSION env (#631)
+        # GET /version reports a real chart_version only if the chart's
+        # Deployment injects CHART_VERSION from .Chart.Version. Render the
+        # chart and assert the env var is present with the in-tree
+        # Chart.yaml `version` value (0.1.0 on a fresh checkout; the
+        # publish job rewrites it to the calver at package time, but the
+        # template binding — `value: {{ .Chart.Version | quote }}` — is
+        # what this gate proves). grep -F on the exact `name:`/`value:`
+        # pair fails the job loud if the env binding ever regresses.
+        run: |
+          set -euo pipefail
+          CHART_VER="$(grep -E '^version:' deploy/charts/meho/Chart.yaml \
+            | head -1 | awk '{print $2}')"
+          echo ">> Chart.yaml version = ${CHART_VER}"
+          grep -F -A1 'name: CHART_VERSION' /tmp/rendered.yaml \
+            | grep -F "value: \"${CHART_VER}\"" \
+            || { echo "::error title=CHART_VERSION env missing::Deployment must inject CHART_VERSION=${CHART_VER} from .Chart.Version (#631)" >&2; exit 1; }
+          echo ">> CHART_VERSION env present with value ${CHART_VER}"
+
   helm-test:
     name: helm install + helm test (pgvector preflight)
     # G0.4-T6 (#263) -- spins up a kind cluster, installs a
@@ -228,7 +259,7 @@ jobs:
     # follow-up issue lands the hardening pass that removes
     # continue-on-error once we have ~10 green runs (per G6.1-T8 AC).
     #
-    # Runs on ``ubuntu-latest`` (NOT ``meho-runners``) because kind
+    # Runs on ``ubuntu-latest`` (NOT ``meho-runners-ci``) because kind
     # needs Docker-in-Docker support that the self-hosted runner
     # pool isn't configured for; the GitHub-hosted runners ship
     # Docker pre-installed and helm/kind-action works out of the box.
@@ -251,7 +282,7 @@ jobs:
         # Docker as the container backend. The default node image
         # (kindest/node:v1.32.x at action HEAD) is fine for our
         # Kubernetes 1.28+ chart target.
-        uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3  # v1.12.0
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
         with:
           cluster_name: meho-helm-test
 
@@ -730,7 +761,7 @@ jobs:
     # but the explicit `if` makes intent visible.
     if: github.event_name != 'pull_request'
     needs: validate
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 15
     permissions:
       # Per-job scope: only `publish` needs to push to GHCR and mint an OIDC
@@ -954,7 +985,7 @@ jobs:
     # successful `helm pull` here can only mean the GHCR package is public.
     if: github.event_name != 'pull_request'
     needs: publish
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Install Helm (no checkout — keeps env scrubbed of repo state)
@@ -971,7 +1002,7 @@ jobs:
         run: |
           set -euo pipefail
           # Isolate Helm from any persisted runner-local auth/config.
-          # The self-hosted `meho-runners` pool does not guarantee a clean
+          # The self-hosted `meho-runners-ci` pool does not guarantee a clean
           # HOME between jobs (https://docs.github.com/en/actions/hosting-your-own-runners);
           # Helm 3.8+ falls back to ~/.docker/config.json for OCI creds when
           # HELM_REGISTRY_CONFIG isn't set (helm/helm#7776), so deleting only

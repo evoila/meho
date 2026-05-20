@@ -445,6 +445,57 @@ async def test_edit_op_rejects_invalid_safety_level() -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_op_sets_llm_instructions_and_writes_audit_without_echo() -> None:
+    """``edit_op(llm_instructions=...)`` persists the blob; audit names the field only."""
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+
+    target_op = "GET:/api/v1/group-0/0"
+    blob = {
+        "when_to_call": "Inspect a single group's first op.",
+        "output_shape": "object with id + status fields",
+    }
+    await service.edit_op(
+        "vmware-rest-9.0",
+        target_op,
+        tenant_id=tenant_id,
+        llm_instructions=blob,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id == tenant_id,
+            EndpointDescriptor.op_id == target_op,
+        )
+        op_row = (await session.execute(stmt)).scalar_one()
+        assert op_row.llm_instructions == blob
+
+    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    payload: Any = row.payload
+    assert payload["fields_updated"] == ["llm_instructions"]
+    # The blob itself is NOT in the audit payload — operator-authored
+    # prose belongs out of the audit table, same posture edit_group
+    # takes for when_to_use.
+    assert "llm_instructions" not in payload
+
+
+@pytest.mark.asyncio
+async def test_edit_op_requires_at_least_one_field() -> None:
+    """Calling ``edit_op`` with every override set to ``None`` raises ``ValueError``."""
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    with pytest.raises(ValueError, match="llm_instructions"):
+        await service.edit_op(
+            "vmware-rest-9.0",
+            "GET:/api/v1/group-0/0",
+            tenant_id=tenant_id,
+        )
+
+
+@pytest.mark.asyncio
 async def test_edit_op_is_enabled_false_override_sticks_after_enable_connector() -> None:
     """Operator-set ``is_enabled=False`` survives a subsequent ``enable_connector``."""
     tenant_id = uuid.uuid4()

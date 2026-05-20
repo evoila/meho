@@ -8,8 +8,10 @@ Coverage matrix (G0.6-T8 / Task #399 acceptance criteria):
 * ``list_operation_groups`` returns enabled groups for a known
   ``connector_id`` with their ``when_to_use`` strings + per-group
   operation counts. Disabled groups are omitted.
-* ``list_operation_groups`` returns an empty groups list for an unknown
-  ``connector_id`` (no 404 -- empty is operationally meaningful).
+* ``list_operation_groups`` / ``search_operations`` raise
+  ``UnknownConnectorError`` for an unknown ``connector_id`` (REST → 404,
+  G0.8-T5 #630); a known connector with zero enabled groups still
+  returns an empty list (the meaningful-empty case is preserved).
 * Tenant scoping on ``list_operation_groups`` -- a tenant-curated group
   is visible only to that tenant.
 * ``search_operations`` ranks hits via hybrid BM25+cosine RRF; the
@@ -48,6 +50,7 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.operations.meta_tools import (
+    UnknownConnectorError,
     call_operation,
     describe_descriptor,
     list_operation_groups,
@@ -226,13 +229,34 @@ async def test_list_operation_groups_returns_enabled_groups_with_when_to_use() -
 
 
 @pytest.mark.asyncio
-async def test_list_operation_groups_returns_empty_list_for_unknown_connector() -> None:
-    """AC: unknown connector_id -> empty groups list (not 404)."""
+async def test_list_operation_groups_unknown_connector_raises() -> None:
+    """G0.8-T5: unknown connector_id raises UnknownConnectorError.
+
+    The route layer maps that to a 404; the prior behaviour (empty
+    ``groups`` list, HTTP 200) was the "empty catalog" trap.
+    """
     operator = _make_operator()
 
-    result = await list_operation_groups(operator, {"connector_id": "ghost-9.9"})
+    with pytest.raises(UnknownConnectorError) as excinfo:
+        await list_operation_groups(operator, {"connector_id": "ghost-9.9"})
 
-    assert result == {"connector_id": "ghost-9.9", "groups": []}
+    assert "ghost-9.9" in str(excinfo.value)
+    assert "<impl_id>-<version>" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_search_operations_unknown_connector_raises(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """G0.8-T5: search_operations raises UnknownConnectorError too —
+    identical unknown-vs-known-empty semantics across both meta-tools."""
+    operator = _make_operator()
+
+    with pytest.raises(UnknownConnectorError):
+        await search_operations(
+            operator,
+            {"connector_id": "ghost-9.9", "query": "anything"},
+        )
 
 
 @pytest.mark.asyncio
@@ -302,6 +326,64 @@ async def test_list_operation_groups_tenant_boundary() -> None:
 
 
 @pytest.mark.asyncio
+async def test_connector_existence_is_tenant_scoped() -> None:
+    """G0.8-T5: the unknown-vs-known-empty decision is per-tenant.
+
+    Regression for the cross-tenant presence oracle: ``connector_exists``
+    must not treat a connector private to another tenant as "known".
+
+    * A connector whose only rows are tenant-A-private must read as
+      *unknown* to tenant B — ``UnknownConnectorError`` (REST → 404), not
+      an empty ``200 []``. Otherwise tenant B learns the connector exists
+      somewhere and the empty-catalog trap is merely re-scoped per tenant.
+    * A NULL-tenant (built-in / shared) connector stays visible to every
+      tenant — the scoping must not over-restrict and 404 a shared
+      connector for a tenant that has no private rows of its own.
+    """
+    # Tenant-A-private connector: rows exist, but only for tenant A.
+    await _seed_group(
+        tenant_id=_TENANT_A,
+        product="private",
+        version="1.x",
+        impl_id="private",
+        group_key="a-only",
+        name="Tenant A only",
+        when_to_use="tenant a private.",
+    )
+    # Shared / built-in connector visible to all tenants.
+    await _seed_group(
+        tenant_id=None,
+        product="shared",
+        version="1.x",
+        impl_id="shared",
+        group_key="builtin",
+        name="Shared",
+        when_to_use="global.",
+    )
+
+    op_a = _make_operator(tenant_id=_TENANT_A)
+    op_b = _make_operator(tenant_id=_TENANT_B)
+
+    # (a) Tenant B cannot see tenant A's private connector at all: the
+    #     caller-visible answer is "unknown", so this is a 404, never
+    #     a 200 [].
+    with pytest.raises(UnknownConnectorError) as excinfo:
+        await list_operation_groups(op_b, {"connector_id": "private-1.x"})
+    assert "private-1.x" in str(excinfo.value)
+
+    # Tenant A still sees its own private connector (no false 404).
+    result_a = await list_operation_groups(op_a, {"connector_id": "private-1.x"})
+    assert [g["group_key"] for g in result_a["groups"]] == ["a-only"]
+
+    # (b) The NULL-tenant shared connector is visible to both tenants —
+    #     scoping must not over-restrict and 404 a shared connector.
+    result_shared_a = await list_operation_groups(op_a, {"connector_id": "shared-1.x"})
+    result_shared_b = await list_operation_groups(op_b, {"connector_id": "shared-1.x"})
+    assert [g["group_key"] for g in result_shared_a["groups"]] == ["builtin"]
+    assert [g["group_key"] for g in result_shared_b["groups"]] == ["builtin"]
+
+
+@pytest.mark.asyncio
 async def test_list_operation_groups_includes_operation_count(
     stub_embedding_service: AsyncMock,
 ) -> None:
@@ -367,7 +449,22 @@ async def test_list_operation_groups_includes_operation_count(
 async def test_search_operations_returns_empty_list_on_empty_corpus(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """No descriptors registered -> ``hits`` is an empty list."""
+    """A KNOWN connector with no matching descriptors -> empty ``hits``.
+
+    The connector is made known-as-data via a seeded group (no
+    descriptors), so this exercises the known-empty path rather than
+    the unknown-connector path (which now raises ``UnknownConnectorError``;
+    see ``test_search_operations_unknown_connector_raises``).
+    """
+    await _seed_group(
+        tenant_id=None,
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        group_key="kv",
+        name="KV v2",
+        when_to_use="kv.",
+    )
     operator = _make_operator()
 
     result = await search_operations(
@@ -560,7 +657,14 @@ async def test_search_operations_unknown_group_returns_empty_hits(
 async def test_search_operations_enforces_tenant_boundary(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Tenant-scoped descriptors don't leak across tenants."""
+    """Tenant-A-private descriptors don't leak into tenant B's hits.
+
+    The connector carries a shared (``tenant_id IS NULL``) descriptor so
+    it is legitimately *known* to both tenants — that keeps this test
+    focused on the hit-list tenant boundary rather than the existence
+    gate (whose own per-tenant 404 behaviour is covered by
+    ``test_connector_existence_is_tenant_scoped``).
+    """
     sessionmaker = get_sessionmaker()
     from datetime import UTC, datetime
 
@@ -594,6 +698,38 @@ async def test_search_operations_enforces_tenant_boundary(
                 updated_at=datetime.now(UTC),
             )
         )
+        # Shared descriptor so the connector is known to every tenant —
+        # without it the tenant-scoped existence gate would 404 tenant B
+        # before the hit-list boundary is even exercised.
+        s.add(
+            EndpointDescriptor(
+                id=uuid.uuid4(),
+                tenant_id=None,
+                product="vault",
+                version="1.x",
+                impl_id="vault",
+                op_id="vault.shared.op",
+                source_kind="typed",
+                method=None,
+                path=None,
+                handler_ref="tests.test_operations_meta_tools._module_handler",
+                summary="Shared op for reading data.",
+                description="shared op.",
+                group_id=None,
+                tags=[],
+                parameter_schema={"type": "object"},
+                response_schema=None,
+                llm_instructions=None,
+                safety_level="safe",
+                requires_approval=False,
+                is_enabled=True,
+                embedding=None,
+                custom_description=None,
+                custom_notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
 
     op_a = _make_operator(tenant_id=_TENANT_A)
     op_b = _make_operator(tenant_id=_TENANT_B)
@@ -606,6 +742,7 @@ async def test_search_operations_enforces_tenant_boundary(
         {"connector_id": "vault-1.x", "query": "read"},
     )
 
+    # Tenant A sees its own private op; tenant B never does.
     assert any(h["op_id"] == "vault.tenant.a.op" for h in result_a["hits"])
     assert all(h["op_id"] != "vault.tenant.a.op" for h in result_b["hits"])
 

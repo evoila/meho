@@ -232,6 +232,13 @@ class TestClassifyOp:
             # write-suffix tuple this would fall through to ``other``
             # and broadcast the full secret payload.
             ("vault.kv.put", "write"),
+            # bind9 record-write verbs (G3.4-T3 #589). The bind9
+            # connector uses ``.add`` / ``.remove`` to match the
+            # consumer wrapper's verb shape; without these suffixes
+            # the rdata (FQDN + IP) would broadcast as ``other`` rather
+            # than redact under the ``write`` branch.
+            ("bind9.record.add", "write"),
+            ("bind9.record.remove", "write"),
         ],
     )
     def test_write_suffixes(self, op_id: str, expected: str) -> None:
@@ -383,3 +390,103 @@ class TestRedactPayload:
         """``result_status`` is the handler's verdict — the redactor doesn't re-classify."""
         result = redact_payload("read", {}, status)
         assert result["result_status"] == status
+
+
+# ---------------------------------------------------------------------------
+# redact_payload(detail=...) — G6.3-T2 (#379) extension
+# ---------------------------------------------------------------------------
+
+
+class TestRedactPayloadDetailKwarg:
+    """G6.3-T2: the resolver's chosen detail picks the redaction branch."""
+
+    def test_detail_none_preserves_existing_credential_read_shape(self) -> None:
+        """``detail=None`` (callers not going through the resolver) keeps pre-G6.3 behaviour."""
+        result = redact_payload(
+            "credential_read",
+            {"path": "secret/foo"},
+            "ok",
+            detail=None,
+        )
+        assert result == {"op_class": "credential_read", "result_status": "ok"}
+
+    def test_detail_none_preserves_existing_read_shape(self) -> None:
+        result = redact_payload("read", {"folder": "prod"}, "ok", detail=None)
+        assert result == {
+            "op_class": "read",
+            "params": {"folder": "prod"},
+            "result_status": "ok",
+        }
+
+    def test_detail_full_on_credential_read_returns_full_params(self) -> None:
+        """The request_override upgrade case: sensitive class → full detail.
+
+        Pins the AC: configure ``request_override="full"`` on a
+        ``credential_read`` → resolver returns ``detail="full"`` →
+        :func:`redact_payload` returns full params + response summary.
+        """
+        result = redact_payload(
+            "credential_read",
+            {"path": "secret/foo", "key": "api-token"},
+            "ok",
+            detail="full",
+        )
+        assert result == {
+            "op_class": "credential_read",
+            "params": {"path": "secret/foo", "key": "api-token"},
+            "result_status": "ok",
+        }
+
+    def test_detail_full_on_audit_query_returns_full_params(self) -> None:
+        result = redact_payload(
+            "audit_query",
+            {"filter": "principal=damir"},
+            "ok",
+            detail="full",
+        )
+        assert result == {
+            "op_class": "audit_query",
+            "params": {"filter": "principal=damir"},
+            "result_status": "ok",
+        }
+
+    def test_detail_aggregate_on_read_collapses_to_credential_shape(self) -> None:
+        """The tenant-rule downgrade case: non-sensitive class → aggregate.
+
+        Pins the AC: configure ``op_id_pattern="k8s.configmap.info"``,
+        ``scope_field="namespace"``, ``scope_value="kube-system"``,
+        ``detail="aggregate"`` → resolver returns ``detail="aggregate"``
+        → :func:`redact_payload` collapses to the credential_read
+        aggregate shape (no params).
+        """
+        result = redact_payload(
+            "read",
+            {"namespace": "kube-system", "name": "kube-root-ca.crt"},
+            "ok",
+            detail="aggregate",
+        )
+        assert result == {"op_class": "read", "result_status": "ok"}
+
+    def test_detail_aggregate_on_audit_query_keeps_row_count(self) -> None:
+        """audit_query aggregate is special-cased to preserve row_count."""
+        result = redact_payload(
+            "audit_query",
+            {"filter": "x", "row_count": 7},
+            "ok",
+            detail="aggregate",
+        )
+        assert result == {
+            "op_class": "audit_query",
+            "result_status": "ok",
+            "row_count": 7,
+        }
+
+    def test_detail_aggregate_on_credential_read_matches_default(self) -> None:
+        """``detail="aggregate"`` on the already-aggregate class is a no-op shape-wise."""
+        result = redact_payload(
+            "credential_read",
+            {"path": "secret/foo"},
+            "ok",
+            detail="aggregate",
+        )
+        assert result == {"op_class": "credential_read", "result_status": "ok"}

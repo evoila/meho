@@ -140,8 +140,8 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is VmwareRestConnector
 
 
-def test_default_session_loader_raises_until_g03_lands() -> None:
-    """The default Vault loader stays unimplemented until G0.3."""
+def test_default_session_loader_raises_deliberate_stub() -> None:
+    """The default Vault loader is a deliberate, clearly-labelled stub."""
     import asyncio
 
     from meho_backplane.connectors.vmware_rest.session import (
@@ -149,7 +149,7 @@ def test_default_session_loader_raises_until_g03_lands() -> None:
     )
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"G0\.3"):
+        with pytest.raises(NotImplementedError, match=r"deliberate stub.*#214"):
             await load_session_credentials_from_vault(_TARGET_A)
 
     asyncio.run(_check())

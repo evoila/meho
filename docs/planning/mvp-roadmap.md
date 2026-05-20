@@ -15,6 +15,7 @@ v0.2" framing on the board.
 |---|---|---|---|
 | **v0.1** | (pre-MVP) | FastAPI chassis, Keycloak JWT, audit middleware, Helm chart, CI, broadcast SSE feed | **shipped — on `main`** |
 | **v0.2** | **MVP1** | Substrate complete + vSphere (REST + vi-json + composites) + KB | in flight (~19 open tasks) |
+| **v0.2.1** | **MVP1 hardening** | Dogfood corrective — make the shipped v0.2 actually consumer-usable (7 upstream wall signals) | all 8 tasks closed; blocks new v0.3/v0.4 starts until done |
 | **v0.3** | **MVP2** | k8s + Vault + bind9 + topology graph | filed, mostly unstaffed |
 | **v0.4** | **MVP3** | NSX + SDDC + Harbor + agent memory | partially filed |
 | **v0.5** | **MVP4** | VCF mgmt plane + broadcast *complete* (live SSE + historical query) | partially filed |
@@ -127,6 +128,51 @@ for later MVPs:
 
 That's deliberate: investing in eval coverage early is cheaper than racing
 to write tests retroactively as each consumer surface lands.
+
+---
+
+## v0.2.1 — MVP1 hardening — G0.8 dogfood corrective
+
+**Slotted ahead of v0.3.** v0.2.0 tagged and deployed smoke-green, but
+seven consumer dogfood signals proved the smoke-green was hollow: the
+acceptance smoke passed only because `dry_run` ingests never write, so a
+fresh runbook-following deploy could do zero tenant-scoped writes. There
+is no value shipping MVP2 on top of an MVP1 the consumer cannot write to,
+so G0.8 corrects it before v0.3 work proceeds.
+
+### What ships
+
+- **Tenant-row JIT seed** so a fresh deploy's first real write succeeds
+  (#628) — the hard FK wall the dry-run smoke masked
+- **Chart Valkey env-var alignment** so `/ready`'s broadcast leg and
+  `helm upgrade` stop failing (#583)
+- **Vault connector reads the operator JWT from request context** —
+  drops the pre-#224 `raw_jwt` stub (#629)
+- **MCP `MCP_RESOURCE_URI` default / fail-loud + actionable 401** (#633)
+- **`connector_id` documented + 404-on-unknown** (no more empty-200
+  "empty catalog" trap) (#630)
+- **`retrieve/usage` counted-surface documented** (#632)
+- **`/version` build-stamping** — `git_sha` / `build_date` /
+  `chart_version` (#631)
+- **v0.2 acceptance smoke extended** to a real federated non-dry-run
+  write so this "green-but-hollow" class cannot recur (#668)
+
+### Initiatives
+
+| Initiative | # |
+|---|---|
+| [G0.8 v0.2 dogfood hardening](https://github.com/evoila/meho/issues/634) | #634 |
+
+Parent goal G0 [#221](https://github.com/evoila/meho/issues/221). All 8
+child Tasks (#628 #583 #629 #633 #630 #632 #631 #668) closed; the three
+hard blockers (#628 / #583 / #629) cleared, lifting the v0.3/v0.4 freeze.
+
+> **`/meho-status` `VERSION_MAP` drift (surfaced, not silently
+> reconciled):** the `meho-status` skill's hardcoded `VERSION_MAP` does
+> not yet carry G0.8 / v0.2.1. Per that skill's hard rule 7 this doc is
+> canonical; the map is the thing that's now behind and must be
+> reconciled by the skill's maintainer — this roadmap edit does not
+> touch the skill.
 
 ---
 

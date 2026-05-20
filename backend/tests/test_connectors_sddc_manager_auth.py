@@ -1,0 +1,464 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Unit tests for :class:`SddcManagerConnector` auth + fingerprint/probe (G3.5-T4 #616).
+
+Exercises HTTP Basic auth with sso_realm handling (default + override),
+per-target credential isolation, the auth_model boundary gate, and the
+fingerprint/probe shape against a mocked ``GET /v1/sddc-managers`` endpoint.
+
+Auth divergence from the NSX/vSphere precedents: no session token is
+established — HTTP Basic is sent on every request via
+``Authorization: Basic <base64(username@realm:password)>``. Credentials are
+cached per target so Vault is only queried once per target per connector
+instance lifetime.
+"""
+
+from __future__ import annotations
+
+import base64
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+
+import pytest
+import respx
+
+from meho_backplane.connectors.adapters.http import HttpConnector
+from meho_backplane.connectors.registry import (
+    clear_registry,
+    register_connector_v2,
+)
+from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.connectors.sddc_manager import (
+    SddcManagerConnector,
+    SddcTargetLike,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_sddc_registry() -> Iterator[None]:
+    """Re-register SddcManagerConnector after sibling tests clear the registry.
+
+    ``test_connectors_registry_v2.py`` installs an autouse fixture that
+    calls :func:`clear_registry` between tests. Re-register before every
+    test in this module and clear after — same pattern
+    :mod:`tests.test_connectors_nsx_auth` established.
+    """
+    clear_registry()
+    register_connector_v2(
+        product=SddcManagerConnector.product,
+        version=SddcManagerConnector.version,
+        impl_id=SddcManagerConnector.impl_id,
+        cls=SddcManagerConnector,
+    )
+    yield
+    clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# Target stub — satisfies SddcTargetLike Protocol structurally.
+# Replaced by the real Target model when G0.3 (#224) lands.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubTarget:
+    name: str
+    host: str
+    port: int | None
+    secret_ref: str
+    auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    sso_realm: str = field(default="vsphere.local")
+
+
+_TARGET_A = _StubTarget(
+    name="sddc-a",
+    host="sddc-a.test.invalid",
+    port=443,
+    secret_ref="kv/data/sddc/sddc-a",
+)
+_TARGET_B = _StubTarget(
+    name="sddc-b",
+    host="sddc-b.test.invalid",
+    port=443,
+    secret_ref="kv/data/sddc/sddc-b",
+)
+
+
+async def _stub_loader(_target: SddcTargetLike) -> dict[str, str]:
+    """Return canned credentials regardless of the target."""
+    return {"username": "svc-meho", "password": "stub-password"}
+
+
+def _make_connector() -> SddcManagerConnector:
+    """Build a connector wired with the stub loader."""
+    return SddcManagerConnector(credentials_loader=_stub_loader)
+
+
+def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
+    """Decode an ``Authorization: Basic <b64>`` header into (username, password)."""
+    assert authorization_header.startswith("Basic ")
+    decoded = base64.b64decode(authorization_header[6:]).decode()
+    username, _, password = decoded.partition(":")
+    return username, password
+
+
+# ---------------------------------------------------------------------------
+# ABC + registration plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_sddc_connector_subclasses_http_connector() -> None:
+    """Sanity check: the connector inherits from HttpConnector with the right metadata."""
+    assert issubclass(SddcManagerConnector, HttpConnector)
+    assert SddcManagerConnector.product == "sddc-manager"
+    assert SddcManagerConnector.version == "9.0"
+    assert SddcManagerConnector.impl_id == "sddc-rest"
+    assert SddcManagerConnector.supported_version_range == ">=9.0,<10.0"
+    assert SddcManagerConnector.priority == 1
+
+
+def test_importing_package_registers_against_v2_registry() -> None:
+    """The package's __init__ calls register_connector_v2 at import time."""
+    from meho_backplane.connectors.registry import all_connectors_v2
+
+    registry = all_connectors_v2()
+    key = ("sddc-manager", "9.0", "sddc-rest")
+    assert key in registry
+    assert registry[key] is SddcManagerConnector
+
+
+def test_default_credentials_loader_raises_until_g03_lands() -> None:
+    """The default Vault loader stays unimplemented until G0.3."""
+    import asyncio
+
+    from meho_backplane.connectors.sddc_manager.session import load_credentials_from_vault
+
+    async def _check() -> None:
+        with pytest.raises(NotImplementedError, match=r"Goal #214"):
+            await load_credentials_from_vault(_TARGET_A)
+
+    asyncio.run(_check())
+
+
+# ---------------------------------------------------------------------------
+# HTTP Basic auth — happy paths
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_sends_basic_auth_with_default_sso_realm() -> None:
+    """auth_headers() produces Authorization: Basic with sso_realm=vsphere.local default.
+
+    The username in the Basic auth header must be ``svc-meho@vsphere.local``,
+    not bare ``svc-meho``. This is the load-bearing sso_realm contract.
+
+    auth_headers() does not make any HTTP calls — it computes the header from
+    cached credentials — so no respx mock is needed here.
+    """
+    connector = _make_connector()
+    headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert "Authorization" in headers
+    assert headers["Authorization"].startswith("Basic ")
+    username, password = _decode_basic_auth(headers["Authorization"])
+    assert username == "svc-meho@vsphere.local"
+    assert password == "stub-password"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_honors_explicit_sso_realm_override() -> None:
+    """A target with a custom sso_realm has that realm reflected in the Basic auth header."""
+    target = _StubTarget(
+        name="sddc-custom",
+        host="sddc-custom.test.invalid",
+        port=443,
+        secret_ref="kv/data/sddc/custom",
+        sso_realm="corp.example.com",
+    )
+    connector = _make_connector()
+
+    headers = await connector.auth_headers(target, raw_jwt="")
+    username, _ = _decode_basic_auth(headers["Authorization"])
+    assert username == "svc-meho@corp.example.com"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
+    """Second auth_headers call against the same target does NOT re-invoke the loader."""
+    call_count = 0
+
+    async def _counting_loader(_target: SddcTargetLike) -> dict[str, str]:
+        nonlocal call_count
+        call_count += 1
+        return {"username": "svc-meho", "password": "stub-password"}
+
+    connector = SddcManagerConnector(credentials_loader=_counting_loader)
+    h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert h1 == h2
+    assert call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_per_target_isolation_keeps_credentials_separate() -> None:
+    """Two targets get two distinct credential cache entries; no cross-target leakage."""
+    call_log: list[str] = []
+
+    async def _tracking_loader(target: SddcTargetLike) -> dict[str, str]:
+        call_log.append(target.name)
+        return {"username": f"svc-{target.name}", "password": "pass"}
+
+    connector = SddcManagerConnector(credentials_loader=_tracking_loader)
+    h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+
+    username_a, _ = _decode_basic_auth(h_a["Authorization"])
+    username_b, _ = _decode_basic_auth(h_b["Authorization"])
+    assert username_a == "svc-sddc-a@vsphere.local"
+    assert username_b == "svc-sddc-b@vsphere.local"
+    # Loader called exactly once per distinct target.
+    assert call_log == ["sddc-a", "sddc-b"]
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Credential loading failure modes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_loader_missing_password_key_raises_runtime_error_naming_target() -> None:
+    """A loader returning a dict without 'password' surfaces a clear RuntimeError."""
+
+    async def _bad_loader(_target: SddcTargetLike) -> dict[str, str]:
+        return {"username": "svc-meho"}  # type: ignore[return-value]
+
+    connector = SddcManagerConnector(credentials_loader=_bad_loader)
+    with pytest.raises(RuntimeError, match=r"password") as exc_info:
+        await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert "sddc-a" in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_loader_missing_username_key_raises_runtime_error_naming_target() -> None:
+    """A loader returning a dict without 'username' surfaces a clear RuntimeError."""
+
+    async def _bad_loader(_target: SddcTargetLike) -> dict[str, str]:
+        return {"password": "stub-password"}  # type: ignore[return-value]
+
+    connector = SddcManagerConnector(credentials_loader=_bad_loader)
+    with pytest.raises(RuntimeError, match=r"username") as exc_info:
+        await connector.auth_headers(_TARGET_A, raw_jwt="")
+
+    assert "sddc-a" in str(exc_info.value)
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Auth model gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "auth_model",
+    [AuthModel.PER_USER.value, AuthModel.IMPERSONATION.value, "unknown-mode"],
+)
+async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model: str) -> None:
+    """Per-user / impersonation modes raise NotImplementedError naming the target + mode."""
+    target = _StubTarget(
+        name="sddc-per-user",
+        host="sddc.test.invalid",
+        port=443,
+        secret_ref="kv/data/sddc/per-user",
+        auth_model=auth_model,
+    )
+    connector = _make_connector()
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        await connector.auth_headers(target, raw_jwt="")
+
+    assert "sddc-per-user" in str(exc_info.value)
+    assert auth_model in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> None:
+    """auth_model=None (pre-G0.3 column-not-yet-populated) is accepted."""
+    target = _StubTarget(
+        name="sddc-pre-g03",
+        host="sddc.test.invalid",
+        port=443,
+        secret_ref="kv/data/sddc/pre-g03",
+        auth_model=None,
+    )
+    connector = _make_connector()
+    headers = await connector.auth_headers(target, raw_jwt="")
+    assert headers["Authorization"].startswith("Basic ")
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
+    """An AuthModel enum member (not just its string value) is accepted."""
+    target = _StubTarget(
+        name="sddc-enum",
+        host="sddc.test.invalid",
+        port=443,
+        secret_ref="kv/data/sddc/enum",
+    )
+    target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
+    connector = _make_connector()
+    headers = await connector.auth_headers(target, raw_jwt="")
+    assert headers["Authorization"].startswith("Basic ")
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# fingerprint() + probe()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
+    """fingerprint() against a respx-mocked GET /v1/sddc-managers returns canonical shape."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(
+            200,
+            json={
+                "elements": [
+                    {
+                        "id": "sddc-uuid-1",
+                        "fqdn": "sddc-a.test.invalid",
+                        "version": "9.0.0.0-24276214",
+                        "build": "24276214",
+                        "domain": {"id": "domain-uuid-1", "name": "MGMT"},
+                    }
+                ],
+                "pageMetadata": {"pageNumber": 1, "pageSize": 10, "totalElements": 1},
+            },
+        )
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.vendor == "vmware"
+    assert fp.product == "sddc-manager"
+    assert fp.version == "9.0.0.0-24276214"
+    assert fp.build == "24276214"
+    assert fp.reachable is True
+    assert fp.probe_method == "GET /v1/sddc-managers"
+    assert fp.extras["management_domain"] == "MGMT"
+    assert fp.extras["management_domain_id"] == "domain-uuid-1"
+    assert fp.extras["id"] == "sddc-uuid-1"
+    assert fp.extras["fqdn"] == "sddc-a.test.invalid"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_unreachable_returns_reachable_false_with_structured_error() -> None:
+    """Transport/status failure returns reachable=False with extras['error']."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(401, json={"message": "Unauthorized"})
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.vendor == "vmware"
+    assert fp.product == "sddc-manager"
+    assert fp.reachable is False
+    assert fp.probe_method == "GET /v1/sddc-managers"
+    error = fp.extras["error"]
+    assert "HTTPStatusError" in error or "401" in error
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_empty_elements_returns_reachable_true_with_no_version() -> None:
+    """An empty elements list produces reachable=True with version=None (API responded)."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(
+            200,
+            json={"elements": [], "pageMetadata": {"totalElements": 0}},
+        )
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.reachable is True
+    assert fp.version is None
+    assert fp.extras["management_domain"] is None
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_returns_ok_true_when_reachable() -> None:
+    """probe() returns ok=True on a reachable target (delegates to fingerprint)."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(
+            200,
+            json={
+                "elements": [
+                    {
+                        "id": "u",
+                        "fqdn": "sddc-a.test.invalid",
+                        "version": "9.0.0.0",
+                        "domain": {"id": "d", "name": "MGMT"},
+                    }
+                ]
+            },
+        )
+        result = await connector.probe(_TARGET_A)
+
+    assert result.ok is True
+    assert result.reason is None
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_returns_ok_false_with_reason_when_unreachable() -> None:
+    """probe() returns ok=False + reason on an unreachable target."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.get("/v1/sddc-managers").respond(401)
+        result = await connector.probe(_TARGET_A)
+
+    assert result.ok is False
+    assert result.reason is not None
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# aclose — credential cache clear + pool tear-down
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aclose_clears_credential_cache_and_pool() -> None:
+    """aclose() clears the in-memory credential cache and tears down the httpx pool."""
+    connector = _make_connector()
+    await connector.auth_headers(_TARGET_A, raw_jwt="")
+    assert "sddc-a" in connector._creds_cache
+    await connector.aclose()
+    assert connector._creds_cache == {}
+    assert connector._clients == {}
+
+
+@pytest.mark.asyncio
+async def test_aclose_with_no_cached_credentials_is_a_noop() -> None:
+    """A fresh connector with no credentials established closes cleanly."""
+    connector = _make_connector()
+    await connector.aclose()
+    assert connector._clients == {}
+    assert connector._creds_cache == {}

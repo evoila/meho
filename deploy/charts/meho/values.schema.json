@@ -217,7 +217,17 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^/",
-          "description": "Absolute filesystem path where fastembed reads / writes cached ONNX weights. Must match `retrieval.modelCache.mountPath` when the PVC is enabled — the chart does not cross-validate the two values to keep override flexibility for operators that mount via `extraVolumes`."
+          "description": "Absolute filesystem path fastembed reads cached ONNX weights from. Default `/opt/meho/model-cache` is the image layer the shipped default model is baked into at build time (evoila/meho#574) — offline + version-locked first boot, no PVC needed. Repoint to a writable `retrieval.modelCache.mountPath` (and set `retrieval.modelCache.enabled: true`) only when overriding `config.retrievalEmbeddingModel` to a non-default model fetched at runtime; the chart does not cross-validate the two values to keep override flexibility for operators that mount via `extraVolumes`."
+        },
+        "backplaneUrl": {
+          "type": "string",
+          "pattern": "^(|https?://.+)$",
+          "description": "MCP audience binding (G0.8-T4 #633). Public base URL of the backplane, no trailing slash. Leave blank for the common ingress-fronted deploy: the chart derives `https://<ingress.host>` (scheme follows `ingress.tls.enabled`). Set explicitly when the public URL differs from the Ingress host. Must be empty or an `http(s)://` URL."
+        },
+        "mcpResourceUri": {
+          "type": "string",
+          "pattern": "^(|https?://.+)$",
+          "description": "MCP audience binding (G0.8-T4 #633). Canonical MCP resource URI, no trailing slash. Leave blank to derive `${BACKPLANE_URL}/mcp` (the documented default). Set explicitly only for a non-default MCP mount point. Must match the Keycloak oidc-audience-mapper value — see `docs/cross-repo/mcp-client-setup.md` Step 1. Must be empty or an `http(s)://` URL."
         }
       }
     },
@@ -283,6 +293,30 @@
       "required": ["postgresOnly"],
       "properties": {
         "postgresOnly": { "type": "boolean" }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "description": "G5.2 memory-layer knobs. `userDefaultTtlDays` drives the default TTL injection G5.2-T2 (#624) applies on `POST /api/v1/memory`. `expiryTickIntervalSeconds` and `expiryEnabled` gate the in-process memory-expiry sweeper started by the FastAPI lifespan (G5.2-T1 #623); set `expiryEnabled: false` when an external cleanup mechanism (k8s CronJob etc.) reaps expired rows instead. The Pydantic validators in `backend/src/meho_backplane/settings.py` enforce the same bounds at app startup; the schema here surfaces them at `helm install` / `helm template` time so misconfigured values fail before the pod ever starts.",
+      "additionalProperties": false,
+      "required": ["userDefaultTtlDays", "expiryTickIntervalSeconds", "expiryEnabled"],
+      "properties": {
+        "userDefaultTtlDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365,
+          "description": "Default time-to-live for user-scoped memory entries, in days. Range [1, 365]; default 7 matches consumer-needs.md §G5."
+        },
+        "expiryTickIntervalSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400,
+          "description": "Cadence of the in-process memory-expiry sweeper, in seconds. Range [60, 86400]; default 86400 (24 h) matches Initiative #374."
+        },
+        "expiryEnabled": {
+          "type": "boolean",
+          "description": "Whether to start the in-process memory-expiry sweeper. Set false when an external cleanup mechanism reaps expired rows."
+        }
       }
     },
     "broadcast": {
@@ -566,7 +600,7 @@
     },
     "extraEnv": {
       "type": "array",
-      "description": "Extra Kubernetes EnvVar objects (value or valueFrom) appended to the backplane container env AND the migration Job container env. Most common use: pointing `SSL_CERT_FILE` at a mounted trust-bundle path so Python's default ssl context trusts internal-CA-signed Vault / Keycloak / Postgres endpoints (Issue #209). Don't collide with the chart's own keys (DATABASE_URL, REDIS_URL).",
+      "description": "Extra Kubernetes EnvVar objects (value or valueFrom) appended to the backplane container env AND the migration Job container env. Most common use: pointing `SSL_CERT_FILE` at a mounted trust-bundle path so Python's default ssl context trusts internal-CA-signed Vault / Keycloak / Postgres endpoints (Issue #209). Don't collide with the chart's own keys (DATABASE_URL, BROADCAST_REDIS_URL).",
       "items": { "type": "object" }
     },
     "retrieval": {

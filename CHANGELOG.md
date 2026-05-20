@@ -53,6 +53,157 @@ shipped and why it matters — not a dump of commit subjects.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-20
+
+**MVP2 — kubernetes + vault + bind9 + topology.** Five Initiatives
+closed (G3.2 / G3.3 / G3.4 / G9.1 / G9.2). Three structural backstops
+landed against the green-but-hollow class of failure that surfaced
+during the closure push: dispatcher MRO-aware binding, registration-
+time `handler_ref` resolvability guard, and the `Python (integration
+testcontainers)` lane is now a required merge gate.
+
+### Added
+
+- **G3.2 — Kubernetes typed connector** (#320). 13 ops via
+  `kubernetes_asyncio` against G0.6's typed-op registry. Ops:
+  `k8s.ls`, `k8s.namespace.list/info`, `k8s.node.list`,
+  `k8s.pod.list/info`, `k8s.deployment.list/info`,
+  `k8s.service.list`, `k8s.ingress.list`,
+  `k8s.configmap.list/info`, `k8s.events.list`, `k8s.logs`.
+  Kubeconfig is fetched from Vault by `secret_ref`; k3d-backed CI
+  acceptance suite. CLI: `meho k8s …`. Replaces the consumer's
+  `kubectl-vcf.sh` wrapper. Onboarding: see [`docs/cross-repo/k8s-onboarding.md`](docs/cross-repo/k8s-onboarding.md).
+- **G3.3 — Vault typed op surface** (#366). KV-v2 + sys + auth
+  read/list ops registered via `register_typed_operation()`. Ops:
+  `vault.kv.list/put/versions/delete`, sys read group, auth read
+  group (userpass + approle). G6 credential_read classifier
+  exerciser. CLI: `meho vault kv/sys/auth …`. Dev-mode CI
+  integration harness. Onboarding: [`docs/cross-repo/vault-onboarding.md`](docs/cross-repo/vault-onboarding.md).
+- **G3.4 — bind9 typed-SSH connector** (#367). First
+  `SshConnector` tier-1 child against the G0.2 Connector ABC. 11
+  ops: `bind9.about`, `zone.list/read`, `record.get/add/remove`,
+  `config.show/apply_file/apply_views/backup/reload`. Atomic-apply
+  discipline — every write op rolls back on `named-checkconf` or
+  dig-verify failure, leaving `/etc/bind/` exactly as it was
+  pre-op. Replaces the consumer's `bind9-dns.sh` wrapper (the
+  heaviest in the inventory). CLI: `meho bind9 …`. Onboarding +
+  credential-leak postmortem links: [`docs/cross-repo/bind9-onboarding.md`](docs/cross-repo/bind9-onboarding.md).
+- **G9.1 — Topology graph substrate + auto-discovery** (#363).
+  `graph_node` + `graph_edge` tables (Alembic 0007). Closed v0.2
+  14-kind node vocabulary + 4-kind auto-discoverable edge
+  vocabulary. `Connector.discover_topology` hook on the connector
+  ABC. Recursive-CTE query verbs (`dependents` / `dependencies` /
+  `path`) with cycle detection. Background refresh service.
+  REST + CLI + MCP surfaces; tenant-scoped throughout. CLI:
+  `meho topology refresh/dependents/dependencies/path` and
+  `meho targets discover`. MCP: `query_topology` + `list_targets`
+  meta-tools. Implements ~70% of [decision #6](docs/planning/v0.2-decisions.md)'s
+  auto-discoverable half.
+- **G9.2 — Curated cross-system edges + annotation flow** (#364).
+  Closed v0.2 10-kind edge vocabulary (Alembic 0010) extends the
+  auto-discoverable four with six operator-curated kinds. CLI:
+  `meho topology annotate/unannotate/list-edges`. Same-kind /
+  incompatible-kind conflict resolution with bidirectional
+  `properties.conflicts_with` markers; supersede-on-curate;
+  refresh sticky-supersede. Tenant-boundary + 10k-node
+  performance acceptance. Implements the ~30% operator-curated
+  half of [decision #6](docs/planning/v0.2-decisions.md).
+
+### Security
+
+- **`_remote_bash_with_sudo()` line-1/line-2/line-3+ stdin
+  discipline** (#703, #707). Closes the 2026-05-04 / 2026-05-05
+  bind9 credential-leak surface. The primitive uses `head -c
+  <byte-count>` to slice the script off stdin before `sudo -S`
+  reads the trailing password line, so sudo cannot swallow
+  script bytes (the original mis-ordered-stdin made six bind9
+  write ops silently no-op in production). A repo-tree grep
+  guard ([`test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree`](backend/tests/integration/test_g3_4_bind9_e2e.py))
+  asserts no other sudo construction can exist anywhere under
+  `connectors/`.
+
+### Changed
+
+- **`Python (integration testcontainers)` is a required merge
+  gate** (#698). Promoted from advisory to required after the
+  bind9 G3.4 Initiative closed green-but-hollow once with this
+  lane's per-op `call_operation` integration tests red. Any
+  future regression of agent-facing dispatch (any connector, any
+  op) now blocks merge instead of closing an Initiative green.
+- **`graph_node.kind` closed-vocabulary discipline tightened**
+  (#712). The migration's `ck_graph_node_kind` CHECK constraint
+  + `_GRAPH_NODE_KINDS` ORM constant + every test fixture must
+  agree on the same closed v0.2 14-kind set. Widening is a
+  coordinated DB + model migration, not a test-only change.
+- **Backplane image bakes the fastembed default model** (#577).
+  Fixes the v0.2 cold-start hang that needed network access on
+  first boot.
+
+### Fixed
+
+- **`handler_unreachable` dispatcher fix** (#697 / #699 / #713).
+  Three layers:
+  - #699: [`is_unbound_method`](backend/src/meho_backplane/operations/_handler_resolve.py)
+    is now MRO-aware identity-matching, not a
+    `__qualname__.startswith(cls.__name__)` heuristic that missed
+    subclass + mixin cases (which had silently no-op'd the bind9
+    `about` op through `call_operation`).
+  - #699 (paired): the typed-dispatch branch now fails loud on a
+    handler that still has `self` as its first param, instead of
+    silently dropping it and crashing with a confusing
+    `TypeError` further downstream.
+  - #713: [`register_typed_operation`](backend/src/meho_backplane/operations/typed_register.py)
+    + `register_composite_operation` call the dispatcher's
+    `import_handler` immediately after `derive_handler_ref`
+    returns, re-raising as `HandlerRefError` with `op_id` /
+    `product` / `version` / `impl_id` context. A connector cannot
+    ship green with an unreachable handler_ref anymore —
+    registration fails at FastAPI lifespan start.
+- **Dispatcher: `audit_*` contextvars not surfacing on the audit
+  row** (#704). The dispatcher's `_build_audit_payload` now reads
+  every `audit_*` contextvar bound by a handler (mirrors the
+  FastAPI middleware's [`_resolve_audit_payload()`](backend/src/meho_backplane/audit.py)
+  pattern). Bind9 write ops carry `state_before` / `state_after`
+  on the `audit_log` row.
+- **MCP audit-row writer: `audit_*` contextvars not surfacing**
+  (#720). The parallel of #704 one architecture-layer over —
+  [`write_mcp_audit_row`](backend/src/meho_backplane/mcp/audit.py)
+  now merges `_resolve_audit_payload()` into the row payload.
+  Caller-supplied keys win on collision so MCP envelope identity
+  fields (`op_id` / `op_class` / `params_hash`) stay
+  authoritative.
+- **CI: process-wide registry isolation under `pytest-xdist`**
+  (#585 / #603 / #604). The unit lane drops from ~49 min to
+  ~6 min after enabling `pytest -n auto`.
+- **Bind9 e2e `_restore_etc_bind` fixture stdin discipline**
+  (#702). The CI fixture's `sudo -S -p ''` plus a leading `\n`
+  write was corrupting the snapshot-restore tar stream; the e2e
+  suite now drives the restore through the same load-bearing
+  primitive as production.
+
+### Notable PRs in this release
+
+[#320](https://github.com/evoila/meho/pull/320) /
+[#366](https://github.com/evoila/meho/pull/366) /
+[#367](https://github.com/evoila/meho/pull/367) /
+[#363](https://github.com/evoila/meho/pull/363) /
+[#364](https://github.com/evoila/meho/pull/364) — the five
+Initiatives — plus the green-but-hollow chain:
+[#591](https://github.com/evoila/meho/pull/591) →
+[#697](https://github.com/evoila/meho/pull/697) →
+[#699](https://github.com/evoila/meho/pull/699) →
+[#702](https://github.com/evoila/meho/pull/702) →
+[#703](https://github.com/evoila/meho/pull/703) →
+[#704](https://github.com/evoila/meho/pull/704) →
+[#698](https://github.com/evoila/meho/pull/698) →
+[#713](https://github.com/evoila/meho/pull/713) →
+[#720](https://github.com/evoila/meho/pull/720).
+
+## [0.2.0] - 2026-05-16
+
+**MVP1 — substrate + vSphere + KB.** The v0.2.0 release body lived in
+`[Unreleased]` at tag time; the section below preserves what shipped.
+
 ### Added
 
 - **Backplane image:** multi-arch (`linux/amd64` + `linux/arm64`)

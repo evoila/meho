@@ -21,11 +21,17 @@ payloads). ``sys`` writes (unseal, mount/unmount, policy write) are out
 of scope for v0.2.
 
 Handler shape mirrors :mod:`meho_backplane.connectors.vault.ops`: each
-handler is a module-level ``async def`` with the ``(target, params) ->
-dict`` signature the G0.6 dispatcher expects from a typed op. The
-dispatcher validates ``params`` against the registered
-``parameter_schema`` before invoking; the handler's only job is the
-Vault HTTP call plus the success-payload shape. Handlers **raise** on
+handler is a module-level ``async def`` typed op. Handlers that forward
+the operator JWT to Vault (``seal_status`` / ``mounts.list`` /
+``auth.list``) take ``(operator, target, params)`` and read the
+request-scoped token from ``operator.raw_jwt`` (G0.8-T3 #629);
+``vault.sys.health`` hits Vault's *unauthenticated* ``/v1/sys/health``
+and keeps the ``(target, params)`` shape (no operator needed). The
+dispatcher's :func:`~meho_backplane.operations._branches.dispatch_typed`
+introspects each signature independently and threads ``operator`` only
+when the handler names it. The dispatcher validates ``params`` against
+the registered ``parameter_schema`` before invoking; the handler's only
+job is the Vault HTTP call plus the success-payload shape. Handlers **raise** on
 failure; the dispatcher's ``connector_error`` branch turns the raised
 exception into a structured :class:`OperationResult` with the exception
 class name in ``extras["exception_class"]`` — so an unreachable or
@@ -65,6 +71,7 @@ import asyncio
 from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.typed_register import register_typed_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
@@ -342,7 +349,9 @@ async def vault_sys_health(target: Any, params: dict[str, Any]) -> dict[str, Any
     }
 
 
-async def vault_sys_seal_status(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_sys_seal_status(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """Read Vault's seal status (``GET /v1/sys/seal-status``).
 
     Op-id: ``vault.sys.seal_status``.
@@ -365,11 +374,13 @@ async def vault_sys_seal_status(target: Any, params: dict[str, Any]) -> dict[str
         Any error hvac raises from the seal-status read.
     """
     _ = params  # schema-validated empty object; no inputs to extract.
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         return await asyncio.to_thread(client.sys.read_seal_status)
 
 
-async def vault_sys_mounts_list(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_sys_mounts_list(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """List enabled secret backends (``GET /v1/sys/mounts``).
 
     Op-id: ``vault.sys.mounts.list``.
@@ -394,7 +405,7 @@ async def vault_sys_mounts_list(target: Any, params: dict[str, Any]) -> dict[str
         Any error hvac raises from the mounts read.
     """
     _ = params
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         response = await asyncio.to_thread(client.sys.list_mounted_secrets_engines)
         # hvac returns the full Vault envelope ({request_id, data, ...}).
         # The mount map lives under ``data``; fall back to the whole
@@ -403,7 +414,9 @@ async def vault_sys_mounts_list(target: Any, params: dict[str, Any]) -> dict[str
         return {"mounts": mounts}
 
 
-async def vault_sys_auth_list(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_sys_auth_list(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """List enabled auth methods (``GET /v1/sys/auth``).
 
     Op-id: ``vault.sys.auth.list``.
@@ -420,7 +433,7 @@ async def vault_sys_auth_list(target: Any, params: dict[str, Any]) -> dict[str, 
         Any error hvac raises from the auth-methods read.
     """
     _ = params
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         response = await asyncio.to_thread(client.sys.list_auth_methods)
         auth_methods = response.get("data", response) if isinstance(response, dict) else response
         return {"auth_methods": auth_methods}

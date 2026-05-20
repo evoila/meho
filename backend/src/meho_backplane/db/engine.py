@@ -62,6 +62,7 @@ __all__ = [
     "create_engine_for_url",
     "dispose_engine",
     "get_engine",
+    "get_raw_session",
     "get_session",
     "get_sessionmaker",
     "reset_engine_for_testing",
@@ -153,8 +154,60 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     its own session lifecycle management because it must commit *before*
     the route handler returns — synchronous-audit semantics are part of
     Goal #11's DoD.
+
+    Service-owned-transaction routes (currently the G9.2 curated-edge
+    handlers at :mod:`meho_backplane.api.v1.topology`, whose
+    :func:`~meho_backplane.topology.annotate.annotate_edge` /
+    :func:`~meho_backplane.topology.annotate.unannotate_edge` callees open
+    their own ``async with session.begin()`` blocks) must use
+    :func:`get_raw_session` instead; opening a second nested
+    ``session.begin()`` on a session that already has one raises
+    ``InvalidRequestError: A transaction is already begun on this Session``
+    at request time.
     """
     async with get_sessionmaker()() as session, session.begin():
+        yield session
+
+
+async def get_raw_session() -> AsyncIterator[AsyncSession]:
+    """FastAPI dependency yielding a non-transactional :class:`AsyncSession`.
+
+    Same lifecycle as :func:`get_session` (session created by the
+    sessionmaker context manager, closed on exit regardless of outcome)
+    **minus** the outer ``async with session.begin()`` block. The route
+    handler — or, more commonly, the service function the route delegates
+    to — is then free to open its own transaction via
+    ``async with session.begin():`` without colliding with one already
+    pinned by the dependency.
+
+    Use this in lieu of :func:`get_session` whenever the service-layer
+    callee manages its own transaction. The G9.2 curated-edge handlers
+    (:mod:`meho_backplane.api.v1.topology`) are the current consumers:
+    :func:`~meho_backplane.topology.annotate.annotate_edge` and
+    :func:`~meho_backplane.topology.annotate.unannotate_edge` open
+    ``async with session.begin()`` themselves so the resolve / upsert /
+    conflict-scan / audit-write all commit-or-roll-back together;
+    layering :func:`get_session`'s implicit ``begin()`` on top of those
+    would trigger SQLAlchemy 2.x's
+    :class:`~sqlalchemy.exc.InvalidRequestError`
+    ("A transaction is already begun on this Session"). The read routes
+    on the same module (``GET /edges``) also use this dep for shape
+    parity — a read-only flow runs fine without an explicit transaction
+    and the consistent shape keeps the four curated-edge routes
+    grep-aligned.
+
+    Routes consume this exactly like :func:`get_session`::
+
+        from fastapi import Depends
+        from meho_backplane.db.engine import get_raw_session
+
+        @router.post("/edges")
+        async def annotate_edge_route(
+            session: AsyncSession = Depends(get_raw_session),
+        ) -> ...:
+            return await annotate_edge(session, ...)
+    """
+    async with get_sessionmaker()() as session:
         yield session
 
 

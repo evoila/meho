@@ -15,11 +15,19 @@ import (
 
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
+	"github.com/evoila/meho/cli/internal/cmd/bind9"
+	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
+	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
+	"github.com/evoila/meho/cli/internal/cmd/memory"
+	"github.com/evoila/meho/cli/internal/cmd/migrate"
+	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
+	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
+	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
 	"github.com/evoila/meho/cli/internal/discovery"
@@ -118,6 +126,14 @@ func newRootCmd() *cobra.Command {
 	// cannot shadow the built-in `audit` parent.
 	root.AddCommand(audit.NewRootCmd())
 
+	// G6.3-T4 (#381) -- broadcast-detail override management verbs
+	// (overrides list / set / remove) for Initiative #376. Wraps the
+	// three /api/v1/broadcast/overrides routes shipped by the same
+	// task. tenant_admin-only; non-admin callers see 403. Registered
+	// before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `broadcast` parent.
+	root.AddCommand(broadcast.NewRootCmd())
+
 	// G4.1-T4 (#418) -- kb verbs (ingest / search / list / show /
 	// add / delete) for Initiative #331. Wraps the five /api/v1/kb*
 	// routes shipped by G4.1-T2 (#416) plus the /api/v1/retrieve
@@ -125,6 +141,20 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `kb` parent.
 	root.AddCommand(kb.NewRootCmd())
+
+	// G5.1-T4 (#424) -- top-level memory verbs (remember / recall /
+	// forget / list) for Initiative #332. Each verb is registered
+	// onto the root directly (not under a `memory` parent) per the
+	// consumer-needs.md §G5 ergonomic shape (`meho remember "..."`
+	// rather than `meho memory remember "..."`). Wraps the four
+	// /api/v1/memory* routes shipped by G5.1-T2 (#422) plus the
+	// /api/v1/retrieve route for the `recall --query` retrieval form.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in verbs.
+	root.AddCommand(memory.NewRememberCmd())
+	root.AddCommand(memory.NewRecallCmd())
+	root.AddCommand(memory.NewForgetCmd())
+	root.AddCommand(memory.NewListCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=
@@ -140,6 +170,28 @@ func newRootCmd() *cobra.Command {
 	// parent.
 	root.AddCommand(vmware.NewRootCmd())
 
+	// G3.5-T3 (#615) -- nsx-rest-4.2 operator alias verbs for
+	// Initiative #368. The verb tree pre-bakes connector_id=
+	// "nsx-rest-4.2" on top of the existing /api/v1/operations/call
+	// dispatcher route. Ships the 9 read-only NSX core verbs (about,
+	// node list, cluster status, segment list, transport-zone list,
+	// tier0 list, tier1 list, firewall policy list, firewall rule list)
+	// plus operation search/call meta-tool wrappers.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `nsx` parent.
+	root.AddCommand(nsx.NewRootCmd())
+
+	// G3.5-T6 (#618) -- sddc-rest-9.0 operator alias verbs for
+	// Initiative #368. The verb tree pre-bakes connector_id=
+	// "sddc-rest-9.0" on top of the existing /api/v1/operations/call
+	// dispatcher route. Ships the 9 read-only SDDC Manager core verbs
+	// (about, manager list, domain list/info, cluster list, host list,
+	// network-pool list, bundle list, workflow list) plus operation
+	// search/call meta-tool wrappers. Replaces ./scripts/sddc-manager.sh.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `sddc-manager` parent.
+	root.AddCommand(sddcmanager.NewRootCmd())
+
 	// G3.3-T6 (#550) -- vault-1.x operator alias verbs for Initiative
 	// #366. The verb tree pre-bakes connector_id="vault-1.x" on top of
 	// the existing /api/v1/operations/call dispatcher route so operators
@@ -152,6 +204,51 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot shadow
 	// the built-in `vault` parent.
 	root.AddCommand(vault.NewRootCmd())
+
+	// G9.1-T6 (#454) -- topology graph verbs (refresh / dependents /
+	// dependencies / path) for Initiative #363. Thin cobra wrappers
+	// over the four /api/v1/topology* routes shipped by G9.1-T5
+	// (#453); the fifth T6 verb, `meho targets discover`, lives on
+	// the targets parent next to the other /api/v1/targets routes.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `topology` parent.
+	root.AddCommand(topology.NewRootCmd())
+
+	// G3.2-T6 (#326) -- k8s-1.x operator alias verbs for Initiative
+	// #320. The verb tree pre-bakes connector_id="k8s-1.x" on top of
+	// the existing /api/v1/operations/call dispatcher route so operators
+	// don't type the connector ID on every invocation. Ships the 14
+	// read-only ops (about/ls + namespace/node list + pod/deployment
+	// list+info + service/ingress/configmap list + configmap info +
+	// event list + logs) registered by G3.2-T1..T5 (#321/#322/#323/
+	// #324/#325). `meho k8s pod list --target rke2-meho --namespace
+	// argocd` replaces the consumer's `kubectl-vcf.sh -n argocd get
+	// pods` wrapper. Registered before registerDynamicSubcommands so
+	// the backplane manifest cannot shadow the built-in `k8s` parent.
+	root.AddCommand(k8s.NewRootCmd())
+
+	// G3.4-T5 (#591) -- bind9-ssh-9.x operator alias verbs for Initiative
+	// #367. The verb tree pre-bakes connector_id="bind9-ssh-9.x" on top
+	// of the existing /api/v1/operations/call dispatcher route so
+	// operators don't type the connector ID on every invocation. Ships
+	// the 11 ops (about, zone list/read, record get/add/remove, config
+	// show/apply-views/apply-file/backup/reload) registered by G3.4-
+	// T1..T4 (#587/#588/#589/#590). `meho bind9 record add
+	// esx-dc6.evba.lab 10.5.50.25 --zone evba.lab --target
+	// vcf-router-bind9` replaces the consumer's
+	// `bind9-dns.sh --add-a-record` wrapper (the 2026-05-04 / 2026-05-05
+	// credential-leak surface — evoila-bosnia/claude-rdc-hetzner-dc#86).
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `bind9` parent.
+	root.AddCommand(bind9.NewRootCmd())
+
+	// G5.3-T1 (#608) -- laptop-local memory migration verb tree for
+	// Initiative #375. v0.1 ships the skeleton (migrate parent +
+	// memory subcommand with flags); flow logic (scanner, huh picker,
+	// submission, mark-migrated) lands in T2–T5 (#609–#612). Registered
+	// before registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `migrate` parent.
+	root.AddCommand(migrate.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

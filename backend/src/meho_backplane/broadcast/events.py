@@ -56,7 +56,7 @@ References
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -81,6 +81,19 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Op-ids that classify as ``credential_mint``. Like
+#: :data:`_CREDENTIAL_READ_OPS`, the explicit allowlist comes before
+#: the write-suffix check so ``harbor.robot.create`` (which ends with
+#: ``.create``) isn't misclassified as plain ``write``. Every op that
+#: returns a freshly-minted secret credential in its response payload
+#: belongs here — the broadcast collapses to aggregate-only so the
+#: secret never reaches the SSE stream or any Slack mirror channel.
+_CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "harbor.robot.create",
+    }
+)
+
 #: Op-id suffixes that imply mutation. Append to this tuple when a new
 #: write-shaped verb spelling lands. ``.put`` is the KV-v2 write verb
 #: (``vault.kv.put`` — G3.3-T1 #545); without it a secret write would
@@ -94,6 +107,16 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".delete",
     ".patch",
     ".put",
+    # bind9 record-write verbs (G3.4-T3 #589). The bind9 connector
+    # uses ``.add`` / ``.remove`` rather than ``.create`` / ``.delete``
+    # to match the consumer wrapper's verb shape (``--add-a-record``
+    # / ``--remove-record``). Without these suffixes ``classify_op``
+    # would fall through to ``other`` and the broadcast classifier
+    # would emit the full param dict (including the rdata) as a
+    # ``other``-class event rather than redact under the ``write``
+    # branch.
+    ".add",
+    ".remove",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
@@ -166,8 +189,8 @@ class BroadcastEvent(BaseModel):
     target_name: str | None = None
     op_id: str
     #: One of ``"read"`` / ``"write"`` / ``"credential_read"`` /
-    #: ``"audit_query"`` / ``"other"``. Derived from
-    #: :func:`classify_op` at publish time.
+    #: ``"credential_mint"`` / ``"audit_query"`` / ``"other"``.
+    #: Derived from :func:`classify_op` at publish time.
     op_class: str
     #: One of ``"ok"`` / ``"error"`` / ``"denied"``. The handler
     #: produces it; the broadcast publisher does not re-classify.
@@ -178,31 +201,32 @@ class BroadcastEvent(BaseModel):
     #: queries audit_log by this id.
     audit_id: UUID
     #: Redacted view per :func:`redact_payload`. NEVER raw params for
-    #: ``credential_read`` or ``audit_query`` classes — the redaction
-    #: contract is upstream of this field.
+    #: ``credential_read``, ``credential_mint``, or ``audit_query`` classes —
+    #: the redaction contract is upstream of this field.
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
 def classify_op(op_id: str) -> str:
-    """Map an op-id to one of the five sensitivity classes.
+    """Map an op-id to one of the sensitivity classes.
 
     Match order is policy-significant:
 
-    1. ``credential_read`` — the explicit allowlist comes first so a
-       hypothetical future ``vault.kv.audit-list`` (read of audit
-       metadata, not secret content) could opt out of the credential
-       class by being absent from :data:`_CREDENTIAL_READ_OPS` and
-       falling through to the suffix check.
-    2. ``audit_query`` — every op-id with the ``audit.`` prefix
-       classifies as audit_query regardless of the verb suffix. Audit
-       responses carry rows that inherit every other op's sensitivity,
-       so the whole namespace is aggregate-only.
-    3. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch``). Same break-when-first-matches rule
-       as ``.endswith`` on a tuple.
-    4. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
+    1. ``credential_read`` — explicit allowlist first so a hypothetical
+       future ``vault.kv.audit-list`` (audit metadata, not secret
+       content) could opt out by being absent from
+       :data:`_CREDENTIAL_READ_OPS` and falling through to the suffix
+       check.
+    2. ``credential_mint`` — explicit allowlist for ops that return a
+       freshly-minted secret in their response payload (e.g.
+       ``harbor.robot.create``). Checked before the ``.create`` suffix
+       so the allowlist wins over the mutation-suffix branch.
+    3. ``audit_query`` — every op-id with the ``audit.`` prefix
+       classifies as audit_query regardless of the verb suffix.
+    4. ``write`` — mutation suffixes (``.create`` / ``.update`` /
+       ``.delete`` / ``.patch``).
+    5. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls``).
-    5. ``other`` — everything else. Falls through to full-detail
+    6. ``other`` — everything else. Falls through to full-detail
        broadcast per decision #3.
 
     Examples
@@ -210,6 +234,8 @@ def classify_op(op_id: str) -> str:
 
     >>> classify_op("vault.kv.read")
     'credential_read'
+    >>> classify_op("harbor.robot.create")
+    'credential_mint'
     >>> classify_op("audit.query")
     'audit_query'
     >>> classify_op("vsphere.vm.list")
@@ -221,6 +247,8 @@ def classify_op(op_id: str) -> str:
     """
     if op_id in _CREDENTIAL_READ_OPS:
         return "credential_read"
+    if op_id in _CREDENTIAL_MINT_OPS:
+        return "credential_mint"
     if op_id.startswith("audit."):
         return "audit_query"
     if op_id.endswith(_WRITE_SUFFIXES):
@@ -258,37 +286,65 @@ def redact_payload(
     op_class: str,
     raw_params: dict[str, Any],
     result_status: str,
+    *,
+    detail: Literal["full", "aggregate"] | None = None,
 ) -> dict[str, Any]:
     """Return the broadcast-safe payload view for *op_class*.
 
-    Three branches, locked by decision #3:
+    Three shapes -- selected by the *effective* detail rather than the
+    op_class alone:
 
-    * ``credential_read`` → ``{op_class, result_status}``. No path, no
-      key names, no values. The mere fact that an operator read a
-      credential is broadcast; the *what* never leaves the audit row.
-    * ``audit_query`` → ``{op_class, result_status, row_count}``. The
-      filter is the most damaging field to broadcast (encodes the
-      investigation target), and the response rows inherit every other
-      op's sensitivity. Aggregate-only collapses to "X ran an audit
-      query that matched N rows".
-    * everything else → ``{op_class, params=raw_params, result_status}``.
-      Full request detail; nested objects pass through verbatim.
+    * **Aggregate**, sensitive class (``audit_query``) →
+      ``{op_class, result_status, row_count}``. The audit-query
+      aggregate retains the response row-count -- a useful
+      team-coordination signal -- but never the filter or matched rows.
+    * **Aggregate**, any other class →
+      ``{op_class, result_status}``. The same shape G6.1's
+      ``credential_read`` default used; pulled out as the universal
+      aggregate when a tenant rule downgrades a normally-full op
+      (e.g. ``k8s.configmap.info`` scoped to ``kube-system``).
+    * **Full** →
+      ``{op_class, params=raw_params, result_status}``. Full request
+      detail; nested objects pass through verbatim. Used by the
+      everything-else default and also by the G6.3 ``request_override``
+      branch that upgrades a sensitive class to full detail per
+      operator opt-in.
+
+    *detail* is the G6.3-T2 (#379) extension. When ``None`` (the
+    pre-G6.3 default), the function falls back to decision #3 of
+    ``docs/planning/v0.2-decisions.md`` -- aggregate for sensitive
+    classes (``credential_read`` / ``credential_mint`` /
+    ``audit_query``), full for everything else. When ``"aggregate"`` or ``"full"`` is passed
+    explicitly, the resolver (:func:`compute_effective_broadcast_detail`)
+    has already decided the effective detail and this function just
+    renders it. Callers that don't go through the resolver
+    (:func:`meho_backplane.operations._audit.publish_broadcast`) keep
+    the ``detail=None`` default and the existing per-class behaviour.
 
     Forward-compatibility note: the return shape is a plain ``dict``
     rather than a typed model because the downstream
     :attr:`BroadcastEvent.payload` field is already ``dict[str, Any]``.
     Promoting either side to a structured model would require a
-    coordinated change to all of T3 / T4 / T6 and is out of scope for
-    T2.
+    coordinated change to all of T3 / T4 / T6 and is out of scope.
     """
-    if op_class == "credential_read":
+    if detail is None:
+        effective_detail: Literal["full", "aggregate"] = (
+            "aggregate"
+            if op_class in {"credential_read", "credential_mint", "audit_query"}
+            else "full"
+        )
+    else:
+        effective_detail = detail
+
+    if effective_detail == "aggregate":
+        if op_class == "audit_query":
+            return {
+                "op_class": op_class,
+                "result_status": result_status,
+                "row_count": _maybe_row_count(raw_params),
+            }
         return {"op_class": op_class, "result_status": result_status}
-    if op_class == "audit_query":
-        return {
-            "op_class": op_class,
-            "result_status": result_status,
-            "row_count": _maybe_row_count(raw_params),
-        }
+
     return {
         "op_class": op_class,
         "params": raw_params,

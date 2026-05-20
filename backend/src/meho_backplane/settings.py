@@ -36,6 +36,11 @@ from typing import Final
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+from meho_backplane.retrieval.embedding import (
+    BAKED_MODEL_CACHE_DIR,
+    DEFAULT_EMBEDDING_MODEL,
+)
+
 __all__ = ["Settings", "get_settings", "parse_bool_env"]
 
 #: Driver schemes accepted on ``DATABASE_URL``. Both are async — the
@@ -223,11 +228,21 @@ class Settings(BaseModel):
         dimension model (e.g. a multilingual 384-dim variant) is
         zero-migration.
     retrieval_model_cache_dir:
-        Filesystem path fastembed uses to cache downloaded ONNX
-        weights. Default ``/var/cache/fastembed`` matches the Helm
-        chart's PVC mount point (``deploy/charts/meho/values.yaml``
-        ``retrieval.modelCache.mountPath``) so pod restarts skip the
-        ~120 MB re-download. Dev/test overrides via
+        Filesystem path fastembed reads ONNX weights from. Default
+        :data:`~meho_backplane.retrieval.embedding.BAKED_MODEL_CACHE_DIR`
+        (``/opt/meho/model-cache``) is an **image layer** the
+        ``backend/Dockerfile`` runtime stage bakes the default model
+        into at build time (``python -m meho_backplane.retrieval.warm``),
+        so the shipped default loads offline + version-locked with no
+        runtime HuggingFace egress and no dependency on a persistent
+        PVC. This deliberately replaced the old
+        ``/var/cache/fastembed`` PVC-mount default: a populated-but-
+        partial PVC (dangling HF symlink / truncated ``*.onnx`` blob)
+        is never self-healed by fastembed and deterministically
+        CrashLoops every fresh pod (evoila/meho#574). The optional
+        ``retrieval.modelCache`` PVC remains available for operators who
+        override ``RETRIEVAL_EMBEDDING_MODEL`` to a *non-default* model
+        that is fetched at runtime. Dev/test overrides via
         ``RETRIEVAL_MODEL_CACHE_DIR`` typically point at
         ``$HOME/.cache/fastembed`` so a developer's existing cache is
         reused across runs.
@@ -277,6 +292,43 @@ class Settings(BaseModel):
         backoff is derived from this value (2x, capped at 4 h) inside
         the scheduler, not a separate knob. Read once per loop
         iteration through :func:`get_settings`'s cache.
+    memory_user_default_ttl_days:
+        Default time-to-live for user-scoped (``kind="memory-user"``)
+        memory entries, in days. G5.2-T2 (#624) consumes this on the
+        ``POST /api/v1/memory`` handler to inject
+        ``expires_at = now() + memory_user_default_ttl_days`` when the
+        caller does not supply an explicit value. Range ``[1, 365]``:
+        below one day defeats the auto-expiry contract; above one year
+        is functionally "permanent" and operators wanting that should
+        pass ``expires_at=null`` explicitly. Default 7 matches
+        consumer-needs.md §G5 ("session-scoped hints expire after 7
+        days unless re-pinned"). Carried here by G5.2-T1 so the
+        chassis owns one settings shape; the write path follows in T2.
+    memory_expiry_tick_interval_seconds:
+        Cadence of the G5.2-T1 memory-expiry sweeper background loop,
+        in seconds. The sweeper (registered in the FastAPI lifespan)
+        sleeps this long between scans of the ``documents`` table for
+        expired ``source="memory"`` rows. Default 86400 (24 h)
+        matches Initiative #374's stated cadence; tests override to
+        sub-second values via env-var monkeypatch + :func:`get_settings`
+        cache-clear. Range ``[60, 86400]``: below one minute makes the
+        sweeper compete with normal request load on a tight loop;
+        above 24 hours is the operator-facing maximum (longer than one
+        day risks accumulating soft-hidden rows that pollute
+        :meth:`~meho_backplane.memory.service.MemoryService.search_memories`'s
+        candidate pool). Read once per loop iteration through
+        :func:`get_settings`'s cache.
+    memory_expiry_enabled:
+        Whether to start the G5.2-T1 memory-expiry sweeper background
+        task in the FastAPI lifespan. Default ``True``: the in-process
+        ``asyncio`` loop is the shipped cleanup mechanism. Operators
+        running a different cleanup mechanism (k8s CronJob, etc.)
+        flip ``MEMORY_EXPIRY_ENABLED=false`` so the chassis does not
+        race the external job; expired rows still surface as soft-
+        hidden through the read-side filter
+        :func:`~meho_backplane.memory._internal.is_expired` until the
+        external job reaps them. Read once at lifespan startup; toggling
+        post-start requires a pod restart to take effect.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -297,11 +349,11 @@ class Settings(BaseModel):
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
     retrieval_embedding_model: str = Field(
-        default="BAAI/bge-small-en-v1.5",
+        default=DEFAULT_EMBEDDING_MODEL,
         min_length=1,
     )
     retrieval_model_cache_dir: str = Field(
-        default="/var/cache/fastembed",
+        default=BAKED_MODEL_CACHE_DIR,
         min_length=1,
     )
     broadcast_redis_url: str = Field(
@@ -311,6 +363,9 @@ class Settings(BaseModel):
     broadcast_retention_hours: int = Field(default=24, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
+    memory_user_default_ttl_days: int = Field(default=7, ge=1, le=365)
+    memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
+    memory_expiry_enabled: bool = True
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -412,11 +467,11 @@ def get_settings() -> Settings:
         ),
         retrieval_embedding_model=os.environ.get(
             "RETRIEVAL_EMBEDDING_MODEL",
-            "BAAI/bge-small-en-v1.5",
+            DEFAULT_EMBEDDING_MODEL,
         ),
         retrieval_model_cache_dir=os.environ.get(
             "RETRIEVAL_MODEL_CACHE_DIR",
-            "/var/cache/fastembed",
+            BAKED_MODEL_CACHE_DIR,
         ),
         broadcast_redis_url=os.environ.get(
             "BROADCAST_REDIS_URL",
@@ -430,5 +485,14 @@ def get_settings() -> Settings:
         ),
         topology_refresh_interval_seconds=int(
             os.environ.get("TOPOLOGY_REFRESH_INTERVAL_SECONDS", "3600"),
+        ),
+        memory_user_default_ttl_days=int(
+            os.environ.get("MEMORY_USER_DEFAULT_TTL_DAYS", "7"),
+        ),
+        memory_expiry_tick_interval_seconds=int(
+            os.environ.get("MEMORY_EXPIRY_TICK_INTERVAL_SECONDS", "86400"),
+        ),
+        memory_expiry_enabled=parse_bool_env(
+            os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
         ),
     )

@@ -1,17 +1,24 @@
 name: meho-runners smoke
-# Verifies the meho-runners self-hosted runner pool can:
-#   1. Pick up + run a job (original scope, claude-rdc-hetzner-dc#262).
+# Verifies the meho-runners-ci self-hosted runner pool can:
+#   1. Pick up + run a job (original scope, claude-rdc-hetzner-dc#262 +
+#      claude-rdc-hetzner-dc#610 for the rke2-ci-side pool).
 #   2. Pull Docker Hub images through the Harbor pull-through cache at
 #      harbor.evba.lab/dockerhub-proxy via the explicit project-prefixed
 #      URL form (the Harbor-supported pull pattern — see
 #      evoila-bosnia/meho-internal#75 + MEHO.HelmCharts#20 for the
 #      "transparent-mirror doesn't work with Harbor" finding).
 #
-# Runs on every push to main + workflow_dispatch. After a week of green
-# runs, the cleanup follow-up on the meho-internal#67 Initiative rewrites
-# the workflows that currently pull `library/<image>` to use the
-# `harbor.evba.lab/dockerhub-proxy/library/<image>` form, and retires the
-# tactical Docker Hub auth shims on security-scan.yml + ci.yml.
+# Runs on every push to main + workflow_dispatch on the
+# meho-runners-ci pool (rke2-ci cluster; chart
+# gha-runner-scale-set@0.14.1). The matrix-over-both-pools shape from
+# #714 collapsed to single-pool when #715 cut the real CI workflows
+# over to meho-runners-ci; the rke2-meho-side `meho-runners` pool
+# retires in claude-rdc-hetzner-dc#611.
+#
+# After a week of green runs, the cleanup follow-up on the meho-internal#67
+# Initiative rewrites the workflows that currently pull `library/<image>`
+# to use the `harbor.evba.lab/dockerhub-proxy/library/<image>` form, and
+# retires the tactical Docker Hub auth shims on security-scan.yml + ci.yml.
 on:
   push:
     branches: [main]
@@ -27,7 +34,7 @@ env:
 
 jobs:
   smoke:
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Identify the runner
@@ -45,8 +52,8 @@ jobs:
       - name: Assert Docker daemon is reachable
         # The dind sidecar shares /var/run/docker.sock via emptyDir; runner
         # container has DOCKER_HOST=unix:///var/run/docker.sock. If the
-        # hand-rolled template.spec in MEHO.HelmCharts regressed, this
-        # prints docker daemon version OR fails loudly.
+        # hand-rolled template.spec in MEHO.HelmCharts / rdc-gitops regressed,
+        # this prints docker daemon version OR fails loudly.
         run: |
           set -euo pipefail
           echo "== docker version =="
@@ -72,7 +79,7 @@ jobs:
         #
         # Fail-mode: TLS error means the CA mount or update-ca-certificates
         # step regressed (likely a chart upgrade that overwrote the
-        # hand-rolled command: in MEHO.HelmCharts values.yaml).
+        # hand-rolled command: in MEHO.HelmCharts / rdc-gitops values.yaml).
         run: |
           set -euo pipefail
           # Just grep the bundle for our CA's CN. Empirically verified
@@ -93,7 +100,7 @@ jobs:
             # only as defence-in-depth: if it is reached, the runner-side
             # CA wiring regressed (chart drift) — the pull step below still
             # exercises dockerd's TLS path as a last-resort signal.
-            echo "Note: runner-side CA bundle check did not match; relying on the pull step below for TLS validation (investigate MEHO.HelmCharts runner-container CA mount — meho-internal#80)."
+            echo "Note: runner-side CA bundle check did not match; relying on the pull step below for TLS validation (investigate meho-runners-ci's runner-container CA mount — meho-internal#80)."
           fi
           echo "✓ Bundle check complete."
 
@@ -142,7 +149,8 @@ jobs:
         # `--insecure` / `--cacert` — proving TLS to Harbor works is the
         # whole point of this step. A `curl: (60) SSL certificate problem`
         # here means the runner-side CA wiring regressed in
-        # MEHO.HelmCharts (see that repo's runner-smoke debugging notes).
+        # MEHO.HelmCharts / rdc-gitops (see that repo's runner-smoke
+        # debugging notes).
         run: |
           set -euo pipefail
           ARTIFACTS_URL="$HARBOR_API_URL/projects/${HARBOR_REPO_PATH%%/*}/repositories/$(echo "${HARBOR_REPO_PATH#*/}" | sed 's|/|%2F|g')/artifacts"
@@ -159,7 +167,7 @@ jobs:
             echo "         the project-prefix path regressed). Check:"
             echo "         - kubectl exec <pod> -c dind -- docker info"
             echo "         - kubectl logs <pod> -c dind | grep -iE 'harbor|tls|x509'"
-            echo "         - the hand-rolled template.spec in MEHO.HelmCharts"
+            echo "         - the hand-rolled template.spec in MEHO.HelmCharts / rdc-gitops"
             exit 1
           fi
           echo "✓ Cache populated."

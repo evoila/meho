@@ -37,7 +37,7 @@ permissions:
 jobs:
   sonarcloud:
     name: SonarCloud Analysis
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 20
     continue-on-error: true
     if: github.event.workflow_run.conclusion == 'success'
@@ -56,6 +56,6 @@ jobs:
         continue-on-error: true  # coverage artifact may not exist yet (no tests)
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@2f77a1ec69fb1d595b06f35ab27e97605bdef703  # v5
+        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995  # v8.1.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

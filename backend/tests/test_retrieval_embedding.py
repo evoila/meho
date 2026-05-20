@@ -121,8 +121,8 @@ def test_embedding_service_cache_dir_expands_tilde() -> None:
     Dev/test overrides commonly set ``RETRIEVAL_MODEL_CACHE_DIR`` to
     ``~/.cache/fastembed``; the constructor must expand it eagerly so
     every subsequent fastembed call sees an absolute path. Production
-    values are absolute (``/var/cache/fastembed`` per the chart's PVC
-    mount) and this expansion is a no-op there.
+    values are absolute (``/opt/meho/model-cache`` — the baked-in image
+    layer, evoila/meho#574) and this expansion is a no-op there.
     """
     service = EmbeddingService(
         model_name="BAAI/bge-small-en-v1.5",

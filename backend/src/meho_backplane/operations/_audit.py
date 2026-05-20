@@ -67,6 +67,46 @@ parent_audit_id_var: ContextVar[uuid.UUID | None] = ContextVar(
 )
 
 
+#: Prefix matching the FastAPI audit middleware's ``audit_*`` contextvar
+#: convention (:data:`meho_backplane.audit._AUDIT_PAYLOAD_PREFIX`).
+#: Connector handlers that need to enrich the dispatcher's audit row
+#: bind e.g. ``structlog.contextvars.bind_contextvars(
+#: audit_state_before=..., audit_state_after=...)`` before returning;
+#: :func:`_build_audit_payload` strips the prefix and merges the
+#: result into the payload, mirroring the chassis HTTP behaviour so
+#: the typed-op dispatch path and the FastAPI route path produce the
+#: same shape of audit row.
+_AUDIT_PAYLOAD_PREFIX: str = "audit_"
+
+
+def _resolve_audit_extras_from_contextvars() -> dict[str, Any]:
+    """Build the ``audit_*``-contextvar extras dict for the audit payload.
+
+    Reads every key in the current structlog contextvar context whose
+    name starts with :data:`_AUDIT_PAYLOAD_PREFIX`, strips the prefix,
+    and returns the result as a fresh dict. ``None`` values are
+    dropped so a handler can ``bind_contextvars(audit_kind=None)`` to
+    intentionally omit a key without writing ``"kind": null``.
+
+    Mirrors :func:`meho_backplane.audit._resolve_audit_payload` (the
+    FastAPI middleware's collector). Duplicated rather than imported
+    because the dispatcher path and the chassis HTTP middleware path
+    must remain decoupled in their imports — but the on-the-wire
+    payload shape stays identical so audit consumers (G8.1 audit
+    query, G8.2 audit replay) can treat both the same.
+    """
+    out: dict[str, Any] = {}
+    for key, value in structlog.contextvars.get_contextvars().items():
+        if not key.startswith(_AUDIT_PAYLOAD_PREFIX):
+            continue
+        if value is None:
+            continue
+        stripped = key[len(_AUDIT_PAYLOAD_PREFIX) :]
+        if stripped:
+            out[stripped] = value
+    return out
+
+
 def _build_audit_payload(
     descriptor: EndpointDescriptor,
     params_hash: str,
@@ -74,12 +114,16 @@ def _build_audit_payload(
 ) -> dict[str, Any]:
     """Compose the ``audit_log.payload`` dict for the dispatcher row.
 
-    Includes a *mirror* of the ``parent_audit_id`` contextvar value
-    in the payload for the v0.2 broadcast-event surface (the
-    broadcast schema is JSON-shaped and consumers parse the payload,
-    not the audit row); the canonical linkage now lives in the real
-    ``audit_log.parent_audit_id`` column added by migration ``0006``
-    and written by :func:`write_audit_row`.
+    Default fields (descriptor, params_hash, result_status,
+    parent_audit_id-mirror) are merged with any ``audit_*``
+    contextvars bound by the connector handler — see
+    :func:`_resolve_audit_extras_from_contextvars`. The
+    parent_audit_id mirror in the payload remains for the v0.2
+    broadcast-event surface (the broadcast schema is JSON-shaped and
+    consumers parse the payload, not the audit row); the canonical
+    linkage lives in the real ``audit_log.parent_audit_id`` column
+    added by migration ``0006`` and written by
+    :func:`write_audit_row`.
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -93,6 +137,11 @@ def _build_audit_payload(
     parent_audit_id = parent_audit_id_var.get()
     if parent_audit_id is not None:
         payload["parent_audit_id"] = str(parent_audit_id)
+    # Handler-bound extras last so a handler can intentionally override
+    # a default (e.g. a future per-op result_status override); the
+    # default keys are documented + load-bearing for audit consumers,
+    # so this layering is the explicit knob, not an accidental coupling.
+    payload.update(_resolve_audit_extras_from_contextvars())
     return payload
 
 

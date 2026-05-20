@@ -48,12 +48,14 @@ from collections.abc import AsyncIterator, Iterator
 import pytest
 from sqlalchemy import text
 
+from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.db import engine as engine_module
 from meho_backplane.db.engine import (
     create_engine_for_url,
     dispose_engine,
     reset_engine_for_testing,
 )
+from meho_backplane.settings import get_settings
 from tests.acceptance._canary_fixtures import (
     CANARY_CONNECTOR_ID,
     CANARY_OPERATOR_TENANT,
@@ -62,6 +64,24 @@ from tests.acceptance._canary_fixtures import (
     ingested_canary_vcsim,
     prewarmed_embeddings,
 )
+from tests.acceptance._harbor_canary_fixtures import (
+    HARBOR_CANARY_OPERATOR_TENANT,
+    IngestedHarborCanary,
+    harbor_acceptance_operator,
+    ingested_harbor_canary,
+)
+from tests.acceptance._nsx_canary_fixtures import (
+    NSX_CANARY_OPERATOR_TENANT,
+    IngestedNsxCanary,
+    ingested_nsx_canary,
+    nsx_acceptance_operator,
+)
+from tests.acceptance._sddc_canary_fixtures import (
+    SDDC_CANARY_OPERATOR_TENANT,
+    IngestedSddcCanary,
+    ingested_sddc_canary,
+    sddc_acceptance_operator,
+)
 from tests.acceptance._vcsim import (
     DEFAULT_VCSIM_TOPOLOGY,
     VcsimEndpoint,
@@ -69,6 +89,7 @@ from tests.acceptance._vcsim import (
     resolve_vcsim_endpoint,
 )
 from tests.integration.conftest import (
+    _CHASSIS_ENV,
     DOCKER_AVAILABLE,
     SKIP_REASON,
     async_pg_url,
@@ -80,16 +101,28 @@ __all__ = [
     "CANARY_OPERATOR_TENANT",
     "DEFAULT_VCSIM_TOPOLOGY",
     "DOCKER_AVAILABLE",
+    "HARBOR_CANARY_OPERATOR_TENANT",
+    "NSX_CANARY_OPERATOR_TENANT",
+    "SDDC_CANARY_OPERATOR_TENANT",
     "SKIP_REASON",
     "IngestedCanaryVcsim",
+    "IngestedHarborCanary",
+    "IngestedNsxCanary",
+    "IngestedSddcCanary",
     "VcsimEndpoint",
     "VcsimTopology",
     "acceptance_operator",
     "async_pg_url",
+    "harbor_acceptance_operator",
     "ingested_canary_vcsim",
+    "ingested_harbor_canary",
+    "ingested_nsx_canary",
+    "ingested_sddc_canary",
     "integration_env",
+    "nsx_acceptance_operator",
     "pg_engine",
     "prewarmed_embeddings",
+    "sddc_acceptance_operator",
     "vcsim_endpoint",
 ]
 
@@ -118,6 +151,42 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "targets",
     "tenant",
 )
+
+
+@pytest.fixture(autouse=True)
+def _acceptance_default_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Pin chassis env vars Settings() requires, for every acceptance test.
+
+    The autouse ``_integration_default_env`` fixture that does this for
+    the integration suite lives in :mod:`tests.integration.conftest`,
+    so pytest scopes it to ``tests/integration/`` only — it does **not**
+    apply to ``tests/acceptance/``. Acceptance tests that load
+    :class:`Settings` without depending on a fixture that transitively
+    pins the env (e.g. ``test_g81_audit_query_acceptance`` via
+    ``pg_engine`` → ``integration_env``, which only overrides
+    ``DATABASE_URL``) therefore die with
+    ``KeyError: 'KEYCLOAK_ISSUER_URL'`` at ``settings.py``'s eager
+    ``os.environ["..."]`` access.
+
+    Reuses :data:`tests.integration.conftest._CHASSIS_ENV` verbatim so
+    the two suites cannot drift. Mirrors the autouse-for-invariants
+    discipline of ``_integration_default_env`` (#679) and the unit-level
+    ``_default_database_url`` fixture; brackets the yield with
+    ``get_settings.cache_clear()`` / ``clear_jwks_cache()`` so neither
+    cache bleeds between tests.
+    """
+    for key, value in _CHASSIS_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    clear_jwks_cache()
+
+    yield
+
+    get_settings.cache_clear()
+    clear_jwks_cache()
 
 
 @pytest.fixture

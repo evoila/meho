@@ -17,15 +17,20 @@ role. The resulting Vault token is per-request and revoked on context
 exit (behaviour inherited from
 :func:`~meho_backplane.auth.vault.vault_client_for_operator`).
 
-Target contract (pre-G0.3 placeholder):
+Target contract (G0.3 #224, operator-aware dispatch G0.8-T3 #629):
 
-:class:`VaultTarget` is a minimal stand-in for the ``Target`` model
-that G0.3 (#224) will land. Once G0.3 merges, replace ``VaultTarget``
-usages with proper ``Target`` instances. The connector reads Vault
+The connector is typed against the real
+:class:`~meho_backplane.targets.schemas.Target`. It reads Vault
 connection parameters (address, role, mount path, namespace, timeout)
-from :func:`~meho_backplane.settings.get_settings` rather than from
-the target because those are deployment-level settings, not per-
-operator overrides.
+from :func:`~meho_backplane.settings.get_settings`, not from the
+target, because those are deployment-level settings, not per-operator
+overrides — so ``probe``/``fingerprint`` accept ``Target | None`` and
+ignore the value entirely. The operator's bearer token is **not** on
+the persisted ``Target`` row (a per-request token must not be
+persisted on a shared target); typed KV/auth/sys handlers read it from
+the request-scoped :class:`~meho_backplane.auth.operator.Operator` the
+dispatcher threads (see
+:func:`~meho_backplane.operations._branches.dispatch_typed`).
 
 Operation dispatch (post-G0.6-T-Refactor-Vault):
 
@@ -51,7 +56,6 @@ construct the :class:`~meho_backplane.auth.operator.Operator` and call
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -65,8 +69,9 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.settings import get_settings
+from meho_backplane.targets.schemas import Target
 
-__all__ = ["VaultConnector", "VaultTarget"]
+__all__ = ["VaultConnector"]
 
 _log = structlog.get_logger(__name__)
 
@@ -83,19 +88,6 @@ _log = structlog.get_logger(__name__)
 # deploys.
 _SYSTEM_TENANT_ID: UUID = UUID(int=0)
 _SYSTEM_OPERATOR_SUB: str = "system:vault-connector-shim"
-
-
-@dataclass(frozen=True)
-class VaultTarget:
-    """Pre-G0.3 stand-in for the G0.3 Target model (VaultConnector only).
-
-    Replace with ``meho_backplane.targets.Target`` once G0.3 (#224)
-    lands. Only ``raw_jwt`` is needed today; connection parameters are
-    read from :func:`~meho_backplane.settings.get_settings` so the same
-    single-source of truth governs probe, fingerprint, and execute.
-    """
-
-    raw_jwt: str | None = None
 
 
 class VaultConnector(Connector):
@@ -119,13 +111,15 @@ class VaultConnector(Connector):
     version = "1.x"
     impl_id = "vault"
 
-    async def fingerprint(self, target: VaultTarget) -> FingerprintResult:
+    async def fingerprint(self, target: Target | None) -> FingerprintResult:
         """Canonical fingerprint from ``GET /v1/sys/health``.
 
         Reuses :func:`~meho_backplane.auth.vault._build_client` so the
         existing test seam applies and the vault_timeout / namespace
         settings are respected without duplicating the client-
-        construction logic.
+        construction logic. ``target`` is part of the
+        :class:`~meho_backplane.connectors.base.Connector` ABC contract
+        but unused — Vault connection params come from settings.
         """
         settings = get_settings()
         client = _auth_vault._build_client(settings)
@@ -158,7 +152,7 @@ class VaultConnector(Connector):
             extras=extras,
         )
 
-    async def probe(self, target: VaultTarget) -> ProbeResult:
+    async def probe(self, target: Target | None) -> ProbeResult:
         """Lightweight reachability check via unauthenticated ``/v1/sys/health``.
 
         Reuses :func:`~meho_backplane.auth.vault._build_client` so the
@@ -198,7 +192,7 @@ class VaultConnector(Connector):
 
     async def execute(
         self,
-        target: VaultTarget,
+        target: Target | None,
         op_id: str,
         params: dict[str, Any],
     ) -> OperationResult:
@@ -219,12 +213,18 @@ class VaultConnector(Connector):
 
         Operator identity is synthesised from a fixed system-tenant
         sentinel because :class:`Connector.execute`'s ABC signature
-        predates the G0.6 introduction of operator-aware dispatch.
-        The synthesised operator's ``raw_jwt`` is read from
-        ``target.raw_jwt`` so the dispatched handler still has the
-        token it needs for OIDC forwarding; the synthesised ``sub``
-        and ``tenant_id`` only surface on the dispatcher's own audit
-        row. Routed call sites already write a richer audit row via
+        carries no operator. The synthesised operator's ``raw_jwt`` is
+        the empty string — the shim's only callers are operator-less
+        (``vault_readiness_probe`` exercises ``vault.sys.health``, an
+        *unauthenticated* Vault endpoint that forwards no token),
+        mirroring the
+        :func:`~meho_backplane.topology.scheduler._system_operator`
+        precedent. Callers that need a real operator JWT forwarded to
+        Vault construct a real :class:`Operator` and call
+        :func:`dispatch` directly (they never route through this shim).
+        The synthesised ``sub`` and ``tenant_id`` only surface on the
+        dispatcher's own audit row; routed call sites already write a
+        richer audit row via
         :class:`~meho_backplane.audit.AuditMiddleware`, which carries
         the real operator identity from the JWT — the dispatcher's
         synthesised row is a strict subset.
@@ -251,7 +251,7 @@ class VaultConnector(Connector):
         # keeps that initialisation order stable.
         from meho_backplane.operations import dispatch
 
-        operator = self._synthesise_legacy_operator(target)
+        operator = self._synthesise_legacy_operator()
         return await dispatch(
             operator=operator,
             connector_id=self._dispatcher_connector_id(),
@@ -281,12 +281,12 @@ class VaultConnector(Connector):
         return cls.product
 
     @staticmethod
-    def _synthesise_legacy_operator(target: VaultTarget) -> Operator:
+    def _synthesise_legacy_operator() -> Operator:
         """Build a minimal :class:`Operator` for the shim's dispatch call.
 
-        The shim has no access to the real operator's identity claims —
-        :class:`Connector.execute`'s ABC signature predates G0.6's
-        operator-aware dispatch. We synthesise:
+        The shim has no access to a real operator's identity claims —
+        :class:`Connector.execute`'s ABC signature carries no operator.
+        We synthesise:
 
         * ``sub`` — a fixed system sentinel
           (:data:`_SYSTEM_OPERATOR_SUB`) so the dispatcher's audit row
@@ -296,10 +296,13 @@ class VaultConnector(Connector):
           ``tenant_id IS NULL`` so the dispatcher's tenant-scoped
           descriptor lookup falls through to the global row regardless;
           the synthesised tenant_id only lands on the audit row.
-        * ``raw_jwt`` — the target's ``raw_jwt`` so the dispatched
-          handler can forward the operator's token to Vault's OIDC
-          auth method. ``None`` collapses to the empty string because
-          :class:`Operator.raw_jwt` is non-optional.
+        * ``raw_jwt`` — the empty string. The shim's only callers are
+          operator-less and exercise the unauthenticated
+          ``vault.sys.health`` op, which forwards no token to Vault
+          (same contract as
+          :func:`~meho_backplane.topology.scheduler._system_operator`).
+          Authenticated ops require a real operator and call
+          :func:`dispatch` directly, never through this shim.
         * ``tenant_role`` — :attr:`TenantRole.OPERATOR`. The v0.2
           policy gate doesn't read the role for ``safety_level='safe'``
           ops; the value is a placeholder that satisfies the model's
@@ -309,7 +312,7 @@ class VaultConnector(Connector):
             sub=_SYSTEM_OPERATOR_SUB,
             name=None,
             email=None,
-            raw_jwt=target.raw_jwt or "",
+            raw_jwt="",
             tenant_id=_SYSTEM_TENANT_ID,
             tenant_role=TenantRole.OPERATOR,
         )

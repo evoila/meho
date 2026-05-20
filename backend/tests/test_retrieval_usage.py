@@ -57,7 +57,10 @@ from meho_backplane.db.models import AuditLog
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.retrieval.usage import (
     CONVERSION_WINDOW,
+    COUNTED_SEARCH_SURFACES,
     MCP_TOOL_PATH_PREFIX,
+    REST_RETRIEVE_EXCLUDED,
+    SEARCH_OPS,
     SUPPORTED_SURFACES,
     DailyUsageBucket,
     SinceValueError,
@@ -288,6 +291,96 @@ async def test_compute_usage_no_matching_surface_returns_empty() -> None:
         )
     assert report.buckets == []
     assert report.total_searches == 0
+
+
+# ---------------------------------------------------------------------------
+# Counted-surface de-silencing (#632) — the REST-excluded zero is no
+# longer context-free.
+# ---------------------------------------------------------------------------
+
+
+def test_counted_search_surfaces_derived_from_search_ops() -> None:
+    """``COUNTED_SEARCH_SURFACES`` mirrors ``SEARCH_OPS`` (single source).
+
+    The documented contract cannot drift from the audit_log query
+    filter: every counted surface label is exactly ``mcp:<tool>`` for a
+    tool in ``SEARCH_OPS``.
+    """
+    assert tuple(f"mcp:{op}" for op in SEARCH_OPS) == COUNTED_SEARCH_SURFACES
+    assert REST_RETRIEVE_EXCLUDED is True
+
+
+@pytest.mark.asyncio
+async def test_usage_report_carries_counted_surface_signal() -> None:
+    """Every ``UsageReport`` carries ``counted_surfaces`` + ``rest_excluded``.
+
+    Asserted on the empty (zero-row) report specifically: the field is
+    present *alongside* ``total_searches=0`` so the zero is
+    self-explaining.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        report = await compute_usage(
+            session=session,
+            since=_NOW - timedelta(days=30),
+            until=_NOW,
+            surfaces=SUPPORTED_SURFACES,
+            tenant_id=_FIXED_TENANT,
+        )
+    assert report.total_searches == 0
+    assert report.counted_surfaces == list(COUNTED_SEARCH_SURFACES)
+    assert report.counted_surfaces == [
+        "mcp:search_knowledge",
+        "mcp:search_memory",
+        "mcp:search_operations",
+    ]
+    assert report.rest_excluded is True
+
+
+@pytest.mark.asyncio
+async def test_rest_only_dogfood_zero_is_not_context_free(
+    usage_client: TestClient,
+) -> None:
+    """REST-only dogfood scenario: the silent zero now self-explains.
+
+    Reproduces the #632 trap end-to-end over the HTTP surface: an
+    operator who has only ever called ``POST /api/v1/retrieve`` (never
+    an audited MCP ``search_knowledge``) queries ``retrieve/usage``.
+    Two ``/api/v1/retrieve``-pathed audit rows stand in for a month of
+    REST-only dogfooding. They are NOT on a counted MCP path, so
+    ``total_searches`` stays ``0`` — but the response now states which
+    surfaces *do* count and that REST is excluded, so the zero reads as
+    "REST is not counted", not "no usage".
+    """
+    await _seed_audit_row(
+        operator_sub="op-rest",
+        tenant_id=_FIXED_TENANT,
+        path="/api/v1/retrieve",
+        occurred_at=_NOW - timedelta(days=10),
+    )
+    await _seed_audit_row(
+        operator_sub="op-rest",
+        tenant_id=_FIXED_TENANT,
+        path="/api/v1/retrieve",
+        occurred_at=_NOW - timedelta(days=2),
+    )
+
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, sub="op-rest", tenant_role=TenantRole.OPERATOR.value)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = usage_client.get(
+            "/api/v1/retrieve/usage?surface=kb",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    # The trap: REST /retrieve calls never tick the counter.
+    assert body["total_searches"] == 0
+    assert body["buckets"] == []
+    # The de-silencing: the zero is no longer context-free.
+    assert body["counted_surfaces"] == list(COUNTED_SEARCH_SURFACES)
+    assert body["rest_excluded"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -723,7 +816,13 @@ def test_usage_report_serialises_to_stable_json() -> None:
         "tenant_id",
         "buckets",
         "total_searches",
+        "counted_surfaces",
+        "rest_excluded",
     }
+    # #632: the counted-surface signal ships defaulted from the single
+    # source of truth and is part of the CLI-consumer contract.
+    assert blob["counted_surfaces"] == list(COUNTED_SEARCH_SURFACES)
+    assert blob["rest_excluded"] is True
     assert set(blob["buckets"][0].keys()) == {
         "date",
         "surface",

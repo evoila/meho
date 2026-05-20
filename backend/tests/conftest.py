@@ -34,6 +34,7 @@ denylist without re-deriving the test contract.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import warnings
@@ -207,12 +208,14 @@ def _default_retrieval_model_cache_dir(
     """Redirect fastembed's ONNX model cache to a writable per-test dir.
 
     The production default at :attr:`Settings.retrieval_model_cache_dir`
-    is ``/var/cache/fastembed`` so the Helm chart's PVC mount survives
-    pod restarts without re-downloading the ~120 MB ONNX blob. That
-    path is read-only on macOS dev sandboxes and on the
-    gha-runner-scale-set CI sandbox (every recent merged PR on main
-    shows 3 FAILURE statuses in ``statusCheckRollup`` for exactly this
-    reason; see Task #472).
+    is ``/opt/meho/model-cache`` — the image layer the default model is
+    baked into at build time (evoila/meho#574). That path does not
+    exist (and its parent is not writable) on macOS dev sandboxes or on
+    the gha-runner-scale-set CI sandbox, so a test that constructs
+    :class:`Settings` without this override would hit the same
+    ``PermissionError`` the old ``/var/cache/fastembed`` default caused
+    (every recent merged PR on main once showed 3 FAILURE statuses in
+    ``statusCheckRollup`` for exactly this reason; see Task #472).
 
     Failure surface: the FastAPI lifespan in
     :mod:`meho_backplane.main` calls
@@ -254,6 +257,41 @@ def _default_retrieval_model_cache_dir(
 
 
 @pytest.fixture(autouse=True)
+def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin a non-empty ``BACKPLANE_URL`` so the lifespan boots in tests.
+
+    G0.8-T4 (#633) added :func:`meho_backplane.main._assert_mcp_resource_uri_configured`
+    to the FastAPI lifespan: the ``/mcp`` router is mounted
+    unconditionally, so a deploy with neither ``MCP_RESOURCE_URI`` nor
+    ``BACKPLANE_URL`` set now fails loudly at startup instead of
+    serving a dark, silent ``/mcp``. The whole ``test_mcp_*`` /
+    ``test_auth_config`` / ``test_middleware`` family boots the app via
+    ``with TestClient(app)`` (which runs the lifespan); without a
+    process-default for ``BACKPLANE_URL`` every one of them would now
+    crash on the new guard for a reason unrelated to what they test.
+
+    Setting it here, before any test imports :func:`get_settings`,
+    makes the default deploy-shape "MCP audience resolvable" so the
+    guard passes silently. Tests that *exercise* the unresolvable path
+    (``test_empty_audience_setting_returns_401``,
+    ``test_audience_not_configured_401_detail_is_actionable``,
+    ``test_mcp_startup_guard``) override with
+    ``monkeypatch.setenv("BACKPLANE_URL", "")`` — ``MonkeyPatch.setenv``
+    is last-write, so the per-test override wins over this autouse
+    default (same precedence contract :func:`_default_database_url`
+    documents).
+
+    The ``get_settings.cache_clear()`` brackets mirror the sibling
+    autouse fixtures so a stale cached ``Settings`` cannot leak the
+    value across tests.
+    """
+    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_secret_leak_sweep(
     caplog: pytest.LogCaptureFixture,
     capfd: pytest.CaptureFixture[str],
@@ -280,36 +318,69 @@ def _no_secret_leak_sweep(
     ``tests/test_secret_leak_checks.py``; this fixture is the safety
     net for everything else.
 
-    **Mid-test drain protection.** ``capfd.readouterr`` is destructive:
-    each call returns *and clears* whatever has been captured since the
-    previous call. A test that drains the buffer mid-run (to assert on
-    its own output) would consume those bytes before this sweep sees
-    them, silently bypassing the check. To stay sound regardless of
-    test internals, the fixture installs a record-and-forward proxy
-    over ``capfd.readouterr`` that copies every read into an internal
-    list; at teardown the sweep concatenates every recorded chunk plus
-    a final post-yield read into the haystack. The current 125 tests
-    do not pre-drain, but this guards against future tests doing so.
+    **Capture surface depends on the runner (#585/#604).** The
+    ``caplog`` (stdlib :mod:`logging`) scan is **always** active — it is
+    reliably per-test isolated even under ``pytest-xdist``. The
+    ``capfd`` (OS-fd-level) scan is active **only single-process**: fd
+    capture is not cleanly per-test under xdist, so a real ``Bearer``
+    emitted by some test's late/async/500-path on a worker would be
+    mis-attributed to whichever test's teardown sweep runs next — a
+    non-deterministic false positive (not a real leak: production
+    redacts ``SENSITIVE_HEADERS`` and the full serial suite is clean).
+    Under xdist the fd scan is skipped; coverage is preserved by the
+    always-on ``caplog`` scan, the explicit
+    ``tests/test_secret_leak_checks.py`` assertions, and production-side
+    redaction (defense in depth). The body details the gate.
+
+    **Mid-test drain protection (single-process path).**
+    ``capfd.readouterr`` is destructive: each call returns *and clears*
+    what was captured since the previous call. A test that drains the
+    buffer mid-run would consume those bytes before this sweep sees
+    them. The fixture installs a record-and-forward proxy over
+    ``capfd.readouterr`` that copies every read into an internal list;
+    at teardown the sweep concatenates every recorded chunk plus a
+    final post-yield read. (Only installed when not under xdist.)
     """
+    # xdist gate (#585/#604). ``capfd`` is OS-fd-level capture; under
+    # pytest-xdist it is NOT cleanly per-test isolated — a real
+    # ``Bearer`` emitted by *some* test's late / async / 500-path on a
+    # worker lands in whichever test's teardown sweep happens to run
+    # next, a non-deterministic FALSE POSITIVE. Proven not a production
+    # leak: ``RequestContextMiddleware`` redacts ``SENSITIVE_HEADERS``,
+    # this sweep is autouse serially too, and the full serial suite is
+    # clean (2007/0/0) while parallel runs flag different innocent
+    # tests run-to-run. So the fd-level scan runs ONLY single-process
+    # (local dev + any serial security context); under xdist we rely on
+    # the ``caplog`` scan below (stdlib ``logging`` IS reliably
+    # per-test under xdist) PLUS the explicit
+    # ``tests/test_secret_leak_checks.py`` assertions PLUS the
+    # production-side header redaction — defense in depth, no real
+    # coverage lost. A capfd-under-xdist redesign is tracked separately
+    # if an fd-only leak surface ever emerges.
+    under_xdist = os.environ.get("PYTEST_XDIST_WORKER") is not None
+
     captured_chunks: list[tuple[str, str]] = []
     real_readouterr = capfd.readouterr
 
-    def _recording_readouterr() -> Any:
-        result = real_readouterr()
-        captured_chunks.append((result.out, result.err))
-        return result
+    if not under_xdist:
+        # Discard pre-test fd residue so the sweep inspects only what
+        # THIS test emits, then record every drain so a mid-test
+        # ``capfd.readouterr()`` cannot consume secret-shaped output
+        # before the post-yield sweep sees it.
+        real_readouterr()
 
-    monkeypatch.setattr(capfd, "readouterr", _recording_readouterr)
+        def _recording_readouterr() -> Any:
+            result = real_readouterr()
+            captured_chunks.append((result.out, result.err))
+            return result
+
+        monkeypatch.setattr(capfd, "readouterr", _recording_readouterr)
 
     yield
 
-    # Final post-yield drain plus everything any in-test caller already
-    # consumed. Concatenating both sides means a mid-test call to
-    # ``capfd.readouterr()`` (or a fixture/teardown call after the
-    # ``yield`` boundary in another autouse fixture) cannot consume
-    # secret-shaped output before the sweep runs.
-    final = real_readouterr()
-    captured_chunks.append((final.out, final.err))
+    if not under_xdist:
+        final = real_readouterr()
+        captured_chunks.append((final.out, final.err))
     out_parts = [out for out, _err in captured_chunks if out]
     err_parts = [err for _out, err in captured_chunks if err]
     log_records = "\n".join(record.getMessage() for record in caplog.records)
@@ -331,6 +402,83 @@ def _no_secret_leak_sweep(
                 f"pattern={pattern.pattern!r} preview={preview!r}",
                 pytrace=False,
             )
+
+
+# ---------------------------------------------------------------------------
+# Global-registry test isolation (#585 — unblocks pytest-xdist)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _force_import_mcp_modules() -> None:
+    """Import every MCP tool/resource module ONCE per worker, up front.
+
+    ``register_mcp_tool`` / ``register_mcp_resource`` fire as *module-
+    import side effects*; :func:`eager_import_mcp_modules` only triggers
+    them on a module's first import (Python caches imports).
+    ``clear_registries()`` (the per-test reset in
+    ``tests/test_mcp_registry.py``) empties ``_TOOLS`` but cannot
+    un-import modules, so whether a later lifespan-driven
+    ``eager_import_mcp_modules()`` re-populates real tools depends purely
+    on import history — deterministic only in full-suite *serial*
+    collection order. That coupling is exactly what made
+    ``test_mcp_registry`` / ``test_audit_middleware`` pass serially but
+    fail under ``pytest-xdist`` (#585; the #540 class generalised).
+
+    Forcing the imports once at session start makes the registration
+    side effects fire before any test, so every subsequent
+    ``eager_import_mcp_modules()`` (lifespan startup, any worker, any
+    order) is a cached no-op. Combined with the per-test
+    snapshot/restore below, registry state becomes a pure function of
+    what each test explicitly registers — order- and worker-independent.
+    """
+    from meho_backplane.mcp.registry import eager_import_mcp_modules
+
+    eager_import_mcp_modules()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_registries() -> Iterator[None]:
+    """Snapshot/restore every process-global registry around each test.
+
+    The backplane keeps mutable module-level registries that the app
+    lifespan and ``@register_*`` decorators populate:
+    ``mcp.registry._TOOLS`` / ``_RESOURCES``,
+    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``, and
+    ``operations.typed_register._TYPED_OP_REGISTRARS``. None had a
+    process-wide per-test reset, so a test that triggered the lifespan
+    leaked real registrations into whatever test the (xdist) scheduler
+    ran next on the same worker. #540 fixed exactly one of these with a
+    local fixture; this generalises the snapshot/restore to all of
+    them, process-wide.
+
+    Snapshot the *contents* (not the binding — other modules hold the
+    same dict/list objects, so rebinding would not propagate) at setup,
+    restore them verbatim at teardown. Restore-not-clear: registrations
+    a test legitimately makes survive *within* that test; only the
+    cross-test bleed is removed.
+    """
+    from meho_backplane.connectors import registry as conn_reg
+    from meho_backplane.mcp import registry as mcp_reg
+    from meho_backplane.operations import typed_register as typed_reg
+
+    tools = dict(mcp_reg._TOOLS)
+    resources = dict(mcp_reg._RESOURCES)
+    connectors_v1 = dict(conn_reg._REGISTRY)
+    connectors_v2 = dict(conn_reg._REGISTRY_V2)
+    registrars = list(typed_reg._TYPED_OP_REGISTRARS)
+    try:
+        yield
+    finally:
+        mcp_reg._TOOLS.clear()
+        mcp_reg._TOOLS.update(tools)
+        mcp_reg._RESOURCES.clear()
+        mcp_reg._RESOURCES.update(resources)
+        conn_reg._REGISTRY.clear()
+        conn_reg._REGISTRY.update(connectors_v1)
+        conn_reg._REGISTRY_V2.clear()
+        conn_reg._REGISTRY_V2.update(connectors_v2)
+        typed_reg._TYPED_OP_REGISTRARS[:] = registrars
 
 
 # ---------------------------------------------------------------------------

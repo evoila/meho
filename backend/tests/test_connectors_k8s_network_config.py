@@ -126,7 +126,7 @@ def _clean_kubernetes_registry() -> Iterator[None]:
     register_connector_v2(
         product="k8s",
         version="1.x",
-        impl_id="kubernetes-asyncio",
+        impl_id="k8s",
         cls=KubernetesConnector,
     )
     yield

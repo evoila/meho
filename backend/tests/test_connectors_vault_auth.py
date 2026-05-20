@@ -24,16 +24,18 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import hvac.exceptions
 import pytest
 import requests.exceptions
 
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.vault import (
-    VaultConnector,
-    VaultTarget,
     register_vault_typed_operations,
 )
+from meho_backplane.operations import dispatch
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -80,8 +82,38 @@ async def _registered_vault_typed_ops(
     yield
 
 
-def _make_target(jwt: str = "fake.jwt.value") -> VaultTarget:
-    return VaultTarget(raw_jwt=jwt)
+def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
+    """Request-scoped operator carrying the bearer token the vault
+    handlers forward to Vault's JWT/OIDC auth (G0.8-T3 #629). Replaces
+    the pre-#224 ``VaultTarget(raw_jwt=...)`` stub.
+    """
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+async def _dispatch_vault(
+    op_id: str, params: dict[str, Any], *, jwt: str = "fake.jwt.value"
+) -> OperationResult:
+    """Dispatch a vault op through the real operator-aware path.
+
+    The dispatcher threads a real :class:`Operator`, resolves the
+    connector by ``connector_id``, and ``target`` is ``None`` (vault
+    connection params come from settings). The handler reads the JWT
+    from ``operator.raw_jwt`` — the #629 contract.
+    """
+    return await dispatch(
+        operator=_make_operator(jwt),
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=None,
+        params=params,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +166,7 @@ async def test_auth_op_is_dispatchable(
     elif op_id == "vault.auth.approle.read":
         params = {"role_name": "deploy"}
 
-    result = await VaultConnector().execute(_make_target(), op_id, params)
+    result = await _dispatch_vault(op_id, params)
 
     assert result.status == "ok", result.error
     assert result.extras.get("error_code") != "unknown_op"
@@ -152,9 +184,7 @@ async def test_userpass_list_returns_sorted_keys(
     fake = install_fake_client(monkeypatch)
     fake.auth.userpass.users = {"armon": {}, "mitchellh": {}}
 
-    result = await VaultConnector().execute(
-        _make_target(jwt="op-jwt"), "vault.auth.userpass.list", {}
-    )
+    result = await _dispatch_vault("vault.auth.userpass.list", {}, jwt="op-jwt")
 
     assert result.status == "ok", result.error
     assert result.result == {"keys": ["armon", "mitchellh"]}
@@ -171,7 +201,7 @@ async def test_approle_list_returns_sorted_keys(
     fake = install_fake_client(monkeypatch)
     fake.auth.approle.roles = {"prod": {}, "dev": {}, "test": {}}
 
-    result = await VaultConnector().execute(_make_target(), "vault.auth.approle.list", {})
+    result = await _dispatch_vault("vault.auth.approle.list", {})
 
     assert result.status == "ok", result.error
     assert result.result == {"keys": ["dev", "prod", "test"]}
@@ -185,8 +215,8 @@ async def test_list_empty_mount_normalises_to_empty_list(
     """A mounted-but-empty backend yields ``{'keys': []}`` (Vault 204)."""
     install_fake_client(monkeypatch)  # default: no users / no roles
 
-    up = await VaultConnector().execute(_make_target(), "vault.auth.userpass.list", {})
-    ar = await VaultConnector().execute(_make_target(), "vault.auth.approle.list", {})
+    up = await _dispatch_vault("vault.auth.userpass.list", {})
+    ar = await _dispatch_vault("vault.auth.approle.list", {})
 
     assert up.status == "ok" and up.result == {"keys": []}
     assert ar.status == "ok" and ar.result == {"keys": []}
@@ -200,8 +230,7 @@ async def test_list_honours_non_default_mount(
     fake = install_fake_client(monkeypatch)
     fake.auth.userpass.users = {"svc": {}}
 
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.auth.userpass.list",
         {"mount": "userpass-prod"},
     )
@@ -229,8 +258,7 @@ async def test_userpass_read_returns_config(
         }
     }
 
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.auth.userpass.read",
         {"username": "ci", "mount": "userpass-prod"},
     )
@@ -259,9 +287,7 @@ async def test_approle_read_returns_config(
         }
     }
 
-    result = await VaultConnector().execute(
-        _make_target(), "vault.auth.approle.read", {"role_name": "deploy"}
-    )
+    result = await _dispatch_vault("vault.auth.approle.read", {"role_name": "deploy"})
 
     assert result.status == "ok", result.error
     assert result.result["token_policies"] == ["default"]
@@ -298,7 +324,7 @@ async def test_list_backend_not_mounted_surfaces_structured_error(
     fake = install_fake_client(monkeypatch)
     getattr(fake.auth, backend).list_exc = hvac.exceptions.InvalidPath("no handler for route")
 
-    result = await VaultConnector().execute(_make_target(), op_id, params)
+    result = await _dispatch_vault(op_id, params)
 
     assert result.status == "error"
     assert result.error is not None
@@ -332,7 +358,7 @@ async def test_read_backend_not_mounted_surfaces_structured_error(
     target_backend.read_exc = hvac.exceptions.InvalidPath("no handler for route")
     target_backend.list_exc = hvac.exceptions.InvalidPath("no handler for route")
 
-    result = await VaultConnector().execute(_make_target(), op_id, params)
+    result = await _dispatch_vault(op_id, params)
 
     assert result.status == "error"
     assert result.extras.get("error_code") == "connector_error"
@@ -364,7 +390,7 @@ async def test_read_missing_entity_under_mounted_backend_keeps_invalid_path(
     target_backend.read_exc = hvac.exceptions.InvalidPath("no secret found")
     # list_exc stays None -> the probe LIST succeeds (empty roster).
 
-    result = await VaultConnector().execute(_make_target(), op_id, params)
+    result = await _dispatch_vault(op_id, params)
 
     assert result.status == "error"
     assert result.extras.get("error_code") == "connector_error"
@@ -413,7 +439,7 @@ async def test_invalid_params_rejected_by_schema(
     """
     install_fake_client(monkeypatch)
 
-    result = await VaultConnector().execute(_make_target(), op_id, params)
+    result = await _dispatch_vault(op_id, params)
 
     assert result.status == "error"
     assert result.error is not None
@@ -458,7 +484,7 @@ async def test_login_failure_surfaces_vault_client_error_class(
     """
     install_fake_client(monkeypatch, login_exc=login_exc)
 
-    result = await VaultConnector().execute(_make_target(), op_id, params)
+    result = await _dispatch_vault(op_id, params)
 
     assert result.status == "error"
     assert result.error is not None

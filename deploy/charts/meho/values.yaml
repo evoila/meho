@@ -174,11 +174,61 @@ config:
   vaultTimeoutSeconds: "10.0"
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
-  # Retrieval substrate (G0.4-T2 #259). The chart sets the model cache
-  # dir to match the PVC mount point so a `retrieval.modelCache.enabled`
-  # flip is the operator's single source of truth for the cache path.
+  # MCP audience binding (G0.8-T4 #633). The `/mcp` router is mounted
+  # unconditionally; every `/mcp` Bearer token must carry
+  # `aud == MCP_RESOURCE_URI`. Leave both blank for the common
+  # ingress-fronted deploy: the chart derives
+  # `BACKPLANE_URL=https://<ingress.host>` (scheme follows
+  # `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp`
+  # so the documented default actually materialises. Set `backplaneUrl`
+  # explicitly when the public URL differs from the Ingress host (split
+  # horizon, external LB). Set `mcpResourceUri` explicitly only for a
+  # non-default MCP mount point. When neither is set AND no Ingress is
+  # configured, the backend fails loudly at startup with the remediation
+  # (it does NOT serve a dark, silent `/mcp`). The operator must still
+  # add a matching Keycloak oidc-audience-mapper — see
+  # `docs/cross-repo/mcp-client-setup.md` Step 1.
+  backplaneUrl: ""
+  mcpResourceUri: ""
+  # Retrieval substrate (G0.4-T2 #259). The default model is BAKED INTO
+  # THE IMAGE at /opt/meho/model-cache (backend/Dockerfile warm step,
+  # evoila/meho#574) so first boot is offline + version-locked and does
+  # NOT depend on a persistent PVC that can be poisoned by a partial
+  # first download. Leave `retrievalModelCacheDir` at the baked path
+  # unless you also override `retrievalEmbeddingModel` to a non-default
+  # model that must be fetched at runtime — in that case point it at the
+  # opt-in `retrieval.modelCache` PVC mountPath and set
+  # `retrieval.modelCache.enabled: true`.
   retrievalEmbeddingModel: "BAAI/bge-small-en-v1.5"
-  retrievalModelCacheDir: "/var/cache/fastembed"
+  retrievalModelCacheDir: "/opt/meho/model-cache"
+
+# Memory layer (G5.2 #374). The backplane ships an in-process
+# memory-expiry sweeper that runs in the FastAPI lifespan and removes
+# `source="memory"` rows whose `metadata.expires_at` has passed. The
+# defaults here track the consumer-needs.md §G5 contract (7-day TTL,
+# 24-hour sweep cadence). Disable `expiryEnabled` only when an external
+# cleanup mechanism (k8s CronJob etc.) reaps expired rows instead;
+# expired rows remain soft-hidden via the read-side filter until the
+# external job runs.
+memory:
+  # -- Default time-to-live for user-scoped memory entries, in days.
+  # G5.2-T2 (#624) consumes this on `POST /api/v1/memory` to inject
+  # `expires_at = now() + userDefaultTtlDays` when the caller omits an
+  # explicit value. Operators wanting permanent memories pass
+  # `expires_at: null` on the write or set this to a year-class value.
+  # Range [1, 365]. Default 7 matches consumer-needs.md §G5
+  # ("session-scoped hints expire after 7 days unless re-pinned").
+  userDefaultTtlDays: 7
+  # -- Cadence of the in-process memory-expiry sweeper, in seconds.
+  # Default 86400 (24h) matches Initiative #374's stated cadence.
+  # Range [60, 86400]: below one minute competes with request load;
+  # above one day risks accumulating soft-hidden rows.
+  expiryTickIntervalSeconds: 86400
+  # -- Whether to start the in-process memory-expiry sweeper. Set
+  # false when an external cleanup mechanism reaps expired rows
+  # instead; the read-side filter still hides expired rows from
+  # consumers until the external job runs.
+  expiryEnabled: true
 
 postgres:
   # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
@@ -234,8 +284,8 @@ audit:
 # running Valkey OSS as a single-replica Deployment with ephemeral streams.
 # Subchart slug is `broadcast` rather than `redis` because the protocol
 # contract matters more than the brand. The backplane connects via the
-# `REDIS_URL` env var (operator-facing) rendered against the Service name
-# `<release>-broadcast`.
+# `BROADCAST_REDIS_URL` env var (operator-facing) rendered against the
+# Service name `<release>-broadcast`.
 #
 # Operators on clusters running an external Valkey/Redis can flip
 # `broadcast.enabled: false` and (in v0.2+) point the backplane at the
@@ -308,21 +358,30 @@ connectors:
   # surface lands post-Goal-2 with the first product ticket.
   enabled: []
 
-# Retrieval substrate (G0.4, Initiative #225). The backplane's fastembed
-# pipeline (G0.4-T2 #259) downloads ~120 MB of ONNX weights for the
-# default model `BAAI/bge-small-en-v1.5` to a local cache. The chart
-# mounts a PVC at `retrieval.modelCache.mountPath` so pod restarts don't
-# re-download. The PVC is RWO (single-attach): v0.2 ships single-replica
-# anyway, and a multi-replica deploy can either disable the PVC and pay
-# the per-pod download or provide its own RWX PVC via `extraVolumes` +
-# `extraVolumeMounts`.
+# Retrieval substrate (G0.4, Initiative #225). The shipped default model
+# `BAAI/bge-small-en-v1.5` is BAKED INTO THE IMAGE at
+# `/opt/meho/model-cache` (backend/Dockerfile warm step, evoila/meho#574)
+# so the default deploy needs neither HuggingFace egress nor a PVC: first
+# boot is offline + version-locked. The `modelCache` PVC below is
+# therefore an OPT-IN optimisation for operators who override
+# `config.retrievalEmbeddingModel` to a non-default model that must be
+# fetched at runtime — it is `enabled: false` by default. It is RWO
+# (single-attach); v0.2 ships single-replica anyway.
+#
+# WARNING (evoila/meho#574): when you do enable this PVC for a custom
+# model, fastembed treats an existing snapshot dir as "present" and will
+# NOT re-fetch — a partial/interrupted first download (or a CSI volume
+# that doesn't preserve the HF cache's `snapshots/<sha>/*.onnx ->
+# ../../blobs/<hash>` symlinks) poisons the PVC permanently and every
+# fresh pod CrashLoops. Recovery is to delete the PVC and redeploy.
 retrieval:
   modelCache:
-    # -- Mount the model-cache PVC on the backplane Pod. When `false`,
-    # the chart skips the PVC + the volume mount and fastembed downloads
-    # weights to an ephemeral path on every pod restart (acceptable for
-    # short-lived dev clusters; not for production).
-    enabled: true
+    # -- Mount an extra writable model-cache PVC on the backplane Pod.
+    # Default `false`: the shipped default model is baked into the image,
+    # so the default deploy needs no PVC. Set `true` ONLY when you
+    # override `config.retrievalEmbeddingModel` to a non-default model
+    # that is fetched at runtime and you want it to survive pod restarts.
+    enabled: false
     # -- Requested PVC size. `BAAI/bge-small-en-v1.5` is ~120 MB on
     # disk; 200Mi gives headroom for the tokenizer metadata plus a
     # future swap to a same-dim multilingual model without resizing.
@@ -429,7 +488,7 @@ extraVolumeMounts: []
 # (accepts `value` OR `valueFrom`). Most common use: `SSL_CERT_FILE`
 # pointing at a mounted trust bundle's path, so Python's default ssl
 # context honours internal CAs. The list is appended after the chart's
-# own env (DATABASE_URL, REDIS_URL); operator values win on collisions
+# own env (DATABASE_URL, BROADCAST_REDIS_URL); operator values win on collisions
 # only if Kubernetes' duplicate-EnvVar resolution rule (last-write-wins)
 # applies to your runtime. Don't rely on overrides — pick a name that
 # doesn't clash.

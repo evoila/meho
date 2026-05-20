@@ -93,7 +93,9 @@ from meho_backplane.retrieval.eval.runner import (
     eval_all,
 )
 from meho_backplane.retrieval.usage import (
+    COUNTED_SEARCH_SURFACES,
     MCP_TOOL_PATH_PREFIX,
+    REST_RETRIEVE_EXCLUDED,
     SEARCH_OPS,
     SUPPORTED_SURFACES,
 )
@@ -243,6 +245,28 @@ class RetireChecklistReport(BaseModel):
     until: datetime
     surfaces: list[SurfaceChecklist]
     overall_verdict: ChecklistVerdict
+
+    #: The fully-qualified surface labels whose audit_log rows feed
+    #: criterion 1 (days since first daily use) and criterion 2
+    #: (operator breadth) — the same audited MCP search meta-tools
+    #: :mod:`meho_backplane.retrieval.usage` counts. Surfaced here so an
+    #: operator whose overlap clock is stuck (criteria 1 + 2 perpetually
+    #: red) can see *why*: REST ``POST /api/v1/retrieve`` does not feed
+    #: these criteria; only the audited ``/mcp`` search tools do.
+    #: Defaulted from :data:`COUNTED_SEARCH_SURFACES` so the verdict
+    #: surface cannot drift from the audit-log scan filter.
+    counted_surfaces: list[str] = Field(
+        default_factory=lambda: list(COUNTED_SEARCH_SURFACES),
+    )
+
+    #: ``True`` whenever REST ``POST /api/v1/retrieve`` is excluded from
+    #: the audit-log scan that feeds the daily-use + operator-breadth
+    #: criteria (always, in v0.2 — see
+    #: :data:`meho_backplane.retrieval.usage.REST_RETRIEVE_EXCLUDED`).
+    #: De-silences the "GREEN never arrives" trap for a REST-only
+    #: dogfood: the retire decision is fed by the counted MCP surface,
+    #: not REST ``/retrieve``.
+    rest_excluded: bool = Field(default=REST_RETRIEVE_EXCLUDED)
 
 
 # ---------------------------------------------------------------------------

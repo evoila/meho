@@ -28,7 +28,7 @@ The conftest at `backend/tests/acceptance/conftest.py` wraps `resolve_vcsim_endp
 
 The helper consults sources in this order:
 
-1. **`MEHO_VCSIM_URL`** — explicit base URL pointing at a running vcsim instance (e.g. `https://10.0.5.4:8989`). The helper parses the URL and returns an endpoint without booting a container. This is the CI path for the meho-runners pool when a vcsim daemon is provisioned alongside the runner.
+1. **`MEHO_VCSIM_URL`** — explicit base URL pointing at a running vcsim instance (e.g. `https://10.0.5.4:8989`). The helper parses the URL and returns an endpoint without booting a container. This is the CI path for the meho-runners-ci pool when a vcsim daemon is provisioned alongside the runner.
 2. **testcontainers-managed `vmware/vcsim` boot** — when no env override resolves, the helper boots the public `vmware/vcsim` image with the seed flags described under "Seeding the topology" and yields an endpoint targeting the host-mapped port. The image name is overridable via `MEHO_TEST_VCSIM_IMAGE` for registry-mirror swaps.
 3. **Skip** — when neither path is viable (no env var + no Docker socket), the fixture skips via `pytest.skip` with the `VCSIM_DOCKER_SKIP_REASON` message. The CI runner pool provisions Docker so the tests run there; agent sandboxes without Docker collect cleanly and skip.
 
@@ -97,7 +97,7 @@ Doc PRs adding a new helper should cite this module as the prior art and call ou
 
 ## CI integration
 
-The vcsim-backed tests run on the `meho-runners` pool (gha-runner-scale-set, ARC v2) per the existing test workflow. The Docker Hub login step at [`.github/workflows/ci.yml:109-110`](../../.github/workflows/ci.yml) authenticates pulls of `vmware/vcsim:latest`; no static service definition is needed because the testcontainers fixture boots vcsim per-test-session.
+The vcsim-backed tests run on the `meho-runners-ci` pool (gha-runner-scale-set, ARC v2) per the existing test workflow. The Docker Hub login step at [`.github/workflows/ci.yml:109-110`](../../.github/workflows/ci.yml) authenticates pulls of `vmware/vcsim:latest`; no static service definition is needed because the testcontainers fixture boots vcsim per-test-session.
 
 `MEHO_VCSIM_URL` is **not** set in CI by default — the testcontainers path runs on every PR. Operators can override locally with `MEHO_VCSIM_URL=http://localhost:8989` when running `vcsim -l :8989` outside the pytest session.
 

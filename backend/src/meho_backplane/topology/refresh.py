@@ -45,7 +45,7 @@ from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import false, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
@@ -99,7 +99,18 @@ class RefreshResult(BaseModel):
 
 
 def _node_key(kind: str, name: str) -> tuple[str, str]:
-    """Natural key for a node within a ``(tenant_id, target scope)``."""
+    """Natural key for a node within a tenant.
+
+    ``graph_node`` is unique on ``(tenant_id, kind, name)`` — the
+    ``graph_node_tenant_kind_name_idx`` index is **target-independent**.
+    A node can therefore already exist in the tenant under a different
+    ``target_id`` (discovered by another target) or under
+    ``target_id IS NULL`` (a manually-annotated node — see
+    :func:`meho_backplane.topology.resolvers.resolve_node`). The
+    reconcile must key its upsert decision on this tenant-wide grain,
+    not on the per-target scope, or a node the snapshot re-asserts
+    collides with the existing row on the unique index.
+    """
     return (kind, name)
 
 
@@ -126,6 +137,117 @@ def _properties_differ(current: Any, incoming: Any) -> bool:
     return dict(current) != dict(incoming)
 
 
+#: Keys in ``graph_edge.properties`` reserved for §6 conflict-detection
+#: markers written by :mod:`meho_backplane.topology.annotate`.
+#: :func:`_reconcile_edges` must **preserve** these on the refresh
+#: write path — overwriting them clears the sticky-supersede invariant
+#: on the next probe and silently brings a superseded auto edge back
+#: into traversal. Initiative #364 §6 (Task #595, G9.2-T3) locks this
+#: invariant; the merge logic in :func:`_merge_edge_properties` below
+#: implements it.
+_RESERVED_MARKER_KEYS: tuple[str, ...] = ("superseded_by", "conflicts_with")
+
+
+def _strip_reserved_markers(properties: Any) -> dict[str, Any]:
+    """Return ``properties`` as a plain dict with §6 markers removed.
+
+    Reserved markers (``superseded_by`` / ``conflicts_with``) are
+    operator-only artefacts — they may only enter ``graph_edge.properties``
+    through :func:`annotate_edge`. A connector that emits them in an
+    :class:`~meho_backplane.connectors.schemas.EdgeHint` (whether through
+    a bug, copy-paste from a different row, or — in the hostile case —
+    deliberate forgery) would otherwise smuggle a supersede / conflict
+    mark onto an auto row and bypass the §6 annotate-only invariant.
+    Stripping at the refresh boundary is fail-closed: even a malformed
+    or untrusted hint cannot create a pre-superseded auto edge.
+    """
+    return {k: v for k, v in dict(properties or {}).items() if k not in _RESERVED_MARKER_KEYS}
+
+
+def _merge_edge_properties(
+    current: Any,
+    incoming: Any,
+) -> dict[str, Any]:
+    """Return sanitized ``incoming`` merged with the reserved markers from ``current``.
+
+    A refresh hint owns the connector's view of an edge — everything
+    *except* the conflict markers an operator's annotation may have
+    stamped on the row. Wholesale overwriting ``edge.properties`` (the
+    pre-#595 behaviour) erased those markers on the next probe, which
+    broke the sticky-supersede invariant in §6 of Initiative #364:
+
+    * a curated annotation marked an auto edge ``superseded_by``;
+    * the next refresh re-saw the auto edge and overwrote
+      ``properties`` from the hint;
+    * the supersede mark vanished and the auto edge silently
+      reappeared in traversal.
+
+    The fix is a key-level merge: reserved keys (``superseded_by``,
+    ``conflicts_with``) survive from ``current``; everything else is
+    sourced from ``incoming``. The merge is also one-sided in the
+    other direction — reserved markers in ``incoming`` are dropped
+    via :func:`_strip_reserved_markers` so a buggy or hostile
+    connector cannot inject a supersede mark from the probe path.
+    Only :func:`annotate_edge` may set those keys; only
+    :func:`unannotate_edge` of the curated row clears the supersede
+    mark (Initiative #364 §6).
+    """
+    merged = _strip_reserved_markers(incoming)
+    current_dict = dict(current or {})
+    for key in _RESERVED_MARKER_KEYS:
+        if key in current_dict:
+            merged[key] = current_dict[key]
+    return merged
+
+
+async def _load_reconcile_candidate_nodes(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    nodes: tuple[NodeHint, ...],
+) -> list[GraphNode]:
+    """Load every node a node-reconcile pass might touch, by natural key.
+
+    ``graph_node`` is unique on ``(tenant_id, kind, name)``
+    (target-independent), so the upsert decision must consider rows
+    under *any* ``target_id`` — a node discovered by this target may
+    already exist because another target discovered it, or because an
+    operator annotated it (``target_id IS NULL``). The query unions two
+    row sets within the tenant:
+
+    * rows whose ``(kind, name)`` is in the current snapshot — the
+      upsert candidates (the set the old ``target_id``-only filter
+      missed, which is the #673 collision: a re-INSERT of a row that
+      already exists under a different / NULL ``target_id`` blew the
+      unique index mid-reconcile under autoflush);
+    * rows already owned by *this* target — needed for the soft-delete
+      pass, which must stay scoped to this target so a refresh never
+      soft-deletes another target's node or a manual annotation.
+    """
+    discovered_pairs = {(n.kind, n.name) for n in nodes}
+    snapshot_predicate = (
+        tuple_(GraphNode.kind, GraphNode.name).in_(sorted(discovered_pairs))
+        if discovered_pairs
+        else false()
+    )
+    return list(
+        (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    or_(
+                        snapshot_predicate,
+                        GraphNode.target_id == target_id,
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 async def _reconcile_nodes(
     session: AsyncSession,
     *,
@@ -147,23 +269,15 @@ async def _reconcile_nodes(
       (inserted or kept). The edge pass resolves *discovered* edge
       endpoints through this map; an edge pointing at a node the
       current discovery dropped is itself dropped (soft-deleted).
-    * ``all_key_to_id`` — every node in the ``(tenant, target)`` scope,
-      including ones soft-deleted this refresh or on a prior one. The
-      edge pass needs this to map an *existing* edge's ``from/to`` node
-      ids back to keys so it can decide whether that edge is still
-      discovered (and to soft-delete it when it is not).
+    * ``all_key_to_id`` — every loaded node (see
+      :func:`_load_reconcile_candidate_nodes`), including ones
+      soft-deleted this refresh or on a prior one. The edge pass needs
+      this to map an *existing* edge's ``from/to`` node ids back to keys
+      so it can decide whether that edge is still discovered (and to
+      soft-delete it when it is not).
     """
-    existing_rows = (
-        (
-            await session.execute(
-                select(GraphNode).where(
-                    GraphNode.tenant_id == tenant_id,
-                    GraphNode.target_id == target_id,
-                )
-            )
-        )
-        .scalars()
-        .all()
+    existing_rows = await _load_reconcile_candidate_nodes(
+        session, tenant_id=tenant_id, target_id=target_id, nodes=nodes
     )
     existing_by_key = {_node_key(r.kind, r.name): r for r in existing_rows}
 
@@ -198,15 +312,30 @@ async def _reconcile_nodes(
             all_key_to_id[key] = new_id
             added += 1
             continue
-        # Present in both — refresh last_seen, and properties when changed.
-        if row.last_seen is None or _properties_differ(row.properties, hint.properties):
+        # Present in both — refresh last_seen, and properties when
+        # changed. Also adopt the row onto this target: a node first
+        # seen as a manual annotation (``target_id IS NULL``) or
+        # discovered by another target is now observed by *this*
+        # target's probe, so this target owns its lifecycle (and its
+        # future soft-delete) going forward.
+        if (
+            row.last_seen is None
+            or row.target_id != target_id
+            or _properties_differ(row.properties, hint.properties)
+        ):
             updated += 1
         row.properties = dict(hint.properties)
+        row.target_id = target_id
         row.last_seen = now
         live_key_to_id[key] = row.id
 
     for key, row in existing_by_key.items():
         if key in discovered_by_key:
+            continue
+        if row.target_id != target_id:
+            # Owned by another target (or a manual annotation): not in
+            # this target's snapshot is expected, not a removal. The
+            # owning target's own refresh decides its fate.
             continue
         if row.last_seen is None:
             # Already soft-deleted on a prior refresh; not a fresh removal.
@@ -316,6 +445,10 @@ async def _reconcile_edges(
         from_id = live_node_key_to_id[_node_key(hint.from_kind, hint.from_name)]
         to_id = live_node_key_to_id[_node_key(hint.to_kind, hint.to_name)]
         if existing_edge is None:
+            # Sanitize before insert so a connector emitting a reserved
+            # marker in its hint (buggy or hostile) cannot create a
+            # pre-superseded / pre-conflicting auto edge that bypasses
+            # the §6 annotate-only invariant (Initiative #364).
             session.add(
                 GraphEdge(
                     id=uuid.uuid4(),
@@ -324,7 +457,7 @@ async def _reconcile_edges(
                     to_node_id=to_id,
                     kind=hint.kind,
                     source="auto",
-                    properties=dict(hint.properties),
+                    properties=_strip_reserved_markers(hint.properties),
                     discovered_by=discovered_by,
                     first_seen=now,
                     last_seen=now,
@@ -332,11 +465,32 @@ async def _reconcile_edges(
             )
             added += 1
             continue
+        if existing_edge.source == "curated":
+            # Curated edges are operator-owned: the probe's view of the
+            # row's properties is not authoritative. The refresh only
+            # records that the probe still observes the edge
+            # (``last_seen`` bump); the operator-supplied ``note`` /
+            # ``evidence_url`` / ``annotated_*`` and any §6 markers
+            # stay untouched. Without this branch the next refresh
+            # after :func:`annotate_edge` of a previously-auto edge
+            # would wipe the caller's free-text props
+            # (Initiative #364 §6 — M1 of PR #651 review).
+            if existing_edge.last_seen is None:
+                updated += 1
+            existing_edge.last_seen = now
+            continue
+
+        # Merge — not overwrite — so the §6 conflict markers
+        # (``superseded_by`` / ``conflicts_with``) an operator's
+        # annotation may have stamped on this row survive the refresh.
+        # The wholesale-overwrite this used to do silently cleared the
+        # sticky-supersede invariant; see :func:`_merge_edge_properties`.
+        merged_properties = _merge_edge_properties(existing_edge.properties, hint.properties)
         if existing_edge.last_seen is None or _properties_differ(
-            existing_edge.properties, hint.properties
+            existing_edge.properties, merged_properties
         ):
             updated += 1
-        existing_edge.properties = dict(hint.properties)
+        existing_edge.properties = merged_properties
         existing_edge.last_seen = now
 
     for key, row in existing_by_key.items():

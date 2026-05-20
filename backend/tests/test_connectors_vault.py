@@ -64,11 +64,13 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import hvac.exceptions
 import pytest
 import requests.exceptions
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op
 from meho_backplane.connectors import all_connectors_v2
 from meho_backplane.connectors.registry import (
@@ -76,12 +78,12 @@ from meho_backplane.connectors.registry import (
     list_connector_impls,
     register_connector_v2,
 )
+from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.vault import (
     VaultConnector,
-    VaultTarget,
     register_vault_typed_operations,
 )
-from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
@@ -176,8 +178,49 @@ async def _registered_vault_typed_ops(
     yield
 
 
-def _make_target(jwt: str = "fake.jwt.value") -> VaultTarget:
-    return VaultTarget(raw_jwt=jwt)
+def _make_target() -> None:
+    """probe()/fingerprint() read Vault params from settings, not the
+    target — G0.3 #224 dropped the per-connector target stub and G0.8-T3
+    #629 typed these methods against ``Target | None``. Tests pass None.
+    """
+    return None
+
+
+def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
+    """A request-scoped operator carrying the bearer token the vault
+    handlers forward to Vault's JWT/OIDC auth (G0.8-T3 #629). Replaces
+    the pre-#224 ``VaultTarget(raw_jwt=...)`` stub — the token is
+    request-scoped operator context, never persisted target config.
+    """
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+async def _dispatch_vault(
+    op_id: str, params: dict[str, Any], *, jwt: str = "fake.jwt.value"
+) -> OperationResult:
+    """Dispatch a vault op through the real operator-aware path.
+
+    Mirrors how ``/api/v1/operations/call`` and the MCP
+    ``call_operation`` meta-tool reach the vault handlers: a real
+    :class:`Operator` is threaded by the dispatcher, the connector is
+    resolved by ``connector_id``, ``target`` is ``None`` (vault
+    connection params come from settings). The handler reads the JWT
+    from ``operator.raw_jwt`` — exactly the contract #629 establishes.
+    """
+    return await dispatch(
+        operator=_make_operator(jwt),
+        connector_id="vault-1.x",
+        op_id=op_id,
+        target=None,
+        params=params,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +379,7 @@ async def test_execute_unknown_op_returns_dispatcher_unknown_op_shape(
     ``unknown_op`` shape carries only the count, not the enumeration.
     """
     install_fake_client(monkeypatch)
-    connector = VaultConnector()
-    result = await connector.execute(_make_target(), "vault.nonexistent.op", {})
+    result = await _dispatch_vault("vault.nonexistent.op", {})
 
     assert result.status == "error"
     assert "vault.nonexistent.op" in (result.error or "")
@@ -364,11 +406,10 @@ async def test_execute_vault_kv_read_returns_secret_data(
         secret={"username": "demo", "region": "eu-central-1"},
         kv_version=7,
     )
-    connector = VaultConnector()
-    result = await connector.execute(
-        _make_target(jwt="op-jwt"),
+    result = await _dispatch_vault(
         "vault.kv.read",
         {"path": "secret/meho/test/federation"},
+        jwt="op-jwt",
     )
 
     assert result.status == "ok", result.error
@@ -401,8 +442,7 @@ async def test_execute_vault_kv_read_honors_explicit_mount(
     forwarding on ``vault.kv.read`` the wrapper goal is unmet.
     """
     fake = install_fake_client(monkeypatch, secret={"k": "v"})
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.kv.read",
         {"mount": "kv-prod", "path": "team/api"},
     )
@@ -451,7 +491,7 @@ async def test_execute_vault_kv_read_invalid_path_returns_dispatcher_error(
     ``invalid_params`` shape.
     """
     install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(_make_target(), "vault.kv.read", params)
+    result = await _dispatch_vault("vault.kv.read", params)
 
     assert result.status == "error"
     assert result.error is not None
@@ -467,7 +507,7 @@ async def test_execute_vault_kv_read_non_string_path_returns_dispatcher_error(
 ) -> None:
     """A non-string ``path`` hits the schema's ``"type": "string"`` constraint."""
     install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(_make_target(), "vault.kv.read", {"path": 123})
+    result = await _dispatch_vault("vault.kv.read", {"path": 123})
 
     assert result.status == "error"
     assert result.error is not None
@@ -504,8 +544,7 @@ async def test_execute_login_failure_surfaces_vault_client_error_class(
     the known VaultClientError subclass set.
     """
     install_fake_client(monkeypatch, login_exc=login_exc)
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.kv.read",
         {"path": "some/path"},
     )
@@ -543,8 +582,7 @@ async def test_execute_read_failure_surfaces_non_vault_client_error_class(
     the contract by exercising both common read-phase failure shapes.
     """
     install_fake_client(monkeypatch, read_exc=read_exc)
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.kv.read",
         {"path": "some/path"},
     )
@@ -566,10 +604,10 @@ async def test_execute_vault_kv_list_returns_key_names(
     _registered_vault_typed_ops: None,
 ) -> None:
     fake = install_fake_client(monkeypatch, keys=["api-key", "db/"])
-    result = await VaultConnector().execute(
-        _make_target(jwt="op-jwt"),
+    result = await _dispatch_vault(
         "vault.kv.list",
         {"path": "meho/test"},
+        jwt="op-jwt",
     )
 
     assert result.status == "ok", result.error
@@ -586,8 +624,7 @@ async def test_execute_vault_kv_list_honors_explicit_mount(
     _registered_vault_typed_ops: None,
 ) -> None:
     fake = install_fake_client(monkeypatch, keys=["x"])
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.kv.list",
         {"mount": "kv-prod", "path": "team"},
     )
@@ -603,10 +640,10 @@ async def test_execute_vault_kv_put_writes_new_version(
     _registered_vault_typed_ops: None,
 ) -> None:
     fake = install_fake_client(monkeypatch, kv_version=4)
-    result = await VaultConnector().execute(
-        _make_target(jwt="op-jwt"),
+    result = await _dispatch_vault(
         "vault.kv.put",
         {"path": "meho/test", "data": {"token": "s3cr3t"}, "cas": 4},
+        jwt="op-jwt",
     )
 
     assert result.status == "ok", result.error
@@ -628,8 +665,7 @@ async def test_execute_vault_kv_put_cas_omitted_passes_none(
 ) -> None:
     """No ``cas`` ⇒ hvac called with ``cas=None`` (unconditional write)."""
     fake = install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.kv.put",
         {"path": "meho/test", "data": {"k": "v"}},
     )
@@ -650,7 +686,7 @@ async def test_execute_vault_kv_put_invalid_params_returns_dispatcher_error(
 ) -> None:
     """Schema enforces ``required`` path+data and ``minProperties`` on data."""
     install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(_make_target(), "vault.kv.put", params)
+    result = await _dispatch_vault("vault.kv.put", params)
 
     assert result.status == "error"
     assert result.error is not None
@@ -670,8 +706,7 @@ async def test_execute_vault_kv_versions_returns_metadata(
             "3": {"created_time": "2026-03-01T00:00:00Z", "destroyed": False},
         },
     )
-    result = await VaultConnector().execute(
-        _make_target(),
+    result = await _dispatch_vault(
         "vault.kv.versions",
         {"path": "meho/test"},
     )
@@ -690,10 +725,10 @@ async def test_execute_vault_kv_delete_soft_deletes_versions(
     _registered_vault_typed_ops: None,
 ) -> None:
     fake = install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(
-        _make_target(jwt="op-jwt"),
+    result = await _dispatch_vault(
         "vault.kv.delete",
         {"path": "meho/test", "versions": [2, 3]},
+        jwt="op-jwt",
     )
 
     assert result.status == "ok", result.error
@@ -716,7 +751,7 @@ async def test_execute_vault_kv_delete_invalid_params_returns_dispatcher_error(
 ) -> None:
     """Schema enforces ``required`` path+versions and ``minItems`` on versions."""
     install_fake_client(monkeypatch)
-    result = await VaultConnector().execute(_make_target(), "vault.kv.delete", params)
+    result = await _dispatch_vault("vault.kv.delete", params)
 
     assert result.status == "error"
     assert result.error is not None
@@ -750,7 +785,7 @@ async def test_execute_kv_ops_vault_error_envelope_surfaces_connector_error(
         monkeypatch,
         **{exc_kwarg: RuntimeError("permission denied")},
     )
-    result = await VaultConnector().execute(_make_target(), op_id, params)
+    result = await _dispatch_vault(op_id, params)
 
     assert result.status == "error"
     assert result.error is not None
@@ -770,7 +805,7 @@ async def test_execute_vault_kv_list_malformed_payload_is_structured_error(
         return {"data": {}}  # missing "keys"
 
     monkeypatch.setattr(fake.secrets.kv.v2, "list_secrets", _bad_list)
-    result = await VaultConnector().execute(_make_target(), "vault.kv.list", {"path": "p"})
+    result = await _dispatch_vault("vault.kv.list", {"path": "p"})
 
     assert result.status == "error"
     assert result.extras.get("error_code") == "connector_error"

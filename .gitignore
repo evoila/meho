@@ -76,6 +76,7 @@ cli/*.out
 *.bak
 *.orig
 .idea/
+*.code-workspace
 
 # =============================================================================
 # Docker / runtime data

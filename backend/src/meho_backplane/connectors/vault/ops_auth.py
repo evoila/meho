@@ -76,6 +76,7 @@ from typing import Any
 import hvac.exceptions
 
 import meho_backplane.auth.vault as _auth_vault
+from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors.vault.ops_auth_schemas import (
     VAULT_AUTH_APPROLE_LIST_LLM_INSTRUCTIONS,
@@ -130,7 +131,9 @@ class VaultAuthBackendNotMountedError(VaultClientError):
 # --- handlers --------------------------------------------------------------
 
 
-async def vault_auth_userpass_list(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_auth_userpass_list(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """List usernames on a Vault userpass auth mount.
 
     Op-id: ``vault.auth.userpass.list``. Delegates to hvac's
@@ -149,7 +152,7 @@ async def vault_auth_userpass_list(target: Any, params: dict[str, Any]) -> dict[
         branch surfaces ``extras["exception_class"]``.
     """
     mount: str = str(params.get("mount", "userpass")).strip()
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
             payload = await asyncio.to_thread(client.auth.userpass.list_user, mount_point=mount)
         except hvac.exceptions.InvalidPath as exc:
@@ -159,7 +162,9 @@ async def vault_auth_userpass_list(target: Any, params: dict[str, Any]) -> dict[
         return {"keys": _extract_keys(payload)}
 
 
-async def vault_auth_userpass_read(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_auth_userpass_read(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """Read one userpass user's config (policies, token TTLs).
 
     Op-id: ``vault.auth.userpass.read``. Delegates to hvac's
@@ -178,7 +183,7 @@ async def vault_auth_userpass_read(target: Any, params: dict[str, Any]) -> dict[
     """
     username: str = str(params["username"]).strip()
     mount: str = str(params.get("mount", "userpass")).strip()
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
             payload = await asyncio.to_thread(
                 client.auth.userpass.read_user,
@@ -190,7 +195,9 @@ async def vault_auth_userpass_read(target: Any, params: dict[str, Any]) -> dict[
         return _extract_data(payload)
 
 
-async def vault_auth_approle_list(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_auth_approle_list(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """List role names on a Vault approle auth mount.
 
     Op-id: ``vault.auth.approle.list``. Delegates to hvac's
@@ -206,7 +213,7 @@ async def vault_auth_approle_list(target: Any, params: dict[str, Any]) -> dict[s
         Login-side failure (Vault unreachable, role denied).
     """
     mount: str = str(params.get("mount", "approle")).strip()
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
             payload = await asyncio.to_thread(client.auth.approle.list_roles, mount_point=mount)
         except hvac.exceptions.InvalidPath as exc:
@@ -216,7 +223,9 @@ async def vault_auth_approle_list(target: Any, params: dict[str, Any]) -> dict[s
         return {"keys": _extract_keys(payload)}
 
 
-async def vault_auth_approle_read(target: Any, params: dict[str, Any]) -> dict[str, Any]:
+async def vault_auth_approle_read(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
     """Read one AppRole's config (policies, token + secret-id TTLs).
 
     Op-id: ``vault.auth.approle.read``. Delegates to hvac's
@@ -232,7 +241,7 @@ async def vault_auth_approle_read(target: Any, params: dict[str, Any]) -> dict[s
     """
     role_name: str = str(params["role_name"]).strip()
     mount: str = str(params.get("mount", "approle")).strip()
-    async with _auth_vault.vault_client_for_operator(target) as client:
+    async with _auth_vault.vault_client_for_operator(operator) as client:
         try:
             payload = await asyncio.to_thread(
                 client.auth.approle.read_role,

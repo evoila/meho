@@ -331,6 +331,35 @@ For the durable map of what's in this module, why it's split the way
 it is, and how the build flow injects identity at link time, see
 [`../docs/codebase/cli.md`](../docs/codebase/cli.md).
 
+## Interactive-form dependency (huh)
+
+G5.3-T1 (#608) adds [`charm.land/huh/v2`](https://github.com/charmbracelet/huh)
+(MIT, v2.0.3) as the CLI's first interactive-form dependency. `huh` is the
+second-generation Charm form library — the import path migrated from
+`github.com/charmbracelet/huh` in v1 to the vanity domain `charm.land/huh/v2`
+in v2.
+
+**Why huh over the alternatives:**
+
+- **`manifoldco/promptui`** — unmaintained since approximately 2020; no
+  releases for several years and outstanding issues that predate current
+  terminal emulator behaviour.
+- **`AlecAivazis/survey/v2`** — verbose composition model and a large
+  hand-rolled TUI stack. Maintenance has slowed with the broader ecosystem
+  shift toward Bubble Tea-native libraries.
+- **`charm.land/huh/v2`** — actively maintained by Charmbracelet; built on
+  Bubble Tea v2 (`charm.land/bubbletea/v2`) and Lipgloss v2
+  (`charm.land/lipgloss/v2`) which are the same TUI primitives the rest of
+  the Charm ecosystem uses. Standalone (no Bubble Tea program required for
+  simple flows) and fully embeddable in a Bubble Tea model for the richer
+  migration UX in T3–T4. MIT-licensed.
+
+This dependency establishes **Charm (Bubble Tea / Lipgloss / huh)** as the
+CLI's TUI stack for any future interactive surface. All three libraries share
+the `charm.land` vanity-domain import namespace and a compatible versioning
+cadence; pulling in huh/v2 transitively satisfies any future Bubble Tea or
+Lipgloss v2 requirement at no extra cost.
+
 ## License
 
 [Apache 2.0](../LICENSE). Every Go source file carries the SPDX

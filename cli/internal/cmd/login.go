@@ -17,6 +17,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/migrate"
 )
 
 // newLoginCmd returns the `meho login` subcommand. The cobra surface
@@ -117,6 +118,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(out, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
+			printMigrationNudge(out)
 			return nil
 		},
 	}
@@ -242,6 +244,27 @@ func fetchBackplaneAuthConfig(ctx context.Context, httpClient *http.Client, back
 // at 64 KiB). Kept extracted so call sites read the same way.
 func decodeJSON(data []byte, into any) error {
 	return json.Unmarshal(data, into)
+}
+
+// printMigrationNudge prints a one-line tip when the operator has
+// memory files in the default source directory that have not yet been
+// migrated. Any error (dir resolution failure, stat error) silently
+// degrades to "print nothing" — the nudge must never block or fail login.
+func printMigrationNudge(w io.Writer) {
+	dir, err := migrate.ResolveSourceDir("")
+	if err != nil {
+		return
+	}
+	ok, err := migrate.MarkerExists(dir)
+	if err != nil || ok {
+		return
+	}
+	files, err := migrate.ScanDir(dir)
+	if err != nil || len(files) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Tip: you have %d memory file(s) at %s. Run `meho migrate memory` to sync them to MEHO.\n",
+		len(files), dir)
 }
 
 // stdoutPrompter writes the device-code prompt to w. Format mirrors

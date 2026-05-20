@@ -224,15 +224,15 @@ class _FakeFingerprint:
 
 
 class _VaultDispatchTarget:
-    """Target that satisfies both the dispatcher and the real handlers.
+    """Target that satisfies the dispatcher's resolution + audit reads.
 
     The dispatcher reads ``product`` / ``fingerprint.version`` /
     ``preferred_impl_id`` (connector resolution — tolerated-miss for
     typed ops) and ``id`` / ``name`` (audit row + broadcast
-    ``target_name``). The real Vault handlers read ``raw_jwt`` via
-    :func:`~meho_backplane.auth.vault.vault_client_for_operator`. One
-    object carries both surfaces so the dispatch path is exercised
-    verbatim — no handler-direct shortcut.
+    ``target_name``). The Vault handlers read the operator JWT from the
+    request-scoped :class:`~meho_backplane.auth.operator.Operator` the
+    dispatcher threads (G0.8-T3 #629), **not** from this target — so it
+    carries no ``raw_jwt``.
 
     ``name`` is a benign, non-secret label; the broadcast event is
     *allowed* to carry it (decision #3's aggregate includes the
@@ -246,7 +246,6 @@ class _VaultDispatchTarget:
         self.preferred_impl_id: str | None = None
         self.id: UUID = uuid.uuid4()
         self.name = "rdc-vault-prod"
-        self.raw_jwt = "header.payload.signature"
 
 
 # ---------------------------------------------------------------------------

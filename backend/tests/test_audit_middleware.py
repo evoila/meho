@@ -233,13 +233,87 @@ async def test_authenticated_request_writes_one_audit_row(
     assert str(row.request_id).replace("-", "") == response_request_id
     assert row.duration_ms is not None
     assert row.duration_ms >= 0
-    assert row.payload == {}
+    # G6.3-T2 (#379) + T3 (#380): every authenticated audit row gains
+    # ``broadcast_detail_origin`` (which precedence step decided) and
+    # ``broadcast_detail_effective`` (the chosen detail enum).
+    # Chassis-era routes with no tenant rules + no per-call override
+    # land on ``"default"`` origin; ``GET /api/v1/health`` classifies
+    # as ``other`` op_class so the default detail is ``"full"``.
+    assert row.payload == {
+        "broadcast_detail_origin": "default",
+        "broadcast_detail_effective": "full",
+    }
     # G0.1-T3: tenant_id from the JWT claim lands on the audit row.
     # The default helper-minted token carries DEFAULT_TENANT_ID, which
     # ``verify_jwt_and_bind`` binds into contextvars and the audit
     # middleware reads back, parses, and writes here.
     assert row.tenant_id is not None
     assert str(row.tenant_id) == _DEFAULT_TENANT_ID
+
+
+@pytest.mark.asyncio
+async def test_broadcast_event_payload_omits_audit_only_origin_key(
+    isolated_audit_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G6.3-T2 (#379): origin lands on audit row but NOT on broadcast event.
+
+    Regression test for the payload-mutation leak surfaced on
+    [PR #683](https://github.com/evoila/meho/pull/683): the
+    middleware mutates the audit ``payload`` dict with the
+    resolver's origin, and pre-fix the *same* dict was passed to
+    :func:`_publish_broadcast_event` whose
+    :func:`redact_payload` call with ``detail="full"`` rendered
+    ``payload`` as ``params`` -- leaking ``tenant_rule:<uuid>``
+    identifiers into the SSE / Slack / MCP-resource feeds.
+
+    Asserts both halves of the contract:
+    * The audit row's ``payload`` carries ``broadcast_detail_origin``.
+    * The published :class:`BroadcastEvent`'s ``payload`` (a
+      ``redact_payload`` return value with ``detail="full"`` for a
+      chassis ``GET`` route) carries no ``broadcast_detail_origin``
+      key -- neither at the top level nor nested inside ``params``.
+    """
+    from meho_backplane.broadcast import BroadcastEvent
+
+    captured: list[BroadcastEvent] = []
+
+    async def _capture_publish(event: BroadcastEvent) -> None:
+        captured.append(event)
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture_publish)
+
+    key = _make_rsa_keypair("kid-leak-test")
+    token = _mint_token(key, sub="op-leak", name="Leak", email="leak@example.com")
+    _install_fake_vault(monkeypatch)
+
+    client = TestClient(app)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+
+    # Audit row carries the origin AND effective (T3 #380).
+    rows = await _fetch_audit_rows(isolated_audit_engine)
+    assert len(rows) == 1
+    assert rows[0].payload == {
+        "broadcast_detail_origin": "default",
+        "broadcast_detail_effective": "full",
+    }
+
+    # Broadcast event must NOT carry either audit-only key -- not at
+    # the top level, not inside ``params``.
+    assert len(captured) == 1
+    event_payload = captured[0].payload
+    for forbidden in ("broadcast_detail_origin", "broadcast_detail_effective"):
+        assert forbidden not in event_payload
+    nested_params = event_payload.get("params")
+    if isinstance(nested_params, dict):
+        for forbidden in ("broadcast_detail_origin", "broadcast_detail_effective"):
+            assert forbidden not in nested_params
 
 
 # ---------------------------------------------------------------------------

@@ -194,6 +194,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
@@ -220,6 +221,7 @@ __all__ = [
     "Document",
     "EndpointDescriptor",
     "GraphEdge",
+    "GraphEdgeKind",
     "GraphNode",
     "OperationGroup",
     "Target",
@@ -1142,16 +1144,74 @@ _GRAPH_NODE_KINDS: tuple[str, ...] = (
     "volume",
 )
 
-#: Closed enum of :attr:`GraphEdge.kind` -- the v0.2 auto-discoverable
-#: subset. G9.2 ships a follow-up migration that widens this with the
-#: operator-curated cross-system edge vocabulary; until then, every
-#: ``graph_edge.kind`` value at write time MUST be one of these four.
-_GRAPH_EDGE_KINDS: tuple[str, ...] = (
-    "runs-on",
-    "mounts",
-    "routes-through",
-    "belongs-to",
-)
+
+class GraphEdgeKind(StrEnum):
+    """Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
+
+    Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
+    the four auto-discoverable kinds G9.1 (#363) shipped, plus six
+    operator-curated cross-system kinds that auto-discovery cannot infer
+    (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
+    is closed -- widening it is a coordinated DB + model change (new
+    migration, new enum member, new decision row) so the v0.2.next
+    policy-engine grammar parsing ``kind`` stays portable across tenants.
+
+    The four auto-discoverable kinds (refresh service writes these on
+    every probe-derived edge):
+
+    * :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``
+      ``node``: the physical / scheduling host of a workload.
+    * :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``
+      ``volume``: storage attachment.
+    * :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,
+      ``service`` ``routes-through`` ``pod``: network routing path.
+    * :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``
+      ``belongs-to`` ``host`` (logical group membership).
+
+    The six curated-only kinds (operator-asserted via
+    ``meho topology annotate``; cannot be derived from probes):
+
+    * :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
+      (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical
+      cross-system example.
+    * :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
+      ``service-X`` -> ``database-Y`` where neither side knows about the
+      other in its own probe output).
+    * :attr:`REPLICATES_TO` -- operator-asserted replication relationship
+      between two storage / database nodes.
+    * :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
+    * :attr:`ROUTES_VIA` -- operator-asserted network path through an
+      intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the
+      probes only see point-to-point reachability).
+    * :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
+      connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
+      ``vault-policy-prod-read``).
+
+    Mirrors the closed-enum pattern :class:`AuthModel`
+    (:mod:`meho_backplane.connectors.schemas`) sets: a Python
+    :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
+    both moved in lock-step by one Alembic migration so the enum and the
+    constraint cannot drift.
+    """
+
+    RUNS_ON = "runs-on"
+    MOUNTS = "mounts"
+    ROUTES_THROUGH = "routes-through"
+    BELONGS_TO = "belongs-to"
+    AUTHENTICATES_VIA = "authenticates-via"
+    DEPENDS_ON = "depends-on"
+    REPLICATES_TO = "replicates-to"
+    BACKED_UP_BY = "backed-up-by"
+    ROUTES_VIA = "routes-via"
+    POLICY_BINDS = "policy-binds"
+
+
+#: Closed enum of :attr:`GraphEdge.kind` -- the v0.2 ten-kind vocabulary.
+#: Derived from :class:`GraphEdgeKind` so the enum and the CHECK constraint
+#: cannot drift; the drift guard
+#: :func:`tests.test_topology_schema.test_graph_edge_kinds_match_enum`
+#: enforces the equality at unit-test time.
+_GRAPH_EDGE_KINDS: tuple[str, ...] = tuple(k.value for k in GraphEdgeKind)
 
 #: Closed enum of :attr:`GraphEdge.source` -- ``auto`` for
 #: probe-derived edges (T3 refresh), ``curated`` reserved for the
@@ -1312,12 +1372,18 @@ class GraphEdge(Base):
       alone, so the cascade is invisible during normal operation and
       exists only for tenant purges + test cleanup.
     * ``kind`` -- Text NOT NULL with a DB-layer
-      ``CHECK kind IN (...)`` constraint. The v0.2 auto-discoverable
-      vocabulary is :data:`_GRAPH_EDGE_KINDS`; G9.2 widens it.
+      ``CHECK kind IN (...)`` constraint. The closed v0.2 ten-kind
+      vocabulary is :class:`GraphEdgeKind` -- four auto-discoverable
+      kinds (refresh writes these) plus six curated-only kinds
+      (operator annotation only). :data:`_GRAPH_EDGE_KINDS` is derived
+      from the enum so the CHECK constraint and the Python type cannot
+      drift; widening requires a new Alembic migration that updates
+      both in lock-step (G9.2 #364 / migration ``0010`` was the first
+      widening, from G9.1's four to v0.2's ten).
     * ``source`` -- Text NOT NULL with a DB-layer
       ``CHECK source IN (...)`` constraint. ``auto`` for
-      probe-derived (T3 refresh); ``curated`` reserved for the
-      operator-asserted edges G9.2 lands.
+      probe-derived (T3 refresh); ``curated`` for the
+      operator-asserted edges G9.2 (#364) ships.
     * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
       ``{}``. Per-edge structured data (e.g. a mount's options, a
       route's port). Same forward-compat escape-hatch shape as

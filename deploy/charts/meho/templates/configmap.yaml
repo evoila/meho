@@ -49,12 +49,41 @@ data:
   DATABASE_POOL_TIMEOUT: {{ .Values.config.databasePoolTimeout | quote }}
   # G0.4-T2 (#259) — retrieval substrate fastembed model + on-disk cache
   # path. The cache path here is the env-var contract the backplane
-  # honours; the matching `retrieval.modelCache.mountPath` value (above)
-  # is what the PVC actually mounts. Operators flipping
-  # `retrieval.modelCache.enabled=false` should still leave this
-  # pointing at the chart's default — the backplane falls back to
-  # writing weights to that path even without a PVC backing it (an
-  # `emptyDir`-equivalent ephemeral write that re-downloads weights on
-  # every restart).
+  # honours. The chart default `/opt/meho/model-cache` is the image
+  # layer the default model is BAKED INTO at build time (evoila/meho#574)
+  # — no PVC, no runtime HuggingFace download for the shipped default.
+  # Only repoint this (and enable `retrieval.modelCache`) when overriding
+  # `retrievalEmbeddingModel` to a non-default model fetched at runtime;
+  # if you point it at a writable PVC mountPath, that PVC is what
+  # survives restarts (and is subject to the #574 partial-cache caveat
+  # documented on `retrieval.modelCache`).
   RETRIEVAL_EMBEDDING_MODEL: {{ .Values.config.retrievalEmbeddingModel | quote }}
   RETRIEVAL_MODEL_CACHE_DIR: {{ .Values.config.retrievalModelCacheDir | quote }}
+  # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
+  # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
+  # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
+  # sets neither the resolved audience is empty and every /mcp request
+  # 401s with no signal. These keys are only emitted when an effective
+  # value resolves — explicit `config.backplaneUrl` / `config.mcpResourceUri`,
+  # or derived from the Ingress host for the common ingress-fronted
+  # deploy (see `meho.backplaneUrl` / `meho.mcpResourceUri` helpers).
+  # When nothing resolves the keys are omitted (env var stays unset) and
+  # the backend's startup guard fails loudly with the remediation.
+  {{- $backplaneUrl := include "meho.backplaneUrl" . }}
+  {{- if $backplaneUrl }}
+  BACKPLANE_URL: {{ $backplaneUrl | quote }}
+  {{- end }}
+  {{- $mcpResourceUri := include "meho.mcpResourceUri" . }}
+  {{- if $mcpResourceUri }}
+  MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
+  {{- end }}
+  # G5.2-T1 (#623) — memory layer knobs. `userDefaultTtlDays` is consumed
+  # by G5.2-T2 (#624) on `POST /api/v1/memory`; `expiryTickIntervalSeconds`
+  # + `expiryEnabled` gate the in-process memory-expiry sweeper started
+  # by the FastAPI lifespan. The env-var names are the backplane's
+  # contract (`backend/src/meho_backplane/settings.py`); the chart
+  # converts the YAML values to strings via `quote` (booleans included)
+  # so the ConfigMap stays string-typed end-to-end.
+  MEMORY_USER_DEFAULT_TTL_DAYS: {{ .Values.memory.userDefaultTtlDays | quote }}
+  MEMORY_EXPIRY_TICK_INTERVAL_SECONDS: {{ .Values.memory.expiryTickIntervalSeconds | quote }}
+  MEMORY_EXPIRY_ENABLED: {{ .Values.memory.expiryEnabled | quote }}

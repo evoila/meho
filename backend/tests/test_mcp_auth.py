@@ -418,6 +418,46 @@ def test_empty_audience_setting_returns_401(
         get_settings.cache_clear()
 
 
+def test_audience_not_configured_401_detail_is_actionable(
+    keypair: Any,
+    jwks: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``audience_not_configured`` 401 body names the fix + links the doc.
+
+    G0.8-T4 (#633): the bare ``audience_not_configured`` token told an
+    operator *that* the MCP audience was unset but not *what to do* —
+    the consumer dogfood signal was an operator staring at a context-
+    free 401 with the ``/mcp`` surface dark. The 401 ``detail`` must
+    now name ``MCP_RESOURCE_URI`` / ``BACKPLANE_URL`` + the Keycloak
+    audience-mapper step and link the operator runbook, while still
+    starting with the original ``audience_not_configured`` token so
+    callers matching the prefix keep working.
+    """
+    monkeypatch.setenv("BACKPLANE_URL", "")
+    monkeypatch.setenv("MCP_RESOURCE_URI", "")
+    get_settings.cache_clear()
+    try:
+        client = TestClient(app)
+        with respx.mock as router:
+            _mock_discovery_and_jwks(router, jwks)
+            token = _mint_mcp_token(keypair, audience="")
+            response = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 101, "method": "ping"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 401
+        detail = response.json()["detail"]
+        assert detail.startswith("audience_not_configured")
+        assert "MCP_RESOURCE_URI" in detail
+        assert "BACKPLANE_URL" in detail
+        assert "oidc-audience-mapper" in detail
+        assert "docs/cross-repo/mcp-client-setup.md" in detail
+    finally:
+        get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # Settings resolution: explicit MCP_RESOURCE_URI overrides the BACKPLANE_URL derivation
 # ---------------------------------------------------------------------------

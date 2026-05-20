@@ -243,7 +243,7 @@ implementation of that decision.
 | Auth | None (no `requirepass`) | v0.1 single-tenant; gated at the network layer by the umbrella chart's NetworkPolicy |
 | Update strategy | `Recreate` | Single-replica + port-bind constraint makes RollingUpdate worse |
 | Probes | TCP `connect` on 6379 | Minimal — avoids coupling to `redis-cli` / `valkey-cli` binary naming variance |
-| Service | ClusterIP `<release>-broadcast:6379` (port name `redis`) | In-cluster only; backplane consumes via the operator-facing `REDIS_URL` env |
+| Service | ClusterIP `<release>-broadcast:6379` (port name `redis`) | In-cluster only; backplane consumes via the operator-facing `BROADCAST_REDIS_URL` env |
 
 The subchart lives unpacked at `deploy/charts/meho/charts/broadcast/`.
 The parent `Chart.yaml` declares it as a dependency with
@@ -267,13 +267,17 @@ subchart's own values.yaml shape is also enforced by Helm independently —
 this parent block is the surface visible to the umbrella's `--set` flags.
 
 **Backplane wiring.** When `broadcast.enabled: true` (the default), the
-backplane Deployment renders a `REDIS_URL` env var pointing at
+backplane Deployment renders a `BROADCAST_REDIS_URL` env var pointing at
 `redis://{{ .Release.Name }}-broadcast:{{ .Values.broadcast.service.port }}/0`.
-The full broadcast feature is v0.2 work; the env var is forward-prepared
-in v0.1 so the chassis discovers the endpoint as soon as the broadcast
-code uses it. ADR 0005 locked `redis-py` as the driver — it parses
-`redis://` schemes against a Valkey endpoint unchanged (wire-protocol
-compatibility carries from Redis 7.2.4).
+The env-var name is load-bearing: `Settings.broadcast_redis_url`
+(`backend/src/meho_backplane/settings.py`) resolves from
+`BROADCAST_REDIS_URL` and falls back to `redis://localhost:6379` when it
+is unset, so a chart that injects any other name (the v0.2 `REDIS_URL`
+mismatch fixed in #583) leaves the readiness probe's broadcast leg
+dialing localhost while the healthy Service is never contacted. ADR 0005
+locked `redis-py` as the driver — it parses `redis://` schemes against a
+Valkey endpoint unchanged (wire-protocol compatibility carries from
+Redis 7.2.4).
 
 **Operator-supplied secrets.** The Job + the backplane both consume
 `DATABASE_URL` from a Kubernetes Secret named by
@@ -305,6 +309,7 @@ values overlay:
 | `vault.address` | Per-environment Vault endpoint |
 | `keycloak.issuer` | Per-environment Keycloak issuer URL |
 | `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract) |
+| `config.backplaneUrl` / `config.mcpResourceUri` | G0.8-T4 (#633). Blank by design: for the common ingress-fronted deploy the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` via the `meho.backplaneUrl` / `meho.mcpResourceUri` helpers, so the `/mcp` audience resolves without operator action. Set explicitly only when the public URL differs from the Ingress host, or for a non-default MCP mount. When neither resolves (no ingress, nothing set) the backend fails loudly at startup with the remediation rather than serving a dark `/mcp` (`_assert_mcp_resource_uri_configured` in `main.py`). The operator must still add a matching Keycloak `oidc-audience-mapper` — see `docs/cross-repo/mcp-client-setup.md` Step 1 |
 | `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled |
 
 A blank field falls into the typed-schema contract immediately — `helm
@@ -499,8 +504,10 @@ helm template test deploy/charts/meho/ --set bogus.field=x 2>&1 | grep "addition
 ## Publish workflow (`.github/workflows/chart.yml`)
 
 The chart is packaged, pushed to OCI, and cosign-signed by
-`.github/workflows/chart.yml`. The workflow targets `meho-runners` (the
-project's self-hosted runner pool, per #160 + #167) and shares the
+`.github/workflows/chart.yml`. The workflow targets `meho-runners-ci` (the
+project's self-hosted runner pool on the dedicated rke2-ci cluster,
+introduced by #160 + #167 on rke2-meho and migrated to rke2-ci via
+claude-rdc-hetzner-dc#610 / #715) and shares the
 hardening conventions of `image.yml` (Task #33): job-level fork-PR guard,
 SHA-pinned actions with `# vX.Y.Z` comments, minimum `permissions:` block
 (`contents: read`, `packages: write`, `id-token: write`), per-job
@@ -584,22 +591,32 @@ into `GITHUB_STEP_SUMMARY` on every successful publish.
 ## PR-level CI (`.github/workflows/ci.yml`)
 
 `ci.yml` is the central per-PR test harness. Every PR targeting `main`
-runs three jobs in parallel, one per in-tree toolchain, and every push
-to `main` re-runs the same matrix as a regression catch. Branch
-protection consumes the workflow's overall status as a required check.
+runs four jobs in parallel and every push to `main` re-runs the same
+matrix as a regression catch. Branch protection consumes each job's
+status as a required check (per
+`branches/main/protection.required_status_checks.contexts` —
+re-verified after the 2026-05-20 #698 promotion of the integration
+lane, the structural corrective to the v0.2 / G3.4 green-but-hollow
+incidents #634 / #697).
 
 ### Matrix
 
 | Job | Surface | Steps |
 | --- | --- | --- |
-| `python-lint-test` | `backend/` | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -x --cov` -> upload `python-coverage` artefact |
-| `go-lint-test` | `cli/` | `golangci-lint` (v6 action, v1.64.8 binary) -> `go build ./...` -> `go test -race -cover ./...` |
-| `helm-lint-template` | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
+| `python-lint-test` (`Python (ruff + mypy + pytest)`) | `backend/` unit + acceptance subtree | `uv sync --locked --all-groups` -> `ruff check` -> `ruff format --check` -> `mypy --strict` -> `pytest -n 3 --dist loadscope` (excludes `tests/integration/`; `--cov=meho_backplane --cov-report=xml` only on push-to-main via `COVERAGE_CORE=sysmon`, PEP 669 backend; PRs skip `--cov` to stay fast — #726, #739) -> upload `python-coverage` artefact |
+| `python-integration` (`Python (integration testcontainers)`) | `backend/tests/integration/` | `uv sync --locked --all-groups` -> `pytest tests/integration/` against pgvector / valkey / k3d / vcsim / vault testcontainers via DinD. **Required merge gate (#698)** so the lane that exercises real connector dispatch can no longer ship red. |
+| `go-lint-test` (`Go (golangci-lint + go test)`) | `cli/` | `golangci-lint` (v6 action) -> `go build ./...` -> `go test -race -cover ./...` |
+| `helm-lint-template` (`Helm (lint + template + kubeconform)`) | `deploy/charts/meho/` | `helm lint` -> `helm template` -> `kubeconform --strict --kubernetes-version 1.28.0` |
 
-Each job runs on its own `meho-runners` runner with a 10-minute
-`timeout-minutes`. Wall-clock for a green PR comes in well under the
-Goal #11 10-minute budget because the three jobs never block each other
-— the slowest job is the workflow's elapsed time.
+Each job runs on its own `meho-runners-ci` runner. `python-lint-test`,
+`go-lint-test`, and `helm-lint-template` carry a 10-minute
+`timeout-minutes`; `python-integration` carries 60 minutes for the
+container-pull + DinD spin-up + testcontainers sweep (xdist
+loadgroup parallelisation to bring it well under cap tracked in #564).
+Wall-clock for a green PR is the slowest job's elapsed time because
+the four jobs never block each other — `python-integration` typically
+dominates and is the dispatch surface for the Goal #11 budget
+conversation.
 
 ### Fail-loud posture
 
@@ -635,8 +652,9 @@ in their dedicated workflows.
 
 ### Coverage handoff to SonarCloud
 
-The Python job runs `pytest --cov-report=xml` and uploads
-`backend/coverage.xml` as the `python-coverage` artefact.
+On pushes to `main`, the Python job runs
+`COVERAGE_CORE=sysmon uv run pytest ... --cov=meho_backplane --cov-report=xml tests/`
+and uploads `backend/coverage.xml` as the `python-coverage` artefact.
 [`quality-gate.yml`](../../.github/workflows/quality-gate.yml) listens
 on `workflow_run: workflows: ["CI"]`, downloads that exact artefact
 name via `actions/download-artifact@v4`, and feeds the XML into the
@@ -644,6 +662,18 @@ SonarCloud scan. The workflow name (`CI`) and the artefact name
 (`python-coverage`) are the load-bearing contract between the two
 workflows — changing either side without the other would silently lose
 coverage reporting in SonarCloud.
+
+`--cov` is gated to push events only (#726): on PRs, the merge gate
+stays fast and SonarCloud's new-code coverage widget shows "no data"
+until the branch lands on `main`. The Clean-as-You-Code model tolerates
+the one-merge delay because `main` always carries fresh data and
+`quality-gate.yml` is whole-job `continue-on-error`. `COVERAGE_CORE=sysmon`
+(#739) swaps coverage.py's default C tracer for the PEP 669
+`sys.monitoring` backend (Python 3.12+, supported by coverage.py 7.4+;
+the lockfile pins 7.14). Sysmon's event-driven model removes most of
+the per-line tracing tax; line/branch counts are identical to the
+ctrace baseline within ±1% by construction, so the SonarCloud signal
+is unaffected.
 
 ### Fork-PR guard
 
@@ -654,7 +684,7 @@ if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.f
 ```
 
 This is defence in depth on top of branch protection — the
-`meho-runners` self-hosted runner pool is internal infrastructure, so
+`meho-runners-ci` self-hosted runner pool is internal infrastructure, so
 arbitrary code from a forked PR (`go test`, `pytest`, `helm template`
 with custom values) is never allowed to execute on it. The OR
 short-circuits on `push` events so main-branch CI is unaffected.
@@ -675,6 +705,9 @@ in the correct subdir on its own.
 (cd backend && uv run ruff format --check src/ tests/)
 (cd backend && uv run mypy src/)
 (cd backend && uv run pytest -x --cov=meho_backplane --cov-report=term tests/)
+# To mirror the push-mode CI coverage run (Python 3.12+):
+# (cd backend && COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 \
+#     --ignore=tests/integration --cov=meho_backplane --cov-report=xml tests/)
 
 # Go
 # CGO_ENABLED=1 is required for `go test -race` — same reason ci.yml
@@ -732,7 +765,7 @@ merge, not against mocks.
 | Property | Value |
 | --- | --- |
 | Event | `pull_request_target` against `main` (`opened`, `synchronize`, `reopened`) |
-| Runner | `meho-runners` (self-hosted) |
+| Runner | `meho-runners-ci` (self-hosted) |
 | Concurrency group | `pr-smoke-${{ github.event.pull_request.number }}` with `cancel-in-progress: true` |
 | Permissions | `contents: read`, `packages: write`, `id-token: write`, `pull-requests: write` |
 | Job timeout | 12 min (8 min smoke budget + cold-cache headroom — Task #50 AC #5) |
@@ -874,12 +907,13 @@ Steps, in order:
 ### Smoke contract (`scripts/ci/pr-smoke.sh`)
 
 The smoke script is deliberately scoped to the **unauthenticated
-operator surface** — three assertions, no Keycloak access token:
+operator surface** — four assertions, no Keycloak access token:
 
 | Endpoint | Assertion | Why |
 | --- | --- | --- |
 | `/healthz` | HTTP 200 | Liveness probe contract; the in-cluster kubelet uses this exact path |
-| `/version` | `git_sha` present and not `"unknown"` | Confirms the deployed image carries build metadata (image.yml stamps it) and isn't a fallback build |
+| `/version` | `git_sha` present and not `"unknown"` | Confirms the deployed image carries build metadata (`image.yml` / `pr-smoke.yml` pass `GIT_SHA` as a Docker `build-arg`, #631) and isn't a fallback build |
+| `/version` | `chart_version` present, not `"unknown"`, non-empty | Confirms the helm-installed chart injected `CHART_VERSION` from `.Chart.Version` (#631) — the deployed-chart provenance the governance backplane exists to answer |
 | `/api/v1/health` | HTTP 401 unauthenticated | Negative auth test — a 200 here would mean auth middleware regressed open OR Keycloak realm is wired wrong; both are PR-blocking regressions Goal #11 considers non-negotiable |
 
 The full authenticated federation-chain smoke

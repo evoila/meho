@@ -114,7 +114,7 @@ jobs:
     # The OR short-circuits on push events, so the missing pull_request context
     # on push is irrelevant. Job-level (not step-level) so no step ever starts.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 45  # arm64 emulation under QEMU is 3-5x slower than native
     env:
       # Surfaced at the job level so the `Notify claude-rdc-hetzner-dc` step
@@ -177,6 +177,18 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Build-identity stamps surfaced via GET /version (#631). The
+          # Dockerfile already declares `ARG GIT_SHA` / `ARG BUILD_DATE`
+          # and re-exports them as ENV; without these build-args the ARGs
+          # keep their `unknown` defaults and the shipped image cannot
+          # self-report which commit it was built from. BUILD_DATE reuses
+          # docker/metadata-action's `org.opencontainers.image.created`
+          # label (RFC3339, UTC) so the /version build_date and the OCI
+          # `created` annotation are the same single value — no second
+          # `date -u` step that could drift between the two.
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
           # GHA-backed remote cache. The first build cold-fills it; subsequent
           # builds reuse layers across branches.
           cache-from: type=gha
@@ -313,7 +325,7 @@ jobs:
         # scanning alerts. Requires `security-events: write` at the job or
         # workflow level — granted in the top-level permissions block.
         if: github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e  # v4.35.4
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4.35.5
         with:
           sarif_file: trivy-results.sarif
           # Category disambiguates this run when other SARIF sources (e.g.

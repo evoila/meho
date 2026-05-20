@@ -44,12 +44,31 @@ names.
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
   `/api/v1/retrieve` route (G0.4-T5 #262, `source="kb"` scoped)
   for the search verb.
+- `meho remember / recall / forget / list` (G5.1-T4 #424) — memory
+  operator surface, registered as **top-level** verbs (no `memory`
+  parent — per consumer-needs.md §G5's ergonomic shape:
+  `meho remember "note"` rather than `meho memory remember "note"`).
+  Wraps the four `/api/v1/memory*` routes shipped by G5.1-T2 (#422)
+  plus the `/api/v1/retrieve` route (G0.4-T5 #262, `source="memory"`
+  scoped) for `meho recall --query`. Five scopes: `user` /
+  `user-tenant` / `user-target` / `tenant` / `target`. The two
+  target-scoped values require `--target NAME`; the CLI rejects a
+  missing `--target` client-side before the round-trip.
+- `meho migrate ...` (G5.3 #608–#612) — laptop-local memory migration
+  surface. T1 (#608) ships the `migrate` parent + `memory` subcommand
+  skeleton. T2 (#609) adds the frontmatter scanner + scope-suggestion
+  table. T3 (#610) adds the machine-local detector. T4 (#611) wires the
+  interactive `huh` picker, `--dry-run` (JSON envelopes), and
+  `--non-interactive` (user/feedback only) paths. T5 (#612) adds the
+  real HTTP submission layer (POST `/api/v1/memory`), post-login nudge,
+  marker file, and `docs/cli/memory-migration.md`. Depends on
+  `charm.land/huh/v2` (MIT).
 
 ## Module layout
 
 ```text
 cli/
-├── go.mod                  # github.com/evoila/meho/cli; Go 1.22.
+├── go.mod                  # github.com/evoila/meho/cli; Go 1.25.8.
 ├── Makefile                # build / test / lint / install / generate / snapshot / release.
 ├── .golangci.yml           # linter config (rationale below).
 ├── .goreleaser.yaml        # GoReleaser v2 release config (rationale: § Release pipeline).
@@ -79,8 +98,8 @@ cli/
     │   ├── root_test.go       # built-in command surface + dynamic-graft test.
     │   ├── version.go         # `meho version` subcommand.
     │   ├── version_test.go    # output-contract test.
-    │   ├── login.go           # `meho login` subcommand + auth-config discovery + config persistence.
-    │   ├── login_test.go      # override-resolution + help-flag tests.
+    │   ├── login.go           # `meho login` subcommand + auth-config discovery + config persistence + post-login memory-migration nudge (T5 #612).
+    │   ├── login_test.go      # override-resolution + help-flag + post-login nudge tests.
     │   ├── status.go          # `meho status` subcommand + --json + URL resolver.
     │   ├── status_test.go     # happy/JSON/no-creds/unreachable/401/redaction tests.
     │   ├── audit/            # G8.1-T3 #467 — `meho audit …` verb tree.
@@ -111,6 +130,13 @@ cli/
     │   │   ├── show_test.go      # path-escape + Markdown body to stdout + 404 slug_not_found tests.
     │   │   ├── add_test.go       # body-from-file / @- / inline + metadata parse + 422 surface tests.
     │   │   └── delete_test.go    # confirm-prompt + idempotent-204 + --json envelope tests.
+    │   ├── memory/           # G5.1-T4 #424 — top-level `meho remember/recall/forget/list` (no parent).
+    │   │   ├── memory.go         # Scope enum + Entry/ListResponse/RetrievalHit + shared HTTP/auth helpers + parseScope/parseTTL/parseTags/parseScopeSlugArg/loadBody/confirmPrompt.
+    │   │   ├── remember.go       # `meho remember <body> [--scope --slug --target --tag --ttl --persist --json]` (POST /api/v1/memory). `--persist` (G5.2-T2 #624) sends explicit `expires_at: null` to opt out of the backend's default-7-day TTL on `memory-user` writes.
+    │   │   ├── recall.go         # `meho recall <scope>/<slug>` or `meho recall --query` (GET /api/v1/memory/{scope}/{slug} or POST /api/v1/retrieve, source="memory").
+    │   │   ├── forget.go         # `meho forget <scope>/<slug> [--confirm --target --json]` (DELETE /api/v1/memory/{scope}/{slug}).
+    │   │   ├── list.go           # `meho list [--scope --tag --slug-pattern --include-expired --limit --json]` (GET /api/v1/memory).
+    │   │   └── memory_test.go    # parseScope/parseTTL/parseScopeSlugArg + verb-happy-path + 403/404/422 + decline + JSON envelope tests.
     │   ├── connector/         # G0.7-T5 #405 — `meho connector …` verb tree.
     │   │   ├── connector.go      # NewRootCmd + shared HTTP/auth helpers.
     │   │   ├── ingest.go         # `meho connector ingest` (POST /api/v1/connectors/ingest).
@@ -135,14 +161,34 @@ cli/
     │   │   ├── usage_test.go           # query-param + wire-shape + 403/400 routing tests.
     │   │   ├── retire_checklist.go     # `meho retrieval retire-checklist` (POST /api/v1/retrieve/retire-checklist) — G4.3-T6 #445.
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
+    │   ├── migrate/           # G5.3 #608–#612 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
+    │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2.
+    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; real submitFn wired in T5 (#612).
+    │   │   ├── memory_test.go    # --dry-run envelope + source_id, --non-interactive filter, machine-local skip, empty-dir guard.
+    │   │   ├── submit.go         # G5.3-T5 #612 — doSubmit (spinner + POST /api/v1/memory), in-package HTTP helper trio, isTransient retry logic.
+    │   │   └── submit_test.go    # POST body shape, source_id stability, upsert rerun, transient retry, summary line, --mark-migrated.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
-    │   └── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
+    │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).
+    │   └── topology/          # G9.1-T6 #454 + G9.2-T6 #599 — `meho topology refresh/dependents/dependencies/path/annotate/unannotate/list-edges` over the T5 REST surface (#453, #597).
+    │                          #   (the 5th G9.1-T6 verb, `meho targets discover`, lives in targets/discover.go.)
     │       ├── vault.go          # NewRootCmd + shared HTTP/auth/render helpers + ConnectorID const.
     │       ├── dispatch.go       # CallResult/callRequestBody + dispatchOp + renderCallResult + generic renderer.
     │       ├── kv.go             # `meho vault kv read|list|put|versions|delete` (vault.kv.* ops, #545).
     │       ├── sys.go            # `meho vault sys health|seal-status|mounts-list|auth-list` (vault.sys.* ops, #546).
     │       ├── auth.go           # `meho vault auth userpass/approle list+read` (vault.auth.* ops, #547).
     │       └── vault_test.go     # helpers + verb-tree wiring + flag→params wire-shape + e2e mocked-backplane tests.
+    ├── migrate/               # G5.3 — pure-logic helpers for the memory migration flow (Initiative #375).
+    │   ├── doc.go                # package doc.
+    │   ├── machinelocal.go       # DetectMachineLocal — heuristic detector for laptop-local content (#610).
+    │   ├── machinelocal_test.go  # table-driven per-Category tests + truncation + seam coverage (#610).
+    │   ├── marker.go             # G5.3-T5 #612 — TouchMarker / MarkerExists — XDG migration-complete marker file; full implementation.
+    │   ├── marker_test.go        # touch + exists + idempotent + delete-re-enables + sanitizeDirName.
+    │   ├── picker.go             # G5.3-T4 #611 — BuildForm (huh), SubmitPlan, FinalizeSkip, DefaultPlan, slugFromPath, SourceIDPrefix, scope/action builders.
+    │   ├── picker_test.go        # slug, validateSlug, BuildForm structure, role-filtered scope options, FinalizeSkip, DefaultPlan.
+    │   ├── scan.go               # G5.3-T2 #609 — ResolveSourceDir + ScanDir + MemoryFile (frontmatter parser + BodySHA256 + MachineLocalOptOut).
+    │   ├── scan_test.go          # table-driven: well-formed/missing/malformed frontmatter, machine-local comment, BodySHA256 stability, ScanDir, ResolveSourceDir.
+    │   ├── suggest.go            # G5.3-T2 #609 — SuggestScope table + exported Scope* constants.
+    │   └── suggest_test.go       # full mapping table including tenantConfigured branch and unknown-type fallback.
     ├── discovery/
     │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
     │   └── discovery_test.go  # 200/404/transport/decode + collision tests.
@@ -549,8 +595,8 @@ end-to-end reconnect / 401 / 403 / Ctrl-C tests need the
 [oapi-codegen v2.5](https://github.com/oapi-codegen/oapi-codegen)
 from `cli/api/openapi.json` — a committed snapshot of the
 backplane's OpenAPI document. v2.5 is the last v2.x release with
-Go 1.22 minimum; later versions require Go 1.24+ and would bump
-the module's `go` directive prematurely. The generator itself runs
+Go 1.25.8 minimum (raised from 1.22 by charm.land/huh/v2 v2.0.3's
+transitive deps in PR #640). The generator itself runs
 on a newer Go toolchain (downloaded automatically by `go install`
 when the host has Go 1.21+) so this is a build-time vs.
 runtime split.
@@ -710,14 +756,15 @@ G0.6-T13 DoD was "three CLI verbs", not four.
 
 ## Targets registry (`meho targets`, G0.3-T5 #256)
 
-`cli/internal/cmd/targets/` registers the three operator-facing verbs
-that wrap the targets registry routes from G0.3-T3 (#254) and the
-G0.3-T1.5 (#477) probe-persistence remediation. The verbs are the
-operator-side surface for the per-tenant `targets` table — a
-fingerprinted catalog of vendor systems the operator manages (vCenter
-hosts, Vault instances, k8s clusters, …) that the G0.6 dispatcher
-resolves at `call` time. Write verbs (`create` / `update` / `delete`)
-are deferred; bulk import lands under G0.3-T6 (#257).
+`cli/internal/cmd/targets/` registers the operator-facing verbs that
+wrap the targets registry routes from G0.3-T3 (#254), the G0.3-T1.5
+(#477) probe-persistence remediation, and the G9.1-T6 (#454) discover
+verb. The verbs are the operator-side surface for the per-tenant
+`targets` table — a fingerprinted catalog of vendor systems the
+operator manages (vCenter hosts, Vault instances, k8s clusters, …)
+that the G0.6 dispatcher resolves at `call` time. Write verbs
+(`create` / `update` / `delete`) are deferred; bulk import lands
+under G0.3-T6 (#257).
 
 ### Subcommands
 
@@ -746,13 +793,27 @@ are deferred; bulk import lands under G0.3-T6 (#257).
   cached fingerprint survives. A connector that raises propagates as
   a 500; per the #477 accepted trade-off the CLI surfaces the
   underlying detail rather than masking it as a graceful failure.
+- `meho targets discover <product> [--seed-target <name>]` — calls
+  `GET /api/v1/targets/discover` (G9.1-T6 #454, the verb #256
+  explicitly deferred here). Iterates every connector registered for
+  `<product>`, calling each connector's `list_candidates` hook, and
+  renders the merged candidate `NAME / HOST / PORT / CONFIDENCE`
+  table plus a `SKIPPED / REASON` table for connectors that
+  contributed nothing. Read-only — it never creates `targets` rows;
+  the operator reviews and runs `meho targets create`
+  (auto-registration is v0.2.next). `--seed-target` scopes discovery
+  to one already-registered target's reach; it is resolved
+  tenant-scoped server-side, so a cross-tenant seed name 404s like a
+  typo. Documented in depth under "Topology verbs" (the verb is part
+  of G9.1-T6 and shares that initiative's contract).
 
-### Reserved flags (same shape across all three verbs)
+### Reserved flags (same shape across the verbs)
 
 - `--json` — emit the raw JSON envelope to stdout instead of the human
   render. Stable schemas: `list` → `[]TargetSummary`; `describe` →
   full `Target` (including `fingerprint` + `preferred_impl_id`);
-  `probe` → `FingerprintResult`.
+  `probe` → `FingerprintResult`; `discover` →
+  `DiscoverResult` (`discovered` + `skipped`).
 - `--backplane <url>` — override the backplane URL (defaults to the
   URL recorded by `meho login`).
 
@@ -866,6 +927,114 @@ Pydantic models (duplicated per package to avoid the cmd/* import
 cycle cmd/root.go's graft would otherwise create). Exit codes: `0`
 status=ok, `1` status=error/denied (via the `errOpError` sentinel),
 `2` auth_expired, `3` unreachable, `4` unexpected_response.
+
+## Topology verbs (`meho topology`, G9.1-T6 #454 + G9.2-T6 #599)
+
+`cli/internal/cmd/topology/` registers seven operator-facing topology
+verbs that wrap the T5 REST surface (#453 / #597). The eighth
+G9.1-T6 verb, `meho targets discover`, lives under the `meho targets`
+parent (`cli/internal/cmd/targets/discover.go`) because the backend
+registers `GET /api/v1/targets/discover` on the targets router, under
+the canonical `/api/v1/targets` prefix.
+
+### Subcommands (G9.1 read/traversal — #454)
+
+- `meho topology refresh <target>` — `POST
+  /api/v1/topology/refresh/<target>`. Rediscovers one target's
+  topology and reconciles it into the graph; renders the per-target
+  `nodes: +A -R ~U` / `edges: +A -R ~U` count summary. The backend
+  resolves `<target>` tenant-scoped, so a cross-tenant target 404s
+  identically to a typo (cross-tenant refresh is impossible by
+  construction).
+- `meho topology dependents <name|alias> [--depth N] [--kind K]
+  [--node-kind K]` — `GET /api/v1/topology/dependents/<name>`.
+  Reverse closure ("what depends on me" — the blast-radius verb
+  consumer-needs.md L258 specifies, run *before* a destructive op).
+  Renders a depth-ordered `DEPTH / KIND / NAME / VIA` table; the
+  anchor is row 0 (empty VIA) so an operator distinguishes "exists,
+  no dependents" (one row) from "not in this tenant" (zero rows).
+- `meho topology dependencies <name|alias> [--depth N] [--kind K]
+  [--node-kind K]` — `GET /api/v1/topology/dependencies/<name>`.
+  Forward closure ("what I depend on") — the mirror of `dependents`,
+  same table shape and contract, opposite walk direction.
+- `meho topology path <from> <to> [--max-hops N] [--from-kind K]
+  [--to-kind K]` — `GET /api/v1/topology/path?from=A&to=B`. Shortest
+  unweighted path rendered as a `kind/name -> … (N hops)` chain, or
+  the no-path line when unreachable / an endpoint is missing /
+  cross-tenant (all the same `null` answer, exit 0, never an error).
+
+### Subcommands (G9.2 curated-edge write + listing — #599)
+
+- `meho topology annotate <from> <kind> <to> [--note "..."]
+  [--evidence-url URL] [--from-kind K] [--to-kind K]` — `POST
+  /api/v1/topology/edges`. Asserts a curated cross-system edge.
+  Idempotent (server-side upsert). `--help` inlines the closed
+  10-kind vocabulary table (§12 of Initiative #364) so operators
+  discover valid `<kind>` values without leaving the CLI.
+  `--evidence-url` is kebab-case on the CLI but maps to the wire
+  field `evidence_url` (snake_case per `_AnnotateEdgeRequest`).
+  Requires `tenant_admin`; a 403 renders the backend's role hint
+  with exit class `insufficient_role`.
+- `meho topology unannotate <edge-id> | <from> <kind> <to>
+  [--from-kind K] [--to-kind K]` — `DELETE
+  /api/v1/topology/edges/<edge_id>`. The tuple form is **client-
+  side**: a `GET /api/v1/topology/edges?from=&kind=&to=&source=
+  curated` resolves the unique curated edge, then `DELETE` removes
+  it by id. T5's DELETE is id-only (no tuple-form route), so the
+  resolution must happen here. The route's typed 409 (auto-row
+  deletion refused; §3 of Initiative #364) is rendered with the
+  server's `detail.message` verbatim — the annotate-over-auto
+  remediation guidance, not a raw HTTP dump. Requires `tenant_admin`.
+- `meho topology list-edges [--kind K] [--source curated|auto]
+  [--from N] [--to N] [--conflicts] [--limit N] [--offset N]` —
+  `GET /api/v1/topology/edges`. Flat filterable listing of the
+  tenant's edges. `--source` maps directly to the `graph_edge.source`
+  column literal; `--conflicts` surfaces the §6 conflict-detector
+  recoverability listing only. Default output is an aligned
+  `KIND / SOURCE / FROM / TO / LAST_SEEN` table; `--json` emits the
+  raw `[]Edge` envelope so consumers can pipe ids into the
+  `unannotate <edge-id>` form. Role: `operator`.
+
+### Flag → query-param mapping
+
+The route exposes `kind` (anchor `(tenant_id, kind, name)` pin) and
+`kind_filter` (walk-edge filter) as two distinct params. Per the #454
+spec `--kind <edge_kind>` is the **edge** filter, so `--kind` maps to
+`kind_filter`; the separate `--node-kind` flag maps to `kind` and is
+the remedy the 409 `ambiguous_node` render points at ("re-run with
+--node-kind …"). `path` maps `--from-kind`/`--to-kind` →
+`from_kind`/`to_kind` and `--max-hops` → `max_hops`. `--depth`
+(1..64) and `--max-hops` (1..32) mirror the API's `Query(le=…)`
+ceilings and fail fast client-side (no 422 round-trip), the same
+discipline `meho targets list --limit` applies.
+
+### Reserved flags (every verb)
+
+- `--json` — emit the raw envelope to stdout instead of the human
+  render. Stable schemas: `refresh` → `RefreshResult`;
+  `dependents`/`dependencies` → `[]Node`; `path` →
+  `Path` or literal `null` (the unreachable answer, emitted
+  verbatim so jq consumers see one contract); `annotate` →
+  `TopologyEdge` (the 201 response shape); `unannotate` →
+  `{"deleted": "<edge_id>"}` on success; `list-edges` →
+  `[]TopologyEdge`.
+- `--backplane <url>` — override the backplane URL (defaults to the
+  URL `meho login` recorded).
+
+### HTTP shape + exit codes
+
+Same in-package `resolveBackplane` / `doAuthedRequest` /
+`renderRequestError` trio every sibling verb tree carries (the
+shared-helper-vs-import-cycle reason `kb.go` documents — Initiative
+#363 names a `cli/internal/api_client/topology.go`, but the codebase
+convention supersedes that path; the intent is satisfied in-package).
+`renderHTTPError` adds the topology-specific 409 `ambiguous_node`
+classifier (names the colliding kinds + the `--node-kind` remedy) and
+reuses the resolver's structured 404 near-miss formatter for
+`refresh`. Exit codes: `0` ok (including empty closure / no drift /
+no path — all operationally meaningful, never 404), `2` auth_expired,
+`3` unreachable, `4` unexpected_response (404 / 409 / malformed),
+`5` insufficient_role (403; backend names the required role).
 
 ## Server-driven discovery (`internal/discovery/`)
 
@@ -1278,21 +1447,23 @@ Direct:
 * `golang.org/x/oauth2` — supplies `Config.DeviceAuth` and
   `Config.DeviceAccessToken` for the RFC 8628 device-code flow,
   plus `Config.TokenSource` for the T3 refresh path. Pinned at
-  `v0.26.0`, the last release that still targets Go 1.22; later
-  versions require Go 1.23+ and would bump the module's go
-  directive prematurely.
+  `v0.27.0`; the Go 1.22 minimum constraint that previously blocked
+  upgrades is lifted now that the module requires Go 1.25.8.
 * `github.com/oapi-codegen/runtime` — runtime helpers the generated
   client uses (JSON merging for `oneOf` unions, parameter styling
-  per RFC 6570). Pinned at `v1.1.1` for Go 1.22 compatibility;
-  later runtimes require Go 1.24+.
+  per RFC 6570). Pinned at `v1.1.1`; the Go 1.22 compatibility
+  constraint that blocked upgrades is lifted now that the module
+  requires Go 1.25.8 — upgrade tracked as a follow-up.
 
 Build-time tool (not in `go.mod`; installed under `bin/` via
 `make tools`):
 
 * `github.com/oapi-codegen/oapi-codegen/v2` — the OpenAPI → Go
   client generator itself. Pinned at `v2.5.0`, the last v2.x
-  release that still targets Go 1.22 as the minimum module go
-  directive. `make tools` runs `go install …@v2.5.0` with
+  release whose module go directive was compatible with Go 1.22;
+  now that the module requires Go 1.25.8, a newer v2.x may be
+  used — upgrade tracked as a follow-up. `make tools` runs
+  `go install …@v2.5.0` with
   `GOBIN=$PWD/bin`; the generator itself executes on a Go 1.24+
   toolchain that Go downloads automatically (the `go install`
   command honours the dep's `go` directive).

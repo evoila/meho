@@ -11,7 +11,7 @@
 #   go-lint-test      : golangci-lint + go build + go test on cli/
 #   helm-lint-template: helm lint + helm template + kubeconform on deploy/charts/meho/
 #
-# Each job runs on its own meho-runners runner in parallel; total wall
+# Each job runs on its own meho-runners-ci runner in parallel; total wall
 # clock for a green PR is well below the 10-minute Goal #11 budget
 # because the three jobs never block each other. Per-job
 # `timeout-minutes` caps a runaway gate at twice its observed cost.
@@ -82,12 +82,12 @@ jobs:
     name: Python (ruff + mypy + pytest)
     # Fork-PR guard: never execute project code from a fork on the
     # self-hosted runner pool. Mirrors image.yml + chart.yml's stance —
-    # `runs-on: meho-runners` is internal infra, so fork PRs skip
+    # `runs-on: meho-runners-ci` is internal infra, so fork PRs skip
     # entirely. Push events (main) short-circuit the OR via
     # github.event_name != 'pull_request'. Job-level (not step-level)
     # so no step ever starts on a fork PR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     # 50-min cap: this job is the deterministic required gate — ruff
     # + ruff-format + mypy + the unit pytest sweep with
     # tests/integration/ EXCLUDED (--ignore=tests/integration). The
@@ -103,9 +103,12 @@ jobs:
     # testcontainer variance) with headroom for unit-suite growth.
     # Job name is intentionally unchanged so the existing
     # branch-protection required check stays satisfied. The durable
-    # fix that brings this back under ~10 min — pytest-xdist
-    # `-n auto` parallelization of the serial unit suite — is
-    # tracked in #564.
+    # fix — pytest-xdist `-n auto` parallelization of the unit suite —
+    # LANDED via #585 (which removed the global-registry isolation
+    # leaks that blocked it; see the Pytest step below). The 50-min
+    # cap is now generous headroom kept deliberately for the first
+    # parallel CI runs; retune downward once real multi-core CI
+    # wall-clock is observed (local: 10:18 → 6:14).
     timeout-minutes: 50
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
@@ -194,22 +197,107 @@ jobs:
         # are already declared there.
         run: uv run mypy src/
 
+      - name: Cache fastembed model (drift-guard + slow-lane)
+        # The drift-guard below downloads the ~67 MB default ONNX model
+        # from HuggingFace. Without this cache every run re-fetches it
+        # unauthenticated over the cluster's shared NAT egress (HF
+        # rate-limits anonymous pulls) — pure repeated cost on the
+        # slowest required job. Key on uv.lock: fastembed's version is
+        # pinned there, so a fastembed bump (which can remap the HF
+        # source/filename) misses the cache and the model re-downloads
+        # exactly once, then re-saves. restore-keys lets an unrelated
+        # lock change still reuse the prior model blob.
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.fastembed-cache
+          key: fastembed-model-${{ runner.os }}-${{ hashFiles('backend/uv.lock') }}
+          restore-keys: |
+            fastembed-model-${{ runner.os }}-
+
+      - name: Embedding-model drift guard (evoila/meho#574)
+        # Regression guard for #574: actually instantiate
+        # TextEmbedding(DEFAULT_EMBEDDING_MODEL) + run one real embed,
+        # so a fastembed<->model-repo drift (the model repo dropping
+        # `model_optimized.onnx`, fastembed remapping the HF source,
+        # an incompatible fastembed bump, …) fails THIS PR instead of
+        # CrashLooping in production on a clean deploy. Green ci.yml on
+        # a runtime-fetched model cannot catch this; this step does.
+        # The image build runs the same module to BAKE the model
+        # (backend/Dockerfile); here we only assert, into the cached
+        # workspace dir (the runner sandbox can't write `/opt`).
+        # HF_TOKEN (if the secret is configured) authenticates the
+        # download for higher HF rate limits + faster pulls; absent →
+        # empty → anonymous (current behaviour, no regression).
+        env:
+          MEHO_WARM_CACHE_DIR: ${{ github.workspace }}/.fastembed-cache
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: uv run python -m meho_backplane.retrieval.warm
+
       - name: Pytest (unit + coverage)
-        # -x exits on first failure (fast feedback on PR runs).
-        # --ignore=tests/integration EXCLUDES the container-heavy
-        # integration subtree (pgvector/valkey/k3d/vcsim
-        # testcontainers) — it runs in the sibling `python-integration`
-        # job so this required gate stays fast + deterministic.
-        # --cov=meho_backplane emits a coverage report; --cov-report=xml
-        # produces coverage.xml in the working dir, which the next step
-        # uploads as the `python-coverage` artifact consumed by
-        # SonarCloud (quality-gate.yml). --cov-report=term echoes the
-        # summary into the workflow log. NOTE: coverage now reflects
-        # the unit sweep only; integration-only-covered lines are not
-        # counted. Combined coverage (cov-append across both jobs) is
-        # a follow-up on #564 — acceptable interim since SonarCloud's
-        # gate is new-code-coverage weighted.
-        run: uv run pytest -x --ignore=tests/integration --cov=meho_backplane --cov-report=xml --cov-report=term tests/
+        # PARALLELIZED via pytest-xdist (#585 unblocked this). The
+        # serial sweep was the job's dominant cost (~49 min in CI vs
+        # ~5 min local). #585 added process-wide global-registry
+        # snapshot/restore + deterministic MCP-module import in
+        # tests/conftest.py, eliminating the cross-module isolation
+        # leaks that previously made `-n auto` red on
+        # test_mcp_registry / test_audit_middleware. Controlled
+        # same-commit proof (acceptance of #585): serial 2007/0/0 and
+        # `-n auto --dist loadscope` 2007/0/0 — identical, empty
+        # failure set; local wall-clock serial 10:18 → xdist 6:14
+        # (limited by core count; CI multi-core gets the ~49→~10 min).
+        # -n 3: pinned. -n auto was inconsistent on these ARC pods —
+        # run 26164020459 (main, 2026-05-20 12:57Z) reported 4 workers,
+        # a later same-day PR push reported 8. The variance points at
+        # cgroup-aware CPU detection mismatches (or pod-size drift);
+        # either way, pinning removes the ambiguity and the context-
+        # switch tax `-n auto` was silently paying. 3 reserves headroom
+        # for the xdist coordinator + the DinD daemon (testcontainers
+        # pgvector/valkey fire from unit-suite tests too, not just the
+        # integration job — see MEHO_TEST_PGVECTOR_IMAGE env above).
+        # --dist loadscope: a module's
+        # tests stay on one worker so module-/session-scoped fixtures
+        # (testcontainers PG, embedding service) instantiate per
+        # worker, not per test. --maxfail=1 preserves the old `-x`
+        # fast-fail (xdist ignores `-x`). --ignore=tests/integration →
+        # the container-heavy subtree runs in the sibling
+        # `python-integration` job. Coverage is the unit sweep only;
+        # combined cov is #564.
+        # Coverage gated to push events only (push-to-main): pytest-cov
+        # instrumentation is the unit job's dominant cost — run
+        # 26164020459 clocked ~27min on 2678 items, and coverage tracing
+        # adds an empirical 30-60% wall-time tax on xdist suites. PRs
+        # skip --cov entirely so the merge gate stays fast; main pushes
+        # still produce coverage.xml for quality-gate.yml's SonarCloud
+        # workflow_run consumer. SonarCloud's Clean-as-You-Code semantics
+        # tolerate coverage updating one merge later — main always
+        # carries fresh data, and quality-gate.yml is whole-job
+        # continue-on-error so missing PR coverage never blocks merge.
+        # Trade-off accepted: PR-level Sonar coverage decoration goes
+        # quiet (the new-code coverage widget shows "no data" on PRs).
+        # --cov-report=term dropped regardless — purely cosmetic and
+        # serializes through xdist workers.
+        # COVERAGE_CORE=sysmon swaps coverage.py's default C tracer
+        # (per-line `sys.settrace` callbacks) for the PEP 669
+        # `sys.monitoring` backend introduced in Python 3.12 and
+        # supported by coverage.py 7.4+ (lock pins 7.14). sysmon's
+        # event-driven model halves coverage's wall-time tax in typical
+        # suites; locally on a small xdist run the line counts matched
+        # ctrace exactly (2913/11832 in both), which is what we need
+        # for SonarCloud parity. Scoped to the push branch where --cov
+        # actually runs — setting the env var on the PR branch would
+        # be a harmless no-op (no `--cov` flag), but inlining it next
+        # to the only command that reads it keeps intent local.
+        # Branch-coverage is OFF in this project (no `--cov-branch`,
+        # no `[tool.coverage.run] branch=true`), so the sysmon branch-
+        # coverage caveat (requires `env.PYBEHAVIOR.branch_right_left`,
+        # not yet on the CI's Python) does not apply.
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration \
+              --cov=meho_backplane --cov-report=xml tests/
+          else
+            uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
+          fi
 
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).
@@ -234,20 +322,34 @@ jobs:
     # testcontainers) that made the combined serial sweep blow every
     # timeout cap (see python-lint-test comment). Separated so the
     # required lint+mypy+unit gate stays fast and deterministic while
-    # integration still runs on every PR. This job is NOT yet in the
-    # branch-protection required-check set — promoting it requires a
-    # repo-admin settings change (documented in the PR). Until then it
-    # is a visible, fail-loud signal but not merge-blocking.
+    # integration runs on every PR.
+    # **Required merge gate as of 2026-05-20 (#698).** This job's
+    # context ("Python (integration testcontainers)") is in
+    # ``branches/main/protection.required_status_checks.contexts``;
+    # promoting it was the structural corrective to the v0.2 / G3.4
+    # green-but-hollow incidents (#634 / #697) — the lane that
+    # exercises real connector dispatch, k3d / bind9-container /
+    # vcsim / federated-write acceptance, must be merge-blocking so
+    # red integration cannot ship to ``main`` again.
     # 60-min cap: container pulls + DinD spin-up + the serial
     # integration sweep. pytest-xdist loadgroup parallelization to
     # bring this well under cap is tracked in #564.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 60
     env:
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       MEHO_TEST_VCSIM_IMAGE: harbor.evba.lab/dockerhub-proxy/vmware/vcsim:latest
+      MEHO_TEST_VAULT_IMAGE: harbor.evba.lab/dockerhub-proxy/hashicorp/vault:1.18
+      # G3.2-T6 (#326) — k3s container fixture for the K8s typed-connector
+      # E2E acceptance harness (tests/integration/test_connectors_k8s_e2e.py
+      # and the existing tests/integration/test_connectors_k8s_k3d.py).
+      # Pinned to the same minor the k3d/k3s fixture's in-code default
+      # uses (rancher/k3s:v1.32.5-k3s1) so the Harbor proxy serves the
+      # exact tag the testcontainers fixture asks for, without a docker.io
+      # round-trip.
+      MEHO_TEST_K3S_IMAGE: harbor.evba.lab/dockerhub-proxy/rancher/k3s:v1.32.5-k3s1
     defaults:
       run:
         working-directory: backend
@@ -277,14 +379,17 @@ jobs:
         # Only the tests/integration/ subtree. No --cov here: coverage
         # is emitted by the unit job (see its NOTE); combined coverage
         # is a #564 follow-up. -x for fast-fail on the first broken
-        # integration case.
+        # integration case. Deliberately NOT parallelized: the unit
+        # job is the ~49min bottleneck (now split-parallelized); this
+        # job is ~6min and its container-heavy fixtures under xdist
+        # are unverified — out of scope for the perf change.
         run: uv run pytest -x tests/integration/
 
   go-lint-test:
     name: Go (golangci-lint + go test)
     # Fork-PR guard mirrors the Python job — same rationale.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -297,32 +402,30 @@ jobs:
         # the tree today.
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
         with:
-          # Tracks `cli/go.mod`'s `go 1.23.0` directive. golangci-lint
+          # Tracks `cli/go.mod`'s `go 1.25.8` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
           # version; running an older Go than go.mod requires fails with
           # `go.mod requires go >= X` (CI run 25680051917).
-          go-version: '1.23'
+          # Bumped from 1.23 → 1.25 because charm.land/huh/v2 v2.0.3's
+          # transitive deps raised the minimum to go 1.25.8 (PR #640).
+          go-version: '1.25'
           cache-dependency-path: cli/go.sum
 
       - name: golangci-lint
-        # v6 (NOT v7+ / v8+ / v9+) because the in-tree cli/.golangci.yml
-        # is written in the golangci-lint v1 config schema (disable-all +
-        # explicit enable list, v1 linter names like `gosimple` /
-        # `errcheck`). golangci-lint-action v7.x+ refuses to install any
-        # v1.x binary at all — fails with `invalid version string
-        # 'v1.64.8', golangci-lint v1 is not supported`. PR #198
-        # (Dependabot) attempted the major bump from v6.5.2 -> v9.2.0
-        # without the corresponding v2 config migration and broke every
-        # Go CI run on main between #198's merge and this revert. To
-        # prevent the same problem recurring, the action's major-version
-        # bumps are now in Dependabot's ignore list (see
-        # `.github/dependabot.yml`); minor / patch bumps within v6 still
-        # come through normally. Migrating cli/.golangci.yml to the v2
-        # schema is tracked as a separate follow-up — when that lands,
-        # the action major and the binary version flip together.
-        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84  # v6.5.2
+        # v9.2.0: cli/.golangci.yml was migrated from v1 to v2 schema in
+        # PR #640 (alongside the go 1.25 bump) so the action major upgrade
+        # is now safe. golangci-lint v2.12.2 is compiled with Go 1.25,
+        # resolving the "go language version used to build golangci-lint
+        # is lower than the targeted Go version" failure that v1.64.8
+        # (built with Go 1.24) produced once go-version was bumped to 1.25.
+        # golangci-lint-action v7+ refuses v1.x binaries; v9.2.0 requires
+        # golangci-lint >= v2.x and fully supports the v2 config schema.
+        # SHA pinned to v9.2.0 commit (devops_best_practices: pin to
+        # immutable SHA). Dependabot ignore list updated to track v9.x
+        # minor/patch bumps rather than the now-retired v6 pin.
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
         with:
-          version: v1.64.8
+          version: v2.12.2
           working-directory: cli
 
       - name: Go build
@@ -335,7 +438,7 @@ jobs:
       - name: Ensure C toolchain is available (for cgo race runtime)
         # `go test -race` links the cgo-based race runtime, which needs
         # a working C toolchain — both `gcc` (or any cc) AND libc
-        # development headers (`<stdlib.h>` etc.). The `meho-runners`
+        # development headers (`<stdlib.h>` etc.). The `meho-runners-ci`
         # self-hosted pool ships a minimal image without either, so
         # the race test would fail with one of:
         #   - `cgo: C compiler "gcc" not found` (no gcc), or
@@ -355,7 +458,7 @@ jobs:
         # later `cgo:` error. `--no-install-recommends` keeps the
         # install fast and minimal: gcc + libc6-dev only, no
         # editors/manpages/etc. The proper long-term fix is to bake
-        # the C toolchain into the meho-runners base image; until
+        # the C toolchain into the meho-runners-ci base image; until
         # then this step keeps PR CI green without expanding the
         # workflow's blast radius.
         if: runner.os == 'Linux'
@@ -386,7 +489,7 @@ jobs:
         # CGO_ENABLED=1 is required: `go test -race` is implemented in
         # the cgo-based race runtime and refuses to run otherwise
         # (`go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`).
-        # The `meho-runners` self-hosted pool defaults to CGO_ENABLED=0,
+        # The `meho-runners-ci` self-hosted pool defaults to CGO_ENABLED=0,
         # so the flag must be set explicitly here. The preceding step
         # ensures `gcc` is on PATH so the race runtime can actually
         # link. Scoped to this step only — the build/lint steps work
@@ -400,7 +503,7 @@ jobs:
     name: Helm (lint + template + kubeconform)
     # Fork-PR guard mirrors the other jobs.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners
+    runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -420,7 +523,7 @@ jobs:
         # JSON Schemas offline. Pin to v0.6.7 by SHA256 — same shape
         # chart.yml uses (devops_best_practices: no `curl|sh` of
         # unpinned binaries). Install to $HOME/.local/bin because the
-        # self-hosted meho-runners pool runs as a non-root user that
+        # self-hosted meho-runners-ci pool runs as a non-root user that
         # cannot write to /usr/local/bin (regression caught in PR #173
         # / CI run 25644668781). Appending to $GITHUB_PATH surfaces
         # the binary to subsequent steps without relying on the install

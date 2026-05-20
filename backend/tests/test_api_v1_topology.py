@@ -50,12 +50,19 @@ from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog
+from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
+from meho_backplane.topology.annotate import AutoEdgeDeletionError, NodeRef
 from meho_backplane.topology.query import AmbiguousNodeError
 from meho_backplane.topology.refresh import RefreshResult
-from meho_backplane.topology.schemas import TopologyNode, TopologyPath
+from meho_backplane.topology.resolvers import NodeNotFoundError
+from meho_backplane.topology.schemas import (
+    TopologyEdge,
+    TopologyEdgeEndpoint,
+    TopologyNode,
+    TopologyPath,
+)
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
@@ -424,3 +431,871 @@ async def test_read_route_binds_canonical_op_id(
     payload = rows[0].payload or {}
     assert payload.get("op_id") == op_id
     assert payload.get("op_class") == "read"
+
+
+# ---------------------------------------------------------------------------
+# G9.2-T5 (#597) — curated-edge routes
+# ---------------------------------------------------------------------------
+
+
+def _admin_token_value(*, tenant_id: UUID = _TENANT_ID, sub: str = "admin-1") -> tuple[Any, str]:
+    """Convenience for an admin-role JWT pinned to the default tenant."""
+    return _token(TenantRole.TENANT_ADMIN, tenant_id=tenant_id, sub=sub)
+
+
+def _seeded_graph_edge(
+    *,
+    edge_id: uuid.UUID,
+    from_node_id: uuid.UUID,
+    to_node_id: uuid.UUID,
+    kind: str = "depends-on",
+    source: str = "curated",
+    tenant_id: UUID = _TENANT_ID,
+    note: str | None = "rebuilt-from-test",
+) -> GraphEdge:
+    """Construct an unattached ``GraphEdge`` row the ``annotate_edge`` mock
+    can return so ``_edge_to_response`` has something to look up."""
+    return GraphEdge(
+        id=edge_id,
+        tenant_id=tenant_id,
+        from_node_id=from_node_id,
+        to_node_id=to_node_id,
+        kind=kind,
+        source=source,
+        properties={"note": note} if note else {},
+        discovered_by="admin-1",
+    )
+
+
+def _make_graph_node(
+    *,
+    name: str,
+    kind: str = "vm",
+    tenant_id: UUID = _TENANT_ID,
+) -> GraphNode:
+    return GraphNode(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        kind=kind,
+        name=name,
+        properties={},
+        target_id=None,
+        discovered_by="probe",
+    )
+
+
+async def _persist_node(node: GraphNode) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(node)
+
+
+async def _persist_edge(edge: GraphEdge) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session, session.begin():
+        session.add(edge)
+
+
+# --- Route mounting --------------------------------------------------------
+
+
+def test_curated_edge_routes_mounted_on_main_app() -> None:
+    """The three curated-edge routes appear on the prod app + OpenAPI doc."""
+    from meho_backplane.main import app
+
+    expected = {
+        "/api/v1/topology/edges",
+        "/api/v1/topology/edges/{edge_id}",
+    }
+    actual = {getattr(r, "path", None) for r in app.routes}
+    assert not (expected - actual), f"missing: {expected - actual}"
+
+    paths = app.openapi()["paths"]
+    assert "post" in paths["/api/v1/topology/edges"]
+    assert "get" in paths["/api/v1/topology/edges"]
+    assert "delete" in paths["/api/v1/topology/edges/{edge_id}"]
+
+
+# --- Unauthenticated → 401 -------------------------------------------------
+
+
+def test_annotate_edge_unauthenticated_returns_401(client: TestClient) -> None:
+    resp = client.post(
+        "/api/v1/topology/edges",
+        json={"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+    )
+    assert resp.status_code == 401
+
+
+def test_unannotate_edge_unauthenticated_returns_401(client: TestClient) -> None:
+    edge_id = uuid.uuid4()
+    resp = client.delete(f"/api/v1/topology/edges/{edge_id}")
+    assert resp.status_code == 401
+
+
+def test_list_edges_unauthenticated_returns_401(client: TestClient) -> None:
+    resp = client.get("/api/v1/topology/edges")
+    assert resp.status_code == 401
+
+
+# --- RBAC ------------------------------------------------------------------
+
+
+def test_annotate_edge_operator_returns_403(client: TestClient) -> None:
+    """``operator``-level principal is below ``tenant_admin``; POST must 403."""
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges",
+            headers=_authed(token),
+            json={"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+        )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "insufficient_role"
+
+
+def test_unannotate_edge_operator_returns_403(client: TestClient) -> None:
+    """``operator``-level principal must not delete curated edges."""
+    key, token = _token(TenantRole.OPERATOR)
+    edge_id = uuid.uuid4()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/edges/{edge_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 403
+
+
+def test_list_edges_readonly_returns_403(client: TestClient) -> None:
+    """``read_only`` is below ``operator``; GET must 403."""
+    key, token = _token(TenantRole.READ_ONLY)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get("/api/v1/topology/edges", headers=_authed(token))
+    assert resp.status_code == 403
+
+
+def test_list_edges_operator_succeeds(client: TestClient) -> None:
+    """``operator`` is sufficient for the read; the helper is called."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.list_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get("/api/v1/topology/edges", headers=_authed(token))
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+    fake.assert_awaited_once()
+
+
+# --- POST /edges — happy path + 422 + error mapping ------------------------
+
+
+async def test_annotate_edge_admin_round_trip(client: TestClient) -> None:
+    """``tenant_admin`` POST hits :func:`annotate_edge`, returns the wire shape."""
+    key, token = _admin_token_value()
+    from_node = _make_graph_node(name="svc-A", kind="vm")
+    to_node = _make_graph_node(name="db-1", kind="service")
+    edge_id = uuid.uuid4()
+    edge = _seeded_graph_edge(
+        edge_id=edge_id,
+        from_node_id=from_node.id,
+        to_node_id=to_node.id,
+    )
+    # Persist the endpoint rows so ``session.get(GraphNode, ...)`` in
+    # ``_edge_to_response`` returns the real rows from the same DB the
+    # mock returned the (unattached) edge against.
+    await _persist_node(from_node)
+    await _persist_node(to_node)
+
+    fake = AsyncMock(return_value=edge)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.annotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges",
+            headers=_authed(token),
+            json={
+                "from": {"name": "svc-A", "kind": "vm"},
+                "kind": "depends-on",
+                "to": {"name": "db-1", "kind": "service"},
+                "note": "rebuilt-from-test",
+                "evidence_url": "https://example/INVENTORY.md#A",
+            },
+        )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["id"] == str(edge_id)
+    assert body["kind"] == "depends-on"
+    assert body["source"] == "curated"
+    assert body["from"]["name"] == "svc-A"
+    assert body["from"]["kind"] == "vm"
+    assert body["to"]["name"] == "db-1"
+
+    # The service is called with NodeRef wrappers carrying the JSON
+    # payload's name + kind hints; route owns the wire→dataclass coercion.
+    args = fake.call_args
+    assert args.args[2] == NodeRef(name="svc-A", kind="vm")
+    assert args.args[3] == "depends-on"
+    assert args.args[4] == NodeRef(name="db-1", kind="service")
+    assert args.kwargs == {
+        "note": "rebuilt-from-test",
+        "evidence_url": "https://example/INVENTORY.md#A",
+    }
+
+
+def test_annotate_edge_unknown_kind_returns_422(client: TestClient) -> None:
+    """Pydantic enum field rejects an unknown ``kind`` before the service runs."""
+    key, token = _admin_token_value()
+    fake = AsyncMock()
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.annotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges",
+            headers=_authed(token),
+            json={
+                "from": {"name": "a"},
+                "kind": "made-up-kind",
+                "to": {"name": "b"},
+            },
+        )
+    assert resp.status_code == 422
+    fake.assert_not_awaited()
+
+
+def test_annotate_edge_unknown_field_returns_422(client: TestClient) -> None:
+    """``extra='forbid'`` rejects typo'd body keys at the boundary."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges",
+            headers=_authed(token),
+            json={
+                "from": {"name": "a"},
+                "kind": "depends-on",
+                "to": {"name": "b"},
+                "evidnce_url": "https://typo",  # typo'd field name
+            },
+        )
+    assert resp.status_code == 422
+
+
+def test_annotate_edge_ambiguous_endpoint_returns_409(client: TestClient) -> None:
+    """``AmbiguousNodeError`` from the service maps to 409 ``ambiguous_node``."""
+    key, token = _admin_token_value()
+    fake = AsyncMock(side_effect=AmbiguousNodeError("svc-A", ["vm", "service"]))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.annotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges",
+            headers=_authed(token),
+            json={
+                "from": {"name": "svc-A"},
+                "kind": "depends-on",
+                "to": {"name": "db-1"},
+            },
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "ambiguous_node"
+    assert detail["name"] == "svc-A"
+    assert detail["kinds"] == ["service", "vm"]
+
+
+def test_annotate_edge_missing_endpoint_returns_404(client: TestClient) -> None:
+    """``NodeNotFoundError`` maps to 404 with the requested name + kind."""
+    key, token = _admin_token_value()
+    fake = AsyncMock(side_effect=NodeNotFoundError("ghost-host", "vm"))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.annotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges",
+            headers=_authed(token),
+            json={
+                "from": {"name": "ghost-host", "kind": "vm"},
+                "kind": "depends-on",
+                "to": {"name": "db-1"},
+            },
+        )
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert detail["error"] == "node_not_found"
+    assert detail["name"] == "ghost-host"
+    assert detail["kind"] == "vm"
+
+
+# --- DELETE /edges/{edge_id} — 204 + 409 + 404 -----------------------------
+
+
+async def test_unannotate_edge_admin_round_trip(client: TestClient) -> None:
+    """``tenant_admin`` DELETE invokes ``unannotate_edge`` by id, 204 on ok."""
+    key, token = _admin_token_value()
+    edge_id = uuid.uuid4()
+    fake = AsyncMock(return_value=edge_id)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.unannotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/edges/{edge_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 204
+    # The service is keyed on ``edge_id``; the route never passes the
+    # triple form (the path-param surface is id-only).
+    assert fake.call_args.kwargs == {"edge_id": edge_id}
+
+
+def test_unannotate_edge_auto_source_returns_409(client: TestClient) -> None:
+    """``AutoEdgeDeletionError`` maps to 409 with the auto edge's id + message."""
+    key, token = _admin_token_value()
+    edge_id = uuid.uuid4()
+    fake = AsyncMock(side_effect=AutoEdgeDeletionError(edge_id))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.unannotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/edges/{edge_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "auto_edge_deletion"
+    assert detail["edge_id"] == str(edge_id)
+    assert "auto" in detail["message"].lower()
+
+
+def test_unannotate_edge_missing_returns_404(client: TestClient) -> None:
+    """``ValueError`` from the service collapses to 404 (cross-tenant id same)."""
+    key, token = _admin_token_value()
+    edge_id = uuid.uuid4()
+    fake = AsyncMock(side_effect=ValueError("graph_edge not found in this tenant"))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.unannotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/edges/{edge_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert detail["error"] == "edge_not_found"
+    assert detail["edge_id"] == str(edge_id)
+
+
+def test_unannotate_edge_invalid_uuid_returns_422(client: TestClient) -> None:
+    """A non-UUID path segment is a 422 — FastAPI rejects before the handler."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            "/api/v1/topology/edges/not-a-uuid",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 422
+
+
+# --- GET /edges — filters + 409 + serialisation ----------------------------
+
+
+def test_list_edges_forwards_filters(client: TestClient) -> None:
+    """Every query param is forwarded as a keyword arg to ``list_edges``."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.list_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/edges?kind=depends-on&source=curated"
+            "&from=svc-A&to=db-1&conflicts=true&limit=50&offset=25",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    kwargs = fake.call_args.kwargs
+    assert kwargs == {
+        "kind": "depends-on",
+        "source": "curated",
+        "from_ref": "svc-A",
+        "to_ref": "db-1",
+        "conflicts_only": True,
+        "limit": 50,
+        "offset": 25,
+    }
+    # The tenant_id positional arg is taken from the JWT, not a query
+    # param — non-overrideable.
+    assert fake.call_args.args[1] == _TENANT_ID
+
+
+def test_list_edges_default_filters(client: TestClient) -> None:
+    """Defaults: ``limit=200``, ``offset=0``, ``conflicts_only=False``."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.list_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get("/api/v1/topology/edges", headers=_authed(token))
+    assert resp.status_code == 200, resp.text
+    kwargs = fake.call_args.kwargs
+    assert kwargs["limit"] == 200
+    assert kwargs["offset"] == 0
+    assert kwargs["conflicts_only"] is False
+    assert kwargs["kind"] is None
+    assert kwargs["source"] is None
+
+
+def test_list_edges_invalid_kind_returns_422(client: TestClient) -> None:
+    """Pydantic rejects an unknown ``kind`` query param."""
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/edges?kind=not-a-kind",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 422
+
+
+def test_list_edges_invalid_source_returns_422(client: TestClient) -> None:
+    """``source`` pattern restricts to ``auto`` / ``curated``."""
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/edges?source=banned",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 422
+
+
+def test_list_edges_limit_above_ceiling_returns_422(client: TestClient) -> None:
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/edges?limit=10000",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 422
+
+
+def test_list_edges_serialises_wire_shape(client: TestClient) -> None:
+    """The response body carries ``from`` / ``to`` endpoint objects + props."""
+    key, token = _token(TenantRole.OPERATOR)
+    edge_id = uuid.uuid4()
+    from_id, to_id = uuid.uuid4(), uuid.uuid4()
+    edge = TopologyEdge(
+        id=edge_id,
+        from_endpoint=TopologyEdgeEndpoint(id=from_id, kind="vm", name="svc-A"),
+        to_endpoint=TopologyEdgeEndpoint(id=to_id, kind="service", name="db-1"),
+        kind="depends-on",
+        source="curated",
+        properties={"note": "n", "conflicts_with": [str(uuid.uuid4())]},
+        last_seen=None,
+    )
+    fake = AsyncMock(return_value=[edge])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.list_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get("/api/v1/topology/edges", headers=_authed(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body) == 1
+    row = body[0]
+    assert row["id"] == str(edge_id)
+    assert row["from"]["name"] == "svc-A"
+    assert row["to"]["name"] == "db-1"
+    assert row["kind"] == "depends-on"
+    assert row["source"] == "curated"
+    # ``properties`` round-trips as a plain JSON dict; frozen at the
+    # Pydantic layer is irrelevant on the wire.
+    assert row["properties"]["note"] == "n"
+    assert isinstance(row["properties"]["conflicts_with"], list)
+
+
+def test_list_edges_ambiguous_from_returns_409(client: TestClient) -> None:
+    """An ambiguous ``from`` query param surfaces as 409 ``ambiguous_node``."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(side_effect=AmbiguousNodeError("svc-A", ["vm", "service"]))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.list_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/edges?from=svc-A",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "ambiguous_node"
+    assert detail["name"] == "svc-A"
+
+
+# --- Audit op-id binding (write class) -------------------------------------
+
+
+async def test_annotate_route_binds_write_op_id(client: TestClient) -> None:
+    """``POST /edges`` writes an ``audit_log`` row with op_id=topology.annotate +
+    op_class=write."""
+    key, token = _admin_token_value()
+    from_node = _make_graph_node(name="svc-A", kind="vm")
+    to_node = _make_graph_node(name="db-1", kind="service")
+    await _persist_node(from_node)
+    await _persist_node(to_node)
+    edge = _seeded_graph_edge(
+        edge_id=uuid.uuid4(),
+        from_node_id=from_node.id,
+        to_node_id=to_node.id,
+    )
+    fake = AsyncMock(return_value=edge)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.annotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges",
+            headers=_authed(token),
+            json={
+                "from": {"name": "svc-A", "kind": "vm"},
+                "kind": "depends-on",
+                "to": {"name": "db-1", "kind": "service"},
+            },
+        )
+    assert resp.status_code == 201, resp.text
+
+    rows = await _audit_rows_for_path("/api/v1/topology/edges")
+    # Only the POST has been issued against this path in this test;
+    # AuditMiddleware writes one row per request.
+    assert len(rows) == 1
+    payload = rows[0].payload or {}
+    assert payload.get("op_id") == "topology.annotate"
+    assert payload.get("op_class") == "write"
+
+
+async def test_unannotate_route_binds_write_op_id(client: TestClient) -> None:
+    """``DELETE /edges/{id}`` audit row carries op_id=topology.unannotate +
+    op_class=write."""
+    key, token = _admin_token_value()
+    edge_id = uuid.uuid4()
+    fake = AsyncMock(return_value=edge_id)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.unannotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/edges/{edge_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 204
+
+    rows = await _audit_rows_for_path(f"/api/v1/topology/edges/{edge_id}")
+    assert len(rows) == 1
+    payload = rows[0].payload or {}
+    assert payload.get("op_id") == "topology.unannotate"
+    assert payload.get("op_class") == "write"
+
+
+async def test_list_edges_route_binds_read_op_id(client: TestClient) -> None:
+    """``GET /edges`` audit row carries op_id=topology.list_edges +
+    op_class=read."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.list_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get("/api/v1/topology/edges", headers=_authed(token))
+    assert resp.status_code == 200
+
+    rows = await _audit_rows_for_path("/api/v1/topology/edges")
+    assert len(rows) == 1
+    payload = rows[0].payload or {}
+    assert payload.get("op_id") == "topology.list_edges"
+    assert payload.get("op_class") == "read"
+
+
+# ---------------------------------------------------------------------------
+# G9.2-T8 (#600) — bulk import
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_import_route_mounted_on_main_app() -> None:
+    """``POST /api/v1/topology/edges/bulk`` appears in the OpenAPI document."""
+    from meho_backplane.main import app as main_app
+
+    paths = main_app.openapi()["paths"]
+    assert "/api/v1/topology/edges/bulk" in paths
+    assert "post" in paths["/api/v1/topology/edges/bulk"]
+
+
+def test_bulk_import_unauthenticated_returns_401(client: TestClient) -> None:
+    resp = client.post(
+        "/api/v1/topology/edges/bulk",
+        json={"edges": [{"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}}]},
+    )
+    assert resp.status_code == 401
+
+
+def test_bulk_import_operator_returns_403(client: TestClient) -> None:
+    """``operator`` is below ``tenant_admin``; bulk must 403."""
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+                ]
+            },
+        )
+    assert resp.status_code == 403
+
+
+def test_bulk_import_empty_edges_returns_422(client: TestClient) -> None:
+    """``edges`` is non-empty (``min_length=1``)."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={"edges": []},
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_too_many_edges_returns_422(client: TestClient) -> None:
+    """The route caps the batch size at 1000 rows."""
+    key, token = _admin_token_value()
+    edges = [
+        {"from": {"name": f"a-{i}"}, "kind": "depends-on", "to": {"name": f"b-{i}"}}
+        for i in range(1001)
+    ]
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={"edges": edges},
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_unknown_kind_returns_422(client: TestClient) -> None:
+    """A typo'd ``kind`` is caught at the Pydantic boundary."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "made-up", "to": {"name": "b"}},
+                ]
+            },
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_unknown_field_returns_422(client: TestClient) -> None:
+    """``extra='forbid'`` rejects typo'd field names at the boundary."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {
+                        "from": {"name": "a"},
+                        "kind": "depends-on",
+                        "to": {"name": "b"},
+                        "evidnce_url": "https://typo",
+                    }
+                ]
+            },
+        )
+    assert resp.status_code == 422
+
+
+def test_bulk_import_admin_round_trip(client: TestClient) -> None:
+    """``tenant_admin`` POST calls ``bulk_import_edges`` and renders the response.
+
+    The service helper is stubbed out — the surface under test is the
+    route's coercion of the JSON body into :class:`BulkImportRow`
+    instances plus the response model shape. The integration suite
+    (T9-style) exercises the real service against a live DB; here we
+    only verify that the route's wire-shape contract holds.
+    """
+    from meho_backplane.topology.bulk_import import BulkEdgeResult, BulkImportResult
+
+    key, token = _admin_token_value()
+    fake_result = BulkImportResult(
+        dry_run=False,
+        created=1,
+        updated=1,
+        conflicts=0,
+        rows=[
+            BulkEdgeResult(
+                index=0,
+                action="create",
+                edge_id=str(uuid.uuid4()),
+                from_name="sa-a",
+                from_kind="principal",
+                to_name="vr-a",
+                to_kind="vault-role",
+                kind="authenticates-via",
+                superseded=[],
+                conflicts=[],
+            ),
+            BulkEdgeResult(
+                index=1,
+                action="update",
+                edge_id=str(uuid.uuid4()),
+                from_name="svc-orders",
+                from_kind="service",
+                to_name="db-orders",
+                to_kind="service",
+                kind="depends-on",
+                superseded=[],
+                conflicts=[],
+            ),
+        ],
+    )
+    fake = AsyncMock(return_value=fake_result)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.bulk_import_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {
+                        "from": {"name": "sa-a", "kind": "principal"},
+                        "kind": "authenticates-via",
+                        "to": {"name": "vr-a", "kind": "vault-role"},
+                    },
+                    {
+                        "from": {"name": "svc-orders", "kind": "service"},
+                        "kind": "depends-on",
+                        "to": {"name": "db-orders", "kind": "service"},
+                    },
+                ]
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["dry_run"] is False
+    assert body["created"] == 1
+    assert body["updated"] == 1
+    assert len(body["rows"]) == 2
+    assert body["rows"][0]["action"] == "create"
+    fake.assert_awaited_once()
+
+
+def test_bulk_import_dry_run_forwards_flag(client: TestClient) -> None:
+    """``dry_run=true`` is forwarded to the service kwarg."""
+    from meho_backplane.topology.bulk_import import BulkImportResult
+
+    key, token = _admin_token_value()
+    fake_result = BulkImportResult(dry_run=True, created=0, updated=0, conflicts=0, rows=[])
+    fake = AsyncMock(return_value=fake_result)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.bulk_import_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+                ],
+                "dry_run": True,
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["dry_run"] is True
+    assert fake.call_args.kwargs == {"dry_run": True}
+
+
+def test_bulk_import_validation_error_returns_422(client: TestClient) -> None:
+    """``BulkImportValidationError`` maps to 422 with the per-row error list."""
+    from meho_backplane.topology.bulk_import import (
+        BulkImportRowError,
+        BulkImportValidationError,
+    )
+
+    key, token = _admin_token_value()
+    fake = AsyncMock(
+        side_effect=BulkImportValidationError(
+            [
+                BulkImportRowError(
+                    index=1,
+                    error="node_not_found",
+                    message="node 'ghost' not found",
+                    name="ghost",
+                    kind="vm",
+                ),
+            ]
+        )
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.bulk_import_edges", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.post(
+            "/api/v1/topology/edges/bulk",
+            headers=_authed(token),
+            json={
+                "edges": [
+                    {"from": {"name": "a"}, "kind": "depends-on", "to": {"name": "b"}},
+                    {"from": {"name": "ghost"}, "kind": "depends-on", "to": {"name": "z"}},
+                ]
+            },
+        )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert detail["error"] == "invalid_bulk"
+    assert len(detail["errors"]) == 1
+    assert detail["errors"][0]["index"] == 1
+    assert detail["errors"][0]["error"] == "node_not_found"

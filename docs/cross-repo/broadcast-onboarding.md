@@ -150,11 +150,16 @@ be a privacy regression — the integration test
 [`test_broadcast_publisher.py`](../../backend/tests/test_broadcast_publisher.py)
 explicitly negative-asserts this.
 
-Future tightening (G6.3 #333-class follow-up): per-tenant
-opt-in/opt-out flags will let operators flip `credential_read` /
-`audit_query` to full-detail (e.g. for internal-only-trusted
-tenants). v0.2 ships conservative defaults; the toggle is a separate
-Initiative.
+Operator + admin overrides on top of the conservative default
+ship as G6.3 (Initiative
+[#376](https://github.com/evoila/meho/issues/376)). Two surfaces:
+the per-call `X-Broadcast-Detail: full` header (any operator, per
+request — upgrades a sensitive class to full detail for one call)
+and the durable `BroadcastOverride` rules (tenant admin, per
+tenant — downgrade or upgrade an op-class for the whole tenant or
+a scoped subset). See [`broadcast-overrides.md`](./broadcast-overrides.md)
+for the operator-side flag and admin-side CRUD recipes (CLI, REST,
+MCP).
 
 ## Authentication + RBAC
 

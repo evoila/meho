@@ -30,6 +30,12 @@
 //     `fingerprint` value in TargetCreate / TargetUpdate bodies
 //     via `model_config = ConfigDict(extra='forbid')`).
 //
+//   - `meho targets discover <product> [--seed-target <name>]
+//     [--json]` — GET /api/v1/targets/discover (G9.1-T6 / Task #454,
+//     the verb #256 explicitly deferred). Lists candidate targets
+//     every connector registered for `<product>` can reach but that
+//     are not yet registered; never auto-creates rows.
+//
 // Each verb wraps one or more backplane routes and renders the
 // response in either a human-readable form or `--json` mode.
 // Authentication piggybacks on the token meho login wrote — same
@@ -66,14 +72,15 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "targets",
-		Short:        "Operate the MEHO targets registry (list / describe / probe / import)",
-		Long:         "List, describe, probe, and bulk-import targets registered in the operator's tenant.",
+		Short:        "Operate the MEHO targets registry (list / describe / probe / import / discover)",
+		Long:         "List, describe, probe, bulk-import, and discover candidate targets in the operator's tenant.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newDescribeCmd())
 	cmd.AddCommand(newProbeCmd())
 	cmd.AddCommand(newImportCmd())
+	cmd.AddCommand(newDiscoverCmd())
 	return cmd
 }
 

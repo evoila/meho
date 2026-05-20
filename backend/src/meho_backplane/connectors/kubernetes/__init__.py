@@ -14,13 +14,16 @@ both the v1 single-product registry and the v2 three-tuple registry:
   removed by G0.6-T11 (#412); ``POST /api/v1/operations/call`` is the
   canonical dispatch surface.
 * **v2 entry** -- ``register_connector_v2(product="k8s",
-  version="1.x", impl_id="kubernetes-asyncio",
-  cls=KubernetesConnector)`` (G0.6-T2 #393). The v2 entry is what the
-  G0.6 dispatcher's
+  version="1.x", impl_id="k8s", cls=KubernetesConnector)``
+  (G0.6-T2 #393). The v2 entry is what the G0.6 dispatcher's
   :func:`~meho_backplane.connectors.resolver.resolve_connector` reads;
-  the ``connector_id="kubernetes-asyncio-1.x"`` produced by
+  the ``connector_id="k8s-1.x"`` produced by
   :func:`~meho_backplane.operations._lookup.parse_connector_id`
-  resolves through this entry.
+  resolves through this entry. The ``impl_id == product`` shape
+  mirrors the Vault sibling (single-impl typed connector pattern --
+  the library name ``kubernetes_asyncio`` lives in the package layout
+  + ``pyproject.toml`` dependency, not the registry's natural-key
+  triple).
 
 The registry is imported eagerly at app startup via
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
@@ -109,7 +112,7 @@ register_connector("k8s", KubernetesConnector)
 register_connector_v2(
     product="k8s",
     version="1.x",
-    impl_id="kubernetes-asyncio",
+    impl_id="k8s",
     cls=KubernetesConnector,
 )
 

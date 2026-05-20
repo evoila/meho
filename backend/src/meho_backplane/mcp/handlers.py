@@ -73,7 +73,7 @@ import json
 import time
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import jsonschema
 import structlog
@@ -81,7 +81,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast import (
     BroadcastEvent,
-    classify_op,
+    compute_effective_broadcast_detail,
     publish_event,
     redact_payload,
 )
@@ -115,6 +115,54 @@ _log = structlog.get_logger(__name__)
 #: this code to distinguish "I tried to read a resource that doesn't
 #: exist" from "I called a method the server doesn't support".
 _RESOURCE_NOT_FOUND: int = -32002
+
+
+def _read_mcp_broadcast_detail(raw_params: dict[str, Any]) -> Literal["full"] | None:
+    """Pull ``_meta.broadcast_detail`` out of an MCP method's ``params``.
+
+    G6.3-T3 (#380): MCP spec §Common/Utilities/_meta blesses ``_meta``
+    as the per-call metadata envelope. An operator opts into full
+    detail on a sensitive-class tool call (e.g. ``vault.kv.read``) by
+    sending::
+
+        {
+          "method": "tools/call",
+          "params": {
+            "name": "vault.kv.read",
+            "arguments": {"path": "secret/foo"},
+            "_meta": {"broadcast_detail": "full"}
+          }
+        }
+
+    Opt-in only -- per Initiative #376 DoD, only ``"full"`` is honored.
+    Any other value (including ``"aggregate"``, which would be a
+    "weaken via channel" request) is logged at ``info`` level under
+    ``mcp_broadcast_detail_invalid_meta`` and dropped silently -- the
+    request still succeeds and the broadcast uses the default detail.
+
+    Defensive accessors: a malformed ``_meta`` (not a dict, missing
+    entirely, contains the key with a wrong-type value) returns
+    ``None`` without raising. The fail-open contract is the same as
+    :func:`~meho_backplane.broadcast.publisher.publish_event` -- the
+    broadcast layer never converts a benign client mistake into an
+    operation failure.
+
+    Returns ``"full"`` when the operator opted in to full detail,
+    ``None`` otherwise. MCP path passes this value directly to
+    :func:`compute_effective_broadcast_detail` rather than threading
+    it through a contextvar -- handlers already pass :class:`Operator`
+    explicitly, so a parameter is more idiomatic than the structlog
+    contextvar shim the HTTP path uses.
+    """
+    meta = raw_params.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("broadcast_detail")
+    if raw == "full":
+        return "full"
+    if raw is not None:
+        _log.info("mcp_broadcast_detail_invalid_meta", value=raw)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +242,7 @@ async def handle_tools_call(
     raw_params = params or {}
     name = raw_params.get("name")
     arguments = raw_params.get("arguments", {})
+    request_override = _read_mcp_broadcast_detail(raw_params)
     start = time.monotonic()
     audit_payload: dict[str, Any] = {
         "op_id": name if isinstance(name, str) else "",
@@ -271,6 +320,69 @@ async def handle_tools_call(
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()
+        # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
+        # row commits so ``broadcast_detail_origin`` lands on the
+        # row's payload. The op_id is the tool name verbatim so
+        # :func:`classify_op` matches credential / audit / read /
+        # write suffixes correctly (e.g. ``vault.kv.read`` →
+        # ``credential_read`` → aggregate-only redacted payload by
+        # default).
+        #
+        # ``resolver_params`` merges the raw tool ``arguments`` on top
+        # of ``audit_payload`` so scope-matched override rules
+        # (``scope_field="namespace"`` keys into ``raw_params["namespace"]``,
+        # ``scope_field="target_name"`` keys into ``raw_params["target"]``)
+        # can match against the actual MCP call. The hashed
+        # ``audit_payload`` (``params_hash``) stays the persistence
+        # shape; the resolver-visible view also carries the unhashed
+        # arguments. Arguments win on key collision -- if a tool
+        # happens to define an ``op_class`` argument, the operator
+        # value would take precedence, but that overlap is a tool-
+        # naming bug T4's API layer can warn on later.
+        resolver_params: dict[str, Any] = dict(audit_payload)
+        if isinstance(arguments, dict):
+            resolver_params.update(arguments)
+        (
+            broadcast_op_class,
+            broadcast_detail,
+            broadcast_origin,
+        ) = await compute_effective_broadcast_detail(
+            op_id=audit_name,
+            tenant_id=operator.tenant_id,
+            raw_params=resolver_params,
+            request_override=request_override,
+        )
+        # Snapshot the broadcast-visible params BEFORE injecting the
+        # audit-only ``broadcast_detail_origin`` /
+        # ``broadcast_detail_effective`` keys. The audit row gets the
+        # augmented ``audit_payload``; the broadcast event reads
+        # ``broadcast_params`` so audit-internal metadata (origin,
+        # ``tenant_rule:<uuid>``, effective-detail enum) never reaches
+        # the broadcast feed.
+        broadcast_params = dict(resolver_params)
+        audit_payload["broadcast_detail_origin"] = broadcast_origin
+        # G6.3-T3 (#380): effective detail joins origin as an audit-
+        # only forensic field. Subscribers see ``detail`` through the
+        # rendered ``redact_payload`` shape; the audit row needs the
+        # raw enum for ``meho audit query`` filtering.
+        audit_payload["broadcast_detail_effective"] = broadcast_detail
+        # #704 strip-and-merge, applied to MCP path. Per-tool handlers
+        # bind ``audit_*`` contextvars (e.g. ``audit_override_op`` from
+        # G6.3-T5's broadcast-overrides verbs); the chassis HTTP route
+        # path merges them via :func:`audit._resolve_audit_payload` and
+        # the typed-op dispatcher path via
+        # :func:`operations._audit._build_audit_payload`. MCP was the
+        # third audit-write path missing the merge — the test
+        # ``test_set_via_mcp_writes_audit_row_with_override_diff``
+        # expects ``override_op``/``override_id``/``override_pattern``/
+        # ``override_detail`` to land on the row's payload.
+        _audit_prefix = "audit_"
+        for _k, _v in structlog.contextvars.get_contextvars().items():
+            if not _k.startswith(_audit_prefix) or _v is None:
+                continue
+            _stripped = _k[len(_audit_prefix) :]
+            if _stripped:
+                audit_payload.setdefault(_stripped, _v)
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,
@@ -299,17 +411,16 @@ async def handle_tools_call(
         # commit succeeds. ``publish_event`` is fail-open by contract,
         # so a Valkey wobble never converts an OK tool call into a
         # JSON-RPC -32603. Audit row is the canonical record; broadcast
-        # is the real-time view. The op_id is the tool name verbatim
-        # so :func:`classify_op` matches credential / audit / read /
-        # write suffixes correctly (e.g. ``vault.kv.read`` →
-        # ``credential_read`` → aggregate-only redacted payload).
+        # is the real-time view.
         await _publish_mcp_event(
             audit_id=audit_id,
             operator=operator,
             op_id=audit_name,
+            op_class=broadcast_op_class,
+            detail=broadcast_detail,
             audit_path=f"/mcp/tools/call/{audit_name}",
             status_code=status_code,
-            audit_payload=audit_payload,
+            audit_payload=broadcast_params,
         )
 
 
@@ -403,6 +514,7 @@ async def handle_resources_read(
     """
     raw_params = params or {}
     uri = raw_params.get("uri")
+    request_override = _read_mcp_broadcast_detail(raw_params)
     start = time.monotonic()
     audit_uri = uri if isinstance(uri, str) and uri else "<empty>"
     audit_payload: dict[str, Any] = {
@@ -457,6 +569,30 @@ async def handle_resources_read(
     finally:
         duration_ms = (time.monotonic() - start) * 1000
         audit_id = uuid.uuid4()
+        # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit
+        # row commits. The broadcast op_id is the generic
+        # ``mcp.resource.read`` (resource URIs are per-request unique
+        # and would explode the metric cardinality) so the resolver
+        # falls through to ``other`` op_class by default; tenant rules
+        # can still match via ``op_id_pattern="mcp.resource.*"``.
+        (
+            broadcast_op_class,
+            broadcast_detail,
+            broadcast_origin,
+        ) = await compute_effective_broadcast_detail(
+            op_id="mcp.resource.read",
+            tenant_id=operator.tenant_id,
+            raw_params=audit_payload,
+            request_override=request_override,
+        )
+        # Snapshot the broadcast-visible params BEFORE injecting the
+        # audit-only ``broadcast_detail_origin`` /
+        # ``broadcast_detail_effective`` keys -- same separation of
+        # audit-row and broadcast-event payloads as the tools/call
+        # path above.
+        broadcast_params = dict(audit_payload)
+        audit_payload["broadcast_detail_origin"] = broadcast_origin
+        audit_payload["broadcast_detail_effective"] = broadcast_detail
         try:
             await write_mcp_audit_row(
                 audit_id=audit_id,
@@ -476,19 +612,15 @@ async def handle_resources_read(
             )
             raise
         # G6.1-T3 publish-on-write hook for the resources/read path.
-        # Resource URIs are per-request unique (e.g. they embed
-        # tenant_id), so the broadcast op_id is the generic
-        # ``mcp.resource.read`` — :func:`classify_op` falls through
-        # to ``other`` (full-detail) which is correct: resources are
-        # not credential reads nor audit queries, just operator-facing
-        # GET-shape calls.
         await _publish_mcp_event(
             audit_id=audit_id,
             operator=operator,
             op_id="mcp.resource.read",
+            op_class=broadcast_op_class,
+            detail=broadcast_detail,
             audit_path=f"/mcp/resources/read/{audit_uri}",
             status_code=status_code,
-            audit_payload=audit_payload,
+            audit_payload=broadcast_params,
         )
 
 
@@ -518,6 +650,8 @@ async def _publish_mcp_event(
     audit_id: uuid.UUID,
     operator: Operator,
     op_id: str,
+    op_class: str,
+    detail: Literal["full", "aggregate"],
     audit_path: str,
     status_code: int,
     audit_payload: dict[str, Any],
@@ -540,12 +674,17 @@ async def _publish_mcp_event(
     keeps the per-URI path for forensic queries, while the broadcast
     event uses the tool-name (tools/call) or a stable
     ``mcp.resource.read`` constant (resources/read) so
-    :func:`classify_op` matches the sensitivity-class taxonomy
-    correctly without per-URI cardinality blowup on the
-    ``broadcast_events_published_total`` metric.
+    :func:`~meho_backplane.broadcast.events.classify_op` matches the
+    sensitivity-class taxonomy correctly without per-URI cardinality
+    blowup on the ``broadcast_events_published_total`` metric.
+
+    As of G6.3-T2 (#379) the *(op_class, detail)* pair is resolved
+    upstream by :func:`compute_effective_broadcast_detail`; this helper
+    no longer calls :func:`classify_op` or decides the redaction
+    branch. The split lets the resolver inject its decision-origin
+    into the audit row's payload *before* the audit write commits.
     """
     result_status = _classify_mcp_status(status_code)
-    op_class = classify_op(op_id)
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=datetime.now(UTC),
@@ -556,7 +695,7 @@ async def _publish_mcp_event(
         op_class=op_class,
         result_status=result_status,
         audit_id=audit_id,
-        payload=redact_payload(op_class, audit_payload, result_status),
+        payload=redact_payload(op_class, audit_payload, result_status, detail=detail),
     )
     # publish_event is itself fail-open; the wrap here is belt-and-
     # suspenders against an exception in BroadcastEvent construction

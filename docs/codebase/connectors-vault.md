@@ -30,8 +30,15 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   the shared `auth.vault` seams. `execute` is a thin shim that
   delegates to the G0.6 dispatcher (parameter validation, policy gate,
   audit, broadcast, JSONFlux) so pre-G0.6 callers keep working.
-- **`VaultTarget`** (`connector.py`) — pre-G0.3 stand-in for the
-  `Target` model; carries only `raw_jwt`.
+- **Operator-aware JWT (G0.8-T3 #629)** — the operator's bearer token
+  is request-scoped state on the `Operator` the dispatcher threads to
+  handlers whose signature names an `operator` parameter
+  (`operations/_branches.py::dispatch_typed`). The Vault handlers read
+  `operator.raw_jwt`; the token is **never** read off the persisted
+  `Target` (a per-request bearer must not live on a shared, persisted
+  target row). The pre-G0.3 `VaultTarget` stub that carried `raw_jwt`
+  was deleted by #629; `probe`/`fingerprint`/`execute` are typed
+  against the real `targets.schemas.Target | None`.
 - **KV-v2 op group** (`ops.py`) — `register_vault_typed_operations()`
   registers the `vault.kv.*` surface (G0.6-T-Refactor shipped
   `vault.kv.read`; G3.3-T1 #545 adds list/put/versions/delete). Group
@@ -265,10 +272,12 @@ and a real Postgres audit store (reusing the integration conftest's
 
 ## Known issues
 
-- `VaultTarget` is a pre-G0.3 placeholder; replace with the real
-  `Target` model once G0.3 (#224) connection-parameter resolution
-  lands. Connection params (address/namespace/timeout) currently come
-  from `get_settings()`, not the target.
+- Connection params (address/namespace/timeout) come from
+  `get_settings()`, not the target — Vault is a deployment-level
+  singleton in v0.2, so `probe`/`fingerprint` accept `Target | None`
+  and ignore the value. (The pre-G0.3 `VaultTarget` stub was removed
+  by G0.8-T3 #629; the operator JWT now comes from request-scoped
+  `Operator` context, not a persisted target field.)
 - `vault.sys.seal_status` is unauthenticated on Vault's side but is
   routed through `vault_client_for_operator` for uniform per-operator
   audit attribution — at the cost of one extra OIDC login + revoke per

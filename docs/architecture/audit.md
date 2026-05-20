@@ -97,6 +97,24 @@ Both gaps are downstream of T4 and disclosed in #468's PR body (#505). T5's acce
 
 The REST surface emits `op_id="meho.audit.query"` (the canonical, bound via the `audit_op_id` contextvar override the chassis honors). The MCP surface emits `op_id="query_audit"` (the tool name verbatim, per the MCP dispatcher convention at [`mcp/handlers.py:199`](../../backend/src/meho_backplane/mcp/handlers.py)). Same logical operation; different identifiers per dispatch path. Operators forensically searching `audit_log` for "all audit-query calls regardless of surface" today need to OR both op_ids. Unifying via a `ToolDefinition.audit_op_id` override field or a tool rename is a v0.2.next surface.
 
+## Audit-row channel convention (HTTP / MCP / INTERNAL)
+
+The `audit_log.method` column is the **channel** the row was written from; `audit_log.path` is the **op identifier within that channel**. The split keeps audit-query filters partitionable by surface without joining on `path`, and stays auditable as new background-process writers land.
+
+| `method` literal | Channel | Writer | Example `path` |
+|---|---|---|---|
+| `GET` / `POST` / `PATCH` / `DELETE` / etc. | Chassis HTTP | [`audit.py::_write_audit_row`](../../backend/src/meho_backplane/audit.py) (called by `AuditMiddleware`) | The HTTP route, e.g. `/api/v1/memory/{scope}/{slug}` |
+| `MCP` | MCP JSON-RPC dispatch | [`mcp/audit.py::write_mcp_audit_row`](../../backend/src/meho_backplane/mcp/audit.py) (called by the per-op handler) | `/mcp/tools/call/{tool_name}` or `/mcp/resources/read/{uri}` |
+| `INTERNAL` | Background-process / system | [`memory/audit.py::write_internal_audit_row`](../../backend/src/meho_backplane/memory/audit.py) (called by lifespan-owned tasks) | The op identifier, e.g. `memory.expire` |
+
+`operator_sub` on every `INTERNAL` row is a stable synthetic identity (e.g. `"system"` for the G5.2-T1 memory-expiry sweeper; future writers should pick a stable name like `"system:retention-sweeper"`). Audit-query filters partition system-driven rows from operator-driven rows by `method = 'INTERNAL'` rather than by parsing `operator_sub`.
+
+### Known `INTERNAL` `path` values
+
+- `memory.expire` — the G5.2-T1 memory-expiry sweeper (#623). One row per affected tenant per sweep tick; payload is `{"expired_count": <int>, "scopes": ["memory-user", ...]}`. Forward reference for [G8.2 #219](https://github.com/evoila/meho/issues/219): `meho audit query --op memory.expire` will pick these rows up by path when the verb ships.
+
+The convention is closed-set on the *channel* axis (HTTP / MCP / INTERNAL is the trichotomy) and open-set on the *op-id* axis (every new background writer reserves a new `path` value, documented in this section before the writer lands). The G6.1 sensitivity classifier treats `method = 'INTERNAL'` rows as non-sensitive by default (a system row reaping expired memory carries no operator intent to leak); writers handling tenant-sensitive payloads should request an `op_class` override via the same contextvar mechanism the HTTP path uses.
+
 ## Sibling Initiative
 
 [G8.2 (#377)](https://github.com/evoila/meho/issues/377) — audit replay (`meho audit replay <session-id>`) — builds a recursive-CTE traversal on top of the `parent_audit_id` filter shipped in [T1 (#465)](https://github.com/evoila/meho/issues/465). G8.1 ships the filter (which raises `UnsupportedFilterError` in v0.2 because the column hasn't landed yet); G8.2 ships the schema column, the recursive traversal, and the operator-facing `replay` verb. The split keeps each Initiative shippable on its own clock.

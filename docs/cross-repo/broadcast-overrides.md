@@ -63,19 +63,34 @@ double-rotates a secret.
 
 The `meho` CLI does not yet expose a per-call broadcast-detail
 flag (tracked as a future enhancement). Until that lands, attach
-the `X-Broadcast-Detail: full` header directly via `curl` or any
-programmatic HTTP client:
+the `X-Broadcast-Detail: full` header directly to the chassis
+operations dispatcher (`POST /api/v1/operations/call`) via `curl`
+or any programmatic HTTP client. Connector ops -- vault, k8s,
+vsphere, bind9 -- all reach the backend through this one route;
+there is no dedicated per-connector REST surface to target:
 
 ```console
-$ curl -sS -X GET https://meho.example.com/api/v1/vault/kv/list \
+$ curl -sS -X POST https://meho.example.com/api/v1/operations/call \
     -H "Authorization: Bearer $MEHO_TOKEN" \
+    -H "Content-Type: application/json" \
     -H "X-Broadcast-Detail: full" \
-    --get --data-urlencode 'path=secret/prod/svc-payments'
+    -d '{
+      "connector_id": "vault",
+      "op_id": "vault.kv.list",
+      "target": {"name": "rdc-vault"},
+      "params": {"path": "secret/prod/svc-payments"}
+    }'
 
-$ curl -sS -X GET https://meho.example.com/api/v1/vault/kv/read \
+$ curl -sS -X POST https://meho.example.com/api/v1/operations/call \
     -H "Authorization: Bearer $MEHO_TOKEN" \
+    -H "Content-Type: application/json" \
     -H "X-Broadcast-Detail: full" \
-    --get --data-urlencode 'path=secret/prod/svc-payments/db-password'
+    -d '{
+      "connector_id": "vault",
+      "op_id": "vault.kv.read",
+      "target": {"name": "rdc-vault"},
+      "params": {"path": "secret/prod/svc-payments/db-password"}
+    }'
 ```
 
 The SSE feed for the tenant now shows:
@@ -158,17 +173,27 @@ when they need the upgrade:
 
 ```console
 # Audit-query against a backplane, asking for full detail on the broadcast event.
+# This route DOES exist as a dedicated REST surface
+# (backend/src/meho_backplane/api/v1/audit.py).
 $ curl -sS -X POST https://meho.example.com/api/v1/audit/query \
     -H "Authorization: Bearer $MEHO_TOKEN" \
     -H "Content-Type: application/json" \
     -H "X-Broadcast-Detail: full" \
     -d '{"since": "24h", "limit": 50}'
 
-# Vault KV read with full-detail opt-in.
-$ curl -sS -X GET https://meho.example.com/api/v1/vault/kv/read \
+# Vault KV read with full-detail opt-in -- dispatched through the
+# generic operations route. No /api/v1/vault/* surface exists; the
+# dispatcher resolves the connector + target + op id from the body.
+$ curl -sS -X POST https://meho.example.com/api/v1/operations/call \
     -H "Authorization: Bearer $MEHO_TOKEN" \
+    -H "Content-Type: application/json" \
     -H "X-Broadcast-Detail: full" \
-    --get --data-urlencode 'path=secret/prod/svc-payments/db-password'
+    -d '{
+      "connector_id": "vault",
+      "op_id": "vault.kv.read",
+      "target": {"name": "rdc-vault"},
+      "params": {"path": "secret/prod/svc-payments/db-password"}
+    }'
 ```
 
 Verifying the header landed: after the call, the row's audit
@@ -304,7 +329,7 @@ MCP:
 }
 ```
 
-## Forensics — answering "who flipped this"
+## Forensics
 
 Every broadcast decision lands in the audit row's `payload` JSON
 under two keys:

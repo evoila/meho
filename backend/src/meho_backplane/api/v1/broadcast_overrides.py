@@ -235,21 +235,24 @@ def _bind_remove_audit(*, override_id: uuid.UUID) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Handlers
+# Implementation functions
 # ---------------------------------------------------------------------------
+#
+# Extracted from the route handlers so the G6.3-T5 admin MCP tools
+# (``meho.broadcast.overrides.list|set|remove``) can call into the same
+# code path in-process. The route handlers below are thin wrappers
+# around these; the MCP tools call them with a transient session +
+# concrete :class:`Operator`. Same RBAC (every call site is gated by
+# ``require_role(TENANT_ADMIN)``), same audit + cache-invalidation
+# hooks, same :class:`HTTPException` shapes (the MCP tool wraps those
+# into ``McpInvalidParamsError`` for the JSON-RPC envelope).
 
 
-@router.get("", response_model=list[BroadcastOverrideRead])
-async def list_overrides(
-    operator: Annotated[Operator, _require_tenant_admin],
-    session: Annotated[AsyncSession, Depends(get_session)],
-    op_id_pattern: Annotated[
-        str | None,
-        Query(
-            max_length=128,
-            description="Exact-match filter on op_id_pattern (not a glob match).",
-        ),
-    ] = None,
+async def list_overrides_impl(
+    *,
+    operator: Operator,
+    session: AsyncSession,
+    op_id_pattern: str | None = None,
 ) -> list[BroadcastOverride]:
     """List override rules owned by the operator's tenant.
 
@@ -271,15 +274,11 @@ async def list_overrides(
     return list(result.scalars().all())
 
 
-@router.post(
-    "",
-    response_model=BroadcastOverrideRead,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_override(
+async def create_override_impl(
+    *,
     payload: BroadcastOverrideCreate,
-    operator: Annotated[Operator, _require_tenant_admin],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    operator: Operator,
+    session: AsyncSession,
 ) -> BroadcastOverride:
     """Create an override rule; broadcasts as ``op_class=write``.
 
@@ -307,13 +306,20 @@ async def create_override(
         # propagate so a genuine corruption surfaces as a 500 rather
         # than a misleading "already exists" message.
         #
-        # PG: ``UniqueViolation`` carries ``pgcode == "23505"`` (per
-        # PEP 249's psycopg shape). SQLite: the
+        # PG via asyncpg: ``PostgresError`` exposes the SQLSTATE code
+        # through ``orig.sqlstate`` -- asyncpg's exceptions/_base.py
+        # field map binds character ``'C'`` to ``sqlstate`` (not
+        # ``pgcode``). The earlier ``pgcode`` check was inherited from
+        # the psycopg2 shape and silently returned ``None`` against
+        # asyncpg; SQLite tests passed only via the substring fallback
+        # below. The ``pgcode`` fallback survives in case a future
+        # psycopg-based wiring shows up. SQLite: the
         # ``UNIQUE constraint failed`` substring is the documented
         # form (sqlite.org/lang_conflict.html). Both dialects covered.
-        pgcode = getattr(getattr(exc, "orig", None), "pgcode", None)
-        orig_msg = str(getattr(exc, "orig", exc))
-        is_unique_violation = pgcode == "23505" or "UNIQUE constraint failed" in orig_msg
+        orig = getattr(exc, "orig", None)
+        sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+        orig_msg = str(orig or exc)
+        is_unique_violation = sqlstate == "23505" or "UNIQUE constraint failed" in orig_msg
         if is_unique_violation:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -333,11 +339,11 @@ async def create_override(
     return row
 
 
-@router.delete("/{override_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_override(
+async def delete_override_impl(
+    *,
     override_id: uuid.UUID,
-    operator: Annotated[Operator, _require_tenant_admin],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    operator: Operator,
+    session: AsyncSession,
 ) -> None:
     """Delete an override rule owned by the operator's tenant.
 
@@ -367,3 +373,60 @@ async def delete_override(
         )
     _bind_remove_audit(override_id=override_id)
     invalidate_tenant_cache(operator.tenant_id)
+
+
+# ---------------------------------------------------------------------------
+# Route handlers
+# ---------------------------------------------------------------------------
+
+
+@router.get("", response_model=list[BroadcastOverrideRead])
+async def list_overrides(
+    operator: Annotated[Operator, _require_tenant_admin],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    op_id_pattern: Annotated[
+        str | None,
+        Query(
+            max_length=128,
+            description="Exact-match filter on op_id_pattern (not a glob match).",
+        ),
+    ] = None,
+) -> list[BroadcastOverride]:
+    """List override rules owned by the operator's tenant."""
+    return await list_overrides_impl(
+        operator=operator,
+        session=session,
+        op_id_pattern=op_id_pattern,
+    )
+
+
+@router.post(
+    "",
+    response_model=BroadcastOverrideRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_override(
+    payload: BroadcastOverrideCreate,
+    operator: Annotated[Operator, _require_tenant_admin],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> BroadcastOverride:
+    """Create an override rule; broadcasts as ``op_class=write``."""
+    return await create_override_impl(
+        payload=payload,
+        operator=operator,
+        session=session,
+    )
+
+
+@router.delete("/{override_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_override(
+    override_id: uuid.UUID,
+    operator: Annotated[Operator, _require_tenant_admin],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> None:
+    """Delete an override rule owned by the operator's tenant."""
+    await delete_override_impl(
+        override_id=override_id,
+        operator=operator,
+        session=session,
+    )

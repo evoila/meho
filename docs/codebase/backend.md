@@ -264,6 +264,33 @@ this stage it exposes:
   `--json` output, `--op-id-pattern` filter on list, and the same
   scope-pair check applied client-side so operators get an
   immediate error rather than a remote 422 round-trip.
+* Admin MCP override-CRUD tools (G6.3-T5 #382) — three
+  `tenant_admin` admin tools `meho.broadcast.overrides.list|set|remove`
+  in `src/meho_backplane/mcp/tools/broadcast_overrides.py` that mirror
+  T4's REST surface onto MCP. Each handler opens a transient
+  `AsyncSession` via `get_sessionmaker()` and calls into the same `*_impl`
+  functions T4 extracted from its route handlers
+  (`list_overrides_impl` / `create_override_impl` /
+  `delete_override_impl`), so audit-row binding, cache
+  invalidation, and the cross-tenant 404 invariant behave
+  identically across the REST and MCP transports.
+  `HTTPException` raised by the impl (409 duplicate, 404 not
+  found) translates to `McpInvalidParamsError` → JSON-RPC
+  `-32602` "Invalid params" with the FastAPI detail string
+  preserved (`broadcast_override_already_exists` /
+  `broadcast_override_not_found`). The set handler re-runs
+  arguments through `BroadcastOverrideCreate.model_validate` so
+  the scope-pair invariant and the glob-not-regex blacklist run
+  for MCP callers identically to REST callers. RBAC is enforced
+  at two layers — `required_role=TenantRole.TENANT_ADMIN` hides
+  the three tools from `tools/list` for non-admin operators via
+  `registry.py::all_tools_for`, and `handlers.py::handle_tools_call`
+  re-checks at call time so a non-admin that knows the literal
+  tool name still gets `-32602` with detail `forbidden: …
+  requires a higher role`. The override-management surface is
+  deliberately outside the narrow-waist agent surface per
+  CLAUDE.md postulate 5; pattern matches the existing
+  `connector_admin.py` admin-namespace precedent.
 * Operation dispatch (G0.6-T8 #399) —
   `src/meho_backplane/api/v1/operations.py` exposes
   `POST /api/v1/operations/call` plus the discovery routes

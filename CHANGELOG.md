@@ -50,6 +50,43 @@ shipped and why it matters — not a dump of commit subjects.
   - **Removed** — features removed in this release.
   - **Fixed** — bug fixes.
   - **Security** — vulnerability fixes; flag CVE / advisory.
+  - **Breaking changes** — schema renames, body-shape changes, removed
+    endpoints, or any other contract change that requires adopters to
+    update their client code. Each bullet includes a migration recipe
+    (the smallest concrete edit a v(N-1) client makes to keep working
+    on v(N)). Surfaces above `Added` in the release section so
+    adopters reading top-to-bottom see migrations before features.
+
+**Connector release-notes convention.** Distinguish three connector
+ship states; release-notes / kb / Goal-tracker text must say which
+state the release ships, not the next state up. Full rubric in
+[`docs/codebase/connector-release-readiness.md`](docs/codebase/connector-release-readiness.md).
+
+- **Dispatch + catalog landed.** Connector class registered, ops
+  register into `endpoint_descriptor`, `search_operations` indexes
+  them, per-op `description` / `safety_level` / `requires_approval`
+  metadata is curated, integration tests with **injected loaders**
+  pass. Production execution against real per-target Vault
+  credentials does NOT yet work. Language: *"Kubernetes typed
+  connector dispatch + catalog (13 ops indexed; loader wiring tracked
+  under #214)."*
+- **Loader wired (single auth model).** As above, plus the default
+  loader reads real operator-context per-target Vault credentials for
+  one `auth_model`. Production dispatch executes end-to-end for
+  targets with that auth_model. Language: *"Kubernetes typed
+  connector — `service_account` auth model live; `per_user` auth
+  model tracked under #N."*
+- **Ops curated for production.** All advertised auth_models live;
+  per-op descriptions + safety annotations make the op
+  LLM-discoverable; onboarding doc validates against a real deploy.
+  Language: *"vault-1.x typed op surface ready for production
+  (`jwt-federated` auth model, full ops catalog)."*
+
+The k3d / testcontainers / mock-loader integration test does not
+promote a connector across these states. Promotion is per-auth-model
+and requires the loader to read real Vault per real-target
+credentials. Mention the live auth-model set explicitly on every
+connector-related release-notes line.
 
 ## [Unreleased]
 
@@ -61,6 +98,69 @@ landed against the green-but-hollow class of failure that surfaced
 during the closure push: dispatcher MRO-aware binding, registration-
 time `handler_ref` resolvability guard, and the `Python (integration
 testcontainers)` lane is now a required merge gate.
+
+> **What v0.3.0 ships for the new connectors (k8s / bind9-ssh / vault / vmware-rest):**
+> dispatch + catalog + per-op metadata + safety annotations + `search_operations` indexing
+> + integration-test coverage (against injected loaders for k8s + vmware-rest, against
+> real Vault for the existing `vault-1.x` connector). The bind9-ssh connector executes
+> end-to-end against a real bind9 SSH target.
+>
+> **What v0.3.0 does NOT ship for the per-target-credential connectors (k8s + vmware-rest):**
+> the loader that reads operator-context per-target Vault credentials. Both
+> `load_kubeconfig_from_vault` and `load_session_credentials_from_vault` remain
+> `NotImplementedError` stubs in production, tracked under the open
+> [Goal #214 (Connector parity)](https://github.com/evoila/meho/issues/214).
+>
+> Adopters running a v0.3.0 deploy with `operations/call k8s.namespace.list target=...`
+> against a real Vault-backed target will receive `NotImplementedError` — not
+> "the connector works." The catalog is real and indexed; production execution
+> needs Goal #214 to land per-connector. See
+> [`docs/codebase/connector-release-readiness.md`](docs/codebase/connector-release-readiness.md)
+> for the three-state rubric (dispatch + catalog / loader wired / ops curated).
+
+### Breaking changes
+
+Amended 2026-05-20 ([#735](https://github.com/evoila/meho/issues/735)) after the
+RDC operator-team dogfood surfaced two v0.2.1 → v0.3.0 schema changes
+that shipped without CHANGELOG coverage. Both affect adopters who
+authored v0.2.1 client code against the public REST surface.
+
+- **`POST /api/v1/operations/call` — `target` field shape.** Changed
+  from bare string to object descriptor. A v0.2.1 client encoding
+  `target: "rdc-vault"` now gets HTTP 422 (`dict_type`) on first call
+  after upgrade.
+
+  Migration (one-character change per call site):
+
+  ```diff
+  - {"op_id": "vault.kv.read", "target": "rdc-vault", "params": {...}}
+  + {"op_id": "vault.kv.read", "target": {"name": "rdc-vault"}, "params": {...}}
+  ```
+
+  The new shape accepts the full target descriptor — `name`, `id`, or
+  fingerprint-match — via the G0.3 target-resolver. The old bare-string
+  shape is not aliased; aliasing was considered and rejected (see
+  [#729 (T2)](https://github.com/evoila/meho/issues/729) which tightens
+  `extra="forbid"` across all v1 schemas — extending an alias would
+  cut against that direction).
+
+- **`POST /api/v1/retrieve` — field renames.** `q` → `query`;
+  `top_k` → `limit`. A v0.2.1 client sending the old names will receive
+  HTTP 422 once [#729 (T2 — `extra="forbid"`)](https://github.com/evoila/meho/issues/729)
+  lands; until then the old names silently fall back to defaults
+  (`query=""`, `limit=10`) and the retrieve call returns unrelated results.
+
+  Migration:
+
+  ```diff
+  - {"q": "vault rotation", "top_k": 20}
+  + {"query": "vault rotation", "limit": 20}
+  ```
+
+  `query` aligns the retrieve surface with the agent-facing
+  `search_operations(connector_id, query)` vocabulary already used
+  through MCP; `limit` is the Keep-a-REST convention for pagination
+  size and aligns with the `list_operations` / `list_targets` surfaces.
 
 ### Added
 

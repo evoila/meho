@@ -75,7 +75,15 @@ func doSubmit(cmd *cobra.Command, backplaneOverride string, plans []migrate.Subm
 			if errors.Is(err, errAborted) {
 				break
 			}
-			return fmt.Errorf("entry %s: %w", p.Slug, err)
+			fmt.Fprintln(cmd.OutOrStdout(), res.String())
+			// Route the permanent error through renderSubmitError so the
+			// exit code reflects the failure class (auth_expired=2 for
+			// expired/missing/refresh-rejected tokens, unexpected=4 for
+			// other non-2xx, unreachable=3 for transport errors). Without
+			// this, every permanent error would exit 1 — same code as a
+			// generic CLI error — and `meho migrate memory` in a cron job
+			// would be indistinguishable from an unrelated CLI flag bug.
+			return renderSubmitError(cmd, backplaneURL, err)
 		}
 	}
 
@@ -137,9 +145,11 @@ func postWithRetry(
 
 		if !isTransient(postErr) {
 			res.Errored++
-			fmt.Fprintf(cmd.ErrOrStderr(),
-				"meho migrate memory: permanent error for %s: %v\n", plan.Slug, postErr)
-			return fmt.Errorf("permanent error for %s: %w", plan.Slug, postErr)
+			// Bubble the raw error up — doSubmit routes it through
+			// renderSubmitError for proper exit-code classification.
+			// fmt.Errorf with %w preserves errors.As(_, *httpError) so
+			// renderSubmitError can pick the right exit class.
+			return fmt.Errorf("entry %s: %w", plan.Slug, postErr)
 		}
 
 		// Transient error: auto-retry in non-interactive mode.

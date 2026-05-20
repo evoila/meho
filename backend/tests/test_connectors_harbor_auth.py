@@ -134,7 +134,7 @@ def test_default_credentials_loader_raises_until_g03_lands() -> None:
     from meho_backplane.connectors.harbor.session import load_credentials_from_vault
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"G0\.3"):
+        with pytest.raises(NotImplementedError, match=r"Goal #214"):
             await load_credentials_from_vault(_TARGET_A)
 
     asyncio.run(_check())

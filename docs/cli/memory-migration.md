@@ -77,8 +77,8 @@ The picker pre-selects a scope based on the file's `type` front-matter field:
 |--------|----------------|-----------|
 | `user` | `user` | Personal workflow knowledge — scoped to you. |
 | `feedback` | `user` | Coding preferences — personal by default. |
-| `project` | `user×target` | Project context — tied to the current target. |
-| `reference` | `user×tenant` | Stable reference — shared within the tenant. |
+| `project` | `user×tenant` | Project context — tied to the current tenant. |
+| `reference` | `user` | Stable reference — personal by default. |
 | *(unset / other)* | `user` | Conservative default. |
 
 You can override the suggested scope in the interactive picker. The full 5-scope

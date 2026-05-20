@@ -225,4 +225,3 @@ func sourceID(plan migrate.SubmitPlan) string {
 	}
 	return "laptop-migration/" + prefix
 }
-

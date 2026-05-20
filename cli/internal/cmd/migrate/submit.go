@@ -58,9 +58,8 @@ const maxAutoRetry = 3
 // to avoid opening /dev/tty in a headless environment.
 var runSpinnerFn = func(sp *spinner.Spinner) error { return sp.Run() }
 
-// doSubmit orchestrates spinner progress, per-entry POST with
-// retry/skip/abort handling, and the final summary line. nonInteractive
-// controls whether a transient error prompts the user or auto-retries.
+// doSubmit orchestrates per-entry submission. The interactive error prompt runs
+// outside the spinner to avoid concurrent tea programs sharing the same TTY.
 func doSubmit(cmd *cobra.Command, backplaneOverride string, plans []migrate.SubmitPlan) error {
 	backplaneURL, err := resolveBackplaneURL(backplaneOverride)
 	if err != nil {
@@ -68,41 +67,36 @@ func doSubmit(cmd *cobra.Command, backplaneOverride string, plans []migrate.Subm
 	}
 
 	nonInteractive, _ := cmd.Flags().GetBool("non-interactive")
-
 	var res submitResult
 
-	sp := spinner.New().
-		Title(fmt.Sprintf("Migrating %d entries…", len(plans))).
-		ActionWithErr(func(ctx context.Context) error {
-			for i := range plans {
-				p := plans[i]
-				slug := p.Slug
-				if err := postWithRetry(ctx, cmd, backplaneURL, p, nonInteractive, &res); err != nil {
-					if errors.Is(err, errAborted) {
-						return nil
-					}
-					return fmt.Errorf("entry %s: %w", slug, err)
-				}
+	for i := range plans {
+		p := plans[i]
+		if err := postWithRetry(cmd, backplaneURL, p, nonInteractive, &res); err != nil {
+			if errors.Is(err, errAborted) {
+				break
 			}
-			return nil
-		})
-
-	if err := runSpinnerFn(sp); err != nil {
-		return err
+			return fmt.Errorf("entry %s: %w", p.Slug, err)
+		}
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), res.String())
+	if res.Errored > 0 {
+		noun := "entries"
+		if res.Errored == 1 {
+			noun = "entry"
+		}
+		return fmt.Errorf("meho migrate memory: %d %s failed to migrate", res.Errored, noun)
+	}
 	return nil
 }
 
 var errAborted = errors.New("migration aborted by user")
-var errSkip = errors.New("entry skipped")
 
-// postWithRetry POSTs one plan entry, retrying on transient errors.
-// In interactive mode a prompt offers Retry / Skip / Abort.
-// In non-interactive mode, auto-retries up to maxAutoRetry then skips.
+// postWithRetry submits one plan entry. In non-interactive mode it auto-retries
+// on transient errors (up to maxAutoRetry attempts). In interactive mode, each
+// attempt runs inside its own spinner; the Retry/Skip/Abort prompt is presented
+// outside the spinner so no two tea programs run concurrently.
 func postWithRetry(
-	ctx context.Context,
 	cmd *cobra.Command,
 	backplaneURL string,
 	plan migrate.SubmitPlan,
@@ -125,7 +119,17 @@ func postWithRetry(
 	attempt := 0
 	for {
 		attempt++
-		_, postErr := doAuthedRequest(ctx, backplaneURL, http.MethodPost, "/api/v1/memory", raw)
+		var postErr error
+		sp := spinner.New().
+			Title(fmt.Sprintf("Migrating %q…", plan.Slug)).
+			ActionWithErr(func(ctx context.Context) error {
+				_, postErr = doAuthedRequest(ctx, backplaneURL, http.MethodPost, "/api/v1/memory", raw)
+				return nil
+			})
+		if err := runSpinnerFn(sp); err != nil {
+			return err
+		}
+
 		if postErr == nil {
 			res.Migrated++
 			return nil
@@ -135,12 +139,12 @@ func postWithRetry(
 			res.Errored++
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"meho migrate memory: permanent error for %s: %v\n", plan.Slug, postErr)
-			return nil
+			return fmt.Errorf("permanent error for %s: %w", plan.Slug, postErr)
 		}
 
-		// Transient error handling.
+		// Transient error: auto-retry in non-interactive mode.
 		if nonInteractive {
-			if attempt < maxAutoRetry {
+			if attempt <= maxAutoRetry {
 				res.Retried++
 				continue
 			}
@@ -151,7 +155,7 @@ func postWithRetry(
 			return nil
 		}
 
-		// Interactive prompt.
+		// Interactive mode: prompt runs outside the spinner (no concurrent tea programs).
 		var choice string
 		prompt := huh.NewSelect[string]().
 			Title(fmt.Sprintf("Error migrating %q: %v", plan.Slug, postErr)).

@@ -171,13 +171,86 @@ type RetrieveResponse struct {
 // rememberRequest mirrors the backend `RememberBody` pydantic model
 // (`backend/src/meho_backplane/api/v1/memory.py` L174-211). Fields
 // without JSON `omitempty` are mandatory at the wire level.
+//
+// `Persist` is a tri-state escape-hatch for the `expires_at` field
+// the backend's G5.2-T2 (#624) default-TTL injection key on:
+//
+//   - Persist=false, ExpiresAt="" → field is OMITTED from the JSON;
+//     the backend's :func:`_resolve_default_ttl` sees the field as
+//     absent from :attr:`BaseModel.model_fields_set` and injects
+//     “now + memory_user_default_ttl_days“ on “memory-user“ writes.
+//   - Persist=false, ExpiresAt="<RFC3339>" → field is sent verbatim;
+//     the backend honours it as the explicit cutoff.
+//   - Persist=true → field is emitted as explicit JSON `null`; the
+//     backend sees the field as present in
+//     :attr:`BaseModel.model_fields_set` with value None and skips
+//     the default. This is the wire shape `meho remember --persist`
+//     uses to opt out of the auto-TTL and pin the memory forever.
+//
+// The marshaling can't ride on Go's `,omitempty` semantics alone
+// because `*string`+`omitempty` collapses nil-pointer and empty-
+// string into "omit", whereas the backend's contract distinguishes
+// "absent field" (default fires) from "explicit null" (default
+// skipped). The custom :func:`MarshalJSON` below is the load-bearing
+// gate for the three-state discipline.
 type rememberRequest struct {
-	Scope      Scope          `json:"scope"`
-	Body       string         `json:"body"`
-	Slug       string         `json:"slug,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
-	ExpiresAt  string         `json:"expires_at,omitempty"`
-	TargetName string         `json:"target_name,omitempty"`
+	Scope      Scope
+	Body       string
+	Slug       string
+	Metadata   map[string]any
+	ExpiresAt  string
+	TargetName string
+	// Persist, when true, emits ``"expires_at": null`` on the wire
+	// even when ExpiresAt is empty. Mutually exclusive with a non-
+	// empty ExpiresAt in practice; the verb-level CLI gate refuses
+	// `--persist` + `--ttl` together so the operator's intent is
+	// unambiguous. The struct doesn't enforce that mutual exclusion
+	// itself (callers do) -- when both are set, ExpiresAt wins
+	// because emitting "null" alongside a real timestamp would be
+	// nonsensical.
+	Persist bool
+}
+
+// MarshalJSON renders rememberRequest with explicit handling for the
+// G5.2-T2 (#624) tri-state “expires_at“ contract. See the type-level
+// docstring for the three states and their wire shapes.
+//
+// Implementation notes:
+//
+//   - Uses a positional emit (json.Marshal over a map[string]any)
+//     rather than struct tags so the `expires_at` rendering can branch
+//     on the Persist bool without leaking into the public field set.
+//   - The map ordering does not affect JSON correctness; the backend
+//     parses fields by key, not position.
+//   - "Persist + ExpiresAt set" lets ExpiresAt win (we already wrote
+//     the operator's intent to a clock-aligned cutoff at the
+//     parseTTLFlag stage; emitting `null` would silently override
+//     their `--ttl` value). The verb-level mutual-exclusion gate is
+//     where this collision is reported back to the operator.
+func (r rememberRequest) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"scope": r.Scope,
+		"body":  r.Body,
+	}
+	if r.Slug != "" {
+		out["slug"] = r.Slug
+	}
+	if r.Metadata != nil {
+		out["metadata"] = r.Metadata
+	}
+	if r.TargetName != "" {
+		out["target_name"] = r.TargetName
+	}
+	switch {
+	case r.ExpiresAt != "":
+		out["expires_at"] = r.ExpiresAt
+	case r.Persist:
+		// Explicit JSON `null` so backend's
+		// :func:`_resolve_default_ttl` sees "expires_at" in
+		// :attr:`BaseModel.model_fields_set` and skips the default.
+		out["expires_at"] = nil
+	}
+	return json.Marshal(out)
 }
 
 // retrieveRequest mirrors the backend `RetrieveRequest` pydantic

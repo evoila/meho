@@ -83,7 +83,7 @@ The `TARGET` scope's "any operator in the tenant" RBAC is a v0.2 placeholder. Th
 
 `expires_at` is stored in `documents.metadata` rather than as a dedicated column — the substrate is shared with G4 kb (no expiry concept), and adding a NULL-able expiry column for one consumer would pollute the schema. The read paths (`recall` / `list_memories` / `search_memories`) filter out rows whose stored `expires_at` lies in the past unless the caller opts in via `include_expired=True`. G5.1 ships only this read-side filter; G5.2 #374's daily background task is what *deletes* expired rows and writes the `INTERNAL/memory.expire` audit row.
 
-The default-7-day-TTL injection on user-scoped writes (when the caller omits `expires_at`) is also G5.2 — G5.1 stores `None` in `metadata.expires_at` and the read-side filter treats it as "never expires". The `--persist` flag at the CLI and explicit `expires_at: null` at the API are the opt-outs G5.2 will respect.
+The default-7-day-TTL injection on user-scoped writes (when the caller omits `expires_at`) lands in [G5.2-T2 #624](https://github.com/evoila/meho/issues/624): the `POST /api/v1/memory` handler resolves `expires_at = now(UTC) + Settings.memory_user_default_ttl_days` (env-var `MEMORY_USER_DEFAULT_TTL_DAYS`, default 7, range 1-365 days) when the request body **omits** the field and `scope == MemoryScope.USER`. The "omitted-vs-null" discrimination uses Pydantic v2's `BaseModel.model_fields_set` (the set carries every field name the constructor saw in the input, regardless of value): explicit `"expires_at": null` in the request body opts out and the row persists forever. The CLI's `--persist` flag is exactly that wire shape — it sends `expires_at: null` (rather than omitting the field) so the backend takes the explicit-null branch. Default-TTL only fires on `MemoryScope.USER` (the `memory-user` kind); `user-tenant`, `user-target`, `tenant`, and `target` scopes are team-shared coordinates that stay operator-controlled.
 
 ## The four surfaces
 
@@ -113,7 +113,7 @@ Every route binds two contextvars **before** the service call so the chassis [`A
 
 `forget` and `list` are **deliberately absent** from the agent surface (CLAUDE.md postulate 5 carves the agent surface narrow). An agent reaches list-style queries via `search_memory(scope=...)`; `forget` is a deliberate-write op normally driven by operators, not by the agent without explicit confirmation.
 
-The tool descriptions are load-bearing agent UX — `add_to_memory` is called by every agent session that learns something worth retaining. The descriptions name the lifecycle contract (default 7-day TTL on user scope when G5.2 ships, `--persist` opt-out) so an agent learns it from the tool definition itself rather than guessing.
+The tool descriptions are load-bearing agent UX — `add_to_memory` is called by every agent session that learns something worth retaining. The descriptions name the lifecycle contract (default 7-day TTL on user scope per [G5.2-T2 #624](https://github.com/evoila/meho/issues/624), `--persist` opt-out at the CLI / explicit `expires_at: null` at the API) so an agent learns it from the tool definition itself rather than guessing.
 
 ### MCP resource (T3 #423)
 
@@ -127,7 +127,7 @@ The URI template is a v0.2 simple-expansion shape — `target_name` is **not** i
 
 | Verb | Backend call | Role |
 |---|---|---|
-| `meho remember "body" [--scope SCOPE] [--slug SLUG] [--target NAME] [--tag T] [--ttl 7d] [--json]` | `POST /api/v1/memory` | `operator` |
+| `meho remember "body" [--scope SCOPE] [--slug SLUG] [--target NAME] [--tag T] [--ttl 7d] [--persist] [--json]` | `POST /api/v1/memory` | `operator` |
 | `meho recall <scope>/<slug> [--target NAME] [--json]` | `GET /api/v1/memory/{scope}/{slug}` | `operator` |
 | `meho recall --query "search terms" [--scope SCOPE] [--limit N] [--json]` | `POST /api/v1/retrieve` (`source="memory"` pinned) | `operator` |
 | `meho forget <scope>/<slug> [--target NAME] [--confirm] [--json]` | `DELETE /api/v1/memory/{scope}/{slug}` | `operator` |
@@ -135,7 +135,9 @@ The URI template is a v0.2 simple-expansion shape — `target_name` is **not** i
 
 The verbs are **top-level** (not nested under `meho memory ...`) per the consumer-needs.md §G5 ergonomic shape — "I prefer kubectl over k9s" is a user-scoped `meho remember`, not a `meho memory remember`. The `meho list` verb takes the bare-word slot the issue's acceptance criterion names verbatim (`meho list --scope user`).
 
-`--ttl 7d` is parsed CLI-side into an RFC 3339 `expires_at` and POSTed as `expires_at` in the body; the shorthand accepts `s` / `m` / `h` / `d` suffixes (`time.ParseDuration` doesn't accept `d`, so days are handled explicitly). Empty `--ttl` defers to the backplane default (none in G5.1; default 7 days on `memory-user` writes when G5.2 ships).
+`--ttl 7d` is parsed CLI-side into an RFC 3339 `expires_at` and POSTed as `expires_at` in the body; the shorthand accepts `s` / `m` / `h` / `d` suffixes (`time.ParseDuration` doesn't accept `d`, so days are handled explicitly). Empty `--ttl` defers to the backplane default: G5.1 left this as "never expires"; [G5.2-T2 #624](https://github.com/evoila/meho/issues/624) injects the default 7-day cutoff on `memory-user` writes when the field is omitted.
+
+`--persist` is the explicit opt-out: the verb emits `"expires_at": null` on the wire so the backend's `_resolve_default_ttl` takes the explicit-null branch and skips the default-TTL injection. The flag is mutually exclusive with `--ttl` (passing both surfaces a CLI-side error before the HTTP round-trip; `--persist` means "never expire", `--ttl` sets a finite cutoff). Use `--persist` for memories you intentionally want to retain across the 7-day window — durable user-scoped preferences like `kubectl-preference` or `editor-preference`.
 
 `meho remember "body"` accepts inline text by default; the bare hyphen `-` reads stdin (`echo "body text" | meho remember -`) so piped migration works.
 

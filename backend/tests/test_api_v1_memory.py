@@ -531,6 +531,221 @@ def test_remember_accepts_expires_at_iso_string(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# G5.2-T2 (#624): default-TTL injection on ``memory-user`` writes
+# ---------------------------------------------------------------------------
+#
+# The handler computes ``expires_at = now(UTC) +
+# memory_user_default_ttl_days`` when the request omits ``expires_at``
+# AND ``body.scope == MemoryScope.USER``. Two opt-outs:
+#
+# * explicit ``"expires_at": null`` in the request body → no default
+#   (the CLI ``--persist`` shape). Detection uses
+#   :attr:`BaseModel.model_fields_set`, not ``body.expires_at is None``.
+# * non-``user`` scopes (``user-tenant`` / ``user-target`` / ``tenant``
+#   / ``target``) → no default per #624's narrow scope ("``kind ==
+#   'memory-user'``").
+#
+# Tests assert the value the handler passes to ``MemoryService.remember``
+# via the ``expires_at`` kwarg -- the storage layer is the substrate's
+# concern; the surface contract is what this route sends downstream.
+
+
+def test_remember_user_scope_no_expires_at_injects_default_7_days(
+    client: TestClient,
+) -> None:
+    """Omitted ``expires_at`` on ``user`` scope → default ``now + 7d``.
+
+    Acceptance criterion: stored row has ``metadata.expires_at ~ now
+    + MEMORY_USER_DEFAULT_TTL_DAYS`` (within tolerance for clock drift
+    between the test invocation and the handler's ``datetime.now``).
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    fake_remember = AsyncMock(
+        return_value=_make_entry(scope=MemoryScope.USER, slug="auto-default"),
+    )
+    before = datetime.now(UTC)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.remember", fake_remember),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "user", "body": "default-ttl note"},
+            headers=_authed(token),
+        )
+    after = datetime.now(UTC)
+    assert response.status_code == 201
+    call_kwargs = fake_remember.await_args.kwargs
+    expires_at = call_kwargs["expires_at"]
+    # Default is 7 days from the ``Settings`` ``memory_user_default_ttl_days``
+    # field's own default; verifying the value lies in ``[before+7d,
+    # after+7d]`` covers clock-drift tolerance between the test's
+    # ``datetime.now`` reads and the handler's call without coupling
+    # the assertion to a fixed-second cutoff.
+    assert expires_at is not None
+    assert isinstance(expires_at, datetime)
+    assert before + timedelta(days=7) <= expires_at <= after + timedelta(days=7)
+
+
+def test_remember_user_scope_explicit_null_skips_default(
+    client: TestClient,
+) -> None:
+    """Explicit ``"expires_at": null`` → no default; row persists forever.
+
+    Load-bearing opt-out semantics: the discrimination must be on
+    :attr:`BaseModel.model_fields_set` (pydantic v2), not
+    ``body.expires_at is None`` -- otherwise the CLI ``--persist`` flag
+    (which emits ``"expires_at": null``) would collapse into the default
+    path and the operator's pin-forever intent would be silently
+    overridden.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    fake_remember = AsyncMock(
+        return_value=_make_entry(scope=MemoryScope.USER, slug="persisted"),
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.remember", fake_remember),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "user", "body": "pin forever", "expires_at": None},
+            headers=_authed(token),
+        )
+    assert response.status_code == 201
+    call_kwargs = fake_remember.await_args.kwargs
+    assert call_kwargs["expires_at"] is None
+
+
+def test_remember_user_scope_explicit_expires_at_honoured_verbatim(
+    client: TestClient,
+) -> None:
+    """Explicit ISO-8601 ``expires_at`` is honoured (no override)."""
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    future = datetime(2027, 6, 1, 12, 0, 0, tzinfo=UTC)
+    fake_remember = AsyncMock(
+        return_value=_make_entry(scope=MemoryScope.USER, slug="explicit", expires_at=future),
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.remember", fake_remember),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={
+                "scope": "user",
+                "body": "expires-on-jun-1",
+                "expires_at": future.isoformat(),
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 201
+    call_kwargs = fake_remember.await_args.kwargs
+    assert call_kwargs["expires_at"] == future
+
+
+def test_remember_user_tenant_scope_no_default_ttl(client: TestClient) -> None:
+    """``user-tenant`` scope is *not* in scope for the default TTL.
+
+    #624 narrows the default to ``kind == "memory-user"`` (i.e.
+    :attr:`MemoryScope.USER`). The ``USER_TENANT`` /
+    ``USER_TARGET`` / ``TENANT`` / ``TARGET`` scopes pass
+    ``expires_at`` through unchanged when omitted (i.e. ``None``).
+    Pinning this prevents a future refactor that widened the gate
+    to ``USER_SCOPED`` from silently expiring team-shared memories.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    fake_remember = AsyncMock(
+        return_value=_make_entry(scope=MemoryScope.USER_TENANT, slug="team-note"),
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.remember", fake_remember),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "user-tenant", "body": "team note"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 201
+    call_kwargs = fake_remember.await_args.kwargs
+    assert call_kwargs["expires_at"] is None
+
+
+def test_remember_tenant_scope_no_default_ttl(client: TestClient) -> None:
+    """``tenant`` scope (admin-only write) also bypasses the default.
+
+    Tenant-shared memory is an explicitly operator-managed coordinate
+    -- defaulting a 7-day expiry on the tenant admin's note would
+    surprise the operator. The route mints a ``tenant_admin`` token
+    here so the service-layer RBAC matrix doesn't 403 the call.
+    """
+    tenant_a = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_a)
+    fake_remember = AsyncMock(
+        return_value=_make_entry(scope=MemoryScope.TENANT, slug="tenant-note"),
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.remember", fake_remember),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "tenant", "body": "team policy"},
+            headers=_authed(token),
+        )
+    assert response.status_code == 201
+    call_kwargs = fake_remember.await_args.kwargs
+    assert call_kwargs["expires_at"] is None
+
+
+def test_remember_user_scope_default_ttl_honours_settings_override(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Custom ``MEMORY_USER_DEFAULT_TTL_DAYS`` env var changes the cutoff.
+
+    Pins the env-var → ``Settings`` → handler dataflow so a future
+    refactor that hardcoded the 7-day default (instead of reading
+    :class:`Settings`) would surface here. The fixture clears
+    ``get_settings.cache_clear()`` so the env-var change actually
+    takes effect for this test.
+    """
+    monkeypatch.setenv("MEMORY_USER_DEFAULT_TTL_DAYS", "30")
+    get_settings.cache_clear()
+    tenant_a = uuid.uuid4()
+    key, token = _operator_token(tenant_id=tenant_a)
+    fake_remember = AsyncMock(
+        return_value=_make_entry(scope=MemoryScope.USER, slug="custom-ttl"),
+    )
+    before = datetime.now(UTC)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.memory.MemoryService.remember", fake_remember),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/memory",
+            json={"scope": "user", "body": "30-day note"},
+            headers=_authed(token),
+        )
+    after = datetime.now(UTC)
+    assert response.status_code == 201
+    call_kwargs = fake_remember.await_args.kwargs
+    expires_at = call_kwargs["expires_at"]
+    assert expires_at is not None
+    assert before + timedelta(days=30) <= expires_at <= after + timedelta(days=30)
+
+
+# ---------------------------------------------------------------------------
 # GET / -- list
 # ---------------------------------------------------------------------------
 

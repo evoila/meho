@@ -4,6 +4,7 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -146,14 +147,23 @@ func BuildForm(files []MemoryFile, opts BuildFormOpts) (*huh.Form, []SubmitPlan)
 	}
 
 	// ── Final confirm group ────────────────────────────────────────────
-	var confirmed bool
+	// Validate enforces operator consent: a non-nil error stalls form
+	// submission (huh v2.0.3 gates nextGroupMsg on group.Errors()), so
+	// "No" cannot accidentally submit. The operator's exit paths are
+	// toggle-to-Yes or abort (Ctrl+C, which surfaces as huh.ErrUserAborted
+	// from form.Run() — the caller treats it as a clean cancellation).
 	confirmGroup := huh.NewGroup(
 		huh.NewConfirm().
 			TitleFunc(func() string {
 				mc := countMigrateFromPlans(plans)
 				return fmt.Sprintf("Migrate %d entries (%d skipped). Proceed?", mc, len(plans)-mc)
 			}, nil).
-			Value(&confirmed),
+			Validate(func(b bool) error {
+				if !b {
+					return errors.New("migration cancelled — toggle to Yes or press Ctrl+C to abort")
+				}
+				return nil
+			}),
 	)
 	groups = append(groups, confirmGroup)
 

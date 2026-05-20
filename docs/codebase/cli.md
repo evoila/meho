@@ -162,7 +162,7 @@ cli/
     │   │   └── retire_checklist_test.go # surface-bucket + table-render + marshal tests.
     │   ├── migrate/           # G5.3 #608–#611 — `meho migrate …` laptop-local migration verb tree (Initiative #375).
     │   │   ├── migrate.go        # NewRootCmd + _ import charm.land/huh/v2.
-    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; submitFn seam for T5 (#611).
+    │   │   ├── memory.go         # `meho migrate memory` RunE — interactive picker / --dry-run / --non-interactive; submitFn seam for T5 (#612).
     │   │   └── memory_test.go    # --dry-run envelope + source_id, --non-interactive filter, machine-local skip, empty-dir guard.
     │   ├── vmware/            # G3.1-T7 #511 — `meho vmware …` alias verb tree (connector_id="vmware-rest-9.0" pre-baked).
     │   ├── vault/             # G3.3-T6 #550 — `meho vault …` alias verb tree (connector_id="vault-1.x" pre-baked).

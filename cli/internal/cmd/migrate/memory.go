@@ -5,10 +5,12 @@ package migrate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/migrate"
@@ -90,7 +92,7 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 				plans, refused := nonInteractivePlans(files, opts)
 				if len(refused) > 0 {
 					for _, f := range refused {
-						fmt.Fprintf(os.Stderr,
+						fmt.Fprintf(cmd.ErrOrStderr(),
 							"meho migrate memory: skipping %s (type %q requires interactive review)\n",
 							f.Path, f.Type,
 						)
@@ -99,21 +101,27 @@ func newMemoryCmdWithSubmit(submitFn SubmitFn) *cobra.Command {
 				if err := submitFn(plans); err != nil {
 					return err
 				}
-				if markMigrated {
-					_ = migrate.TouchMarker(dir) // non-fatal in T4 stub
-				}
 				if len(refused) > 0 {
 					return fmt.Errorf("meho migrate memory: %d entries require interactive review", len(refused))
+				}
+				if markMigrated {
+					_ = migrate.TouchMarker(dir) // non-fatal in T4 stub
 				}
 				return nil
 			}
 
 			// ── Interactive path ──────────────────────────────────────
 			form, plans := migrate.BuildForm(files, opts)
-			accessible := os.Getenv("MEHO_ACCESSIBLE") != ""
+			accessible := os.Getenv("MEHO_ACCESSIBLE") == "1"
 			form = form.WithAccessible(accessible)
 
 			if err := form.Run(); err != nil {
+				// Operator aborted (Ctrl+C / Esc, or said "No" on the
+				// batch-confirm then aborted) — surface as clean exit.
+				if errors.Is(err, huh.ErrUserAborted) {
+					fmt.Fprintf(cmd.OutOrStdout(), "Migration cancelled.\n")
+					return nil
+				}
 				return fmt.Errorf("picker: %w", err)
 			}
 

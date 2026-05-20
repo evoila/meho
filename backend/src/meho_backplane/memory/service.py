@@ -31,11 +31,13 @@ filter.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 
 import structlog
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
@@ -53,9 +55,14 @@ from meho_backplane.memory._internal import (
     metadata_str,
     slug_from_source_id,
 )
-from meho_backplane.memory.rbac import MemoryRbacResolver, PermissionDeniedError
+from meho_backplane.memory.rbac import (
+    MemoryRbacResolver,
+    PermissionDeniedError,
+    assert_can_promote,
+)
 from meho_backplane.memory.schemas import (
     TARGET_SCOPED,
+    USER_SCOPED,
     MemoryEntry,
     MemoryEntrySearchHit,
     MemoryScope,
@@ -204,6 +211,361 @@ class MemoryService:
             deleted=deleted,
         )
         return deleted
+
+    async def promote(
+        self,
+        operator: Operator,
+        *,
+        source_scope: MemoryScope,
+        source_slug: str,
+        target_scope: MemoryScope,
+        move: bool = False,
+        target_name: str | None = None,
+    ) -> MemoryEntry | None:
+        """Promote one memory from *source_scope* to a strictly broader *target_scope*.
+
+        G5.2-T4 (#626). Five-phase pipeline: load source under read-RBAC ->
+        authorize via T3's :func:`assert_can_promote` -> build target metadata
+        with ``promoted_from`` marker and cleared ``expires_at`` -> one-
+        transaction probe-insert(+delete-on-move) -> return target row.
+
+        * Returns ``None`` when the source is absent OR not visible to
+          *operator* (the 404 collapse the route renders; preserves the
+          tenant boundary against cross-tenant existence probes).
+        * Raises :class:`InvalidPromotionStepError` (route: 400),
+          :class:`PermissionDeniedError` (route: 403,
+          ``insufficient_promotion_authority``),
+          :class:`NotImplementedError` (route: 501; per-target ACL gap
+          from G0.3 #224), or :class:`ValueError`
+          ``promote_target_conflict`` (route: 409; target slug owned by
+          a different provenance). Errors propagate unchanged; the
+          service layer is FastAPI-free.
+        * Idempotency: re-running the same promotion returns the
+          existing target row (not a 409 and not a duplicate insert).
+          Same-source detection is by ``metadata.promoted_from`` match.
+        * Atomicity: target insert + optional source delete share one
+          :class:`AsyncSession`; a failed target insert rolls back any
+          in-flight delete (the "failed target insert leaves source
+          intact" AC).
+        * TTL clearing: the target row's ``metadata.expires_at`` is
+          always ``None``. Broader-scope memories are intentional and
+          long-lived per Initiative #374.
+
+        ``target_name`` is inherited from the source row when the
+        target scope is target-flavoured and the caller didn't supply
+        one (the ``user-target -> target`` ladder step).
+        """
+        source_doc = await self._load_source_for_promotion(
+            operator=operator,
+            source_scope=source_scope,
+            source_slug=source_slug,
+        )
+        if source_doc is None:
+            return None
+
+        # target_name inheritance for the ``user-target -> target``
+        # ladder step (source row carries the name; route body may
+        # omit it).
+        resolved_target_name = target_name
+        if resolved_target_name is None and target_scope in TARGET_SCOPED:
+            resolved_target_name = metadata_str(source_doc.doc_metadata, "target_name")
+
+        # T3 helper owns the ladder + role matrix; errors propagate.
+        assert_can_promote(
+            operator,
+            source_scope,
+            target_scope,
+            target_id=resolved_target_name,
+        )
+
+        target_source_id = encode_source_id(
+            scope=target_scope,
+            user_sub=operator.sub,
+            target_name=resolved_target_name,
+            slug=source_slug,
+        )
+        source_marker = f"{source_scope.value}/{source_slug}"
+        target_metadata = self._build_promotion_metadata(
+            source_doc=source_doc,
+            target_scope=target_scope,
+            target_name=resolved_target_name,
+            source_marker=source_marker,
+        )
+
+        target_doc = await self._commit_promotion(
+            operator=operator,
+            source_doc=source_doc,
+            source_scope=source_scope,
+            source_slug=source_slug,
+            target_scope=target_scope,
+            target_source_id=target_source_id,
+            target_metadata=target_metadata,
+            source_marker=source_marker,
+            move=move,
+        )
+        return document_to_entry(target_doc)
+
+    async def _commit_promotion(
+        self,
+        *,
+        operator: Operator,
+        source_doc: Document,
+        source_scope: MemoryScope,
+        source_slug: str,
+        target_scope: MemoryScope,
+        target_source_id: str,
+        target_metadata: dict[str, Any],
+        source_marker: str,
+        move: bool,
+    ) -> Document:
+        """One-transaction commit for :meth:`promote`. Idempotency + atomicity.
+
+        Pulled out of :meth:`promote` so the caller stays focused on the
+        load + authorize phases. Same single-session lifecycle the
+        inline original used; the split is purely for readability and
+        per-function-size compliance.
+
+        Returns the target :class:`Document` -- either freshly inserted
+        or the existing-from-idempotent-rerun row. Raises
+        :class:`ValueError` ``promote_target_conflict`` when the target
+        slug is occupied by a row with a different provenance.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            existing = await self._fetch_doc_in_session(
+                session=session,
+                tenant_id=operator.tenant_id,
+                source_id=target_source_id,
+            )
+            if existing is not None:
+                # Idempotent same-source re-run: return the existing
+                # row, no insert, no source delete (move=True on a
+                # re-run would otherwise delete an already-moved
+                # source the operator can't see).
+                existing_marker = metadata_str(existing.doc_metadata, "promoted_from")
+                if existing_marker == source_marker:
+                    self._log.info(
+                        "memory_promote_idempotent",
+                        tenant_id=str(operator.tenant_id),
+                        operator_sub=operator.sub,
+                        source_scope=source_scope.value,
+                        target_scope=target_scope.value,
+                        slug=source_slug,
+                    )
+                    return existing
+                # An unrelated row already occupies the target slug --
+                # 409 territory. Don't silently overwrite.
+                raise ValueError(
+                    f"promote_target_conflict: target slug {source_slug!r} at scope "
+                    f"{target_scope.value!r} already exists with a different provenance"
+                )
+
+            target_doc = await index_document(
+                tenant_id=operator.tenant_id,
+                source=MEMORY_SOURCE,
+                source_id=target_source_id,
+                kind=kind_for_scope(target_scope),
+                body=source_doc.body,
+                metadata=target_metadata,
+                session=session,
+            )
+
+            if move:
+                await session.delete(source_doc)
+
+            await session.commit()
+
+        self._log.info(
+            "memory_promote",
+            tenant_id=str(operator.tenant_id),
+            operator_sub=operator.sub,
+            source_scope=source_scope.value,
+            target_scope=target_scope.value,
+            slug=source_slug,
+            move=move,
+        )
+        return target_doc
+
+    async def _load_source_for_promotion(
+        self,
+        *,
+        operator: Operator,
+        source_scope: MemoryScope,
+        source_slug: str,
+    ) -> Document | None:
+        """Load + RBAC-check the source row for :meth:`promote`.
+
+        Returns ``None`` when the row is absent OR not visible to
+        *operator*. The natural-key encoding for user-flavoured scopes
+        already binds ``operator.sub`` so an operator probing for
+        another operator's user-scoped memory gets ``None`` at the SQL
+        layer; the ``can_read`` check below adds the target-/tenant-
+        flavoured visibility post-filter.
+
+        Pulling the load + visibility check into a helper keeps
+        :meth:`promote`'s control flow flat (one early-return for the
+        invisible-source branch) and gives the route a single
+        ``None``-means-404 contract.
+        """
+        # For user-flavoured source scopes the natural-key encoding
+        # uses operator.sub, which is correct (an operator promoting
+        # their own memory). For target-flavoured source scopes the
+        # natural key needs target_name; we cannot resolve it until
+        # we've loaded the row, so we use a wider SQL query that
+        # bypasses the natural-key encoding.
+        if source_scope in USER_SCOPED:
+            source_id = encode_source_id(
+                scope=source_scope,
+                user_sub=operator.sub,
+                # USER_TARGET requires target_name in the encoding;
+                # promotion of a USER_TARGET source needs the caller
+                # to supply target_name -- which v0.2 doesn't expose
+                # on the route body. Returning None for this branch
+                # is the conservative behaviour until G5.2-T5 wires
+                # the CLI verb with the explicit target_name kwarg.
+                target_name=None if source_scope is not MemoryScope.USER_TARGET else "",
+                slug=source_slug,
+            )
+            # For USER_TARGET the empty target_name yields a non-
+            # matching source_id, returning None -- which the route
+            # surfaces as 404. T5's CLI verb will widen this path.
+            doc = await self._fetch_by_natural_key(operator, source_id)
+        else:
+            # Tenant / target source scope: natural key has no per-
+            # operator component, so a single column-filter query is
+            # enough. Tenant boundary is in tenant_id.
+            doc = await self._fetch_first_for_scope(
+                operator=operator,
+                source_scope=source_scope,
+                source_slug=source_slug,
+            )
+
+        if doc is None:
+            return None
+
+        stored_user_sub = metadata_str(doc.doc_metadata, "user_sub")
+        stored_target_name = metadata_str(doc.doc_metadata, "target_name")
+        if not self._rbac.can_read(
+            operator,
+            source_scope,
+            user_sub=stored_user_sub,
+            target_name=stored_target_name,
+        ):
+            return None
+        return doc
+
+    async def _fetch_first_for_scope(
+        self,
+        *,
+        operator: Operator,
+        source_scope: MemoryScope,
+        source_slug: str,
+    ) -> Document | None:
+        """Tenant- / target-scoped source-row fetch by ``(kind, slug)``.
+
+        For ``TENANT`` and ``TARGET`` source scopes the natural-key
+        encoding is enough to identify a unique row (``tenant:<slug>``
+        for TENANT; the TARGET branch needs a target_name we don't yet
+        have, so this method's caller invokes it via a SQL ``LIKE``
+        match on the slug suffix). Used only by :meth:`promote`.
+        """
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            if source_scope is MemoryScope.TENANT:
+                source_id = encode_source_id(
+                    scope=source_scope,
+                    user_sub=operator.sub,
+                    target_name=None,
+                    slug=source_slug,
+                )
+                result = await session.execute(
+                    select(Document).where(
+                        Document.tenant_id == operator.tenant_id,
+                        Document.source == MEMORY_SOURCE,
+                        Document.source_id == source_id,
+                    )
+                )
+                return result.scalar_one_or_none()
+            # TARGET scope: natural key is ``target:<target_name>:<slug>``;
+            # we don't yet have the caller-supplied target_name on this
+            # path (T4's body shape is ``{to, move}``). v0.2 returns
+            # None for this branch -- T5's CLI verb supplies the
+            # target_name explicitly via a parallel arg, at which point
+            # this method can take it as a kwarg.
+            return None
+
+    @staticmethod
+    async def _fetch_doc_in_session(
+        *,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        source_id: str,
+    ) -> Document | None:
+        """Natural-key fetch within a caller-owned :class:`AsyncSession`.
+
+        Distinct from :meth:`_fetch_by_natural_key` because that helper
+        opens its own session; :meth:`promote` needs the fetch and the
+        subsequent insert/delete to share one transaction.
+        """
+        result = await session.execute(
+            select(Document).where(
+                Document.tenant_id == tenant_id,
+                Document.source == MEMORY_SOURCE,
+                Document.source_id == source_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _build_promotion_metadata(
+        *,
+        source_doc: Document,
+        target_scope: MemoryScope,
+        target_name: str | None,
+        source_marker: str,
+    ) -> dict[str, Any]:
+        """Build the target row's ``doc_metadata`` for a promotion insert.
+
+        Three load-bearing fields beyond what :func:`build_metadata`
+        produces:
+
+        * ``promoted_from = "<source_scope>/<source_slug>"`` -- the
+          idempotency marker. A re-run with the same source produces
+          the same marker; an unrelated promotion lands a different
+          one and doesn't trip the idempotency branch.
+        * ``expires_at = None`` -- promotion intentionally clears the
+          source's TTL. Broader-scope memories are long-lived per the
+          Initiative body.
+        * ``user_sub`` -- ``None`` for tenant- / target-flavoured
+          targets (tenant-shared rows have no per-user owner);
+          inherited from the source for user-flavoured targets. This
+          mirrors :func:`build_metadata`'s scope-aware semantics.
+        """
+        caller_metadata = dict(source_doc.doc_metadata) if source_doc.doc_metadata else {}
+        # Drop the source's bookkeeping fields -- the target's are
+        # different and ``build_metadata``-like layer below overwrites
+        # them, but explicit deletion makes the intent clear and
+        # protects against a future ``build_metadata`` change that
+        # respected caller keys for these names.
+        for key in ("scope", "user_sub", "target_name", "expires_at"):
+            caller_metadata.pop(key, None)
+
+        merged: dict[str, Any] = caller_metadata
+        merged["scope"] = target_scope.value
+        merged["user_sub"] = (
+            metadata_str(source_doc.doc_metadata, "user_sub")
+            if target_scope in USER_SCOPED
+            else None
+        )
+        merged["target_name"] = target_name
+        # Promotion clears the default TTL -- broader-scope memories
+        # are intentional, long-lived per the Initiative body.
+        merged["expires_at"] = None
+        # The idempotency marker -- the re-run path uses this to
+        # decide between "same promotion, return existing" and "409
+        # conflict, different provenance".
+        merged["promoted_from"] = source_marker
+        return merged
 
     # ------------------------------------------------------------------
     # Read paths

@@ -149,6 +149,7 @@ def isolated_registry() -> Iterator[None]:
         topology,
     )
     from meho_backplane.mcp.tools import memory as memory_tools
+    from meho_backplane.mcp.tools import memory_promote as memory_promote_tool
 
     clear_registries()
     importlib.reload(meho_status)
@@ -159,6 +160,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(knowledge)
     importlib.reload(topology)
     importlib.reload(memory_tools)
+    importlib.reload(memory_promote_tool)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)

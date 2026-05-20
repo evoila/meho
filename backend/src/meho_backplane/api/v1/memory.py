@@ -113,6 +113,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.memory import (
+    InvalidPromotionStepError,
     MemoryEntry,
     MemoryScope,
     MemoryService,
@@ -121,7 +122,7 @@ from meho_backplane.memory import (
 from meho_backplane.memory.schemas import SLUG_PATTERN
 from meho_backplane.settings import get_settings
 
-__all__ = ["MemoryListResponse", "RememberBody", "router"]
+__all__ = ["MemoryListResponse", "PromoteBody", "RememberBody", "router"]
 
 router = APIRouter(prefix="/api/v1/memory", tags=["memory"])
 
@@ -154,6 +155,7 @@ _MEMORY_OP_IDS: Final[dict[str, str]] = {
     "list": "memory.list",
     "recall": "memory.recall",
     "forget": "memory.forget",
+    "promote": "memory.promote",
 }
 
 #: Maximum length of the ``slug`` path / query parameter accepted by
@@ -262,6 +264,36 @@ class RememberBody(BaseModel):
     # strings surface as 422 from pydantic's own coercion -- no
     # custom parse layer needed.
     expires_at: datetime | None = None
+    target_name: str | None = Field(default=None, max_length=_SLUG_MAX_LENGTH)
+
+
+class PromoteBody(BaseModel):
+    """POST body for ``/api/v1/memory/{scope}/{slug}/promote``.
+
+    G5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a
+    target-scope name for the ``user -> user-target`` / ``user-target ->
+    target`` ladder steps; ``frozen=True`` + ``extra="forbid"`` mirror
+    :class:`RememberBody`.
+
+    * ``to`` -- the target scope. The route delegates ladder validation
+      to :func:`~meho_backplane.memory.rbac.assert_can_promote`, which
+      raises :class:`InvalidPromotionStepError` on non-ladder pairs (the
+      route maps that to 400).
+    * ``move`` -- when ``True``, delete the source row in the same
+      transaction as the target insert (broadens-and-leaves vs.
+      broadens-and-rewires). Default ``False`` per the issue body.
+    * ``target_name`` -- required when ``to`` is target-flavoured AND
+      the source scope is not (``user -> user-target``). For
+      ``user-target -> target`` the service inherits ``target_name``
+      from the source row, so the caller may omit it; we still accept
+      it for forward-compat with the CLI verb (T5 #627). Omitted
+      values land as ``None``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    to: MemoryScope
+    move: bool = False
     target_name: str | None = Field(default=None, max_length=_SLUG_MAX_LENGTH)
 
 
@@ -573,3 +605,122 @@ async def forget(
         ) from exc
     structlog.contextvars.bind_contextvars(audit_existed=existed)
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+
+def _promote_value_error_to_http(exc: ValueError) -> HTTPException:
+    """Map a service-raised :class:`ValueError` to the right HTTPException.
+
+    Two distinct failure modes share the :class:`ValueError` type at
+    the service boundary:
+
+    * ``promote_target_conflict`` -- target slug occupied by a row
+      with different provenance (409 conflict; not a request-shape
+      error).
+    * Other ValueErrors (e.g. ``target_name required for
+      user-target``) -- request-shape errors mapped to 422 in line
+      with the rest of the memory router.
+
+    The dispatch on prefix keeps the failure surface readable at one
+    function rather than splattered across the route handler.
+    """
+    message = str(exc)
+    if message.startswith("promote_target_conflict"):
+        return HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=message,
+        )
+    return HTTPException(
+        status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=message,
+    )
+
+
+@router.post(
+    "/{scope}/{slug}/promote",
+    response_model=MemoryEntry,
+    status_code=http_status.HTTP_200_OK,
+)
+async def promote(
+    scope: MemoryScope,
+    slug: str,
+    body: PromoteBody,
+    operator: Operator = _require_operator,
+) -> MemoryEntry:
+    """Promote one memory to a strictly broader scope. Idempotent.
+
+    G5.2-T4 (#626). Delegates ladder + authority checks to T3's
+    :func:`~meho_backplane.memory.rbac.assert_can_promote`. The route
+    is the HTTP error-mapping layer plus the audit contextvar
+    (``audit_promotion_target_scope``) that distinguishes promote
+    rows from regular ``memory.remember`` writes for G8 forensic
+    queries.
+
+    Status mapping: **200** new target row OR idempotent re-run
+    (existing row); **400** :class:`InvalidPromotionStepError`;
+    **403** :class:`PermissionDeniedError` with detail
+    ``insufficient_promotion_authority``; **404** source absent or
+    not visible (tenant-boundary info-leak avoidance); **409**
+    target slug owned by a different ``promoted_from`` marker;
+    **501** :class:`NotImplementedError` for the unshipped per-
+    target ACL branch.
+
+    Binds five audit contextvars before the service call so a mid-
+    service exception still produces a correctly-classified audit
+    row. The contextvar pattern mirrors G0.4-T5's ``audit_query_hash``
+    on ``/api/v1/retrieve``.
+    """
+    if len(slug) > _SLUG_MAX_LENGTH:
+        # Path-parameter overrun defence-in-depth; 404 (not 422)
+        # preserves the recall route's info-leak avoidance.
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="memory_not_found",
+        )
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_MEMORY_OP_IDS["promote"],
+        audit_op_class="write",
+        audit_scope=scope.value,
+        audit_slug=slug,
+        audit_promotion_target_scope=body.to.value,
+    )
+    service = MemoryService()
+    try:
+        entry = await service.promote(
+            operator=operator,
+            source_scope=scope,
+            source_slug=slug,
+            target_scope=body.to,
+            move=body.move,
+            target_name=body.target_name,
+        )
+    except InvalidPromotionStepError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except PermissionDeniedError:
+        # Canonical detail per Initiative #374. The helper's
+        # ``reason`` field carries the same literal, but pinning it
+        # here lets audit-query consumers grep one string.
+        raise HTTPException(
+            status_code=http_status.HTTP_403_FORBIDDEN,
+            detail="insufficient_promotion_authority",
+        ) from None
+    except NotImplementedError as exc:
+        # G0.3 #224 per-target ACL gap surfaces loudly per the
+        # helper's contract; 501 is the spec-correct status.
+        raise HTTPException(
+            status_code=http_status.HTTP_501_NOT_IMPLEMENTED,
+            detail=f"not_implemented: {exc}",
+        ) from exc
+    except ValueError as exc:
+        raise _promote_value_error_to_http(exc) from exc
+
+    if entry is None:
+        # 404 across "absent" and "not visible" preserves the
+        # tenant-boundary info-leak avoidance contract.
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="memory_not_found",
+        )
+    return entry

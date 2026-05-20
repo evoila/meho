@@ -431,17 +431,19 @@ async def register_vault_auth_operations(
     # here rather than mistakenly searching ``sys`` for an auth-method
     # listing.
     auth_when_to_use = (
-        "Use for identity / authentication-method inspection on a "
-        "Vault target: 'who am I in this Vault?' (token lookup), "
-        "'which auth backends are mounted and how are they "
-        "configured?', 'what roles exist on the JWT / OIDC / "
-        "approle / kubernetes backend?'. Read-only -- never enables, "
-        "configures, or rotates auth state. Pair with the 'sys' "
-        "group when the question is about the engine-mount surface "
-        "itself (sys.auth.list returns the mount map; this group "
-        "drills into per-backend role configuration). Pair with the "
-        "'kv' group for the post-auth 'what can this identity read?' "
-        "follow-up."
+        "Use for per-role inspection of two specific Vault auth "
+        "backends, ``userpass`` and ``approle``: list the roles "
+        "defined on each backend and read one named role's config "
+        "(``vault.auth.userpass.{list,read}`` / "
+        "``vault.auth.approle.{list,read}``). Read-only; never "
+        "creates, edits, or rotates roles. Route token-identity "
+        "questions ('who am I in this Vault?'), auth-backend mount "
+        "listings ('which auth methods are mounted at which "
+        "paths?'), and any JWT / OIDC / kubernetes-backend role "
+        "inspection to the 'sys' group (``sys.auth.list``) -- the "
+        "auth group only covers the two backends named above. Pair "
+        "with the 'kv' group for the post-auth 'what can this "
+        "identity read?' follow-up."
     )
     for spec in _AUTH_OP_SPECS:
         await register_typed_operation(

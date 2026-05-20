@@ -40,7 +40,35 @@ permissions:
 jobs:
   semgrep:
     name: Semgrep SAST
-    runs-on: meho-runners-ci
+    # Deliberate single-workflow exception to #715's cutover from
+    # `meho-runners` (rke2-meho) to `meho-runners-ci` (rke2-ci). The
+    # initial cutover attempt (PR #717 first push, head 2fd6287)
+    # regressed this required check green->red on the new pool — the
+    # `container:` keyword below makes the GHA runner manager pull
+    # `harbor.evba.lab/dockerhub-proxy/semgrep/semgrep:1.160.0` at the
+    # runner-pod level (not inside the DinD sidecar). On the new
+    # rke2-ci pool that path fails in two distinct ways:
+    #   - DNS: `lookup harbor.evba.lab on 10.43.0.10:53: no such host`
+    #     — the rke2-ci CoreDNS deployment doesn't forward the
+    #     `evba.lab` zone the way rke2-meho's does.
+    #   - GHA-volume-mount: `OCI runtime exec failed: ... /__e/
+    #     node24_alpine/bin/node: no such file or directory` — the
+    #     runner-pod's GHA action-runtime volume isn't surfaced into
+    #     the `container:` image, so `actions/checkout`'s node binary
+    #     can't execute inside it.
+    # Same `docker pull` + `curl harbor.evba.lab` patterns work fine
+    # on the new pool from inside DinD or directly on the runner pod
+    # (runner-smoke matrix run 26161029994 / job on
+    # meho-runners-ci-rzmr8-runner-zvmc5 proved both). The breakage is
+    # narrowly scoped to GHA's `container:` keyword pre-runner-start
+    # path. Until the rke2-ci chart on `evoila-bosnia/claude-rdc-hetzner-dc`
+    # closes both gaps, this single workflow stays on the old
+    # `meho-runners` pool — which keeps Semgrep SAST green and lets
+    # #611's "5+ green PRs on meho-runners-ci" counter advance for the
+    # other 17 cutover'd workflows. Flip this back to
+    # `meho-runners-ci` (one-line revert; drop this comment block)
+    # once the rke2-ci-side fix lands; #611 then drains the old pool.
+    runs-on: meho-runners
     timeout-minutes: 15
     # Pulled through the in-cluster Harbor proxy cache
     # (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` is public,

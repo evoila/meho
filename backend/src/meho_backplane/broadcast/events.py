@@ -201,8 +201,8 @@ class BroadcastEvent(BaseModel):
     #: queries audit_log by this id.
     audit_id: UUID
     #: Redacted view per :func:`redact_payload`. NEVER raw params for
-    #: ``credential_read`` or ``audit_query`` classes — the redaction
-    #: contract is upstream of this field.
+    #: ``credential_read``, ``credential_mint``, or ``audit_query`` classes —
+    #: the redaction contract is upstream of this field.
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -83,6 +83,7 @@ import asyncio
 import base64
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -349,6 +350,123 @@ class HarborConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    async def robot_create(
+        self,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a project-scoped robot account via Harbor 2.x.
+
+        Op-id: ``harbor.robot.create``. Classified ``credential_mint``:
+        the broadcast collapses to aggregate-only so the minted secret
+        never appears in the SSE feed or any Slack mirror channel.
+
+        Uses :meth:`_post_json` (non-retried POST — Harbor's create
+        endpoint is non-idempotent; a retry could mint a second account
+        with the same name, which Harbor rejects with 409 anyway, but
+        the tenacity decorator must not trigger).
+
+        The handler grants push + pull access on the named project.
+        Scoped permissions are sufficient for the canonical CI/CD use
+        case; system-level access would require the system-robot API
+        (``POST /api/v2.0/robots``) which is out of scope for this Task.
+
+        Parameters
+        ----------
+        target
+            Resolved Harbor target (must satisfy :class:`HarborTargetLike`).
+        params
+            Schema-validated: ``name`` (str), ``project`` (str),
+            ``duration`` (int, -1 for never-expire).
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{id: int, name: str, secret: str}`` — the secret is the
+            minted credential, returned ONLY on creation by Harbor.
+
+        Raises
+        ------
+        httpx.HTTPStatusError
+            On any 4xx/5xx from Harbor (e.g. 409 Conflict if a robot
+            with this name already exists in the project). The dispatcher
+            catches all exceptions and wraps them as ``connector_error``
+            OperationResults.
+        """
+        name = str(params["name"])
+        project = str(params["project"])
+        duration = int(params["duration"])
+
+        body: dict[str, Any] = {
+            "name": name,
+            "duration": duration,
+            "disable": False,
+            "level": "project",
+            "permissions": [
+                {
+                    "kind": "project",
+                    "namespace": project,
+                    "access": [
+                        {"resource": "repository", "action": "push"},
+                        {"resource": "repository", "action": "pull"},
+                    ],
+                }
+            ],
+        }
+        path = f"/api/v2.0/projects/{quote(project, safe='')}/robots"
+        result = await self._post_json(target, path, raw_jwt="", json=body)
+        return {
+            "id": result["id"],
+            "name": result["name"],
+            "secret": result["secret"],
+        }
+
+    async def robot_delete(
+        self,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Delete a project-scoped robot account via Harbor 2.x.
+
+        Op-id: ``harbor.robot.delete``. Classified ``write`` (suffix-based).
+        No secret material in the response.
+
+        Uses the pooled httpx client directly (non-retried DELETE —
+        ``HttpConnector._IDEMPOTENT_METHODS`` is ``{GET, HEAD, OPTIONS}``
+        and ``_request_json`` rejects non-idempotent verbs; no
+        ``_delete_json`` helper exists on the base class). Permanent
+        removal — irreversible.
+
+        Parameters
+        ----------
+        target
+            Resolved Harbor target.
+        params
+            Schema-validated: ``project`` (str), ``id`` (int ≥ 1).
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{id: int, deleted: True}`` — Harbor returns HTTP 200 with an
+            empty body; the ``id`` echo is synthesized for a useful
+            agent-facing result.
+
+        Raises
+        ------
+        httpx.HTTPStatusError
+            On any 4xx/5xx from Harbor (e.g. 404 if the robot ID does
+            not exist in the named project).
+        """
+        project = str(params["project"])
+        robot_id = int(params["id"])
+
+        path = f"/api/v2.0/projects/{quote(project, safe='')}/robots/{robot_id}"
+        client = await self._http_client(target)
+        headers = await self.auth_headers(target, raw_jwt="")
+        resp = await client.request("DELETE", path, headers=headers)
+        resp.raise_for_status()
+        return {"id": robot_id, "deleted": True}
 
     async def aclose(self) -> None:
         """Clear cached credentials, then tear down the httpx pool.

@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: the load-bearing safe-sudo primitive + bind9 connector
+# class are kept colocated; the file is dense (docstrings + JSON Schemas) but
+# splitting `_remote_bash_with_sudo` out would re-create the exact "sudo argv
+# leaks from a non-whitelisted module" failure shape the safety assertion in
+# tests/integration/test_g3_4_bind9_e2e.py polices. See the helper's
+# docstring for the wire-shape + leak-prevention analysis.
 
 """Bind9Connector -- typed SSH-transport connector for ISC bind9 9.x.
 
@@ -80,15 +86,25 @@ _log = structlog.get_logger(__name__)
 # in G0.3's Target model rollout. Mirrors the placeholder in the SSH adapter.
 type Target = Any
 
-# Fixed remote command for the safe-sudo helper. Built once at module
-# scope so the helper's ``conn.run`` call site has zero string
-# interpolation -- the only caller-supplied data flows through
-# ``input=`` (stdin), never through the command string. ``-S`` makes
-# sudo read the password from stdin; ``-p ''`` suppresses the prompt
-# so the password line is not echoed; ``bash -s`` reads its commands
-# from stdin (the remainder after ``sudo -S`` has consumed its single
-# password line).
-_SUDO_BASH_REMOTE_CMD: str = "sudo -S -p '' bash -s"
+
+def _build_sudo_bash_remote_cmd(script_byte_len: int) -> str:
+    """Build the remote command for :meth:`Bind9Connector._remote_bash_with_sudo`.
+
+    Returns the constant boilerplate parameterised only by
+    *script_byte_len* — an integer derived from the caller's script
+    bytes. ``script`` and ``sudo_password`` themselves are never
+    interpolated into argv. See the helper's docstring for the full
+    wire-shape + leak-prevention analysis; module-level so the unit
+    suite (which mocks ``conn.run``) can assert against the exact
+    rendered shape without duplicating it.
+    """
+    return (
+        f"set -e; umask 077; f=$(mktemp); "
+        f'trap "rm -f $f" EXIT; '
+        f'head -c {script_byte_len} > "$f"; '
+        f'sudo -S -p "" bash "$f"'
+    )
+
 
 # Regex that recovers the ``<X.Y.Z>`` version triple from a
 # ``named -v`` banner. ISC ships the banner as
@@ -187,30 +203,57 @@ class Bind9Connector(SshConnector):
     ) -> asyncssh.SSHCompletedProcess:
         """Run *script* on *target* under ``sudo`` without leaking the password.
 
-        Safe-by-construction sudo invocation. The wire shape is fixed:
+        Safe-by-construction sudo invocation. The wire shape is built
+        by :func:`_build_sudo_bash_remote_cmd`:
 
-        1. Remote command (argv): ``"sudo -S -p '' bash -s"`` -- one
-           constant string with no caller interpolation. ``sudo -S``
-           reads the password from stdin; ``-p ''`` suppresses the
-           prompt so the password line is not echoed back; ``bash -s``
-           reads its commands from stdin once sudo has consumed the
-           password line.
-        2. Stdin payload: ``"<sudo_password>\\n<script>\\n"`` -- the
-           password is the first line; sudo reads exactly that line
-           and exec's bash with the remainder still buffered on the
-           channel; bash then reads ``script`` as its script body.
+        1. Remote command (argv): ``"set -e; umask 077; f=$(mktemp);
+           trap \"rm -f $f\" EXIT; head -c <N> > \"$f\"; sudo -S -p ''
+           bash \"$f\""``. The only caller-derived interpolation is
+           ``<N>`` — the **byte count** of the UTF-8-encoded script,
+           an integer. ``script`` and ``sudo_password`` themselves are
+           not in argv.
+        2. Stdin payload: ``script_bytes + sudo_password + "\\n"`` —
+           ``head -c N`` reads exactly the script bytes off the pipe
+           into ``$f`` via unbuffered ``read(2)`` (no stdio prefetch),
+           then ``sudo -S`` reads the password from what remains on
+           stdin (EOF immediately after the password's newline, so
+           sudo's stdio buffer has nothing past the password line to
+           swallow). ``bash "$f"`` then reads the script body from
+           the temp file, not stdin.
+
+        Why the temp-file split (#697 RCA, 2026-05-20): the previous
+        shape ``"sudo -S -p '' bash -s"`` + ``<pw>\\n<script>\\n`` on
+        stdin silently broke against real sudo. ``sudo -S`` reads
+        its password line via buffered stdio (``fgetc``/``getline``),
+        which on a pipe consumes not just the ``\\n``-terminated
+        password but a chunk of adjacent buffered bytes from the
+        same kernel read. Those bytes go into sudo's FILE* and are
+        discarded when sudo execs bash — so ``bash -s`` saw EOF
+        immediately and write ops (record.add / record.remove /
+        config.apply_*) silently no-op'd (audit ``state_after ==
+        state_before``). Reproduced locally against the bind9
+        testcontainer + Debian sudo 1.9.x. Sliding the script body
+        through a temp file isolates sudo's stdio from the script
+        bytes — sudo can prefetch all it wants, there's nothing
+        beyond the password line on its stdin to lose.
 
         The caller passes *script* and *sudo_password* as separate
         arguments and **cannot** express a mis-ordered payload: the
         helper builds the stdin string itself. The password never
         appears in the remote argv (so ``ps`` / ``/proc/<pid>/cmdline``
         cannot see it), never appears in the remote shell-history file
-        (because ``bash -s`` does not record stdin-read commands), and
+        (``bash <file>`` does not record file-sourced commands), and
         is never written to the local structured-log event (the
-        helper logs ``cmd_len`` and ``exit_status`` only; *script* and
-        *sudo_password* are not bound into any log call). The shape is
-        the encoded fix for the 2026-05-04 and 2026-05-05 credential
-        leaks documented in the parent Initiative #367's WI1.
+        helper logs ``cmd_len`` and ``script_len`` only; *script* and
+        *sudo_password* are not bound into any log call). The script
+        briefly lives on the remote SSH user's tmp under ``umask
+        077`` with a ``trap rm -f`` finaliser; the script body is
+        explicitly contracted as the bind9 op (NOT credentials), so
+        the on-disk window is acceptable. The shape is the encoded
+        fix for the 2026-05-04 / 2026-05-05 credential leaks
+        documented in the parent Initiative #367's WI1, hardened
+        against the 2026-05-20 stdio-buffer-swallow regression
+        (#697).
 
         Parameters
         ----------
@@ -265,28 +308,31 @@ class Bind9Connector(SshConnector):
                 "characters would smuggle additional bash commands onto stdin"
             )
         conn = await self._connect(target, raw_jwt)
-        stdin_payload = f"{sudo_password}\n{script}\n"
-        # ``conn.run(cmd, input=...)`` is the canonical asyncssh shape
-        # for "run cmd and feed it stdin"; the password line is
-        # therefore on the remote process's stdin, not in any argv.
-        # The asyncio.wait_for wrapper matches the parent adapter's
-        # _run_command timeout contract.
+        # New wire shape (#697 fix): script bytes first, password
+        # last, EOF immediately after. ``head -c <N>`` on the remote
+        # reads exactly the script's byte count via unbuffered
+        # read(2), so sudo's buffered stdin sees only the password
+        # line and can't prefetch-and-swallow script bytes (the bug
+        # that silently no-op'd write ops in v0.3 CI).
+        script_bytes = script.encode("utf-8")
+        cmd = _build_sudo_bash_remote_cmd(len(script_bytes))
+        stdin_payload = f"{script}{sudo_password}\n"
         result = await asyncio.wait_for(
-            conn.run(_SUDO_BASH_REMOTE_CMD, input=stdin_payload, check=False),
+            conn.run(cmd, input=stdin_payload, check=False),
             timeout=timeout,
         )
-        # Structured-logging discipline: cmd_len uses the fixed
-        # remote command's length (so the value is stable across all
-        # invocations and carries no information about the script
-        # body); script_len uses ``len(script)`` so operators can
-        # correlate stdout size against a per-invocation length
-        # signal without leaking the body itself. Neither
-        # ``sudo_password`` nor ``script`` are bound into the event.
+        # Structured-logging discipline: cmd_len records the rendered
+        # remote command's length (which varies only by the digit
+        # count of len(script_bytes) — a coarser size signal than
+        # ``script_len`` already carries); ``script_len`` is the
+        # per-invocation byte length operators correlate stdout size
+        # against. Neither ``sudo_password`` nor ``script`` are bound
+        # into the event.
         _log.info(
             "ssh_sudo_command_executed",
             target=target.name,
-            cmd_len=len(_SUDO_BASH_REMOTE_CMD),
-            script_len=len(script),
+            cmd_len=len(cmd),
+            script_len=len(script_bytes),
             exit_code=result.exit_status,
         )
         return result

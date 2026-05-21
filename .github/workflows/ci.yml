@@ -308,7 +308,7 @@ jobs:
             COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration \
               --cov=meho_backplane --cov-report=xml tests/
           else
-            uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
+            uv run pytest -n 6 --dist loadscope --durations=25 --ignore=tests/integration tests/
           fi
 
       - name: Upload Python coverage artifact

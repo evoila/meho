@@ -277,23 +277,36 @@ class CredentialsCache:
             )
             return raw
 
-    def invalidate(self, target: VcfTargetLike) -> None:
+    async def invalidate(self, target: VcfTargetLike) -> None:
         """Drop the cached credentials for *target*.
 
-        Synchronous because callers hold no lock on read-only invalidation
-        decisions; concurrent ``get`` callers re-acquire the lock and
-        re-load. Used by the consuming connector after a credentials
-        rotation event (rare; surfaced via a future admin endpoint).
+        Coroutine acquiring ``self._lock`` so the mutation is serialised
+        against in-flight :meth:`get` callers for the same target; otherwise
+        a concurrent ``invalidate(t)`` between ``get(t)``'s load and its
+        cache write would silently re-introduce a stale entry. Used by the
+        consuming connector after a credentials rotation event (rare;
+        surfaced via a future admin endpoint).
         """
-        self._cache.pop(target.name, None)
+        async with self._lock:
+            self._cache.pop(target.name, None)
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         """Drop all cached credentials.
 
-        Called by the consuming connector's ``aclose`` so credentials don't
-        outlive the connector instance.
+        Coroutine acquiring ``self._lock`` for the same reason
+        :meth:`invalidate` does — a concurrent ``clear()`` racing an
+        in-flight ``get(t)`` could otherwise leave the just-loaded entry
+        in the cache after ``clear()`` returned. Called by the consuming
+        connector's ``aclose`` so credentials don't outlive the connector
+        instance; Harbor's ``aclose`` at
+        ``backend/src/meho_backplane/connectors/harbor/connector.py:471-481``
+        and SDDC Manager's at
+        ``backend/src/meho_backplane/connectors/sddc_manager/connector.py:317-318``
+        are the in-tree precedent (each wraps a ``dict.clear`` in
+        ``async with self._creds_lock``).
         """
-        self._cache.clear()
+        async with self._lock:
+            self._cache.clear()
 
     @property
     def cached_targets(self) -> frozenset[str]:

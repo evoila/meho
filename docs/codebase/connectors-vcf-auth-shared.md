@@ -41,8 +41,12 @@ The recorded-fixture refresh tool at
   `NotImplementedError` until Goal #214 lands the operator-context
   per-target Vault credential read.
 - **`CredentialsCache`** — small per-target cache around a
-  `VcfCredentialsLoader`. Methods: `get(target)`, `invalidate(target)`,
-  `clear()`. Property: `cached_targets`. Construct with
+  `VcfCredentialsLoader`. Methods are all coroutines:
+  `await get(target)`, `await invalidate(target)`, `await clear()` —
+  each acquires the same internal `asyncio.Lock` so a concurrent
+  rotation / connector-teardown cannot race an in-flight load (the
+  load-once-per-target contract downstream consumers depend on).
+  Property: `cached_targets`. Construct with
   `CredentialsCache(loader, product_label="vrops")` — the label is used
   in error messages so operators reading audit logs can attribute
   failures to a specific connector.

@@ -300,6 +300,18 @@ async def _record_one(
 
     _log.info("recording %s %s %s", call.method, call.path, call.params or "")
     resp = await client.request(call.method, call.path, params=call.params or None, headers=headers)
+    if resp.status_code >= 400:
+        # Refuse to write a vendor error payload as a fixture — the recorded-
+        # fixture E2E suites in #837/#838/#839/#840 replay these as the canonical
+        # "appliance returned X" shape, and a 4xx/5xx body would poison the set.
+        # main()'s outer ``except Exception`` returns exit code 1, so the
+        # operator sees the failure immediately and can rerun once the
+        # appliance call is fixed.
+        raise RuntimeError(
+            f"{call.fixture_name}: {call.method} {call.path} returned HTTP "
+            f"{resp.status_code}; refusing to record a non-2xx response as a "
+            f"fixture (body[:200]={resp.text[:200]!r})"
+        )
     try:
         body: Any = resp.json()
     except ValueError:

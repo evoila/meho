@@ -21,6 +21,7 @@ covers only the *login round-trip* this module is responsible for.
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -213,7 +214,7 @@ async def test_credentials_cache_invalidate_drops_only_that_target() -> None:
     cache = CredentialsCache(_stub_loader, product_label="vcf-fleet")
     await cache.get(_TARGET_A)
     await cache.get(_TARGET_B)
-    cache.invalidate(_TARGET_A)
+    await cache.invalidate(_TARGET_A)
     assert cache.cached_targets == frozenset({"vrops-b"})
 
 
@@ -222,7 +223,7 @@ async def test_credentials_cache_clear_drops_all_entries() -> None:
     cache = CredentialsCache(_stub_loader, product_label="vcf-fleet")
     await cache.get(_TARGET_A)
     await cache.get(_TARGET_B)
-    cache.clear()
+    await cache.clear()
     assert cache.cached_targets == frozenset()
 
 
@@ -346,9 +347,6 @@ async def test_vcf_session_login_uses_default_payload_when_none_provided(
     captured: dict[str, object] = {}
 
     def _capture(request: httpx.Request) -> httpx.Response:
-        captured["json"] = httpx.Request(
-            request.method, request.url, content=request.content
-        ).read()
         captured["content"] = request.content
         return httpx.Response(200, headers={"sessionId": "tok"})
 
@@ -365,8 +363,6 @@ async def test_vcf_session_login_uses_default_payload_when_none_provided(
 
     body = captured["content"]
     assert isinstance(body, bytes)
-    import json
-
     parsed = json.loads(body.decode())
     assert parsed == {"username": "admin", "password": "p"}
 
@@ -396,8 +392,6 @@ async def test_vcf_session_login_payload_builder_takes_precedence(
             payload_builder=_vrli_builder,
             token_extractor=lambda r: r.headers.get("sessionId"),
         )
-
-    import json
 
     parsed = json.loads(captured_bodies[0].decode())
     assert parsed == {

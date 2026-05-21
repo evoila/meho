@@ -399,11 +399,31 @@ _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 
 
 async def _insert_harbor_descriptors() -> None:
-    """Seed the 9 curated Harbor core ops as enabled EndpointDescriptor rows."""
+    """Seed the 9 curated Harbor core ops as enabled EndpointDescriptor rows.
+
+    Idempotent: skips rows that already exist. The ``pg_engine`` fixture is
+    module-scoped so the same PG container is shared across every test in the
+    module; naively inserting on every ``harbor_e2e`` setup call would raise a
+    ``UniqueViolationError`` on the second test's setup because the first
+    test's commit is still visible.
+    """
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, uuid.UUID] = {}
     async with sessionmaker() as session:
         for group in HARBOR_CORE_GROUPS:
+            result = await session.execute(
+                select(OperationGroup).where(
+                    OperationGroup.tenant_id.is_(None),
+                    OperationGroup.product == HARBOR_PRODUCT,
+                    OperationGroup.version == HARBOR_VERSION,
+                    OperationGroup.impl_id == HARBOR_IMPL_ID,
+                    OperationGroup.group_key == group.group_key,
+                )
+            )
+            existing_group = result.scalar_one_or_none()
+            if existing_group is not None:
+                group_ids[group.group_key] = existing_group.id
+                continue
             group_row = OperationGroup(
                 tenant_id=None,
                 product=HARBOR_PRODUCT,
@@ -419,6 +439,20 @@ async def _insert_harbor_descriptors() -> None:
             group_ids[group.group_key] = group_row.id
 
         for op in HARBOR_CORE_OPS:
+            existing_desc = (
+                await session.execute(
+                    select(EndpointDescriptor).where(
+                        EndpointDescriptor.tenant_id.is_(None),
+                        EndpointDescriptor.product == HARBOR_PRODUCT,
+                        EndpointDescriptor.version == HARBOR_VERSION,
+                        EndpointDescriptor.impl_id == HARBOR_IMPL_ID,
+                        EndpointDescriptor.op_id == op.op_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_desc is not None:
+                continue
+
             method, path = op.op_id.split(":", 1)
             placeholders = _PATH_VAR_RE.findall(path)
             param_schema: dict[str, object]

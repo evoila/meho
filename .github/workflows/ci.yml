@@ -94,28 +94,20 @@ jobs:
     # pool scales from 0, so an idle period costs one cold-start on the
     # next run. Provisioned RDC-side in rdc-gitops#55.
     runs-on: meho-runners-ci-heavy
-    # 50-min cap: this job is the deterministic required gate — ruff
-    # + ruff-format + mypy + the unit pytest sweep with
-    # tests/integration/ EXCLUDED (--ignore=tests/integration). The
-    # container-heavy integration subtree moved to the sibling
-    # `python-integration` job below (which finishes in ~4 min — it
-    # is only ~5% of the test count, never the bottleneck). The real
-    # cost is the serial UNIT suite itself: run 25992737115 reached
-    # only 62% in a 25-min cap, extrapolating to ~40 min wall-clock
-    # for ruff+mypy+uv-sync+unit+coverage. History: the combined
-    # serial sweep blew the 10→20→40-min caps (runs 25910787068,
-    # 25970564527, 25972807988, 25987329377). Splitting integration
-    # out + a 50-min cap makes this gate deterministic (no
-    # testcontainer variance) with headroom for unit-suite growth.
-    # Job name is intentionally unchanged so the existing
-    # branch-protection required check stays satisfied. The durable
-    # fix — pytest-xdist `-n auto` parallelization of the unit suite —
-    # LANDED via #585 (which removed the global-registry isolation
-    # leaks that blocked it; see the Pytest step below). The 50-min
-    # cap is now generous headroom kept deliberately for the first
-    # parallel CI runs; retune downward once real multi-core CI
-    # wall-clock is observed (local: 10:18 → 6:14).
-    timeout-minutes: 50
+    # 20-min cap: ~2x the observed ~9.3-min job wall after #771/#799
+    # removed the per-test descriptor re-embedding that had dominated
+    # this job. pytest is ~8m33s with --cov+sysmon (run 26245676016,
+    # the post-#799 push) / ~7m35s without; everything else in the job
+    # (uv sync, ruff, mypy, drift-guard) is <1 min combined. History:
+    # the combined serial sweep once blew the 10→20→40→50-min caps
+    # (runs 25910787068, 25970564527, 25972807988, 25987329377,
+    # 25992737115) before the integration split (#570), xdist
+    # (#585/#603), and the #799 re-embed fix landed; the 50-min cap was
+    # generous headroom from that era. Retuned down now that real
+    # multi-core wall-clock is observed, exactly as the prior comment
+    # instructed. Job name is intentionally unchanged so the existing
+    # branch-protection required check stays satisfied.
+    timeout-minutes: 20
     env:
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
@@ -274,42 +266,32 @@ jobs:
         # the container-heavy subtree runs in the sibling
         # `python-integration` job. Coverage is the unit sweep only;
         # combined cov is #564.
-        # Coverage gated to push events only (push-to-main): pytest-cov
-        # instrumentation is the unit job's dominant cost — run
-        # 26164020459 clocked ~27min on 2678 items, and coverage tracing
-        # adds an empirical 30-60% wall-time tax on xdist suites. PRs
-        # skip --cov entirely so the merge gate stays fast; main pushes
-        # still produce coverage.xml for quality-gate.yml's SonarCloud
-        # workflow_run consumer. SonarCloud's Clean-as-You-Code semantics
-        # tolerate coverage updating one merge later — main always
-        # carries fresh data, and quality-gate.yml is whole-job
-        # continue-on-error so missing PR coverage never blocks merge.
-        # Trade-off accepted: PR-level Sonar coverage decoration goes
-        # quiet (the new-code coverage widget shows "no data" on PRs).
-        # --cov-report=term dropped regardless — purely cosmetic and
-        # serializes through xdist workers.
+        # Coverage runs on BOTH push and PR. #726 had gated --cov to
+        # push-only on the belief that pytest-cov was the unit job's
+        # dominant cost; the #771 diagnostic (#793) disproved that — the
+        # real cost was per-test descriptor re-embedding (fixed #799),
+        # not coverage. With that fixed + sysmon, --cov adds only ~1 min
+        # (pytest ~8m33s with cov vs ~7m35s without; run 26245676016),
+        # so the job stays ~9.3 min — under the Goal #11 10-min budget —
+        # while PRs regain SonarCloud Clean-as-You-Code new-code-coverage
+        # decoration (no more "no data" on the PR widget) instead of it
+        # updating one merge late. quality-gate.yml stays whole-job
+        # continue-on-error, so a missing/late artifact still never
+        # blocks merge. --cov-report is xml only — term is purely
+        # cosmetic and serializes through xdist workers.
         # COVERAGE_CORE=sysmon swaps coverage.py's default C tracer
         # (per-line `sys.settrace` callbacks) for the PEP 669
-        # `sys.monitoring` backend introduced in Python 3.12 and
-        # supported by coverage.py 7.4+ (lock pins 7.14). sysmon's
-        # event-driven model halves coverage's wall-time tax in typical
-        # suites; locally on a small xdist run the line counts matched
-        # ctrace exactly (2913/11832 in both), which is what we need
-        # for SonarCloud parity. Scoped to the push branch where --cov
-        # actually runs — setting the env var on the PR branch would
-        # be a harmless no-op (no `--cov` flag), but inlining it next
-        # to the only command that reads it keeps intent local.
-        # Branch-coverage is OFF in this project (no `--cov-branch`,
-        # no `[tool.coverage.run] branch=true`), so the sysmon branch-
-        # coverage caveat (requires `env.PYBEHAVIOR.branch_right_left`,
-        # not yet on the CI's Python) does not apply.
+        # `sys.monitoring` backend (Python 3.12+, coverage.py 7.4+; lock
+        # pins 7.14). sysmon's event-driven model roughly halves the
+        # tax; locally the line counts matched the C tracer exactly
+        # (2913/11832 in both), which is what SonarCloud parity needs.
+        # Branch-coverage is OFF in this project (no `--cov-branch`, no
+        # `[tool.coverage.run] branch=true`), so the sysmon branch-
+        # coverage caveat (requires `env.PYBEHAVIOR.branch_right_left`)
+        # does not apply.
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration \
-              --cov=meho_backplane --cov-report=xml tests/
-          else
-            uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
-          fi
+          COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration \
+            --cov=meho_backplane --cov-report=xml tests/
 
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).

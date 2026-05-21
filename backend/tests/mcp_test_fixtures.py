@@ -129,7 +129,12 @@ def isolated_registry() -> Iterator[None]:
     in any test file that imports the fixture after the first one
     runs. The G4.1-T3 kb meta-tools (``mcp.tools.knowledge``) and the
     matching ``meho://kb/{slug}`` resource (``mcp.resources.kb``) join
-    the list for the same reason. The G9.1-T7 topology meta-tools
+    the list for the same reason. The G0.9.1-T6 manual-seed admin tool
+    (``mcp.tools.topology_create_node`` -- ``meho.topology.create_node``)
+    lives in a separate module so the older
+    ``mcp.tools.topology`` file does not grow further past the
+    600-line code-quality guidance; it joins the reload list
+    explicitly. The G9.1-T7 topology meta-tools
     (``mcp.tools.topology`` — ``query_topology`` + ``list_targets``)
     join the list for the same reason. The G5.1-T3 memory meta-tools
     (``mcp.tools.memory`` — ``search_memory`` + ``add_to_memory``) and
@@ -147,6 +152,7 @@ def isolated_registry() -> Iterator[None]:
         meho_status,
         operations,
         topology,
+        topology_create_node,
     )
     from meho_backplane.mcp.tools import memory as memory_tools
     from meho_backplane.mcp.tools import memory_promote as memory_promote_tool
@@ -159,6 +165,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(broadcast_overrides)
     importlib.reload(knowledge)
     importlib.reload(topology)
+    importlib.reload(topology_create_node)
     importlib.reload(memory_tools)
     importlib.reload(memory_promote_tool)
     importlib.reload(tenant_info)

@@ -36,6 +36,10 @@ models that G9.1-T1 (#448, migration `0007`) created.
   `conflicts_with` for incompatible kinds over the same endpoint
   pair). Writes one audit row (`op_id="topology.annotate"`,
   `op_class="write"`) and publishes one broadcast event.
+  **Precondition:** both endpoints must already exist as `graph_node`
+  rows. A fresh tenant has zero nodes; seed them via
+  `create_or_get_node` (manual seed) or `refresh_target_topology`
+  (probe-driven) first.
 - `unannotate_edge(session, operator, *, edge_id=None, from_ref=None, kind=None, to_ref=None) -> UUID`
   — hard-delete a curated edge (selector is either `edge_id` or the
   full triple; both/neither → `UnannotateSelectorError`). Refuses
@@ -43,6 +47,27 @@ models that G9.1-T1 (#448, migration `0007`) created.
   resurrect on next refresh). Clears reciprocal `superseded_by` /
   `conflicts_with` markers the deleted edge left on auto rows.
   Writes one audit row + one broadcast event.
+
+**Manual node seed — entry point (async, write half, G0.9.1-T6 #778):**
+
+- `create_or_get_node(session, operator, *, kind, name, note=None, evidence_url=None) -> CreateNodeResult`
+  — manually seed a `graph_node` row in the operator's tenant.
+  Validates `kind` against `_GRAPH_NODE_KINDS` (raise
+  `InvalidNodeKindError` *before* any DB write), then idempotent
+  upsert on the `graph_node_tenant_kind_name_idx`
+  (`(tenant_id, kind, name)`) unique key. Manual seeds set
+  `discovered_by=operator.sub`; a re-seed over an auto-discovered row
+  promotes `discovered_by` to the operator (mirrors `annotate_edge`'s
+  auto→curated promotion). Writes one audit row
+  (`op_id="topology.create_node"`, `op_class="write"`,
+  `method="CREATE_NODE"`) and publishes one broadcast event
+  (fail-open after commit). Closes the **empty-tenant bootstrap gap**:
+  before this verb, a fresh tenant could not reach a working topology
+  state via MCP because `annotate_edge` requires both endpoints to
+  already exist and the only node-creating path was the CLI verb
+  `meho topology refresh <target>`. The verb is also the canonical
+  path for **curated inner-graph nodes the probes cannot derive**
+  (vault-role, keycloak-realm, externally-managed principals).
 
 Both service functions own a `session.begin()` block internally and
 publish broadcast events after commit (fail-open per the refresh
@@ -111,7 +136,14 @@ REST wrappers). G9.2-T7 (#598) widened the parametric tool with the
 `meho.topology.annotate` / `meho.topology.unannotate`
 (`required_role=TENANT_ADMIN`, `op_class="write"`); both admin tools
 call `annotate_edge` / `unannotate_edge` directly and are visible only
-to a tenant_admin-scoped session. G9.1-T8 (#456) shipped the closing
+to a tenant_admin-scoped session. G0.9.1-T6 (#778) added a third
+admin meta-tool `meho.topology.create_node` in
+`mcp/tools/topology_create_node.py` (separate module to keep
+`mcp/tools/topology.py` from accreting further past the 600-line
+guidance; the registry auto-discovers either way) that closes the
+empty-tenant bootstrap gap — calls `create_or_get_node` directly,
+same `tenant_admin` / `write` shape as the annotate pair.
+G9.1-T8 (#456) shipped the closing
 acceptance suite
 (`backend/tests/integration/test_topology_g91_acceptance.py` + the
 parametric `backend/tests/fixtures/topology_10k_nodes.py` 10k-node
@@ -453,6 +485,61 @@ so the guard runs only where the column is JSONB.
    (`method="UNANNOTATE"`, `path="topology.unannotate"`,
    `op_class="write"`). Commit. Publish one broadcast event
    (fail-open).
+
+## Manual node seed control flow (write half — G0.9.1-T6 #778)
+
+### `create_or_get_node`
+
+1. Validate `kind` against `_GRAPH_NODE_KINDS` (raise
+   `InvalidNodeKindError` *before* any DB read).
+2. `async with session.begin()` — one transaction wraps the
+   lookup + upsert + audit write.
+3. Look up the existing row for the `(tenant_id, kind, name)` unique
+   tuple (the `graph_node_tenant_kind_name_idx` index). Found
+   → merge the four manual-seed property keys (`note`,
+   `evidence_url`, `seeded_by`, `seeded_at`) onto the existing JSONB
+   (auto-discovered keys like `status`, `phase` are preserved),
+   refresh `last_seen`, and promote `discovered_by` to the operator
+   iff the existing row was probe-derived (auto→curated promotion;
+   matches `annotate_edge`'s shape). Absent → `INSERT` a fresh row
+   with `discovered_by=operator.sub`, `target_id=None` (manual seeds
+   never adopt onto a target — only the refresh service does that),
+   `properties={note, evidence_url, seeded_by, seeded_at}`,
+   `first_seen = last_seen = now`.
+4. Add one `audit_log` row in the same session
+   (`method="CREATE_NODE"`, `path="topology.create_node"`,
+   `payload={op_id, op_class:"write", node_id, kind, name,
+   was_created, note, evidence_url}`, `target_id` = the seeded
+   node's own `target_id` when non-null, else `None`).
+5. Commit. Then publish one `BroadcastEvent` (`op_class="write"` —
+   set explicitly because the `.create_node` suffix is not in
+   `_WRITE_SUFFIXES`; same rationale as `.annotate` /
+   `.unannotate`). Publish is fail-open: a publish exception is
+   logged, never raised.
+
+**Idempotency invariant.** A repeat call with the same
+`(kind, name)` always returns `was_created=False` after the first
+insert — the unique index guarantees one row per triple, and the
+refresh service's `_node_key((kind, name))` lookup recognises
+operator-seeded rows on the next probe (refresh keys on the same
+unique tuple, not on `discovered_by`). A manually-seeded node that
+the refresh service later discovers is adopted normally: refresh
+keeps `(tenant_id, kind, name)` as its identity, updates
+`last_seen` + `properties` from the probe payload, and the operator
+retains audit-trail authorship (the `audit_log` row from this verb
+is permanent — even an auto-rewrite of `discovered_by` by a
+subsequent refresh does not erase it).
+
+**Not a refresh trigger.** This verb is a manual seed for nodes the
+operator wants to assert directly (the empty-tenant bootstrap entry
+point, or curated inner-graph nodes the probes cannot derive). It
+does not run any probe, does not write edges, and does not set
+`target_id`. If the seeded node corresponds to a target that
+should be auto-discovered going forward, run
+`meho topology refresh <target>` after the bootstrap: the refresh
+will adopt the node onto the target (`target_id` gets set, the
+node's properties pick up probe-derived shape) without losing the
+manual-seed audit trail.
 
 ## REST API surface (T5, #453 + G9.2-T5 #597)
 

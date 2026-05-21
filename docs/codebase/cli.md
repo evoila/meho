@@ -1521,6 +1521,144 @@ project keeps the dep graph small — every transitive import is one
 more thing supply-chain scanning has to vouch for, and operators
 have to trust to run `meho login` against their secrets.
 
+## Admin Keycloak bootstrap (`meho admin keycloak bootstrap-clients`, G0.9.1-T11 #791)
+
+`cli/internal/cmd/admin/keycloak/` registers the install-time
+realm-provisioning verb that closes the v0.3.1 dogfood's deepest
+deployer friction: a working `meho-cli` device-code client + the
+public MCP browser-flow client + the **5 protocol mappers + 4 default
+client scopes + meho-admins group + admin user** that together let
+`meho login` and the MCP onramp authenticate without 4 sequential
+walls of opaque `invalid_token` / `unauthorized_client` errors. The
+verb encodes the 5-step recipe documented in
+[`deploy/values-examples/README.md`](../../deploy/values-examples/README.md)
+§ Auth onramp recipe — that doc remains the manual path for realms
+where the admin API isn't reachable; this verb is the automation when
+it is.
+
+Unlike the rest of the CLI tree (which dispatches through the
+backplane via the G0.6 dispatcher route), `meho admin keycloak`
+talks **directly** to a Keycloak admin REST API using operator
+credentials. The verb is a one-shot install-time helper, not an
+agent-facing operation, and is **not** mirrored on the MCP surface.
+
+### Subcommands
+
+- `meho admin keycloak bootstrap-clients` — idempotently reconcile a
+  realm against the recipe:
+  1. Public device-code client (default name `meho-cli`,
+     `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`,
+     every other flow off).
+  2. Public authorization-code+PKCE MCP client (default name
+     `meho-mcp-client`, `standardFlowEnabled=true`,
+     `pkce.code.challenge.method=S256`, redirect URIs for Claude.ai +
+     localhost MCP Inspector).
+  3. 5 protocol mappers cloned from the reference shape on
+     `meho-backplane`, installed on **both** public clients:
+     `audience-meho-backplane`, `meho-mcp-audience`, `tenant-id`,
+     `tenant-role`, `groups-claim`.
+  4. 4 default client scopes (`basic`, `roles`, `web-origins`,
+     `acr`) explicitly assigned to **both** public clients. The
+     `basic` scope is load-bearing — Keycloak 25+ moved the `sub`
+     claim mapper into it, and clients created via the admin API do
+     **not** auto-inherit the realm's default-default scopes, so an
+     explicit assignment is the only way to guarantee `sub` lands in
+     the access token (RFC 9068 §2.2.1 requires it).
+  5. The `meho-admins` top-level group + an admin user joined to
+     it, with a password set via `/users/{id}/reset-password`.
+
+### Idempotency
+
+Every step does a "does this exist?" check before mutating:
+
+- Clients: `GET /clients?clientId=<id>`; on hit, PUT to update; on
+  miss, POST to create.
+- Mappers: `GET /clients/{uuid}/protocol-mappers/models`; missing
+  mapper → POST; existing-but-different → PUT; existing-and-equal →
+  skip.
+- Default scopes: `GET /clients/{uuid}/default-client-scopes`;
+  missing scope → PUT; already present → skip.
+- Group: `GET /groups?search=<name>` (filtered client-side to exact
+  match); missing → POST.
+- User: `GET /users?exact=true&username=<name>`; missing → POST then
+  `PUT /users/{id}/reset-password`; existing → skip the password
+  reset (silent password rotation on a re-run is strictly worse than
+  a "set it once at create time" rule — see the per-finding rationale
+  in `reconcileUser`).
+
+A clean re-run prints `[skip]` for every resource and exits 0.
+
+### Refusals
+
+The verb refuses operator-friendly mistakes at the validation
+boundary:
+
+- `--cli-client-id meho-backplane` (or `--mcp-client-id
+  meho-backplane`) → refuses with a one-line explanation that
+  `meho-backplane` is the confidential resource-server client and is
+  out of scope.
+- `--mcp-resource-uri` with a trailing slash → refuses, because the
+  backplane normalises `MCP_RESOURCE_URI` server-side and the
+  audience claim in the token must match the no-slash form.
+- `--skip-user-provisioning` omitted but `--admin-user-username` /
+  password unset → refuses with the specific missing-flag name.
+
+### Secret handling
+
+Two passwords flow through the verb: the **master-realm admin
+password** (used to mint the admin token via the password grant
+against the built-in `admin-cli` client) and the **new admin user's
+password**. Both are read from env vars (`KEYCLOAK_ADMIN_PASSWORD` /
+`KEYCLOAK_ADMIN_USER_PASSWORD`) or stdin; neither is ever accepted
+via a command-line flag, so neither lands in shell history, `ps`
+output, or process supervisor logs. The pattern mirrors the
+reference shell script's mode-600 tempfile dance, adapted for Go's
+stdin reader.
+
+### HTTP client
+
+Stdlib `net/http` + `encoding/json` — no Keycloak Go SDK in
+`go.mod`. The admin verb's surface area is small (clients +
+protocol-mappers + client-scopes + users + groups, all under
+`/admin/realms/{realm}/...`); pulling in a generated SDK for that is
+a bad supply-chain tradeoff. The same discipline as the rest of the
+CLI: every transitive import has to justify its place in `go.sum`.
+
+The `--insecure-skip-tls-verify` flag flips `tls.Config.InsecureSkipVerify`
+on a custom transport for the one-time bootstrap case where the
+operator workstation has not yet trusted the realm's internal CA.
+The flag is opt-in and explicit; the default uses the system trust
+store via `http.DefaultTransport`.
+
+### Tests
+
+`bootstrap_test.go` drives a fake Keycloak (`httptest.Server` +
+in-memory state maps) through eight scenarios:
+
+- Fresh realm: every resource created, mapper + scope counts match
+  the recipe (5 mappers, 4 default scopes, 2 clients, 1 group, 1
+  user).
+- Idempotent re-run: zero new POSTs against the same realm; password
+  reset called exactly once across two runs.
+- Confidential-client refusal: `--cli-client-id meho-backplane`
+  errors at the validation boundary.
+- Trailing-slash refusal: `--mcp-resource-uri .../mcp/` errors with
+  a "trailing slash" message naming the recipe rule.
+- Dry-run: zero Keycloak calls, banner present in stdout.
+- Skip-user-provisioning: 2 clients land, 0 groups, 0 users.
+- Mandatory-flag validation: missing `--keycloak-base-url`,
+  `--realm`, etc. each surface a flag-specific error.
+- Mapper-shape parity with the reference shell script:
+  `audience-meho-backplane` carries `included.client.audience=
+  meho-backplane`; `meho-mcp-audience` carries `included.custom.
+  audience=<uri>`; `tenant-id` / `tenant-role` are
+  `oidc-hardcoded-claim-mapper`; `groups-claim` is
+  `oidc-group-membership-mapper` with `claim.name=groups`.
+
+Real-realm verification belongs in a future `testcontainers` Keycloak
+integration test; the unit suite proves the orchestrator's
+interaction shape, not the realm semantics.
+
 ## Known issues / forward-compat scaffolding
 
 * `meho version` prints CLI metadata only. The Goal #11 contract

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -255,6 +256,7 @@ def test_retrieval_hit_is_frozen() -> None:
     hits unchanged; a mutable shape would risk a handler accidentally
     mutating a hit between RRF fusion and response serialisation.
     """
+    ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     hit = RetrievalHit(
         document_id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
@@ -263,6 +265,8 @@ def test_retrieval_hit_is_frozen() -> None:
         kind="kb-entry",
         body="body",
         doc_metadata={},
+        created_at=ts,
+        updated_at=ts,
         fused_score=0.03,
         bm25_score=0.5,
         cosine_score=0.7,
@@ -271,6 +275,33 @@ def test_retrieval_hit_is_frozen() -> None:
     )
     with pytest.raises((ValueError, TypeError)):
         hit.fused_score = 0.99  # type: ignore[misc]
+
+
+def test_retrieval_hit_requires_timestamps() -> None:
+    """``RetrievalHit`` rejects construction without ``created_at`` / ``updated_at``.
+
+    G0.9.1-T4 (#776). The substrate must carry the persisted column
+    values through to downstream consumers (memory ``search_memory``
+    today, every other read surface that wants honest mtime later);
+    defaulting them to ``None`` or an epoch sentinel would re-open the
+    silent-corruption trap the issue closed. Pinning the required-
+    field contract here keeps future schema edits honest.
+    """
+    with pytest.raises(ValueError, match=r"created_at|updated_at"):
+        RetrievalHit(  # type: ignore[call-arg]
+            document_id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            source="kb",
+            source_id="k8s",
+            kind="kb-entry",
+            body="body",
+            doc_metadata={},
+            fused_score=0.03,
+            bm25_score=0.5,
+            cosine_score=0.7,
+            bm25_rank=1,
+            cosine_rank=1,
+        )
 
 
 # ---------------------------------------------------------------------------

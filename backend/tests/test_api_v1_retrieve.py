@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
@@ -129,6 +130,7 @@ def retrieve_client() -> Iterator[TestClient]:
 
 def _make_hit(body: str = "doc body") -> RetrievalHit:
     """Build a :class:`RetrievalHit` for stub responses."""
+    ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     return RetrievalHit(
         document_id=UUID("11111111-1111-1111-1111-111111111111"),
         tenant_id=UUID("22222222-2222-2222-2222-222222222222"),
@@ -137,6 +139,8 @@ def _make_hit(body: str = "doc body") -> RetrievalHit:
         kind="kb-entry",
         body=body,
         doc_metadata={"author": "ops"},
+        created_at=ts,
+        updated_at=ts,
         fused_score=0.032,
         bm25_score=0.85,
         cosine_score=0.72,

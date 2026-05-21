@@ -43,7 +43,6 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.memory._internal import (
-    EPOCH,
     MEMORY_SOURCE,
     auto_slug,
     build_metadata,
@@ -840,11 +839,12 @@ class MemoryService:
         * the stored ``expires_at`` is in the past.
 
         Otherwise returns the ranked search hit with the retrieval
-        substrate's per-signal scores attached. The retrieval
-        substrate does not expose ``created_at`` / ``updated_at``
-        through :class:`RetrievalHit`; v0.2 surfaces :data:`EPOCH`
-        as the placeholder and the API layer (T2 #422) renders these
-        as ``null``.
+        substrate's per-signal scores attached. ``created_at`` /
+        ``updated_at`` are passed through from :class:`RetrievalHit`,
+        which mirrors the persisted :class:`Document` columns, so
+        ``search_memory`` returns the same timestamps as a fresh
+        write / direct read of the row (G0.9.1-T4 #776 fixed this
+        path after consumer feedback observed epoch zero strings).
         """
         try:
             hit_scope = scope_for_kind(hit.kind)
@@ -877,8 +877,8 @@ class MemoryService:
             expires_at=expires_at,
             user_sub=user_sub,
             target_name=target_name,
-            created_at=EPOCH,
-            updated_at=EPOCH,
+            created_at=hit.created_at,
+            updated_at=hit.updated_at,
         )
         return MemoryEntrySearchHit(
             entry=entry,

@@ -1013,6 +1013,13 @@ async def test_agent_flow_search_and_add_memory_round_trip(
     into the tool descriptions ("search first, then add if missing")
     works end-to-end: a newly-added memory surfaces in a subsequent
     search call from the same operator.
+
+    Also pins the **G0.9.1-T4 (#776)** timestamp passthrough: the
+    ``created_at`` / ``updated_at`` ``search_memory`` returns for the
+    just-written entry are the real DB column values, not the epoch
+    placeholder the v0.3.1 path surfaced. The pre-fix consumer report
+    observed ``1970-01-01T00:00:00Z`` on every search response; the
+    assertions below would have caught that regression at AC time.
     """
     # Import deferred so the test module loads even when the MCP tool
     # module hasn't been imported elsewhere in the session.
@@ -1025,6 +1032,7 @@ async def test_agent_flow_search_and_add_memory_round_trip(
     distinctive_phrase = "ggwp-canary-g51-mcp-marker"
 
     # add_to_memory -- write through the MCP surface.
+    before_write = datetime.now(UTC)
     add_result = await _add_to_memory_handler(
         op_a_operator,
         {
@@ -1049,6 +1057,33 @@ async def test_agent_flow_search_and_add_memory_round_trip(
         f"add_to_memory + search_memory round-trip failed; hits did not include "
         f"{distinctive_slug!r}. Got {slugs}"
     )
+
+    # G0.9.1-T4 (#776): search must return real timestamps, not epoch.
+    matching_hit = next(hit for hit in hits if hit["entry"]["slug"] == distinctive_slug)
+    written_created = datetime.fromisoformat(add_result["created_at"])
+    written_updated = datetime.fromisoformat(add_result["updated_at"])
+    searched_created = datetime.fromisoformat(matching_hit["entry"]["created_at"])
+    searched_updated = datetime.fromisoformat(matching_hit["entry"]["updated_at"])
+    # The write path and the search path read from the same row; the
+    # column values must match exactly. Using ``==`` rather than a
+    # tolerance because both timestamps originate from the same UPDATE
+    # round-trip's ``datetime.now(UTC)`` snapshot.
+    assert searched_created == written_created, (
+        f"search_memory created_at drifted from add_to_memory's value: "
+        f"search={searched_created!r}, write={written_created!r}"
+    )
+    assert searched_updated == written_updated, (
+        f"search_memory updated_at drifted from add_to_memory's value: "
+        f"search={searched_updated!r}, write={written_updated!r}"
+    )
+    # Defence in depth: ``EPOCH`` (the placeholder the pre-fix path
+    # surfaced) must never appear on a persisted row's search result.
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    assert searched_created != epoch, "search_memory returned EPOCH for created_at"
+    assert searched_updated != epoch, "search_memory returned EPOCH for updated_at"
+    # And: the timestamp must be on the live wall-clock side of the
+    # write moment (sanity-check against an off-by-clock-skew bug).
+    assert searched_created >= before_write
 
 
 # ---------------------------------------------------------------------------

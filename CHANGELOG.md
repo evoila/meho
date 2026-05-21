@@ -105,6 +105,12 @@ connector-related release-notes line.
   the remediation for a listed-but-unresolvable id. Closes Signal #6
   from the 2026-05-21 RDC v0.3.1 dogfood
   ([#773](https://github.com/evoila/meho/issues/773)).
+- `search_memory` now returns real `created_at` / `updated_at` for
+  each hit instead of the `1970-01-01T00:00:00Z` epoch placeholder
+  that v0.3.1 surfaced. The retrieval substrate's `RetrievalHit`
+  carries the persisted `documents` row timestamps through to memory
+  search projections, so the read path matches what `add_to_memory`
+  and direct recall return for the same row (#776).
 
 ## [0.3.1] - 2026-05-21
 

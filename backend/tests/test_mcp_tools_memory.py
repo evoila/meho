@@ -212,6 +212,7 @@ async def test_tools_call_search_memory_returns_ranked_hits(
     client, op = client_with_operator
     captured: dict[str, object] = {}
 
+    ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     fake_hit = RetrievalHit(
         document_id=uuid.uuid4(),
         tenant_id=op.tenant_id,
@@ -225,6 +226,8 @@ async def test_tools_call_search_memory_returns_ranked_hits(
             "expires_at": None,
             "scope": "user",
         },
+        created_at=ts,
+        updated_at=ts,
         fused_score=0.7,
         bm25_score=0.4,
         cosine_score=0.85,

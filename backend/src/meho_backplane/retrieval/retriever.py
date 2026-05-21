@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -126,6 +127,14 @@ class RetrievalHit(BaseModel):
     top-:data:`CANDIDATE_LIMIT`). Likewise ``bm25_rank`` /
     ``cosine_rank`` are the 1-based ranks (1 = best) the document
     held in each signal's list, None when absent.
+
+    ``created_at`` / ``updated_at`` mirror the persisted
+    :class:`~meho_backplane.db.models.Document` columns so downstream
+    consumers (memory ``search_memory``, kb search projections) can
+    surface real write-time / mtime values instead of substituting a
+    placeholder. The retriever already issues a full ``SELECT * FROM
+    documents WHERE id IN (...)`` for each top-fused row, so carrying
+    the columns through is a free pass-through, not an extra query.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -137,6 +146,8 @@ class RetrievalHit(BaseModel):
     kind: str
     body: str
     doc_metadata: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
     fused_score: float
     bm25_score: float | None
     cosine_score: float | None
@@ -247,33 +258,72 @@ async def _retrieve_in_session(
     helper-owned session without duplicating the algorithm. Read-only
     by construction; no commit / rollback paths.
 
-    Raw SQL is used here (rather than the ORM ``select(Document)``
-    + ``func.ts_rank_cd(...)`` style) because the BM25 + cosine
-    operators (``@@``, ``<=>``) are pgvector / PG-FTS extensions
-    SQLAlchemy doesn't model natively. Parameterised bind variables
-    keep the query injection-safe; the embedding cast
-    (``CAST(:emb AS vector)``) is the documented pgvector pattern
-    for binding a Python ``list[float]`` to a ``vector(384)`` column.
+    Raw SQL is used inside the candidate helpers (rather than the ORM
+    ``select(Document)`` + ``func.ts_rank_cd(...)`` style) because the
+    BM25 + cosine operators (``@@``, ``<=>``) are pgvector / PG-FTS
+    extensions SQLAlchemy doesn't model natively.
     """
     log = structlog.get_logger()
     query_embedding = await get_embedding_service().encode_one(query)
-    # pgvector's wire format for a vector literal is a bracketed list
-    # of floats: ``[0.1, 0.2, ...]``. Python's ``str(list)`` produces
-    # exactly that shape, which lets the bound ``$1`` work through
-    # asyncpg's text codec (asyncpg has no native ``vector`` type
-    # registered against the raw ``text()`` statement, so the bind
-    # variable must arrive as a string for ``CAST($1 AS vector)`` to
-    # parse). Without this serialisation asyncpg raises
-    # ``TypeError: expected str, got list`` deep inside the text
-    # codec because Python list -> wire format conversion is gated
-    # on a typed column adapter we don't have here.
-    embedding_literal = "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
+    embedding_literal = _vector_literal(query_embedding)
 
-    # BM25 candidates -- top :data:`CANDIDATE_LIMIT` rows whose body
-    # contains at least one query term (the ``@@`` filter), ranked by
-    # ``ts_rank_cd`` descending. The ``:source IS NULL OR ...``
-    # pattern lets us bind a single SQL string for every filter
-    # combination; the asyncpg driver short-circuits the OR cleanly.
+    bm25_rows = await _bm25_candidates(session, tenant_id, query, source, kind)
+    cosine_rows = await _cosine_candidates(session, tenant_id, embedding_literal, source, kind)
+
+    fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
+    if not fused:
+        log.info(
+            "retrieve_empty",
+            tenant_id=str(tenant_id),
+            source=source,
+            kind=kind,
+        )
+        return []
+
+    hits = await _hydrate_hits(session, fused)
+    log.info(
+        "retrieve_hits",
+        tenant_id=str(tenant_id),
+        source=source,
+        kind=kind,
+        hit_count=len(hits),
+    )
+    return hits
+
+
+def _vector_literal(query_embedding: Sequence[float]) -> str:
+    """Serialize a Python ``list[float]`` to the pgvector wire literal.
+
+    pgvector's wire format for a vector literal is a bracketed list of
+    floats: ``[0.1, 0.2, ...]``. Python's ``str(list)`` produces almost
+    that shape but uses ``repr`` for each float; manually formatting
+    with a fixed precision keeps the bind variable stable across
+    Python releases and round-tripping through asyncpg's text codec
+    (asyncpg has no native ``vector`` type registered against the raw
+    ``text()`` statement, so the bind variable must arrive as a string
+    for ``CAST($1 AS vector)`` to parse). Without this serialisation
+    asyncpg raises ``TypeError: expected str, got list`` deep inside
+    the text codec because Python list → wire format conversion is
+    gated on a typed column adapter we don't have here.
+    """
+    return "[" + ", ".join(f"{x:.7f}" for x in query_embedding) + "]"
+
+
+async def _bm25_candidates(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    query: str,
+    source: str | None,
+    kind: str | None,
+) -> Sequence[Any]:
+    """Top :data:`CANDIDATE_LIMIT` BM25 candidates by ``ts_rank_cd``.
+
+    Returns rows whose body contains at least one query term (the
+    ``@@`` filter), ranked descending. The ``CAST(:source AS text) IS
+    NULL OR ...`` pattern lets us bind a single SQL string for every
+    filter combination; the asyncpg driver short-circuits the OR
+    cleanly.
+    """
     bm25_sql = text(
         """
         SELECT id, ts_rank_cd(
@@ -289,7 +339,7 @@ async def _retrieve_in_session(
         LIMIT :limit
         """
     )
-    bm25_result = await session.execute(
+    result = await session.execute(
         bm25_sql,
         {
             "query": query,
@@ -299,16 +349,25 @@ async def _retrieve_in_session(
             "limit": CANDIDATE_LIMIT,
         },
     )
-    bm25_rows = bm25_result.all()
+    return result.all()
 
-    # Cosine candidates -- top :data:`CANDIDATE_LIMIT` rows by
-    # ``embedding <=> query_embedding`` distance. ``1 - distance``
-    # converts pgvector's cosine *distance* (0 = identical) to a
-    # similarity *score* (1 = identical) so callers can rank on a
-    # higher-is-better signal that aligns with BM25's ``ts_rank_cd``.
-    # No content filter on the cosine side -- the embedding is the
-    # query, and the IVFFlat index returns ranked candidates whether
-    # the body shares query terms or not.
+
+async def _cosine_candidates(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    embedding_literal: str,
+    source: str | None,
+    kind: str | None,
+) -> Sequence[Any]:
+    """Top :data:`CANDIDATE_LIMIT` cosine candidates by pgvector distance.
+
+    ``1 - (embedding <=> query)`` converts pgvector's cosine *distance*
+    (0 = identical) to a similarity *score* (1 = identical) so callers
+    can rank on a higher-is-better signal that aligns with BM25's
+    ``ts_rank_cd``. No content filter on the cosine side -- the
+    embedding is the query, and the IVFFlat index returns ranked
+    candidates whether the body shares query terms or not.
+    """
     cosine_sql = text(
         """
         SELECT id, 1 - (embedding <=> CAST(:emb AS vector)) AS score
@@ -320,7 +379,7 @@ async def _retrieve_in_session(
         LIMIT :limit
         """
     )
-    cosine_result = await session.execute(
+    result = await session.execute(
         cosine_sql,
         {
             "emb": embedding_literal,
@@ -330,22 +389,23 @@ async def _retrieve_in_session(
             "limit": CANDIDATE_LIMIT,
         },
     )
-    cosine_rows = cosine_result.all()
+    return result.all()
 
-    fused = _rrf_fuse(bm25_rows, cosine_rows, limit=limit)
-    if not fused:
-        log.info(
-            "retrieve_empty",
-            tenant_id=str(tenant_id),
-            source=source,
-            kind=kind,
-        )
-        return []
 
-    # Fetch full Document rows for the top-`limit` ids in one query;
-    # avoids dragging the full body / metadata through the two
-    # candidate queries (which only need id + score for the fusion
-    # decision).
+async def _hydrate_hits(
+    session: AsyncSession,
+    fused: Sequence[_FusedEntry],
+) -> list[RetrievalHit]:
+    """Project fused entries to :class:`RetrievalHit` via a single ``IN`` fetch.
+
+    Fetches full :class:`Document` rows for the top-fused ids in one
+    query; avoids dragging the full body / metadata through the two
+    candidate queries (which only need id + score for the fusion
+    decision). A concurrent delete between candidate scan and hydrate
+    can leave a fused id without a row -- we skip those defensively
+    rather than raising, because retrieval is a read-only contract and
+    the caller would rather see N-1 hits than an error.
+    """
     top_ids = [entry.document_id for entry in fused]
     doc_result = await session.execute(select(Document).where(Document.id.in_(top_ids)))
     docs_by_id = {doc.id: doc for doc in doc_result.scalars().all()}
@@ -354,11 +414,6 @@ async def _retrieve_in_session(
     for entry in fused:
         doc = docs_by_id.get(entry.document_id)
         if doc is None:
-            # Shouldn't happen -- the candidate queries pulled ids
-            # from `documents` -- but guard against the SQLAlchemy
-            # cache-staleness edge case where a concurrent delete
-            # removed the row between the candidate query and the
-            # full fetch.
             continue
         hits.append(
             RetrievalHit(
@@ -369,6 +424,8 @@ async def _retrieve_in_session(
                 kind=doc.kind,
                 body=doc.body,
                 doc_metadata=doc.doc_metadata,
+                created_at=doc.created_at,
+                updated_at=doc.updated_at,
                 fused_score=entry.fused_score,
                 bm25_score=entry.bm25_score,
                 cosine_score=entry.cosine_score,
@@ -376,14 +433,6 @@ async def _retrieve_in_session(
                 cosine_rank=entry.cosine_rank,
             )
         )
-
-    log.info(
-        "retrieve_hits",
-        tenant_id=str(tenant_id),
-        source=source,
-        kind=kind,
-        hit_count=len(hits),
-    )
     return hits
 
 

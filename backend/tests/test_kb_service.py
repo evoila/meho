@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -423,6 +424,7 @@ async def test_search_entries_pins_kb_source_and_adapts_hits(
 ) -> None:
     """``search_entries`` calls retrieve with ``source='kb'`` and adapts the result shape."""
     tenant_id = uuid.uuid4()
+    ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     fake_hit = RetrievalHit(
         document_id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -431,6 +433,8 @@ async def test_search_entries_pins_kb_source_and_adapts_hits(
         kind="kb-entry",
         body="A" * 500,  # longer than the snippet width to verify truncation
         doc_metadata={"author": "ops"},
+        created_at=ts,
+        updated_at=ts,
         fused_score=0.5,
         bm25_score=0.3,
         cosine_score=0.7,
@@ -489,6 +493,7 @@ async def test_search_entries_short_body_snippet_is_full_body(
 ) -> None:
     """When the body fits within the snippet width, snippet == body (no ellipsis)."""
     short = "Just a short body."
+    ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     fake_hit = RetrievalHit(
         document_id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
@@ -497,6 +502,8 @@ async def test_search_entries_short_body_snippet_is_full_body(
         kind="kb-entry",
         body=short,
         doc_metadata={},
+        created_at=ts,
+        updated_at=ts,
         fused_score=0.1,
         bm25_score=None,
         cosine_score=0.1,

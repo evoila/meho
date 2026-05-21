@@ -103,17 +103,22 @@ The budget does **not** cover:
   [acceptance Task #56](https://github.com/evoila-bosnia/meho-internal/issues/56),
   the federation-chain smoke, not this one). The cold-deploy
   acceptance does **not** drive `meho login` end-to-end, but the
-  realm-side prerequisite the CLI needs — a public `meho-cli`
-  Keycloak client with the device-grant flow enabled and an audience
-  mapper — is a consumer-side provisioning step that must precede
-  `meho login`. The recipe lives in
-  [`deploy/values-examples/README.md`](../../deploy/values-examples/README.md)
-  § `meho-cli` public Keycloak client; the chart value to wire it
-  through is `config.keycloakCliClientId` (env
-  `KEYCLOAK_CLI_CLIENT_ID`). Auto-provisioning the client at
-  install time is tracked as
-  [#791](https://github.com/evoila/meho/issues/791) (G0.9.1-T11) and
-  is not yet shipped.
+  realm-side prerequisites the CLI and MCP onramp share — a
+  public `meho-cli` Keycloak client (device-grant enabled) and a
+  public `meho-mcp-client` (auth-code + PKCE), each with the same
+  5 protocol mappers and 4 default client scopes — are
+  consumer-side provisioning steps that must precede `meho login`
+  and the MCP-client wire-up. The consolidated recipe lives in
+  [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp),
+  with a 4-wall symptom→cause→fix matrix that bounds the failure
+  modes (notably the `basic`/`sub` gotcha — Keycloak 25+ moved
+  `sub` into the `basic` scope, and admin-API-created clients
+  don't auto-inherit realm default-default scopes). The CLI-side
+  chart value to wire the resulting client_id through is
+  `config.keycloakCliClientId` (env `KEYCLOAK_CLI_CLIENT_ID`).
+  Auto-provisioning the realm-side state at install time is
+  tracked as [#791](https://github.com/evoila/meho/issues/791)
+  (G0.9.1-T11) and is not yet shipped.
 
 ### Why 5 minutes is the right bar
 

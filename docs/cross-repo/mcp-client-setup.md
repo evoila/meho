@@ -11,6 +11,8 @@ Copyright (c) 2026 evoila Group
 
 MEHO speaks MCP 2025-06-18 over Streamable HTTP at the `/mcp` route. The wire protocol is fixed by the spec; what isn't fixed is the Keycloak realm configuration that issues tokens carrying the right `aud` claim, and the per-client configuration step that points a given MCP client at your backplane. This doc walks both — the realm-side change is one-time, the client-side change is per-installation.
 
+> **Pre-flight (load-bearing).** Before any MCP client can authenticate against MEHO, the deployer MUST pre-create a **public** OAuth client in the Keycloak realm — MEHO doesn't implement RFC 7591 Dynamic Client Registration, and Keycloak's default Trusted Hosts policy returns 403 for anonymous DCR on any prod realm. The full deployer recipe (5-step realm walk + 4-wall symptom→cause→fix matrix covering both the CLI and the MCP onramp) lives in [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp). The steps below are the **MCP-client-side wire-up** that runs *after* the public client + mappers + scopes exist in the realm; Step 2 here is the minimum-shape recap, with the full recipe as the authoritative source. If `tools/list` returns an empty list or every call 401s with `invalid_token`, the recipe's 4-wall matrix is the right place to start.
+
 If you're operating MEHO via the dogfood consumer ([`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)), the realm-side change ships in [Goal #11's cross-repo deps](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/261); follow the client-side steps below.
 
 ## Step 1 — Register the MCP resource URI as an audience in Keycloak
@@ -43,7 +45,9 @@ A different operator (different MEHO hostname) substitutes the URI accordingly. 
 
 ## Step 2 — Register an MCP client in Keycloak
 
-MEHO v0.2 doesn't implement RFC 7591 Dynamic Client Registration; operators register the MCP client statically. The recommended shape is one client per MCP-client-implementation per operator, but a single shared client also works.
+MEHO doesn't implement RFC 7591 Dynamic Client Registration; operators register the MCP client statically. The recommended shape is one client per MCP-client-implementation per operator, but a single shared client also works.
+
+> **Use the consolidated recipe.** The full client shape (5 protocol mappers, 4 default client scopes, the `basic`/`sub` gotcha) is documented in [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp) — that recipe is the source of truth and stays in sync with the CLI's needs. The `kcadm.sh` snippet below is the minimum shape and **does not by itself produce a working MCP onramp** — without the 5 mappers and the 4 default scopes, tokens minted by this client are rejected with `invalid_token` (Wall #2 / Wall #3 in the matrix). Read the consolidated recipe and then return here for the per-MCP-client setup at Step 3.
 
 ```bash
 # Public client (PKCE-only, no client secret) — the MCP spec mandates
@@ -133,6 +137,20 @@ Cline and Continue both consume an `mcp.json` in the workspace. The shape mirror
 
 OAuth handling is client-specific; refer to each client's docs for the token-acquisition path. Both expect the same Bearer-token flow MEHO advertises via the protected-resource metadata document.
 
+### Claude Code (HTTP MCP) and Cursor — `.mcp.json` `client_id` limitation
+
+Claude Code's native HTTP-MCP support and Cursor's MCP wire-up, as of 2026-05, follow the RFC 9728 metadata trail correctly: they fetch `/.well-known/oauth-protected-resource`, read the `authorization_servers` field, then attempt OAuth 2.1 + PKCE against the Keycloak realm. The problem is the next step: **neither `.mcp.json` shape exposes a `client_id` field**, so both clients fall back to dynamic client registration (RFC 7591). Keycloak's default Trusted Hosts policy ships with an empty whitelist — anonymous DCR is de-facto disabled — so the registration POST returns `HTTP 403 {"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request to client-registration service. Details: Host not trusted."}` and the wire-up never completes.
+
+Pre-registering `meho-mcp-client` on the realm side (Step 2 above + the [auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)) is necessary but **not sufficient** for these clients: they have no place to put the resulting `client_id`.
+
+Two workarounds today:
+
+1. **Use a wire-format-compatible MCP client.** Claude.ai Custom Connector, MCP Inspector, Cline, and Continue all expose a place for the operator to provide the OAuth client_id (Custom Connector picks it up from the realm's discovery once the operator approves the consent screen; the rest take it from `mcp.json` / per-client config). For everyday operator workflows, this is the first-class path.
+
+2. **Shim Claude Code / Cursor through `mcp-remote` (or an equivalent stdio→HTTP proxy).** The proxy holds a Bearer token (acquired out-of-band via `meho login --print-token` or any other path), translates the stdio MCP transport these clients spawn against an `npx mcp-remote ...` command-line into Streamable-HTTP calls to MEHO, and injects the `Authorization` header. The trade-off is operational: the proxy needs the token rotated when it expires; the Claude Code / Cursor process never sees the OAuth flow at all. This is the only path until the upstream MCP clients expose `client_id` in `.mcp.json`.
+
+Opening RFC 7591 DCR on the realm side is **not** the right fix: a public DCR endpoint on a prod realm is a long-term posture decision (which clients are allowed to self-register; how the operator audits unknown clients) and shouldn't be flipped on to work around a per-client config gap. The right long-term fix is upstream MCP-client `client_id` support; the right short-term fix is one of the two workarounds above.
+
 ## Step 4 — Verify connectivity
 
 After the client is wired:
@@ -154,10 +172,19 @@ The response carries `WWW-Authenticate: Bearer resource_metadata="https://meho.e
 
 ### Token rejected at the MCP server (401, `invalid_token`)
 
-The token's `aud` doesn't match `MCP_RESOURCE_URI`:
+The token's `aud` doesn't match `MCP_RESOURCE_URI`, or the token is missing a claim the backplane validates against:
 
 - Confirm Step 1 wired the audience mapper on the *correct* client (the same client that's issuing the operator's token).
 - Confirm the OAuth `resource` parameter the client sends matches `MCP_RESOURCE_URI`. Claude.ai's Custom Connector flow derives `resource` automatically from the URL the operator pasted — but a forwarder / reverse proxy that rewrites the path can leave the audience claim pointing at the wrong URI. Capture the issued token via the realm's token-introspection endpoint and read `aud` to confirm.
+- Decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm the **full claim shape** — `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`; `tenant_id`, `tenant_role`, `groups`, and **`sub`** are all present. Missing `sub` is the silent killer (Wall #3 in the consolidated matrix): Keycloak 25 moved `sub` into the `basic` client scope, and clients created via the admin REST API don't auto-inherit realm default-default scopes. The full diagnostic chain lives in [`deploy/values-examples/README.md` § Four-wall symptom → cause → fix matrix](../../deploy/values-examples/README.md#four-wall-symptom--cause--fix-matrix).
+
+### MCP client → Keycloak DCR returns 403 `"Host not trusted"`
+
+The client attempted dynamic client registration (RFC 7591) and Keycloak rejected with `HTTP 403 {"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request to client-registration service. Details: Host not trusted."}`:
+
+- This is the **correct** response from Keycloak — its default Trusted Hosts policy ships with an empty whitelist, so anonymous DCR is de-facto disabled. MEHO doesn't implement RFC 7591 either; the metadata's "follow the trail" UX assumes the client already holds a `client_id`, which on a fresh realm it doesn't.
+- The fix is on the deployer side, not the realm-policy side: pre-register a public client per [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp) Step 2. Opening DCR on a prod realm is a long-term posture decision, not the right onramp workaround.
+- If the MCP client can't carry `client_id` in its config (Claude Code's HTTP MCP, Cursor — see § Claude Code (HTTP MCP) and Cursor above), the deployer-side fix doesn't help until the upstream client exposes the field; the workaround is to shim through an stdio→HTTP proxy.
 
 ### `tools/list` returns an empty list
 
@@ -181,10 +208,14 @@ MEHO is spec-conformant; any MCP-2025-06-18 Streamable-HTTP client with OAuth 2.
 ## References
 
 - MEHO MCP architecture: [`docs/architecture/mcp.md`](../architecture/mcp.md).
+- Consolidated deployer auth-onramp recipe (CLI + MCP) + 4-wall matrix: [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp).
 - MCP 2025-06-18 spec: <https://modelcontextprotocol.io/specification/2025-06-18>.
 - MCP authorization: <https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization>.
 - RFC 9728 (Protected Resource Metadata): <https://datatracker.ietf.org/doc/html/rfc9728>.
 - RFC 8707 (Resource Indicators): <https://www.rfc-editor.org/rfc/rfc8707.html>.
+- RFC 7591 (Dynamic Client Registration): <https://datatracker.ietf.org/doc/html/rfc7591>.
+- RFC 8628 (Device Authorization Grant): <https://www.rfc-editor.org/rfc/rfc8628>.
 - Claude.ai Custom Connectors: <https://modelcontextprotocol.io/docs/develop/connect-remote-servers>.
 - MCP Inspector: <https://github.com/modelcontextprotocol/inspector>.
 - Keycloak audience mappers: <https://www.keycloak.org/docs/latest/server_admin/#_audience>.
+- Keycloak client-registration policies (Trusted Hosts): <https://www.keycloak.org/securing-apps/client-registration>.

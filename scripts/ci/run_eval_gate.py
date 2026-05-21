@@ -71,6 +71,7 @@ import asyncio
 import sys
 import uuid
 from collections.abc import Awaitable
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Importable because the CI job runs `uv sync` in backend/ first +
@@ -83,6 +84,11 @@ from meho_backplane.retrieval.eval.baseline_io import (
 from meho_backplane.retrieval.eval.corpus import load_corpus
 from meho_backplane.retrieval.eval.runner import eval_all
 from meho_backplane.retrieval.retriever import RetrievalHit
+
+# Deterministic timezone-aware timestamp for stub RetrievalHits. Matches
+# the shape used by tests/test_retrieval_eval_runner.py::_make_hit so the
+# gate script and the unit tests stay aligned on stub semantics.
+_STUB_TS: datetime = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
@@ -115,7 +121,9 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
       surface.
     """
     kb_answers = {row.query: row.expected_hits[0] for row in load_corpus("kb")}
-    ops_answers = {row.query: row.expected_op_ids[0] for row in load_corpus("operations")}
+    ops_answers = {
+        row.query: row.expected_op_ids[0] for row in load_corpus("operations")
+    }
     memory_answers = {row.query: row.expected_hits[0] for row in load_corpus("memory")}
 
     def _hit(slug: str, source: str, tenant_id: uuid.UUID) -> RetrievalHit:
@@ -127,6 +135,8 @@ def _build_perfect_retrieve_fn() -> Awaitable[list[RetrievalHit]]:
             kind=f"{source}-entry",
             body=f"body for {slug}",
             doc_metadata={},
+            created_at=_STUB_TS,
+            updated_at=_STUB_TS,
             fused_score=0.5,
             bm25_score=0.5,
             cosine_score=0.5,

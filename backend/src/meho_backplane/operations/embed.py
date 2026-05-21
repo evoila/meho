@@ -37,8 +37,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from meho_backplane.retrieval.embedding import EmbeddingService, get_embedding_service
+from meho_backplane.retrieval.embedding import (
+    EMBEDDING_DIMENSION,
+    EmbeddingService,
+    get_embedding_service,
+)
 from meho_backplane.retrieval.indexer import compute_body_hash
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "build_embedding_text",
@@ -116,5 +121,18 @@ async def encode_endpoint_text(
     bother).
     """
     if service is None:
+        # Default path (production + the per-test app-lifespan boot's
+        # run_typed_op_registrars). The #771 test stub applies ONLY
+        # here — never when a caller passes an explicit service, which
+        # is the deterministic-embedding test seam
+        # (e.g. test_operations_meta_tools seeds [0.1]*384 vectors and
+        # asserts ranking against them). Stubbing the default path skips
+        # the fastembed encode that dominates the per-test lifespan boot
+        # (~5.5s local / 35-47s CI per app-booting test); descriptor rows
+        # still INSERT with a valid-shaped zero vector, so tool-
+        # registration / RBAC / schema tests (which never read the
+        # vector) are unaffected.
+        if get_settings().test_stub_descriptor_embedding:
+            return [0.0] * EMBEDDING_DIMENSION
         service = get_embedding_service()
     return await service.encode_one(text)

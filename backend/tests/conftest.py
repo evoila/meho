@@ -280,6 +280,59 @@ def _default_retrieval_model_cache_dir(
 
 
 @pytest.fixture(autouse=True)
+def _stub_descriptor_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Iterator[None]:
+    """Stub default-path descriptor embedding in the per-test lifespan boot (#771).
+
+    Every test that constructs ``TestClient(meho_backplane.main.app)``
+    (the whole ``test_mcp_*`` family, plus middleware / auth_config
+    tests that exercise the lifespan) runs ``run_typed_op_registrars``
+    against the fresh per-test DB, which re-embeds every typed-op
+    descriptor through the real fastembed model. That encode is the
+    dominant unit-job cost — ~5.5 s locally and 35-47 s on CI per
+    app-booting test (#771; confirmed via CI-side ``--durations`` +
+    cold-boot profiling). Setting ``MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING``
+    makes :func:`encode_endpoint_text` return a zero vector on the
+    default (no explicit service) path, so registration is near-instant.
+    Descriptor rows still INSERT with a valid-shaped embedding column;
+    tool-registration / RBAC / schema tests never read the vector.
+
+    Scope is the *default path only* — callers that pass an explicit
+    ``embedding_service`` (the deterministic-embedding test seam, e.g.
+    :mod:`tests.test_operations_meta_tools`) are unaffected, so they keep
+    asserting ranking against their own seeded vectors. A test that
+    relies on *lifespan-registered* descriptor embeddings for ranking
+    requests :func:`real_descriptor_embeddings` to opt out.
+    """
+    if "real_descriptor_embeddings" in request.fixturenames:
+        # The opt-out fixture owns the env var for this test.
+        yield
+        return
+    monkeypatch.setenv("MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING", "1")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def real_descriptor_embeddings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Opt out of the #771 default-path descriptor-embedding stub.
+
+    For the rare test that asserts operation semantic-search ranking
+    over *lifespan-registered* descriptors (rather than its own
+    explicit-service-seeded corpus). Clears
+    ``MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING`` so registration computes the
+    real fastembed embedding for this test.
+    """
+    monkeypatch.delenv("MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin a non-empty ``BACKPLANE_URL`` so the lifespan boots in tests.
 

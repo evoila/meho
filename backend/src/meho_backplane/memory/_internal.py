@@ -48,7 +48,6 @@ from meho_backplane.memory.schemas import (
 )
 
 __all__ = [
-    "EPOCH",
     "MEMORY_SOURCE",
     "auto_slug",
     "build_metadata",
@@ -65,13 +64,6 @@ __all__ = [
 #: table. Centralised here so the service / API / MCP / CLI layers
 #: never spell the literal themselves.
 MEMORY_SOURCE: str = "memory"
-
-#: Placeholder timestamp surfaced when the retrieval substrate does
-#: not expose created/updated through ``RetrievalHit``. The API layer
-#: (T2 #422) renders this as ``null``; callers that need a real
-#: timestamp re-fetch via :meth:`MemoryService.recall`, which carries
-#: the column values from :class:`Document`.
-EPOCH: datetime = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 def auto_slug() -> str:

@@ -525,12 +525,17 @@ def _build_hit(
     slug: str,
     body: str = "stub body",
     expires_at: datetime | None = None,
+    created_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> RetrievalHit:
     """Build a :class:`RetrievalHit` shaped like one the substrate would emit.
 
     Helper for the search tests: lets each test pin the metadata
     fields ``MemoryService.search_memories`` post-filters on without
-    going through the SQL path.
+    going through the SQL path. ``created_at`` / ``updated_at``
+    default to a deterministic non-epoch instant so a passthrough
+    regression (the G0.9.1-T4 #776 fix) surfaces in any test that
+    asserts on the result-side timestamps.
     """
     metadata: dict[str, Any] = {
         "scope": kind.removeprefix("memory-"),
@@ -538,6 +543,7 @@ def _build_hit(
         "target_name": target_name,
         "expires_at": expires_at.isoformat() if expires_at is not None else None,
     }
+    default_ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     return RetrievalHit(
         document_id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -546,6 +552,8 @@ def _build_hit(
         kind=kind,
         body=body,
         doc_metadata=metadata,
+        created_at=created_at if created_at is not None else default_ts,
+        updated_at=updated_at if updated_at is not None else default_ts,
         fused_score=0.5,
         bm25_score=0.4,
         cosine_score=0.6,
@@ -645,6 +653,52 @@ async def test_search_memories_with_scope_narrows_kind_filter() -> None:
         )
     call_kwargs = retrieve_mock.await_args.kwargs
     assert call_kwargs["kind"] == "memory-tenant"
+
+
+@pytest.mark.asyncio
+async def test_search_memories_passes_through_hit_timestamps() -> None:
+    """``created_at`` / ``updated_at`` on the search result match the substrate hit.
+
+    G0.9.1-T4 (#776) regression gate. Before the fix the service
+    substituted ``EPOCH`` for both fields because :class:`RetrievalHit`
+    didn't carry them; the consumer dogfood (Signal #11) observed
+    ``1970-01-01T00:00:00Z`` strings on every search response. This
+    test pins the passthrough: a hit with distinct, non-epoch
+    ``created_at`` / ``updated_at`` surfaces unchanged on
+    ``result.entry``. The default ``_build_hit`` instant already
+    differs from ``EPOCH``; this test makes the two timestamps
+    distinct so an accidental ``updated_at = created_at`` swap
+    surfaces too.
+    """
+    tenant = uuid.UUID("00000000-0000-0000-0000-00000000a0a0")
+    operator = _op(tenant_id=tenant)
+    created = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
+    updated = datetime(2026, 5, 21, 10, 20, 33, tzinfo=UTC)
+    hit = _build_hit(
+        kind="memory-user",
+        tenant_id=tenant,
+        user_sub=operator.sub,
+        target_name=None,
+        slug="ts-passthrough",
+        created_at=created,
+        updated_at=updated,
+    )
+    with patch(
+        "meho_backplane.memory.service.retrieve",
+        new=AsyncMock(return_value=[hit]),
+    ):
+        service = MemoryService()
+        results = await service.search_memories(operator=operator, query="any")
+
+    assert len(results) == 1
+    assert results[0].entry.created_at == created
+    assert results[0].entry.updated_at == updated
+    # Defence in depth: explicitly disallow the old EPOCH placeholder
+    # so a regression to "swap in a sentinel that looks real" is
+    # caught here, not just by the equality assertions above.
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    assert results[0].entry.created_at != epoch
+    assert results[0].entry.updated_at != epoch
 
 
 # ---------------------------------------------------------------------------

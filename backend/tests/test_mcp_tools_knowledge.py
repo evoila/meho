@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -188,6 +189,7 @@ async def test_tools_call_search_knowledge_returns_ranked_hits(
     client, op = client_with_operator
     captured: dict[str, object] = {}
 
+    ts = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
     fake_hit = RetrievalHit(
         document_id=uuid.uuid4(),
         tenant_id=op.tenant_id,
@@ -196,6 +198,8 @@ async def test_tools_call_search_knowledge_returns_ranked_hits(
         kind="kb-entry",
         body="How to revert a vSphere VM snapshot via the REST API.",
         doc_metadata={"author": "ops"},
+        created_at=ts,
+        updated_at=ts,
         fused_score=0.8,
         bm25_score=0.5,
         cosine_score=0.9,

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -57,6 +58,9 @@ from meho_backplane.retrieval.retriever import RetrievalHit
 # ---------------------------------------------------------------------------
 
 
+_STUB_TS: datetime = datetime(2026, 5, 21, 10, 16, 12, tzinfo=UTC)
+
+
 def _make_hit(slug: str, source: str = "kb") -> RetrievalHit:
     """Build a synthetic RetrievalHit so the runner doesn't need PG."""
     return RetrievalHit(
@@ -67,6 +71,8 @@ def _make_hit(slug: str, source: str = "kb") -> RetrievalHit:
         kind=f"{source}-entry",
         body=f"body for {slug}",
         doc_metadata={},
+        created_at=_STUB_TS,
+        updated_at=_STUB_TS,
         fused_score=0.5,
         bm25_score=0.5,
         cosine_score=0.5,

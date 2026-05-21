@@ -39,6 +39,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -56,6 +57,7 @@ from meho_backplane.operations.meta_tools import (
     list_operation_groups,
     search_operations,
 )
+from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
 
 # ---------------------------------------------------------------------------
@@ -1074,3 +1076,67 @@ async def test_describe_descriptor_cross_tenant_is_invisible() -> None:
     op_b = _make_operator(tenant_id=_TENANT_B)
     result = await describe_descriptor(op_b, descriptor_id)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_real_descriptor_embedding_path(
+    real_descriptor_embeddings: None,
+    session: AsyncSession,
+) -> None:
+    """Guard the real (non-stubbed) descriptor-embedding path end-to-end.
+
+    The suite-wide #771 stub (``_stub_descriptor_embedding`` in
+    ``tests/conftest.py``) makes ``encode_endpoint_text`` return a zero
+    vector on its default path, so almost every test registers descriptors
+    with a placeholder embedding. Opting into ``real_descriptor_embeddings``
+    turns the stub off for this test, so the registrar computes a genuine
+    fastembed vector — covering the path the global stub otherwise blinds
+    the suite to (a regression breaking real descriptor embedding, or search
+    ranking over it, would pass every other test).
+    """
+    # No ``embedding_service`` -> default path -> real fastembed, because
+    # ``real_descriptor_embeddings`` cleared the stub env var.
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_module_handler,
+        summary="Read a KV v2 secret from a path.",
+        description="Reads a secret stored in the KV v2 mount.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.sys.health",
+        handler=_module_handler,
+        summary="Check the cluster health.",
+        description="Reports the seal status and leader info.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+    )
+
+    # The stored descriptor carries a real, non-zero embedding -- not the
+    # suite-wide stub's zero vector.
+    descriptor = (
+        await session.execute(
+            select(EndpointDescriptor).where(EndpointDescriptor.op_id == "vault.kv.read"),
+        )
+    ).scalar_one()
+    assert descriptor.embedding is not None
+    assert len(descriptor.embedding) == EMBEDDING_DIMENSION
+    assert any(component != 0.0 for component in descriptor.embedding)
+
+    # Hybrid BM25 + cosine search over the real vectors ranks the obvious
+    # match first.
+    operator = _make_operator()
+    result = await search_operations(
+        operator,
+        {"connector_id": "vault-1.x", "query": "read secret"},
+    )
+    hits = result["hits"]
+    assert hits, "expected at least one hit"
+    assert hits[0]["op_id"] == "vault.kv.read"

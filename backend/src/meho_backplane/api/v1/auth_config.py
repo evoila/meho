@@ -4,17 +4,19 @@
 """``GET /api/v1/auth-config`` — public OAuth discovery for the CLI.
 
 The CLI's device-code flow (``cli/internal/cmd/login.go``) needs the
-Keycloak realm issuer URL and the audience claim before it can run
-``cfg.DeviceAuth(flowCtx)``. Operators should only have to know one
-URL — the backplane's — so the CLI fetches both values from this
-endpoint at the start of ``meho login``.
+Keycloak realm issuer URL, the backplane audience, and the public
+device-code ``client_id`` before it can run ``cfg.DeviceAuth(flowCtx)``.
+Operators should only have to know one URL — the backplane's — so the
+CLI fetches all three values from this endpoint at the start of
+``meho login``.
 
 Unauthenticated by design:
 
 * This is the OAuth metadata the CLI needs **before** it can auth.
 * The values are public OAuth metadata — the issuer URL appears in
-  every JWT's ``iss`` claim and the audience appears in every JWT's
-  ``aud`` claim. They are not secrets.
+  every JWT's ``iss`` claim, the audience appears in every JWT's
+  ``aud`` claim, and the CLI ``client_id`` is a public OAuth identifier
+  (no client secret involved). They are not secrets.
 * Adding authentication here would create a chicken-and-egg loop with
   ``meho login``.
 
@@ -26,14 +28,31 @@ both read from the same env-var contract documented in
 
 Response shape locked by the CLI's discovery parser in
 ``cli/internal/cmd/login.go`` (search for ``keycloak_issuer`` /
-``audience`` in that file's ``fetchBackplaneAuthConfig``). Field
-renames here are wire-compat breaks for the CLI.
+``audience`` / ``cli_client_id`` in that file's
+``fetchBackplaneAuthConfig``). Field renames here are wire-compat
+breaks for the CLI.
 
-Closes the gap documented in closed Task #44's coordination note
-("add the endpoint to G2.2-T3's ``/api/v1/health`` Task body
-retroactively as a follow-up issue") that was never filed; the CLI
-shipped with the ``--issuer`` / ``--client-id`` fallback flags while
-this surface waited.
+The three fields:
+
+* ``keycloak_issuer`` — the realm issuer URL.
+* ``audience`` — the JWT ``aud`` value the backplane validates inbound
+  tokens against. This is the **confidential** resource-server
+  identifier (e.g. ``meho-backplane``); device-code clients cannot use
+  it as ``client_id`` because it carries a client secret.
+* ``cli_client_id`` — the **public** device-code ``client_id`` the CLI
+  uses to drive the RFC 8628 device authorization grant. Sourced from
+  :attr:`~meho_backplane.settings.Settings.keycloak_cli_client_id`
+  (chart-wired via ``config.keycloakCliClientId``). When unset (empty
+  string), the CLI surfaces an actionable error naming the public-client
+  requirement rather than silently using ``audience``.
+
+The ``cli_client_id`` field was added by G0.9.1-T9 after the 2026-05-21
+RDC dogfood (Signal #16) showed that the v0.3.1 endpoint (issuer +
+audience only) silently broke ``meho login`` on its documented happy
+path — the CLI was mapping ``audience`` to ``client_id``, but Keycloak
+rejects device-code initiation against a confidential resource-server
+client with ``401 unauthorized_client``. Closes the gap documented in
+closed Task #44's coordination note that was never filed.
 """
 
 from __future__ import annotations
@@ -49,14 +68,20 @@ __all__ = ["router"]
 class AuthConfigResponse(BaseModel):
     """OAuth discovery surface returned to ``meho login``.
 
-    Field names match the CLI's expected JSON keys (``keycloak_issuer``
-    and ``audience``); renaming either field is a wire-compat break.
+    Field names match the CLI's expected JSON keys (``keycloak_issuer``,
+    ``audience``, ``cli_client_id``); renaming any field is a wire-compat
+    break for the CLI's discovery parser. ``cli_client_id`` defaults to
+    the empty string on the response when the backplane has not been
+    wired (``KEYCLOAK_CLI_CLIENT_ID`` unset); the CLI distinguishes
+    empty-string from absent-key and emits the same actionable
+    public-client error in both cases.
     """
 
     model_config = ConfigDict(frozen=True)
 
     keycloak_issuer: str
     audience: str
+    cli_client_id: str
 
 
 router = APIRouter(prefix="/api/v1", tags=["auth"])
@@ -64,7 +89,7 @@ router = APIRouter(prefix="/api/v1", tags=["auth"])
 
 @router.get("/auth-config", response_model=AuthConfigResponse)
 async def auth_config() -> AuthConfigResponse:
-    """Return Keycloak issuer + audience for the CLI's device-code flow.
+    """Return Keycloak issuer, audience, and CLI client_id for device-code flow.
 
     Reads :func:`~meho_backplane.settings.get_settings` so the response
     cannot drift from the values :mod:`~meho_backplane.auth.jwt` uses
@@ -78,4 +103,5 @@ async def auth_config() -> AuthConfigResponse:
     return AuthConfigResponse(
         keycloak_issuer=str(settings.keycloak_issuer_url).rstrip("/"),
         audience=settings.keycloak_audience,
+        cli_client_id=settings.keycloak_cli_client_id,
     )

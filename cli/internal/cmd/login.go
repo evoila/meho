@@ -48,8 +48,10 @@ func newLoginCmd() *cobra.Command {
 			"$XDG_CONFIG_HOME/meho/credentials.json on headless hosts.\n\n" +
 			"Discovery: by default the CLI fetches the backplane's auth-config " +
 			"endpoint at <backplane-url>/api/v1/auth-config to learn the realm " +
-			"issuer and OAuth client ID. Until that endpoint ships, pass " +
-			"--issuer and --client-id explicitly.",
+			"issuer and the public device-code client_id. Pass --issuer and/or " +
+			"--client-id to skip discovery or override either half (e.g. when " +
+			"the backplane URL isn't reachable on the operator's network but " +
+			"the IdP is).",
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,10 +65,11 @@ func newLoginCmd() *cobra.Command {
 
 			// Resolve auth config. Override flags win; otherwise hit
 			// the backplane's discovery endpoint. The override path
-			// is the documented fallback while G2.2 is still wiring
-			// up /api/v1/auth-config — operators can ship a working
-			// login today even though the backplane endpoint doesn't
-			// exist yet.
+			// stays useful when the backplane URL isn't reachable on
+			// the operator's network (locked-down VPN, intermediate
+			// firewall) but the IdP is — meho login can still
+			// complete by skipping discovery via both --issuer and
+			// --client-id.
 			cfg, err := resolveAuthConfig(ctx, http.DefaultClient, backplaneURL, issuerOverride, clientIDOverride)
 			if err != nil {
 				return err
@@ -163,17 +166,26 @@ func resolveAuthConfig(ctx context.Context, httpClient *http.Client, backplaneUR
 
 	cfg, err := fetchBackplaneAuthConfig(ctx, httpClient, backplaneURL)
 	if err != nil {
+		// The remediation differs depending on the failure shape, but
+		// the CLI can't tell a TLS verify error from a 404 reliably
+		// without sniffing the wrapped error chain — and a misleading
+		// hint is worse than a complete one. Both error paths name
+		// the flag-override fallback AND the TLS-trust remediation so
+		// the operator can pick whichever matches what they see. (The
+		// TLS hint addresses internal-CA deployments where the
+		// operator's system trust store doesn't yet know the
+		// deployment's CA; Goal #11 RDC dogfood Signal #16, 2026-05-21.)
 		if issuerOverride != "" || clientIDOverride != "" {
 			// Caller pinned at least one half; surface the discovery
 			// failure with a hint that pinning both flags is the
 			// supported fallback.
 			return authConfig{}, fmt.Errorf(
-				"backplane auth-config discovery failed (%w); pass both --issuer and --client-id to skip discovery",
+				"backplane auth-config discovery failed (%w); pass both --issuer and --client-id to skip discovery, or install your deployment's root CA in your system trust store",
 				err,
 			)
 		}
 		return authConfig{}, fmt.Errorf(
-			"backplane auth-config discovery failed (%w); rerun with --issuer and --client-id",
+			"backplane auth-config discovery failed (%w); rerun with --issuer and --client-id, or install your deployment's root CA in your system trust store",
 			err,
 		)
 	}
@@ -188,18 +200,31 @@ func resolveAuthConfig(ctx context.Context, httpClient *http.Client, backplaneUR
 }
 
 // fetchBackplaneAuthConfig queries the backplane for its OIDC
-// configuration. The endpoint is documented in Initiative #42 / Task
-// #44 as /api/v1/auth-config — once G2.2 ships it, this function
-// becomes the happy path. Until then it'll return a discovery error
-// and operators use the --issuer / --client-id overrides.
+// configuration. The endpoint shipped with v0.3.1 carried two fields
+// (issuer + audience); v0.3.2 (G0.9.1-T9, after RDC dogfood Signal #16)
+// added the public device-code client_id as a third field.
 //
-// Response shape (per the Task body coordination note):
+// Response shape:
 //
-//	{ "keycloak_issuer": "...", "audience": "..." }
+//	{
+//	  "keycloak_issuer": "...",      // realm URL — driven into Issuer
+//	  "audience":        "...",      // backplane resource-server id
+//	  "cli_client_id":   "..."       // public device-code client — driven into ClientID
+//	}
 //
-// We map keycloak_issuer → Issuer and audience → ClientID; the
-// audience claim in Keycloak's JWT is the OAuth client_id by
-// default, so the same value drives both.
+// We map keycloak_issuer → Issuer and cli_client_id → ClientID. The
+// audience field is intentionally NOT used here as ClientID: it is
+// the confidential resource-server identifier the backplane validates
+// inbound JWTs against, and Keycloak rejects device-code initiation
+// against a confidential client with `401 unauthorized_client` (the
+// device grant requires a public client because the CLI can't carry
+// a client secret). v0.3.1 mis-mapped audience → ClientID and broke
+// `meho login`'s documented happy path; the v0.3.2 endpoint adds the
+// dedicated cli_client_id field for this exact reason. Older
+// backplanes that don't carry the field — or operators that haven't
+// wired KEYCLOAK_CLI_CLIENT_ID — surface as an empty string here,
+// which we promote to an actionable error naming the public-client
+// requirement rather than silently retrying with audience.
 func fetchBackplaneAuthConfig(ctx context.Context, httpClient *http.Client, backplaneURL string) (authConfig, error) {
 	endpoint := backplaneURL + "/api/v1/auth-config"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
@@ -229,6 +254,7 @@ func fetchBackplaneAuthConfig(ctx context.Context, httpClient *http.Client, back
 	var payload struct {
 		KeycloakIssuer string `json:"keycloak_issuer"`
 		Audience       string `json:"audience"`
+		CLIClientID    string `json:"cli_client_id"`
 	}
 	if err := decodeJSON(body, &payload); err != nil {
 		return authConfig{}, fmt.Errorf("parse auth-config: %w", err)
@@ -236,7 +262,21 @@ func fetchBackplaneAuthConfig(ctx context.Context, httpClient *http.Client, back
 	if payload.KeycloakIssuer == "" || payload.Audience == "" {
 		return authConfig{}, errors.New("auth-config response missing keycloak_issuer or audience")
 	}
-	return authConfig{Issuer: payload.KeycloakIssuer, ClientID: payload.Audience}, nil
+	if payload.CLIClientID == "" {
+		// Treat absent-key and empty-string identically — both mean
+		// "this backplane has not been wired with a public CLI
+		// client_id". Naming the public-client requirement (and the
+		// override escape hatch) up front is the highest-signal hint
+		// we can give an operator who has only ever seen Keycloak's
+		// `401 unauthorized_client` from the device-grant endpoint.
+		return authConfig{}, fmt.Errorf(
+			"auth-config response carries no cli_client_id: the backplane has not been wired with a public OAuth client for device-code login. " +
+				"Ask your deployer to register a public Keycloak client (suggested name `meho-cli`, device-grant enabled, audience mapper -> backplane) " +
+				"and set the chart value `config.keycloakCliClientId` (env `KEYCLOAK_CLI_CLIENT_ID`) to its client_id. " +
+				"Override per-invocation with `--client-id <public-client-id>`",
+		)
+	}
+	return authConfig{Issuer: payload.KeycloakIssuer, ClientID: payload.CLIClientID}, nil
 }
 
 // decodeJSON is a tiny wrapper that lets us swap json.Unmarshal for a

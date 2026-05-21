@@ -115,6 +115,16 @@ resources:
 config:
   keycloakIssuerUrl: "https://keycloak.evba.lab/realms/<REPLACE: realm-name>"
   keycloakAudience: meho-backplane
+  # G0.9.1-T9 (#789, RDC Signal #16). Public OAuth client_id `meho
+  # login` uses for device-code initiation. Must reference a
+  # PRE-CREATED public Keycloak client in the realm above (the
+  # deployer creates it before `helm install` — auto-provisioning is
+  # tracked as T11 / #791). See `deploy/values-examples/README.md`
+  # for the realm-side recipe (device-grant flow enabled, audience
+  # mapper -> keycloakAudience, no client secret). Leave empty to
+  # keep v0.3.1 behaviour: the backplane still serves the endpoint
+  # but `meho login` surfaces an actionable public-client error.
+  keycloakCliClientId: meho-cli
   keycloakJwksCacheTtlSeconds: "300"
   keycloakJwtLeewaySeconds: "30"
   vaultAddr: https://vault.evba.lab

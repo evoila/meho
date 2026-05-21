@@ -36,6 +36,7 @@ request.
     | --- | --- |
     | `image.tag` | An immutable tag from the G2.4 image pipeline. Production: `sha-<40-char-git-sha>` from a green CI run. Pre-prod / lab: `v0.1.0` once the release tag exists. **`:latest` and `:main` are forbidden by Goal #11 deploy discipline.** |
     | `config.keycloakIssuerUrl` / `keycloak.issuer` realm | Your Keycloak realm name. Both fields must agree — the ConfigMap-sourced env mirrors the values block (`config.keycloakIssuerUrl` is what the backplane process reads at startup). |
+    | `config.keycloakCliClientId` | The client_id of the **public** Keycloak client `meho login` uses for device-code flow. Pre-create the client in the realm above (see [§ `meho-cli` public Keycloak client](#meho-cli-public-keycloak-client-for-meho-login)) — `meho-cli` is the suggested default. Leaving this empty keeps v0.3.1 behaviour: the backplane endpoint serves an empty value and `meho login` surfaces an actionable public-client error. |
     | `networkPolicy.postgresCIDR` | The IPv4 CIDR of your Postgres Service. Recover via `kubectl get endpoints <pg-svc> -n <ns> -o jsonpath='{.subsets[].addresses[].ip}'` and widen to the controlling subnet. |
     | `networkPolicy.vaultCIDR` | Same, for Vault. |
     | `networkPolicy.keycloakCIDR` | Same, for Keycloak. |
@@ -253,6 +254,73 @@ If `/ready` still reports `ssl_error` after the mount lands, check the
 **migration Job's** Pod logs — that Job uses the same bundle. A
 common drift cause: a typo'd ConfigMap name (the mount succeeds but
 the file is empty / wrong).
+
+## `meho-cli` public Keycloak client (for `meho login`)
+
+`meho login` runs the OAuth 2.0 Device Authorization Grant (RFC 8628)
+against the realm configured in `config.keycloakIssuerUrl`. The device
+grant requires a **public** client — Keycloak rejects device-code
+initiation against a confidential client (one with a client secret)
+with `401 unauthorized_client` because the CLI cannot carry a secret
+safely. Up through v0.3.1, the CLI silently re-used the **confidential**
+`keycloakAudience` value (`meho-backplane`) as the OAuth `client_id`
+and `meho login` therefore failed on its documented happy path
+(consumer report 2026-05-21, Signal #16).
+
+v0.3.2 fixes the CLI shape, but **the deployer is still responsible
+for pre-creating the public client in the Keycloak realm** before
+`helm install`. Auto-provisioning the client from a Helm post-install
+hook is tracked as [#791 (T11)](https://github.com/evoila/meho/issues/791);
+this section is the manual recipe until that lands.
+
+### Realm-side recipe
+
+In the Keycloak realm that hosts `meho-backplane`, create a new
+**public** client with these settings:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Client ID | `meho-cli` (suggested) | Matches the default in `values-rdc-example.yaml`. Any short identifier works — set `config.keycloakCliClientId` to whatever you choose. |
+| Client authentication | **Off** (public client) | The device grant cannot be completed by a confidential client; the CLI has nowhere to store a secret. |
+| Authentication flow → Standard flow | Off | The CLI doesn't run the authorization-code grant. |
+| Authentication flow → Direct access grants | Off | Resource-owner password is explicitly out of scope. |
+| Authentication flow → **OAuth 2.0 Device Authorization Grant** | **On** | Required for `meho login`. |
+| Valid redirect URIs | (none) | Device flow doesn't redirect. |
+| Mapper → audience mapper | Add a `meho-backplane` audience mapper that injects `meho-backplane` (your `keycloakAudience` value) into the access token's `aud` claim | Without this, tokens issued for `meho-cli` carry `aud: meho-cli` and the backplane rejects them with `audience_not_configured`. |
+
+### Wire it into Helm
+
+Set the chart value to the client_id you just created:
+
+```yaml
+config:
+  keycloakCliClientId: meho-cli   # or whatever you chose
+```
+
+The backplane's `/api/v1/auth-config` endpoint will surface this value
+as the `cli_client_id` JSON field, which `meho login`'s discovery
+parser maps to the OAuth `client_id`. The CLI also accepts
+`--client-id <id>` as a per-invocation override, useful when a
+deployer publishes multiple public clients (e.g. `meho-cli-prod`,
+`meho-cli-staging`) and the chart value pins one default.
+
+### Verify
+
+After `helm install` (or `helm upgrade`):
+
+```bash
+curl -sf https://meho.evba.lab/api/v1/auth-config | jq .
+# { "keycloak_issuer": "...", "audience": "meho-backplane", "cli_client_id": "meho-cli" }
+
+meho login https://meho.evba.lab
+# Logged in to https://meho.evba.lab; token stored in keyring.
+```
+
+If `cli_client_id` comes back as the empty string, the chart value
+wasn't set; if `meho login` reports `unauthorized_client` after
+discovery, the client is configured as confidential rather than
+public (toggle "Client authentication" off in the Keycloak admin UI
+and retry).
 
 ## End-to-end install flow
 

@@ -11,9 +11,9 @@ would deadlock ``meho login``.
 
 The wire shape is locked to the CLI's parser in
 ``cli/internal/cmd/login.go``'s ``fetchBackplaneAuthConfig``: it
-expects exactly ``keycloak_issuer`` and ``audience`` JSON keys. Field
-renames here are wire-compat breaks. The shape assertion below would
-catch that.
+expects exactly ``keycloak_issuer``, ``audience``, and
+``cli_client_id`` JSON keys. Field renames here are wire-compat
+breaks. The shape assertion below would catch that.
 """
 
 from __future__ import annotations
@@ -43,20 +43,22 @@ def _auth_config_settings(
     """
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.evba.lab/realms/evba")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("KEYCLOAK_CLI_CLIENT_ID", "meho-cli")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.evba.lab")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
 
 
-def test_auth_config_returns_keycloak_issuer_and_audience(
+def test_auth_config_returns_keycloak_issuer_audience_and_cli_client_id(
     _auth_config_settings: None,
 ) -> None:
     """Happy path: response carries the values the CLI parses.
 
     Wire shape locked to the CLI's expectation in
     ``cli/internal/cmd/login.go``'s ``fetchBackplaneAuthConfig`` —
-    the parser reads ``keycloak_issuer`` and ``audience`` JSON keys.
+    the parser reads ``keycloak_issuer``, ``audience``, and
+    ``cli_client_id`` JSON keys.
     """
     with TestClient(app) as client:
         response = client.get("/api/v1/auth-config")
@@ -66,7 +68,46 @@ def test_auth_config_returns_keycloak_issuer_and_audience(
     assert payload == {
         "keycloak_issuer": "https://keycloak.evba.lab/realms/evba",
         "audience": "meho-backplane",
+        "cli_client_id": "meho-cli",
     }
+
+
+def test_auth_config_cli_client_id_defaults_empty_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``KEYCLOAK_CLI_CLIENT_ID`` unset → ``cli_client_id`` is ``""``.
+
+    The G0.9.1-T9 contract keeps backwards compatibility with the
+    v0.3.1 endpoint by making ``KEYCLOAK_CLI_CLIENT_ID`` optional: the
+    field still appears on every response (so the CLI's parser shape
+    stays stable), but the CLI distinguishes empty-string from "field
+    was set" and emits an actionable public-client error rather than
+    silently falling back to ``audience``.
+
+    Pinning this behaviour in a test stops a future contributor from
+    "fixing" the empty default by raising at startup — that would break
+    every existing deployment on upgrade and shifts the actionable
+    error from the CLI (where the operator sees it) to a backplane
+    CrashLoopBackOff (where they don't).
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.evba.lab/realms/evba")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.delenv("KEYCLOAK_CLI_CLIENT_ID", raising=False)
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.evba.lab")
+    get_settings.cache_clear()
+
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/auth-config")
+    finally:
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cli_client_id"] == ""
+    # Sanity: the other fields still populate.
+    assert payload["keycloak_issuer"] == "https://keycloak.evba.lab/realms/evba"
+    assert payload["audience"] == "meho-backplane"
 
 
 def test_auth_config_normalises_trailing_slash_on_issuer(
@@ -86,6 +127,7 @@ def test_auth_config_normalises_trailing_slash_on_issuer(
         "https://keycloak.evba.lab/realms/evba/",
     )
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("KEYCLOAK_CLI_CLIENT_ID", "meho-cli")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.evba.lab")
     get_settings.cache_clear()
 

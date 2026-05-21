@@ -265,14 +265,33 @@ Authorization Grant (RFC 8628). End-to-end shape:
 
 1. **Auth-config discovery.** The CLI calls
    `GET <backplane-url>/api/v1/auth-config` to learn the Keycloak
-   realm issuer and the OAuth `client_id` to use. The response shape
-   is `{"keycloak_issuer": "...", "audience": "..."}`.
-   * **Operator override.** When that endpoint isn't reachable
-     (G2.2 hasn't wired it yet, the operator is behind a VPN that
-     blocks the backplane but routes the IdP, etc.), pass
-     `--issuer` and `--client-id` to skip discovery entirely. A
-     partial override (just one flag) still hits the backplane for
-     the other half.
+   realm issuer and the public device-code `client_id` to use. The
+   response shape is
+   `{"keycloak_issuer": "...", "audience": "...", "cli_client_id": "..."}`.
+   * **Field mapping.** `keycloak_issuer` drives the OIDC issuer
+     URL; `cli_client_id` drives the OAuth `client_id` for the
+     device-code grant. `audience` is the **confidential**
+     resource-server identifier the backplane validates inbound
+     JWTs against — it is NOT used as `client_id` (Keycloak rejects
+     device-code initiation against a confidential client with
+     `401 unauthorized_client`). v0.3.1 shipped without
+     `cli_client_id` and the CLI mis-mapped `audience` → `client_id`,
+     which deadlocked `meho login` on its documented happy path
+     (G0.9.1-T9, RDC Signal #16, 2026-05-21); v0.3.2 added the
+     dedicated field and fixed the mapping.
+   * **Absent / empty `cli_client_id`.** When the field is missing
+     (older backplane) or empty (newer backplane without
+     `KEYCLOAK_CLI_CLIENT_ID` wired), the CLI surfaces an
+     actionable error naming the public-client requirement and the
+     `--client-id` override rather than silently retrying with
+     `audience`.
+   * **Operator override.** Pass `--issuer` and `--client-id` to
+     skip discovery entirely — useful when the backplane URL isn't
+     reachable on the operator's network but the IdP is. A partial
+     override (just one flag) still hits the backplane for the
+     other half. TLS-discovery failures additionally point at the
+     "install your deployment's root CA in your system trust store"
+     remediation for internal-CA deployments.
 2. **OIDC discovery.** The CLI fetches
    `<issuer>/.well-known/openid-configuration` to learn the
    `device_authorization_endpoint` and `token_endpoint`. If the
@@ -1482,11 +1501,13 @@ have to trust to run `meho login` against their secrets.
   thrash. Filed as a follow-up adjacent to T3.
 * Persistent `--config` and `-v/--verbose` flags are registered on
   the root command but not yet consumed; reserved for v0.2.
-* The auth-config endpoint at `/api/v1/auth-config` doesn't exist on
-  the backplane yet (a G2.2 coordination Task). Operators using
-  this Task's binary against today's backplane must pass `--issuer`
-  and `--client-id` explicitly to `meho login`; the prose error
-  message guides them to those flags.
+* The auth-config endpoint at `/api/v1/auth-config` shipped in v0.3.1
+  (issuer + audience) and was completed in v0.3.2 (G0.9.1-T9) with
+  the `cli_client_id` field that drives the CLI's device-code
+  `client_id`. Operators on a backplane older than v0.3.2 (or one
+  where `KEYCLOAK_CLI_CLIENT_ID` was never wired) get an actionable
+  public-client error from `meho login` and the `--issuer`/
+  `--client-id` overrides as the documented escape hatch.
 * The `/api/v1/commands` discovery endpoint doesn't exist on the
   backplane yet (G2.2 coordination, identical to `/api/v1/auth-config`).
   The CLI's discovery fetch degrades to "no extra commands"

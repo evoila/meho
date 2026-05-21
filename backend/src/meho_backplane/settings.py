@@ -105,6 +105,21 @@ class Settings(BaseModel):
         backplane is registered as a Keycloak client (e.g.
         ``meho-backplane``); only tokens whose ``aud`` matches that
         client id are honoured. Required.
+    keycloak_cli_client_id:
+        The OAuth ``client_id`` of the **public** device-code client
+        that ``meho login`` uses to initiate the RFC 8628 device flow
+        (suggested name ``meho-cli``). Surfaced through
+        ``GET /api/v1/auth-config`` so the CLI can discover it without
+        the operator hand-passing ``--client-id``. Must be a public
+        client (no client secret) with the device-grant flow enabled
+        and an audience mapper that injects ``keycloak_audience`` into
+        the issued access token's ``aud`` claim — see
+        ``deploy/values-examples/README.md`` for the realm-side recipe.
+        Default ``""`` (unset) keeps backwards compatibility with the
+        v0.3.1 endpoint shape: the field still appears on the response
+        but the CLI surfaces an actionable error rather than silently
+        misusing ``audience`` (which is the confidential resource-
+        server identifier, not a public client).
     keycloak_jwks_cache_ttl_seconds:
         Maximum age of a cached JWKS document before it must be
         refetched. The cache also refreshes on a kid-miss (key
@@ -333,6 +348,7 @@ class Settings(BaseModel):
 
     keycloak_issuer_url: HttpUrl
     keycloak_audience: str = Field(min_length=1)
+    keycloak_cli_client_id: str = ""
     keycloak_jwks_cache_ttl_seconds: int = Field(default=300, gt=0)
     keycloak_jwt_leeway_seconds: int = Field(default=30, ge=0)
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
@@ -442,6 +458,7 @@ def get_settings() -> Settings:
     return Settings(
         keycloak_issuer_url=os.environ["KEYCLOAK_ISSUER_URL"],  # type: ignore[arg-type]
         keycloak_audience=os.environ["KEYCLOAK_AUDIENCE"],
+        keycloak_cli_client_id=os.environ.get("KEYCLOAK_CLI_CLIENT_ID", ""),
         keycloak_jwks_cache_ttl_seconds=int(
             os.environ.get("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300"),
         ),

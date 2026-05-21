@@ -93,10 +93,16 @@ const (
 
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
 //
-// Field names match the CLI's expected JSON keys (“keycloak_issuer“
-// and “audience“); renaming either field is a wire-compat break.
+// Field names match the CLI's expected JSON keys (“keycloak_issuer“,
+// “audience“, “cli_client_id“); renaming any field is a wire-compat
+// break for the CLI's discovery parser. “cli_client_id“ defaults to
+// the empty string on the response when the backplane has not been
+// wired (“KEYCLOAK_CLI_CLIENT_ID“ unset); the CLI distinguishes
+// empty-string from absent-key and emits the same actionable
+// public-client error in both cases.
 type AuthConfigResponse struct {
 	Audience       string `json:"audience"`
+	CliClientId    string `json:"cli_client_id"`
 	KeycloakIssuer string `json:"keycloak_issuer"`
 }
 

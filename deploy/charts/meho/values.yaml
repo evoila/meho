@@ -166,6 +166,23 @@ resources:
 config:
   keycloakIssuerUrl: ""
   keycloakAudience: ""
+  # -- Public OAuth client_id the CLI uses to drive the RFC 8628
+  # device-code grant (`meho login`). Surfaced via
+  # `GET /api/v1/auth-config` as the `cli_client_id` field; the CLI
+  # maps it to `client_id` when initiating the device flow. Default
+  # `""` (unset) keeps backwards compatibility with v0.3.1 — the
+  # endpoint still returns the field but `meho login` surfaces an
+  # actionable public-client error rather than silently falling back
+  # to `keycloakAudience` (which is the confidential resource-server
+  # identifier and cannot run device-code; Keycloak rejects it with
+  # `401 unauthorized_client`). Operators MUST set this to the
+  # client_id of a public Keycloak client (suggested name `meho-cli`)
+  # with the device-grant flow enabled and an audience mapper that
+  # injects `keycloakAudience` into the issued access token's `aud`
+  # claim — see `deploy/values-examples/README.md` § meho-cli public
+  # client for the realm-side recipe. G0.9.1-T9 (RDC dogfood Signal
+  # #16, 2026-05-21).
+  keycloakCliClientId: ""
   keycloakJwksCacheTtlSeconds: "300"
   keycloakJwtLeewaySeconds: "30"
   vaultAddr: ""

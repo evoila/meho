@@ -201,6 +201,10 @@
       "properties": {
         "keycloakIssuerUrl": { "type": "string", "minLength": 1 },
         "keycloakAudience": { "type": "string", "minLength": 1 },
+        "keycloakCliClientId": {
+          "type": "string",
+          "description": "Public OAuth client_id surfaced to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`. The CLI maps this field (NOT `keycloakAudience`) to the device-code `client_id`. Must be a Keycloak public client (no client secret) with the device-grant flow enabled and an audience mapper that injects `keycloakAudience` into the issued access token. Default `\"\"` keeps backwards compatibility with v0.3.1 — the backplane endpoint still returns the field but the CLI surfaces an actionable public-client error rather than silently misusing `keycloakAudience` (which is the confidential resource-server id and is rejected by Keycloak's device-grant endpoint with `401 unauthorized_client`). G0.9.1-T9, RDC dogfood Signal #16, 2026-05-21. See `deploy/values-examples/README.md` for the realm-side recipe."
+        },
         "keycloakJwksCacheTtlSeconds": { "type": "string", "pattern": "^[0-9]+$" },
         "keycloakJwtLeewaySeconds": { "type": "string", "pattern": "^[0-9]+$" },
         "vaultAddr": { "type": "string", "format": "uri", "minLength": 1 },

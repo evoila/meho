@@ -121,6 +121,14 @@ postgres:
 config:
   keycloakIssuerUrl: http://mock-keycloak.meho.svc:8080/realms/meho
   keycloakAudience: meho-backplane
+  # Mock public CLI client_id for the kind overlay. The mock IdP
+  # above doesn't actually run device-code — this value just exercises
+  # the env-var plumbing and lets `GET /api/v1/auth-config` return a
+  # non-empty `cli_client_id` so the response shape matches what a
+  # real deploy would serve. For a functional `meho login` end-to-end,
+  # use `values-rdc-example.yaml` against a real Keycloak realm with
+  # a pre-created public `meho-cli` client.
+  keycloakCliClientId: meho-cli
   vaultAddr: http://mock-vault.meho.svc:8200
 
 # The bundled broadcast subchart (Valkey 9.x per ADR 0005) is left

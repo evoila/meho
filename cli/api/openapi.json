@@ -85,7 +85,7 @@
           "auth"
         ],
         "summary": "Auth Config",
-        "description": "Return Keycloak issuer + audience for the CLI's device-code flow.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is trailing-slash-\nnormalised here \u2014 Keycloak's discovery document advertises the\ncanonical form without a trailing slash and the CLI's own URL\nconstruction (``<issuer>/.well-known/openid-configuration``) is\ncleaner against the normalised form.",
+        "description": "Return Keycloak issuer, audience, and CLI client_id for device-code flow.\n\nReads :func:`~meho_backplane.settings.get_settings` so the response\ncannot drift from the values :mod:`~meho_backplane.auth.jwt` uses\nwhen it validates inbound JWTs. The issuer URL is trailing-slash-\nnormalised here \u2014 Keycloak's discovery document advertises the\ncanonical form without a trailing slash and the CLI's own URL\nconstruction (``<issuer>/.well-known/openid-configuration``) is\ncleaner against the normalised form.",
         "operationId": "auth_config_api_v1_auth_config_get",
         "responses": {
           "200": {
@@ -1496,15 +1496,20 @@
           "audience": {
             "type": "string",
             "title": "Audience"
+          },
+          "cli_client_id": {
+            "type": "string",
+            "title": "Cli Client Id"
           }
         },
         "type": "object",
         "required": [
           "keycloak_issuer",
-          "audience"
+          "audience",
+          "cli_client_id"
         ],
         "title": "AuthConfigResponse",
-        "description": "OAuth discovery surface returned to ``meho login``.\n\nField names match the CLI's expected JSON keys (``keycloak_issuer``\nand ``audience``); renaming either field is a wire-compat break."
+        "description": "OAuth discovery surface returned to ``meho login``.\n\nField names match the CLI's expected JSON keys (``keycloak_issuer``,\n``audience``, ``cli_client_id``); renaming any field is a wire-compat\nbreak for the CLI's discovery parser. ``cli_client_id`` defaults to\nthe empty string on the response when the backplane has not been\nwired (``KEYCLOAK_CLI_CLIENT_ID`` unset); the CLI distinguishes\nempty-string from absent-key and emits the same actionable\npublic-client error in both cases."
       },
       "AuthModel": {
         "type": "string",

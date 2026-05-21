@@ -259,6 +259,31 @@ def test_all_five_routes_mounted_on_main_app() -> None:
     assert "post" in paths["/api/v1/kb/ingest"]
 
 
+def test_kb_entry_create_slug_field_teaches_leading_letter_rule() -> None:
+    """G0.9.1-T8 / Signal #15: the POST body's slug field carries a
+    description that names the leading-letter rule and a positive example,
+    so OpenAPI consumers (Swagger UI, generated SDKs, CLI help) see the
+    constraint before they ship a 422.
+
+    Doc-drift guard — substring assertions kept loose so prose can evolve.
+    """
+    from meho_backplane.api.v1.kb import KbEntryCreate
+
+    schema = KbEntryCreate.model_json_schema()
+    slug_field = schema["properties"]["slug"]
+
+    description = slug_field.get("description", "")
+    assert "lowercase letter" in description.lower()
+    assert "start with" in description.lower()
+    # Negative example must be present so the constraint is discoverable.
+    assert "657" in description
+
+    # Positive example must round-trip through Pydantic v2's `examples=`
+    # surface so Swagger UI / openapi.json carries it.
+    examples = slug_field.get("examples") or []
+    assert "vcenter-9.0-snapshot-revert" in examples
+
+
 # ---------------------------------------------------------------------------
 # Unauthenticated (401) -- every route
 # ---------------------------------------------------------------------------

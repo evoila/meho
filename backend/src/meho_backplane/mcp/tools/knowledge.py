@@ -95,12 +95,21 @@ _MAX_SEARCH_LIMIT: Final[int] = 50
 
 #: Shared slug-shape description rendered into both the tool input schema
 #: (``add_to_knowledge``) and the resource template (``meho://kb/{slug}``).
-#: Authored once so a future contract tweak edits one string.
+#: Authored once so a future contract tweak edits one string. The
+#: leading-letter rule is called out twice (in the prose AND in a paired
+#: positive/negative example) because the v0.3.1 consumer dogfood
+#: (G0.9.1-T8, Signal #15) hit -32602 on a digit-leading slug
+#: ('657-recovery') without finding the rule in the schema description —
+#: the regex catches it, but the example-of-an-invalid-slug here is
+#: what makes the constraint discoverable before the call goes out.
 _SLUG_DESCRIPTION: Final[str] = (
     "Operator-facing identifier in kebab-case, recommended shape "
-    "'<product>-<version>-<topic>' (e.g. 'vcenter-9.0-snapshot-revert'). "
+    "'<product>-<version>-<topic>'. "
     "Must start with a lowercase letter, end with a lowercase letter or "
-    "digit, and contain only lowercase letters, digits, hyphens, or dots."
+    "digit, and contain only lowercase letters, digits, hyphens, or dots. "
+    "Valid example: 'vcenter-9.0-snapshot-revert'. "
+    "Invalid example: '657-recovery' — slugs may not start with a digit; "
+    "rewrite to 'ticket-657-recovery' or similar."
 )
 
 

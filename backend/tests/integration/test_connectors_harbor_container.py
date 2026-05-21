@@ -197,6 +197,7 @@ def harbor_core_addr() -> Iterator[str]:
         .with_env("POSTGRESQL_DATABASE", "registry")
         .with_env("REDIS_HOST", _REDIS_ALIAS)
         .with_env("REDIS_PORT", "6379")
+        .with_env("CACHE_TYPE", "redis")
         .with_env("HARBOR_ADMIN_PASSWORD", _HARBOR_ADMIN_PASSWORD)
         .with_env("CORE_SECRET", core_secret)
         .with_env("JOBSERVICE_SECRET", job_secret)
@@ -234,21 +235,21 @@ def harbor_core_addr() -> Iterator[str]:
         pytest.skip(f"harbor-core container failed to start ({type(exc).__name__}): {exc}")
 
     try:
-        wait_for_logs(core_container, "HTTP proxy is up", timeout=60)
-    except Exception:
-        # Fall back: poll the /api/v2.0/systeminfo endpoint directly.
+        try:
+            wait_for_logs(core_container, "HTTP proxy is up", timeout=60)
+        except Exception:
+            # Fall back: poll the /api/v2.0/systeminfo endpoint directly.
+            host = core_container.get_container_host_ip()
+            port = core_container.get_exposed_port(8080)
+            base = f"http://{host}:{port}"
+            _wait_for_harbor_ready(base, timeout=60)
+
         host = core_container.get_container_host_ip()
         port = core_container.get_exposed_port(8080)
-        base = f"http://{host}:{port}"
-        _wait_for_harbor_ready(base, timeout=60)
+        base_url = f"http://{host}:{port}"
 
-    host = core_container.get_container_host_ip()
-    port = core_container.get_exposed_port(8080)
-    base_url = f"http://{host}:{port}"
+        _seed_harbor(base_url)
 
-    _seed_harbor(base_url)
-
-    try:
         yield base_url
     finally:
         core_container.stop()
@@ -385,9 +386,7 @@ async def harbor_e2e(
         clear_registry()
 
 
-def _make_credentials_loader(
-    username: str, password: str
-):  # type: ignore[no-untyped-def]
+def _make_credentials_loader(username: str, password: str):  # type: ignore[no-untyped-def]
     async def _loader(_target: HarborTargetLike) -> dict[str, str]:
         return {"username": username, "password": password}
 
@@ -558,9 +557,13 @@ async def test_robot_list_never_returns_secret(
         params={},
     )
     assert result.status == "ok", result.error
-    # Result is a list (possibly empty at this point); no entry must have a secret.
-    robots: list[dict[str, object]] = result.result if isinstance(result.result, list) else []
+    assert isinstance(result.result, list), (
+        f"GET:/api/v2.0/robots must return a list, got "
+        f"{type(result.result).__name__}: {result.result!r}"
+    )
+    robots: list[dict[str, object]] = result.result
     for robot in robots:
+        assert isinstance(robot, dict), f"unexpected robot entry shape: {robot!r}"
         assert "secret" not in robot, (
             f"robot list entry {robot.get('name')!r} must not expose 'secret'"
         )

@@ -88,10 +88,6 @@ func printArtifactList(w io.Writer, r *CallResult) {
 	for _, artifact := range items {
 		digest, _ := artifact["digest"].(string)
 		pushTime, _ := artifact["push_time"].(string)
-		shortDigest := digest
-		if len(shortDigest) > 19 {
-			shortDigest = shortDigest[:7+12] // "sha256:" + 12 hex chars
-		}
 		tags, _ := artifact["tags"].([]any)
 		if len(tags) == 0 {
 			fmt.Fprintf(w, "%-20s %-72s  %s\n", "<untagged>", truncate(digest, 72), truncate(pushTime, 30))

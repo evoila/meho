@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Credential + target shape for the vROps (VCF Operations 9.0) connector.
+
+The hand-rolled
+:class:`~meho_backplane.connectors.vcf_operations.connector.VcfOperationsConnector`
+reads service-account credentials from the target's Vault path and sends them
+as HTTP Basic auth on every request — no session token is established; vROps'
+``/suite-api/api/*`` surface accepts Basic auth on each call.
+
+The credential fetch (Vault path → ``{"username": ..., "password": ...}`` dict)
+is delegated to the shared :class:`~meho_backplane.connectors._shared.vcf_auth.CredentialsCache`
+and :data:`~meho_backplane.connectors._shared.vcf_auth.VcfCredentialsLoader`
+contract — all three G3.6 skeleton connectors (vROps #829, vRLI #830,
+Fleet #831) share the same load-once-per-target cache shape and the same
+``RuntimeError``-naming-target contract for missing keys (#841).
+
+vROps adds one product-specific field on top of the shared target Protocol:
+``auth_source``. When set, the connector appends ``?auth-source=<value>`` as a
+query parameter on authenticated requests so vROps can route the Basic-auth
+challenge to a non-local identity domain (``Local``, ``vIDM``, an Active
+Directory realm name, etc.). When unset (``None``), the connector omits the
+query parameter and vROps routes against its default local realm. The exact
+acceptable values are operator-configured per vROps deployment; the connector
+passes the string through verbatim.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol, runtime_checkable
+
+from meho_backplane.connectors._shared.vcf_auth import (
+    VcfCredentialsLoader,
+    load_credentials_from_vault,
+)
+
+__all__ = [
+    "VcfOperationsCredentialsLoader",
+    "VcfOperationsTargetLike",
+    "load_credentials_from_vault",
+]
+
+
+VcfOperationsCredentialsLoader = VcfCredentialsLoader
+"""Async callable resolving a target to ``{"username": ..., "password": ...}``.
+
+Type alias for :data:`~meho_backplane.connectors._shared.vcf_auth.VcfCredentialsLoader`.
+Re-exported under a connector-flavoured name so the public API of the
+:mod:`meho_backplane.connectors.vcf_operations` package reads cohesively
+(``VcfOperationsConnector(credentials_loader=...)``) without exposing the
+shared module name at the boundary.
+"""
+
+
+@runtime_checkable
+class VcfOperationsTargetLike(Protocol):
+    """Minimum target shape :class:`VcfOperationsConnector` reads.
+
+    Structural Protocol — the concrete ``Target`` model in
+    :mod:`meho_backplane.targets` (G0.3 #224) satisfies this unchanged. Extends
+    the shared :class:`~meho_backplane.connectors._shared.vcf_auth.VcfTargetLike`
+    base with one product-specific field:
+
+    * ``auth_source`` — optional vROps auth-source name. When set, the
+      connector appends ``?auth-source=<value>`` to authenticated request
+      URLs. When ``None``, no query parameter is added and vROps uses its
+      default local realm. The accepted values (``Local``, ``vIDM``, an AD
+      realm name, etc.) are operator-configured per vROps deployment; the
+      connector passes the string through verbatim.
+
+    The base shared fields (``name``, ``host``, ``port``, ``secret_ref``,
+    ``auth_model``) are gated and consumed identically to the other G3.6
+    skeletons (see :class:`VcfTargetLike`).
+    """
+
+    name: str
+    host: str
+    port: int | None
+    secret_ref: str
+    auth_model: str | None
+    auth_source: str | None

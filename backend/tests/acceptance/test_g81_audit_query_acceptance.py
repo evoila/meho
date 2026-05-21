@@ -14,7 +14,8 @@ Coverage matrix (mirrors the 8 scenarios in the issue body #469):
 1. **Tenant boundary** — overlapping target names / principal subs
    across two tenants; tenant-A operator's REST surface never returns
    tenant-B rows, returns 404 (not 403) on tenant-B's audit_id,
-   and silently drops a body-supplied cross-tenant ``tenant_id``.
+   and rejects a body-supplied cross-tenant ``tenant_id`` with 422
+   (``extra="forbid"`` per G0.9-T2 #729).
 2. **Cursor pagination correctness** — 250 rows in tenant A, paged
    at limit=100 across three pages; ``asyncio.gather`` runs a
    concurrent 50-row insert against page-2-read using the page-1
@@ -345,20 +346,22 @@ async def test_scenario_1_show_cross_tenant_audit_id_returns_404(
     assert resp.status_code != 403
 
 
-async def test_scenario_1_body_tenant_id_is_silently_dropped(
+async def test_scenario_1_body_tenant_id_is_rejected_422(
     pg_engine: None,
     valkey_url: str,
     async_pg_url: str,
 ) -> None:
-    """Scenario 1 continued: body `tenant_id=<B>` is ignored; tenant-A rows still returned."""
-    async with await _session_for_url(async_pg_url) as session:
-        seeds = await seed_tenants_with_overlap(
-            session,
-            tenant_a=uuid.UUID(TENANT_A_ID),
-            tenant_b=uuid.UUID(TENANT_B_ID),
-        )
-        await session.commit()
+    """Scenario 1 continued: a body-supplied `tenant_id` is rejected with 422.
 
+    The substrate tenant boundary is enforced by the JWT claim, never a
+    client-controllable body field. G0.9-T2 (#729) set ``extra="forbid"``
+    on every public v1 request schema, so ``AuditQueryRequest`` now
+    rejects an unknown ``tenant_id`` field with a 422 ``extra_forbidden``
+    rather than silently dropping it (the prior ``extra="ignore"``
+    behaviour this test originally asserted). The 422 is the stronger
+    guarantee — a cross-tenant override attempt fails loudly at the
+    validation boundary instead of being quietly ignored.
+    """
     app = _build_audit_acceptance_app()
     key = make_rsa_keypair("kid-A")
     token_a = _mint_operator(keypair=key, sub="damir", tenant_id=TENANT_A_ID)
@@ -368,19 +371,14 @@ async def test_scenario_1_body_tenant_id_is_silently_dropped(
             mock_discovery_and_jwks(mock_router, public_jwks(key))
             resp = await client.post(
                 "/api/v1/audit/query",
-                # The body-supplied tenant_id is NOT on AuditQueryRequest;
-                # Pydantic's default extra="ignore" silently drops it.
-                # The substrate's tenant_id is the operator's JWT claim,
-                # always — never anything client-controllable.
                 json={"tenant_id": TENANT_B_ID, "target": "rdc-vcenter"},
                 headers=_bearer(token_a),
             )
-    assert resp.status_code == 200, resp.text
-    row_ids = {row["id"] for row in resp.json()["rows"]}
-    assert str(seeds["row_a"]) in row_ids
-    assert str(seeds["row_b"]) not in row_ids, (
-        "body tenant_id=<B> was honoured — substrate tenant boundary broken"
-    )
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert any(
+        err["type"] == "extra_forbidden" and err["loc"] == ["body", "tenant_id"] for err in detail
+    ), f"expected extra_forbidden on body.tenant_id, got {detail}"
 
 
 # ---------------------------------------------------------------------------

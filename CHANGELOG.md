@@ -221,6 +221,33 @@ connector-related release-notes line.
   rule and pair the positive example with a digit-leading negative
   example, so the constraint is visible before the call goes out
   ([#780](https://github.com/evoila/meho/issues/780), Signal #15).
+- Publish a consolidated **deployer auth-onramp recipe** (5-step
+  realm walk + 4-wall symptom→cause→fix matrix) covering both the
+  `meho login` CLI device-code path and the MCP-client onramp.
+  Lives in [`deploy/values-examples/README.md` § Auth onramp
+  recipe (CLI + MCP)](deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp);
+  cross-linked from `docs/cross-repo/mcp-client-setup.md` (the
+  pre-registered-public-client requirement is now surfaced up
+  front, not buried at Step 2) and `docs/acceptance/install.md`.
+  Closes the ~2.5-hour first-login wall the 2026-05-21 RDC
+  dogfood walked (Addendum II Ask #3), including the
+  `basic`/`sub` Keycloak 25+ gotcha (admin-API-created clients
+  don't auto-inherit realm default-default scopes, so `sub` is
+  missing and tokens are rejected with opaque `invalid_token`)
+  and the `.mcp.json` `client_id` limitation for Claude Code +
+  Cursor (RFC 7591 DCR is closed by Keycloak's Trusted Hosts
+  policy on any prod realm; the deployer-side fix doesn't help
+  until those clients expose `client_id` — shim through
+  `mcp-remote` is the workaround). Docs-only; no backplane code
+  change (the RFC 9728 surface is correct). G0.9.1-T10 under
+  [#772](https://github.com/evoila/meho/issues/772) /
+  [#790](https://github.com/evoila/meho/issues/790).
+  Auto-provisioning the recipe at install time is tracked under
+  [#791](https://github.com/evoila/meho/issues/791) (T11);
+  token-validator error specificity is
+  [#797](https://github.com/evoila/meho/issues/797) (T12); the
+  `meho login` device-flow deadline fix is
+  [#798](https://github.com/evoila/meho/issues/798) (T13).
 
 ## [0.3.1] - 2026-05-21
 

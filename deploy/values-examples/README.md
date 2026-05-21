@@ -36,7 +36,7 @@ request.
     | --- | --- |
     | `image.tag` | An immutable tag from the G2.4 image pipeline. Production: `sha-<40-char-git-sha>` from a green CI run. Pre-prod / lab: `v0.1.0` once the release tag exists. **`:latest` and `:main` are forbidden by Goal #11 deploy discipline.** |
     | `config.keycloakIssuerUrl` / `keycloak.issuer` realm | Your Keycloak realm name. Both fields must agree — the ConfigMap-sourced env mirrors the values block (`config.keycloakIssuerUrl` is what the backplane process reads at startup). |
-    | `config.keycloakCliClientId` | The client_id of the **public** Keycloak client `meho login` uses for device-code flow. Pre-create the client in the realm above (see [§ `meho-cli` public Keycloak client](#meho-cli-public-keycloak-client-for-meho-login)) — `meho-cli` is the suggested default. Leaving this empty keeps v0.3.1 behaviour: the backplane endpoint serves an empty value and `meho login` surfaces an actionable public-client error. |
+    | `config.keycloakCliClientId` | The client_id of the **public** Keycloak client `meho login` uses for device-code flow. Pre-create the client in the realm above per the [auth onramp recipe](#auth-onramp-recipe-cli--mcp) (`meho-cli` is the suggested default). Leaving this empty keeps v0.3.1 behaviour: the backplane endpoint serves an empty value and `meho login` surfaces an actionable public-client error. |
     | `networkPolicy.postgresCIDR` | The IPv4 CIDR of your Postgres Service. Recover via `kubectl get endpoints <pg-svc> -n <ns> -o jsonpath='{.subsets[].addresses[].ip}'` and widen to the controlling subnet. |
     | `networkPolicy.vaultCIDR` | Same, for Vault. |
     | `networkPolicy.keycloakCIDR` | Same, for Keycloak. |
@@ -255,72 +255,292 @@ If `/ready` still reports `ssl_error` after the mount lands, check the
 common drift cause: a typo'd ConfigMap name (the mount succeeds but
 the file is empty / wrong).
 
-## `meho-cli` public Keycloak client (for `meho login`)
+## Auth onramp recipe (CLI + MCP)
 
-`meho login` runs the OAuth 2.0 Device Authorization Grant (RFC 8628)
-against the realm configured in `config.keycloakIssuerUrl`. The device
-grant requires a **public** client — Keycloak rejects device-code
-initiation against a confidential client (one with a client secret)
-with `401 unauthorized_client` because the CLI cannot carry a secret
-safely. Up through v0.3.1, the CLI silently re-used the **confidential**
-`keycloakAudience` value (`meho-backplane`) as the OAuth `client_id`
-and `meho login` therefore failed on its documented happy path
-(consumer report 2026-05-21, Signal #16).
+> First-login auth-onramp for both `meho login` (CLI device-code) and
+> the MCP-client surface (`/mcp` over RFC 9728 + OAuth 2.1 + PKCE).
+> The 2026-05-21 RDC dogfood walked the realm from scratch and paid
+> ~2.5 hours hitting four sequential walls — none of them documented
+> in one place at the time. This section is the consolidated 5-step
+> recipe + 4-wall symptom→cause→fix matrix that closes that gap.
+> Companion to [`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md)
+> (MCP-client-side configuration) and
+> [`docs/acceptance/install.md`](../../docs/acceptance/install.md)
+> (cold-deploy acceptance contract).
+>
+> **Scope.** Both `meho login` and most MCP clients (Claude Desktop /
+> Claude.ai, MCP Inspector, Claude Code's HTTP MCP, Cursor) need
+> **public** OAuth clients pre-provisioned in the Keycloak realm
+> before they can authenticate. MEHO is RFC-correct (the chassis
+> emits the RFC 9728 metadata document, and the `/mcp` 401 carries
+> `WWW-Authenticate: Bearer resource_metadata=…`) — but the implicit
+> "follow the metadata trail and run dynamic client registration"
+> path is closed by Keycloak's default Trusted Hosts policy on any
+> realistic prod realm, and a public client can't appear by magic.
+> The deployer creates two public clients (one for the CLI, one for
+> MCP) with the right mappers + scopes; the consolidated automation
+> verb that does this in one idempotent step ships under
+> [#791](https://github.com/evoila/meho/issues/791) (G0.9.1-T11).
+> This recipe is the manual path the verb encodes.
 
-v0.3.2 fixes the CLI shape, but **the deployer is still responsible
-for pre-creating the public client in the Keycloak realm** before
-`helm install`. Auto-provisioning the client from a Helm post-install
-hook is tracked as [#791 (T11)](https://github.com/evoila/meho/issues/791);
-this section is the manual recipe until that lands.
+### 5-step realm recipe
 
-### Realm-side recipe
+The recipe assumes the confidential resource-server client
+`meho-backplane` already exists (it's how the backplane validates
+inbound tokens; created at install time alongside the realm). Steps
+1–5 add the **public** clients + the user that approve and consume
+those tokens.
+
+#### Step 1 — Install the deployment's TLS CA on the operator workstation
+
+`meho login` (Go) and most MCP clients verify TLS against the
+operator's **OS trust store**, not the `SSL_CERT_FILE` env var.
+On Linux: `update-ca-certificates` after dropping the CA in
+`/usr/local/share/ca-certificates/`. On macOS: import to the system
+keychain via `Keychain Access` or `security add-trusted-cert -d -r
+trustRoot -k /Library/Keychains/System.keychain <ca>.pem`; Go on
+macOS reads the system keychain via the Security framework and
+**ignores `SSL_CERT_FILE`**, so the env-var trick that works for
+Python on the backplane side doesn't carry over to the workstation
+CLI. On Windows: import to `Trusted Root Certification Authorities`
+via `certutil -addstore -f Root <ca>.pem`. Verify with
+`curl -sf https://<backplane-host>/healthz` from a fresh shell.
+
+If this step is skipped, `meho login` fails at the discovery probe
+with an `x509: certificate signed by unknown authority` error and
+the breadcrumb points at `--client-id`/`--issuer` overrides — which
+doesn't fix TLS. The override surfaces a separate failure mode but
+isn't the right recovery for an untrusted CA.
+
+#### Step 2 — Create the public `meho-cli` device-code client
 
 In the Keycloak realm that hosts `meho-backplane`, create a new
 **public** client with these settings:
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| Client ID | `meho-cli` (suggested) | Matches the default in `values-rdc-example.yaml`. Any short identifier works — set `config.keycloakCliClientId` to whatever you choose. |
-| Client authentication | **Off** (public client) | The device grant cannot be completed by a confidential client; the CLI has nowhere to store a secret. |
+| Client ID | `meho-cli` (suggested) | Matches the default in `values-rdc-example.yaml`. Any short identifier works — set `config.keycloakCliClientId` (`KEYCLOAK_CLI_CLIENT_ID`) to whatever you choose. |
+| Client authentication | **Off** (public client) | The device grant cannot be completed by a confidential client; the CLI has nowhere to store a secret. Confidential client + device-grant → `401 unauthorized_client` from Keycloak's device endpoint (Wall #1). |
 | Authentication flow → Standard flow | Off | The CLI doesn't run the authorization-code grant. |
 | Authentication flow → Direct access grants | Off | Resource-owner password is explicitly out of scope. |
-| Authentication flow → **OAuth 2.0 Device Authorization Grant** | **On** | Required for `meho login`. |
+| Authentication flow → Implicit flow | Off | Deprecated by OAuth 2.1. |
+| Authentication flow → Service accounts roles | Off | Public clients can't hold credentials. |
+| Authentication flow → **OAuth 2.0 Device Authorization Grant** | **On** | Required for `meho login` ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). |
 | Valid redirect URIs | (none) | Device flow doesn't redirect. |
-| Mapper → audience mapper | Add a `meho-backplane` audience mapper that injects `meho-backplane` (your `keycloakAudience` value) into the access token's `aud` claim | Without this, tokens issued for `meho-cli` carry `aud: meho-cli` and the backplane rejects them with `audience_not_configured`. |
+
+#### Step 3 — Clone all 5 protocol mappers from `meho-backplane` onto `meho-cli`
+
+Tokens minted by `meho-cli` must carry the same claim shape the
+backplane validates — otherwise the token decodes cleanly but is
+rejected with `invalid_token` (Wall #2). The five mappers (verbatim
+names from the dogfood reference, copy hardcoded values from the
+`meho-backplane` client in the same realm):
+
+| Mapper name | Type | Output claim | Notes |
+| --- | --- | --- | --- |
+| `audience-meho-backplane` | `oidc-audience-mapper` | `aud` adds `meho-backplane` | Without this, tokens carry `aud: meho-cli` and the backplane rejects them with `audience_not_configured` / `invalid_audience`. |
+| `meho-mcp-audience` | `oidc-audience-mapper` | `aud` adds `<backplane-url>/mcp` | Required so a token minted via the CLI can also drive `/mcp` calls. Use **Included Custom Audience** (no client-mapper UI option exists for an arbitrary URI). Paste the URI **without** a trailing slash — MEHO normalises `MCP_RESOURCE_URI` server-side and the audience claim must match the no-trailing-slash form. |
+| `tenant-id` | `oidc-hardcoded-claim` | `tenant_id` | Hardcoded to the tenant UUID the operator belongs to. Without this the backplane rejects with `missing_tenant_claim` (Wall #2). |
+| `tenant-role` | `oidc-hardcoded-claim` | `tenant_role` | Hardcoded to one of `read_only` / `operator` / `tenant_admin`. Without this the backplane rejects with `missing_tenant_role_claim`. |
+| `groups-claim` | `oidc-group-membership-mapper` | `groups` | Drives group-based RBAC (`meho-admins`, etc.). Without this group-gated tools report empty results rather than failing — a softer failure than the above, but still misleading. |
+
+Hardcoded-claim mappers are intentional: in the dogfood lab the
+realm doesn't model tenants/roles as group attributes, so hardcoded
+values are the simplest path. A realm that already encodes
+tenant/role on the user (group attribute, custom user-attribute,
+identity-provider mapping) can swap these for `oidc-usermodel-*`
+mappers — keep the **claim names** identical (`tenant_id`,
+`tenant_role`) because that's what the backplane validates against.
+
+Validator-side errors at the decode stage are made specific by
+[#797](https://github.com/evoila/meho/issues/797) (G0.9.1-T12):
+once that lands, `invalid_audience` / `missing_sub` / `token_expired`
+/ `invalid_signature` / `invalid_issuer` are distinguished in the
+401 `detail` body instead of all collapsing to `invalid_token`.
+
+#### Step 4 — Explicitly assign the 4 default client scopes
+
+| Scope | Why | What breaks if it's missing |
+| --- | --- | --- |
+| `basic` | Carries the **Subject (sub) protocol mapper**. Keycloak 25 moved the `sub` claim out of the hardcoded token-generation path and into a protocol mapper inside this scope ([Keycloak 25 release notes](https://www.keycloak.org/2024/06/keycloak-2500-released) — the change persists in Keycloak 26+). RFC 9068 §2.2.1 makes `sub` REQUIRED on JWT access tokens, so a token without it is correctly rejected — the diagnostic is the opaque part. | Wall #3: every backplane call returns 401 `invalid_token` with no hint that `sub` is missing. This is the deepest wall — every other claim is present, the token *looks* well-formed, and the breakage moves with the realm regardless of how the client was created. |
+| `roles` | Carries realm-roles + client-roles into the token. | Group-gated tools may report empty / unauthorised results. |
+| `web-origins` | Allowed CORS origins for browser-driven flows. | Browser-driven MCP clients (Claude.ai Custom Connector) fail CORS pre-flight. |
+| `acr` | Authentication Context Class Reference — drives step-up auth. | Step-up flows misbehave; not load-bearing for first login but cheap to ship. |
+
+> **The `basic`/`sub` gotcha (load-bearing).** Clients **created via
+> the Keycloak admin REST API do not auto-inherit the realm's
+> default-default client scopes** the way the admin-console UI's
+> "Create" button does. The console populates `defaultClientScopes`
+> on the new client to the realm's "Default" set; `kcadm.sh` /
+> direct admin-API `POST /clients` does not, unless the request body
+> explicitly includes a `defaultClientScopes` array. Re-using a
+> realm-default scope **name** in `optionalClientScopes` doesn't
+> back-fill it as default either. The recovery is to set
+> `defaultClientScopes: ["basic","roles","web-origins","acr"]`
+> explicitly in the admin-API request body, or to re-add each scope
+> via the admin console afterwards. The consumer's reference script
+> at [`scripts/keycloak-bootstrap-meho-cli.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/issues/670)
+> sets all four explicitly to be safe.
+
+#### Step 5 — Provision a user in `meho-admins` with a password
+
+The realm ships with zero human users — prior lab work rode
+`client_credentials` and never needed one. Device-code, by RFC 8628
+§3.4, requires a real user to approve the verification URL.
+
+Create at least one user (any username; the dogfood lab uses the
+operator's email) with:
+
+- A password (any policy-compliant value; the user is prompted to
+  change it on first login if the realm's password policy says so).
+- Group membership: `meho-admins` (so the `groups-claim` mapper at
+  Step 3 emits `meho-admins` and the backplane's group-gated tools
+  are reachable).
+
+The user's `email_verified` flag does not need to be true for
+device-code to complete; if your realm enforces verified email
+elsewhere, set it true on this user.
+
+### MCP onramp — public `meho-mcp-client` (Claude.ai / Claude Desktop / MCP Inspector)
+
+Repeat Steps 2–4 for a second public client used by MCP clients
+that **can** carry `client_id` in their config (Claude.ai Custom
+Connector, MCP Inspector). Suggested client ID `meho-mcp-client`;
+client-shape contrast with `meho-cli`:
+
+| Setting | `meho-mcp-client` | Why differs from `meho-cli` |
+| --- | --- | --- |
+| Standard flow (authorization-code + PKCE) | **On** | MCP 2025-06-18 mandates OAuth 2.1 authorization-code + PKCE for the `/mcp` path; the device grant is a CLI-only convenience. |
+| Device grant | Off | Not needed; MCP clients run the browser-redirect flow. |
+| Valid redirect URIs | `https://claude.ai/api/mcp/auth_callback`, `http://localhost:*` | Covers the Claude.ai Custom Connector and any localhost MCP Inspector. |
+| Web origins | `+` (or a tight allow-list) | CORS for the browser flow. |
+| PKCE challenge method | `S256` | Spec-required for public-client PKCE. |
+
+The 5 protocol mappers + 4 default client scopes from Steps 3–4
+apply identically. The recipe at
+[`docs/cross-repo/mcp-client-setup.md`](../../docs/cross-repo/mcp-client-setup.md)
+documents the per-client configuration step for each MCP client.
+
+> **`.mcp.json` `client_id` limitation (Claude Code + Cursor).**
+> Claude Code's HTTP-MCP support and Cursor's MCP wire-up
+> as of 2026-05 follow the RFC 9728 metadata trail to the
+> Keycloak authorization server but **do not expose a
+> `client_id` field in their `.mcp.json` shape**. They
+> attempt dynamic client registration (RFC 7591) against the
+> Keycloak `clients-registrations/openid-connect` endpoint
+> and hit Keycloak's Trusted Hosts policy — which ships with
+> an empty whitelist, so anonymous DCR is **de-facto
+> disabled** ([Keycloak docs](https://www.keycloak.org/securing-apps/client-registration)).
+> The deployer-side fix (registering a public client by hand)
+> doesn't help these clients until they expose `client_id` in
+> `.mcp.json`. Two workarounds today: (a) use Claude.ai
+> Custom Connector or MCP Inspector for first-class wire-up
+> against `meho-mcp-client`; (b) shim Claude Code / Cursor
+> through `mcp-remote` (or an equivalent stdio→HTTP proxy)
+> and bake the Bearer token into the wrapper. The right
+> long-term fix is upstream MCP-client `client_id` support,
+> not opening DCR on a prod realm.
 
 ### Wire it into Helm
 
-Set the chart value to the client_id you just created:
+Set the chart value to the CLI client_id you created at Step 2:
 
 ```yaml
 config:
   keycloakCliClientId: meho-cli   # or whatever you chose
 ```
 
-The backplane's `/api/v1/auth-config` endpoint will surface this value
+The backplane's `/api/v1/auth-config` endpoint surfaces this value
 as the `cli_client_id` JSON field, which `meho login`'s discovery
 parser maps to the OAuth `client_id`. The CLI also accepts
 `--client-id <id>` as a per-invocation override, useful when a
 deployer publishes multiple public clients (e.g. `meho-cli-prod`,
 `meho-cli-staging`) and the chart value pins one default.
 
+The MCP public client (`meho-mcp-client`) is not chart-wired today
+— Claude.ai's Custom Connector and MCP Inspector both ask the
+operator to paste a client_id at config time. Auto-discovery via
+RFC 9728 advertises the authorization server but not the
+`client_id` (the metadata document defines that as an out-of-band
+parameter, intentionally).
+
 ### Verify
 
-After `helm install` (or `helm upgrade`):
+After `helm install` / `helm upgrade` and the realm steps above:
 
 ```bash
+# 1. Auth-config endpoint carries cli_client_id.
 curl -sf https://meho.evba.lab/api/v1/auth-config | jq .
-# { "keycloak_issuer": "...", "audience": "meho-backplane", "cli_client_id": "meho-cli" }
+# {
+#   "keycloak_issuer": "https://keycloak.evba.lab/realms/evba",
+#   "audience": "meho-backplane",
+#   "cli_client_id": "meho-cli"
+# }
 
+# 2. CLI device-code flow completes.
 meho login https://meho.evba.lab
 # Logged in to https://meho.evba.lab; token stored in keyring.
+
+# 3. Authenticated REST call succeeds.
+curl -sf -H "Authorization: Bearer $(meho status --print-token)" \
+  https://meho.evba.lab/api/v1/health
+# {"status": "ok"}
+
+# 4. MCP RFC 9728 metadata document is reachable.
+curl -sf https://meho.evba.lab/.well-known/oauth-protected-resource | jq .
+# {
+#   "resource": "https://meho.evba.lab/mcp",
+#   "authorization_servers": ["https://keycloak.evba.lab/realms/evba"],
+#   ...
+# }
 ```
 
-If `cli_client_id` comes back as the empty string, the chart value
-wasn't set; if `meho login` reports `unauthorized_client` after
-discovery, the client is configured as confidential rather than
-public (toggle "Client authentication" off in the Keycloak admin UI
-and retry).
+### Four-wall symptom → cause → fix matrix
+
+The deployer's first-login walk hits these four walls in sequence;
+each surfaces with a different symptom but the cause-and-fix chain
+is bounded. Walls are numbered for the dogfood-report cross-reference.
+
+| Wall | Symptom | Cause | Fix |
+| --- | --- | --- | --- |
+| **W1** | Device-code initiation 401s with `{"error":"unauthorized_client","error_description":"Invalid client or Invalid client credentials"}`. Or DCR 403s with `{"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request to client-registration service. Details: Host not trusted."}`. | The CLI / MCP client tried to drive the device or authorization-code grant against a **confidential** client (typically `meho-backplane`), or anonymous DCR against a realm whose Trusted Hosts policy ships with an empty whitelist. Confidential clients require a `client_secret` the CLI can't carry; DCR on a prod realm is closed by design ([Keycloak docs](https://www.keycloak.org/securing-apps/client-registration)). | Pre-create a **public** client per Step 2 (and Step 2-MCP for the MCP path). Set `config.keycloakCliClientId` to the CLI client's ID so `/api/v1/auth-config` surfaces it. Operators on older backplanes can pass `--client-id <id>` per-invocation. Don't open DCR — the right fix is a deployer-side public client. |
+| **W2** | Token issuance succeeds; every backend call 401s with `{"detail":"invalid_token"}` (specifics post-[#797](https://github.com/evoila/meho/issues/797): `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim`). | The public client mints tokens with a different claim shape than `meho-backplane` validates against — missing the `audience-meho-backplane` mapper (wrong `aud`), the `meho-mcp-audience` mapper (no MCP audience), the `tenant-id` mapper, or the `tenant-role` mapper. | Clone all 5 mappers from the `meho-backplane` client onto the public client per Step 3. After the fix, decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`, plus `tenant_id`, `tenant_role`, `groups` are present. |
+| **W3** | Token issuance succeeds; every backend call 401s with `{"detail":"invalid_token"}` even after Wall #2 is closed; decoded token has `aud`, `tenant_id`, `tenant_role`, `groups` but **no `sub` claim**. | The `basic` client scope wasn't assigned. Keycloak 25 moved `sub` into the Subject (sub) protocol mapper inside the `basic` scope; clients created via the admin REST API don't auto-inherit realm default-default scopes the way the admin-console UI populates them. RFC 9068 §2.2.1 makes `sub` REQUIRED on JWT access tokens, so rejection is spec-correct — the diagnostic is the opaque part. | Add `basic`, `roles`, `web-origins`, `acr` to the public client's **default** client scopes per Step 4. Re-issue (logout and re-login; existing tokens are stale) and confirm `sub` is now present. After [#797](https://github.com/evoila/meho/issues/797) lands the symptom is `{"detail":"missing_sub"}` instead of the opaque form. |
+| **W4** | `meho login` fails with `meho: token exchange failed: context deadline exceeded`, often before the human has a chance to approve the verification URL. | Not the device-code TTL (which is already 10 minutes per `cli/internal/auth/devicecode.go:355`'s `PollTimeout = 10 * time.Minute` — longer than Keycloak's default 600 s `expires_in`). The real cause is an **ambient parent deadline** on `cmd.Context()` (CI step timeout, `claude` bash-tool timeout, IDE-task wrapper) that truncates the approval wait far below the device-code lifetime. | (Until [#798](https://github.com/evoila/meho/issues/798) lands) run `meho login` in a real interactive terminal without a short wrapper deadline; or raise the wrapper timeout to ≥ `expires_in` + headroom. After #798 lands the message distinguishes "parent deadline fired" from "device code expired" and the device-flow approval wait detaches from a too-short parent context. |
+
+### Out of scope for this recipe
+
+- **The broader Deploying-MEHO guide.** This recipe is one entry in
+  the consolidated deployment guide tracked under
+  [#559](https://github.com/evoila/meho/issues/559) (deployment-
+  friction umbrella). When #559 lands, this recipe moves there
+  verbatim; until then `deploy/values-examples/README.md` is the
+  authoritative deployer doc for the chart values + the auth-onramp
+  recipe.
+- **Automation of the recipe.** [#791](https://github.com/evoila/meho/issues/791)
+  (G0.9.1-T11) ships `meho admin keycloak bootstrap-cli-client` — an
+  idempotent verb that creates the two public clients + 5 mappers +
+  4 default scopes from one invocation. The recipe above is the
+  manual path until that automation lands.
+- **Confidential `meho-backplane` client.** Out of scope — it's
+  created at realm-install time alongside the Keycloak realm itself
+  and isn't touched by this recipe. Rotating its client secret is
+  also out of scope.
+- **RFC 7591 Dynamic Client Registration support in MEHO.** A real
+  feature with its own design tradeoffs (which clients are allowed
+  to self-register; how operators audit unknown registrations);
+  tracked separately, not a v0.3.2 onramp fix. `docs/cross-repo/mcp-client-setup.md`
+  notes it as future work.
+- **The CLI device-code client provisioning + auth-config endpoint
+  completion.** [#789](https://github.com/evoila/meho/issues/789)
+  (G0.9.1-T9) — already landed in v0.3.2.
+- **Token-validator error specificity at the decode stage.**
+  [#797](https://github.com/evoila/meho/issues/797) (G0.9.1-T12)
+  makes Wall #2 / Wall #3 symptoms specific (`invalid_audience` /
+  `missing_sub` / …) instead of opaque `invalid_token`.
+- **The `meho login` context-deadline fix.**
+  [#798](https://github.com/evoila/meho/issues/798) (G0.9.1-T13)
+  closes Wall #4 in code.
 
 ## End-to-end install flow
 

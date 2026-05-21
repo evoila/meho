@@ -111,6 +111,29 @@ connector-related release-notes line.
 
 ### Added
 
+- **`VcfOperationsConnector` skeleton** (G3.6-T1
+  [#829](https://github.com/evoila/meho/issues/829)) — `HttpConnector`
+  subclass registered under
+  `(product="vcf-operations", version="9.0", impl_id="vrops-rest")`.
+  HTTP Basic auth on every request (vROps' `/suite-api/api/*` surface
+  is stateless — no session token); optional `auth-source` query
+  parameter on authenticated requests when `target.auth_source` is set,
+  routing the Basic challenge to a non-local identity domain (vIDM, AD
+  realm name, etc.). Auth-model boundary gate accepts
+  `shared_service_account` / the enum member / `None` (pre-G0.3
+  sentinel) and rejects everything else with `NotImplementedError`
+  naming the target + mode. `fingerprint()` against
+  `GET /suite-api/api/versions/current` lifts `releaseName` →
+  `version`, `buildNumber` → `build`, and `humanlyReadableReleaseName`
+  → `extras` when present; transport / status failures return
+  `reachable=False` with structured `extras["error"]`. `probe()`
+  delegates to `fingerprint()` — vROps has no dedicated `/health`
+  endpoint. Shares the `connectors/_shared/vcf_auth.py` scaffolding
+  ([#841](https://github.com/evoila/meho/issues/841)) for the Basic
+  header, auth-model predicate, credentials cache, and Vault loader
+  stub with the sibling vRLI #830 + Fleet #831 skeletons. Operations
+  ship in G3.6-T2 (#833) via G0.7 spec ingestion against the vROps
+  `/suite-api` OpenAPI spec.
 - **`meho admin keycloak bootstrap-clients` CLI verb** (G0.9.1-T11
   #791). Idempotently provisions the realm-side prerequisites the
   2026-05-21 RDC dogfood proved are the single highest-friction

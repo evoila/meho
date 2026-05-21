@@ -87,7 +87,7 @@ def _make_connector() -> HarborConnector:
 
 @pytest.mark.asyncio
 async def test_robot_create_posts_to_harbor_and_returns_id_name_secret() -> None:
-    """robot_create() calls POST /api/v2.0/projects/{project}/robots and returns
+    """robot_create() calls POST /api/v2.0/robots and returns
     {id, name, secret} from the Harbor response."""
     connector = _make_connector()
     harbor_response = {
@@ -98,7 +98,7 @@ async def test_robot_create_posts_to_harbor_and_returns_id_name_secret() -> None
         "expiration_time": -1,
     }
     with respx.mock(assert_all_called=True) as mock:
-        mock.post("https://harbor.test.invalid/api/v2.0/projects/myproject/robots").mock(
+        mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(
             return_value=respx.MockResponse(201, json=harbor_response)
         )
         result = await connector.robot_create(
@@ -124,9 +124,7 @@ async def test_robot_create_sends_basic_auth_header() -> None:
         )
 
     with respx.mock() as mock:
-        mock.post("https://harbor.test.invalid/api/v2.0/projects/proj/robots").mock(
-            side_effect=_capture
-        )
+        mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(side_effect=_capture)
         await connector.robot_create(
             _TARGET,
             {"name": "bot", "project": "proj", "duration": 90},
@@ -153,9 +151,7 @@ async def test_robot_create_sends_correct_permission_body() -> None:
         )
 
     with respx.mock() as mock:
-        mock.post("https://harbor.test.invalid/api/v2.0/projects/alpha/robots").mock(
-            side_effect=_capture
-        )
+        mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(side_effect=_capture)
         await connector.robot_create(
             _TARGET,
             {"name": "deployer", "project": "alpha", "duration": 90},
@@ -180,7 +176,7 @@ async def test_robot_create_raises_on_http_error() -> None:
 
     connector = _make_connector()
     with respx.mock() as mock:
-        mock.post("https://harbor.test.invalid/api/v2.0/projects/myproject/robots").mock(
+        mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(
             return_value=respx.MockResponse(409, json={"errors": [{"code": "CONFLICT"}]})
         )
         with pytest.raises(httpx.HTTPStatusError):
@@ -198,11 +194,11 @@ async def test_robot_create_raises_on_http_error() -> None:
 
 @pytest.mark.asyncio
 async def test_robot_delete_sends_delete_to_harbor_and_returns_synthetic_result() -> None:
-    """robot_delete() sends DELETE /api/v2.0/projects/{project}/robots/{id} and
+    """robot_delete() sends DELETE /api/v2.0/robots/{id} and
     returns {id, deleted: True} since Harbor returns HTTP 200 with empty body."""
     connector = _make_connector()
     with respx.mock(assert_all_called=True) as mock:
-        mock.delete("https://harbor.test.invalid/api/v2.0/projects/myproject/robots/42").mock(
+        mock.delete("https://harbor.test.invalid/api/v2.0/robots/42").mock(
             return_value=respx.MockResponse(200)
         )
         result = await connector.robot_delete(
@@ -225,9 +221,7 @@ async def test_robot_delete_sends_basic_auth_header() -> None:
         return respx.MockResponse(200)
 
     with respx.mock() as mock:
-        mock.delete("https://harbor.test.invalid/api/v2.0/projects/proj/robots/7").mock(
-            side_effect=_capture
-        )
+        mock.delete("https://harbor.test.invalid/api/v2.0/robots/7").mock(side_effect=_capture)
         await connector.robot_delete(_TARGET, {"project": "proj", "id": 7})
 
     assert "authorization" in captured_headers
@@ -242,7 +236,7 @@ async def test_robot_delete_raises_on_http_error() -> None:
 
     connector = _make_connector()
     with respx.mock() as mock:
-        mock.delete("https://harbor.test.invalid/api/v2.0/projects/myproject/robots/99").mock(
+        mock.delete("https://harbor.test.invalid/api/v2.0/robots/99").mock(
             return_value=respx.MockResponse(404)
         )
         with pytest.raises(httpx.HTTPStatusError):

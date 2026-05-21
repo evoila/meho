@@ -11,7 +11,9 @@ operator-reviewed read-only ops, the curated group/op metadata, and the
 acceptance test suite (dispatch smoke + JSONFlux force-handle). G3.5-T9 (#621)
 adds robot lifecycle typed ops (`harbor.robot.create` / `harbor.robot.delete`)
 and the `credential_mint` G6 broadcast classifier.
-CLI verbs + MCP review + real-container E2E arrive in G3.5-T10 (#622).
+G3.5-T10 (#622) adds the `meho harbor …` CLI verb tree
+(`cli/internal/cmd/harbor/`), the real-container E2E test against
+`goharbor/harbor-core:v2.11.0`, and `docs/cross-repo/harbor-onboarding.md`.
 
 Source: `backend/src/meho_backplane/connectors/harbor/`.
 
@@ -214,17 +216,15 @@ acceptance fixtures and unit tests assert this invariant explicitly.
 - `harbor.robot.create` grants push + pull access on the named project only.
   System-level robot creation (`POST /api/v2.0/robots`) is out of scope for this Task.
 - Robot secret rotation / refresh is out of scope — tracked as a follow-up.
-- Real-container integration tests (against `goharbor/harbor-core:v2.11`) are
-  out of scope for this Task; they arrive in #622 (CLI/MCP/E2E).
 - Full G0.7 spec-canary ingest (live Harbor OpenAPI spec through
-  `IngestionPipelineService`) is deferred to #622 when the spec-shelf is
-  wired to the meho-runners pool.
+  `IngestionPipelineService`) remains deferred; wired to the meho-runners
+  pool as a follow-up after the spec-shelf ships.
 
 ## References
 
 - Issues: #619 (G3.5-T7 skeleton), #620 (G3.5-T8 read-ops curation),
-  #621 (G3.5-T9 robot lifecycle + credential_mint classifier)
-- Successor task: #622 (G3.5-T10 CLI/MCP/E2E)
+  #621 (G3.5-T9 robot lifecycle + credential_mint classifier),
+  #622 (G3.5-T10 CLI verbs + real-container E2E + harbor-onboarding.md)
 - Initiative: #368 (G3.5 tier-2 batch)
 - HttpConnector base: `backend/src/meho_backplane/connectors/adapters/http.py`
 - Broadcast classifier: `backend/src/meho_backplane/broadcast/events.py` (`classify_op`, `redact_payload`)

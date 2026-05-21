@@ -282,7 +282,7 @@ async def register_harbor_robot_operations(
         summary="Create a project-scoped robot account in Harbor.",
         description=(
             "Creates a project-scoped robot account via "
-            "POST /api/v2.0/projects/{project}/robots. "
+            "POST /api/v2.0/robots (Harbor v2 robot API, level=project). "
             "The response payload contains a freshly-minted secret credential "
             "returned ONLY on creation — Harbor does not expose it again. "
             "Classified credential_mint: the broadcast collapses to aggregate-only "
@@ -310,7 +310,7 @@ async def register_harbor_robot_operations(
         summary="Delete a project-scoped robot account from Harbor.",
         description=(
             "Deletes a project-scoped robot account via "
-            "DELETE /api/v2.0/projects/{project}/robots/{id}. "
+            "DELETE /api/v2.0/robots/{id} (Harbor v2 robot API). "
             "Requires the numeric robot ID (returned by harbor.robot.create). "
             "Non-idempotent write — permanent removal. safety_level=caution."
         ),

@@ -83,7 +83,6 @@ import asyncio
 import base64
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 import structlog
@@ -177,6 +176,24 @@ class HarborConnector(HttpConnector):
         self._credentials_loader: HarborCredentialsLoader = (
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
+
+    async def _http_client(self, target: HarborTargetLike) -> httpx.AsyncClient:
+        """Return the pooled client with Harbor's session cookie discarded.
+
+        Harbor sets a ``sid`` session cookie on every authenticated
+        response. httpx's default cookie jar would store it and replay it
+        on the next request, which flips Harbor out of stateless Basic
+        auth into session mode — and session mode rejects state-changing
+        verbs (POST/PUT/DELETE) that lack an ``X-Harbor-CSRF-Token``
+        header with ``403 {"code":"FORBIDDEN","message":"CSRF token not
+        found in request"}``. This connector authenticates with HTTP
+        Basic on every call by design (see :mod:`.session` — "no session
+        token is established"), so the cookie is never wanted: clear the
+        jar before each request to keep every call stateless.
+        """
+        client = await super()._http_client(target)
+        client.cookies.clear()
+        return client
 
     async def auth_headers(self, target: HarborTargetLike, raw_jwt: str) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
@@ -367,10 +384,9 @@ class HarborConnector(HttpConnector):
         with the same name, which Harbor rejects with 409 anyway, but
         the tenacity decorator must not trigger).
 
-        The handler grants push + pull access on the named project.
-        Scoped permissions are sufficient for the canonical CI/CD use
-        case; system-level access would require the system-robot API
-        (``POST /api/v2.0/robots``) which is out of scope for this Task.
+        The handler grants push + pull access on the named project via the
+        Harbor v2 robot API (``POST /api/v2.0/robots`` with ``level=project``).
+        System-level access (omit ``level`` + ``namespace``) is out of scope.
 
         Parameters
         ----------
@@ -414,7 +430,7 @@ class HarborConnector(HttpConnector):
                 }
             ],
         }
-        path = f"/api/v2.0/projects/{quote(project, safe='')}/robots"
+        path = "/api/v2.0/robots"
         result = await self._post_json(target, path, raw_jwt="", json=body)
         return {
             "id": result["id"],
@@ -458,10 +474,9 @@ class HarborConnector(HttpConnector):
             On any 4xx/5xx from Harbor (e.g. 404 if the robot ID does
             not exist in the named project).
         """
-        project = str(params["project"])
         robot_id = int(params["id"])
 
-        path = f"/api/v2.0/projects/{quote(project, safe='')}/robots/{robot_id}"
+        path = f"/api/v2.0/robots/{robot_id}"
         client = await self._http_client(target)
         headers = await self.auth_headers(target, raw_jwt="")
         resp = await client.request("DELETE", path, headers=headers)

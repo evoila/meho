@@ -338,6 +338,18 @@ class Settings(BaseModel):
     jwt_tenant_claim_name: str = Field(default="tenant_id", min_length=1)
     jwt_tenant_role_claim_name: str = Field(default="tenant_role", min_length=1)
     enable_rbac_test_route: bool = False
+    #: Test-only: when True, ``encode_endpoint_text`` returns a zero
+    #: vector instead of computing the real fastembed embedding for a
+    #: descriptor at registration time. Set via
+    #: ``MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING`` by the test conftest so
+    #: the per-test app-lifespan boot (which re-runs
+    #: ``run_typed_op_registrars`` against a fresh per-test DB) does not
+    #: re-embed every typed-op descriptor — the dominant unit-job cost
+    #: per #771. Tests that exercise operation semantic-search seed
+    #: their own real embeddings and leave this off. NEVER set in
+    #: production: stubbed descriptor vectors make operation search
+    #: return meaningless rankings.
+    test_stub_descriptor_embedding: bool = False
     backplane_url: str = ""
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl
@@ -443,6 +455,9 @@ def get_settings() -> Settings:
         ),
         enable_rbac_test_route=parse_bool_env(
             os.environ.get("MEHO_ENABLE_RBAC_TEST_ROUTE"),
+        ),
+        test_stub_descriptor_embedding=parse_bool_env(
+            os.environ.get("MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING"),
         ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),

@@ -83,7 +83,6 @@ import asyncio
 import base64
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 import structlog
@@ -367,10 +366,9 @@ class HarborConnector(HttpConnector):
         with the same name, which Harbor rejects with 409 anyway, but
         the tenacity decorator must not trigger).
 
-        The handler grants push + pull access on the named project.
-        Scoped permissions are sufficient for the canonical CI/CD use
-        case; system-level access would require the system-robot API
-        (``POST /api/v2.0/robots``) which is out of scope for this Task.
+        The handler grants push + pull access on the named project via the
+        Harbor v2 robot API (``POST /api/v2.0/robots`` with ``level=project``).
+        System-level access (omit ``level`` + ``namespace``) is out of scope.
 
         Parameters
         ----------
@@ -414,7 +412,7 @@ class HarborConnector(HttpConnector):
                 }
             ],
         }
-        path = f"/api/v2.0/projects/{quote(project, safe='')}/robots"
+        path = "/api/v2.0/robots"
         result = await self._post_json(target, path, raw_jwt="", json=body)
         return {
             "id": result["id"],
@@ -458,10 +456,9 @@ class HarborConnector(HttpConnector):
             On any 4xx/5xx from Harbor (e.g. 404 if the robot ID does
             not exist in the named project).
         """
-        project = str(params["project"])
         robot_id = int(params["id"])
 
-        path = f"/api/v2.0/projects/{quote(project, safe='')}/robots/{robot_id}"
+        path = f"/api/v2.0/robots/{robot_id}"
         client = await self._http_client(target)
         headers = await self.auth_headers(target, raw_jwt="")
         resp = await client.request("DELETE", path, headers=headers)

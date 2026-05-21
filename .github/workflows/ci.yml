@@ -87,7 +87,13 @@ jobs:
     # github.event_name != 'pull_request'. Job-level (not step-level)
     # so no step ever starts on a fork PR.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: meho-runners-ci
+    # Dedicated heavy ARC scale set (6000m requests=limits, max 5 pods)
+    # for the unit suite only — #761. The other jobs (Go, Helm,
+    # integration) stay on the 4-core `meho-runners-ci` pool; only the
+    # pytest sweep is CPU-bound enough to want the extra cores. Heavy
+    # pool scales from 0, so an idle period costs one cold-start on the
+    # next run. Provisioned RDC-side in rdc-gitops#55.
+    runs-on: meho-runners-ci-heavy
     # 50-min cap: this job is the deterministic required gate — ruff
     # + ruff-format + mypy + the unit pytest sweep with
     # tests/integration/ EXCLUDED (--ignore=tests/integration). The
@@ -245,16 +251,22 @@ jobs:
         # `-n auto --dist loadscope` 2007/0/0 — identical, empty
         # failure set; local wall-clock serial 10:18 → xdist 6:14
         # (limited by core count; CI multi-core gets the ~49→~10 min).
-        # -n 3: pinned. -n auto was inconsistent on these ARC pods —
-        # run 26164020459 (main, 2026-05-20 12:57Z) reported 4 workers,
-        # a later same-day PR push reported 8. The variance points at
-        # cgroup-aware CPU detection mismatches (or pod-size drift);
-        # either way, pinning removes the ambiguity and the context-
-        # switch tax `-n auto` was silently paying. 3 reserves headroom
-        # for the xdist coordinator + the DinD daemon (testcontainers
-        # pgvector/valkey fire from unit-suite tests too, not just the
-        # integration job — see MEHO_TEST_PGVECTOR_IMAGE env above).
-        # --dist loadscope: a module's
+        # -n 6: pinned, matched to the dedicated `meho-runners-ci-heavy`
+        # scale set's 6000m guaranteed cores (#761). History: -n auto
+        # was inconsistent on the shared 4-core pool (run 26164020459
+        # reported 4 workers, a later same-day push reported 8 — cgroup
+        # detection drift), so #726 pinned -n 3 (N-1, leaving a core for
+        # the coordinator + DinD on the burstable 4-core pool). The heavy
+        # pool is QoS Guaranteed (requests=limits=6000m), so the
+        # host-core-detection ambiguity is gone and the headroom math
+        # changes: 6 workers fully subscribe the pod. The xdist
+        # coordinator is mostly IPC-blocked and DinD is near-idle during
+        # pure-CPU test execution (testcontainers pgvector/valkey only
+        # burst at spin-up — see MEHO_TEST_PGVECTOR_IMAGE env above), so
+        # full subscription is the intended trade. If the #761 wall/
+        # variance measurement shows oversubscription symptoms (high
+        # variance, wall not improving vs -n 3), drop to -n 5 (N-1) as
+        # the fallback. --dist loadscope: a module's
         # tests stay on one worker so module-/session-scoped fixtures
         # (testcontainers PG, embedding service) instantiate per
         # worker, not per test. --maxfail=1 preserves the old `-x`
@@ -293,10 +305,10 @@ jobs:
         # not yet on the CI's Python) does not apply.
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            COVERAGE_CORE=sysmon uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration \
+            COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration \
               --cov=meho_backplane --cov-report=xml tests/
           else
-            uv run pytest -n 3 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
+            uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
           fi
 
       - name: Upload Python coverage artifact

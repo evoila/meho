@@ -11,7 +11,9 @@ tool surface:
   (``additionalProperties: false``) and the MEHO-internal RBAC fields
   stripped from the wire shape.
 * ``inputSchema`` ``required`` lists match the spec: ``[query]`` for
-  ``search_memory``; ``[content, scope]`` for ``add_to_memory``.
+  ``search_memory``; ``[body, scope]`` for ``add_to_memory`` (renamed
+  from ``content`` to align with ``add_to_knowledge`` + the REST
+  ``POST /api/v1/memory`` body schema per G0.9.1-T7 (#779)).
 * Tool descriptions name what + when + which scope + cross-reference
   G5.2's TTL default (load-bearing per the AI-engineering anchor).
 * ``tools/call search_memory`` against a seeded corpus returns ranked
@@ -97,7 +99,7 @@ def test_tools_list_exposes_memory_tools_with_strict_input_schema(
     """AC: both tools appear with strict 2020-12 schemas.
 
     ``search_memory`` requires ``[query]``; ``add_to_memory`` requires
-    ``[content, scope]``. Both have ``additionalProperties: false``.
+    ``[body, scope]``. Both have ``additionalProperties: false``.
     The MEHO-internal RBAC fields (``required_role`` / ``op_class``)
     are stripped by :meth:`ToolDefinition.to_wire`.
     """
@@ -123,9 +125,13 @@ def test_tools_list_exposes_memory_tools_with_strict_input_schema(
 
     assert "add_to_memory" in tools_by_name
     add = tools_by_name["add_to_memory"]
-    assert add["inputSchema"]["required"] == ["content", "scope"]
+    assert add["inputSchema"]["required"] == ["body", "scope"]
     assert add["inputSchema"]["additionalProperties"] is False
-    assert "content" in add["inputSchema"]["properties"]
+    assert "body" in add["inputSchema"]["properties"]
+    # G0.9.1-T7 (#779): the old ``content`` name is gone; ``extra="forbid"``
+    # via additionalProperties:false means a v0.3.1 client posting
+    # ``content`` will fail loud at the JSON-Schema gate.
+    assert "content" not in add["inputSchema"]["properties"]
     assert "scope" in add["inputSchema"]["properties"]
     assert "ttl" in add["inputSchema"]["properties"]
     assert "target_name" in add["inputSchema"]["properties"]
@@ -444,7 +450,7 @@ async def test_tools_call_add_to_memory_creates_entry_and_is_recallable(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Operator prefers concise CLI output.",
+                    "body": "Operator prefers concise CLI output.",
                     "scope": "user",
                     "slug": "cli-output-preference",
                     "tags": ["preference"],
@@ -503,7 +509,7 @@ async def test_tools_call_add_to_memory_applies_ttl(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Short-lived note.",
+                    "body": "Short-lived note.",
                     "scope": "user",
                     "ttl": "P7D",
                 },
@@ -576,7 +582,7 @@ async def test_tools_call_add_to_memory_user_scope_no_ttl_injects_default(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Operator-scope note that should age out.",
+                    "body": "Operator-scope note that should age out.",
                     "scope": "user",
                     "slug": "default-ttl-user",
                 },
@@ -629,7 +635,7 @@ async def test_tools_call_add_to_memory_user_scope_explicit_null_ttl_persists(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Pin this note forever (CLI --persist parity).",
+                    "body": "Pin this note forever (CLI --persist parity).",
                     "scope": "user",
                     "slug": "persist-forever-user",
                     "ttl": None,
@@ -675,7 +681,7 @@ async def test_tools_call_add_to_memory_user_tenant_scope_no_default_ttl(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Team-shared note in this tenant.",
+                    "body": "Team-shared note in this tenant.",
                     "scope": "user-tenant",
                     "slug": "team-note-mcp",
                 },
@@ -714,7 +720,7 @@ def test_tools_call_add_to_memory_rejects_year_ttl(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "x",
+                    "body": "x",
                     "scope": "user",
                     "ttl": "P1Y",
                 },
@@ -746,7 +752,7 @@ def test_tools_call_add_to_memory_rejects_malformed_ttl(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "x",
+                    "body": "x",
                     "scope": "user",
                     "ttl": "seven days",
                 },
@@ -786,7 +792,7 @@ def test_tools_call_add_to_memory_operator_denied_tenant_scope(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Tenant-wide convention.",
+                    "body": "Tenant-wide convention.",
                     "scope": "tenant",
                     "slug": "tenant-convention",
                 },
@@ -822,7 +828,7 @@ async def test_tools_call_add_to_memory_tenant_admin_can_write_tenant_scope(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Use Brunello for all wine-pairing demos.",
+                    "body": "Use Brunello for all wine-pairing demos.",
                     "scope": "tenant",
                     "slug": "wine-pairing-tenant-default",
                 },
@@ -873,7 +879,7 @@ def test_tools_call_add_to_memory_requires_target_name_for_target_scope(
             "params": {
                 "name": "add_to_memory",
                 "arguments": {
-                    "content": "Target-specific gotcha.",
+                    "body": "Target-specific gotcha.",
                     "scope": "target",
                 },
             },
@@ -893,7 +899,7 @@ def test_tools_call_add_to_memory_requires_target_name_for_target_scope(
 def test_tools_call_add_to_memory_rejects_missing_required(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """Schema validation fires before the handler — missing ``content`` → -32602."""
+    """Schema validation fires before the handler — missing ``body`` → -32602."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -910,6 +916,44 @@ def test_tools_call_add_to_memory_rejects_missing_required(
     assert response.status_code == 200
     body = response.json()
     assert body["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_tools_call_add_to_memory_rejects_legacy_content_field(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """G0.9.1-T7 (#779): the old ``content`` field is now rejected.
+
+    The MCP `add_to_memory` tool renamed `content` -> `body` to align
+    with `add_to_knowledge` and the REST `POST /api/v1/memory` body
+    schema. ``additionalProperties: false`` on the inputSchema means a
+    v0.3.1 client posting ``content`` (without ``body``) fails the
+    JSON-Schema gate with INVALID_PARAMS -- not a silent drop. This is
+    the breaking-change contract documented in CHANGELOG [0.3.2].
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "content": "legacy v0.3.1 wire shape",
+                    "scope": "user",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    err = response.json()["error"]
+    assert err["code"] == INVALID_PARAMS
 
 
 # ---------------------------------------------------------------------------

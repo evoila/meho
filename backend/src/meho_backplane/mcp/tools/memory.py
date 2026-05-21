@@ -298,7 +298,7 @@ async def _add_to_memory_handler(
     verify the write landed without a follow-up
     ``resources/read meho://memory/{scope}/{slug}`` round-trip.
     """
-    content: str = arguments["content"]
+    body: str = arguments["body"]
     scope = MemoryScope(arguments["scope"])
     slug = arguments.get("slug")
     target_name = arguments.get("target_name")
@@ -337,7 +337,7 @@ async def _add_to_memory_handler(
         entry = await service.remember(
             operator,
             scope=scope,
-            body=content,
+            body=body,
             slug=slug,
             metadata=metadata,
             expires_at=expires_at,
@@ -467,14 +467,16 @@ register_mcp_tool(
         inputSchema={
             "type": "object",
             "properties": {
-                "content": {
+                "body": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
                         "Memory body. Markdown is fine; stored as-is. "
                         "The retrieval substrate indexes it as a single "
                         "document (BM25 over tsvector + 384-dim embedding "
-                        "for cosine)."
+                        "for cosine). Field name aligned with "
+                        "`add_to_knowledge` and the REST `POST /api/v1/memory` "
+                        "body schema (G0.9.1-T7, #779)."
                     ),
                 },
                 "scope": {
@@ -530,7 +532,7 @@ register_mcp_tool(
                     ),
                 },
             },
-            "required": ["content", "scope"],
+            "required": ["body", "scope"],
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,

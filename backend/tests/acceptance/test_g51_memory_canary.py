@@ -1031,14 +1031,16 @@ async def test_agent_flow_search_and_add_memory_round_trip(
     distinctive_slug = "canary-g51-agent-flow"
     distinctive_phrase = "ggwp-canary-g51-mcp-marker"
 
-    # add_to_memory -- write through the MCP surface.
+    # add_to_memory -- write through the MCP surface. G0.9.1-T7 (#779)
+    # renamed the wire field ``content`` -> ``body`` to align with
+    # ``add_to_knowledge`` + the REST ``POST /api/v1/memory`` body.
     before_write = datetime.now(UTC)
     add_result = await _add_to_memory_handler(
         op_a_operator,
         {
             "scope": "user",
             "slug": distinctive_slug,
-            "content": (
+            "body": (
                 f"Agent-flow round-trip canary entry. {distinctive_phrase} is the search anchor."
             ),
         },

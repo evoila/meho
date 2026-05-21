@@ -225,6 +225,10 @@ async def test_set_creates_row_returns_override_dict(
     assert override["op_id_pattern"] == "k8s.configmap.info"
     assert override["detail"] == "aggregate"
     assert uuid.UUID(override["id"])
+    # G0.9.1-T7 (#779): top-level ``override_id`` mirrors the
+    # ``meho.broadcast.overrides.remove`` arg shape so an agent can
+    # round-trip set -> remove with a single read off the response.
+    assert result["override_id"] == override["id"]
     rows = await _override_rows()
     assert len(rows) == 1
 
@@ -313,6 +317,58 @@ async def test_remove_deletes_row(
     assert result == {"removed": True}
     rows = await _override_rows()
     assert rows == []
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_set_remove_round_trip_uses_top_level_override_id(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    seeded_operator_tenant: None,  # noqa: F811
+) -> None:
+    """G0.9.1-T7 (#779): ``.set`` response and ``.remove`` arg are symmetric.
+
+    An agent must be able to read the id directly off the ``.set``
+    response at the same path ``.remove`` consumes -- the sibling-verb
+    asymmetry the consumer feedback flagged. The handler returns the
+    id under top-level ``override_id`` (mirroring the ``override_id``
+    argument of ``meho.broadcast.overrides.remove``); the nested
+    ``override`` envelope is preserved for backwards compatibility
+    with v0.3.1 clients that read ``.override.id``.
+    """
+    client, _op = client_with_operator
+    create_resp = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.broadcast.overrides.set",
+                "arguments": {"op_id_pattern": "k8s.pod.*", "detail": "aggregate"},
+            },
+        },
+    )
+    create_result = _result_dict(create_resp)
+    # Round-trip: hand the top-level override_id straight back as the
+    # remove arg, no nested-key extraction required.
+    remove_resp = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.broadcast.overrides.remove",
+                "arguments": {"override_id": create_result["override_id"]},
+            },
+        },
+    )
+    assert _result_dict(remove_resp) == {"removed": True}
+    assert await _override_rows() == []
 
 
 # ---------------------------------------------------------------------------

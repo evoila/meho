@@ -244,6 +244,32 @@ MCP (admin meta-tool, `tenant_admin` namespace):
 }
 ```
 
+The response shape is symmetric with `meho.broadcast.overrides.remove`
+(v0.3.2 [G0.9.1-T7 #779](https://github.com/evoila/meho/issues/779)) —
+the new rule's id is exposed at top-level `override_id` (matching the
+`remove` arg shape) **and** nested under `override.id` (preserved so
+v0.3.1 clients reading `.override.id` keep working):
+
+```jsonc
+{
+  "override_id": "3a7e0c8c-7b3e-49cb-9b5d-9c1f5a2e3d4e",
+  "override": {
+    "id": "3a7e0c8c-7b3e-49cb-9b5d-9c1f5a2e3d4e",
+    "tenant_id": "...",
+    "op_id_pattern": "vsphere.vm.*",
+    "scope_field": null,
+    "scope_value": null,
+    "detail": "aggregate",
+    "created_by_sub": "op-admin",
+    "created_at": "...",
+    "updated_at": "..."
+  }
+}
+```
+
+An agent can therefore round-trip `set → remove` reading only
+`result.override_id` from the `.set` response.
+
 ### Create a downgrade rule (scoped to one namespace / target)
 
 CLI:

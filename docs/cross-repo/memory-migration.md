@@ -157,7 +157,7 @@ For a tenant-scoped rollback ("we agreed to roll back the team-wide `gitops-conv
 
 Once the laptop directory is migrated (or you've decided which files stay laptop-local), new memories are written through MEHO directly:
 
-- **Agent path.** Every agent session that learns something durable calls `add_to_memory(content, scope, ttl?, slug?, ...)` through the MCP meta-tool. The agent must `search_memory` first to avoid duplicates; same-slug re-add merges in place via the body-hash short-circuit.
+- **Agent path.** Every agent session that learns something durable calls `add_to_memory(body, scope, ttl?, slug?, ...)` through the MCP meta-tool (the field was renamed from `content` to `body` in v0.3.2 to match `add_to_knowledge` + the REST surface; see [G0.9.1-T7 #779](https://github.com/evoila/meho/issues/779)). The agent must `search_memory` first to avoid duplicates; same-slug re-add merges in place via the body-hash short-circuit.
 - **Operator CLI.**
 
   ```bash

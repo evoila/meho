@@ -33,7 +33,13 @@ T4 exposes
 and translates the result into the MCP wire shape:
 
 * List → ``{"overrides": [<row dict>, ...]}``.
-* Set → ``{"override": <row dict>}``.
+* Set → ``{"override_id": <uuid str>, "override": <row dict>}``. The
+  top-level ``override_id`` mirrors the ``override_id`` argument of
+  ``meho.broadcast.overrides.remove`` so an agent can round-trip
+  set → remove with a single read off the response (G0.9.1-T7,
+  #779). The nested ``override`` envelope is preserved so v0.3.1
+  clients reading ``.override.id`` keep working — additive shape,
+  no breaking rename.
 * Remove → ``{"removed": true}`` (204-equivalent).
 
 :class:`HTTPException` raised by the impl (409 on duplicate, 404 on
@@ -197,7 +203,18 @@ async def _set_handler(
             )
         except HTTPException as exc:
             raise _http_to_mcp(exc) from exc
-        return {"override": _row_to_dict(row)}
+        override_dict = _row_to_dict(row)
+        # Top-level ``override_id`` mirrors the ``override_id`` arg shape
+        # ``meho.broadcast.overrides.remove`` consumes, so an agent can
+        # round-trip set -> remove using a single read off the set
+        # response (G0.9.1-T7, #779). The nested ``override`` envelope
+        # is preserved so existing clients that read ``.override.id`` /
+        # other columns keep working -- the additive shape avoids the
+        # breaking-rename a swap-out would have caused.
+        return {
+            "override_id": override_dict["id"],
+            "override": override_dict,
+        }
 
 
 register_mcp_tool(
@@ -211,7 +228,11 @@ register_mcp_tool(
             "both omitted (op-wide rule). detail is one of "
             "full|aggregate. A duplicate (same pattern + scope triple) "
             "returns an error with detail "
-            "'broadcast_override_already_exists'."
+            "'broadcast_override_already_exists'. "
+            "Response shape: {override_id, override: {...}}. The "
+            "top-level override_id matches the override_id argument of "
+            "meho.broadcast.overrides.remove, so set -> remove round-"
+            "trips with a single read off the response (G0.9.1-T7, #779)."
         ),
         inputSchema={
             "type": "object",

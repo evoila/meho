@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **MCP `add_to_memory` argument renamed `content` → `body`**
+  ([#779](https://github.com/evoila/meho/issues/779)). Aligns the
+  agent-facing memory write surface with `add_to_knowledge` and the
+  REST `POST /api/v1/memory` body schema — all three now name the
+  field `body`. The tool's `inputSchema` is
+  `additionalProperties: false`, so a v0.3.1 client still posting
+  `{"content": "..."}` fails loud with JSON-RPC `-32602`
+  Invalid Params (not a silent drop).
+
+  Migration: rename the wire field. CLI / REST callers are
+  unaffected (REST already used `body`).
+
+  ```diff
+  - {"name":"add_to_memory","arguments":{"content":"...","scope":"user"}}
+  + {"name":"add_to_memory","arguments":{"body":"...","scope":"user"}}
+  ```
+
 ### Added
 
 - **`meho.topology.create_node` MCP verb** (tenant_admin, `op_class="write"`)
@@ -116,6 +135,15 @@ connector-related release-notes line.
   tool description alone can now recover from the
   `-32602 no graph_node matched <name> in this tenant` failure mode
   ([#778](https://github.com/evoila/meho/issues/778)).
+- **MCP `meho.broadcast.overrides.set` response now exposes
+  `override_id` at top level**
+  ([#779](https://github.com/evoila/meho/issues/779)) — symmetric
+  with the `override_id` argument of
+  `meho.broadcast.overrides.remove`. The nested `override` envelope
+  is preserved (`response.override.id == response.override_id`), so
+  v0.3.1 clients reading `.override.id` keep working; new clients
+  can read `.override_id` directly and hand it to `.remove` without
+  walking the envelope.
 
 ### Fixed
 

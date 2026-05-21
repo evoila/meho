@@ -90,6 +90,33 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **`meho.topology.create_node` MCP verb** (tenant_admin, `op_class="write"`)
+  for manual `graph_node` seeding — closes the empty-tenant bootstrap
+  gap surfaced by the 2026-05-21 RDC second-cycle dogfood (Signal #14).
+  A fresh tenant has zero nodes; `meho.topology.annotate` previously
+  required both endpoints to already exist as `graph_node` rows, and
+  the only node-creating path was the CLI verb
+  `meho topology refresh <target>` — unreachable from an MCP session.
+  The new verb is idempotent on `(tenant, kind, name)`, writes one
+  audit row (`op_id="topology.create_node"`,
+  `method="CREATE_NODE"`) and one broadcast event per call. The verb
+  is also the canonical path for curated inner-graph nodes the probes
+  cannot derive (vault-role, keycloak-realm, externally-managed
+  principals) ([#778](https://github.com/evoila/meho/issues/778)).
+
+### Changed
+
+- **`meho.topology.annotate` tool description** now states the
+  bootstrap precondition ("both endpoints must already exist as
+  `graph_node` rows") and names the remediation paths
+  (`meho.topology.create_node` for MCP-only seeds; `meho topology
+  refresh <target>` for probe-driven seeds). An agent reading the
+  tool description alone can now recover from the
+  `-32602 no graph_node matched <name> in this tenant` failure mode
+  ([#778](https://github.com/evoila/meho/issues/778)).
+
 ### Fixed
 
 - `search_memory` now returns real `created_at` / `updated_at` for

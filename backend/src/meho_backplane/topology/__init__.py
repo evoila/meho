@@ -104,6 +104,11 @@ from meho_backplane.topology.bulk_import import (
     BulkImportValidationError,
     bulk_import_edges,
 )
+from meho_backplane.topology.nodes import (
+    CreateNodeResult,
+    InvalidNodeKindError,
+    create_or_get_node,
+)
 from meho_backplane.topology.query import list_edges
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.resolvers import (
@@ -127,7 +132,9 @@ __all__ = [
     "BulkImportRow",
     "BulkImportRowError",
     "BulkImportValidationError",
+    "CreateNodeResult",
     "InvalidEdgeKindError",
+    "InvalidNodeKindError",
     "NodeNotFoundError",
     "NodeRef",
     "RefreshResult",
@@ -137,6 +144,7 @@ __all__ = [
     "annotate_edge",
     "annotate_edge_in_txn",
     "bulk_import_edges",
+    "create_or_get_node",
     "list_edges",
     "refresh_target_topology",
     "resolve_node",

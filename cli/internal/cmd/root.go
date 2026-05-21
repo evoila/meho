@@ -18,6 +18,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
+	"github.com/evoila/meho/cli/internal/cmd/harbor"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
 	"github.com/evoila/meho/cli/internal/cmd/memory"
@@ -180,6 +181,17 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `nsx` parent.
 	root.AddCommand(nsx.NewRootCmd())
+
+	// G3.5-T10 (#622) -- harbor-rest-2.x operator alias verbs for
+	// Initiative #368. The verb tree pre-bakes connector_id=
+	// "harbor-rest-2.x" on top of the existing /api/v1/operations/call
+	// dispatcher route. Ships the 9 read-only Harbor core verbs (about,
+	// health, project list/info, repository list/info, artifact list/info,
+	// robot list) plus robot create/delete typed ops and operation
+	// search/call meta-tool wrappers.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `harbor` parent.
+	root.AddCommand(harbor.NewRootCmd())
 
 	// G3.5-T6 (#618) -- sddc-rest-9.0 operator alias verbs for
 	// Initiative #368. The verb tree pre-bakes connector_id=

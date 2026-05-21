@@ -27,6 +27,19 @@ skeleton.
 from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_logs.connector import VcfLogsConnector
+from meho_backplane.connectors.vcf_logs.core_ops import (
+    VRLI_CONNECTOR_ID,
+    VRLI_CORE_GROUPS,
+    VRLI_CORE_OPS,
+    VRLI_IMPL_ID,
+    VRLI_PATH_RULES,
+    VRLI_PRODUCT,
+    VRLI_VERSION,
+    VrliCoreGroup,
+    VrliCoreOp,
+    apply_vrli_core_curation,
+    classify_vrli_op,
+)
 from meho_backplane.connectors.vcf_logs.session import (
     VcfCredentialsLoader,
     VcfLogsTargetLike,
@@ -41,9 +54,20 @@ register_connector_v2(
 )
 
 __all__ = [
+    "VRLI_CONNECTOR_ID",
+    "VRLI_CORE_GROUPS",
+    "VRLI_CORE_OPS",
+    "VRLI_IMPL_ID",
+    "VRLI_PATH_RULES",
+    "VRLI_PRODUCT",
+    "VRLI_VERSION",
     "SessionLoginError",
     "VcfCredentialsLoader",
     "VcfLogsConnector",
     "VcfLogsTargetLike",
+    "VrliCoreGroup",
+    "VrliCoreOp",
+    "apply_vrli_core_curation",
+    "classify_vrli_op",
     "load_credentials_from_vault",
 ]

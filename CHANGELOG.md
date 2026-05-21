@@ -130,6 +130,27 @@ connector-related release-notes line.
   [`docs/cross-repo/g36-vrops-canary.md`](docs/cross-repo/g36-vrops-canary.md).
   Write ops (custom-group / maintenance-mode set / alert-ack) stay
   `is_enabled=False` per the Initiative #369 out-of-scope list.
+- **vRLI 9.x read-only v0.5 core curation** (G3.6-T5
+  [#834](https://github.com/evoila/meho/issues/834)) —
+  `connectors/vcf_logs/core_ops.py` ships `VRLI_CORE_OPS` /
+  `VRLI_CORE_GROUPS` / `apply_vrli_core_curation` enabling exactly
+  **7 read-only operations** across 5 groups against the
+  `vrli-rest-9.0` connector triple after G0.7 spec ingestion of
+  `vcf-logs-9.0/api-v2.yaml`: `vrli.about`
+  (`GET /api/v2/version`), `vrli.event.query`
+  (`GET /api/v2/events/{constraints}` — JSONFlux-handle-shaped),
+  `vrli.aggregated.query`
+  (`GET /api/v2/aggregated-events/{constraints}`),
+  `vrli.field.list` (`GET /api/v2/fields`), `vrli.host.list`
+  (`GET /api/v2/hosts`), `vrli.content.pack.list`
+  (`GET /api/v2/content/contentpack/list`), and `vrli.alert.list`
+  (`GET /api/v2/alerts`). The `classify_vrli_op` path-prefix
+  classifier rejects non-`GET` methods so write ops never land
+  under a curated group; `apply_vrli_core_curation` mirrors the
+  Harbor + NSX precedents (audit-log-driven operator-override
+  exclusion so `enable_group`'s cascade skips non-core ops in
+  curated groups). Operator runbook at
+  [`docs/cross-repo/g36-vrli-canary.md`](docs/cross-repo/g36-vrli-canary.md).
 - **`VcfOperationsConnector` skeleton** (G3.6-T1
   [#829](https://github.com/evoila/meho/issues/829)) — `HttpConnector`
   subclass registered under

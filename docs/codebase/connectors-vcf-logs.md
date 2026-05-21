@@ -34,6 +34,15 @@ downstream paths differ per connector.
   `VcfTargetLike` with an optional `provider` field
   (`"Local"` / `"ActiveDirectory"` / `"vIDM"`). The concrete `Target`
   model satisfies it structurally once the column lands.
+- **`VRLI_CORE_OPS` / `VRLI_CORE_GROUPS` / `apply_vrli_core_curation`** —
+  `connectors/vcf_logs/core_ops.py` (#834 G3.6-T5). The
+  operator-review metadata + driver for the read-only v0.5 core
+  (7 ops across 5 groups: `vrli.about`, `vrli.event.query`,
+  `vrli.aggregated.query`, `vrli.field.list`, `vrli.host.list`,
+  `vrli.content.pack.list`, `vrli.alert.list`). The path-prefix
+  classifier `classify_vrli_op` rejects non-`GET` methods so write
+  ops never land under a curated group — same shape Harbor + NSX
+  use.
 - **Re-exports of the shared module**: `VcfCredentialsLoader`,
   `load_credentials_from_vault` (default stub),
   `SessionLoginError` — callers should import these from
@@ -197,8 +206,12 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
 ## References
 
 - Task: <https://github.com/evoila/meho/issues/830>
+  (skeleton + auth) and
+  <https://github.com/evoila/meho/issues/834>
+  (spec ingestion + operator-review curation)
 - Parent initiative: <https://github.com/evoila/meho/issues/369>
 - Parent goal: <https://github.com/evoila/meho/issues/214>
+- Canary runbook: [`docs/cross-repo/g36-vrli-canary.md`](../cross-repo/g36-vrli-canary.md)
 - Shared auth module: `connectors/_shared/vcf_auth.py` (#841)
 - vRLI API:
   <https://developer.broadcom.com/xapis/vrealize-log-insight-api/latest/>

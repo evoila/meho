@@ -222,11 +222,16 @@ def classify_op(op_id: str) -> str:
        so the allowlist wins over the mutation-suffix branch.
     3. ``audit_query`` — every op-id with the ``audit.`` prefix
        classifies as audit_query regardless of the verb suffix.
-    4. ``write`` — mutation suffixes (``.create`` / ``.update`` /
+    4. ``read`` / ``write`` — HTTP-method-prefixed ingested op IDs
+       (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
+       map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
+       map to ``write``. Checked before the dot-suffix branches since
+       ingested ops carry no meho verb suffix.
+    5. ``write`` — mutation suffixes (``.create`` / ``.update`` /
        ``.delete`` / ``.patch``).
-    5. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
+    6. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls``).
-    6. ``other`` — everything else. Falls through to full-detail
+    7. ``other`` — everything else. Falls through to full-detail
        broadcast per decision #3.
 
     Examples
@@ -238,6 +243,10 @@ def classify_op(op_id: str) -> str:
     'credential_mint'
     >>> classify_op("audit.query")
     'audit_query'
+    >>> classify_op("GET:/api/v2.0/systeminfo")
+    'read'
+    >>> classify_op("DELETE:/api/v2.0/projects/myproj/repositories/myrepo")
+    'write'
     >>> classify_op("vsphere.vm.list")
     'read'
     >>> classify_op("vsphere.vm.create")
@@ -251,6 +260,13 @@ def classify_op(op_id: str) -> str:
         return "credential_mint"
     if op_id.startswith("audit."):
         return "audit_query"
+    # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo").
+    # GET/HEAD are safe reads by HTTP semantics; all mutation methods are writes.
+    # Checked after the explicit allowlists so credential_mint pins still win.
+    if op_id.startswith(("GET:", "HEAD:")):
+        return "read"
+    if op_id.startswith(("POST:", "PUT:", "PATCH:", "DELETE:")):
+        return "write"
     if op_id.endswith(_WRITE_SUFFIXES):
         return "write"
     if op_id.endswith(_READ_SUFFIXES):

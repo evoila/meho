@@ -257,6 +257,22 @@ class TestClassifyOp:
         """Default branch keeps the broadcast informative without policy decisions."""
         assert classify_op(op_id) == "other"
 
+    @pytest.mark.parametrize(
+        ("op_id", "expected"),
+        [
+            ("GET:/api/v2.0/systeminfo", "read"),
+            ("GET:/api/v2.0/projects", "read"),
+            ("HEAD:/api/v2.0/projects/myproj", "read"),
+            ("POST:/api/v2.0/projects", "write"),
+            ("PUT:/api/v2.0/projects/myproj", "write"),
+            ("PATCH:/api/v2.0/projects/myproj", "write"),
+            ("DELETE:/api/v2.0/projects/myproj/repositories/repo", "write"),
+        ],
+    )
+    def test_http_method_prefix_ingested_ops(self, op_id: str, expected: str) -> None:
+        """HTTP-method-prefixed ingested op IDs map via HTTP semantics."""
+        assert classify_op(op_id) == expected
+
     def test_credential_read_takes_priority_over_suffix(self) -> None:
         """``vault.kv.list`` ends in ``.list`` but the allowlist match wins.
 

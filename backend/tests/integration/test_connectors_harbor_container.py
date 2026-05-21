@@ -653,9 +653,9 @@ async def test_robot_create_credential_mint_classification(
     # classification collapses the event to aggregate-only, so the
     # result payload in the broadcast is null/omitted (no secret egress).
     event = next(e for e in captured_events if e.op_id == "harbor.robot.create")
-    # The event.result (if present) must not contain the secret key.
-    if event.result is not None:
-        assert "secret" not in event.result, (
+    # The event.payload (always the redacted view) must not contain the secret key.
+    if event.payload is not None:
+        assert "secret" not in event.payload, (
             "broadcast event for credential_mint must not expose robot secret"
         )
 

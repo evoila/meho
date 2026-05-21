@@ -8,22 +8,29 @@ every adversarial input shape with a structured 401 — never a 500, never
 a leaked claim value, never a 200 with a bypass. Each row in the issue
 body's failure-mode table maps to one or more tests below.
 
-Failure modes covered (rows from issue body, JWT half):
+Failure modes covered (rows from issue body, JWT half).
+
+Most decode-stage failures now surface a *specific* code per G0.9.1-T12
+(Initiative #772 / Task #797). The diagnostic value (expected audience,
+expected issuer, claim name, exception class) lives in the structlog
+event — never in the unauthenticated 401 body — mirroring the existing
+``malformed_tenant_claim`` body-vs-log split.
 
 * Missing ``Authorization`` header → 401 ``missing_token``
 * ``Authorization`` without ``Bearer `` prefix → 401 ``missing_token``
-* Unparseable JWT (random bytes) → 401 ``invalid_token``
-* JWT signed by an unknown key → 401 ``invalid_token``
-* JWT with a tampered signature → 401 ``invalid_token``
-* JWT signed under a tampered payload → 401 ``invalid_token``
-* JWT expired (``exp`` in the past, beyond leeway) → 401 ``invalid_token``
-* JWT not yet valid (``nbf`` in the future, beyond leeway) → 401 ``invalid_token``
-* JWT with wrong audience (``aud`` != configured) → 401 ``invalid_token``
-* JWT with wrong issuer (``iss`` != configured) → 401 ``invalid_token``
-* JWT missing required claim (``sub``) → 401 ``invalid_token``
+* Unparseable JWT (random bytes) → 401 ``invalid_token`` (structural)
+* JWT signed by an unknown key → 401 ``signature_verification_failed``
+* JWT with a tampered signature → 401 ``signature_verification_failed``
+* JWT signed under a tampered payload → 401 ``signature_verification_failed``
+* JWT expired (``exp`` in the past, beyond leeway) → 401 ``token_expired``
+* JWT not yet valid (``nbf`` in the future, beyond leeway) → 401
+  ``token_not_yet_valid``
+* JWT with wrong audience (``aud`` != configured) → 401 ``invalid_audience``
+* JWT with wrong issuer (``iss`` != configured) → 401 ``invalid_issuer``
+* JWT missing required claim (``sub``) → 401 ``missing_sub``
 * JWT with the wrong algorithm (``HS256`` when only ``RS256`` accepted)
-  → 401 ``invalid_token``
-* JWT with the ``none`` algorithm → 401 ``invalid_token``
+  → 401 ``invalid_token`` (structural — authlib rejects pre-claims)
+* JWT with the ``none`` algorithm → 401 ``invalid_token`` (structural)
 * JWT with a missing ``kid`` header → 401 ``invalid_token``
 * JWT with a ``kid`` that doesn't exist in the JWKS even after refresh
   → 401 ``invalid_token`` (and exactly one forced JWKS refresh ran)
@@ -36,7 +43,9 @@ Each test asserts:
 2. The exact ``{"detail": "<reason>"}`` body shape.
 3. No leaked exception message — the reason string is one of the
    centrally-defined tokens (``missing_token`` / ``invalid_token`` /
-   ``jwks_unavailable``).
+   ``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
+   ``token_expired`` / ``token_not_yet_valid`` /
+   ``signature_verification_failed`` / ``jwks_unavailable``).
 
 Test isolation re-uses the fixture pattern Task #22 established: respx
 intercepts the OIDC discovery + JWKS HTTP calls, RSA fixture keys mint
@@ -200,12 +209,13 @@ def test_two_segment_token_returns_invalid_token() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_token_signed_by_unknown_key_returns_invalid_token() -> None:
-    """A JWT signed by a key NOT in the JWKS rejects as ``invalid_token``.
+def test_token_signed_by_unknown_key_returns_signature_verification_failed() -> None:
+    """A JWT signed by a key NOT in the JWKS surfaces ``signature_verification_failed``.
 
     Mints a token under a fresh keypair, then publishes a JWKS that
     contains a *different* key with the same kid. authlib's signature
-    verification must reject; the dependency must surface 401.
+    verification must reject; the dependency must surface 401 with the
+    specific G0.9.1-T12 code (was ``invalid_token`` pre-T12).
     """
     signing_key = make_rsa_keypair("kid-A")
     published_key = make_rsa_keypair("kid-A")  # same kid, different key material
@@ -220,11 +230,11 @@ def test_token_signed_by_unknown_key_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "signature_verification_failed"}
 
 
-def test_tampered_signature_returns_invalid_token() -> None:
-    """Flipping bytes in the signature segment rejects as ``invalid_token``.
+def test_tampered_signature_returns_signature_verification_failed() -> None:
+    """Flipping bytes in the signature segment surfaces ``signature_verification_failed``.
 
     The header + payload claim values are all valid; only the signature
     bytes are corrupted. Verifies the signature-check step actually
@@ -244,11 +254,11 @@ def test_tampered_signature_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "signature_verification_failed"}
 
 
-def test_tampered_payload_returns_invalid_token() -> None:
-    """Modifying a payload byte (without resigning) rejects as ``invalid_token``.
+def test_tampered_payload_returns_signature_verification_failed() -> None:
+    """Modifying a payload byte (without resigning) surfaces ``signature_verification_failed``.
 
     Different attack from a tampered signature: here an attacker tries
     to pretend they are a different ``sub`` while keeping the original
@@ -281,7 +291,7 @@ def test_tampered_payload_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "signature_verification_failed"}
 
 
 # ---------------------------------------------------------------------------
@@ -289,11 +299,12 @@ def test_tampered_payload_returns_invalid_token() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_expired_token_beyond_leeway_returns_invalid_token() -> None:
-    """``exp`` in the past, beyond the configured leeway → ``invalid_token``.
+def test_expired_token_beyond_leeway_returns_token_expired() -> None:
+    """``exp`` in the past, beyond the configured leeway → ``token_expired``.
 
     Default leeway is 30s; ``expires_in=-600`` puts the token 10 minutes
-    in the past — well outside the tolerance window.
+    in the past — well outside the tolerance window. G0.9.1-T12 promotes
+    this from the opaque ``invalid_token`` v0.3.1 surfaced.
     """
     key = make_rsa_keypair("kid-A")
     token = mint_token(key, expires_in=-600)
@@ -307,15 +318,17 @@ def test_expired_token_beyond_leeway_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "token_expired"}
 
 
-def test_not_yet_valid_token_beyond_leeway_returns_invalid_token() -> None:
-    """``nbf`` in the future beyond leeway → ``invalid_token``.
+def test_not_yet_valid_token_beyond_leeway_returns_token_not_yet_valid() -> None:
+    """``nbf`` in the future beyond leeway → ``token_not_yet_valid``.
 
     ``not_before_offset=600`` puts ``nbf`` 10 minutes ahead of now,
     again well past the 30-second leeway window. Captures the symmetric
-    side of the clock-skew defence.
+    side of the clock-skew defence. Surfaced as ``token_not_yet_valid``
+    (a separate code from ``token_expired`` because the remediation is
+    different — clock-skew on the *issuing* side rather than rotation).
     """
     key = make_rsa_keypair("kid-A")
     token = mint_token(key, not_before_offset=600)
@@ -329,15 +342,17 @@ def test_not_yet_valid_token_beyond_leeway_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "token_not_yet_valid"}
 
 
-def test_wrong_audience_returns_invalid_token() -> None:
-    """``aud`` mismatch (not the configured client id) → ``invalid_token``.
+def test_wrong_audience_returns_invalid_audience() -> None:
+    """``aud`` mismatch (not the configured client id) → ``invalid_audience``.
 
     Defends against tokens minted for a different OIDC client in the
     same Keycloak realm — they would be cryptographically valid but
-    must not authorise this backplane.
+    must not authorise this backplane. G0.9.1-T12 promotes this from
+    the opaque ``invalid_token`` v0.3.1 surfaced (consumer Addendum II
+    Wall #2).
     """
     key = make_rsa_keypair("kid-A")
     token = mint_token(key, audience="some-other-client")
@@ -351,11 +366,11 @@ def test_wrong_audience_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "invalid_audience"}
 
 
-def test_wrong_issuer_returns_invalid_token() -> None:
-    """``iss`` mismatch (not the configured Keycloak realm) → ``invalid_token``.
+def test_wrong_issuer_returns_invalid_issuer() -> None:
+    """``iss`` mismatch (not the configured Keycloak realm) → ``invalid_issuer``.
 
     Defends against an attacker presenting a token from a different
     realm even if its signature happens to validate against the
@@ -373,15 +388,18 @@ def test_wrong_issuer_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "invalid_issuer"}
 
 
-def test_missing_sub_claim_returns_invalid_token() -> None:
-    """A token without ``sub`` → ``invalid_token``.
+def test_missing_sub_claim_returns_missing_sub() -> None:
+    """A token without ``sub`` → ``missing_sub`` (G0.9.1-T12).
 
-    OIDC core §2 mandates ``sub``; the dependency rejects tokens that
-    lack it (separate from authlib's own ``MissingClaimError`` check
-    on ``iss`` / ``aud``).
+    OIDC core §2 / RFC 9068 §2.2.1 make ``sub`` REQUIRED on access
+    tokens. The decoder now marks ``sub`` as essential so authlib
+    surfaces the failure as a ``MissingClaimError`` during decode and
+    :func:`_classify_decode_error` returns the specific ``missing_sub``
+    code instead of letting the claim drop through to the generic
+    fallback (consumer Addendum II Wall #3).
     """
     key = make_rsa_keypair("kid-A")
     token = mint_token(key, omit_sub=True)
@@ -395,7 +413,7 @@ def test_missing_sub_claim_returns_invalid_token() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "missing_sub"}
 
 
 # ---------------------------------------------------------------------------

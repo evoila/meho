@@ -376,7 +376,12 @@ def test_kid_rotation_triggers_jwks_refresh_and_succeeds() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_audience_mismatch_returns_401() -> None:
+def test_audience_mismatch_returns_invalid_audience() -> None:
+    """``aud`` mismatch surfaces as ``invalid_audience`` (G0.9.1-T12).
+
+    Pre-T12 collapsed to opaque ``invalid_token``; the specific code now
+    names the failed check (consumer dogfood Addendum II Wall #2).
+    """
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key, audience="wrong-audience")
 
@@ -389,10 +394,11 @@ def test_audience_mismatch_returns_401() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "invalid_audience"}
 
 
-def test_issuer_mismatch_returns_401() -> None:
+def test_issuer_mismatch_returns_invalid_issuer() -> None:
+    """``iss`` mismatch surfaces as ``invalid_issuer`` (G0.9.1-T12)."""
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key, issuer="https://attacker.test/realms/meho")
 
@@ -405,10 +411,12 @@ def test_issuer_mismatch_returns_401() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "invalid_issuer"}
 
 
-def test_expired_token_returns_401() -> None:
+def test_expired_token_returns_token_expired() -> None:
+    """``exp`` in the past beyond leeway surfaces as ``token_expired``
+    (G0.9.1-T12)."""
     key = _make_rsa_keypair("kid-A")
     # expires_in negative → exp is in the past, beyond the leeway window
     token = _mint_token(key, expires_in=-600)
@@ -422,10 +430,12 @@ def test_expired_token_returns_401() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "token_expired"}
 
 
-def test_tampered_signature_returns_401() -> None:
+def test_tampered_signature_returns_signature_verification_failed() -> None:
+    """Tampered signature surfaces as ``signature_verification_failed``
+    (G0.9.1-T12)."""
     key = _make_rsa_keypair("kid-A")
     token = _mint_token(key)
     # Flip the last 10 chars of the signature segment.
@@ -441,7 +451,7 @@ def test_tampered_signature_returns_401() -> None:
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "signature_verification_failed"}
 
 
 # ---------------------------------------------------------------------------
@@ -944,3 +954,218 @@ def test_tenant_role_enum_values_match_v02_contract() -> None:
         "operator",
         "read_only",
     }
+
+
+# ---------------------------------------------------------------------------
+# G0.9.1-T12 — decode-stage failure codes + body-vs-log info-leak boundary
+# (Addendum II Ask #1 / consumer dogfood walls #2 + #3)
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_audience_logs_expected_audience_but_not_in_body(
+    log_buffer: io.StringIO,
+) -> None:
+    """``invalid_audience`` carries the expected value in the log only.
+
+    Body-vs-log split mirrors the ``malformed_tenant_claim`` precedent:
+    the public 401 carries only the machine-readable code; the
+    diagnostic expected-vs-received value lives in the structlog event
+    where operators with log access can see it. An unauthenticated
+    caller probing the backplane for the configured audience must not
+    be able to harvest it from the 401 body.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, audience="some-other-client")
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body == {"detail": "invalid_audience"}
+    # The expected-audience string must NOT leak into the unauthenticated
+    # 401 response body.
+    assert _AUDIENCE not in response.text
+    # ...but it MUST appear in the structured log line.
+    _assert_event_logged(
+        log_buffer,
+        "invalid_audience",
+        claim_name="aud",
+        expected_audience=_AUDIENCE,
+    )
+
+
+def test_invalid_issuer_logs_expected_issuer_but_not_in_body(
+    log_buffer: io.StringIO,
+) -> None:
+    """``invalid_issuer`` carries the expected issuer in the log only."""
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, issuer="https://attacker.test/realms/meho")
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "invalid_issuer"}
+    # The configured-issuer string must NOT leak into the body.
+    assert _ISSUER not in response.text
+    _assert_event_logged(
+        log_buffer,
+        "invalid_issuer",
+        claim_name="iss",
+        expected_issuer=_ISSUER,
+    )
+
+
+def test_missing_sub_returns_missing_sub_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """A token without ``sub`` → 401 ``missing_sub`` + structured event.
+
+    Pre-G0.9.1-T12 this surfaced as opaque ``invalid_token``. RFC 9068
+    §2.2.1 makes ``sub`` REQUIRED on access tokens, so the rejection is
+    correct; T12 just promotes the *code* from opaque to specific.
+    """
+    key = _make_rsa_keypair("kid-A")
+    # Mint without ``sub`` by passing an empty string and stripping it
+    # in the helper — _mint_token only includes ``sub`` when non-empty
+    # is not the helper here; need to drop it from payload.
+    # Workaround: build the token directly without ``sub``.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        jwt = JsonWebToken(["RS256"])
+        now = int(time.time())
+        payload: dict[str, Any] = {
+            "iss": _ISSUER,
+            "aud": _AUDIENCE,
+            "iat": now,
+            "exp": now + 3600,
+            "nbf": now,
+            "tenant_id": _DEFAULT_TENANT_ID,
+            "tenant_role": _DEFAULT_TENANT_ROLE,
+        }
+        header = {"alg": "RS256", "kid": key.as_dict()["kid"], "typ": "JWT"}
+        token_bytes: bytes | str = jwt.encode(header, payload, key)
+        token = token_bytes.decode("ascii") if isinstance(token_bytes, bytes) else token_bytes
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "missing_sub"}
+    _assert_event_logged(log_buffer, "missing_sub", claim_name="sub")
+
+
+def test_token_expired_returns_token_expired_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """``exp`` in the past → 401 ``token_expired`` + structured event."""
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, expires_in=-600)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "token_expired"}
+    _assert_event_logged(log_buffer, "token_expired")
+
+
+def test_signature_verification_failed_returns_specific_code_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """Tampered signature → 401 ``signature_verification_failed`` + event."""
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key)
+    head, _, tail = token.rpartition(".")
+    tampered = f"{head}.{'A' * len(tail)}"
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {tampered}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "signature_verification_failed"}
+    _assert_event_logged(log_buffer, "signature_verification_failed")
+
+
+def test_nbf_future_returns_token_not_yet_valid_and_logs(
+    log_buffer: io.StringIO,
+) -> None:
+    """``nbf`` in the future beyond leeway → 401 ``token_not_yet_valid`` + event.
+
+    Distinct from ``token_expired`` because the remediation is
+    different — clock skew on the issuing side rather than rotation
+    cadence.
+    """
+    key = _make_rsa_keypair("kid-A")
+    token = _mint_token(key, not_before_offset=600)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        client = TestClient(_build_app())
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "token_not_yet_valid"}
+    _assert_event_logged(log_buffer, "token_not_yet_valid")
+
+
+def test_existing_tenant_claim_paths_unchanged_by_decode_stage_codes() -> None:
+    """The pre-T12 tenant-claim error codes must keep their exact spellings.
+
+    Hard requirement on G0.9.1-T12: the decode-stage codes are additive;
+    the post-decode tenant-claim extractors remain on their existing
+    codes (`missing_tenant_claim` / `missing_tenant_role_claim` /
+    `malformed_tenant_claim` / `unknown_tenant_role`). A regression
+    that renamed any of these would break consumer docs in
+    `docs/cross-repo/keycloak-tenant-claims.md` and the operator's
+    log-greps. This guard pins all four spellings together.
+    """
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+
+    cases: list[tuple[str, dict[str, Any]]] = [
+        ("missing_tenant_claim", {"tenant_id": None}),
+        ("missing_tenant_role_claim", {"tenant_role": None}),
+        ("malformed_tenant_claim", {"tenant_id": "not-a-uuid"}),
+        ("unknown_tenant_role", {"tenant_role": "superadmin"}),
+    ]
+    for expected_detail, kwargs in cases:
+        token = _mint_token(key, **kwargs)
+        with respx.mock as mock_router:
+            _mock_discovery_and_jwks(mock_router, jwks)
+            client = TestClient(_build_app())
+            response = client.get(
+                "/whoami",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 401
+        assert response.json() == {"detail": expected_detail}

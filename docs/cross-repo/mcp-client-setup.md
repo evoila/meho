@@ -170,13 +170,24 @@ The response carries `WWW-Authenticate: Bearer resource_metadata="https://meho.e
 - Check the `resource_metadata` URL is publicly reachable from where the client runs. Claude.ai's connector backend runs in Anthropic's cloud; a backplane behind a private network or self-signed TLS won't be reachable. Expose the backplane via a public ingress or a tunnel (Cloudflare, ngrok) for the Custom Connector flow.
 - Confirm `BACKPLANE_URL` in the backplane's ConfigMap resolves to the public hostname. If `BACKPLANE_URL` is wrong, `resource_metadata` points at the wrong host.
 
-### Token rejected at the MCP server (401, `invalid_token`)
+### Token rejected at the MCP server (401)
 
-The token's `aud` doesn't match `MCP_RESOURCE_URI`, or the token is missing a claim the backplane validates against:
+From v0.3.2 the 401 body carries a *specific* `detail` code naming the failed check — read the body first, then walk to the matching remediation. Earlier v0.3.x deploys collapsed every decode-stage failure into one opaque `invalid_token`; that opacity is what consumer Addendum II walls #2 + #3 burned ~40 minutes on (#797).
 
-- Confirm Step 1 wired the audience mapper on the *correct* client (the same client that's issuing the operator's token).
-- Confirm the OAuth `resource` parameter the client sends matches `MCP_RESOURCE_URI`. Claude.ai's Custom Connector flow derives `resource` automatically from the URL the operator pasted — but a forwarder / reverse proxy that rewrites the path can leave the audience claim pointing at the wrong URI. Capture the issued token via the realm's token-introspection endpoint and read `aud` to confirm.
-- Decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm the **full claim shape** — `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`; `tenant_id`, `tenant_role`, `groups`, and **`sub`** are all present. Missing `sub` is the silent killer (Wall #3 in the consolidated matrix): Keycloak 25 moved `sub` into the `basic` client scope, and clients created via the admin REST API don't auto-inherit realm default-default scopes. The full diagnostic chain lives in [`deploy/values-examples/README.md` § Four-wall symptom → cause → fix matrix](../../deploy/values-examples/README.md#four-wall-symptom--cause--fix-matrix).
+| `detail` code | What it means | Where to look |
+|---|---|---|
+| `invalid_audience` | The token's `aud` claim doesn't match `MCP_RESOURCE_URI`. | Confirm Step 1 wired the audience mapper on the *correct* client (the one that issues the operator's token). Confirm the OAuth `resource` parameter the client sends matches `MCP_RESOURCE_URI` — Claude.ai's Custom Connector flow derives `resource` automatically from the URL the operator pasted, but a forwarder / reverse proxy that rewrites the path can leave the audience claim pointing at the wrong URI. Capture the issued token via the realm's token-introspection endpoint and read `aud` to confirm. |
+| `invalid_issuer` | The token's `iss` doesn't match the configured Keycloak realm. | Confirm the client is authenticating against the same Keycloak realm `KEYCLOAK_ISSUER_URL` names; a stale OAuth state from a previous realm survives in some clients across config changes. |
+| `missing_sub` | The token lacks the `sub` claim — the silent killer (Wall #3 in the [consolidated matrix](../../deploy/values-examples/README.md#four-wall-symptom--cause--fix-matrix)). Keycloak 25+ moved `sub` into the `basic` client scope, and clients created via the admin REST API don't auto-inherit realm default-default scopes. | Add the `basic` default scope to the client (see [`deploy/values-examples/README.md` § Auth onramp recipe (CLI + MCP)](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp) Step 2 / Wall #3). |
+| `token_expired` | `exp` is in the past beyond the configured leeway. | Refresh the access token; check the client's refresh-token plumbing. |
+| `token_not_yet_valid` | `nbf` is in the future beyond leeway — clock skew. | Sync the system clock on the issuing side (Keycloak host) or on the calling host. |
+| `signature_verification_failed` | The JWS signature doesn't verify against the issuer's published key. | Confirm the client is presenting the token from the *same* realm the backplane validates against. A token from a different realm whose `kid` happens to collide with one in the cached JWKS will surface here. |
+| `missing_tenant_claim` / `malformed_tenant_claim` / `missing_tenant_role_claim` / `unknown_tenant_role` | Post-decode tenant-claim extraction failed — the realm omits or mis-shapes the MEHO-required tenant mappers. | See [`keycloak-tenant-claims.md`](./keycloak-tenant-claims.md) for the realm-side recipe. |
+| `invalid_token` | A structural failure with no more specific code — truncated JWS, `alg: none` rejection, or a `kid` not in the JWKS even after a forced refresh. | Capture the raw `Authorization` header value and inspect the JWS structure (three dot-separated base64url segments, RS256 alg). |
+
+The diagnostic value behind each code (expected audience, expected issuer, claim name, exception class) is in the backplane's **server log**, not the response body — that's the deliberate body-vs-log info-leak boundary an unauthenticated 401 honours. Operators with log access can `grep` for the `detail` code on the backplane logger to see the full picture.
+
+For the full cross-wall diagnostic chain (mapper misconfig vs. missing scope vs. wrong realm vs. proxy strip), walk [`deploy/values-examples/README.md` § Four-wall symptom → cause → fix matrix](../../deploy/values-examples/README.md#four-wall-symptom--cause--fix-matrix).
 
 ### MCP client → Keycloak DCR returns 403 `"Host not trusted"`
 

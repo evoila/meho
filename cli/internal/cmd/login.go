@@ -60,8 +60,17 @@ func newLoginCmd() *cobra.Command {
 				return fmt.Errorf("invalid backplane URL %q: %w", backplaneURL, err)
 			}
 
-			ctx, cancel := context.WithTimeout(cmd.Context(), auth.PollTimeout)
-			defer cancel()
+			// Discovery and auth-config fetches honour the ambient
+			// `cmd.Context()` deadline: those are short, bounded HTTP
+			// calls that should fail fast if the network is wedged.
+			// Only the interactive device-flow wait below detaches
+			// from that ambient context (see NewDeviceFlowContext) —
+			// without that split, a wrapping CI step or bash-tool
+			// deadline would silently truncate the operator's
+			// approval window and `context deadline exceeded` would
+			// be misattributed to the device code itself
+			// (Initiative G0.9.1, Wall #4).
+			parentCtx := cmd.Context()
 
 			// Resolve auth config. Override flags win; otherwise hit
 			// the backplane's discovery endpoint. The override path
@@ -70,12 +79,12 @@ func newLoginCmd() *cobra.Command {
 			// firewall) but the IdP is — meho login can still
 			// complete by skipping discovery via both --issuer and
 			// --client-id.
-			cfg, err := resolveAuthConfig(ctx, http.DefaultClient, backplaneURL, issuerOverride, clientIDOverride)
+			cfg, err := resolveAuthConfig(parentCtx, http.DefaultClient, backplaneURL, issuerOverride, clientIDOverride)
 			if err != nil {
 				return err
 			}
 
-			doc, err := auth.FetchDiscoveryFromRealm(ctx, http.DefaultClient, cfg.Issuer)
+			doc, err := auth.FetchDiscoveryFromRealm(parentCtx, http.DefaultClient, cfg.Issuer)
 			if err != nil {
 				return err
 			}
@@ -92,10 +101,20 @@ func newLoginCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			prompter := stdoutPrompter(out)
 
-			result, err := auth.RunDeviceFlow(ctx, doc, cfg.ClientID, auth.DeviceFlowOptions{
-				HTTPClient: http.DefaultClient,
-				Scopes:     scopes,
-				Prompter:   prompter,
+			// Build the detached device-flow context. Inherits values
+			// from parentCtx (so future oauth2.HTTPClient injections
+			// at this layer would still ride through), drops the
+			// parent's deadline (so a short wrapper deadline can't
+			// truncate the approval wait), and re-attaches
+			// SIGINT/SIGTERM cancellation + a PollTimeout cap.
+			flowCtx, cancelFlow := auth.NewDeviceFlowContext(parentCtx)
+			defer cancelFlow()
+
+			result, err := auth.RunDeviceFlow(flowCtx, doc, cfg.ClientID, auth.DeviceFlowOptions{
+				HTTPClient:    http.DefaultClient,
+				Scopes:        scopes,
+				Prompter:      prompter,
+				ParentContext: parentCtx,
 			})
 			if err != nil {
 				return err

@@ -11,7 +11,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -208,6 +211,18 @@ type DeviceFlowOptions struct {
 	// without one. The cobra command in cmd/login.go supplies a
 	// stdout-writing implementation; tests pass an in-memory one.
 	Prompter DeviceFlowPrompter
+	// ParentContext is the caller's ambient context (`cmd.Context()`
+	// in the cobra layer). It is **not** used to govern the polling
+	// wait — that role belongs to `ctx`, which the caller should
+	// build via NewDeviceFlowContext so a short ambient deadline
+	// cannot truncate the operator's approval window. ParentContext
+	// is consulted *only* in the error path: if the polling wait
+	// ends with `context.DeadlineExceeded` and ParentContext has
+	// also timed out, the returned error names the ambient deadline
+	// explicitly instead of the generic IdP-shaped message.
+	// Optional — leave nil if the caller has no separate parent
+	// (tests, embedded uses).
+	ParentContext context.Context
 }
 
 // RunDeviceFlow performs RFC 8628 against the supplied discovery
@@ -272,7 +287,7 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 	// interval and slow_down semantics in RFC 8628 §3.5.
 	tok, err := cfg.DeviceAccessToken(flowCtx, deviceResp)
 	if err != nil {
-		return nil, classifyDeviceTokenError(err)
+		return nil, classifyDeviceTokenError(opts.ParentContext, err)
 	}
 
 	return &LoginResult{Token: tok, Issuer: doc.Issuer}, nil
@@ -284,7 +299,18 @@ func RunDeviceFlow(ctx context.Context, doc *DiscoveryDocument, clientID string,
 // as Go-native sentinels so the cobra command can render them with
 // operator-friendly hints rather than dumping the raw upstream
 // payload.
-func classifyDeviceTokenError(err error) error {
+//
+// parentCtx is the cobra `cmd.Context()` (i.e. the ambient process /
+// CI / wrapper context). The polling wait runs on a context that's
+// deliberately detached from parentCtx (see NewDeviceFlowContext) so
+// a short ambient deadline can no longer truncate the operator's
+// approval window. But if a non-IdP timeout fires (our own
+// PollTimeout cap, or — for diagnostic value — an ambient deadline
+// that was previously the failure mode), we want the operator to see
+// which deadline was at fault rather than the generic
+// `context deadline exceeded`. A nil parentCtx is treated the same
+// as a non-cancelled parent.
+func classifyDeviceTokenError(parentCtx context.Context, err error) error {
 	var retr *oauth2.RetrieveError
 	if errors.As(err, &retr) {
 		switch retr.ErrorCode {
@@ -294,7 +320,92 @@ func classifyDeviceTokenError(err error) error {
 			return fmt.Errorf("meho: authorisation denied by the operator at the verification URI")
 		}
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Our own PollTimeout cap fired (10m). The ambient parent
+		// context having ALSO timed out is the historical
+		// misattribution case — name it so the operator stops
+		// chasing the IdP for a CI/wrapper timeout.
+		if parentCtx != nil && errors.Is(parentCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("meho: login timed out waiting for approval; the parent process imposed a deadline shorter than the %s device-flow cap — rerun in a terminal without a wrapping timeout, or approve faster", PollTimeout)
+		}
+		return fmt.Errorf("meho: login timed out waiting for approval after %s; rerun and approve sooner, or pass a longer device-code lifetime via your IdP", PollTimeout)
+	}
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("meho: login cancelled before approval (received SIGINT/SIGTERM or explicit cancel)")
+	}
 	return fmt.Errorf("meho: token exchange failed: %w", err)
+}
+
+// NewDeviceFlowContext returns the context that should govern the
+// device-code approval wait, decoupled from the caller's ambient
+// context (cobra's `cmd.Context()`, a CI job step, the wrapping
+// shell's process group, the IDE's bash-tool timeout, …).
+//
+// Why detach. RFC 8628's device-code lifetime (`expires_in`) is
+// typically minutes — Keycloak defaults to 600s. The whole point of
+// the device-code flow is that the operator may be on a different
+// machine, may walk to a kiosk, may need to fetch a hardware token.
+// If the polling wait inherits the parent's deadline, a 30-second
+// CI-step timeout (or any wrapper that imposed a similar bound)
+// silently truncates the approval window and the operator sees
+// `context deadline exceeded` — misattributed to the device code,
+// which was still valid. The original consumer report (Initiative
+// G0.9.1, Addendum II Wall #4) hit this twice; the fix is structural,
+// not a value bump.
+//
+// What we keep:
+//
+//   - Context values from `parent` (e.g. `oauth2.HTTPClient`) ride
+//     through via `context.WithoutCancel` — values propagate, the
+//     parent's Done channel does not.
+//   - SIGINT / SIGTERM still abort promptly via `signal.NotifyContext`
+//     — a Ctrl-C at the terminal must not be ignored just because the
+//     caller's process context was already detached.
+//   - An absolute upper bound of `PollTimeout` (10 minutes) prevents
+//     a wedged IdP from holding the CLI forever.
+//
+// What we drop:
+//
+//   - The parent's deadline. Whether the caller is `bash` with a
+//     `timeout 30s` prefix, a CI step with a default 60s budget, or
+//     a test harness with `context.WithTimeout`, the device-flow
+//     wait now ignores it. The parent's deadline still applies to
+//     network calls that ran before this point (discovery,
+//     auth-config); only the interactive wait is exempt.
+//   - The parent's `cancel` call. A caller that explicitly cancels
+//     `parent` does not abort the device-flow wait. This is
+//     deliberate — the device flow is uncancellable from outside the
+//     terminal (the user has already been shown the verification
+//     URL). For genuine cancellation, send SIGINT.
+//
+// The returned cancel func must always be called (use defer) — it
+// releases both the signal handler and the PollTimeout timer.
+func NewDeviceFlowContext(parent context.Context) (context.Context, context.CancelFunc) {
+	// Step 1: shed the parent's Done channel but inherit its values.
+	// Available since Go 1.21; semantics documented at
+	// https://pkg.go.dev/context#WithoutCancel.
+	detached := context.WithoutCancel(parent)
+
+	// Step 2: re-attach a clean cancellation source rooted in OS
+	// signals only. signal.NotifyContext registers the signals on
+	// the returned context and stops the relay when the cancel func
+	// runs, so we don't leak a signal handler across logins.
+	signalCtx, stopSignals := signal.NotifyContext(detached, os.Interrupt, syscall.SIGTERM)
+
+	// Step 3: cap the whole interactive wait at PollTimeout. Keeps
+	// the worst case bounded if the IdP wedges and the operator
+	// walks away. The oauth2 package additionally caps polling at
+	// `deviceResp.Expiry` internally, so this is the *outer* bound.
+	flowCtx, cancelTimeout := context.WithTimeout(signalCtx, PollTimeout)
+
+	// Compose both cleanup hooks into one cancel func. Callers only
+	// have to defer the returned func and both inner resources
+	// release. Order is timeout first (releases the timer), then
+	// signal relay (releases the signal.Notify registration).
+	return flowCtx, func() {
+		cancelTimeout()
+		stopSignals()
+	}
 }
 
 // ConvertOAuthToken collapses an oauth2.Token into the StoredToken

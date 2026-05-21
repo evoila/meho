@@ -295,7 +295,17 @@ register_mcp_tool(
                         "Partial target descriptor. The dispatcher "
                         "resolves the `name` field against the targets "
                         "registry; aliases are accepted. Pass null "
-                        "for operations that do not act on a target."
+                        "for operations that do not act on a target. "
+                        "NOTE: this tool's `target` is a dict "
+                        '({"name": "<target-name>"}) because the '
+                        "dispatcher reserves room for additional "
+                        "future fields (e.g. an alias-precedence pin); "
+                        "the topology / audit read tools (`query_topology`, "
+                        "`query_audit`) take a bare-string `target` "
+                        "since they only need the name. See "
+                        "`docs/architecture/mcp.md` ('Target-reference "
+                        "shape convention') for the canonical forward "
+                        "convention any new tool should follow."
                     ),
                     "properties": {
                         "name": {"type": "string", "minLength": 1},

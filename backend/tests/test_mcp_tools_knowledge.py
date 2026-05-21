@@ -160,6 +160,47 @@ def test_tool_descriptions_satisfy_ai_engineering_anchor(
     assert "search_knowledge" in add_desc
 
 
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_add_to_knowledge_slug_description_teaches_leading_letter_rule(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """G0.9.1-T8 / Signal #15: the slug schema description names the
+    leading-letter constraint AND carries a digit-leading negative
+    example, so an agent reading the schema (not just the regex)
+    learns the rule before it ships a 422/-32602.
+
+    Doc-drift guard: a future edit that drops either half of the
+    positive / negative example pair surfaces here. Substring matching
+    keeps the assertion loose so prose can evolve.
+    """
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+    tools_by_name = {t["name"]: t for t in response.json()["result"]["tools"]}
+
+    slug_desc = tools_by_name["add_to_knowledge"]["inputSchema"]["properties"]["slug"][
+        "description"
+    ]
+
+    # The leading-letter rule must be stated in prose, not just enforced
+    # by the regex behind the scenes.
+    assert "lowercase letter" in slug_desc.lower()
+    assert "start with" in slug_desc.lower()
+
+    # A positive AND a negative example must both be present — the
+    # consumer-feedback signal (#15) was that the example-only schema
+    # left the constraint undiscoverable until the call failed.
+    assert "vcenter-9.0-snapshot-revert" in slug_desc  # positive
+    assert "657" in slug_desc  # negative (digit-leading)
+    assert "invalid" in slug_desc.lower()
+
+
 # ---------------------------------------------------------------------------
 # search_knowledge — call path
 # ---------------------------------------------------------------------------

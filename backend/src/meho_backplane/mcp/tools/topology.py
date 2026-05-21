@@ -168,7 +168,13 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Root node name for `dependents` / `dependencies`. "
                 "Resolved against `graph_node.name` scoped to the "
                 "operator's tenant. Required when `kind` is `dependents` "
-                "or `dependencies`; ignored for `path`."
+                "or `dependencies`; ignored for `path`. "
+                "NOTE: this tool's `target` is a bare string because "
+                "the read path only needs the name; `call_operation` "
+                "wraps the same concept in a `{name: ...}` dict to "
+                "leave room for future selector fields. See "
+                "`docs/architecture/mcp.md` ('Target-reference shape "
+                "convention')."
             ),
             "maxLength": 256,
         },

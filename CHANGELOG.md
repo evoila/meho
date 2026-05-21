@@ -175,6 +175,35 @@ connector-related release-notes line.
   from the 2026-05-21 RDC v0.3.1 dogfood
   ([#773](https://github.com/evoila/meho/issues/773)).
 
+### Documentation
+
+- **Target-reference shape convention documented** for the MCP
+  agent surface. The agent surface today carries three internally
+  coherent but cross-tool-divergent shapes for naming a target /
+  node — `call_operation` takes `target: {name: ...}` (object),
+  `query_topology` / `query_audit` take `target: "<name>"` (bare
+  string), `meho.topology.annotate` takes paired `from_name` /
+  `to_name`. The 2026-05-21 RDC second-cycle dogfood (Signal #8)
+  flagged this as migration fatigue across tools. A new
+  "Target-reference shape convention" section in
+  [`docs/architecture/mcp.md`](docs/architecture/mcp.md) captures
+  the three shapes, the rationale for each, and the forward
+  convention any new tool should follow — so no fourth shape lands
+  by accident before the deliberate v0.4+ unification. The
+  `call_operation` / `query_topology` / `query_audit` tool
+  descriptions now cross-reference this section. **No wire-schema
+  change** — this is docs-only ([#780](https://github.com/evoila/meho/issues/780)).
+- **kb slug leading-letter constraint surfaced in schema descriptions**
+  for the `add_to_knowledge` MCP tool and the `POST /api/v1/kb`
+  request body. The slug regex requires a leading lowercase letter,
+  but the existing example (`vcenter-9.0-snapshot-revert`)
+  satisfied the rule silently — a caller running a digit-leading
+  slug (`657-recovery`) tripped a -32602 / 422 without ever seeing
+  the constraint in the schema. Both descriptions now name the
+  rule and pair the positive example with a digit-leading negative
+  example, so the constraint is visible before the call goes out
+  ([#780](https://github.com/evoila/meho/issues/780), Signal #15).
+
 ## [0.3.1] - 2026-05-21
 
 **v0.3.0 dogfood-hardening patch.** No new headline features — this

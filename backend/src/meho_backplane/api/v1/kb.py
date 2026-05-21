@@ -159,7 +159,19 @@ class KbEntryCreate(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    slug: str = Field(min_length=1, max_length=_SLUG_MAX_LENGTH)
+    slug: str = Field(
+        min_length=1,
+        max_length=_SLUG_MAX_LENGTH,
+        description=(
+            "Operator-facing identifier in kebab-case. Must start with "
+            "a lowercase letter, end with a lowercase letter or digit, "
+            "and contain only lowercase letters, digits, hyphens, or "
+            "dots. The leading-letter rule (G0.9.1-T8, Signal #15) is "
+            "the most common surprise: '657-recovery' is rejected; "
+            "rewrite as 'ticket-657-recovery'."
+        ),
+        examples=["vcenter-9.0-snapshot-revert"],
+    )
     body: str = Field(min_length=1)
     metadata: dict[str, Any] | None = None
 

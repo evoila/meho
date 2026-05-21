@@ -143,12 +143,35 @@ Fail-closed: audit write failure → MCP call fails with JSON-RPC `INTERNAL_ERRO
 
 `params_hash` is SHA256 of canonicalized (sorted-keys JSON) arguments — content-addressable, deterministic, doesn't leak the args.
 
+## Target-reference shape convention
+
+The agent surface today has three distinct shapes for "name a target/node by name". This is deliberate but easy to mistake for inconsistency — and it surfaced as Signal #8 of the 2026-05-21 RDC second-cycle dogfood (#780). The shapes are internally coherent per tool; the divergence is *across* tools.
+
+| Shape | Tool(s) | Why |
+|---|---|---|
+| `target: {"name": "<name>"}` (object with `name` key) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) | The dispatcher reserves room for additional future selector fields on the target descriptor (e.g. an `alias_precedence` pin or a tenant-scoped `kind` disambiguator) without a breaking schema change. The `{name}` envelope is the partial form; only `name` is honoured today. |
+| `target: "<name>"` (bare string) | [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`dependents`/`dependencies`), [`query_audit`](../../backend/src/meho_backplane/mcp/tools/audit.py) | Read tools only need the name. The bare-string shape keeps the argument cheap and the schema legible; no selector fields are anticipated. |
+| `from_name`/`to_name`: `"<name>"` (paired strings) | [`meho.topology.annotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`meho.topology.unannotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`path`) | These tools name **two** nodes (a directed edge pair). The two flat fields mirror Python's `(from_, to)` keyword convention (with `from_name` because `from` is a reserved word) and let the JSON Schema layer require both atomically. A nested `{from: {name}, to: {name}}` object would be ceremony for no benefit. |
+
+[`list_targets`](../../backend/src/meho_backplane/mcp/tools/topology.py) returns rows that carry a bare `name`; that is the value the caller passes to `call_operation` (wrapped as `{name: ...}`) or to `query_topology` (as a bare string).
+
+### Forward convention for new tools
+
+When a new tool needs to reference a target/node by name, pick the shape that matches the tool's *role*:
+
+1. **Write/dispatch tools that act on one target** (anything like `call_operation`) — **use the `{name: ...}` object form.** The forward-compat headroom matters; the cost of an envelope is one extra brace pair.
+2. **Read tools that filter by one target name** (anything like `query_audit`, single-anchor closure queries) — **use the bare-string `target`.** No selector room is needed; keep the schema flat.
+3. **Tools that operate on an edge (two endpoints)** — **use the `from_name`/`to_name` pair.** Match the existing `meho.topology.annotate` schema verbatim so an agent carrying a node-pair through the topology surface can hand the same arguments to the next tool without renaming.
+
+A future v0.4+ unification (a shared `TargetRef` / `TargetSelector` model with strict-schema breakage) is on the roadmap (Initiative #772 out-of-scope; v0.3.2 is docs-first); that decision will cite this section. Until then: **do not introduce a fourth shape**. If you find yourself reaching for one, file an Initiative-level discussion rather than landing it.
+
 ## Adding an MCP tool
 
 For a new vendor connector op:
 
 1. **Implement the op** in your connector's `_op_map` (per [`connectors.md`](connectors.md)).
-2. **Register an MCP tool** in `backend/src/meho_backplane/mcp/tools/<product>.py`:
+2. **Pick the target-reference shape** per the "Target-reference shape convention" section above — bare-string `target` for read tools, `{name: ...}` object for write/dispatch tools, `from_name`/`to_name` pair for edge tools. The example below is a single-target read.
+3. **Register an MCP tool** in `backend/src/meho_backplane/mcp/tools/<product>.py`:
    ```python
    register_mcp_tool(
        ToolDefinition(
@@ -169,8 +192,8 @@ For a new vendor connector op:
        handler=_vsphere_vm_list_handler,
    )
    ```
-3. **Lifespan eager-import** picks it up on restart.
-4. **Verify** via `tools/list` then `tools/call` against a running backplane (use `@modelcontextprotocol/inspector`).
+4. **Lifespan eager-import** picks it up on restart.
+5. **Verify** via `tools/list` then `tools/call` against a running backplane (use `@modelcontextprotocol/inspector`).
 
 ## Adding an MCP resource
 

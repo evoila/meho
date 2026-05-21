@@ -85,7 +85,12 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
             "description": (
                 "Target name or alias. Substrate matches against "
                 "`targets.name` scoped to the operator's tenant; an "
-                "unknown name returns zero rows, not an error."
+                "unknown name returns zero rows, not an error. "
+                "NOTE: this tool's `target` is a bare string (read "
+                "tools only need the name); `call_operation` wraps "
+                "the same concept in a `{name: ...}` dict. See "
+                "`docs/architecture/mcp.md` ('Target-reference shape "
+                "convention')."
             ),
             "maxLength": 256,
         },

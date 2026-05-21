@@ -87,12 +87,20 @@ TTL semantics
 The handler parses it into a concrete ``expires_at`` timestamp before
 calling the service so the storage layer sees the same wall-clock
 shape it accepts on the REST surface (T2 #422). A missing ``ttl`` on
-a user-scope write picks up the **default 7-day TTL** that G5.2 #374
-will inject when its background expiry executor lands; for G5.1 the
-metadata column simply stores ``None`` and the read-side filter
-treats it as "never expires". The tool description names this
-contract explicitly so an agent that wants a specific lifetime knows
-to set ``ttl``, and an agent that wants the default knows to omit it.
+a user-scope write picks up the **default TTL** from
+``MEMORY_USER_DEFAULT_TTL_DAYS`` (7 days at the
+``Settings.memory_user_default_ttl_days`` default) via the shared
+:func:`~meho_backplane.memory.ttl.resolve_default_expires_at` resolver
+the REST handler uses. An explicit ``null`` (the CLI ``--persist``
+opt-out) bypasses the default and persists the row forever; non-user
+scopes never see the default. G0.9.1-T3 (#775) lifted the resolver
+into a shared helper so both surfaces stay in sync -- previously the
+MCP path bypassed the discrimination, producing a silent regression
+where user-scope memories written via MCP never expired. The tool
+description names this contract explicitly so an agent that wants a
+specific lifetime knows to set ``ttl``, an agent that wants
+persistence knows to pass ``null``, and an agent that wants the
+default knows to omit it.
 """
 
 from __future__ import annotations
@@ -106,6 +114,7 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.memory.rbac import PermissionDeniedError
 from meho_backplane.memory.schemas import MemoryScope
 from meho_backplane.memory.service import MemoryService
+from meho_backplane.memory.ttl import resolve_default_expires_at
 
 __all__: list[str] = []
 
@@ -269,10 +278,13 @@ async def _add_to_memory_handler(
       surfaces as JSON-Schema validation failure (``-32602``) before
       this handler runs.
     * Parsing the optional ``ttl`` ISO 8601 duration into an absolute
-      ``expires_at``. The service stores the parsed timestamp in
-      ``doc_metadata.expires_at`` and the read-side filter uses it
-      directly; G5.2's expiry executor reaps rows whose ``expires_at``
-      has passed.
+      ``expires_at`` and resolving the G5.2-T2 (#624) default-TTL
+      contract via :func:`resolve_default_expires_at` so a user-scope
+      write with ``ttl`` omitted injects ``now(UTC) +
+      memory_user_default_ttl_days`` (parity with the REST surface).
+      G0.9.1-T3 (#775) closed the divergence -- previously this
+      handler always passed ``expires_at`` to the service, defeating
+      the surface-layer "set vs unset" split.
     * Catching :class:`PermissionDeniedError` from the service's RBAC
       matrix (most commonly: an ``operator`` role attempting a
       ``TENANT`` write) and re-raising as
@@ -297,13 +309,28 @@ async def _add_to_memory_handler(
     # it up uniformly across MCP and REST writes.
     metadata: dict[str, Any] | None = {"tags": list(tags)} if tags is not None else None
 
-    expires_at: datetime | None = None
-    ttl_raw = arguments.get("ttl")
-    if ttl_raw is not None:
-        try:
-            expires_at = _parse_iso_duration(ttl_raw)
-        except ValueError as exc:
-            raise McpInvalidParamsError(f"add_to_memory: {exc}") from exc
+    # Discriminate "ttl absent from JSON" from "ttl explicitly null".
+    # The MCP dispatcher's JSON-Schema gate (additionalProperties:
+    # false) already rejects unknown keys, so ``"ttl" in arguments``
+    # is the canonical set-vs-unset signal for this surface -- the
+    # exact analogue of pydantic's ``model_fields_set`` on the REST
+    # side. Without this split, ``arguments.get("ttl")`` returning
+    # ``None`` collapses the ``--persist`` opt-out into the default
+    # path and the divergence #775 fixes reappears.
+    ttl_was_set = "ttl" in arguments
+    explicit_expires_at: datetime | None = None
+    if ttl_was_set:
+        ttl_raw = arguments["ttl"]
+        if ttl_raw is not None:
+            try:
+                explicit_expires_at = _parse_iso_duration(ttl_raw)
+            except ValueError as exc:
+                raise McpInvalidParamsError(f"add_to_memory: {exc}") from exc
+    expires_at = resolve_default_expires_at(
+        scope,
+        expires_at_was_set=ttl_was_set,
+        explicit_expires_at=explicit_expires_at,
+    )
 
     service = MemoryService()
     try:
@@ -428,10 +455,11 @@ register_mcp_tool(
             "prefer extending its body (re-add with same slug, body-hash "
             "short-circuit updates in place). "
             "TTL is optional, formatted as ISO 8601 duration ('P7D' = "
-            "7 days, 'PT1H' = 1 hour). Omit to accept the backend "
-            "default (G5.2 #374 will inject a 7-day TTL on user-scope "
-            "writes; tenant- and target-scope writes default to no "
-            "expiry). "
+            "7 days, 'PT1H' = 1 hour). Omit on a 'user'-scope write to "
+            "accept the backend default (7-day expiry from "
+            "MEMORY_USER_DEFAULT_TTL_DAYS); pass explicit null to "
+            "persist forever; tenant- and target-scope writes default "
+            "to no expiry. "
             "Do NOT use this for durable, generalizable team knowledge — "
             "that belongs in `add_to_knowledge`. Memory is for shorter-"
             "lived, operator/tenant/target-scoped state."
@@ -465,10 +493,11 @@ register_mcp_tool(
                     "description": (
                         "Optional ISO 8601 duration ('P7D', 'PT1H', "
                         "'PT30M'). Months and years are not accepted "
-                        "(variable-length). Omit to accept the backend "
-                        "default — G5.2 #374 will inject a 7-day TTL on "
-                        "user-scope writes; tenant/target writes default "
-                        "to no expiry."
+                        "(variable-length). Omit on a 'user'-scope write "
+                        "to accept the backend default (7 days from "
+                        "MEMORY_USER_DEFAULT_TTL_DAYS); pass null to "
+                        "persist forever (the CLI --persist opt-out); "
+                        "tenant/target writes default to no expiry."
                     ),
                 },
                 "target_name": {

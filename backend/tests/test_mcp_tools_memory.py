@@ -519,6 +519,175 @@ async def test_tools_call_add_to_memory_applies_ttl(
     assert delta < 60, f"expected ~7 days from {before}, got {parsed} (delta={delta}s)"
 
 
+# ---------------------------------------------------------------------------
+# G0.9.1-T3 (#775): default-TTL injection on the MCP add_to_memory path
+# ---------------------------------------------------------------------------
+#
+# The MCP handler delegates the default-TTL decision to the same
+# :func:`meho_backplane.memory.ttl.resolve_default_expires_at` resolver
+# the REST handler uses. The discrimination on the MCP side is
+# ``"ttl" in arguments`` (the dispatcher only carries keys the inbound
+# JSON-RPC payload supplied, gated by ``additionalProperties: false``);
+# the canonical opt-outs match the REST surface:
+#
+# * ``ttl`` omitted on user-scope → ``now + 7d`` default (load-bearing
+#   parity with REST's ``model_fields_set`` branch on the same shape).
+# * Explicit ``"ttl": null`` on user-scope → no expiry (CLI ``--persist``
+#   parity).
+# * Non-user scopes (``user-tenant`` etc.) → no default even with ``ttl``
+#   omitted, mirroring #624's narrow gate.
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_add_to_memory_user_scope_no_ttl_injects_default(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """AC #1: omitted ``ttl`` on ``user`` scope → ``expires_at ~ now + 7d``.
+
+    Closes the regression #775 documents: prior to G0.9.1 the MCP path
+    always passed ``expires_at`` explicitly to ``service.remember``
+    (including ``None`` when ``ttl`` was absent), defeating the
+    surface-layer "set vs unset" split and silently producing memories
+    with ``expires_at=null`` -- so user-scope MCP writes lived forever
+    despite the documented 7-day default.
+
+    Tolerance window mirrors the existing ``applies_ttl`` test:
+    ``parsed`` should land within ±60 s of ``before + 7 d`` so a slow
+    test machine never flakes.
+    """
+    client, _op = client_with_operator
+
+    before = datetime.now(UTC)
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "content": "Operator-scope note that should age out.",
+                    "scope": "user",
+                    "slug": "default-ttl-user",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    # The persisted row carries the injected default. Without the fix
+    # this would be ``None``.
+    assert payload["expires_at"] is not None, (
+        "user-scope MCP write with omitted ttl must inject the default "
+        f"expires_at; got payload={payload}"
+    )
+    parsed = datetime.fromisoformat(payload["expires_at"])
+    expected = before + timedelta(days=7)
+    delta = abs((parsed - expected).total_seconds())
+    assert delta < 60, f"expected ~7 days from {before}, got {parsed} (delta={delta}s)"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_add_to_memory_user_scope_explicit_null_ttl_persists(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """AC #2: explicit ``"ttl": null`` on ``user`` scope → no expiry.
+
+    Load-bearing opt-out parity with the REST surface: the CLI
+    ``--persist`` flag emits ``"expires_at": null`` and the agent
+    surface mirrors it with ``"ttl": null``. Discrimination is
+    ``"ttl" in arguments`` -- ``arguments.get("ttl") is None`` would
+    collapse this branch into the default path and silently override
+    the operator's pin-forever intent.
+    """
+    client, _op = client_with_operator
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "content": "Pin this note forever (CLI --persist parity).",
+                    "scope": "user",
+                    "slug": "persist-forever-user",
+                    "ttl": None,
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False, body
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["expires_at"] is None, (
+        f"explicit ttl=null must opt out of the default; got payload={payload}"
+    )
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_tools_call_add_to_memory_user_tenant_scope_no_default_ttl(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stub_embedding: AsyncMock,
+) -> None:
+    """AC #3: non-``user`` scopes bypass the default even with ``ttl`` omitted.
+
+    #624 narrows the default to ``kind == "memory-user"``. Pinning the
+    ``user-tenant`` scope here prevents a future refactor that widened
+    the gate to ``USER_SCOPED`` from silently expiring team-shared
+    memories on the MCP path. Parity with the equivalent REST test
+    ``test_remember_user_tenant_scope_no_default_ttl``.
+    """
+    client, _op = client_with_operator
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "add_to_memory",
+                "arguments": {
+                    "content": "Team-shared note in this tenant.",
+                    "scope": "user-tenant",
+                    "slug": "team-note-mcp",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["isError"] is False, body
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["expires_at"] is None, (
+        f"non-user scope must not get the default ttl; got payload={payload}"
+    )
+
+
 @pytest.mark.parametrize(
     "client_with_operator",
     [TenantRole.OPERATOR],

@@ -101,7 +101,7 @@ is the single source of truth for the safe-URL alphabet so a typo
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any, Final
 
 import structlog
@@ -120,7 +120,7 @@ from meho_backplane.memory import (
     PermissionDeniedError,
 )
 from meho_backplane.memory.schemas import SLUG_PATTERN
-from meho_backplane.settings import get_settings
+from meho_backplane.memory.ttl import resolve_default_expires_at
 
 __all__ = ["MemoryListResponse", "PromoteBody", "RememberBody", "router"]
 
@@ -177,19 +177,18 @@ _LIST_LIMIT_MAX: Final[int] = 500
 def _resolve_default_ttl(body: RememberBody) -> datetime | None:
     """Return the effective ``expires_at`` for a ``remember`` write.
 
-    G5.2-T2 (#624). Implements the default-TTL injection contract for
-    ``POST /api/v1/memory``:
+    Thin REST-side adapter over
+    :func:`meho_backplane.memory.ttl.resolve_default_expires_at`. The
+    shared resolver carries the G5.2-T2 (#624) policy; this wrapper's
+    only job is to translate Pydantic's ``model_fields_set`` view of
+    "field absent from JSON" vs "field present with value null" into
+    the primitives shape the resolver expects.
 
-    * :attr:`MemoryScope.USER` scope **and** ``expires_at`` field
-      absent from the request body → ``now(UTC) +
-      Settings.memory_user_default_ttl_days``.
-    * Any other scope (``user-tenant`` / ``user-target`` / ``tenant``
-      / ``target``) → :attr:`RememberBody.expires_at` unchanged
-      (which is ``None`` when omitted, mirroring G5.1 behaviour).
-    * Explicit ``"expires_at": null`` on ``user`` scope → ``None``
-      (the CLI ``--persist`` opt-out shape: persist forever).
-    * Explicit ``"expires_at": "<ISO-8601>"`` on ``user`` scope → that
-      datetime verbatim (the caller picked a cutoff; no override).
+    G0.9.1-T3 (#775) introduced the shared resolver so the MCP
+    ``add_to_memory`` tool applies the same default-TTL discrimination
+    -- previously the MCP path always passed ``expires_at`` explicitly
+    to :meth:`MemoryService.remember` and the default never fired on
+    that surface, producing a silent divergence between REST and MCP.
 
     The "field absent" vs "explicit null" discrimination uses
     :attr:`BaseModel.model_fields_set` (pydantic v2): the set carries
@@ -201,30 +200,12 @@ def _resolve_default_ttl(body: RememberBody) -> datetime | None:
     path. Verified against the installed pydantic 2.13.4 (`uv run
     python -c "from pydantic import BaseModel; ..."` -- explicit
     ``b=None`` is in ``model_fields_set``, absent ``b`` is not).
-
-    Why only ``MemoryScope.USER``: consumer-needs.md §G5's
-    "session-scoped hints expire by default" rule targets the per-
-    operator-only scope (``kind="memory-user"``); ``user-tenant`` and
-    ``user-target`` rows are team-shared coordinates the consumer
-    spec leaves operator-controlled. The Task body pins this to
-    ``kind == "memory-user"`` -- not the broader "any user-* scope"
-    -- so the surface stays narrow until a future Task widens it
-    with an explicit hierarchy decision.
     """
-    if "expires_at" in body.model_fields_set:
-        # Caller supplied the field (either an ISO timestamp or
-        # explicit null); honour their intent verbatim. This branch
-        # is the CLI ``--persist`` opt-out path when the value is
-        # ``None``.
-        return body.expires_at
-    if body.scope is not MemoryScope.USER:
-        # Default only fires on the ``memory-user`` kind per #624.
-        # Other scopes fall through to the G5.1 baseline (no auto-TTL,
-        # row persists until an operator deletes it or G5.2's
-        # promote/expire verbs touch it).
-        return None
-    settings = get_settings()
-    return datetime.now(UTC) + timedelta(days=settings.memory_user_default_ttl_days)
+    return resolve_default_expires_at(
+        body.scope,
+        expires_at_was_set="expires_at" in body.model_fields_set,
+        explicit_expires_at=body.expires_at,
+    )
 
 
 class RememberBody(BaseModel):

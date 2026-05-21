@@ -11,10 +11,16 @@ contract** between MEHO and the deployment environment — `helm install` /
 `helm upgrade --install` consumes it and produces the core Kubernetes
 resources that make up a running backplane:
 
-- Deployment — the backplane Pod (FastAPI app, `uvicorn` on port 8000).
+- Deployment — the backplane Pod (FastAPI app, `uvicorn` on port 8000
+  with `--proxy-headers` so the cluster's TLS-terminating Ingress'
+  `X-Forwarded-Proto: https` survives FastAPI's trailing-slash 307
+  redirects; trusted-proxy CIDR is operator-configurable via
+  `config.forwardedAllowIps`, see
+  [`docs/cross-repo/reverse-proxy-contract.md`](../cross-repo/reverse-proxy-contract.md)).
 - Service — ClusterIP front-door for the Deployment, target port `http`.
 - Ingress — TLS-enabled external entry with cert-manager annotations.
-- ConfigMap — non-secret env (Keycloak URLs, Vault address, pool sizes).
+- ConfigMap — non-secret env (Keycloak URLs, Vault address, pool sizes,
+  `FORWARDED_ALLOW_IPS` for the uvicorn proxy-header trust list).
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
   Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.

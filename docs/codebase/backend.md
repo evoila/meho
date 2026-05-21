@@ -795,7 +795,17 @@ PYTHONPATH-leak imports.
 ## Control flow
 
 1. The container's `CMD` invokes
-   `uvicorn meho_backplane.main:app --host 0.0.0.0 --port 8000`.
+   `uvicorn meho_backplane.main:app --host 0.0.0.0 --port 8000 --proxy-headers`.
+   `--proxy-headers` installs uvicorn's `ProxyHeadersMiddleware` at the
+   ASGI server layer so `X-Forwarded-Proto` / `X-Forwarded-For` from
+   the cluster's TLS-terminating Ingress survive into the ASGI
+   `scope.scheme` (Issue [#730](https://github.com/evoila/meho/issues/730),
+   RDC dogfood Signal #3). The trusted-upstream list comes from the
+   `FORWARDED_ALLOW_IPS` env var the chart's ConfigMap renders from
+   `config.forwardedAllowIps`; uvicorn's secure default is
+   `127.0.0.1` only. See
+   [`docs/cross-repo/reverse-proxy-contract.md`](../cross-repo/reverse-proxy-contract.md)
+   for the operator-side contract.
 2. uvicorn imports `meho_backplane.main`, which constructs the
    `FastAPI` instance with the `lifespan` async context manager,
    wraps it in `RequestContextMiddleware`, and mounts the `health` and

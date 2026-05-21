@@ -59,6 +59,17 @@ data:
   # documented on `retrieval.modelCache`).
   RETRIEVAL_EMBEDDING_MODEL: {{ .Values.config.retrievalEmbeddingModel | quote }}
   RETRIEVAL_MODEL_CACHE_DIR: {{ .Values.config.retrievalModelCacheDir | quote }}
+  # Issue #730 (Signal #3, RDC dogfood 2026-05-20). Restricts the
+  # connecting peers uvicorn trusts as upstream proxies when parsing
+  # `X-Forwarded-Proto` / `X-Forwarded-For`. uvicorn reads
+  # `FORWARDED_ALLOW_IPS` natively — equivalent to the
+  # `--forwarded-allow-ips` CLI flag (omitted from the Dockerfile CMD
+  # so the operator-tunable env var stays the single source of truth).
+  # See `deploy/charts/meho/values.yaml` (`config.forwardedAllowIps`)
+  # for the operator-facing override and
+  # `docs/cross-repo/reverse-proxy-contract.md` for the trust
+  # contract.
+  FORWARDED_ALLOW_IPS: {{ .Values.config.forwardedAllowIps | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

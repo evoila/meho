@@ -195,7 +195,8 @@
         "databasePoolSize",
         "databasePoolTimeout",
         "retrievalEmbeddingModel",
-        "retrievalModelCacheDir"
+        "retrievalModelCacheDir",
+        "forwardedAllowIps"
       ],
       "properties": {
         "keycloakIssuerUrl": { "type": "string", "minLength": 1 },
@@ -228,6 +229,11 @@
           "type": "string",
           "pattern": "^(|https?://.+)$",
           "description": "MCP audience binding (G0.8-T4 #633). Canonical MCP resource URI, no trailing slash. Leave blank to derive `${BACKPLANE_URL}/mcp` (the documented default). Set explicitly only for a non-default MCP mount point. Must match the Keycloak oidc-audience-mapper value — see `docs/cross-repo/mcp-client-setup.md` Step 1. Must be empty or an `http(s)://` URL."
+        },
+        "forwardedAllowIps": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Comma-separated IPs / CIDRs uvicorn trusts as upstream proxies for `X-Forwarded-Proto` / `X-Forwarded-For` parsing (rendered into the `FORWARDED_ALLOW_IPS` env var; uvicorn reads it natively). Fixes the HTTPS→HTTP redirect downgrade behind a TLS-terminating Ingress (Issue #730, Signal #3, RDC dogfood 2026-05-20). Default `127.0.0.1` matches uvicorn's secure default and fails-closed in-cluster (the Ingress controller's pod IP is never the loopback). Operators MUST override for production with the Ingress controller's pod CIDR (e.g. `10.42.0.0/16` for the RKE2 default). `*` disables the allow-list and is acceptable only for ephemeral CI / single-tenant labs where every connecting peer is the cluster's own proxy. See `docs/cross-repo/reverse-proxy-contract.md`."
         }
       }
     },

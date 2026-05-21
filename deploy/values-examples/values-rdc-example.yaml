@@ -123,6 +123,14 @@ config:
   vaultTimeoutSeconds: "10.0"
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
+  # Reverse-proxy trust list (Issue #730, RDC Signal #3). uvicorn's
+  # default `127.0.0.1` fails-closed in-cluster — the Ingress
+  # controller's pod IP is never the loopback. The rke2-infra RDC
+  # cluster runs the default pod CIDR; pin to the ingress controller's
+  # pod-CIDR slice if you've subnetted it tighter. See
+  # `docs/cross-repo/reverse-proxy-contract.md` for the per-cluster
+  # recommended values and the diagnostic walk.
+  forwardedAllowIps: "10.42.0.0/16"
 
 postgres:
   # Cluster-internal Postgres on rke2-infra (per Goal #11 cross-repo deps).

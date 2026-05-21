@@ -182,6 +182,17 @@ arguments` key-presence checks so omitted fields never reach
 indistinguishable from an omission with `arguments.get(...)`). Only
 fields the operator explicitly named are forwarded.
 
+The `ingest` handler additionally maps `VersionMismatchError` and
+`UncoveredVersionLabel` to JSON-RPC `-32602 Invalid Params` with
+the structured detail on `error.data` (G0.9.1-T5 #777). Both
+exceptions describe caller-input mistakes — the operator's `version`
+label disagrees with the supplied spec, or falls outside every
+registered class's advertised range — so `-32602` is the right code
+(not `-32603 Internal Error`, which the pre-fix generic catch-all
+emitted). The structured `data` payload is built by the shared
+helpers in `operations/ingest/error_envelopes.py` so the REST 422
+detail and the MCP `error.data` member share one source of truth.
+
 ## Key types
 
 ### `EndpointDescriptorProto` (`ingest/schemas.py`)
@@ -329,6 +340,33 @@ cross-checked for internal consistency: two specs disagreeing on
 the major version surface as `VersionMismatchError` with
 `kind="multi_spec_inconsistent"`. Specs missing `info.version`
 entirely skip the check (older spec dialects keep ingesting).
+
+### Shared error-envelope builders (`ingest/error_envelopes.py`)
+
+The REST route at `POST /api/v1/connectors/ingest` and the MCP
+`meho.connector.ingest` tool both need to surface
+`VersionMismatchError` and `UncoveredVersionLabel` as caller-input
+validation errors carrying structured diagnostic detail (expected-
+vs-received versions, the list of advertised
+`supported_version_range` strings) so the operator — or the agent
+acting on the operator's behalf — can self-correct without re-
+prompting.
+
+* `build_version_mismatch_detail(exc)` — REST embeds the returned
+  dict in the `HTTPException(status_code=422).detail` field; MCP
+  embeds it in the JSON-RPC `error.data` member (spec §5.1).
+* `build_uncovered_version_label_detail(exc)` — MCP-only for now;
+  REST emits `str(exc)` for backward compatibility but can switch
+  to the structured builder later without changing the wire shape
+  in a non-additive way.
+
+Pre-G0.9.1-T5 (#777) the MCP path had no typed handling for either
+exception — both fell through to the dispatcher's generic
+`except Exception` arm in `meho_backplane.mcp.server`, which
+surfaced `-32603 "internal error: VersionMismatchError"` and
+discarded the (already-detailed) exception message. The shared
+builders sit in `operations/ingest/error_envelopes.py` so the REST
+422 body and the MCP `-32602` `data` member can't drift again.
 
 ### `list_ingested_connectors()` (`ingest/list_connectors.py`)
 
@@ -630,7 +668,13 @@ operations go live.
 * Issue #407 — T7 task (admin MCP tools).
 * Issue #408 — T8 task (vSphere canary).
 * Issue #409 — T9 task (this doc + the architecture / operator-runbook pair).
+* Issue #740 — G0.9-T8 spec-vs-label cross-check + REST 422 envelope.
+* Issue #741 — G0.9-T9 `UncoveredVersionLabel` pre-flight.
+* Issue #777 — G0.9.1-T5 shared error-envelope builders + MCP `-32602`
+  mapping for `VersionMismatchError` / `UncoveredVersionLabel`.
 * Initiative #389 — G0.7 spec-ingestion pipeline.
+* Initiative #772 — G0.9.1 v0.3.2 dogfood hardening (the rollup that
+  parents #777).
 * Goal #221 — G0 foundational substrate.
 * [docs/architecture/spec-ingestion.md](../architecture/spec-ingestion.md) —
   canonical architecture doc; companion to this codebase map.

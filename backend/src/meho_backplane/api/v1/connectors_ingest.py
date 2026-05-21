@@ -141,6 +141,7 @@ from meho_backplane.operations.ingest import (
     UncoveredVersionLabel,
     UnsupportedSpecError,
     VersionMismatchError,
+    build_version_mismatch_detail,
     default_llm_client_factory,
     list_ingested_connectors,
 )
@@ -238,23 +239,6 @@ async def ingest_endpoint(
     return IngestResponse(ingestion=ingestion_model, grouping=grouping_model)
 
 
-def _version_mismatch_detail(exc: VersionMismatchError) -> dict[str, object]:
-    """Structured 422 body for :class:`VersionMismatchError`.
-
-    Named so the route handler stays readable; the body contract is
-    load-bearing for the CLI's operator-facing error message (which
-    parses the structured detail rather than the rendered string).
-    """
-    return {
-        "kind": exc.kind,
-        "requested_version": exc.requested_version,
-        "spec_info_versions": [
-            {"spec_uri": uri, "info_version": version} for uri, version in exc.spec_info_versions
-        ],
-        "message": str(exc),
-    }
-
-
 async def _run_ingest_with_http_mapping(
     *,
     service: IngestionPipelineService,
@@ -295,10 +279,14 @@ async def _run_ingest_with_http_mapping(
         # G0.9-T8 (#740). 422 (not 400) because the request was
         # syntactically valid but semantically refuses the spec-vs-label
         # cross-check. The structured detail names both versions so the
-        # operator's error message tells them exactly what to fix.
+        # operator's error message tells them exactly what to fix. The
+        # detail builder is shared with the MCP path
+        # (:mod:`meho_backplane.operations.ingest.error_envelopes`,
+        # G0.9.1-T5 #777) so the REST 422 body and the MCP -32602
+        # ``data`` member can't drift.
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=_version_mismatch_detail(exc),
+            detail=build_version_mismatch_detail(exc),
         ) from exc
     except UncoveredVersionLabel as exc:
         # G0.9-T9 (#741). The request body parsed fine (Pydantic

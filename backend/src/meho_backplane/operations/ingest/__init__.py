@@ -33,6 +33,10 @@ from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
     ensure_connector_class_registered,
 )
+from meho_backplane.operations.ingest.error_envelopes import (
+    build_uncovered_version_label_detail,
+    build_version_mismatch_detail,
+)
 from meho_backplane.operations.ingest.exceptions import (
     ConnectorNotFoundError,
     InvalidSchemaError,
@@ -118,6 +122,8 @@ __all__ = [
     "UncoveredVersionLabel",
     "UnsupportedSpecError",
     "VersionMismatchError",
+    "build_uncovered_version_label_detail",
+    "build_version_mismatch_detail",
     "check_version_covered_by_registered_class",
     "default_llm_client_factory",
     "detect_spec_format",

@@ -94,12 +94,17 @@ import structlog
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     ConnectorStatusFilter,
     IngestionPipelineService,
     IngestRequest,
     ReviewService,
     SpecSource,
+    UncoveredVersionLabel,
+    VersionMismatchError,
+    build_uncovered_version_label_detail,
+    build_version_mismatch_detail,
     default_llm_client_factory,
     list_ingested_connectors,
 )
@@ -198,15 +203,40 @@ async def _ingest_handler(
         operator,
         llm_client_factory=default_llm_client_factory,
     )
-    result = await service.ingest(
-        product=request.product,
-        version=request.version,
-        impl_id=request.impl_id,
-        specs=request.specs,
-        base_url=request.base_url,
-        tenant_id=tenant_id,
-        dry_run=request.dry_run,
-    )
+    # G0.9.1-T5 (#777): VersionMismatchError + UncoveredVersionLabel are
+    # caller-input validation errors (the operator's ``version`` label
+    # is incompatible with the supplied spec / not covered by any
+    # registered class) — JSON-RPC ``-32602`` Invalid Params, with the
+    # structured detail on ``error.data`` per spec §5.1. Mirrors the
+    # REST 422 envelope built by
+    # :mod:`meho_backplane.api.v1.connectors_ingest`; the shared
+    # builders in :mod:`meho_backplane.operations.ingest.error_envelopes`
+    # are the single source of truth so the wire shape can't drift.
+    # Without this, the dispatcher's generic ``except Exception`` arm in
+    # :func:`meho_backplane.mcp.server._dispatch_to_handler` would
+    # surface ``-32603 "internal error: VersionMismatchError"`` and
+    # discard the (already-detailed) exception message — opaque to the
+    # agent operator and misclassified as a server fault.
+    try:
+        result = await service.ingest(
+            product=request.product,
+            version=request.version,
+            impl_id=request.impl_id,
+            specs=request.specs,
+            base_url=request.base_url,
+            tenant_id=tenant_id,
+            dry_run=request.dry_run,
+        )
+    except VersionMismatchError as exc:
+        raise McpInvalidParamsError(
+            str(exc),
+            data=build_version_mismatch_detail(exc),
+        ) from exc
+    except UncoveredVersionLabel as exc:
+        raise McpInvalidParamsError(
+            str(exc),
+            data=build_uncovered_version_label_detail(exc),
+        ) from exc
     ingestion_model, grouping_model = result.to_api_models()
     # Build the canonical IngestResponse manually rather than
     # constructing a new instance and round-tripping the inner

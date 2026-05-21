@@ -88,6 +88,12 @@ from tests.acceptance._vcsim import (
     VcsimTopology,
     resolve_vcsim_endpoint,
 )
+from tests.acceptance._vrops_canary_fixtures import (
+    VROPS_CANARY_OPERATOR_TENANT,
+    IngestedVropsCanary,
+    ingested_vrops_canary,
+    vrops_acceptance_operator,
+)
 from tests.integration.conftest import (
     _CHASSIS_ENV,
     DOCKER_AVAILABLE,
@@ -105,10 +111,12 @@ __all__ = [
     "NSX_CANARY_OPERATOR_TENANT",
     "SDDC_CANARY_OPERATOR_TENANT",
     "SKIP_REASON",
+    "VROPS_CANARY_OPERATOR_TENANT",
     "IngestedCanaryVcsim",
     "IngestedHarborCanary",
     "IngestedNsxCanary",
     "IngestedSddcCanary",
+    "IngestedVropsCanary",
     "VcsimEndpoint",
     "VcsimTopology",
     "acceptance_operator",
@@ -118,12 +126,14 @@ __all__ = [
     "ingested_harbor_canary",
     "ingested_nsx_canary",
     "ingested_sddc_canary",
+    "ingested_vrops_canary",
     "integration_env",
     "nsx_acceptance_operator",
     "pg_engine",
     "prewarmed_embeddings",
     "sddc_acceptance_operator",
     "vcsim_endpoint",
+    "vrops_acceptance_operator",
 ]
 
 

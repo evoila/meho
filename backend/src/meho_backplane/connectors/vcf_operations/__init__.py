@@ -43,6 +43,19 @@ All four share the same registration shape; vROps + vRLI + Fleet share the
 
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_operations.connector import VcfOperationsConnector
+from meho_backplane.connectors.vcf_operations.core_ops import (
+    VROPS_CONNECTOR_ID,
+    VROPS_CORE_GROUPS,
+    VROPS_CORE_OPS,
+    VROPS_IMPL_ID,
+    VROPS_PATH_RULES,
+    VROPS_PRODUCT,
+    VROPS_VERSION,
+    VropsCoreGroup,
+    VropsCoreOp,
+    apply_vrops_core_curation,
+    classify_vrops_op,
+)
 from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsCredentialsLoader,
     VcfOperationsTargetLike,
@@ -57,8 +70,19 @@ register_connector_v2(
 )
 
 __all__ = [
+    "VROPS_CONNECTOR_ID",
+    "VROPS_CORE_GROUPS",
+    "VROPS_CORE_OPS",
+    "VROPS_IMPL_ID",
+    "VROPS_PATH_RULES",
+    "VROPS_PRODUCT",
+    "VROPS_VERSION",
     "VcfOperationsConnector",
     "VcfOperationsCredentialsLoader",
     "VcfOperationsTargetLike",
+    "VropsCoreGroup",
+    "VropsCoreOp",
+    "apply_vrops_core_curation",
+    "classify_vrops_op",
     "load_credentials_from_vault",
 ]

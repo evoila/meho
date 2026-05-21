@@ -111,6 +111,25 @@ connector-related release-notes line.
 
 ### Added
 
+- **vROps suite-api spec ingestion + curated read-only v0.5 core**
+  (G3.6-T2 [#833](https://github.com/evoila/meho/issues/833)) —
+  enables the `VcfOperationsConnector` (#829) for agent dispatch by
+  ingesting `docs:vcf-operations-9.0/suite-api.yaml` via the G0.7
+  pipeline and curating the 8-op read core that
+  `search_operations` / `call_operation` surface:
+  `vrops.about` · `vrops.resource.list` · `vrops.resource.get` ·
+  `vrops.alert.list` · `vrops.alertdefinition.list` ·
+  `vrops.symptom.list` · `vrops.recommendation.list` ·
+  `vrops.supermetric.list`. Ships the
+  `apply_vrops_core_curation` helper (mirrors NSX / Harbor / SDDC
+  precedents — `edit_op(is_enabled=False)` operator-override per
+  non-core op, then `edit_group` + `enable_group` cascade), the
+  curated 7-group `when_to_use` text + 8-op `llm_instructions`
+  blobs, dispatch-smoke + JSONFlux force-handle acceptance tests
+  over respx-mocked vROps, and the operator runbook at
+  [`docs/cross-repo/g36-vrops-canary.md`](docs/cross-repo/g36-vrops-canary.md).
+  Write ops (custom-group / maintenance-mode set / alert-ack) stay
+  `is_enabled=False` per the Initiative #369 out-of-scope list.
 - **`VcfOperationsConnector` skeleton** (G3.6-T1
   [#829](https://github.com/evoila/meho/issues/829)) — `HttpConnector`
   subclass registered under

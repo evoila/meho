@@ -54,9 +54,10 @@ completes.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import warnings
-from typing import Any
+from typing import Any, NoReturn
 from uuid import UUID
 
 import httpx
@@ -272,6 +273,16 @@ def _decode_with_jwks(
                     "essential": True,
                     "value": expected_audience,
                 },
+                # ``sub`` is REQUIRED by OIDC core §2 / RFC 9068 §2.2.1
+                # on access tokens. Marking it essential here pushes the
+                # check into authlib's structured ``MissingClaimError``
+                # path so :func:`_classify_decode_error` can surface a
+                # specific ``missing_sub`` code instead of letting the
+                # claim drop through to :func:`_operator_from_claims`'s
+                # generic fallback (where it would collapse to the
+                # opaque ``invalid_token`` code v0.3.1 shipped — see
+                # G0.9.1-T12, consumer Addendum II walls #2 / #3).
+                "sub": {"essential": True},
             },
         )
         claims.validate(leeway=settings.keycloak_jwt_leeway_seconds)
@@ -280,10 +291,11 @@ def _decode_with_jwks(
 
 # Exception classes that authlib raises for any kind of token-content
 # failure (signature, claims, structure). Grouped so ``verify_jwt`` can
-# treat them uniformly as 401 ``invalid_token``. ``_DECODE_ERRORS_WITH_VALUEERROR``
-# adds ``ValueError`` for the post-refresh retry path where a residual
-# kid-miss must also be classified as ``invalid_token`` rather than
-# triggering another infinite refresh loop.
+# dispatch them through :func:`_classify_decode_error` into a structured
+# 401 detail code. ``_DECODE_ERRORS_WITH_VALUEERROR`` adds ``ValueError``
+# for the post-refresh retry path where a residual kid-miss must also
+# fail-closed as 401 rather than triggering another infinite refresh
+# loop.
 _AUTHLIB_DECODE_ERRORS: tuple[type[Exception], ...] = (
     BadSignatureError,
     DecodeError,
@@ -299,6 +311,20 @@ _DECODE_ERRORS_WITH_VALUEERROR: tuple[type[Exception], ...] = (
 )
 
 
+# ``MissingClaimError`` does not expose the claim name as an attribute
+# the way ``InvalidClaimError`` does (``InvalidClaimError.claim_name``);
+# the canonical authlib 1.7 constructor stores the name only in the
+# ``description`` field as ``"Missing '<claim>' claim"``. Parse it back
+# out so :func:`_classify_decode_error` can branch on the specific
+# missing claim (``sub`` / ``aud`` / ``iss``) rather than collapsing
+# every missing essential claim into one opaque code. The pattern is
+# anchored to the documented authlib message format; if a future
+# authlib release changes the wording, the fallback branch logs the
+# raw description as ``detail`` so an operator still has the
+# diagnostic value in the log line.
+_MISSING_CLAIM_NAME_RE: re.Pattern[str] = re.compile(r"Missing '([^']+)' claim")
+
+
 def _http_401(detail: str) -> HTTPException:
     """Build the 401 the dependency raises on any failure path.
 
@@ -307,6 +333,155 @@ def _http_401(detail: str) -> HTTPException:
     in Task #25 will assert on these tokens verbatim.
     """
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+
+def _classify_invalid_claim(
+    exc: InvalidClaimError,
+    *,
+    expected_audience: str,
+    expected_issuer: str,
+) -> tuple[str, dict[str, Any]]:
+    """``InvalidClaimError`` → specific code per `claim_name`.
+
+    Split out of :func:`_classify_decode_error` so the parent stays
+    inside the code-quality function-length budget. ``InvalidClaimError``
+    is the only authlib decode exception that carries the offending
+    claim name as a structured attribute (``claim_name``); the parent
+    dispatches all other exception classes inline.
+    """
+    claim_name = getattr(exc, "claim_name", None) or "unknown"
+    if claim_name == "aud":
+        return "invalid_audience", {
+            "claim_name": "aud",
+            "expected_audience": expected_audience,
+        }
+    if claim_name == "iss":
+        return "invalid_issuer", {
+            "claim_name": "iss",
+            "expected_issuer": expected_issuer,
+        }
+    return "invalid_claim", {"claim_name": claim_name}
+
+
+def _classify_missing_claim(
+    exc: MissingClaimError,
+) -> tuple[str, dict[str, Any]]:
+    """``MissingClaimError`` → specific code per parsed claim name.
+
+    Authlib 1.7's ``MissingClaimError`` does not expose the claim name
+    as an attribute (only ``InvalidClaimError`` does); the constructor
+    stores it in ``description`` as ``"Missing '<claim>' claim"``. The
+    regex parse falls back to the raw description in the log line if a
+    future authlib release changes the wording — the diagnostic value
+    is preserved even if the specific code lands as the generic
+    ``missing_claim``.
+    """
+    description = getattr(exc, "description", "") or ""
+    match = _MISSING_CLAIM_NAME_RE.search(description)
+    claim_name = match.group(1) if match else None
+    if claim_name == "sub":
+        # RFC 9068 §2.2.1 makes ``sub`` REQUIRED on access tokens.
+        # Promoted from ``invalid_token`` (the v0.3.1 catch-all in
+        # :func:`_operator_from_claims`) to a specific code per
+        # G0.9.1-T12.
+        return "missing_sub", {"claim_name": "sub"}
+    if claim_name == "aud":
+        return "missing_audience", {"claim_name": "aud"}
+    if claim_name == "iss":
+        return "missing_issuer", {"claim_name": "iss"}
+    return "missing_claim", {
+        "claim_name": claim_name,
+        "detail": description,
+    }
+
+
+def _classify_decode_error(
+    exc: BaseException,
+    settings: Settings,
+    *,
+    expected_audience: str,
+) -> tuple[str, dict[str, Any]]:
+    """Map an authlib decode/claims exception to a structured 401 code.
+
+    Returns ``(detail_code, log_fields)``:
+
+    * ``detail_code`` — value put into the 401 body. Machine-readable
+      and low info-leak: ``invalid_audience`` / ``invalid_issuer`` /
+      ``missing_sub`` / ``token_expired`` /
+      ``signature_verification_failed`` / ``token_not_yet_valid``, with
+      a residual ``invalid_token`` for genuinely-unclassifiable
+      structural failures (truncated JWS, ``alg: none`` rejection,
+      post-refresh kid miss).
+    * ``log_fields`` — diagnostic value(s) for the structlog event
+      (expected audience / issuer, missing-claim name, exception class).
+      **Never** echoed in the response body. Mirrors the
+      ``malformed_tenant_claim`` body-vs-log split: public callers see
+      the code, operators with log access see the full picture
+      (RFC 6750 §3.1 — the resource server SHOULD NOT include details
+      that aren't well-defined error codes in the body).
+
+    Pre-G0.9.1-T12 every authlib decode failure collapsed to one
+    opaque ``invalid_token``; an operator chasing a 401 had to mint
+    side-by-side tokens to discover which check fired (consumer
+    Addendum II walls #2 + #3). The classifier mirrors the existing
+    tenant-claim extractors' pattern.
+    """
+    # ExpiredTokenError comes first so a token that is *both* expired
+    # and (e.g.) audience-mismatched surfaces the expiry — operators
+    # rotate tokens far more often than they reconfigure audiences and
+    # the expired-token path is by far the most common 401 reason in
+    # healthy production.
+    if isinstance(exc, ExpiredTokenError):
+        return "token_expired", {"reason": "exp_in_past_beyond_leeway"}
+    if isinstance(exc, BadSignatureError):
+        return "signature_verification_failed", {"reason": "jws_signature_mismatch"}
+    if isinstance(exc, InvalidClaimError):
+        return _classify_invalid_claim(
+            exc,
+            expected_audience=expected_audience,
+            expected_issuer=str(settings.keycloak_issuer_url).rstrip("/"),
+        )
+    if isinstance(exc, MissingClaimError):
+        return _classify_missing_claim(exc)
+    if isinstance(exc, InvalidTokenError):
+        # Authlib raises bare ``InvalidTokenError`` (no claim name) for
+        # ``nbf`` / ``iat`` in the future. Surface as a distinct
+        # ``token_not_yet_valid`` — operationally that means a clock
+        # somewhere is wrong (Keycloak or the client), a very different
+        # remediation from any other failure mode.
+        return "token_not_yet_valid", {"reason": "nbf_or_iat_in_future_beyond_leeway"}
+    if isinstance(exc, DecodeError):
+        # Structural break (malformed compact JWS, base64 garbage). No
+        # claim semantics — body and log both name ``invalid_token``.
+        return "invalid_token", {"reason": "jws_decode_error"}
+    # Catch-all for ``JoseError`` (unknown algorithm header, alg=none
+    # rejection, future authlib subclasses). Exception class name lands
+    # in the log so an operator can grep the specific authlib failure
+    # even though the public code collapses to ``invalid_token``.
+    return "invalid_token", {"reason": "jose_error", "exception": type(exc).__name__}
+
+
+def _raise_decode_401(
+    exc: BaseException,
+    settings: Settings,
+    *,
+    expected_audience: str,
+) -> NoReturn:
+    """Classify *exc*, emit the structured structlog event, raise 401.
+
+    The detail code goes into the 401 response body; the diagnostic
+    fields go into the structlog event. Mirrors the
+    ``malformed_tenant_claim`` body-vs-log split: public callers see
+    only the code, operators with log access see the full picture.
+    """
+    detail_code, log_fields = _classify_decode_error(
+        exc,
+        settings,
+        expected_audience=expected_audience,
+    )
+    log = structlog.get_logger(__name__)
+    log.warning(detail_code, **log_fields)
+    raise _http_401(detail_code) from exc
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -339,7 +514,9 @@ async def _decode_with_kid_rotation(
     has changed across authlib releases. We deliberately do **not**
     string-match on it: any ``ValueError`` from ``_decode_with_jwks``
     triggers a single, bounded refresh-and-retry. Other decoding errors
-    (signature, claims, structure) fail fast as 401 ``invalid_token``.
+    (signature, claims, structure) fail fast through
+    :func:`_raise_decode_401`, which classifies the authlib exception
+    into a specific 401 ``detail`` code (G0.9.1-T12 / #797).
 
     The retry budget is exactly one — a second ``ValueError`` after the
     forced JWKS refresh is treated as a hard 401, preventing an
@@ -365,7 +542,7 @@ async def _decode_with_kid_rotation(
         # stable contract. Fall through to refresh-and-retry.
         pass
     except _AUTHLIB_DECODE_ERRORS as exc:
-        raise _http_401("invalid_token") from exc
+        _raise_decode_401(exc, settings, expected_audience=expected_audience)
 
     # Kid miss → refresh once and retry.
     try:
@@ -375,8 +552,13 @@ async def _decode_with_kid_rotation(
 
     try:
         return _decode_with_jwks(token, jwks, settings, expected_audience=expected_audience)
-    except _DECODE_ERRORS_WITH_VALUEERROR as retry_exc:
+    except ValueError as retry_exc:
+        # A second ValueError after the forced refresh means the kid
+        # truly is not in the JWKS — fail-closed as a structural
+        # ``invalid_token`` (no claim-level diagnostic to surface).
         raise _http_401("invalid_token") from retry_exc
+    except _AUTHLIB_DECODE_ERRORS as retry_exc:
+        _raise_decode_401(retry_exc, settings, expected_audience=expected_audience)
 
 
 def _extract_tenant_id(claims: Any, settings: Settings) -> UUID:
@@ -461,9 +643,22 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     """
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
-        # ``sub`` is mandated by OIDC core §2; a token without it is
-        # malformed regardless of signature validity.
-        raise _http_401("invalid_token")
+        # ``sub`` is mandated by OIDC core §2 / RFC 9068 §2.2.1. The
+        # primary enforcement point is the ``sub: essential: True``
+        # entry in :func:`_decode_with_jwks`'s ``claims_options`` —
+        # a token without ``sub`` raises ``MissingClaimError('sub')``
+        # during decode, which :func:`_classify_decode_error` surfaces
+        # as the ``missing_sub`` code. This defensive check covers the
+        # one residual edge case authlib doesn't catch: a ``sub`` that
+        # is *present but not a non-empty string* (e.g. ``{"sub": null}``
+        # or ``{"sub": ""}`` — neither violates "essential" in authlib
+        # 1.7's ``_validate_essential_claims`` quite the way intuition
+        # suggests; ``null`` passes the ``k in self`` check). Surface
+        # the same ``missing_sub`` code so on-call telemetry sees one
+        # event class regardless of which mode fired.
+        log = structlog.get_logger(__name__)
+        log.warning("missing_sub", claim_name="sub", reason="empty_or_non_string")
+        raise _http_401("missing_sub")
     name = claims.get("name")
     email = claims.get("email")
     tenant_id = _extract_tenant_id(claims, settings)
@@ -499,10 +694,18 @@ async def verify_jwt_for_audience(
     validates" — issuer / kid-rotation / signature handling stays
     identical; only the audience differs.
 
-    Raises 401 on every failure mode the chassis chain raises.
-    Failures-with-audience-mismatch surface as ``invalid_token``
-    because that's how authlib's ``InvalidClaimError`` maps in the
-    centralised handler.
+    Raises 401 on every failure mode the chassis chain raises. Each
+    decode-stage failure surfaces a *specific* ``detail`` code so an
+    operator chasing the 401 can name the failed check (see
+    :func:`_classify_decode_error` for the full mapping):
+    ``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
+    ``token_expired`` / ``signature_verification_failed`` /
+    ``token_not_yet_valid``, with the residual ``invalid_token`` kept
+    only for structural failures that don't admit a more specific code
+    (truncated JWS, ``alg: none`` rejection, post-refresh kid miss).
+    The expected-vs-received diagnostic values land in the structlog
+    event only — never in the unauthenticated 401 body — mirroring the
+    existing ``malformed_tenant_claim`` precedent (G0.9.1-T12).
 
     Defence in depth: an empty or whitespace-only ``expected_audience``
     short-circuits to a 401 whose ``detail`` is
@@ -537,7 +740,13 @@ async def verify_jwt(authorization: str | None = Header(default=None)) -> Operat
     Raises 401 on every failure mode — missing header, malformed
     ``Authorization`` shape, JWKS unreachable, signature mismatch,
     expired token, audience mismatch, issuer mismatch, malformed JWT.
-    The error body is intentionally terse (``{"detail": "<reason>"}``)
+    Each decode-stage failure surfaces a *specific* ``detail`` code
+    (``invalid_audience`` / ``invalid_issuer`` / ``missing_sub`` /
+    ``token_expired`` / ``signature_verification_failed`` /
+    ``token_not_yet_valid``) so an operator chasing the 401 can name
+    the failed check; the expected-vs-received diagnostic values land
+    in the structlog event only — never in the response body. The
+    error body is intentionally terse (``{"detail": "<reason>"}``)
     and never echoes claim values; that prevents an unauthenticated
     caller from probing the backplane for token shape.
 

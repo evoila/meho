@@ -270,6 +270,8 @@ def test_invalid_jwt_with_healthy_vault_returns_401(
     Vault is fully wired (login would succeed, secret would read) but
     the dependency layer must reject the request before the route body
     runs. Asserts the no-Vault-call invariant via the fake's call log.
+    Detail code is ``token_expired`` per G0.9.1-T12 (was ``invalid_token``
+    in v0.3.1).
     """
     key = make_rsa_keypair("kid-A")
     expired_token = mint_token(key, expires_in=-600)
@@ -283,7 +285,7 @@ def test_invalid_jwt_with_healthy_vault_returns_401(
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "token_expired"}
     # The route never reached its body — Vault must not have seen any
     # ``jwt_login`` call.
     assert fake_vault.auth.jwt.login_calls == []
@@ -294,7 +296,11 @@ def test_wrong_audience_with_healthy_vault_returns_401(
     http_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A token for a different OIDC client is rejected before Vault runs."""
+    """A token for a different OIDC client is rejected before Vault runs.
+
+    Detail code is ``invalid_audience`` per G0.9.1-T12 (was
+    ``invalid_token`` in v0.3.1).
+    """
     key = make_rsa_keypair("kid-A")
     token = mint_token(key, audience="some-other-client")
     fake_vault = _install_fake_vault(monkeypatch)
@@ -307,7 +313,7 @@ def test_wrong_audience_with_healthy_vault_returns_401(
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "invalid_audience"}
     assert fake_vault.auth.jwt.login_calls == []
 
 
@@ -541,7 +547,9 @@ def test_invalid_jwt_with_dead_vault_returns_401_auth_runs_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both broken → 401 wins. Auth is the outermost gate; Vault is never
-    even attempted; the response is the auth failure verbatim."""
+    even attempted; the response is the auth failure verbatim. Detail
+    code is ``token_expired`` per G0.9.1-T12 (was ``invalid_token`` in
+    v0.3.1)."""
     key = make_rsa_keypair("kid-A")
     expired_token = mint_token(key, expires_in=-3600)
     fake_vault = _install_fake_vault(
@@ -557,7 +565,7 @@ def test_invalid_jwt_with_dead_vault_returns_401_auth_runs_first(
         )
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "invalid_token"}
+    assert response.json() == {"detail": "token_expired"}
     assert fake_vault.auth.jwt.login_calls == []
 
 

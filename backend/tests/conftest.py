@@ -678,3 +678,119 @@ def mock_discovery_and_jwks(
         return_value=httpx.Response(200, json=jwks),
     )
     return discovery_route, jwks_route
+
+
+# ---------------------------------------------------------------------------
+# DIAGNOSTIC INSTRUMENTATION — branch diag/ci-lifespan-timing only (DO NOT MERGE)
+#
+# Env-gated, test-only attribution for the #771 CI wall-time investigation.
+# Both the hook and the autouse fixture are pure no-ops unless their env var
+# is set, so the suite behaves identically to main when the vars are absent.
+#
+#   MEHO_LIFESPAN_TIMING=<path>      per-test timing of each FastAPI lifespan
+#       step, captured by monkeypatching meho_backplane.main's module-level
+#       callables. One JSON line per call, written to "<path>.<worker>".
+#
+#   MEHO_FIXTURE_TIMING_FILE=<path>  per-fixture setup duration for every
+#       fixture in the suite (outer attribution: which fixture's setup the
+#       --durations report is blaming on test_mcp_* setup). Accumulated in
+#       process, flushed once per worker at session finish to "<path>.<worker>".
+# ---------------------------------------------------------------------------
+
+_DIAG_FIXTURE_TIMINGS: list[tuple[float, str, str]] = []
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    """Record per-fixture setup duration when MEHO_FIXTURE_TIMING_FILE is set."""
+    if not os.environ.get("MEHO_FIXTURE_TIMING_FILE"):
+        yield
+        return
+    start = time.perf_counter()
+    yield
+    _DIAG_FIXTURE_TIMINGS.append(
+        (round(time.perf_counter() - start, 3), fixturedef.argname, str(fixturedef.scope)),
+    )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Flush accumulated fixture-setup timings once per worker."""
+    import json
+
+    path = os.environ.get("MEHO_FIXTURE_TIMING_FILE")
+    if not path or not _DIAG_FIXTURE_TIMINGS:
+        return
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    with open(f"{path}.{worker}", "w") as fh:
+        for dur, name, scope in _DIAG_FIXTURE_TIMINGS:
+            fh.write(json.dumps({"dur": dur, "fix": name, "scope": scope}) + "\n")
+
+
+@pytest.fixture(autouse=True)
+def _diag_lifespan_step_timing(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Time each FastAPI lifespan step per test when MEHO_LIFESPAN_TIMING is set.
+
+    Wraps the module-level callables the lifespan invokes (resolved from
+    meho_backplane.main's globals at call time) with timing wrappers that
+    append one record per call. Restored on teardown. Test-only; touches no
+    production code.
+    """
+    import asyncio
+    import json
+
+    path = os.environ.get("MEHO_LIFESPAN_TIMING")
+    if not path:
+        yield
+        return
+
+    import meho_backplane.main as main_mod
+
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    node = request.node.nodeid
+    out = f"{path}.{worker}"
+
+    def _record(step: str, dur: float) -> None:
+        with open(out, "a") as fh:
+            fh.write(json.dumps({"step": step, "dur": round(dur, 3), "node": node}) + "\n")
+
+    def _wrap_sync(orig: Any, name: str) -> Any:
+        def w(*a: Any, **k: Any) -> Any:
+            t = time.perf_counter()
+            try:
+                return orig(*a, **k)
+            finally:
+                _record(name, time.perf_counter() - t)
+
+        return w
+
+    def _wrap_async(orig: Any, name: str) -> Any:
+        async def w(*a: Any, **k: Any) -> Any:
+            t = time.perf_counter()
+            try:
+                return await orig(*a, **k)
+            finally:
+                _record(name, time.perf_counter() - t)
+
+        return w
+
+    names = [
+        "get_engine",
+        "get_broadcast_client",
+        "_eager_import_connectors",
+        "run_typed_op_registrars",
+        "eager_import_mcp_modules",
+        "_preload_embedding_model",
+        "start_topology_refresh_scheduler",
+    ]
+    originals: dict[str, Any] = {}
+    for name in names:
+        orig = getattr(main_mod, name)
+        originals[name] = orig
+        is_async = asyncio.iscoroutinefunction(orig)
+        wrapper = _wrap_async(orig, name) if is_async else _wrap_sync(orig, name)
+        setattr(main_mod, name, wrapper)
+    try:
+        yield
+    finally:
+        for name, orig in originals.items():
+            setattr(main_mod, name, orig)

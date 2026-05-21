@@ -308,7 +308,15 @@ jobs:
             COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration \
               --cov=meho_backplane --cov-report=xml tests/
           else
-            uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration tests/
+            # DIAGNOSTIC (#771, branch diag/ci-lifespan-timing, DO NOT MERGE):
+            # env-gated per-lifespan-step + per-fixture setup attribution, then
+            # aggregate. --maxfail dropped so the full suite yields complete
+            # timing; || true so the aggregator always runs.
+            export MEHO_LIFESPAN_TIMING=/tmp/lifespan
+            export MEHO_FIXTURE_TIMING_FILE=/tmp/fixt
+            uv run pytest -n 6 --dist loadscope --durations=30 --ignore=tests/integration tests/ || true
+            echo "######################## DIAGNOSTIC TIMING ########################"
+            uv run python tests/_diag_aggregate.py
           fi
 
       - name: Upload Python coverage artifact

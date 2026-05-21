@@ -28,7 +28,12 @@ from meho_backplane.memory.expiry import (
     start_memory_expiry_sweeper,
     stop_memory_expiry_sweeper,
 )
-from meho_backplane.memory.rbac import MemoryRbacResolver, PermissionDeniedError
+from meho_backplane.memory.rbac import (
+    InvalidPromotionStepError,
+    MemoryRbacResolver,
+    PermissionDeniedError,
+    assert_can_promote,
+)
 from meho_backplane.memory.schemas import (
     MemoryEntry,
     MemoryEntryCreate,
@@ -38,6 +43,7 @@ from meho_backplane.memory.schemas import (
 from meho_backplane.memory.service import MemoryService
 
 __all__ = [
+    "InvalidPromotionStepError",
     "MemoryEntry",
     "MemoryEntryCreate",
     "MemoryEntrySearchHit",
@@ -45,6 +51,7 @@ __all__ = [
     "MemoryScope",
     "MemoryService",
     "PermissionDeniedError",
+    "assert_can_promote",
     "start_memory_expiry_sweeper",
     "stop_memory_expiry_sweeper",
     "write_internal_audit_row",

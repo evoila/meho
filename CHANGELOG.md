@@ -111,6 +111,27 @@ connector-related release-notes line.
 
 ### Added
 
+- **`meho admin keycloak bootstrap-clients` CLI verb** (G0.9.1-T11
+  #791). Idempotently provisions the realm-side prerequisites the
+  2026-05-21 RDC dogfood proved are the single highest-friction
+  install step: the public `meho-cli` device-code client + the
+  public `meho-mcp-client` browser-flow client (PKCE), **5 protocol
+  mappers on each** (`audience-meho-backplane`, `meho-mcp-audience`,
+  `tenant-id`, `tenant-role`, `groups-claim`), **4 default client
+  scopes on each** (`basic`, `roles`, `web-origins`, `acr` — the
+  `basic`/`sub` Keycloak 25+ gotcha is the load-bearing one), plus
+  the `meho-admins` group and an admin user with a password. Encodes
+  the 5-step recipe from
+  [`deploy/values-examples/README.md` § Auth onramp recipe](deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)
+  so a fresh `helm install`-shaped deploy gets a working
+  authenticated CLI + MCP onramp in one verb instead of ~2.5 hours
+  of console clicking. Re-runs are idempotent (`[skip]` /
+  `[updated]` per resource; never duplicates). Confidential clients
+  (`meho-backplane`) and silent-password-rotation on user re-creates
+  are explicitly refused. Passwords flow via env vars
+  (`KEYCLOAK_ADMIN_PASSWORD`, `KEYCLOAK_ADMIN_USER_PASSWORD`) or
+  stdin — never argv. Stdlib-only HTTP client; no Keycloak Go SDK
+  added to the dep graph.
 - **`meho.topology.create_node` MCP verb** (tenant_admin, `op_class="write"`)
   for manual `graph_node` seeding — closes the empty-tenant bootstrap
   gap surfaced by the 2026-05-21 RDC second-cycle dogfood (Signal #14).

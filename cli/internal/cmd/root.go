@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/cmd/admin"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
@@ -268,6 +269,19 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `migrate` parent.
 	root.AddCommand(migrate.NewRootCmd())
+
+	// G0.9.1-T11 (#791) -- install-time provisioning verbs for the
+	// MEHO deployer onramp. The first verb (`admin keycloak
+	// bootstrap-clients`) idempotently creates the public CLI
+	// device-code + MCP browser-flow clients, their 5 protocol
+	// mappers + 4 default client scopes, the meho-admins group, and
+	// an admin user against a Keycloak realm — encoding the 5-step
+	// recipe documented in deploy/values-examples/README.md.
+	// Confidential-client provisioning is explicitly refused; this
+	// verb is for PUBLIC clients only. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `admin` parent.
+	root.AddCommand(admin.NewRootCmd())
 
 	// Server-driven subcommand discovery (Goal #11 §5). Fetched
 	// best-effort on startup so the operator's `meho --help` lists

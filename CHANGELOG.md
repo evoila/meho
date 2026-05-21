@@ -90,6 +90,174 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-21
+
+**v0.3.0 dogfood-hardening patch.** No new headline features — this
+release closes the eight signals + two ingest sharp-edges surfaced by
+the 2026-05-20 RDC operator-team in-lab dogfood against the freshly
+tagged v0.3.0. Initiative [G0.9 #737](https://github.com/evoila/meho/issues/737)
+parents the ten Tasks; this section follows the three-state release-
+notes convention codified by T7 (per
+[`docs/codebase/connector-release-readiness.md`](docs/codebase/connector-release-readiness.md)).
+
+> **What v0.3.1 ships:** correctness, observability, and release-
+> notes-vocabulary tightenings on top of v0.3.0's dispatch + catalog
+> surface. Every typed connector's `operation_count` now matches its
+> `group_count` for the universe of rows actually advertised;
+> `register_connector_v2`-only connectors (harbor, sddc-manager) are
+> visible in `GET /api/v1/connectors` instead of invisible-until-ops-
+> register; uvicorn honours `X-Forwarded-Proto` from a trusted
+> Ingress so the trailing-slash 307 redirects survive TLS
+> termination; every public v1 request schema is `extra="forbid"`
+> so v0.2.1 clients sending old field names get a fail-loud 422
+> instead of silent-drop; per-group `when_to_use` strings are
+> curated and the kwarg is now required so future connectors can't
+> regress to template literals; the spec-ingestion pipeline
+> validates the operator-supplied `version` label against both
+> `spec.info.version` AND the registered connector classes'
+> `supported_version_range` at ingest time, surfacing
+> orphaned-ops-at-ingest instead of `NoMatchingConnector` at
+> first dispatch.
+>
+> **What v0.3.1 does NOT change:** the `NotImplementedError` stubs
+> for the per-target-credential connectors' loaders
+> (`load_kubeconfig_from_vault` / `load_session_credentials_from_vault`)
+> remain in tree, tracked under the open
+> [Goal #214 (Connector parity)](https://github.com/evoila/meho/issues/214).
+> Adopters running `operations/call k8s.namespace.list target=...`
+> against a real Vault-backed target still receive
+> `NotImplementedError` — see the v0.3.0 callout above for the full
+> three-state rubric. v0.3.1 makes the surrounding release-notes
+> vocabulary honest (Goal #214 body reframed by T6 to spell out the
+> dual-layer model — composites + generic-ingested raw REST — so
+> adopters can plan layer-2 ingest as their long-tail coverage
+> path).
+
+### Breaking changes
+
+- **`POST /api/v1/retrieve`, `POST /api/v1/operations/call`, and
+  every other public v1 request body** now reject unknown fields
+  with HTTP 422 `extra_forbidden`
+  ([#729](https://github.com/evoila/meho/issues/729) /
+  [#746](https://github.com/evoila/meho/pull/746)). v0.2.1 clients
+  that still send the pre-v0.3.0 names (`q` / `top_k` on
+  `/retrieve`, bare-string `target` on `/operations/call`) used to
+  silently fall back to defaults or empty; they now fail-loud. This
+  is the load-bearing half of the v0.3.0 schema renames the
+  [0.3.0] section's `Breaking changes` already enumerates —
+  migrations there are unchanged; v0.3.1 just removes the silent-
+  drop escape hatch.
+
+  Migration: send the canonical field names already documented in
+  the [0.3.0] breaking-changes recipes. If you maintain a v0.2.1-
+  compatible client, gate your encoder on the deployed backplane
+  version and switch on the v0.3.0 schema for any
+  v0.3.0-or-later target.
+
+- **`register_typed_operation` + `register_composite_operation`
+  signatures** now require `when_to_use` as a keyword-only
+  argument ([#731](https://github.com/evoila/meho/issues/731) /
+  [#757](https://github.com/evoila/meho/pull/757)). The auto-
+  derived `"Operations grouped under {group_key!r} for {product}
+  {impl_id}."` default is removed; out-of-tree connector authors
+  must supply an explicit agent-actionable string per group.
+  Empty / whitespace-only strings are normalised to `None` when
+  `group_key is None`. Internal API — affects any third-party
+  connector registering ops against MEHO's typed-op registry.
+
+  Migration: pass `when_to_use="<one-line agent-actionable
+  selection signal>"` to every `register_typed_operation(...)` /
+  `register_composite_operation(...)` call. See the curated
+  strings the v0.3.1 in-tree connectors ship for shape examples
+  ([#732 / #756](https://github.com/evoila/meho/pull/756)).
+
+### Added
+
+- **Curated per-group `when_to_use` strings** for every shipped
+  typed connector — kubernetes (7 groups), vault (3 groups), bind9
+  (4 groups), vmware-rest composites (7 groups)
+  ([#732](https://github.com/evoila/meho/issues/732) /
+  [#756](https://github.com/evoila/meho/pull/756)). Replaces the
+  v0.3.0 template-literal placeholders so an LLM consuming the
+  catalog gets a real selection signal between sibling groups
+  (`vault.kv` vs `vault.sys` vs `vault.auth`, etc.).
+- **Ingest-time `spec.info.version` ↔ operator-label validation**
+  ([#740](https://github.com/evoila/meho/issues/740) /
+  [#762](https://github.com/evoila/meho/pull/762)). `POST
+  /api/v1/connectors/ingest` now classifies the operator-supplied
+  `version` against each spec's `info.version` as `exact` /
+  `compatible` / `incompatible`. Incompatible labels (e.g. ingesting
+  vCenter-9 spec under `version="8.0"`) return 422 with both
+  versions in the detail; compatible-drift emits a structured
+  `connector_ingest_version_drift` event and proceeds.
+- **Ingest-time class-coverage pre-flight**
+  ([#741](https://github.com/evoila/meho/issues/741) /
+  [#763](https://github.com/evoila/meho/pull/763)). `POST
+  /api/v1/connectors/ingest` now checks that the
+  `(product, version, impl_id)` triple is in at least one registered
+  connector class's `supported_version_range` BEFORE the
+  `endpoint_descriptor` row creation. Outside-of-range with a class
+  present → 422 with the class's advertised range; no class
+  registered for `(product, impl_id)` yet → warn-but-proceed via a
+  `connector_ingest_orphaned_class` structured event (the v0.4-
+  staging path where ops land before the class exists).
+- **Connector release-notes convention** codified in CHANGELOG.md
+  + cross-referenced from
+  [`docs/codebase/connector-release-readiness.md`](docs/codebase/connector-release-readiness.md)
+  ([#735](https://github.com/evoila/meho/issues/735) /
+  [#759](https://github.com/evoila/meho/pull/759)). Three states —
+  *dispatch + catalog landed*, *loader wired (single auth model)*,
+  *ops curated for production* — every connector release line now
+  says which state the release ships, not the next state up.
+
+### Changed
+
+- **`/api/v1/connectors` lists `register_connector_v2`-only
+  entries** with `group_count: 0, operation_count: 0` instead of
+  hiding them until ops register
+  ([#733](https://github.com/evoila/meho/issues/733) /
+  [#758](https://github.com/evoila/meho/pull/758)). Operators see
+  "Harbor / sddc-manager registered, no ops yet" as a first-class
+  list row, matching the natural expectation that *connector
+  registered ⇒ visible in list*.
+- **Goal #214 (Connector parity) body reframed** to spell out the
+  dual-layer architecture — Layer 1 (hand-coded composites) +
+  Layer 2 (generic-ingested raw REST via the G0.7 ingest pipeline)
+  — so adopters can plan layer-2 ingest as the long-tail coverage
+  path instead of waiting for a 1:1 binding that was never the
+  plan ([#734](https://github.com/evoila/meho/issues/734) /
+  [#760](https://github.com/evoila/meho/pull/760)). Companion
+  artifact: `docs/cross-repo/goal-214-reframe-2026-05-20.md`.
+
+### Fixed
+
+- **`/api/v1/connectors` `operation_count` rollup now counts
+  typed + composite + ingested rows uniformly**
+  ([#728](https://github.com/evoila/meho/issues/728) /
+  [#747](https://github.com/evoila/meho/pull/747)). v0.3.0
+  rolled up `operation_count: 0` for every typed connector
+  (`bind9-ssh-9.x`, `k8s-1.x`, `vault-1.x`, `vmware-rest-9.0`)
+  because `_operation_count_by_connector` carried a stale
+  `source_kind == "ingested"` filter while the paired groups
+  aggregator counted all source-kinds. Operators (and LLMs)
+  reading the list could conclude the catalog was empty for every
+  typed connector and move on. The two paired queries now count
+  the same universe of rows.
+- **uvicorn `--proxy-headers` + chart `FORWARDED_ALLOW_IPS`**
+  ([#730](https://github.com/evoila/meho/issues/730) /
+  [#748](https://github.com/evoila/meho/pull/748)). The backplane
+  behind a TLS-terminating Ingress used to emit trailing-slash
+  307 `Location` headers with a bare `http://` scheme — security-
+  adjacent (an active interceptor could MITM the second hop). The
+  Dockerfile CMD adds `--proxy-headers`; the chart exposes
+  `config.forwardedAllowIps` (rendered into the
+  `FORWARDED_ALLOW_IPS` env var uvicorn reads natively). Default
+  `127.0.0.1` matches uvicorn's secure default and fails-closed
+  in-cluster — operators MUST override with their Ingress
+  controller's pod CIDR (e.g. `10.42.0.0/16` for RKE2 default)
+  per the new `docs/cross-repo/reverse-proxy-contract.md`
+  runbook.
+
 ## [0.3.0] - 2026-05-20
 
 **MVP2 — kubernetes + vault + bind9 + topology.** Five Initiatives

@@ -7,9 +7,10 @@ dispatches VCF Fleet REST operations under the
 `(product="vcf-fleet", version="9.0", impl_id="fleet-rest")` registry triple.
 G3.6-T7 (#831) shipped the skeleton — HTTP Basic auth against the LCM-local
 user store, the wrapper-verified fingerprint/probe call, and the G0.6
-dispatch shim. G3.6-T8 (#835) will add spec ingestion + operator-review
-curation; G3.6-T9 (#839) will ship the CLI verb tree + recorded-fixture
-E2E.
+dispatch shim. G3.6-T8 (#835) added the operator-review curation surface —
+`FLEET_CORE_GROUPS` + `FLEET_CORE_OPS` + `apply_fleet_core_curation` — the
+v0.5 read core (8 ops across 6 groups). G3.6-T9 (#839) will ship the CLI
+verb tree + recorded-fixture E2E.
 
 Source: `backend/src/meho_backplane/connectors/vcf_fleet/`.
 
@@ -139,6 +140,36 @@ dispatches them through `meho_backplane.operations.dispatch`. The
 connector's `execute()` is the G0.6 ABC-compatibility shim that builds a
 synthetic `Operator` and forwards to the dispatcher; post-G0.6 callers
 construct a real `Operator` and invoke `dispatch` directly.
+
+### Curated read-core (G3.6-T8 #835)
+
+`core_ops.py` carries the operator-review metadata for the v0.5 read core:
+
+- **`FLEET_CORE_GROUPS`** — 6 `FleetCoreGroup` entries: `fleet-about`,
+  `fleet-datacenter`, `fleet-vcenter`, `fleet-environment`, `fleet-product`,
+  `fleet-request`. Each carries the operator-reviewed `name` +
+  `when_to_use` blurb the agent reads through `list_operation_groups`.
+- **`FLEET_CORE_OPS`** — 8 `FleetCoreOp` entries (all `GET:` — the v0.5
+  core is read-only): `fleet.about` (`/lcm/lcops/api/v2/about` — see
+  known-issue below), `fleet.datacenter.list`, `fleet.vcenter.list`,
+  `fleet.environment.list`, `fleet.environment.get`, `fleet.product.list`,
+  `fleet.request.list`, `fleet.request.get`. Each carries a
+  `when_to_call` / `output_shape` / `next_step` `llm_instructions` blob
+  matching the bind9 / NSX / Harbor convention.
+- **`FLEET_PATH_RULES` + `classify_fleet_op`** — deterministic path-prefix
+  classifier feeding the curated `group_key` per op_id. Rule ordering is
+  load-bearing (vcenters before datacenters; products before environments;
+  request paths under `/lcm/request/` independent of LCM-ops paths under
+  `/lcm/lcops/`).
+- **`apply_fleet_core_curation`** — operator-review-time substrate call
+  that runs against an already-ingested connector: disables non-core ops
+  in curated groups via the audit-log-driven operator-override exclusion,
+  enables each curated group, and lands the per-op `llm_instructions`
+  blob. Mirrors `apply_harbor_core_curation` / `apply_nsx_core_curation`
+  verbatim.
+
+The runbook for end-to-end ingest + curate + verify is
+[`docs/cross-repo/g36-fleet-canary.md`](../cross-repo/g36-fleet-canary.md).
 
 ## Dependencies
 

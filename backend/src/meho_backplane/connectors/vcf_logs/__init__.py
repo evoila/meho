@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""meho_backplane.connectors.vcf_logs -- VcfLogsConnector package.
+
+Importing this package registers :class:`VcfLogsConnector` against the
+v2 connector registry under
+``(product="vcf-logs", version="9.0", impl_id="vrli-rest")``. The
+chassis lifespan calls
+:func:`~meho_backplane.connectors.registry._eager_import_connectors`
+which walks every ``connectors/<product>/`` subpackage at startup, so
+the registration lands before any dispatch can occur.
+
+The v1 :func:`~meho_backplane.connectors.registry.register_connector`
+entry point is deliberately **not** called. The connector advertises an
+explicit ``(version="9.0", impl_id="vrli-rest")`` key; the v1 entry
+would land as ``("vcf-logs", "", "")`` and confuse
+:func:`~meho_backplane.connectors.resolver.resolve_connector`'s
+tie-break ladder. Same pattern :mod:`meho_backplane.connectors.nsx` /
+:mod:`meho_backplane.connectors.vcf_automation` established.
+
+Operations for this connector arrive in #834 via G0.7 spec ingestion
+against ``vcf-logs-9.0/openapi.yaml``. This Task ships only the
+skeleton.
+"""
+
+from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
+from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.vcf_logs.connector import VcfLogsConnector
+from meho_backplane.connectors.vcf_logs.session import (
+    VcfCredentialsLoader,
+    VcfLogsTargetLike,
+    load_credentials_from_vault,
+)
+
+register_connector_v2(
+    product="vcf-logs",
+    version="9.0",
+    impl_id="vrli-rest",
+    cls=VcfLogsConnector,
+)
+
+__all__ = [
+    "SessionLoginError",
+    "VcfCredentialsLoader",
+    "VcfLogsConnector",
+    "VcfLogsTargetLike",
+    "load_credentials_from_vault",
+]

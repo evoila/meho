@@ -360,3 +360,25 @@ def test_vcf_logs_connector_registered_under_v2_triple() -> None:
     key = ("vcf-logs", "9.0", "vrli-rest")
     assert key in snapshot
     assert snapshot[key] is VcfLogsConnector
+
+
+def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
+    """VcfFleetConnector package registers under (vcf-fleet, 9.0, fleet-rest).
+
+    The autouse _clean_registry fixture clears the registry before this test,
+    so we manually re-register using the class attributes to assert the triple
+    resolves correctly. Same pattern as the SDDC Manager / Harbor /
+    VCF Automation tests above.
+    """
+    from meho_backplane.connectors.vcf_fleet import VcfFleetConnector
+
+    register_connector_v2(
+        product=VcfFleetConnector.product,
+        version=VcfFleetConnector.version,
+        impl_id=VcfFleetConnector.impl_id,
+        cls=VcfFleetConnector,
+    )
+    snapshot = all_connectors_v2()
+    key = ("vcf-fleet", "9.0", "fleet-rest")
+    assert key in snapshot
+    assert snapshot[key] is VcfFleetConnector

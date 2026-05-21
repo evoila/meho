@@ -357,13 +357,55 @@ Class-side registrations from the v2 connector registry that have
 no DB-side state yet (T5 #733 — "State 0.5" connectors registered
 via `register_connector_v2` but without any rows in
 `operation_group` / `endpoint_descriptor`) are unioned into the
-response with `group_count: 0, operation_count: 0` so operators
-see `connector registered ⇒ visible in list`. Class-only rows are
-always built-in (`tenant_id IS NULL`); under an explicit `status`
-narrowing they're filtered out (no groups ⇒ nothing to review).
-v1-compat shim entries (`(product, "", "")` rows the v1
-`register_connector` writes into the v2 table) are excluded — they
-double-list every v1 connector and aren't separately registered.
+response with `group_count: 0, operation_count: 0` and
+`state: "registered"` so operators see `connector registered ⇒
+visible in list` but the agent knows the dispatcher won't resolve
+calls against them yet. Class-only rows are always built-in
+(`tenant_id IS NULL`); under an explicit `status` narrowing they're
+filtered out (no groups ⇒ nothing to review). v1-compat shim
+entries (`(product, "", "")` rows the v1 `register_connector`
+writes into the v2 table) are excluded — they double-list every v1
+connector and aren't separately registered.
+
+#### Listing-integrity contract (G0.9.1-T1 / #773)
+
+Every `connector_id` the function emits is guaranteed to round-trip
+through the dispatcher's resolve path: for every row with `state:
+"ingested"`,
+`connector_exists(*parse_connector_id(connector_id))` returns
+`True`; for rows with `state: "registered"`, `connector_exists`
+returns `False` honestly (no descriptor rows yet) and the agent
+reads `state` to know it cannot dispatch. Rows whose emitted
+`connector_id` would not round-trip at all are dropped before the
+response is built and a structured
+`dropped_unresolvable_connector_id` log line is emitted per drop —
+two shapes:
+
+* **Stale-rename DB rows.** `endpoint_descriptor` / `operation_group`
+  rows survived an `impl_id` rename (G3.2 #320's
+  `kubernetes-asyncio → k8s` rename) but no migration cleaned them
+  up. `build_connector_id` emits e.g. `"kubernetes-asyncio-1.x"`,
+  `parse_connector_id` derives `product="kubernetes"`, and
+  `connector_exists` cannot find the row because the rows now live
+  under `product="k8s"`. The listing drops the stale row and the
+  log line names both the row's natural-key triple and the parsed
+  triple so the operator can clean up with a single SQL `DELETE`.
+* **v2-registry product disagreement.** A class-side-only entry
+  registered with `product != impl_id.split("-")[0]` whose
+  `connector_id` parses to a different `(version, impl_id)` than
+  the registry advertises is dropped (impossible to recover from
+  inside the listing). The SDDC case — registry
+  `product="sddc-manager"`, parser derives `product="sddc"` — is
+  *not* dropped because `(version, impl_id)` survives the round-
+  trip and `SDDC_PRODUCT="sddc"` already writes DB rows the
+  dispatcher reaches via the parsed product; the listing emits
+  `product="sddc"` (parser-derived) so the wire shape is
+  consistent with what the dispatcher will derive.
+
+Regression test:
+`tests/test_api_v1_connectors_ingest.py::test_list_every_connector_id_round_trips_through_dispatcher`
+asserts the contract over a seeded DB that includes a stale-rename
+row and a class-side-only opless connector.
 
 ### API request / response models (`ingest/api_schemas.py`)
 
@@ -377,7 +419,10 @@ consume so the wire contract is defined once:
 * `ConnectorListItem` / `ConnectorListResponse` — one row per
   visible connector + the wrapper for the list endpoint. The wrapper
   keeps the JSON shape stable when future paging / cursor fields
-  land.
+  land. `ConnectorListItem.state` (G0.9.1-T1 / #773) is `"ingested"`
+  for DB-backed rows the dispatcher can resolve and `"registered"`
+  for class-side-only rows the dispatcher cannot resolve yet — see
+  the listing-integrity contract section above.
 * `EditGroupBody` / `EditOpBody` — PATCH bodies for the per-group
   and per-op edit verbs. Pydantic enforces the bounded enum for
   `safety_level` and the empty-body rejection lands as a service-

@@ -63,6 +63,7 @@ from pydantic import BaseModel, ConfigDict, Field
 __all__ = [
     "ConnectorListItem",
     "ConnectorListResponse",
+    "ConnectorState",
     "ConnectorStatusFilter",
     "EditGroupBody",
     "EditOpBody",
@@ -204,6 +205,33 @@ class IngestResponse(BaseModel):
     grouping: GroupingResultModel | None = None
 
 
+#: Lifecycle state of a row in the ``GET /api/v1/connectors`` response.
+#:
+#: G0.9.1-T1 (#773). Splits the two operator-meaningful states the listing
+#: surfaces:
+#:
+#: * ``"ingested"`` — the connector has at least one row in
+#:   ``operation_group`` / ``endpoint_descriptor`` and the dispatcher can
+#:   resolve it via :func:`~meho_backplane.operations._lookup.connector_exists`.
+#:   ``call_operation`` / ``list_operation_groups`` / ``search_operations``
+#:   will return data (or a documented empty) for this ``connector_id``.
+#: * ``"registered"`` — the connector class is registered in the v2 registry
+#:   (via :func:`~meho_backplane.connectors.registry.register_connector_v2`)
+#:   but no descriptor / group rows exist yet. The dispatcher cannot
+#:   resolve it; ``list_operation_groups`` / ``search_operations`` /
+#:   ``call_operation`` return ``UnknownConnectorError`` (REST → 404).
+#:   The state is *visible-but-not-dispatchable*: operators see the
+#:   connector exists, but know not to call it until the ingest /
+#:   typed-op registration lands rows under it.
+#:
+#: Rows whose ``connector_id`` round-trips through
+#: :func:`parse_connector_id` to a triple the dispatcher cannot resolve
+#: (stale-rename DB rows, class-side-only entries whose v2-registry
+#: product disagrees with the parser's derived product) are dropped
+#: before the listing returns — they have no operator-meaningful state.
+ConnectorState = Literal["ingested", "registered"]
+
+
 class ConnectorListItem(BaseModel):
     """One row in the ``GET /api/v1/connectors`` response.
 
@@ -220,6 +248,20 @@ class ConnectorListItem(BaseModel):
     ``operation_count`` is the sum of operations across all groups
     in scope. Useful for the CLI's
     ``meho connector list --status staged`` summary view.
+
+    ``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows
+    (``"ingested"`` — DB-backed, resolves through the dispatcher) from
+    *registered-but-empty* rows (``"registered"`` — v2-registry entries
+    without descriptor rows yet). Rows that wouldn't round-trip
+    through the resolver at all (stale-impl_id DB rows, v2 entries
+    whose registry product disagrees with the parser's derived
+    product) are filtered out before the response is built;
+    ``connector_id``s the listing emits are guaranteed to resolve
+    through :func:`~meho_backplane.operations._lookup.connector_exists`
+    when ``state == "ingested"``, and explicitly labelled
+    not-yet-dispatchable when ``state == "registered"``. Defaults to
+    ``"ingested"`` so existing call sites (tests, MCP fakes)
+    construct rows without breakage.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -234,6 +276,7 @@ class ConnectorListItem(BaseModel):
     enabled_group_count: int
     disabled_group_count: int
     operation_count: int
+    state: ConnectorState = "ingested"
 
 
 class ConnectorListResponse(BaseModel):

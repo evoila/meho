@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reconcile `GET /api/v1/connectors` with the dispatcher resolve path
+  so no listed `connector_id` is unresolvable. Drops stale-rename DB
+  rows (e.g. pre-`k8s` `kubernetes-asyncio-1.x` survivors from G3.2
+  #320) whose emitted `connector_id` cannot round-trip through
+  `parse_connector_id` + `connector_exists`. Adds `ConnectorListItem.state`
+  (`"ingested"` for DB-backed dispatchable rows, `"registered"` for
+  class-side-only opless entries) so an agent / operator browsing the
+  catalog distinguishes a connector the dispatcher will resolve from one
+  that's registered but not yet dispatchable. De-circularises the
+  `UnknownConnectorError` message to no longer point at the listing as
+  the remediation for a listed-but-unresolvable id. Closes Signal #6
+  from the 2026-05-21 RDC v0.3.1 dogfood
+  ([#773](https://github.com/evoila/meho/issues/773)).
+
 ## [0.3.1] - 2026-05-21
 
 **v0.3.0 dogfood-hardening patch.** No new headline features — this

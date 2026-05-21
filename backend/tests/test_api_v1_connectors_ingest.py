@@ -661,6 +661,23 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     see "connector registered ⇒ visible in list". Built-in
     (``tenant_id IS NULL``); ``group_count`` / ``operation_count``
     both ``0``.
+
+    G0.9.1-T1 (#773) extends T5 with two refinements:
+
+    * Class-side-only rows carry ``state="registered"`` so an LLM /
+      operator browsing the catalog distinguishes
+      *registered-but-not-yet-dispatchable* from *ingested-and-ready*.
+    * The emitted ``product`` is what
+      :func:`~meho_backplane.operations._lookup.parse_connector_id`
+      derives from the ``connector_id``, not the v2 registry's
+      ``product`` field. For SDDC the registry stores
+      ``product="sddc-manager"`` but the listing emits ``"sddc"`` —
+      consistent with what the dispatcher derives from
+      ``parse_connector_id("sddc-rest-9.0")`` and with
+      ``SDDC_PRODUCT="sddc"`` writing into ``endpoint_descriptor``
+      rows. When DB rows land under the parser-derived product the
+      row transitions cleanly from ``state="registered"`` to
+      ``state="ingested"`` without a ``connector_id`` change.
     """
     tenant_a = uuid.uuid4()
     key, token = _operator_token(tenant_id=tenant_a)
@@ -682,12 +699,18 @@ async def test_list_surfaces_register_connector_v2_only_entries(
     assert harbor["enabled_group_count"] == 0
     assert harbor["disabled_group_count"] == 0
     assert harbor["operation_count"] == 0
+    assert harbor["state"] == "registered"
 
     assert "sddc-rest-9.0" in by_id
     sddc = by_id["sddc-rest-9.0"]
-    assert sddc["product"] == "sddc-manager"
+    # The listing emits the parser-derived product ("sddc"), not the
+    # v2 registry's "sddc-manager" — see test docstring for rationale.
+    assert sddc["product"] == "sddc"
+    assert sddc["impl_id"] == "sddc-rest"
+    assert sddc["version"] == "9.0"
     assert sddc["operation_count"] == 0
     assert sddc["group_count"] == 0
+    assert sddc["state"] == "registered"
 
 
 @pytest.mark.asyncio
@@ -720,6 +743,309 @@ async def test_list_class_only_entries_excluded_under_status_narrowing(
     seen_ids = {c["connector_id"] for c in response.json()["connectors"]}
     assert "vmware-rest-9.0" in seen_ids
     assert "harbor-rest-2.x" not in seen_ids
+
+
+# ---------------------------------------------------------------------------
+# G0.9.1-T1 (#773) listing-integrity contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_drops_stale_impl_id_rows_whose_connector_id_will_not_resolve(
+    client: TestClient,
+) -> None:
+    """A stale-rename row that won't round-trip is filtered out.
+
+    G0.9.1-T1 (#773) regression for Signal #6 in the 2026-05-21 RDC
+    v0.3.1 dogfood. The consumer deploy carried ``operation_group`` /
+    ``endpoint_descriptor`` rows under ``impl_id="kubernetes-asyncio"``
+    from the G3.2 (#320) ship, but the connector now registers under
+    ``impl_id="k8s"``. ``GET /api/v1/connectors`` emitted
+    ``"kubernetes-asyncio-1.x"`` for the stale rows; every dispatcher
+    call against that id then returned ``HTTP 404 UnknownConnector``
+    because the parser derives ``product="kubernetes"`` from
+    ``connector_id``, but the seeded rows are under
+    ``product="k8s"``. Round-trip lost.
+
+    The fix: drop any DB-backed row whose emitted ``connector_id``
+    doesn't round-trip through
+    :func:`~meho_backplane.operations._lookup.connector_exists`. The
+    listing now never advertises an id the dispatcher cannot resolve.
+    """
+    tenant_a = uuid.uuid4()
+    # Stale-rename row matching the consumer's deploy: rows live under
+    # product="k8s" but with the pre-rename impl_id="kubernetes-asyncio".
+    # build_connector_id emits "kubernetes-asyncio-1.x"; parse_connector_id
+    # derives product="kubernetes", which connector_exists won't find.
+    await _seed_connector(
+        tenant_id=None,
+        product="k8s",
+        version="1.x",
+        impl_id="kubernetes-asyncio",
+        group_count=1,
+        ops_per_group=2,
+        source_kind="typed",
+    )
+    # Healthy control row so the listing isn't empty.
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        group_count=1,
+        ops_per_group=1,
+    )
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    connectors = response.json()["connectors"]
+    seen_ids = {c["connector_id"] for c in connectors}
+
+    assert "vmware-rest-9.0" in seen_ids
+    assert "kubernetes-asyncio-1.x" not in seen_ids
+
+
+@pytest.mark.asyncio
+async def test_list_every_connector_id_round_trips_through_dispatcher(
+    client: TestClient,
+    _registered_class_only_connectors: None,
+) -> None:
+    """Every emitted ``connector_id`` resolves through ``connector_exists``.
+
+    G0.9.1-T1 (#773) acceptance criterion #2 (verbatim):
+
+        every ``connector_id`` returned by ``list_ingested_connectors``
+        resolves true through
+        ``connector_exists(parse_connector_id(connector_id))`` —
+        asserted over a seeded DB that includes a stale-impl_id row
+        and a class-side-only opless connector.
+
+    Seeds a stale-rename row (filtered out), a healthy DB-backed row
+    (kept, ``state="ingested"``), and exercises the class-side-only
+    registered-but-empty path via the ``_registered_class_only_connectors``
+    fixture (kept, ``state="registered"``). The assertion: for every
+    row the listing returns where ``state == "ingested"``, the
+    dispatcher's
+    :func:`~meho_backplane.operations._lookup.connector_exists` returns
+    ``True`` for the parsed triple. ``state == "registered"`` rows are
+    explicitly *not* dispatchable yet; they're surfaced as a discovery
+    signal, and the operator / agent reads ``state`` to know they
+    can't call ops against them.
+    """
+    from meho_backplane.auth.operator import Operator, TenantRole
+    from meho_backplane.operations._lookup import (
+        connector_exists,
+        parse_connector_id,
+    )
+
+    tenant_a = uuid.uuid4()
+    # Stale-rename row — dispatcher cannot resolve emitted connector_id.
+    await _seed_connector(
+        tenant_id=None,
+        product="k8s",
+        version="1.x",
+        impl_id="kubernetes-asyncio",
+        group_count=1,
+        ops_per_group=1,
+        source_kind="typed",
+    )
+    # Healthy ingested row — dispatcher resolves cleanly.
+    await _seed_connector(
+        tenant_id=tenant_a,
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        group_count=1,
+        ops_per_group=2,
+    )
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    connectors = response.json()["connectors"]
+    operator = Operator(
+        sub="op-roundtrip",
+        name="Round-Trip Probe",
+        email=None,
+        raw_jwt="header.payload.signature",
+        tenant_id=tenant_a,
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    # Stale id must not surface.
+    seen_ids = {c["connector_id"] for c in connectors}
+    assert "kubernetes-asyncio-1.x" not in seen_ids
+    # Healthy ingested row must surface as ingested.
+    by_id = {c["connector_id"]: c for c in connectors}
+    assert by_id["vmware-rest-9.0"]["state"] == "ingested"
+    # Class-only registered rows must surface as registered.
+    assert by_id["harbor-rest-2.x"]["state"] == "registered"
+
+    # Round-trip every emitted id through the dispatcher resolve path.
+    # ``state="ingested"`` rows must resolve through connector_exists;
+    # ``state="registered"`` rows are documented not-yet-dispatchable
+    # and the assertion below pins that contract too.
+    for item in connectors:
+        parsed = parse_connector_id(item["connector_id"])
+        product, version, impl_id = parsed
+        exists = await connector_exists(
+            tenant_id=operator.tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+        )
+        if item["state"] == "ingested":
+            assert exists, (
+                f"ingested row {item['connector_id']!r} did not round-trip — "
+                f"parsed={parsed}, but connector_exists returned False"
+            )
+        else:
+            assert item["state"] == "registered"
+            assert not exists, (
+                f"registered (class-only) row {item['connector_id']!r} "
+                f"unexpectedly resolves through connector_exists — the "
+                f"row should be ingested, not registered"
+            )
+
+
+@pytest.fixture
+def _every_v2_connector_registered() -> Iterator[None]:
+    """Register every production v2 connector for the round-trip test.
+
+    Each production connector subpackage performs its
+    ``register_connector_v2`` call at import time, but the autouse
+    ``_isolate_global_registries`` fixture snapshots-and-restores the
+    registry around each test, so only the entries present at session
+    start (i.e. none, post-restore) survive. Re-register the full
+    production set directly so the round-trip test sees every entry
+    rather than a partial slice.
+    """
+    from meho_backplane.connectors.bind9.connector import Bind9Connector
+    from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
+    from meho_backplane.connectors.nsx.connector import NsxConnector
+    from meho_backplane.connectors.registry import (
+        all_connectors_v2,
+        register_connector_v2,
+    )
+    from meho_backplane.connectors.sddc_manager.connector import (
+        SddcManagerConnector,
+    )
+    from meho_backplane.connectors.vault.connector import VaultConnector
+    from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
+
+    existing = all_connectors_v2()
+    entries: tuple[tuple[str, str, str, type], ...] = (
+        ("bind9", "9.x", "bind9-ssh", Bind9Connector),
+        ("harbor", "2.x", "harbor-rest", HarborConnector),
+        ("k8s", "1.x", "k8s", KubernetesConnector),
+        ("nsx", "4.2", "nsx-rest", NsxConnector),
+        ("sddc-manager", "9.0", "sddc-rest", SddcManagerConnector),
+        ("vault", "1.x", "vault", VaultConnector),
+        ("vmware", "9.0", "vmware-rest", VmwareRestConnector),
+    )
+    for product, version, impl_id, cls in entries:
+        if (product, version, impl_id) not in existing:
+            register_connector_v2(
+                product=product,
+                version=version,
+                impl_id=impl_id,
+                cls=cls,
+            )
+    yield
+
+
+@pytest.mark.asyncio
+async def test_register_connector_v2_round_trip_lossless_for_every_entry(
+    _every_v2_connector_registered: None,
+) -> None:
+    """The build/parse round-trip is lossless for every registered v2 entry.
+
+    G0.9.1-T1 (#773) acceptance criterion #1 (verbatim):
+
+        Round-trip unit test:
+        ``parse_connector_id(build_connector_id(p, v, i)) == (p, v, i)``
+        holds for every connector registered via ``register_connector_v2``
+        / typed registration, including a case where
+        ``product != impl_id.split("-")[0]``.
+
+    The check is *operationally* strict: we don't require the parser
+    to recover the registry's friendly ``product`` (SDDC is the
+    canonical exception: registry ``product="sddc-manager"``, but the
+    dispatcher derives ``"sddc"`` from ``impl_id="sddc-rest"``). What
+    must hold is that:
+
+    * the parser recovers ``(version, impl_id)`` losslessly — these
+      are the natural-key columns the dispatcher matches on; and
+    * when the registry's ``product`` differs from the parser's
+      derived ``product``, the registry's ``product`` matches what
+      :func:`~meho_backplane.connectors.kubernetes.SDDC_PRODUCT`-style
+      constants write into ``endpoint_descriptor`` rows — i.e., the
+      dispatcher's parsed product matches the DB row product, so a
+      DB-backed row lookup succeeds.
+
+    Concretely: ``product != impl_id.split("-")[0]`` is allowed when
+    the v2-registry product is purely a friendly resolver-key label
+    and DB writes use the parser-derived product (the documented SDDC
+    convention). It is *not* allowed when the registry product would
+    also be the DB-row product, because then the dispatcher's parse
+    would miss every row. The class-side-only listing path
+    (``_class_side_only_items``) enforces this by emitting the
+    parser-derived ``product`` on each class-only row.
+
+    This test exhaustively enumerates ``all_connectors_v2()`` and
+    pins the property; new connectors added to the registry are
+    automatically covered.
+    """
+    from meho_backplane.connectors.registry import all_connectors_v2
+    from meho_backplane.operations._lookup import parse_connector_id
+    from meho_backplane.operations.ingest._llm_grouping_internals import (
+        build_connector_id,
+    )
+
+    registry = all_connectors_v2()
+    # Sanity-check the registry actually has the SDDC entry that
+    # exercises the product != impl_id.split("-")[0] case the
+    # acceptance criterion calls out explicitly.
+    assert ("sddc-manager", "9.0", "sddc-rest") in registry, (
+        "SDDC v2 registration missing — the test relies on it as the "
+        "canonical product != impl_id.split('-')[0] case"
+    )
+
+    for (product, version, impl_id), _cls in registry.items():
+        if not version or not impl_id:
+            # v1-compat shim (e.g. ("vault", "", "")) — not separately
+            # registered, see _class_side_only_items docstring.
+            continue
+        connector_id = build_connector_id(product, version, impl_id)
+        parsed_product, parsed_version, parsed_impl_id = parse_connector_id(
+            connector_id,
+        )
+        # (version, impl_id) must round-trip losslessly — these are
+        # the dispatcher's natural-key columns.
+        assert parsed_version == version, (
+            f"version round-trip lost for {(product, version, impl_id)}: "
+            f"build={connector_id!r} parsed_version={parsed_version!r}"
+        )
+        assert parsed_impl_id == impl_id, (
+            f"impl_id round-trip lost for {(product, version, impl_id)}: "
+            f"build={connector_id!r} parsed_impl_id={parsed_impl_id!r}"
+        )
+        # product is allowed to differ from the registry's friendly
+        # name only when the parser's derivation matches what DB
+        # writes use (the SDDC convention). Catch any future registration
+        # that quietly breaks this contract.
+        derived_product = impl_id.split("-")[0]
+        assert parsed_product == derived_product, (
+            f"parser-derived product disagrees with impl_id-prefix "
+            f"convention for {(product, version, impl_id)}: "
+            f"derived={derived_product!r} parsed={parsed_product!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

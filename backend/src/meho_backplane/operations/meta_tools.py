@@ -278,7 +278,10 @@ async def list_operation_groups(
     ):
         raise UnknownConnectorError(
             f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
-            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'); see GET /api/v1/connectors"
+            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'). If this id appeared in "
+            f"GET /api/v1/connectors, the listing is inconsistent with the "
+            f"dispatcher's resolve path — please file a bug report; otherwise "
+            f"the id is mistyped or the connector is not registered on this deploy"
         )
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -386,7 +389,10 @@ async def search_operations(
     ):
         raise UnknownConnectorError(
             f"unknown connector_id {connector_id!r} — expected <impl_id>-<version> "
-            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'); see GET /api/v1/connectors"
+            f"(e.g. 'vmware-rest-9.0', 'vault-1.x'). If this id appeared in "
+            f"GET /api/v1/connectors, the listing is inconsistent with the "
+            f"dispatcher's resolve path — please file a bug report; otherwise "
+            f"the id is mistyped or the connector is not registered on this deploy"
         )
     started = time.monotonic()
     sessionmaker = get_sessionmaker()

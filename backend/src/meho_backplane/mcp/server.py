@@ -160,10 +160,29 @@ class McpInvalidParamsError(Exception):
     this distinctly from a generic :class:`Exception` so the wire
     response carries code ``-32602`` rather than ``-32603``.
 
+    The optional ``data`` attribute lands on the JSON-RPC ``error.data``
+    member (spec §5.1: "A Primitive or Structured value that contains
+    additional information about the error"). Tool handlers that have
+    structured diagnostic detail — e.g. the connector-ingest MCP path
+    surfacing expected-vs-received versions for
+    :class:`~meho_backplane.operations.ingest.VersionMismatchError`
+    via :func:`~meho_backplane.operations.ingest.build_version_mismatch_detail`
+    (G0.9.1-T5 #777) — pass it as ``data=`` so the operator-facing
+    agent gets a self-correcting envelope rather than just a string.
+
     Re-exported from :mod:`meho_backplane.mcp` so T3 (#248) tool
     handlers — and any future MCP method handler — can raise it
     without reaching into a dunder-private symbol.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.data = data
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +299,7 @@ def _error_response(
     message: str,
     *,
     status_code: int = 200,
+    data: dict[str, Any] | None = None,
 ) -> JSONResponse:
     """Build a JSON-RPC error envelope wrapped in the chosen HTTP status.
 
@@ -298,10 +318,16 @@ def _error_response(
     spec at §"Sending Messages to the Server" allows it ("The HTTP
     response body MAY comprise a JSON-RPC error response that has no
     id") and it gives the client a structured failure to render.
+
+    Optional ``data`` lands on the JSON-RPC ``error.data`` member per
+    spec §5.1 ("A Primitive or Structured value that contains
+    additional information about the error"). Used by handlers that
+    have structured diagnostic detail to surface (G0.9.1-T5 #777, the
+    connector-ingest typed envelopes).
     """
     body = JsonRpcResponse(
         id=request_id,
-        error=JsonRpcError(code=code, message=message),
+        error=JsonRpcError(code=code, message=message, data=data),
     )
     return JSONResponse(content=_serialize_response(body), status_code=status_code)
 
@@ -491,7 +517,7 @@ async def _dispatch_to_handler(
                 error=str(exc),
             )
             return Response(status_code=202)
-        return _error_response(jrpc.id, INVALID_PARAMS, str(exc))
+        return _error_response(jrpc.id, INVALID_PARAMS, str(exc), data=exc.data)
     except Exception as exc:
         _log.exception("mcp_handler_error", method=jrpc.method)
         if is_notification:

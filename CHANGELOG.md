@@ -92,6 +92,20 @@ connector-related release-notes line.
 
 ### Fixed
 
+- `search_memory` now returns real `created_at` / `updated_at` for
+  each hit instead of the `1970-01-01T00:00:00Z` epoch placeholder
+  that v0.3.1 surfaced. The retrieval substrate's `RetrievalHit`
+  carries the persisted `documents` row timestamps through to memory
+  search projections, so the read path matches what `add_to_memory`
+  and direct recall return for the same row (#776).
+- Structured ingest error envelopes on the MCP path —
+  `meho.connector.ingest` now maps `VersionMismatchError` and
+  `UncoveredVersionLabel` to JSON-RPC `-32602 Invalid Params` with a
+  structured `error.data` payload (`requested_version`,
+  `spec_info_versions`, registered-class ranges) instead of the prior
+  `-32603 "internal error: VersionMismatchError"`. Detail builders are
+  shared with the REST 422 envelope so the wire shapes can't drift.
+  (#777)
 - Reconcile `GET /api/v1/connectors` with the dispatcher resolve path
   so no listed `connector_id` is unresolvable. Drops stale-rename DB
   rows (e.g. pre-`k8s` `kubernetes-asyncio-1.x` survivors from G3.2
@@ -105,12 +119,6 @@ connector-related release-notes line.
   the remediation for a listed-but-unresolvable id. Closes Signal #6
   from the 2026-05-21 RDC v0.3.1 dogfood
   ([#773](https://github.com/evoila/meho/issues/773)).
-- `search_memory` now returns real `created_at` / `updated_at` for
-  each hit instead of the `1970-01-01T00:00:00Z` epoch placeholder
-  that v0.3.1 surfaced. The retrieval substrate's `RetrievalHit`
-  carries the persisted `documents` row timestamps through to memory
-  search projections, so the read path matches what `add_to_memory`
-  and direct recall return for the same row (#776).
 
 ## [0.3.1] - 2026-05-21
 

@@ -219,6 +219,26 @@ func TestLoginCommandHelpListsFlags(t *testing.T) {
 	}
 }
 
+// TestLoginCommandHelpDocumentsKeyringEscape pins the discoverability
+// half of G0.9.1-T14 / Wall #5: the operator-facing help must name
+// MEHO_KEYRING_DISABLE so a dogfooder grepping the help output for
+// "keyring" finds the escape hatch without having to read the source.
+// The auto-fallback covers the first-time-it-happens path; the
+// documented env var covers the "force the file backend on every
+// subsequent run" path.
+func TestLoginCommandHelpDocumentsKeyringEscape(t *testing.T) {
+	cmd := newLoginCmd()
+	out := cmd.Long
+	if !strings.Contains(out, "MEHO_KEYRING_DISABLE") {
+		t.Errorf("login help must document MEHO_KEYRING_DISABLE; got:\n%s", out)
+	}
+	// Auto-fallback breadcrumb so an operator hitting the macOS size
+	// error sees in --help that the CLI handled it for them.
+	if !strings.Contains(out, "keyring rejects the token by size") {
+		t.Errorf("login help should mention the keyring-size auto-fallback; got:\n%s", out)
+	}
+}
+
 // TestLoginCommandHelpDoesNotClaimEndpointUnshipped pins the breadcrumb
 // fix from G0.9.1-T9 / Signal #16. The v0.3.1 help text claimed
 // `/api/v1/auth-config` was still on the way ("Until that endpoint

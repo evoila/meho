@@ -6,11 +6,14 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/zalando/go-keyring"
 )
 
 // TestFileStoreRoundTrip is the load-bearing happy-path for the
@@ -253,4 +256,193 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// fakeStore is a TokenStore double the fallback-store tests inject so
+// they can drive Save behaviour deterministically without depending on
+// the real OS keyring. Captures the last Save payload for assertions
+// and reports whichever error the test set.
+type fakeStore struct {
+	label     string
+	saveErr   error
+	saveCalls int
+	last      StoredToken
+}
+
+func (f *fakeStore) Save(_, _ string, tok StoredToken) error {
+	f.saveCalls++
+	if f.saveErr != nil {
+		return f.saveErr
+	}
+	f.last = tok
+	return nil
+}
+
+func (f *fakeStore) Load(_, _ string) (StoredToken, error) {
+	return f.last, nil
+}
+
+func (f *fakeStore) Delete(_, _ string) error { return nil }
+
+func (f *fakeStore) Describe() string { return f.label }
+
+// TestFallbackStoreSavesToPrimaryByDefault is the happy path: the
+// primary store accepts the token and the secondary is never touched.
+// Describe() must name the primary so the operator's success message
+// is honest about which backend the token landed in.
+func TestFallbackStoreSavesToPrimaryByDefault(t *testing.T) {
+	primary := &fakeStore{label: "OS keyring"}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	store := newFallbackStore(primary, secondary)
+
+	tok := StoredToken{AccessToken: "small"}
+	if err := store.Save(DefaultService, "user", tok); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if primary.saveCalls != 1 {
+		t.Errorf("primary save calls: got %d, want 1", primary.saveCalls)
+	}
+	if secondary.saveCalls != 0 {
+		t.Errorf("secondary should not be touched on primary success; got %d calls", secondary.saveCalls)
+	}
+	if got := store.Describe(); got != "OS keyring" {
+		t.Errorf("describe: got %q, want %q", got, "OS keyring")
+	}
+}
+
+// TestFallbackStoreFallsBackOnSizeError is the load-bearing test for
+// the G0.9.1-T14 fix: when the primary rejects the payload as too big
+// (the macOS Keychain ~4 KiB cap surfaced via keyring.ErrSetDataTooBig),
+// the wrapper must transparently write to the secondary and have
+// Describe() report the secondary so the login command's success
+// message names the file backend the operator can actually inspect.
+func TestFallbackStoreFallsBackOnSizeError(t *testing.T) {
+	primary := &fakeStore{label: "OS keyring", saveErr: keyring.ErrSetDataTooBig}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	store := newFallbackStore(primary, secondary)
+
+	tok := StoredToken{AccessToken: "huge"}
+	if err := store.Save(DefaultService, "user", tok); err != nil {
+		t.Fatalf("save should succeed via fallback: %v", err)
+	}
+	if primary.saveCalls != 1 {
+		t.Errorf("primary save calls: got %d, want 1", primary.saveCalls)
+	}
+	if secondary.saveCalls != 1 {
+		t.Errorf("secondary save calls: got %d, want 1", secondary.saveCalls)
+	}
+	if secondary.last.AccessToken != "huge" {
+		t.Errorf("secondary did not receive the token: %+v", secondary.last)
+	}
+	if got := store.Describe(); got != "credentials file at /tmp/x" {
+		t.Errorf("describe after fallback should name the file backend: got %q", got)
+	}
+}
+
+// TestFallbackStoreFallsBackOnWrappedSizeError defends against future
+// keyring backends that wrap ErrSetDataTooBig (e.g. with %w via
+// fmt.Errorf for additional context). The sentinel match must use
+// errors.Is, not equality, so a wrapped sentinel still triggers the
+// fallback. Today the macOS and Windows backends return the bare
+// sentinel; pinning the wrapped behaviour here means a future
+// upstream change won't silently regress the fix.
+func TestFallbackStoreFallsBackOnWrappedSizeError(t *testing.T) {
+	wrapped := fmt.Errorf("meho: keyring set: %w", keyring.ErrSetDataTooBig)
+	primary := &fakeStore{label: "OS keyring", saveErr: wrapped}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	store := newFallbackStore(primary, secondary)
+
+	if err := store.Save(DefaultService, "user", StoredToken{AccessToken: "huge"}); err != nil {
+		t.Fatalf("save should succeed via fallback on wrapped sentinel: %v", err)
+	}
+	if secondary.saveCalls != 1 {
+		t.Errorf("secondary save calls: got %d, want 1", secondary.saveCalls)
+	}
+}
+
+// TestFallbackStoreSurfacesNonSizeErrors confirms the wrapper does NOT
+// swallow unrelated keyring failures. A locked Keychain, an
+// unreachable D-Bus session, a Wincred ACL denial — all of those must
+// continue to surface to the operator so they understand the system
+// is broken rather than silently landing tokens in the file backend
+// when the keyring was the intended store. The acceptance criterion
+// hangs on this: "fallback triggers on a size/too-big keyring error
+// specifically [...], not on unrelated keyring failures (which should
+// still surface)."
+func TestFallbackStoreSurfacesNonSizeErrors(t *testing.T) {
+	bespoke := errors.New("dbus: connection refused")
+	primary := &fakeStore{label: "OS keyring", saveErr: bespoke}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	store := newFallbackStore(primary, secondary)
+
+	err := store.Save(DefaultService, "user", StoredToken{AccessToken: "x"})
+	if err == nil {
+		t.Fatalf("expected primary error to propagate, got nil")
+	}
+	if !errors.Is(err, bespoke) {
+		t.Errorf("expected original error to remain unwrappable; got: %v", err)
+	}
+	if secondary.saveCalls != 0 {
+		t.Errorf("secondary must not be touched on non-size errors; got %d calls", secondary.saveCalls)
+	}
+}
+
+// TestFallbackStoreSurfacesBothFailures covers the failure-of-failures
+// case: the keyring rejected by size AND the file backend also
+// failed. The operator needs both signals — the wrapper composes
+// them so they can see which backend ultimately blocked persistence.
+func TestFallbackStoreSurfacesBothFailures(t *testing.T) {
+	diskErr := errors.New("permission denied")
+	primary := &fakeStore{label: "OS keyring", saveErr: keyring.ErrSetDataTooBig}
+	secondary := &fakeStore{label: "credentials file at /tmp/x", saveErr: diskErr}
+	store := newFallbackStore(primary, secondary)
+
+	err := store.Save(DefaultService, "user", StoredToken{AccessToken: "x"})
+	if err == nil {
+		t.Fatalf("expected combined error, got nil")
+	}
+	if !errors.Is(err, diskErr) {
+		t.Errorf("expected file-store error to remain unwrappable; got: %v", err)
+	}
+}
+
+// TestFallbackStoreLoadAndDeleteGoToPrimary pins the documented
+// contract that Load and Delete touch only the primary. We never want
+// Load to fall through to the file store opportunistically, because
+// that would mask a keyring outage with a stale token instead of
+// surfacing the expected "please log in" error.
+func TestFallbackStoreLoadAndDeleteGoToPrimary(t *testing.T) {
+	primary := &fakeStore{label: "OS keyring"}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	store := newFallbackStore(primary, secondary)
+
+	if _, err := store.Load(DefaultService, "user"); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := store.Delete(DefaultService, "user"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if secondary.saveCalls != 0 {
+		t.Errorf("secondary must not be touched on Load/Delete; got %d calls", secondary.saveCalls)
+	}
+}
+
+// TestNewTokenStoreHonorsDisableEnv pins the documented escape hatch
+// — `MEHO_KEYRING_DISABLE=1` forces the file backend straight from
+// the constructor, no probe, no fallback wrapper. The operator
+// success message must name the file backend directly.
+func TestNewTokenStoreHonorsDisableEnv(t *testing.T) {
+	t.Setenv("MEHO_KEYRING_DISABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	store, err := NewTokenStore()
+	if err != nil {
+		t.Fatalf("NewTokenStore: %v", err)
+	}
+	if _, ok := store.(*fileStore); !ok {
+		t.Errorf("disable env should yield raw fileStore, got %T", store)
+	}
+	if !contains(store.Describe(), "credentials file at") {
+		t.Errorf("describe should name file backend: %q", store.Describe())
+	}
 }

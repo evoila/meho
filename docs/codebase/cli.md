@@ -372,7 +372,33 @@ implementations. `NewTokenStore` picks the backend at runtime:
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different
 session — set it before `meho login` to force the file backend
-unconditionally.
+unconditionally. It is also surfaced in `meho login --help` so an
+operator grepping the help output for "keyring" finds it without
+reading the source.
+
+### Auto-fallback on runtime size errors
+
+macOS Keychain's legacy `kSecValueData` path caps a single value at
+~4 KiB, and go-keyring's `add-generic-password` shell-out enforces
+a hard 4096-byte command-line limit. A full OIDC token bundle
+(access_token + refresh_token + id_token, JSON-wrapped, plus the
+library's `go-keyring-base64:` chunk marker) regularly exceeds that
+cap and surfaces as `keyring.ErrSetDataTooBig`. To keep `meho login`
+working on macOS out of the box, `NewTokenStore` returns a
+`fallbackStore` decorator that wraps the keyring backend with the
+file backend as a secondary. On `Save`, if the keyring rejects the
+payload with that specific sentinel (matched via `errors.Is`, not a
+brittle string), the wrapper transparently writes to the file
+backend and remembers that fact so `Describe()` — which the success
+message prints — names the credentials file the operator can
+actually inspect. Every other keyring failure (locked Keychain,
+D-Bus unreachable, Wincred ACL denial) is left to surface unchanged
+so unrelated outages don't silently route tokens to disk.
+
+`Load` and `Delete` go to the primary store only; we never read
+from the secondary opportunistically, because doing so would mask a
+keyring outage with a stale token instead of producing the expected
+"please log in" error.
 
 ### What's persisted
 

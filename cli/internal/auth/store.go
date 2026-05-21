@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -356,7 +357,18 @@ func NewFileStoreAt(path string) TokenStore {
 //     ErrUnsupportedPlatform on platforms without a backend, or a
 //     keyring.Get failure on Linux hosts where Secret Service is
 //     unreachable) routes us to the file backend.
-//  3. Otherwise, return the keyring backend.
+//  3. Otherwise, return the keyring backend **wrapped in a
+//     fallbackStore** that transparently retries against the file
+//     backend on runtime size errors. macOS's legacy Keychain
+//     `kSecValueData` path caps a single value at ~4 KiB and
+//     go-keyring's add-generic-password shell-out enforces a
+//     4096-byte command-line limit; an OIDC token bundle
+//     (access_token + refresh_token + id_token JSON-wrapped, plus
+//     go-keyring's `go-keyring-base64:` chunk marker) regularly
+//     exceeds that and surfaces as keyring.ErrSetDataTooBig. The
+//     wrapper catches that specific sentinel and writes to the file
+//     backend instead, leaving every other keyring failure (D-Bus
+//     down, locked Keychain, etc.) to propagate unchanged.
 //
 // Probe-then-fallback is necessary because the zalando/go-keyring
 // library doesn't expose an "is the keyring available?" function —
@@ -368,9 +380,113 @@ func NewTokenStore() (TokenStore, error) {
 		return NewFileStore()
 	}
 	if keyringAvailable() {
-		return keyringStore{}, nil
+		file, err := NewFileStore()
+		if err != nil {
+			return nil, err
+		}
+		return newFallbackStore(keyringStore{}, file), nil
 	}
 	return NewFileStore()
+}
+
+// fallbackStore wraps a primary TokenStore with a secondary that
+// catches a narrowly-defined runtime failure. The intended pairing is
+// keyringStore (primary) + fileStore (secondary): if `keyring.Set`
+// rejects an oversized token bundle with keyring.ErrSetDataTooBig the
+// wrapper transparently re-saves to the file store and remembers that
+// fact so `Describe()` (which the login command surfaces in its
+// success message) names the backend that actually received the
+// token.
+//
+// Other failure modes from the primary — D-Bus unreachable, Keychain
+// locked, etc. — are left to surface unchanged. We deliberately match
+// on the typed sentinel rather than a substring of the error message
+// so a future go-keyring release that rewords the error string can't
+// silently change which failures route to the file fallback.
+//
+// Load / Delete go to the primary only. The fallback never reads from
+// the secondary opportunistically, because the secondary is the file
+// store and reading from it would mask a keyring outage (an operator
+// would see a stale token instead of the expected "please log in"
+// error). The narrow contract — fall back only on a save-time size
+// rejection — keeps the wrapper's behaviour predictable.
+type fallbackStore struct {
+	primary   TokenStore
+	secondary TokenStore
+
+	// mu guards lastBackend. Save can be racy if a future caller
+	// drives Save concurrently from multiple goroutines (today
+	// `meho login` is single-threaded, but the v0.2 refresh path
+	// may run a background renew while the foreground is also
+	// touching the store).
+	mu          sync.Mutex
+	lastBackend TokenStore
+}
+
+// newFallbackStore is the package-internal constructor so tests can
+// build a fallback over any pair of TokenStore implementations.
+func newFallbackStore(primary, secondary TokenStore) *fallbackStore {
+	return &fallbackStore{
+		primary:     primary,
+		secondary:   secondary,
+		lastBackend: primary,
+	}
+}
+
+// Save tries the primary store first. On a size-rejection sentinel —
+// keyring.ErrSetDataTooBig, raised by go-keyring's macOS and Windows
+// backends when the password payload exceeds the platform's hard cap —
+// we transparently retry against the secondary and record that the
+// secondary now holds the token. Every other primary-side error
+// propagates unchanged so unrelated keyring failures (locked Keychain,
+// D-Bus down) still surface to the operator.
+func (s *fallbackStore) Save(service, user string, tok StoredToken) error {
+	err := s.primary.Save(service, user, tok)
+	if err == nil {
+		s.mu.Lock()
+		s.lastBackend = s.primary
+		s.mu.Unlock()
+		return nil
+	}
+	if !errors.Is(err, keyring.ErrSetDataTooBig) {
+		return err
+	}
+	if ferr := s.secondary.Save(service, user, tok); ferr != nil {
+		// Both backends failed. Surface the file-store error wrapped
+		// so the operator sees the real disk-side problem; mention
+		// the keyring rejection too so they understand why we tried
+		// the file store at all.
+		return fmt.Errorf("meho: keyring rejected token by size (%v) and file fallback also failed: %w", err, ferr)
+	}
+	s.mu.Lock()
+	s.lastBackend = s.secondary
+	s.mu.Unlock()
+	return nil
+}
+
+// Load reads from the primary store only — see the type comment for
+// why we don't opportunistically check the secondary.
+func (s *fallbackStore) Load(service, user string) (StoredToken, error) {
+	return s.primary.Load(service, user)
+}
+
+// Delete removes the entry from the primary store only. The secondary
+// is only ever written to after a Save fell back; if a previous run
+// produced a file-store entry, the operator should clean it up
+// explicitly (or re-run `meho login`, which will overwrite it).
+func (s *fallbackStore) Delete(service, user string) error {
+	return s.primary.Delete(service, user)
+}
+
+// Describe names the backend that received the most recent Save. The
+// login command prints this in its success message so the operator
+// knows where the token landed — critical when the fallback fired,
+// because the on-disk file path is the recovery breadcrumb if anything
+// in the rest of the system misbehaves.
+func (s *fallbackStore) Describe() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastBackend.Describe()
 }
 
 // keyringAvailable probes whether the OS keyring is usable. We use

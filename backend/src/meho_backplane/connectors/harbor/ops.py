@@ -47,6 +47,48 @@ from meho_backplane.retrieval.embedding import EmbeddingService
 __all__ = ["register_harbor_robot_operations"]
 
 
+#: Curated ``when_to_use`` blurb for the Harbor ``robot`` group --
+#: ``harbor.robot.create`` and ``harbor.robot.delete`` share one
+#: ``OperationGroup`` row keyed on ``group_key="robot"`` (typed-
+#: register first-write-wins, see
+#: :func:`~meho_backplane.operations.typed_register._resolve_or_create_group`),
+#: so both registrations pass the identical string. Surfaced verbatim
+#: by ``list_operation_groups``.
+#:
+#: G0.9-T4b (#732) curated the per-group blurbs for the four typed
+#: connectors shipped at v0.3.1 (bind9 / kubernetes / vault / vmware-
+#: rest) but missed Harbor (the connector was new in v0.3.1). G0.9.1-T2
+#: (#774) is the catch-up: source-side curation here plus the Alembic
+#: ``0011`` data migration that backfills the same string onto v0.3.0-
+#: era rows still carrying the kill-switched
+#: ``"Operations grouped under 'robot' for harbor harbor-rest."``
+#: auto-derive template. The text mirrors the entry under
+#: ``("harbor", "2.x", "harbor-rest", "robot")`` in
+#: :data:`~backend.alembic.versions.0011_backfill_operation_group_when_to_use._CURATED_WHEN_TO_USE`
+#: so fresh-DB registrations and backfilled rows are byte-identical.
+_HARBOR_ROBOT_WHEN_TO_USE: str = (
+    "Use for project-scoped robot-account lifecycle on Harbor: "
+    "mint a new robot credential (``harbor.robot.create`` -- "
+    "the response carries a freshly-minted secret returned "
+    "ONLY on creation, never again) and decommission an "
+    "existing one by numeric id (``harbor.robot.delete``). "
+    "Both ops are non-idempotent writes; create is "
+    "credential_mint-classified so the minted secret never "
+    "appears in the SSE broadcast. The right group when "
+    "provisioning a CI/CD push/pull token, rotating an "
+    "expired robot, or revoking machine access to a project. "
+    "Read-only robot inventory (listing existing robots, "
+    "checking expiry, auditing permissions) lives in the "
+    "``harbor-robots`` group under the curated read core; "
+    "this 'robot' group is the write surface. Pair with the "
+    "``harbor-projects`` read group when the agent needs to "
+    "confirm the target project exists before minting, and "
+    "with ``harbor-robots`` when the post-mint audit step "
+    "needs to verify the new robot landed with the expected "
+    "permissions."
+)
+
+
 # ---------------------------------------------------------------------------
 # harbor.robot.create
 # ---------------------------------------------------------------------------
@@ -251,9 +293,7 @@ async def register_harbor_robot_operations(
         parameter_schema=_HARBOR_ROBOT_CREATE_PARAMETER_SCHEMA,
         response_schema=_HARBOR_ROBOT_CREATE_RESPONSE_SCHEMA,
         group_key="robot",
-        # G0.9-T4a #731 placeholder paired with ``group_key``; T4b #732
-        # replaces with a curated blurb for the harbor 'robot' group.
-        when_to_use="TODO: curate (T4b #732)",
+        when_to_use=_HARBOR_ROBOT_WHEN_TO_USE,
         tags=["write", "credential-mint"],
         safety_level="caution",
         requires_approval=False,
@@ -277,9 +317,7 @@ async def register_harbor_robot_operations(
         parameter_schema=_HARBOR_ROBOT_DELETE_PARAMETER_SCHEMA,
         response_schema=_HARBOR_ROBOT_DELETE_RESPONSE_SCHEMA,
         group_key="robot",
-        # G0.9-T4a #731 placeholder paired with ``group_key``; T4b #732
-        # replaces with a curated blurb for the harbor 'robot' group.
-        when_to_use="TODO: curate (T4b #732)",
+        when_to_use=_HARBOR_ROBOT_WHEN_TO_USE,
         tags=["write", "destructive"],
         safety_level="caution",
         requires_approval=False,

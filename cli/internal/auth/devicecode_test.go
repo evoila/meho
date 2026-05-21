@@ -429,3 +429,224 @@ func TestDiscoveryErrorUnwraps(t *testing.T) {
 		t.Errorf("DiscoveryError should unwrap to context.DeadlineExceeded")
 	}
 }
+
+// TestNewDeviceFlowContextDropsParentDeadline is the regression pin
+// for Initiative G0.9.1, Wall #4. A parent context with a deadline
+// shorter than the device-flow approval window must not propagate
+// that deadline to the polling wait. Inheriting context *values*
+// stays — `oauth2.HTTPClient` injection at higher layers depends on
+// it.
+func TestNewDeviceFlowContextDropsParentDeadline(t *testing.T) {
+	type ctxKey struct{}
+
+	// Parent: short deadline + a stuffed value.
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	parent = context.WithValue(parent, ctxKey{}, "carried-through")
+
+	flowCtx, cancelFlow := NewDeviceFlowContext(parent)
+	defer cancelFlow()
+
+	// The parent's deadline must not appear on the flow context (we
+	// installed PollTimeout = 10m, not 10ms). Use Deadline() rather
+	// than waiting and observing Done() so the test stays fast.
+	dl, ok := flowCtx.Deadline()
+	if !ok {
+		t.Fatalf("flow context should have a deadline (PollTimeout cap), got none")
+	}
+	if remaining := time.Until(dl); remaining < PollTimeout-time.Minute {
+		t.Errorf("flow context deadline too close (%v); parent's short deadline leaked", remaining)
+	}
+
+	// Wait past the parent's deadline; the flow context must remain
+	// open. The parent will be Done; the flow context must not be.
+	time.Sleep(40 * time.Millisecond)
+	if parent.Err() == nil {
+		t.Fatalf("parent context should already be expired by now")
+	}
+	if err := flowCtx.Err(); err != nil {
+		t.Errorf("flow context should still be alive after parent expires; got err=%v", err)
+	}
+
+	// Values must still ride through.
+	if got := flowCtx.Value(ctxKey{}); got != "carried-through" {
+		t.Errorf("value not inherited: got %v", got)
+	}
+}
+
+// TestNewDeviceFlowContextCancelStopsSignalRelay ensures the cancel
+// func returned by NewDeviceFlowContext releases both inner
+// resources — the PollTimeout timer and the signal.Notify
+// registration — so spawning a hundred logins doesn't leak a
+// hundred SIGINT handlers. We can't directly observe signal-relay
+// teardown without reaching into runtime internals, so we settle
+// for confirming the context becomes Done after cancel and that
+// the cancel func is safe to call twice.
+func TestNewDeviceFlowContextCancelStopsSignalRelay(t *testing.T) {
+	flowCtx, cancel := NewDeviceFlowContext(context.Background())
+	cancel()
+	cancel() // idempotent — double-defer in callers must not panic.
+
+	select {
+	case <-flowCtx.Done():
+		// Expected.
+	case <-time.After(time.Second):
+		t.Fatalf("flow context should be Done after cancel")
+	}
+}
+
+// TestRunDeviceFlowSurvivesShortParentDeadline is the integration-
+// shaped pin: drive RunDeviceFlow with a parent context whose
+// deadline elapses while the stub IdP is still returning
+// `authorization_pending`. Before the fix, this scenario produced
+// `context deadline exceeded`. After the fix, the polling wait
+// continues past the parent's deadline and the flow completes with
+// the IdP-issued token.
+func TestRunDeviceFlowSurvivesShortParentDeadline(t *testing.T) {
+	const parentBudget = 50 * time.Millisecond
+
+	var tokenCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/device":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"device_code":      "dc",
+				"user_code":        "UC",
+				"verification_uri": "https://kc/device",
+				"expires_in":       600,
+				"interval":         1,
+			})
+		case "/token":
+			n := tokenCalls.Add(1)
+			// Stay pending until the parent budget has elapsed, then
+			// approve. This pins the exact scenario reported in
+			// G0.9.1 Wall #4: the IdP would have approved, but the
+			// CLI had already given up because the ambient deadline
+			// fired first.
+			if n < 3 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "authorization_pending",
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "at",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	doc := &DiscoveryDocument{
+		Issuer:                      "iss",
+		DeviceAuthorizationEndpoint: srv.URL + "/auth/device",
+		TokenEndpoint:               srv.URL + "/token",
+	}
+
+	parent, cancelParent := context.WithTimeout(context.Background(), parentBudget)
+	defer cancelParent()
+
+	flowCtx, cancelFlow := NewDeviceFlowContext(parent)
+	defer cancelFlow()
+
+	// Sanity check: by the time the polling loop logs the second
+	// pending response (~2s into a 1s-interval poll), the parent
+	// deadline is long gone. The detached flow context must still
+	// be open.
+	result, err := RunDeviceFlow(flowCtx, doc, "meho-cli", DeviceFlowOptions{
+		HTTPClient:    srv.Client(),
+		Prompter:      func(context.Context, *oauth2.DeviceAuthResponse) error { return nil },
+		ParentContext: parent,
+	})
+	if err != nil {
+		t.Fatalf("RunDeviceFlow failed even though IdP approved after parent deadline: %v", err)
+	}
+	if result.Token.AccessToken != "at" {
+		t.Errorf("token: got %q, want at", result.Token.AccessToken)
+	}
+	if parent.Err() == nil {
+		t.Fatalf("test invariant violated: parent should have expired by now (budget %v)", parentBudget)
+	}
+}
+
+// TestClassifyDeviceTokenErrorNamesAmbientDeadline verifies the
+// error-message disambiguation for the case where the polling
+// timeout fires *and* the parent context is also past deadline.
+// Operators wrapped under a CI step or bash-tool timeout need to be
+// told the wrapper is the problem, not the IdP — see G0.9.1 Wall
+// #4 acceptance criteria.
+func TestClassifyDeviceTokenErrorNamesAmbientDeadline(t *testing.T) {
+	expiredParent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	// Parent must be observably expired before we classify.
+	if expiredParent.Err() == nil {
+		t.Fatalf("test setup: parent should be expired")
+	}
+
+	err := classifyDeviceTokenError(expiredParent, context.DeadlineExceeded)
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"parent process", "deadline", "wrapping timeout"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message should mention %q, got %q", want, msg)
+		}
+	}
+}
+
+// TestClassifyDeviceTokenErrorDistinguishesCancel pins the cancel
+// branch separately from the deadline branch so SIGINT / explicit
+// cancel still produces a clean message rather than the raw
+// `context canceled`. Acceptance criterion: "Genuine cancellation
+// (SIGINT / explicit cancel) still aborts promptly".
+func TestClassifyDeviceTokenErrorDistinguishesCancel(t *testing.T) {
+	err := classifyDeviceTokenError(context.Background(), context.Canceled)
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Errorf("cancel message missing 'cancelled', got %q", err.Error())
+	}
+}
+
+// TestClassifyDeviceTokenErrorOwnPollTimeout covers the case where
+// our PollTimeout cap fires (10m elapsed) but the parent context
+// is still healthy. The message should not blame the parent.
+func TestClassifyDeviceTokenErrorOwnPollTimeout(t *testing.T) {
+	err := classifyDeviceTokenError(context.Background(), context.DeadlineExceeded)
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "parent process") {
+		t.Errorf("should not blame parent when parent is healthy: %q", msg)
+	}
+	if !strings.Contains(msg, "approval") {
+		t.Errorf("message should mention the approval wait: %q", msg)
+	}
+}
+
+// TestClassifyDeviceTokenErrorIdPCodesUnchanged confirms the
+// existing classifications for `expired_token` / `access_denied`
+// still produce the same operator-facing strings — those branches
+// pre-date this fix and tests / docs already pin them.
+func TestClassifyDeviceTokenErrorIdPCodesUnchanged(t *testing.T) {
+	expired := &oauth2.RetrieveError{ErrorCode: "expired_token"}
+	denied := &oauth2.RetrieveError{ErrorCode: "access_denied"}
+
+	if got := classifyDeviceTokenError(context.Background(), expired).Error(); !strings.Contains(got, "device code expired") {
+		t.Errorf("expired_token message regressed: %q", got)
+	}
+	if got := classifyDeviceTokenError(context.Background(), denied).Error(); !strings.Contains(got, "denied") {
+		t.Errorf("access_denied message regressed: %q", got)
+	}
+}

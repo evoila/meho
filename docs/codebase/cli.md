@@ -311,9 +311,38 @@ Authorization Grant (RFC 8628). End-to-end shape:
    at the IdP-supplied `interval`, honouring RFC 8628's
    `authorization_pending` and `slow_down` semantics. The polling
    loop returns when the IdP issues a token, the device code
-   expires (`expired_token`), the operator denies the grant
-   (`access_denied`), or the context is cancelled. The outer
-   timeout is 10 minutes (`auth.PollTimeout`).
+   expires (`expires_in`, enforced inside the oauth2 package), the
+   operator denies the grant (`access_denied`), or the polling
+   context is cancelled. The outer timeout is 10 minutes
+   (`auth.PollTimeout`).
+
+   **Detached from ambient deadlines.** The interactive approval
+   wait runs on a context built by `auth.NewDeviceFlowContext`,
+   which deliberately drops the ambient `cmd.Context()` deadline
+   while keeping context values (`oauth2.HTTPClient` etc.) and
+   re-attaching `SIGINT` / `SIGTERM` cancellation. Rationale:
+   non-interactive wrappers (CI steps, the Claude Code bash tool,
+   `timeout 30s …` prefixes) often impose deadlines shorter than
+   the device code's `expires_in`. Without the detachment, a
+   wrapper-imposed deadline would propagate into the polling loop
+   and surface as `context deadline exceeded` even though the
+   device code was still valid (Initiative G0.9.1, Wall #4). Only
+   the interactive wait detaches — the discovery and auth-config
+   HTTP calls (steps 1–2) still honour `cmd.Context()`, so genuine
+   network wedges fail fast.
+
+   When the wait does time out, `classifyDeviceTokenError`
+   distinguishes the culprit:
+
+   * IdP-reported `expired_token` / `access_denied` → device-code-
+     specific messages.
+   * `PollTimeout` (10m) elapsed and the ambient parent context is
+     ALSO past deadline → message names the wrapping timeout as
+     the cause and points the operator at running outside the
+     wrapper.
+   * `PollTimeout` elapsed with a healthy parent → message says
+     the operator didn't approve in 10 minutes.
+   * `context.Canceled` → SIGINT / SIGTERM message.
 6. **Persistence.** The access token plus issuer, client_id,
    refresh token (captured for v0.2), and id_token are persisted to
    a backend chosen at runtime — see below.

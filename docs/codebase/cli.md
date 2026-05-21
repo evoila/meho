@@ -372,7 +372,45 @@ implementations. `NewTokenStore` picks the backend at runtime:
 The escape hatch (`MEHO_KEYRING_DISABLE=1`) is documented for
 shared dev hosts where the local keyring belongs to a different
 session — set it before `meho login` to force the file backend
-unconditionally.
+unconditionally. It is also surfaced in `meho login --help` so an
+operator grepping the help output for "keyring" finds it without
+reading the source.
+
+### Auto-fallback on runtime size errors
+
+macOS Keychain's legacy `kSecValueData` path caps a single value at
+~4 KiB, and go-keyring's `add-generic-password` shell-out enforces
+a hard 4096-byte command-line limit. A full OIDC token bundle
+(access_token + refresh_token + id_token, JSON-wrapped, plus the
+library's `go-keyring-base64:` chunk marker) regularly exceeds that
+cap and surfaces as `keyring.ErrSetDataTooBig`. To keep `meho login`
+working on macOS out of the box, `NewTokenStore` returns a
+`fallbackStore` decorator that wraps the keyring backend with the
+file backend as a secondary. On `Save`, if the keyring rejects the
+payload with that specific sentinel (matched via `errors.Is`, not a
+brittle string), the wrapper transparently writes to the file
+backend and remembers that fact so `Describe()` — which the success
+message prints — names the credentials file the operator can
+actually inspect. Every other keyring failure (locked Keychain,
+D-Bus unreachable, Wincred ACL denial) is left to surface unchanged
+so unrelated outages don't silently route tokens to disk.
+
+`Load` bridges to the secondary only on `ErrTokenNotFound` from the
+primary — the case where a previous invocation hit the size-fallback
+path on `Save` and the token sits in the file store. AC #1 ("a
+subsequent `meho status` reads the bearer") would regress without
+this bridge, because a fresh `fallbackStore` in the next process
+starts with the primary reporting "no entry" for that
+`(service, user)`. Every other primary error (locked Keychain, D-Bus
+unreachable, malformed entry) propagates unchanged, so a real
+keyring outage still surfaces as an error instead of masking it with
+a stale file-store entry.
+
+`Delete` goes to the primary store only. After a size-triggered
+fallback the secondary still holds the token, and an operator who
+needs to scrub the credentials file by hand is expected to do so
+explicitly — re-running `meho login` overwrites it in the normal
+case.
 
 ### What's persisted
 

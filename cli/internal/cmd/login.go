@@ -46,6 +46,13 @@ func newLoginCmd() *cobra.Command {
 			"OS keyring (Keychain on macOS, Secret Service on Linux, Wincred " +
 			"on Windows) and falls back to a 0600-mode credentials file at " +
 			"$XDG_CONFIG_HOME/meho/credentials.json on headless hosts.\n\n" +
+			"Credential-store fallback: macOS Keychain caps a single value at " +
+			"~4 KiB, which a full OIDC token bundle can exceed. When the " +
+			"keyring rejects the token by size, the CLI transparently writes " +
+			"to the credentials file instead and the success message names " +
+			"that backend. Set MEHO_KEYRING_DISABLE=1 to force the file " +
+			"backend unconditionally (useful on shared dev hosts where the " +
+			"keyring belongs to another session, or in CI).\n\n" +
 			"Discovery: by default the CLI fetches the backplane's auth-config " +
 			"endpoint at <backplane-url>/api/v1/auth-config to learn the realm " +
 			"issuer and the public device-code client_id. Pass --issuer and/or " +

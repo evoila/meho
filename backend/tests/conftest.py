@@ -200,12 +200,35 @@ def _default_database_url(
     get_settings.cache_clear()
 
 
+@pytest.fixture(scope="session")
+def _shared_model_cache_dir(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """A single fastembed cache dir reused by every test in the worker.
+
+    The ONNX model is identical across all tests, so a read-only cache
+    needs no per-test isolation. The previous per-test ``tmp_path`` dir
+    forced fastembed to re-materialise the model into a fresh empty
+    directory on *every* app-booting test — cheap solo (~3s) but
+    catastrophic under ``pytest-xdist``: N workers each re-fetch
+    per-test and saturate the HF Hub unauthenticated rate limit through
+    the cluster's shared NAT egress, inflating per-test setup to ~22s
+    (the #761 / #771 unit-job-wall finding). Session scope means the
+    model materialises once per worker (N fetches total, not per-test),
+    and ``tmp_path_factory`` keeps each worker's dir distinct so there
+    is no cross-worker write race on first fetch (the partial/
+    symlink-broken-cache failure mode of evoila/meho#574).
+    """
+    return str(tmp_path_factory.mktemp("fastembed-cache-shared"))
+
+
 @pytest.fixture(autouse=True)
 def _default_retrieval_model_cache_dir(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    _shared_model_cache_dir: str,
 ) -> Iterator[None]:
-    """Redirect fastembed's ONNX model cache to a writable per-test dir.
+    """Redirect fastembed's ONNX model cache to a writable shared dir.
+
+    The dir is session-scoped (see :func:`_shared_model_cache_dir`) so
+    the model materialises once per worker rather than once per test.
 
     The production default at :attr:`Settings.retrieval_model_cache_dir`
     is ``/opt/meho/model-cache`` — the image layer the default model is
@@ -235,7 +258,7 @@ def _default_retrieval_model_cache_dir(
     auth_config tests that exercise the lifespan transitively. Setting
     the env var here, before any test imports
     :func:`get_settings`, ensures every settings construction in the
-    test process resolves to a writable :class:`tmp_path`-scoped dir.
+    test process resolves to the writable session-shared dir.
 
     Why a sibling fixture instead of merging into
     :func:`_default_database_url`: the responsibilities are genuinely
@@ -250,7 +273,7 @@ def _default_retrieval_model_cache_dir(
     an earlier test would survive into the next test and silently
     return the previous cache_dir value.
     """
-    monkeypatch.setenv("RETRIEVAL_MODEL_CACHE_DIR", str(tmp_path / "fastembed-cache"))
+    monkeypatch.setenv("RETRIEVAL_MODEL_CACHE_DIR", _shared_model_cache_dir)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

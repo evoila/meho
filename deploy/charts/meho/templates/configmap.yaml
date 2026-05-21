@@ -39,6 +39,14 @@ data:
   # in the Deployment template.
   KEYCLOAK_ISSUER_URL: {{ .Values.config.keycloakIssuerUrl | quote }}
   KEYCLOAK_AUDIENCE: {{ .Values.config.keycloakAudience | quote }}
+  # G0.9.1-T9 (#789, RDC Signal #16). Public OAuth client_id surfaced
+  # to `meho login` via `GET /api/v1/auth-config` as `cli_client_id`.
+  # Unconditionally emitted so the env-var contract stays stable
+  # across deploys; when the operator hasn't wired the value the
+  # backplane sends an empty string and the CLI surfaces an
+  # actionable public-client error rather than silently misusing
+  # `KEYCLOAK_AUDIENCE` (the confidential resource-server id).
+  KEYCLOAK_CLI_CLIENT_ID: {{ .Values.config.keycloakCliClientId | quote }}
   KEYCLOAK_JWKS_CACHE_TTL_SECONDS: {{ .Values.config.keycloakJwksCacheTtlSeconds | quote }}
   KEYCLOAK_JWT_LEEWAY_SECONDS: {{ .Values.config.keycloakJwtLeewaySeconds | quote }}
   VAULT_ADDR: {{ .Values.config.vaultAddr | quote }}

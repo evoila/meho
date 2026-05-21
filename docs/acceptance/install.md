@@ -101,7 +101,19 @@ The budget does **not** cover:
   Section 4)
 - Operator-side device-code login (`meho login` is exercised by
   [acceptance Task #56](https://github.com/evoila-bosnia/meho-internal/issues/56),
-  the federation-chain smoke, not this one)
+  the federation-chain smoke, not this one). The cold-deploy
+  acceptance does **not** drive `meho login` end-to-end, but the
+  realm-side prerequisite the CLI needs — a public `meho-cli`
+  Keycloak client with the device-grant flow enabled and an audience
+  mapper — is a consumer-side provisioning step that must precede
+  `meho login`. The recipe lives in
+  [`deploy/values-examples/README.md`](../../deploy/values-examples/README.md)
+  § `meho-cli` public Keycloak client; the chart value to wire it
+  through is `config.keycloakCliClientId` (env
+  `KEYCLOAK_CLI_CLIENT_ID`). Auto-provisioning the client at
+  install time is tracked as
+  [#791](https://github.com/evoila/meho/issues/791) (G0.9.1-T11) and
+  is not yet shipped.
 
 ### Why 5 minutes is the right bar
 

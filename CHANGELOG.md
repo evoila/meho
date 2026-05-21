@@ -174,6 +174,24 @@ connector-related release-notes line.
   the remediation for a listed-but-unresolvable id. Closes Signal #6
   from the 2026-05-21 RDC v0.3.1 dogfood
   ([#773](https://github.com/evoila/meho/issues/773)).
+- Complete `/api/v1/auth-config` with a public `cli_client_id` field
+  (chart-wired via `config.keycloakCliClientId` / env
+  `KEYCLOAK_CLI_CLIENT_ID`) and fix the `meho login` CLI's discovery
+  mapping — the CLI now drives the device-code `client_id` from
+  `cli_client_id` instead of mis-mapping `audience` (the confidential
+  resource-server identifier, which Keycloak rejects for device-code
+  with `401 unauthorized_client`). Stale `meho login --help`
+  ("Until that endpoint ships") and the TLS-discovery-failure
+  breadcrumb are corrected; the latter now points operators at
+  `--client-id`/`--issuer` overrides **and** root-CA installation for
+  internal-CA deployments. Deployer recipe for the pre-created public
+  `meho-cli` Keycloak client added to
+  [`deploy/values-examples/README.md`](deploy/values-examples/README.md).
+  v0.3.1 first-login regression on the documented happy path; consumer
+  report 2026-05-21 Signal #16 ([#789](https://github.com/evoila/meho/issues/789),
+  G0.9.1-T9 under [#772](https://github.com/evoila/meho/issues/772)).
+  Auto-provisioning the public client at install time is tracked under
+  [#791](https://github.com/evoila/meho/issues/791) (T11).
 
 ### Documentation
 

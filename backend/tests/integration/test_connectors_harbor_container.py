@@ -374,6 +374,10 @@ async def harbor_e2e(
     instance._credentials_loader = _make_credentials_loader(  # type: ignore[misc]
         "admin", _HARBOR_ADMIN_PASSWORD
     )
+    # The test container serves plain HTTP; _base_url() hardcodes https for
+    # production targets. Override on the instance so the client reaches
+    # the container without an SSL handshake.
+    instance._base_url = lambda _target: harbor_core_addr  # type: ignore[method-assign]
 
     target = _HarborTarget(host=host, port=port)
     try:

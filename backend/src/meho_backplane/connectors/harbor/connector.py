@@ -177,6 +177,24 @@ class HarborConnector(HttpConnector):
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
 
+    async def _http_client(self, target: HarborTargetLike) -> httpx.AsyncClient:
+        """Return the pooled client with Harbor's session cookie discarded.
+
+        Harbor sets a ``sid`` session cookie on every authenticated
+        response. httpx's default cookie jar would store it and replay it
+        on the next request, which flips Harbor out of stateless Basic
+        auth into session mode — and session mode rejects state-changing
+        verbs (POST/PUT/DELETE) that lack an ``X-Harbor-CSRF-Token``
+        header with ``403 {"code":"FORBIDDEN","message":"CSRF token not
+        found in request"}``. This connector authenticates with HTTP
+        Basic on every call by design (see :mod:`.session` — "no session
+        token is established"), so the cookie is never wanted: clear the
+        jar before each request to keep every call stateless.
+        """
+        client = await super()._http_client(target)
+        client.cookies.clear()
+        return client
+
     async def auth_headers(self, target: HarborTargetLike, raw_jwt: str) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 

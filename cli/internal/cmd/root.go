@@ -152,10 +152,17 @@ func newRootCmd() *cobra.Command {
 	// /api/v1/retrieve route for the `recall --query` retrieval form.
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in verbs.
+	//
+	// G5.2-T5 (#627) -- top-level `meho promote` verb for Initiative
+	// #374. Wraps POST /api/v1/memory/{scope}/{slug}/promote shipped
+	// by G5.2-T4 (#626). Registered alongside the G5.1 verbs because
+	// the consumer-needs.md §G5 ergonomic shape applies (`meho promote
+	// user/foo --to user-tenant`, not `meho memory promote ...`).
 	root.AddCommand(memory.NewRememberCmd())
 	root.AddCommand(memory.NewRecallCmd())
 	root.AddCommand(memory.NewForgetCmd())
 	root.AddCommand(memory.NewListCmd())
+	root.AddCommand(memory.NewPromoteCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=

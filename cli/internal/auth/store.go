@@ -404,12 +404,21 @@ func NewTokenStore() (TokenStore, error) {
 // so a future go-keyring release that rewords the error string can't
 // silently change which failures route to the file fallback.
 //
-// Load / Delete go to the primary only. The fallback never reads from
-// the secondary opportunistically, because the secondary is the file
-// store and reading from it would mask a keyring outage (an operator
-// would see a stale token instead of the expected "please log in"
-// error). The narrow contract — fall back only on a save-time size
-// rejection — keeps the wrapper's behaviour predictable.
+// Load bridges to the secondary on ErrTokenNotFound only. A previous
+// CLI invocation that hit the size-rejection path on Save lands the
+// token in the secondary (file) store; the next invocation constructs
+// a fresh fallbackStore whose primary still reports "no entry" for
+// that (service, user) pair, and AC #1 ("a subsequent `meho status`
+// reads the bearer") would regress without this bridge. Every other
+// primary error — locked Keychain, D-Bus unreachable, malformed JSON,
+// etc. — surfaces unchanged so a real keyring outage still produces
+// the expected error rather than masking it with a stale file entry.
+//
+// Delete goes to the primary only. After a size-triggered fallback,
+// the secondary still holds the token; an operator running `meho
+// logout` after re-login (which overwrites the secondary) won't see
+// a stale entry, and the asymmetry is documented for the rare case
+// where they need to scrub the credentials file by hand.
 type fallbackStore struct {
 	primary   TokenStore
 	secondary TokenStore
@@ -464,10 +473,23 @@ func (s *fallbackStore) Save(service, user string, tok StoredToken) error {
 	return nil
 }
 
-// Load reads from the primary store only — see the type comment for
-// why we don't opportunistically check the secondary.
+// Load reads from the primary store, and bridges to the secondary
+// only when the primary reports ErrTokenNotFound. The bridge closes
+// the cross-invocation gap: a previous run that hit the size-fallback
+// path on Save persisted the token in the secondary, and a fresh
+// fallbackStore in the next process must surface that token rather
+// than report "please log in". Every other primary error (locked
+// Keychain, D-Bus unreachable, malformed entry) propagates unchanged
+// so a real keyring outage isn't masked by a stale file-store entry.
 func (s *fallbackStore) Load(service, user string) (StoredToken, error) {
-	return s.primary.Load(service, user)
+	tok, err := s.primary.Load(service, user)
+	if err == nil {
+		return tok, nil
+	}
+	if !errors.Is(err, ErrTokenNotFound) {
+		return StoredToken{}, err
+	}
+	return s.secondary.Load(service, user)
 }
 
 // Delete removes the entry from the primary store only. The secondary

@@ -259,14 +259,23 @@ func contains(haystack, needle string) bool {
 }
 
 // fakeStore is a TokenStore double the fallback-store tests inject so
-// they can drive Save behaviour deterministically without depending on
-// the real OS keyring. Captures the last Save payload for assertions
-// and reports whichever error the test set.
+// they can drive Save/Load/Delete behaviour deterministically without
+// depending on the real OS keyring. Captures the last Save payload
+// and per-method call counts; reports whichever errors the test set.
+//
+// loadErr is honoured first if set, then a non-zero `last` is
+// returned; when loadErr is nil and `last` is the zero StoredToken,
+// Load returns ErrTokenNotFound — the sentinel the fallback wrapper
+// keys off when bridging to the secondary.
 type fakeStore struct {
-	label     string
-	saveErr   error
-	saveCalls int
-	last      StoredToken
+	label       string
+	saveErr     error
+	loadErr     error
+	saveCalls   int
+	loadCalls   int
+	deleteCalls int
+	last        StoredToken
+	hasToken    bool
 }
 
 func (f *fakeStore) Save(_, _ string, tok StoredToken) error {
@@ -275,14 +284,25 @@ func (f *fakeStore) Save(_, _ string, tok StoredToken) error {
 		return f.saveErr
 	}
 	f.last = tok
+	f.hasToken = true
 	return nil
 }
 
 func (f *fakeStore) Load(_, _ string) (StoredToken, error) {
+	f.loadCalls++
+	if f.loadErr != nil {
+		return StoredToken{}, f.loadErr
+	}
+	if !f.hasToken {
+		return StoredToken{}, ErrTokenNotFound
+	}
 	return f.last, nil
 }
 
-func (f *fakeStore) Delete(_, _ string) error { return nil }
+func (f *fakeStore) Delete(_, _ string) error {
+	f.deleteCalls++
+	return nil
+}
 
 func (f *fakeStore) Describe() string { return f.label }
 
@@ -406,24 +426,163 @@ func TestFallbackStoreSurfacesBothFailures(t *testing.T) {
 	}
 }
 
-// TestFallbackStoreLoadAndDeleteGoToPrimary pins the documented
-// contract that Load and Delete touch only the primary. We never want
-// Load to fall through to the file store opportunistically, because
-// that would mask a keyring outage with a stale token instead of
-// surfacing the expected "please log in" error.
-func TestFallbackStoreLoadAndDeleteGoToPrimary(t *testing.T) {
+// TestFallbackStoreLoadHappyPathStaysOnPrimary pins the contract
+// that Load returns the primary's token directly when the primary has
+// one. The secondary is only consulted to close the cross-invocation
+// gap (primary returns ErrTokenNotFound); on the happy path it must
+// stay completely untouched so a routine `meho status` never opens
+// the credentials file on hosts where the keyring is healthy.
+func TestFallbackStoreLoadHappyPathStaysOnPrimary(t *testing.T) {
 	primary := &fakeStore{label: "OS keyring"}
 	secondary := &fakeStore{label: "credentials file at /tmp/x"}
 	store := newFallbackStore(primary, secondary)
 
-	if _, err := store.Load(DefaultService, "user"); err != nil {
+	// Seed the primary so its Load returns a token (not ErrTokenNotFound).
+	if err := primary.Save(DefaultService, "user", StoredToken{AccessToken: "from-primary"}); err != nil {
+		t.Fatalf("seed primary: %v", err)
+	}
+	primary.saveCalls = 0 // ignore seed call in assertions
+
+	got, err := store.Load(DefaultService, "user")
+	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
+	if got.AccessToken != "from-primary" {
+		t.Errorf("load returned wrong token: got %q, want %q", got.AccessToken, "from-primary")
+	}
+	if primary.loadCalls != 1 {
+		t.Errorf("primary load calls: got %d, want 1", primary.loadCalls)
+	}
+	if secondary.loadCalls != 0 {
+		t.Errorf("secondary must not be touched on primary hit; got %d Load calls", secondary.loadCalls)
+	}
+}
+
+// TestFallbackStoreDeleteGoesToPrimaryOnly pins the documented
+// asymmetry: Delete touches only the primary even though Load may
+// bridge to the secondary. A previous size-fallback run that
+// persisted to the file store leaves an entry that re-login
+// overwrites in the normal case; operators who need to scrub by hand
+// do so explicitly.
+func TestFallbackStoreDeleteGoesToPrimaryOnly(t *testing.T) {
+	primary := &fakeStore{label: "OS keyring"}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	store := newFallbackStore(primary, secondary)
+
 	if err := store.Delete(DefaultService, "user"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if secondary.saveCalls != 0 {
-		t.Errorf("secondary must not be touched on Load/Delete; got %d calls", secondary.saveCalls)
+	if primary.deleteCalls != 1 {
+		t.Errorf("primary delete calls: got %d, want 1", primary.deleteCalls)
+	}
+	if secondary.deleteCalls != 0 {
+		t.Errorf("secondary must not be touched on Delete; got %d calls", secondary.deleteCalls)
+	}
+}
+
+// TestFallbackStoreLoadBridgesToSecondaryOnNotFound is the B1
+// regression: when the primary reports ErrTokenNotFound (the state a
+// fresh process sees after a previous run hit the size-fallback path
+// on Save), Load must surface the token persisted on the secondary so
+// AC #1 ("a subsequent `meho status` reads the bearer") holds across
+// process boundaries.
+func TestFallbackStoreLoadBridgesToSecondaryOnNotFound(t *testing.T) {
+	primary := &fakeStore{label: "OS keyring"}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	// Pre-seed the secondary as if a prior invocation had hit the
+	// size-fallback path. Reset saveCalls so the assertions below
+	// reflect only the Load-path behaviour under test.
+	if err := secondary.Save(DefaultService, "user", StoredToken{AccessToken: "from-secondary"}); err != nil {
+		t.Fatalf("seed secondary: %v", err)
+	}
+	secondary.saveCalls = 0
+
+	store := newFallbackStore(primary, secondary)
+
+	got, err := store.Load(DefaultService, "user")
+	if err != nil {
+		t.Fatalf("load should bridge to secondary on primary not-found: %v", err)
+	}
+	if got.AccessToken != "from-secondary" {
+		t.Errorf("bridged load returned wrong token: got %q, want %q", got.AccessToken, "from-secondary")
+	}
+	if primary.loadCalls != 1 {
+		t.Errorf("primary load calls: got %d, want 1", primary.loadCalls)
+	}
+	if secondary.loadCalls != 1 {
+		t.Errorf("secondary load calls: got %d, want 1 (bridge expected)", secondary.loadCalls)
+	}
+}
+
+// TestFallbackStoreLoadCrossInvocationAfterSizeFallback is the
+// load-bearing AC #1 round-trip: drive a size-rejected Save through a
+// fallbackStore (which lands the token in the secondary), construct a
+// fresh fallbackStore over the same (primary, secondary) pair, and
+// assert that Load returns the persisted token. This is the exact
+// shape of two consecutive CLI invocations — `meho login` then `meho
+// status` — on a macOS host where the keyring rejects the bundle by
+// size.
+func TestFallbackStoreLoadCrossInvocationAfterSizeFallback(t *testing.T) {
+	primary := &fakeStore{label: "OS keyring", saveErr: keyring.ErrSetDataTooBig}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+
+	// Invocation 1: login persists via fallback.
+	loginStore := newFallbackStore(primary, secondary)
+	want := StoredToken{AccessToken: "huge-bearer", RefreshToken: "huge-refresh"}
+	if err := loginStore.Save(DefaultService, "user", want); err != nil {
+		t.Fatalf("login save should succeed via fallback: %v", err)
+	}
+	if secondary.saveCalls != 1 {
+		t.Fatalf("size fallback did not write to secondary: saveCalls=%d", secondary.saveCalls)
+	}
+
+	// Invocation 2: a fresh process constructs a new fallbackStore
+	// over the same primary/secondary pair. The primary still
+	// returns ErrTokenNotFound (it never accepted the oversized
+	// payload), and Load must bridge to the secondary.
+	statusStore := newFallbackStore(primary, secondary)
+	got, err := statusStore.Load(DefaultService, "user")
+	if err != nil {
+		t.Fatalf("status load should surface the persisted token: %v", err)
+	}
+	if got.AccessToken != want.AccessToken {
+		t.Errorf("access token: got %q, want %q", got.AccessToken, want.AccessToken)
+	}
+	if got.RefreshToken != want.RefreshToken {
+		t.Errorf("refresh token: got %q, want %q", got.RefreshToken, want.RefreshToken)
+	}
+	if secondary.loadCalls != 1 {
+		t.Errorf("secondary load calls: got %d, want 1", secondary.loadCalls)
+	}
+}
+
+// TestFallbackStoreLoadSurfacesNonNotFoundErrors confirms the bridge
+// is narrow: a primary error that is NOT ErrTokenNotFound (locked
+// Keychain, D-Bus unreachable, malformed entry) must propagate so a
+// real keyring outage isn't masked by a stale file-store entry.
+func TestFallbackStoreLoadSurfacesNonNotFoundErrors(t *testing.T) {
+	bespoke := errors.New("dbus: connection refused")
+	primary := &fakeStore{label: "OS keyring", loadErr: bespoke}
+	secondary := &fakeStore{label: "credentials file at /tmp/x"}
+	// Seed the secondary with a token that the wrapper must NOT
+	// return — if the bridge fires on the wrong error class, this
+	// test catches it.
+	if err := secondary.Save(DefaultService, "user", StoredToken{AccessToken: "stale"}); err != nil {
+		t.Fatalf("seed secondary: %v", err)
+	}
+	secondary.saveCalls = 0
+
+	store := newFallbackStore(primary, secondary)
+
+	_, err := store.Load(DefaultService, "user")
+	if err == nil {
+		t.Fatalf("expected primary error to propagate, got nil")
+	}
+	if !errors.Is(err, bespoke) {
+		t.Errorf("expected original error to remain unwrappable; got: %v", err)
+	}
+	if secondary.loadCalls != 0 {
+		t.Errorf("secondary must not be touched on non-not-found primary errors; got %d Load calls", secondary.loadCalls)
 	}
 }
 

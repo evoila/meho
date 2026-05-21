@@ -395,10 +395,22 @@ actually inspect. Every other keyring failure (locked Keychain,
 D-Bus unreachable, Wincred ACL denial) is left to surface unchanged
 so unrelated outages don't silently route tokens to disk.
 
-`Load` and `Delete` go to the primary store only; we never read
-from the secondary opportunistically, because doing so would mask a
-keyring outage with a stale token instead of producing the expected
-"please log in" error.
+`Load` bridges to the secondary only on `ErrTokenNotFound` from the
+primary — the case where a previous invocation hit the size-fallback
+path on `Save` and the token sits in the file store. AC #1 ("a
+subsequent `meho status` reads the bearer") would regress without
+this bridge, because a fresh `fallbackStore` in the next process
+starts with the primary reporting "no entry" for that
+`(service, user)`. Every other primary error (locked Keychain, D-Bus
+unreachable, malformed entry) propagates unchanged, so a real
+keyring outage still surfaces as an error instead of masking it with
+a stale file-store entry.
+
+`Delete` goes to the primary store only. After a size-triggered
+fallback the secondary still holds the token, and an operator who
+needs to scrub the credentials file by hand is expected to do so
+explicitly — re-running `meho login` overwrites it in the normal
+case.
 
 ### What's persisted
 

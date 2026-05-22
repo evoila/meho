@@ -301,6 +301,19 @@ def test_parse_ifconfig_extracts_ether() -> None:
     assert em0["ether"] == "08:00:27:1a:2b:3c"
 
 
+def test_parse_ifconfig_extracts_ether_uppercase() -> None:
+    """Regex must match uppercase MAC hex digits (e.g. VMware/Hyper-V vNICs)."""
+    output = (
+        "vmx0: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> metric 0 mtu 1500\n"
+        "\tether 00:0C:29:AB:CD:EF\n"
+        "\tinet 10.0.0.2 netmask 0xffffff00\n"
+        "\tstatus: active\n"
+    )
+    ifaces = parse_ifconfig(output)
+    assert len(ifaces) == 1
+    assert ifaces[0]["ether"] == "00:0C:29:AB:CD:EF"
+
+
 def test_parse_ifconfig_extracts_status() -> None:
     ifaces = parse_ifconfig(_IFCONFIG_SAMPLE)
     em0 = next(i for i in ifaces if i["name"] == "em0")

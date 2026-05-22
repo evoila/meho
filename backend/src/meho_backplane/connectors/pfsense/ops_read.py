@@ -7,8 +7,8 @@ Adds the following typed ops to :class:`PfSenseConnector`:
 
 * ``pfsense.version`` -- ``cat /etc/version``, structured output.
 * ``pfsense.firewall.rules`` -- ``pfctl -sr`` parsed into rule rows.
-* ``pfsense.firewall.state`` -- ``pfctl -ss`` parsed; large output;
-  see JSONFlux handle note below.
+* ``pfsense.firewall.state`` -- ``pfctl -ss`` parsed into state rows;
+  returns rows inline as ``{rows, total}``.
 * ``pfsense.nat.rules`` -- ``pfctl -sn`` parsed into NAT rule rows.
 * ``pfsense.interface.list`` -- ``ifconfig -a`` parsed.
 * ``pfsense.gateway.list`` -- ``/cf/conf/config.xml`` ``<gateways>``
@@ -28,14 +28,10 @@ and return Python data. The bound-method handlers are the thin SSH-
 call + parse + shape layer. The unit suite pins the parsers directly
 against fixture text without booting an event loop.
 
-JSONFlux handle pattern
-------------------------
+JSONFlux handle pattern -- deferred to the reducer
+----------------------------------------------------
 
-``pfsense.firewall.state`` returns the raw parsed state table. pfSense
-deployments with many active connections can produce thousands of rows
-from ``pfctl -ss``, making this op the primary candidate for JSONFlux
-reduction. Mirroring the K8s
-(:mod:`~meho_backplane.connectors.kubernetes.ops_core`) and bind9
+All handlers return rows inline. Mirroring the bind9
 (:mod:`~meho_backplane.connectors.bind9.ops_zone`) precedent, the
 handle is the **reducer's** responsibility — not the connector's.
 Setting handle creation here would couple every connector to the
@@ -43,9 +39,11 @@ reducer's calibration threshold and bypass the reducer's
 audit / TTL / store-routing logic.
 
 The handler ships ``rows`` + ``total`` so a future JSONFlux reducer
-can spill out-of-band when ``len(rows) > threshold``, exactly as the
-K8s sibling does. The LLM instructions note the JSONFlux
-handle path so agent prompts know the large-response contract.
+can pull both signals (inlined sample size + total) to drive its
+threshold check, exactly as the bind9 sibling does. No handle exists
+today — the current
+:class:`~meho_backplane.operations.reducer.PassThroughReducer` always
+returns the inline payload unchanged.
 
 References
 ----------
@@ -285,7 +283,7 @@ _IFCONFIG_INET6_RE = re.compile(
 )
 _IFCONFIG_STATUS_RE = re.compile(r"^\s+status:\s+(?P<status>\S+)")
 _IFCONFIG_MEDIA_RE = re.compile(r"^\s+media:\s+(?P<media>.+)")
-_IFCONFIG_ETHER_RE = re.compile(r"^\s+ether\s+(?P<ether>[0-9a-f:]+)")
+_IFCONFIG_ETHER_RE = re.compile(r"^\s+ether\s+(?P<ether>[0-9A-Fa-f:]+)")
 
 
 def parse_ifconfig(output: str) -> list[dict[str, Any]]:
@@ -653,10 +651,10 @@ _WHEN_TO_USE_FIREWALL = (
     "(``pfsense.firewall.state``). Call ``pfsense.firewall.rules`` when "
     "the operator wants to audit the ruleset; call "
     "``pfsense.firewall.state`` when the operator wants to inspect active "
-    "connections. The state table can be large on busy firewalls — "
-    "large responses return a JSONFlux handle (key "
-    "``pfsense_firewall_state``) via the shared HandleStore; use "
-    "``result_describe``/``result_query`` to page through."
+    "connections. The state table can be large on busy firewalls; rows "
+    "are returned inline as ``{rows, total}``. When the JSONFlux handle "
+    "pattern is supported, large state lists will be available for "
+    "paging via result_describe/result_query."
 )
 
 #: Curated ``when_to_use`` for the ``nat`` group.
@@ -791,11 +789,10 @@ READ_OPS: tuple[PfSenseOp, ...] = (
             "Runs ``pfctl -ss`` over SSH and parses the active state "
             "table into structured state rows. Each row carries the "
             "protocol, interface, source address, direction, destination "
-            "address, and the full unparsed pfctl state line. Returns a "
-            "``{rows, total}`` envelope. The state table can be very "
-            "large on busy firewalls; large responses return a JSONFlux "
-            "handle (key ``pfsense_firewall_state``). No params; safe to "
-            "call on any healthy pfSense target with shell access."
+            "address, and the full unparsed pfctl state line. Returns "
+            "rows inline as ``{rows, total}``. The state table can be "
+            "very large on busy firewalls. No params; safe to call on "
+            "any healthy pfSense target with shell access."
         ),
         parameter_schema=_EMPTY_PARAMS,
         response_schema={
@@ -828,11 +825,10 @@ READ_OPS: tuple[PfSenseOp, ...] = (
             "parameter_hints": {},
             "output_shape": (
                 "``{rows: [{proto, iface, src, direction, dst, state}], "
-                "total: N}``. On busy firewalls ``total`` can be in the "
-                "thousands; the future JSONFlux reducer spills to the "
-                "HandleStore (key ``pfsense_firewall_state``) when "
-                "``total`` exceeds the configured threshold — use "
-                "``result_describe`` / ``result_query`` to page through."
+                "total: N}``. Rows are returned inline; ``total`` can be "
+                "in the thousands on busy firewalls. When the JSONFlux "
+                "handle pattern is supported, large state lists will be "
+                "available for paging via result_describe/result_query."
             ),
         },
     ),

@@ -59,11 +59,11 @@ func runContentPackList(cmd *cobra.Command, targetName string, jsonOut bool, bac
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	const opID = "GET:/api/v2/content/contentpack/list"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printContentPackList)
+	return conn.Render(cmd, opID, r, jsonOut, printContentPackList)
 }
 
 func printContentPackList(w io.Writer, r *CallResult) {

@@ -77,11 +77,11 @@ func runAlertDefinitionList(cmd *cobra.Command, targetName, paramsFlag string, j
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 	}
 	const opID = "GET:/suite-api/api/alertdefinitions"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printAlertDefinitionList)
+	return conn.Render(cmd, opID, r, jsonOut, printAlertDefinitionList)
 }
 
 func printAlertDefinitionList(w io.Writer, r *CallResult) {

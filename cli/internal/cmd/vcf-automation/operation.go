@@ -194,5 +194,5 @@ func runOperationCall(cmd *cobra.Command, opID, targetName, paramsFlag string, j
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, nil)
+	return conn.Render(cmd, opID, r, jsonOut, nil)
 }

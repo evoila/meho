@@ -54,17 +54,17 @@ func runNetworkPoolList(cmd *cobra.Command, targetName string, jsonOut bool, bac
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/network-pools", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/network-pools", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/network-pools", r, jsonOut, printNetworkPoolList)
+	return conn.Render(cmd, "GET:/v1/network-pools", r, jsonOut, printNetworkPoolList)
 }
 
 func printNetworkPoolList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/network-pools", r)
+		conn.PrintGeneric(w, "GET:/v1/network-pools", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF network pools (%d)\n", len(entries))

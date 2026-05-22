@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -105,11 +106,11 @@ func runVMList(cmd *cobra.Command, opts vmListOpts) error {
 	if perr != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(perr.Error()), opts.JSONOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/vcenter/vm", opts.TargetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/vcenter/vm", opts.TargetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	return renderCallResult(cmd, "GET:/vcenter/vm", r, opts.JSONOut, printVMList)
+	return conn.Render(cmd, "GET:/vcenter/vm", r, opts.JSONOut, printVMList)
 }
 
 // printVMList renders a VM list as a table. vSphere's GET /vcenter/vm
@@ -157,7 +158,7 @@ func fallbackResultRender(w io.Writer, r *CallResult) {
 	if len(r.Result) == 0 || string(r.Result) == "null" {
 		return
 	}
-	pretty, err := prettyJSON(r.Result)
+	pretty, err := dispatch.PrettyJSON(r.Result)
 	if err == nil {
 		fmt.Fprintln(w, pretty)
 		return
@@ -299,11 +300,11 @@ func runVMInfo(cmd *cobra.Command, nameOrID, targetName string, jsonOut bool, ba
 	}
 	opID := "GET:/vcenter/vm/{vm}"
 	params := map[string]any{"vm": moid}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printVMInfo)
+	return conn.Render(cmd, opID, r, jsonOut, printVMInfo)
 }
 
 // printVMInfo renders a single-VM detail block. The result body's
@@ -405,12 +406,12 @@ func runVMCreate(cmd *cobra.Command, targetName, specFlag string, jsonOut bool, 
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 	}
 	opID := "vmware.composite.vm.create"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
 	// The composite's success shape is opaque to the CLI today
 	// (T6 ships the canonical envelope; CLI consumers read --json).
 	// Use the generic renderer until the shape stabilises.
-	return renderCallResult(cmd, opID, r, jsonOut, nil)
+	return conn.Render(cmd, opID, r, jsonOut, nil)
 }

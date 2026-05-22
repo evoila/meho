@@ -58,11 +58,11 @@ func runClusterStatus(cmd *cobra.Command, targetName string, jsonOut bool, backp
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v1/cluster/status", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v1/cluster/status", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v1/cluster/status", r, jsonOut, printClusterStatus)
+	return conn.Render(cmd, "GET:/api/v1/cluster/status", r, jsonOut, printClusterStatus)
 }
 
 func printClusterStatus(w io.Writer, r *CallResult) {

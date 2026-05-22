@@ -57,11 +57,11 @@ func runHostList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneO
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v2/hosts", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2/hosts", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v2/hosts", r, jsonOut, printHostList)
+	return conn.Render(cmd, "GET:/api/v2/hosts", r, jsonOut, printHostList)
 }
 
 func printHostList(w io.Writer, r *CallResult) {

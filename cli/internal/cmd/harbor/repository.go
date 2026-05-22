@@ -60,11 +60,11 @@ func runRepositoryList(cmd *cobra.Command, projectName, targetName string, jsonO
 	}
 	opID := "GET:/api/v2.0/projects/{project_name}/repositories"
 	params := map[string]any{"project_name": projectName}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printRepositoryList)
+	return conn.Render(cmd, opID, r, jsonOut, printRepositoryList)
 }
 
 func printRepositoryList(w io.Writer, r *CallResult) {
@@ -136,11 +136,11 @@ func runRepositoryInfo(cmd *cobra.Command, projectName, repoName, targetName str
 		"project_name":    projectName,
 		"repository_name": repoName,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printRepositoryInfo)
+	return conn.Render(cmd, opID, r, jsonOut, printRepositoryInfo)
 }
 
 func printRepositoryInfo(w io.Writer, r *CallResult) {

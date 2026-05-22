@@ -62,11 +62,11 @@ func runArtifactList(cmd *cobra.Command, projectName, repoName, targetName strin
 		"project_name":    projectName,
 		"repository_name": repoName,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printArtifactList)
+	return conn.Render(cmd, opID, r, jsonOut, printArtifactList)
 }
 
 func printArtifactList(w io.Writer, r *CallResult) {
@@ -150,11 +150,11 @@ func runArtifactInfo(cmd *cobra.Command, projectName, repoName, reference, targe
 		"repository_name": repoName,
 		"reference":       reference,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printArtifactInfo)
+	return conn.Render(cmd, opID, r, jsonOut, printArtifactInfo)
 }
 
 func printArtifactInfo(w io.Writer, r *CallResult) {

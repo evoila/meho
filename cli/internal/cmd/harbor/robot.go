@@ -60,11 +60,11 @@ func runRobotList(cmd *cobra.Command, targetName string, jsonOut bool, backplane
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v2.0/robots", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2.0/robots", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v2.0/robots", r, jsonOut, printRobotList)
+	return conn.Render(cmd, "GET:/api/v2.0/robots", r, jsonOut, printRobotList)
 }
 
 func printRobotList(w io.Writer, r *CallResult) {
@@ -156,11 +156,11 @@ func runRobotCreate(cmd *cobra.Command, robotName, projectName string, duration 
 		"project":  projectName,
 		"duration": duration,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "harbor.robot.create", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.robot.create", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "harbor.robot.create", r, jsonOut, printRobotCreate)
+	return conn.Render(cmd, "harbor.robot.create", r, jsonOut, printRobotCreate)
 }
 
 func printRobotCreate(w io.Writer, r *CallResult) {
@@ -233,11 +233,11 @@ func runRobotDelete(cmd *cobra.Command, projectName string, robotID int, targetN
 		"project": projectName,
 		"id":      robotID,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "harbor.robot.delete", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.robot.delete", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "harbor.robot.delete", r, jsonOut, printRobotDelete)
+	return conn.Render(cmd, "harbor.robot.delete", r, jsonOut, printRobotDelete)
 }
 
 func printRobotDelete(w io.Writer, r *CallResult) {

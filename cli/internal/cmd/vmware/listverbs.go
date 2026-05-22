@@ -61,11 +61,11 @@ func runSimpleList(cmd *cobra.Command, spec simpleListSpec, targetName string, j
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, spec.opID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, spec.opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, spec.opID, r, jsonOut, makeSimpleListPrinter(spec))
+	return conn.Render(cmd, spec.opID, r, jsonOut, makeSimpleListPrinter(spec))
 }
 
 func makeSimpleListPrinter(spec simpleListSpec) func(io.Writer, *CallResult) {

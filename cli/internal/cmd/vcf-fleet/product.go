@@ -61,11 +61,11 @@ func runProductList(cmd *cobra.Command, environmentID, targetName string, jsonOu
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	params := map[string]any{"environmentId": environmentID}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, productListOpID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, productListOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, productListOpID, r, jsonOut, printProductList)
+	return conn.Render(cmd, productListOpID, r, jsonOut, printProductList)
 }
 
 func printProductList(w io.Writer, r *CallResult) {
@@ -76,7 +76,7 @@ func printProductList(w io.Writer, r *CallResult) {
 	}
 	entries, err := decodeListResult(r.Result)
 	if err != nil {
-		printGenericResult(w, productListOpID, r)
+		conn.PrintGeneric(w, productListOpID, r)
 		return
 	}
 	if len(entries) == 0 {

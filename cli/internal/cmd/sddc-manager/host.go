@@ -71,17 +71,17 @@ func runHostList(cmd *cobra.Command, targetName, domainID, clusterID string, jso
 			params["clusterId"] = clusterID
 		}
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/hosts", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/hosts", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/hosts", r, jsonOut, printHostList)
+	return conn.Render(cmd, "GET:/v1/hosts", r, jsonOut, printHostList)
 }
 
 func printHostList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/hosts", r)
+		conn.PrintGeneric(w, "GET:/v1/hosts", r)
 		return
 	}
 	fmt.Fprintf(w, "ESXi hosts (%d)\n", len(entries))

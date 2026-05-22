@@ -59,11 +59,11 @@ func runSegmentList(cmd *cobra.Command, targetName string, jsonOut bool, backpla
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	const opID = "GET:/policy/api/v1/infra/segments"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printSegmentList)
+	return conn.Render(cmd, opID, r, jsonOut, printSegmentList)
 }
 
 func printSegmentList(w io.Writer, r *CallResult) {

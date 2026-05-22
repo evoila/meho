@@ -58,11 +58,11 @@ func runNodeList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneO
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v1/transport-nodes", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v1/transport-nodes", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v1/transport-nodes", r, jsonOut, printNodeList)
+	return conn.Render(cmd, "GET:/api/v1/transport-nodes", r, jsonOut, printNodeList)
 }
 
 func printNodeList(w io.Writer, r *CallResult) {

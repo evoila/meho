@@ -59,11 +59,11 @@ func runTier0List(cmd *cobra.Command, targetName string, jsonOut bool, backplane
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	const opID = "GET:/policy/api/v1/infra/tier-0s"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printTier0List)
+	return conn.Render(cmd, opID, r, jsonOut, printTier0List)
 }
 
 func printTier0List(w io.Writer, r *CallResult) {

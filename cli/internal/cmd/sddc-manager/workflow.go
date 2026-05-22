@@ -63,17 +63,17 @@ func runWorkflowList(cmd *cobra.Command, targetName, statusFilter string, jsonOu
 	if statusFilter != "" {
 		params = map[string]any{"status": statusFilter}
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/tasks", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/tasks", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/tasks", r, jsonOut, printWorkflowList)
+	return conn.Render(cmd, "GET:/v1/tasks", r, jsonOut, printWorkflowList)
 }
 
 func printWorkflowList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/tasks", r)
+		conn.PrintGeneric(w, "GET:/v1/tasks", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF workflow tasks (%d)\n", len(entries))

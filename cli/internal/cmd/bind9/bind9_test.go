@@ -484,7 +484,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "bind9.about", "vcf-router-bind9", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "bind9.about", "vcf-router-bind9", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "bind9.about", "vcf-router-bind9", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "bind9.about", "vcf-router-bind9", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -559,7 +559,7 @@ func TestDispatchOpRecordAddSendsExpectedParams(t *testing.T) {
 		"zone": "evba.lab",
 		"type": "A",
 	}
-	if _, err := dispatchOp(context.Background(), srv.URL, "bind9.record.add", "vcf-router-bind9", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "bind9.record.add", "vcf-router-bind9", params); err != nil {
 		t.Fatalf("dispatchOp record.add: %v", err)
 	}
 }

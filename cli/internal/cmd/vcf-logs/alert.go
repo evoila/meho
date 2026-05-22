@@ -58,11 +58,11 @@ func runAlertList(cmd *cobra.Command, targetName string, jsonOut bool, backplane
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v2/alerts", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2/alerts", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v2/alerts", r, jsonOut, printAlertList)
+	return conn.Render(cmd, "GET:/api/v2/alerts", r, jsonOut, printAlertList)
 }
 
 func printAlertList(w io.Writer, r *CallResult) {

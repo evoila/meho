@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -47,11 +48,11 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/releases/system", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/releases/system", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/releases/system", r, jsonOut, printAbout)
+	return conn.Render(cmd, "GET:/v1/releases/system", r, jsonOut, printAbout)
 }
 
 func printAbout(w io.Writer, r *CallResult) {
@@ -87,7 +88,7 @@ func printAbout(w io.Writer, r *CallResult) {
 		return
 	}
 	if len(r.Result) > 0 && string(r.Result) != "null" {
-		pretty, err := prettyJSON(r.Result)
+		pretty, err := dispatch.PrettyJSON(r.Result)
 		if err == nil {
 			fmt.Fprintln(w, pretty)
 		} else {

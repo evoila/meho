@@ -61,11 +61,11 @@ func runTransportZoneList(cmd *cobra.Command, targetName string, jsonOut bool, b
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, tzOpID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, tzOpID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, tzOpID, r, jsonOut, printTransportZoneList)
+	return conn.Render(cmd, tzOpID, r, jsonOut, printTransportZoneList)
 }
 
 func printTransportZoneList(w io.Writer, r *CallResult) {

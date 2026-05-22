@@ -61,11 +61,11 @@ func runDatacenterList(cmd *cobra.Command, targetName string, jsonOut bool, back
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, datacenterListOpID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, datacenterListOpID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, datacenterListOpID, r, jsonOut, printDatacenterList)
+	return conn.Render(cmd, datacenterListOpID, r, jsonOut, printDatacenterList)
 }
 
 func printDatacenterList(w io.Writer, r *CallResult) {
@@ -76,7 +76,7 @@ func printDatacenterList(w io.Writer, r *CallResult) {
 	}
 	entries, err := decodeListResult(r.Result)
 	if err != nil {
-		printGenericResult(w, datacenterListOpID, r)
+		conn.PrintGeneric(w, datacenterListOpID, r)
 		return
 	}
 	if len(entries) == 0 {

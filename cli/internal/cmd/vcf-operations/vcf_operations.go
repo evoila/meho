@@ -49,6 +49,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/api"
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -184,7 +185,7 @@ func fallbackResultRender(w io.Writer, r *CallResult) {
 	if len(r.Result) == 0 || string(r.Result) == "null" {
 		return
 	}
-	pretty, err := prettyJSON(r.Result)
+	pretty, err := dispatch.PrettyJSON(r.Result)
 	if err == nil {
 		fmt.Fprintln(w, pretty)
 		return
@@ -201,7 +202,7 @@ func printErrorTrailer(w io.Writer, r *CallResult) {
 	}
 	if len(r.Extras) > 0 && string(r.Extras) != "null" {
 		fmt.Fprintln(w, "extras:")
-		pretty, err := prettyJSON(r.Extras)
+		pretty, err := dispatch.PrettyJSON(r.Extras)
 		if err == nil {
 			fmt.Fprintln(w, pretty)
 		} else {

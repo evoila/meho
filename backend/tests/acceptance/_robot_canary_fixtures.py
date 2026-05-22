@@ -47,6 +47,7 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -79,9 +80,11 @@ __all__ = [
     "ROBOT_CANARY_SERVERS",
     "ROBOT_FORCE_HANDLE_LIST_OP_ID",
     "ROBOT_FORCE_HANDLE_PARAMS",
+    "ROBOT_SANDBOX_TARGET_NAME",
     "ROBOT_TARGET_NAME",
     "IngestedRobotCanary",
     "ingested_robot_canary",
+    "ingested_robot_canary_sandbox",
     "robot_acceptance_operator",
 ]
 
@@ -90,6 +93,10 @@ ROBOT_CANARY_OPERATOR_TENANT: UUID = UUID("00000000-0000-0000-0000-0000000000fe"
 
 #: Stable :class:`Target.name` for the seeded Robot target.
 ROBOT_TARGET_NAME: str = "robot-acceptance"
+
+#: Stable :class:`Target.name` for the seeded sandbox Robot target
+#: (all endpoints return HTTP 200 + empty arrays).
+ROBOT_SANDBOX_TARGET_NAME: str = "robot-acceptance-sandbox"
 
 #: ``.test.invalid`` (RFC 6761 reserved) so no real network egress fires.
 ROBOT_CANARY_BASE_URL: str = "https://robot-canary.test.invalid"
@@ -369,6 +376,32 @@ def _register_robot_routes(mock: respx.MockRouter) -> None:
     mock.get("/key").respond(200, json=ROBOT_CANARY_KEYS)
 
 
+def _register_robot_sandbox_routes(mock: respx.MockRouter) -> None:
+    """Register the 10 Robot sandbox routes — every path returns 200 + empty array.
+
+    Mirrors the Hetzner Robot consumer sandbox behaviour:
+    ``https://robot-sandbox.hetzner.com`` returns HTTP 200 with empty JSON
+    arrays (``[]``) for every read endpoint when called with any valid Basic
+    credential. The sandbox op for ``GET:/query`` returns ``{}`` (an empty
+    object, not an array) because the Robot Webservice query endpoint returns
+    an object shape. All other read ops return ``[]``.
+
+    Operators use the sandbox before they have a production Robot account;
+    the MEHO op surface must tolerate empty-array responses gracefully
+    (``status='ok'``, empty ``result``) without crashing.
+    """
+    mock.get("/query").respond(200, json={})
+    mock.get("/server").respond(200, json=[])
+    mock.get("/server/1.2.3.1").respond(200, json={})
+    mock.get("/ip").respond(200, json=[])
+    mock.get("/subnet").respond(200, json=[])
+    mock.get("/vswitch").respond(200, json=[])
+    mock.get("/vswitch/4321").respond(200, json={})
+    mock.get("/failover").respond(200, json=[])
+    mock.get("/rdns").respond(200, json=[])
+    mock.get("/key").respond(200, json=[])
+
+
 @pytest.fixture
 def robot_acceptance_operator() -> Operator:
     """Frozen :class:`Operator` the Robot dispatch tests act as."""
@@ -439,7 +472,7 @@ async def ingested_robot_canary(
         f"(hetzner-robot, {ROBOT_VERSION}, {ROBOT_IMPL_ID}); got {connector_cls!r}"
     )
 
-    instance = get_or_create_connector_instance(connector_cls)
+    instance = cast(HetznerRobotConnector, get_or_create_connector_instance(connector_cls))
     instance._credentials_loader = _robot_credentials_loader  # type: ignore[attr-defined]
 
     async with respx.mock(
@@ -453,6 +486,87 @@ async def ingested_robot_canary(
                 operator=robot_acceptance_operator,
                 connector_id=ROBOT_CONNECTOR_ID,
                 target_name=ROBOT_TARGET_NAME,
+                base_url=ROBOT_CANARY_BASE_URL,
+            )
+        finally:
+            await instance.aclose()
+            reset_dispatcher_caches()
+
+
+@pytest.fixture
+async def ingested_robot_canary_sandbox(
+    pg_engine: None,
+    robot_acceptance_operator: Operator,
+) -> AsyncIterator[IngestedRobotCanary]:
+    """Yield a dispatcher-ready Robot setup where every op returns 200 + empty arrays.
+
+    Models the Hetzner Robot consumer sandbox
+    (``https://robot-sandbox.hetzner.com``): all 10 read endpoints respond
+    with HTTP 200 + empty JSON arrays (``[]``) or empty objects (``{}``) for
+    the query endpoint. Operators who run against the sandbox before they
+    have a production Robot account should receive ``status='ok'`` with an
+    empty result — not a parse crash.
+
+    Setup is identical to :func:`ingested_robot_canary` except:
+
+    * The seeded :class:`Target` uses :data:`ROBOT_SANDBOX_TARGET_NAME`
+      (a separate name to avoid primary-key collision in tests that use
+      both fixtures in the same session).
+    * The respx router maps every path to ``200 + []`` (or ``200 + {}``)
+      via :func:`_register_robot_sandbox_routes`.
+    """
+    await _insert_robot_descriptors()
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        target = Target(
+            tenant_id=ROBOT_CANARY_OPERATOR_TENANT,
+            name=ROBOT_SANDBOX_TARGET_NAME,
+            aliases=[],
+            product="hetzner-robot",
+            host=ROBOT_CANARY_BASE_URL.removeprefix("https://"),
+            port=443,
+            fqdn=None,
+            secret_ref="kv/data/hetzner/robot-sandbox",
+            auth_model="shared_service_account",
+            vpn_required=False,
+            extras={},
+            fingerprint=ROBOT_CANARY_FINGERPRINT,
+            notes="seeded by tests.acceptance._robot_canary_fixtures.ingested_robot_canary_sandbox",
+        )
+        session.add(target)
+        await session.commit()
+
+    registry = all_connectors_v2()
+    connector_cls = registry.get(("hetzner-robot", ROBOT_VERSION, ROBOT_IMPL_ID))
+    if connector_cls is None:
+        import importlib
+
+        import meho_backplane.connectors.hetzner_robot as _robot_pkg
+
+        importlib.reload(_robot_pkg)
+        registry = all_connectors_v2()
+        connector_cls = registry.get(("hetzner-robot", ROBOT_VERSION, ROBOT_IMPL_ID))
+
+    assert connector_cls is HetznerRobotConnector, (
+        f"expected HetznerRobotConnector registered for "
+        f"(hetzner-robot, {ROBOT_VERSION}, {ROBOT_IMPL_ID}); got {connector_cls!r}"
+    )
+
+    instance = cast(HetznerRobotConnector, get_or_create_connector_instance(connector_cls))
+    instance._credentials_loader = _robot_credentials_loader  # type: ignore[attr-defined]
+
+    async with respx.mock(
+        base_url=ROBOT_CANARY_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        _register_robot_sandbox_routes(mock)
+        try:
+            yield IngestedRobotCanary(
+                operator=robot_acceptance_operator,
+                connector_id=ROBOT_CONNECTOR_ID,
+                target_name=ROBOT_SANDBOX_TARGET_NAME,
                 base_url=ROBOT_CANARY_BASE_URL,
             )
         finally:

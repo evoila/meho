@@ -80,6 +80,7 @@ from tests.acceptance._robot_canary_fixtures import (
     ROBOT_CANARY_OPERATOR_TENANT,
     IngestedRobotCanary,
     ingested_robot_canary,
+    ingested_robot_canary_sandbox,
     robot_acceptance_operator,
 )
 from tests.acceptance._sddc_canary_fixtures import (
@@ -134,6 +135,7 @@ __all__ = [
     "ingested_harbor_canary",
     "ingested_nsx_canary",
     "ingested_robot_canary",
+    "ingested_robot_canary_sandbox",
     "ingested_sddc_canary",
     "ingested_vrops_canary",
     "integration_env",

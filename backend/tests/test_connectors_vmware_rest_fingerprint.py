@@ -28,6 +28,7 @@ import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.schemas import (
     AuthModel,
     FingerprintResult,
@@ -61,7 +62,7 @@ _TARGET = _StubTarget(
 )
 
 
-async def _stub_loader(_target: VsphereTargetLike) -> dict[str, str]:
+async def _stub_loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
     return {"username": "svc-meho", "password": "stub-password"}
 
 

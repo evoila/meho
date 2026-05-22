@@ -78,7 +78,7 @@ session cookie or token is established. The flow:
    the shared `CredentialsCache`. Missing-key (`"username"` /
    `"password"`) returns from the loader surface as `RuntimeError` naming
    both the target and the missing key.
-2. `auth_headers(target, raw_jwt)` checks `target.auth_model` via the
+2. `auth_headers(target, operator)` checks `target.auth_model` via the
    shared `is_acceptable_auth_model` predicate. Anything other than
    `shared_service_account` / the enum member / `None` (the pre-G0.3
    sentinel) raises `NotImplementedError` naming both the target and the

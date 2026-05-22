@@ -17,11 +17,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from urllib.parse import parse_qsl
+from uuid import UUID
 
 import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx import (
     NsxConnector,
@@ -32,6 +34,18 @@ from meho_backplane.connectors.registry import (
     register_connector_v2,
 )
 from meho_backplane.connectors.schemas import AuthModel
+
+
+def _make_operator(raw_jwt: str = "") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -157,7 +171,7 @@ async def test_auth_headers_establishes_session_with_form_encoded_body() -> None
             200,
             headers={"X-XSRF-TOKEN": xsrf_token, "Set-Cookie": "JSESSIONID=jsess-1; Path=/"},
         )
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert session_route.called and session_route.call_count == 1
     assert headers == {"X-XSRF-TOKEN": xsrf_token}
@@ -192,8 +206,8 @@ async def test_auth_headers_reuses_cached_session_across_calls() -> None:
             200,
             headers={"X-XSRF-TOKEN": xsrf_token, "Set-Cookie": "JSESSIONID=jsess-1; Path=/"},
         )
-        h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert h1 == h2 == {"X-XSRF-TOKEN": xsrf_token}
     # The load-bearing assertion -- exactly one POST /api/session/create
@@ -217,8 +231,8 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
             headers={"X-XSRF-TOKEN": "xsrf-b", "Set-Cookie": "JSESSIONID=jsess-b"},
         )
 
-        h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+        h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
 
     assert route_a.called and route_b.called
     assert h_a == {"X-XSRF-TOKEN": "xsrf-a"}
@@ -249,7 +263,7 @@ async def test_session_create_401_surfaces_runtime_error_naming_target() -> None
     async with respx.mock(base_url="https://nsx-a.test.invalid") as mock:
         mock.post("/api/session/create").respond(401, json={"error": "invalid_credentials"})
         with pytest.raises(RuntimeError, match=r"nsx-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "401" in str(exc_info.value)
     await connector.aclose()
@@ -269,7 +283,7 @@ async def test_session_create_missing_xsrf_header_raises() -> None:
         # Set-Cookie present but no X-XSRF-TOKEN -- failure case.
         mock.post("/api/session/create").respond(200, headers={"Set-Cookie": "JSESSIONID=jsess-1"})
         with pytest.raises(RuntimeError, match=r"nsx-a"):
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     await connector.aclose()
 
@@ -285,7 +299,7 @@ async def test_loader_missing_password_key_raises_clear_error() -> None:
 
     async with respx.mock(base_url="https://nsx-a.test.invalid"):
         with pytest.raises(RuntimeError, match=r"password"):
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
     await connector.aclose()
 
 
@@ -311,7 +325,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
     connector = _make_connector()
 
     with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, raw_jwt="")
+        await connector.auth_headers(target, operator=_make_operator())
 
     assert "nsx-per-user" in str(exc_info.value)
     assert auth_model in str(exc_info.value)
@@ -332,7 +346,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
 
     async with respx.mock(base_url="https://nsx.test.invalid") as mock:
         mock.post("/api/session/create").respond(200, headers={"X-XSRF-TOKEN": "pre-g03-token"})
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, operator=_make_operator())
 
     assert headers == {"X-XSRF-TOKEN": "pre-g03-token"}
     await connector.aclose()
@@ -352,7 +366,7 @@ async def test_auth_headers_accepts_enum_value_for_auth_model() -> None:
 
     async with respx.mock(base_url="https://nsx.test.invalid") as mock:
         mock.post("/api/session/create").respond(200, headers={"X-XSRF-TOKEN": "enum-token"})
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, operator=_make_operator())
 
     assert headers == {"X-XSRF-TOKEN": "enum-token"}
     await connector.aclose()
@@ -399,7 +413,9 @@ async def test_downstream_401_triggers_relogin_and_retry_once() -> None:
             ),
         ]
 
-        result = await connector._get_json_with_session_retry(_TARGET_A, "/api/v1/node", raw_jwt="")
+        result = await connector._get_json_with_session_retry(
+            _TARGET_A, "/api/v1/node", operator=_make_operator()
+        )
 
     assert result["node_version"] == "4.2.0.0.0"
     # Re-login fired exactly once -- two POSTs total.
@@ -429,7 +445,9 @@ async def test_downstream_401_then_still_401_after_relogin_raises_runtime_error(
         node_route = mock.get("/api/v1/node").respond(401)
 
         with pytest.raises(RuntimeError, match=r"nsx-a") as exc_info:
-            await connector._get_json_with_session_retry(_TARGET_A, "/api/v1/node", raw_jwt="")
+            await connector._get_json_with_session_retry(
+                _TARGET_A, "/api/v1/node", operator=_make_operator()
+            )
 
     assert "401" in str(exc_info.value)
     assert "after refresh" in str(exc_info.value)
@@ -461,7 +479,9 @@ async def test_downstream_non_401_status_error_propagates_untouched() -> None:
         mock.get("/api/v1/node").respond(502)
 
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            await connector._get_json_with_session_retry(_TARGET_A, "/api/v1/node", raw_jwt="")
+            await connector._get_json_with_session_retry(
+                _TARGET_A, "/api/v1/node", operator=_make_operator()
+            )
 
     assert exc_info.value.response.status_code == 502
     # One session-create call (initial); no re-login fired.
@@ -586,7 +606,7 @@ async def test_aclose_clears_session_token_cache_and_pool() -> None:
         mock.post("/api/session/create").respond(
             200, headers={"X-XSRF-TOKEN": "xsrf", "Set-Cookie": "JSESSIONID=js"}
         )
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert connector._session_tokens == {"nsx-a": "xsrf"}
     await connector.aclose()

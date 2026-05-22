@@ -109,6 +109,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
     basic_auth_header,
@@ -169,16 +171,17 @@ class VcfOperationsConnector(HttpConnector):
     async def auth_headers(
         self,
         target: VcfOperationsTargetLike,
-        raw_jwt: str,
+        operator: Operator,
     ) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target*, caches
         them (via the shared :class:`CredentialsCache`), and reuses the cached
-        values on subsequent calls. ``raw_jwt`` is accepted for ABC-signature
-        compatibility but unused — :attr:`AuthModel.SHARED_SERVICE_ACCOUNT`
-        authenticates with a Vault-sourced service account, not the operator's
-        OIDC token.
+        values on subsequent calls. ``operator`` is accepted for the shared
+        HTTP auth surface (G3.9-T1) but unused —
+        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
+        Vault-sourced service account, not the operator's OIDC token.
+        Threading the operator into vROps' credential loader is #G3.10.
 
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is anything
         other than ``shared_service_account`` or ``None``. Same predicate as
@@ -191,7 +194,7 @@ class VcfOperationsConnector(HttpConnector):
         separate seams matches httpx's own API surface
         (``client.request(..., headers=..., params=...)``).
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT mode does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT mode does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -222,7 +225,7 @@ class VcfOperationsConnector(HttpConnector):
         method: str,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -235,7 +238,8 @@ class VcfOperationsConnector(HttpConnector):
         via :meth:`_get_json`). Caller-supplied params win on key conflict —
         an operation handler that explicitly sets ``auth-source`` overrides
         the per-target default; nothing today exercises that path, but the
-        ordering documents the intended precedence.
+        ordering documents the intended precedence. ``operator`` is forwarded
+        to the base method (and thence :meth:`auth_headers`) unchanged.
         """
         merged_params = dict(self._auth_query_params(target))
         if params:
@@ -248,7 +252,7 @@ class VcfOperationsConnector(HttpConnector):
             target,
             method,
             path,
-            raw_jwt=raw_jwt,
+            operator=operator,
             params=final_params,
             json=json,
         )
@@ -267,7 +271,9 @@ class VcfOperationsConnector(HttpConnector):
         """
         probed_at = datetime.now(UTC)
         try:
-            payload = await self._get_json(target, "/suite-api/api/versions/current", raw_jwt="")
+            payload = await self._get_json(
+                target, "/suite-api/api/versions/current", operator=synthesise_system_operator()
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",

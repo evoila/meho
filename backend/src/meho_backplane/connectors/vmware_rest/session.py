@@ -39,6 +39,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
+from meho_backplane.auth.operator import Operator
+
 __all__ = [
     "SessionCredentials",
     "VsphereSessionLoader",
@@ -83,21 +85,30 @@ class VsphereTargetLike(Protocol):
     auth_model: str | None
 
 
-VsphereSessionLoader = Callable[[VsphereTargetLike], Awaitable[dict[str, str]]]
-"""Async callable resolving a target to ``{"username": ..., "password": ...}``.
+VsphereSessionLoader = Callable[[VsphereTargetLike, Operator], Awaitable[dict[str, str]]]
+"""Async callable resolving a (target, operator) pair to credentials.
 
-The connector's :meth:`VmwareRestConnector._session_token` invokes the
-loader exactly once per target (first-use), caching the resulting session
-token under ``target.name``. The return type is the looser
-``dict[str, str]`` (not :class:`SessionCredentials`) because Python
-:class:`Protocol` instances aren't runtime-constructible without a
-matching class — production code returns a plain dict and the connector
-reads ``creds["username"]`` / ``creds["password"]`` by key.
+Returns ``{"username": ..., "password": ...}``. The connector's
+:meth:`VmwareRestConnector._session_token` invokes the loader exactly
+once per target (first-use), caching the resulting session token under
+``target.name``. The return type is the looser ``dict[str, str]`` (not
+:class:`SessionCredentials`) because Python :class:`Protocol` instances
+aren't runtime-constructible without a matching class — production code
+returns a plain dict and the connector reads ``creds["username"]`` /
+``creds["password"]`` by key.
+
+The ``operator`` parameter carries the full
+:class:`~meho_backplane.auth.operator.Operator` (frozen) so the live
+loader (G3.9-T3) can read the per-target secret under the operator's
+identity via ``vault_client_for_operator(operator)`` — the locked
+decision in
+[docs/architecture/connector-auth.md](docs/architecture/connector-auth.md).
 """
 
 
 async def load_session_credentials_from_vault(
     target: VsphereTargetLike,
+    operator: Operator,
 ) -> dict[str, str]:
     """Default credential loader — Vault read by ``target.secret_ref``.
 
@@ -108,6 +119,10 @@ async def load_session_credentials_from_vault(
     caller without an explicit loader override receives a clear error
     rather than a silent fallback or a hallucinated credential pair.
 
+    ``operator`` is accepted (G3.9-T1 threads it down the auth surface)
+    but unused until G3.9-T3 implements the live read as
+    ``async with vault_client_for_operator(operator) as client: ...``.
+
     The supported workaround is to inject a custom
     :class:`VsphereSessionLoader` (``session_loader``) on
     ``VmwareRestConnector`` at construction time; tests and acceptance
@@ -116,6 +131,7 @@ async def load_session_credentials_from_vault(
     ``{"username": ..., "password": ...}`` dict — is tracked under the
     open Goal #214 (Connector parity).
     """
+    del operator  # threaded for G3.9-T3's live read; the stub never uses it
     raise NotImplementedError(
         "load_session_credentials_from_vault is a deliberate stub: the "
         "operator-context per-target Vault credential read is not yet wired "

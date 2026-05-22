@@ -123,6 +123,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newUnannotateCmd())
 	cmd.AddCommand(newListEdgesCmd())
 	cmd.AddCommand(newBulkImportCmd())
+	cmd.AddCommand(newTimelineCmd())
 	return cmd
 }
 

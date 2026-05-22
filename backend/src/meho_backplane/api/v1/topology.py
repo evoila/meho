@@ -93,6 +93,7 @@ read-shaped trace.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -122,6 +123,7 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_timeline,
 )
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.resolvers import NodeNotFoundError
@@ -130,7 +132,9 @@ from meho_backplane.topology.schemas import (
     TopologyEdgeEndpoint,
     TopologyNode,
     TopologyPath,
+    TopologyTimelineResult,
 )
+from meho_backplane.topology.timeline_cursor import InvalidTimelineCursorError
 
 __all__ = ["router"]
 
@@ -161,6 +165,7 @@ _OP_ANNOTATE = "topology.annotate"
 _OP_UNANNOTATE = "topology.unannotate"
 _OP_LIST_EDGES = "topology.list_edges"
 _OP_BULK_IMPORT = "topology.bulk_import"
+_OP_TIMELINE = "topology.timeline"
 
 #: HTTP-boundary ceiling on the number of edges accepted in one
 #: ``POST /edges/bulk`` body. The consumer's INVENTORY.md
@@ -178,6 +183,15 @@ _BULK_IMPORT_MAX_EDGES = 1000
 #: widen the HTTP boundary.
 _LIST_EDGES_LIMIT_DEFAULT = 200
 _LIST_EDGES_LIMIT_MAX = 1000
+
+#: ``GET /topology/timeline`` ``limit`` ceiling at the HTTP boundary.
+#: Default 50 per Task #861 acceptance criterion ("default
+#: ``--limit 50``"); the substrate ceiling is 1000. Tighter HTTP cap
+#: than the substrate is the same pattern :data:`_LIST_EDGES_LIMIT_MAX`
+#: uses -- the boundary layer can clamp without re-issuing the
+#: substrate primitive's own ceiling.
+_TIMELINE_LIMIT_DEFAULT = 50
+_TIMELINE_LIMIT_MAX = 1000
 
 #: Bounds mirror the service-layer defaults (``query._DEFAULT_DEPTH`` /
 #: ``query._DEFAULT_MAX_HOPS``); the ceilings cap a pathological
@@ -900,3 +914,94 @@ async def _edge_to_response(edge: object, session: AsyncSession) -> TopologyEdge
         properties=dict(edge.properties or {}),
         last_seen=edge.last_seen,
     )
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T5 (#861) — tenant-wide timeline of graph changes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/timeline", response_model=TopologyTimelineResult)
+async def timeline_route(
+    target: str | None = Query(default=None, max_length=256),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    limit: int = Query(
+        default=_TIMELINE_LIMIT_DEFAULT,
+        ge=1,
+        le=_TIMELINE_LIMIT_MAX,
+    ),
+    cursor: str | None = Query(default=None, max_length=1024),
+    operator: Operator = _require_operator,
+    session: AsyncSession = Depends(get_raw_session),
+) -> TopologyTimelineResult:
+    """Tenant-wide chronological feed of graph changes.
+
+    Wraps :func:`~meho_backplane.topology.query.query_timeline` (G9.3-T5
+    #861). Walks ``graph_node_history`` + ``graph_edge_history`` in
+    ``(valid_from DESC, history_id DESC)`` order, paginated via opaque
+    forward-only cursor encoding ``(valid_from, history_id, source)``.
+    Tenant scope is ``operator.tenant_id`` -- no surface accepts a
+    tenant id on this route.
+
+    Query parameters:
+
+    * ``target`` -- optional target name or alias. Resolved tenant-
+      scoped via :func:`~meho_backplane.targets.resolver.resolve_target`
+      (alias-aware, 404 with near-misses when nothing matches). The
+      resolved target id narrows the timeline to history rows for
+      resources belonging to that target -- nodes whose ``target_id``
+      matches, and edges whose either endpoint belongs to the target.
+    * ``since`` / ``until`` -- ISO-8601 absolute datetimes; either
+      bound is optional. Duration shorthand (``"24h"`` / ``"7d"``) is
+      a CLI convenience that the CLI front parses; the REST API
+      accepts absolute timestamps only, mirroring the audit-query
+      router's split (G8.1-T2 #466).
+    * ``limit`` -- page size (default ``50`` per the issue body;
+      ceiling ``1000``).
+    * ``cursor`` -- opaque next-page token from a prior response.
+
+    Errors:
+
+    * **404 ``no_target``** -- ``target`` did not resolve to a row in
+      the tenant. Near-miss matches surface in ``detail.matches`` for
+      operator self-correction (same shape as the ``refresh`` route).
+    * **400 ``invalid_cursor``** -- ``cursor`` is not a valid opaque
+      token (tampered or hand-crafted). The substrate's
+      :class:`InvalidTimelineCursorError` message is echoed.
+
+    The route binds ``audit_op_id="topology.timeline"`` /
+    ``audit_op_class="audit_query"`` per [decision #3](docs/planning/v0.2-decisions.md)
+    -- temporal graph queries are inspections of system state, parallel
+    to G8's audit-log query surface; the broadcast event carries only
+    ``{op_id, result_status, row_count}`` so the request filter (which
+    may name a sensitive target) and the rows themselves never leak
+    onto the SSE / Slack feed.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_TIMELINE,
+        audit_op_class="audit_query",
+    )
+    target_id: uuid.UUID | None = None
+    if target is not None:
+        # Re-use the existing tenant-scoped resolver so a missing
+        # target lands as the canonical 404 envelope (with near-miss
+        # suggestions) the CLI already renders for refresh / show.
+        resolved = await resolve_target(session, operator.tenant_id, target)
+        target_id = resolved.id
+
+    try:
+        result = await query_timeline(
+            operator,
+            target_id=target_id,
+            since=since,
+            until=until,
+            limit=limit,
+            cursor=cursor,
+        )
+    except InvalidTimelineCursorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Broadcast aggregate signal: row count only, never per-row payload.
+    structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    return result

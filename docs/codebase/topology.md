@@ -615,6 +615,72 @@ back atomically with the batch. No additional wiring was needed for
 G9.3-T2: the hook is on the call path the bulk importer already
 uses.
 
+## Timeline query (read half — G9.3-T5 #861)
+
+`query_timeline` (in `backend/src/meho_backplane/topology/query.py`)
+is the tenant-wide chronological feed of graph changes — "what's
+been happening in the graph in the last hour?" without rooting at a
+specific resource. It UNIONs `graph_node_history` +
+`graph_edge_history` and walks both tables in `(valid_from DESC,
+history_id DESC)` order, paginated via opaque forward-only cursor.
+
+### Pagination
+
+OFFSET-based pagination is broken under the diff-on-write hook
+(T2 #857) — new history rows land continuously, and offset shifts
+every subsequent row. A keyset cursor over the `(valid_from,
+history_id, source)` lex order is correctness-preserving: page N+1
+starts at the row strictly after page N's last row, and a concurrent
+insert either lands below the cursor (appears on a later page) or
+above the cursor (stays outside the paged sweep). No row is
+duplicated or skipped by the act of paging.
+
+The cursor is opaque (base64-encoded JSON, see
+`topology/timeline_cursor.py`) so consumers treat it as a token
+rather than parsing it. `source` is the third component because the
+two history tables have independent `BIGSERIAL` counters — a node
+and an edge can share `(valid_from, history_id)`; alphabetical
+order (`"node" > "edge"` in DESC) is the deterministic tie-breaker.
+
+### Query shape
+
+Two parallel single-index scans (one per table) followed by a
+Python-side merge, rather than a SQL `UNION ALL`. Two reasons:
+
+1. Each table's `(tenant_id, valid_from DESC)` composite index is
+   the natural access path; the planner would otherwise materialise
+   the union before sorting, defeating the index.
+2. The `--target` filter joins `graph_node` (for the node side) and
+   `graph_edge` + endpoint `graph_node` (for the edge side).
+   Inlining those joins into a single UNION'd statement would mix
+   two access paths in one plan — fragile under data growth.
+
+The merge is a two-pointer pass: pop the larger head from either
+list, with the source-discriminator tie-breaker. Memory is
+O(per_side_fetch) = O(limit + 1) per side, bounded by `limit ≤ 1000`.
+
+### Filters
+
+- `target_id` — optional `targets.id`. Nodes filter on
+  `graph_node.target_id`; edges filter on the endpoint nodes'
+  `target_id` (either endpoint touching the target qualifies — an
+  edge crossing two targets is part of both timelines).
+- `since` / `until` — inclusive `valid_from` bounds. The CLI
+  resolves duration shorthand (`24h` / `7d`) client-side to an
+  absolute ISO-8601 before crossing the wire.
+- `limit` — page size, default 50 per the Task #861 acceptance
+  criterion; ceiling 1000.
+
+### Audit class
+
+The REST route binds `audit_op_id="topology.timeline"` /
+`audit_op_class="audit_query"` per [decision #3](../planning/v0.2-decisions.md)
+— temporal graph queries are inspections of system state, parallel
+to G8's audit-log query surface. The broadcast event carries only
+`{op_id, result_status, row_count}` so the request filter (which
+may name a sensitive target) and the row contents never leak onto
+the SSE / Slack feed.
+
 ## Manual node seed control flow (write half — G0.9.1-T6 #778)
 
 ### `create_or_get_node`
@@ -670,10 +736,10 @@ will adopt the node onto the target (`target_id` gets set, the
 node's properties pick up probe-derived shape) without losing the
 manual-seed audit trail.
 
-## REST API surface (T5, #453 + G9.2-T5 #597)
+## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Nine routes total — eight on the topology
+the read + write halves. Ten routes total — nine on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -686,6 +752,7 @@ router, one on the targets router:
 | `DELETE /api/v1/topology/edges/{edge_id}` | `unannotate_edge` (T3 #595) | `topology.unannotate` | **tenant_admin** |
 | `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
 | `POST /api/v1/topology/edges/bulk` | `bulk_import_edges` (T8 #600) | `topology.bulk_import` | **tenant_admin** |
+| `GET /api/v1/topology/timeline` | `query_timeline` (G9.3-T5 #861) | `topology.timeline` | operator |
 | `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
 
 Load-bearing details:

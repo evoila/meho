@@ -159,13 +159,16 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     assert wire_schema["required"] == ["kind"]
     assert wire_schema["additionalProperties"] is False
     # G9.2-T7 (#598) widened the enum with the `edges` facet (replaces a
-    # standalone list_edges meta-tool); the closure / path branches and
-    # their conditional requireds stay unchanged.
+    # standalone list_edges meta-tool); G9.3-T5 (#861) added the
+    # `timeline` facet (tenant-wide chronological feed of graph
+    # changes from the *_history tables). The closure / path branches
+    # and their conditional requireds stay unchanged.
     assert wire_schema["properties"]["kind"]["enum"] == [
         "dependents",
         "dependencies",
         "path",
         "edges",
+        "timeline",
     ]
     # The wire shape carries NO top-level combinator — Anthropic 400s on
     # it (#905); the conditional logic moved to the stored schema below.
@@ -186,8 +189,10 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     assert sorted(by_kind["path"]) == ["from_name", "to_name"]
-    # `edges` has no required field — all filters are optional.
+    # `edges` and `timeline` have no required field — every filter is
+    # optional on both facets.
     assert "edges" not in by_kind
+    assert "timeline" not in by_kind
 
 
 def test_no_published_tool_wire_schema_has_top_level_combinator() -> None:

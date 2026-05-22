@@ -239,7 +239,13 @@ def test_no_separate_list_edges_tool_registered() -> None:
 
 
 def test_query_topology_input_schema_includes_edges_facet() -> None:
-    """The kind enum widened to include 'edges' with no extra required field."""
+    """The kind enum widened to include 'edges' / 'timeline' with no extra
+    required field.
+
+    G9.2-T7 (#598) added ``edges``; G9.3-T5 (#861) added ``timeline``.
+    Both extra kinds have no conditional required clause -- every
+    filter on either facet is optional.
+    """
     entry = get_tool("query_topology")
     assert entry is not None
     defn, _ = entry
@@ -249,22 +255,27 @@ def test_query_topology_input_schema_includes_edges_facet() -> None:
         "dependencies",
         "path",
         "edges",
+        "timeline",
     ]
-    # No 4th `allOf` clause is needed — `edges` has no required fields.
-    # The other three branches stay as-is.
+    # No extra `allOf` clauses for `edges` / `timeline` -- both have
+    # no required fields. The other three branches stay as-is.
     by_kind = {
         c["if"]["properties"]["kind"]["const"]: c["then"]["required"] for c in schema["allOf"]
     }
     assert "edges" not in by_kind
+    assert "timeline" not in by_kind
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     # The new filter knobs surface as optional properties on the schema.
     for prop in ("source", "conflicts", "limit", "offset"):
         assert prop in schema["properties"]
+    # Timeline knobs.
+    for prop in ("since", "until", "cursor"):
+        assert prop in schema["properties"]
 
 
 def test_query_topology_output_schema_widened_for_edges() -> None:
-    """The outputSchema also names the 'edges' facet."""
+    """The outputSchema names the 'edges' and 'timeline' facets."""
     entry = get_tool("query_topology")
     assert entry is not None
     defn, _ = entry
@@ -272,6 +283,10 @@ def test_query_topology_output_schema_widened_for_edges() -> None:
     assert out is not None
     assert "edges" in out["properties"]
     assert "edges" in out["properties"]["kind"]["enum"]
+    # G9.3-T5 (#861): timeline facet adds `rows` + `next_cursor`.
+    assert "rows" in out["properties"]
+    assert "next_cursor" in out["properties"]
+    assert "timeline" in out["properties"]["kind"]["enum"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

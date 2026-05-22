@@ -33,7 +33,14 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
-__all__ = ["TopologyEdge", "TopologyEdgeEndpoint", "TopologyNode", "TopologyPath"]
+__all__ = [
+    "TopologyEdge",
+    "TopologyEdgeEndpoint",
+    "TopologyNode",
+    "TopologyPath",
+    "TopologyTimelineEntry",
+    "TopologyTimelineResult",
+]
 
 
 def _deep_freeze(value: Any) -> Any:
@@ -200,3 +207,81 @@ class TopologyEdge(BaseModel):
         # field-serialiser contract.
         thawed: dict[str, Any] = _deep_thaw(value)
         return thawed
+
+
+class TopologyTimelineEntry(BaseModel):
+    """One row of the topology timeline (G9.3-T5).
+
+    Task #861 ships the tenant-wide chronological feed of graph
+    changes -- "what's been happening in the graph in the last hour"
+    without rooting at a specific resource. Each row projects one
+    ``graph_node_history`` or ``graph_edge_history`` mutation into a
+    compact summary the CLI / REST / MCP fronts can render or page
+    through.
+
+    Field-to-column mapping:
+
+    * ``valid_from`` -- ``*_history.valid_from``; every history row
+      from one operation carries the same timestamp (the diff-on-write
+      hook is the single source per :mod:`.history`).
+    * ``history_id`` -- ``*_history.history_id``. Required because the
+      cursor's tie-breaker discriminator is ``(valid_from, history_id,
+      source)`` -- ``valid_from`` alone is not unique within a refresh.
+    * ``source`` -- ``"node"`` for :class:`GraphNodeHistory`, ``"edge"``
+      for :class:`GraphEdgeHistory`. The discriminator the UNION
+      preserves.
+    * ``change_kind`` -- one of ``"created"`` / ``"updated"`` /
+      ``"removed"`` per :class:`GraphHistoryChangeKind`.
+    * ``resource_id`` -- ``node_id`` or ``edge_id`` of the mutated row.
+      ``None`` only after the referenced live row has been
+      hard-deleted (``ON DELETE SET NULL``) -- a rare survivability
+      shape; most timeline rows carry the FK intact.
+    * ``summary`` -- one-line human-readable description derived from
+      ``snapshot.before`` / ``snapshot.after``. Format:
+      ``"<change_kind> <kind> <name>"`` for nodes (e.g. ``"created vm
+      vm-prod"``); ``"<change_kind> <edge_kind> <from> -> <to>"`` for
+      edges (e.g. ``"removed runs-on vm-prod -> host-a"``). Falls back
+      to ``"<change_kind> <source>"`` when the live row is gone and
+      the snapshot did not preserve enough context.
+    * ``audit_id`` -- the soft-FK to the ``audit_log.id`` of the
+      operation that caused the mutation. ``None`` only for legacy
+      / mid-rollout rows; the diff-on-write hook always populates it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    valid_from: datetime
+    history_id: int
+    source: str
+    change_kind: str
+    resource_id: UUID | None
+    summary: str
+    audit_id: UUID | None
+
+
+class TopologyTimelineResult(BaseModel):
+    """Page of timeline rows plus the forward-only continuation cursor.
+
+    ``next_cursor`` is :data:`None` when fewer than ``limit`` rows
+    were available (the query reached the end of the matching set).
+    Consumers iterate by re-issuing the same filter with
+    ``cursor = next_cursor`` until ``next_cursor`` is None.
+
+    The cursor is opaque (base64-encoded JSON over ``(valid_from,
+    history_id, source)``) -- consumers treat it as a token. Stability
+    under concurrent inserts: a new history row landing in the window
+    between page N and page N+1 is naturally placed by the keyset
+    compare (``(valid_from, history_id) < (cursor.ts, cursor.id)``)
+    and either appears on a later page (if it falls below the cursor)
+    or never (if it lands above the cursor). No row is duplicated or
+    skipped by the act of paging.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # ``tuple`` (not ``list``) so the ``frozen=True`` immutability
+    # contract extends to in-place mutation: a list would still accept
+    # ``.append`` / ``.pop`` despite the ``frozen`` block on attribute
+    # reassignment. Consumers iterating over ``rows`` see the same shape.
+    rows: tuple[TopologyTimelineEntry, ...]
+    next_cursor: str | None

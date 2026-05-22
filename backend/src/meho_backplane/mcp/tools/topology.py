@@ -83,6 +83,7 @@ rejected at the schema layer before the handler runs.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any, Final
 
 from sqlalchemy import select
@@ -108,8 +109,10 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_timeline,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
+from meho_backplane.topology.timeline_cursor import InvalidTimelineCursorError
 
 __all__: list[str] = []
 
@@ -138,6 +141,13 @@ _MAX_HOPS_MAX: Final[int] = 32
 _EDGES_LIMIT_DEFAULT: Final[int] = 200
 _EDGES_LIMIT_MAX: Final[int] = 1000
 
+#: ``timeline`` facet defaults / ceilings. Mirror the T5 substrate
+#: bounds (``query._DEFAULT_TIMELINE_LIMIT`` = 50,
+#: ``query._MAX_TIMELINE_LIMIT`` = 1000). Default 50 per the Task
+#: #861 acceptance criterion ("default ``--limit 50``").
+_TIMELINE_LIMIT_DEFAULT: Final[int] = 50
+_TIMELINE_LIMIT_MAX: Final[int] = 1000
+
 #: Canonical ``GraphEdgeKind`` values, materialised once at module load
 #: so the inputSchema enum + the kind_filter description stay in lock-step
 #: with :class:`~meho_backplane.db.models.GraphEdgeKind` without
@@ -151,7 +161,7 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "kind": {
             "type": "string",
-            "enum": ["dependents", "dependencies", "path", "edges"],
+            "enum": ["dependents", "dependencies", "path", "edges", "timeline"],
             "description": (
                 "Which read shape to run. `dependents` = reverse closure "
                 "(what depends on `target`); `dependencies` = forward "
@@ -159,7 +169,12 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "unweighted route between `from_name` and `to_name`; "
                 "`edges` = flat tenant-scoped listing of `graph_edge` "
                 "rows (the inventory-survey shape, replaces a "
-                "standalone `list_edges` meta-tool)."
+                "standalone `list_edges` meta-tool); `timeline` = "
+                "tenant-wide chronological feed of graph changes from "
+                "the G9.3 `graph_node_history` + `graph_edge_history` "
+                "tables, cursor-paginated -- 'what's been happening in "
+                "the graph in the last hour?' without rooting at a "
+                "specific resource."
             ),
         },
         "target": {
@@ -236,12 +251,19 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": "integer",
             "minimum": 1,
             "maximum": _EDGES_LIMIT_MAX,
-            "default": _EDGES_LIMIT_DEFAULT,
+            # No schema-level ``default`` -- the effective default
+            # varies by ``kind`` (``edges`` -> ``_EDGES_LIMIT_DEFAULT``,
+            # ``timeline`` -> ``_TIMELINE_LIMIT_DEFAULT``). A single
+            # default in the schema would mislead schema-driven MCP
+            # clients into pre-populating the edges default on every
+            # call, over-requesting timeline pages.
             "description": (
-                f"Page size for `kind=edges` (default "
-                f"{_EDGES_LIMIT_DEFAULT}; ceiling {_EDGES_LIMIT_MAX}, "
-                "matching the substrate `list_edges` cap). Ignored for "
-                "the closure kinds and `path`."
+                f"Page size for paginated facets. `kind=edges` defaults "
+                f"to {_EDGES_LIMIT_DEFAULT}; `kind=timeline` defaults to "
+                f"{_TIMELINE_LIMIT_DEFAULT}. Shared ceiling "
+                f"{_EDGES_LIMIT_MAX}, matching the substrate "
+                "`list_edges` cap. Ignored for the closure kinds and "
+                "`path`."
             ),
         },
         "offset": {
@@ -296,6 +318,36 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 f"{_MAX_HOPS_DEFAULT}; hard ceiling {_MAX_HOPS_MAX}. "
                 "Ignored for the closure kinds."
             ),
+        },
+        "since": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 absolute lower bound on `valid_from` for "
+                "`kind=timeline`. Inclusive. Pair with `until` to "
+                "scope the timeline to one window. Ignored for the "
+                "closure / path / edges kinds."
+            ),
+            "format": "date-time",
+        },
+        "until": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 absolute upper bound on `valid_from` for "
+                "`kind=timeline`. Inclusive. Ignored for the closure "
+                "/ path / edges kinds."
+            ),
+            "format": "date-time",
+        },
+        "cursor": {
+            "type": ["string", "null"],
+            "description": (
+                "Opaque forward-pagination token from a prior "
+                "`kind=timeline` page's `next_cursor`. Encodes "
+                "`(valid_from, history_id, source)`; stable under "
+                "concurrent inserts from the G9.3 diff-on-write hook. "
+                "Ignored for non-timeline kinds."
+            ),
+            "maxLength": 1024,
         },
     },
     "required": ["kind"],
@@ -355,7 +407,16 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     'tenant\'); `{kind: "path", path: TopologyPath|null}` for `path` '
     "(null = unreachable within `max_hops`, a valid answer, not an "
     'error); `{kind: "edges", edges: [TopologyEdge, ...]}` for `edges` '
-    "(flat list, ordered by `last_seen DESC NULLS LAST, id`)."
+    "(flat list, ordered by `last_seen DESC NULLS LAST, id`).\n\n"
+    "For `kind=timeline`: tenant-wide chronological feed of graph "
+    "changes -- 'what changed in the graph since 9am?' → "
+    "`query_topology {kind: timeline, since: 2026-05-22T09:00:00Z}`. "
+    "Use `since` / `until` to bound the window. Cursor-paginated "
+    "(default `limit: 50`); a non-null `next_cursor` in the response "
+    "means more rows exist -- pass it back as `cursor` on the next "
+    "call to walk forward. Returns "
+    '`{kind: "timeline", rows: [TopologyTimelineEntry, ...], '
+    "next_cursor: <token|null>}`."
 )
 
 
@@ -400,6 +461,8 @@ async def _query_topology_handler(
         if kind == "edges":
             edges = await _list_edges_facet(operator, arguments)
             return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
+        if kind == "timeline":
+            return await _timeline_facet(operator, arguments)
         # kind == "path" — the enum + schema guarantee no other value.
         result = await find_path(
             operator,
@@ -414,6 +477,72 @@ async def _query_topology_handler(
     return {
         "kind": kind,
         "path": None if result is None else result.model_dump(mode="json"),
+    }
+
+
+async def _timeline_facet(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch the ``kind="timeline"`` facet to G9.3-T5's substrate.
+
+    Parses ISO-8601 strings from ``since`` / ``until`` (the MCP layer
+    accepts absolute ISO-8601 only; the CLI layer adds the
+    ``"24h"`` / ``"7d"`` duration-shorthand convenience and resolves
+    it to an absolute timestamp before crossing the wire). Forwards
+    the optional cursor verbatim.
+
+    :class:`InvalidTimelineCursorError` from the substrate surfaces
+    as JSON-RPC ``-32602`` -- the cursor came from a prior
+    ``next_cursor`` of this same tool, so a tampered / hand-crafted
+    token is an operator-actionable input problem.
+
+    ``target`` is intentionally **not** wired in here: the MCP
+    surface for ``kind=timeline`` does not accept a per-target
+    narrowing because the closure / path kinds already use ``target``
+    for a different concept (the anchor node name). Operators
+    wanting the per-target slice use the CLI ``meho topology
+    timeline --target ...`` which resolves the name to a target id
+    before calling the substrate. A future MCP widening can add a
+    ``target_id`` argument without conflicting with the closure
+    semantics.
+    """
+    since_str = arguments.get("since")
+    until_str = arguments.get("until")
+    cursor = arguments.get("cursor")
+    since_dt: datetime | None = None
+    until_dt: datetime | None = None
+    if isinstance(since_str, str):
+        try:
+            since_dt = datetime.fromisoformat(since_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=timeline): 'since' is not ISO-8601: {since_str!r}",
+            ) from exc
+    if isinstance(until_str, str):
+        try:
+            until_dt = datetime.fromisoformat(until_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=timeline): 'until' is not ISO-8601: {until_str!r}",
+            ) from exc
+
+    try:
+        result = await query_timeline(
+            operator,
+            target_id=None,
+            since=since_dt,
+            until=until_dt,
+            limit=int(arguments.get("limit", _TIMELINE_LIMIT_DEFAULT)),
+            cursor=cursor if isinstance(cursor, str) else None,
+        )
+    except InvalidTimelineCursorError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+
+    return {
+        "kind": "timeline",
+        "rows": [r.model_dump(mode="json") for r in result.rows],
+        "next_cursor": result.next_cursor,
     }
 
 
@@ -461,7 +590,13 @@ register_mcp_tool(
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["dependents", "dependencies", "path", "edges"],
+                    "enum": [
+                        "dependents",
+                        "dependencies",
+                        "path",
+                        "edges",
+                        "timeline",
+                    ],
                 },
                 "nodes": {
                     "type": "array",
@@ -486,6 +621,24 @@ register_mcp_tool(
                         "Present for `kind=edges`. TopologyEdge rows "
                         "ordered (last_seen DESC NULLS LAST, id). See "
                         "`meho_backplane.topology.schemas.TopologyEdge`."
+                    ),
+                },
+                "rows": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Present for `kind=timeline`. TopologyTimelineEntry "
+                        "rows ordered (valid_from DESC, history_id DESC). "
+                        "See `meho_backplane.topology.schemas."
+                        "TopologyTimelineEntry`."
+                    ),
+                },
+                "next_cursor": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Present for `kind=timeline`. Opaque next-page "
+                        "token, or null when the page is the end of the "
+                        "matching set."
                     ),
                 },
             },

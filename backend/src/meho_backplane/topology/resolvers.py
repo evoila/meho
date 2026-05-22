@@ -48,7 +48,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import Uuid as SAUuid
+from sqlalchemy import bindparam, select, text
 
 from meho_backplane.db.models import GraphNode
 
@@ -118,6 +119,18 @@ class NodeNotFoundError(ValueError):
 #: ``avoid-sqlalchemy-text`` SAST rule does not fire (no string
 #: interpolation; every value is a ``:named`` bind). Mirrors the
 #: pattern in :mod:`meho_backplane.topology.query`.
+#:
+#: ``tenant_id`` rides through SQLAlchemy's :class:`Uuid` bind type so
+#: the asyncpg / aiosqlite drivers serialise the UUID natively. On
+#: ``Uuid()``-typed columns SQLite stores the value as 32-char hex
+#: (no dashes) and matches incoming binds via the same conversion;
+#: passing ``str(uuid)`` would deliver the dashed-canonical form,
+#: which mismatches the stored hex and produces a silent zero-row
+#: result -- :func:`resolve_node`'s bare-name branch would then
+#: raise :class:`NodeNotFoundError` even for a row that exists.
+#: Production PG accepts both forms, masking the bug there. Same
+#: pattern :mod:`meho_backplane.topology.query`'s ``_TIMELINE_*_SQL``
+#: uses since #861.
 _ANCHOR_KINDS_SQL = text(
     """
     SELECT DISTINCT kind
@@ -125,13 +138,13 @@ _ANCHOR_KINDS_SQL = text(
     WHERE tenant_id = :tenant_id
       AND name = :name
     """
-)
+).bindparams(bindparam("tenant_id", type_=SAUuid()))
 
 
 async def _collect_distinct_kinds(
     session: AsyncSession,
     *,
-    tenant_id: str,
+    tenant_id: UUID | str,
     name: str,
 ) -> list[str]:
     """Return the distinct ``kind`` values for ``(tenant_id, name)``.
@@ -143,9 +156,14 @@ async def _collect_distinct_kinds(
 
     Kept private — the public ambiguity surface is
     :class:`AmbiguousNodeError`, raised by callers that decide what to
-    do with the kind list. ``tenant_id`` is taken as ``str`` because
-    asyncpg's text codec accepts the string form for UUID binds (same
-    convention :mod:`query` uses).
+    do with the kind list. Accepts ``tenant_id`` as either a
+    :class:`UUID` or a ``str``; the :class:`Uuid` bind type on
+    :data:`_ANCHOR_KINDS_SQL` coerces both to the column's wire
+    format (PG native ``uuid`` / SQLite ``CHAR(32)`` hex). Production
+    PG masked the latent dashed-vs-hex mismatch the bind type now
+    resolves; the SQLite test driver surfaces it as a silent zero-row
+    result, which :func:`resolve_node` then turns into a spurious
+    :class:`NodeNotFoundError`.
     """
     result = await session.execute(
         _ANCHOR_KINDS_SQL,
@@ -213,10 +231,8 @@ async def resolve_node(
         AmbiguousNodeError: Bare-name lookup hit multiple kinds; pass
             ``kind=`` to disambiguate.
     """
-    tenant_str = str(tenant_id)
-
     if kind is None:
-        kinds = await _collect_distinct_kinds(session, tenant_id=tenant_str, name=name)
+        kinds = await _collect_distinct_kinds(session, tenant_id=tenant_id, name=name)
         if not kinds:
             raise NodeNotFoundError(name)
         if len(kinds) > 1:

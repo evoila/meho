@@ -123,6 +123,7 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_history,
     query_timeline,
 )
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
@@ -130,6 +131,7 @@ from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import (
     TopologyEdge,
     TopologyEdgeEndpoint,
+    TopologyHistoryResult,
     TopologyNode,
     TopologyPath,
     TopologyTimelineResult,
@@ -166,6 +168,7 @@ _OP_UNANNOTATE = "topology.unannotate"
 _OP_LIST_EDGES = "topology.list_edges"
 _OP_BULK_IMPORT = "topology.bulk_import"
 _OP_TIMELINE = "topology.timeline"
+_OP_HISTORY = "topology.history"
 
 #: HTTP-boundary ceiling on the number of edges accepted in one
 #: ``POST /edges/bulk`` body. The consumer's INVENTORY.md
@@ -192,6 +195,16 @@ _LIST_EDGES_LIMIT_MAX = 1000
 #: substrate primitive's own ceiling.
 _TIMELINE_LIMIT_DEFAULT = 50
 _TIMELINE_LIMIT_MAX = 1000
+
+#: ``GET /topology/history/{name}`` ``limit`` ceiling at the HTTP
+#: boundary. Mirrors the substrate ceiling
+#: :data:`meho_backplane.topology.query._MAX_HISTORY_ROWS`. Per-resource
+#: history is bounded by retention (default 90 days) and the operator
+#: typically wants the complete walk in one response; the route default
+#: is the same ceiling because a tighter cap on the HTTP boundary
+#: would silently truncate the walk and the operator would think they
+#: see the full history when they don't.
+_HISTORY_LIMIT_MAX = 5000
 
 #: Bounds mirror the service-layer defaults (``query._DEFAULT_DEPTH`` /
 #: ``query._DEFAULT_MAX_HOPS``); the ceilings cap a pathological
@@ -1003,5 +1016,89 @@ async def timeline_route(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Broadcast aggregate signal: row count only, never per-row payload.
+    structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T3 (#859) — per-resource history walk
+# ---------------------------------------------------------------------------
+
+
+@router.get("/history/{name}", response_model=TopologyHistoryResult)
+async def history_route(
+    name: str,
+    kind: str | None = Query(default=None, max_length=64),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    include_edges: bool = Query(default=False),
+    limit: int = Query(default=_HISTORY_LIMIT_MAX, ge=1, le=_HISTORY_LIMIT_MAX),
+    operator: Operator = _require_operator,
+) -> TopologyHistoryResult:
+    """Chronological history walk anchored at one ``graph_node``.
+
+    Wraps :func:`~meho_backplane.topology.query.query_history` (G9.3-T3
+    #859). Companion to ``GET /topology/timeline`` (G9.3-T5): timeline
+    is "what changed in the graph at all in this window"; history is
+    "what changed for THIS specific resource". Resolved via the G9.1
+    resolver :func:`~meho_backplane.topology.resolvers.resolve_node` so
+    name + optional kind disambiguation use the same surface every
+    G9.1 + G9.2 verb does.
+
+    Query parameters:
+
+    * ``kind`` -- optional ``graph_node.kind`` pin to disambiguate
+      when a bare *name* resolves to multiple kinds in the tenant.
+    * ``since`` / ``until`` -- ISO-8601 absolute datetime bounds on
+      ``valid_from`` (inclusive at both ends). The CLI front resolves
+      duration shorthand (``"24h"`` / ``"7d"``) to an absolute
+      timestamp before crossing the wire, mirroring the timeline
+      route's split.
+    * ``include_edges`` -- when ``true``, also walk every history row
+      for edges incident to the resolved node (joined via the inner
+      subquery ``edge_id IN (SELECT id FROM graph_edge WHERE
+      from_node_id = anchor OR to_node_id = anchor)``). The merged
+      result still orders newest-first.
+    * ``limit`` -- hard cap on returned rows (1..``_HISTORY_LIMIT_MAX``).
+      Defaults to the ceiling because per-resource history is bounded
+      by retention; tighter caps would silently truncate the walk.
+
+    Errors:
+
+    * **404 ``node_not_found``** -- *name* (and *kind*, when supplied)
+      does not resolve to any node in the tenant. Cross-tenant names
+      surface identically -- the tenant boundary is opaque to the
+      caller.
+    * **409 ``ambiguous_node``** -- bare *name* resolves to multiple
+      kinds; pass ``kind`` to disambiguate.
+
+    The route binds ``audit_op_id="topology.history"`` /
+    ``audit_op_class="audit_query"`` per [decision #3](docs/planning/v0.2-decisions.md)
+    -- temporal graph queries are inspections of system state,
+    parallel to G8's audit-log query surface; the broadcast event
+    carries only ``{op_id, result_status, row_count}`` so the
+    response rows (which may carry the snapshot of a sensitive
+    resource's pre/post payload) never leak onto the SSE / Slack
+    feed. Same shape T5's timeline route uses.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_HISTORY,
+        audit_op_class="audit_query",
+    )
+    try:
+        result = await query_history(
+            operator,
+            name,
+            kind=kind,
+            since=since,
+            until=until,
+            include_edges=include_edges,
+            limit=limit,
+        )
+    except AmbiguousNodeError as exc:
+        raise _ambiguous_node_http(exc) from exc
+    except NodeNotFoundError as exc:
+        raise _node_not_found_http(exc) from exc
+
     structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
     return result

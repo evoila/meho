@@ -36,6 +36,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 __all__ = [
     "TopologyEdge",
     "TopologyEdgeEndpoint",
+    "TopologyHistoryEntry",
+    "TopologyHistoryResult",
     "TopologyNode",
     "TopologyPath",
     "TopologyTimelineEntry",
@@ -257,6 +259,71 @@ class TopologyTimelineEntry(BaseModel):
     resource_id: UUID | None
     summary: str
     audit_id: UUID | None
+
+
+class TopologyHistoryEntry(BaseModel):
+    """One row of the per-resource history walk (G9.3-T3).
+
+    Task #859 ships the operator surface ``meho topology history
+    <node>`` -- "what changed for THIS resource?" The differentiator
+    from :class:`TopologyTimelineEntry` (G9.3-T5) is that history
+    carries the full ``snapshot`` JSONB (``{before, after}``) per row
+    rather than a one-line summary -- the forensic shape for ``--json``
+    reconstruction. Field-to-column mapping otherwise matches
+    timeline:
+
+    * ``valid_from`` -- ``*_history.valid_from``.
+    * ``history_id`` -- ``*_history.history_id``.
+    * ``source`` -- ``"node"`` for :class:`GraphNodeHistory`, ``"edge"``
+      for :class:`GraphEdgeHistory` (only ``"edge"`` rows ever appear
+      when the caller passed ``include_edges=True``).
+    * ``change_kind`` -- one of ``"created"`` / ``"updated"`` /
+      ``"removed"`` per :class:`GraphHistoryChangeKind`.
+    * ``resource_id`` -- ``node_id`` for node-side rows, ``edge_id``
+      for edge-side rows. ``None`` only after the referenced live row
+      has been hard-deleted (``ON DELETE SET NULL``).
+    * ``snapshot`` -- the full ``{before, after}`` JSONB. ``None``
+      only for legacy / mid-rollout rows that pre-date the
+      diff-on-write hook; every hook-emitted row populates it.
+    * ``audit_id`` -- soft-FK to the ``audit_log.id`` of the
+      operation that caused the mutation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    valid_from: datetime
+    history_id: int
+    source: str
+    change_kind: str
+    resource_id: UUID | None
+    snapshot: dict[str, Any] | None
+    audit_id: UUID | None
+
+
+class TopologyHistoryResult(BaseModel):
+    """The full per-resource history walk plus the resolved anchor.
+
+    Unlike :class:`TopologyTimelineResult` (which is cursor-paginated),
+    the per-resource walk returns one page bounded by the substrate's
+    ``_MAX_HISTORY_ROWS`` cap -- per-resource history is bounded by
+    the retention window (default 90 days) and the operator typically
+    wants the complete chronology in one response. No ``next_cursor``;
+    a caller that overflows the cap narrows ``since`` / ``until``.
+
+    ``anchor_node_id`` is the resolved :class:`GraphNode.id` of the
+    anchor. Echoing it lets the CLI / MCP fronts surface "I resolved
+    your name X to node Y" in the human-readable header without a
+    second resolver round trip.
+
+    ``include_edges`` echoes the call-site flag so a consumer can
+    branch on whether edge rows are expected to appear in ``rows``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    anchor_node_id: UUID
+    include_edges: bool
+    rows: tuple[TopologyHistoryEntry, ...]
 
 
 class TopologyTimelineResult(BaseModel):

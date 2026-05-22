@@ -108,10 +108,57 @@ SECRET_LEAK_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 )
 
 
+@pytest.fixture(scope="session")
+def _schema_template_db(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Build the migrated SQLite schema ONCE per xdist worker; tests copy it.
+
+    :func:`_default_database_url` previously ran ``alembic upgrade head``
+    against a fresh per-test SQLite file. That replays the full migration
+    chain on every test — ~1.02s/test in CI x ~3.2k tests ~= ~9 min of
+    cumulative DB-setup wall, the dominant remaining unit-job cost after the
+    #771 / #786 / #799 work (the #793 "next target"). The schema is identical
+    across every test, so we replay the chain *once per worker* into a
+    template file and :func:`shutil.copyfile` it per test: a byte copy is
+    ~1000x cheaper than a full Alembic replay, preserves the exact per-test
+    fresh-file isolation, and copies the ``alembic_version`` stamp so tests
+    still observe ``head``.
+
+    Session scope + ``tmp_path_factory`` mirrors :func:`_shared_model_cache_dir`:
+    one build per worker (N total, not per-test), each worker's template
+    distinct so there is no cross-worker write race.
+
+    Migration-state tests (``test_alembic_probe``, ``test_migration_compat``,
+    ``test_migration_0011_*``) override ``DATABASE_URL`` with their own DB and
+    run their own Alembic, so the template never reaches them.
+    """
+    from alembic import command
+
+    from meho_backplane.db.migrations import alembic_config
+
+    template = tmp_path_factory.mktemp("schema-template") / "template.db"
+    url = f"sqlite+aiosqlite:///{template}"
+    # ``backend/alembic/env.py`` reads ``DATABASE_URL``; set it for the
+    # one-time build then restore the prior value so this session-scoped
+    # fixture does not leak a URL into the per-test fixture below.
+    prev = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = url
+    try:
+        cfg = alembic_config()
+        cfg.set_main_option("sqlalchemy.url", url)
+        command.upgrade(cfg, "head")
+    finally:
+        if prev is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = prev
+    return str(template)
+
+
 @pytest.fixture(autouse=True)
 def _default_database_url(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
+    _schema_template_db: str,
 ) -> Iterator[None]:
     """Provide a default ``DATABASE_URL`` (file-backed SQLite, schema applied).
 
@@ -120,10 +167,10 @@ def _default_database_url(
     added in T27 and the ``audit_log`` table needs to exist post-T28
     so the synchronous audit middleware doesn't fail-closed on every
     authenticated request. Pinning the default to a per-test tmp-path
-    SQLite file (rather than ``:memory:``) lets us run
-    ``alembic upgrade head`` against it once at fixture setup; the
-    file-backed URL is what makes the schema visible to the engine the
-    app constructs in a different connection than the migration runner.
+    SQLite file (rather than ``:memory:``) lets us copy the per-worker
+    migrated template (see :func:`_schema_template_db`) into it at fixture
+    setup; the file-backed URL is what makes the schema visible to the engine
+    the app constructs in a different connection than the migration runner.
     ``:memory:`` databases are connection-scoped — schema applied via
     one connection is invisible to the next, so audit middleware
     inserts would fail with ``no such table: audit_log``.
@@ -142,39 +189,33 @@ def _default_database_url(
     the file-backed DB this fixture creates is the one the app's
     audit middleware sees.
 
-    The Alembic upgrade runs in this autouse fixture's *sync* portion
-    so it's well-defined relative to ``@pytest.mark.asyncio`` tests:
-    fixture body executes before pytest-asyncio enters its event
-    loop. :func:`alembic.command.upgrade` invokes
-    :func:`asyncio.run` internally via the env.py async cookbook,
-    which would clash with an outer running loop.
+    The Alembic replay now happens once per session in
+    :func:`_schema_template_db` (outside any test's event loop); this
+    fixture's per-test work is a plain :func:`shutil.copyfile`, so there is
+    no ``asyncio.run``-vs-running-loop clash to sequence around.
     """
     # Local import to avoid a top-of-file circular-ish dependency:
     # this conftest is loaded before any meho_backplane modules,
     # and importing the engine module here means it gets imported
     # once at fixture-resolution time per test.
-    from alembic import command
+    import shutil
 
     from meho_backplane.db.engine import dispose_engine, reset_engine_for_testing
-    from meho_backplane.db.migrations import alembic_config
 
     db_path = tmp_path / "default.db"
     url = f"sqlite+aiosqlite:///{db_path}"
 
-    # ``DATABASE_URL`` must be set **before** ``command.upgrade`` runs:
-    # ``backend/alembic/env.py`` reads ``os.environ.get("DATABASE_URL")``
-    # and overrides whatever ``cfg.set_main_option("sqlalchemy.url", ...)``
-    # was set to here. Without the reordering, a ``DATABASE_URL`` inherited
-    # from the parent process silently redirects the migration runner at a
-    # different database than the fixture configured — the test DB ends up
-    # un-migrated and the next ``get_engine()`` call fails with
-    # ``no such table: audit_log``. monkeypatch.setenv is rolled back on
-    # teardown so the override is still per-test scoped.
-    monkeypatch.setenv("DATABASE_URL", url)
+    # Copy the per-worker migrated template (#793 amortization — see
+    # :func:`_schema_template_db`) instead of replaying the full Alembic chain
+    # per test. The byte copy preserves the schema *and* the ``alembic_version``
+    # stamp; per-test isolation is unchanged (still a fresh file per test).
+    shutil.copyfile(_schema_template_db, db_path)
 
-    cfg = alembic_config()
-    cfg.set_main_option("sqlalchemy.url", url)
-    command.upgrade(cfg, "head")
+    # ``DATABASE_URL`` must be set so the engine the app constructs binds to
+    # this per-test DB. ``monkeypatch.setenv`` is rolled back on teardown so the
+    # override stays per-test scoped; migration-state tests that set their own
+    # ``DATABASE_URL`` win via last-write.
+    monkeypatch.setenv("DATABASE_URL", url)
 
     get_settings.cache_clear()
     reset_engine_for_testing()

@@ -149,6 +149,16 @@ _EDGES_LIMIT_MAX: Final[int] = 1000
 _TIMELINE_LIMIT_DEFAULT: Final[int] = 50
 _TIMELINE_LIMIT_MAX: Final[int] = 1000
 
+#: ``history`` facet ceiling. Mirrors the T3 substrate cap
+#: (``query._MAX_HISTORY_ROWS`` = 5000) and the REST route cap
+#: (``api/v1/topology._HISTORY_LIMIT_MAX``) so the four fronts (REST /
+#: CLI / MCP / substrate) clamp the per-resource walk identically.
+#: Per-resource history is bounded by retention, so the default IS the
+#: ceiling -- a tighter MCP default would silently truncate the walk
+#: and operators would think they see the full history when they
+#: don't (same reasoning T3 used for the REST and CLI defaults).
+_HISTORY_LIMIT_MAX: Final[int] = 5000
+
 #: Canonical ``GraphEdgeKind`` values, materialised once at module load
 #: so the inputSchema enum + the kind_filter description stay in lock-step
 #: with :class:`~meho_backplane.db.models.GraphEdgeKind` without
@@ -263,19 +273,28 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
         "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": _EDGES_LIMIT_MAX,
+            # Permissive base ceiling matches the loosest substrate cap
+            # (``query_history`` accepts 1..``_HISTORY_LIMIT_MAX``); the
+            # per-facet ``allOf`` clauses below tighten this to the
+            # ``edges`` (1000) and ``timeline`` (1000) substrate caps so
+            # MCP callers can't smuggle an over-cap value past the
+            # schema and trip the substrate's ``ValueError`` at runtime.
+            "maximum": _HISTORY_LIMIT_MAX,
             # No schema-level ``default`` -- the effective default
             # varies by ``kind`` (``edges`` -> ``_EDGES_LIMIT_DEFAULT``,
-            # ``timeline`` -> ``_TIMELINE_LIMIT_DEFAULT``). A single
-            # default in the schema would mislead schema-driven MCP
-            # clients into pre-populating the edges default on every
-            # call, over-requesting timeline pages.
+            # ``timeline`` -> ``_TIMELINE_LIMIT_DEFAULT``,
+            # ``history`` -> ``_HISTORY_LIMIT_MAX``). A single default
+            # in the schema would mislead schema-driven MCP clients
+            # into pre-populating the edges default on every call,
+            # over-requesting timeline / history pages.
             "description": (
                 f"Page size for paginated facets. `kind=edges` defaults "
-                f"to {_EDGES_LIMIT_DEFAULT}; `kind=timeline` defaults to "
-                f"{_TIMELINE_LIMIT_DEFAULT}. Shared ceiling "
-                f"{_EDGES_LIMIT_MAX}, matching the substrate "
-                "`list_edges` cap. Ignored for the closure kinds and "
+                f"to {_EDGES_LIMIT_DEFAULT} (ceiling {_EDGES_LIMIT_MAX}); "
+                f"`kind=timeline` defaults to {_TIMELINE_LIMIT_DEFAULT} "
+                f"(ceiling {_TIMELINE_LIMIT_MAX}); `kind=history` "
+                f"defaults to {_HISTORY_LIMIT_MAX} (also the ceiling -- "
+                "per-resource history is bounded by retention so the "
+                "default IS the cap). Ignored for the closure kinds and "
                 "`path`."
             ),
         },
@@ -398,6 +417,23 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
         {
             "if": {"properties": {"kind": {"const": "history"}}},
             "then": {"required": ["target"]},
+        },
+        # Per-facet ``limit`` ceilings. The base ``limit.maximum`` above
+        # is the loosest cap (5000 for ``history``); the ``edges`` and
+        # ``timeline`` substrates cap tighter (1000 each), so we
+        # intersect a stricter ``maximum`` for those kinds. JSON Schema
+        # 2020-12 ``allOf`` semantics: every applicable subschema must
+        # validate, so the effective ceiling for a given ``kind`` is
+        # ``min(base.maximum, then.maximum)``. Without this, an
+        # ``edges`` caller passing ``limit=1500`` would pass the schema
+        # but trip ``list_edges``'s ``ValueError`` at runtime.
+        {
+            "if": {"properties": {"kind": {"const": "edges"}}},
+            "then": {"properties": {"limit": {"maximum": _EDGES_LIMIT_MAX}}},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "timeline"}}},
+            "then": {"properties": {"limit": {"maximum": _TIMELINE_LIMIT_MAX}}},
         },
     ],
 }
@@ -653,6 +689,7 @@ async def _history_facet(
         since=since_dt,
         until=until_dt,
         include_edges=bool(arguments.get("include_edges", False)),
+        limit=int(arguments.get("limit", _HISTORY_LIMIT_MAX)),
     )
     return {
         "kind": "history",

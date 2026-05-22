@@ -1467,6 +1467,114 @@
         }
       }
     },
+    "/api/v1/topology/history/{name}": {
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "History Route",
+        "description": "Chronological history walk anchored at one ``graph_node``.\n\nWraps :func:`~meho_backplane.topology.query.query_history` (G9.3-T3\n#859). Companion to ``GET /topology/timeline`` (G9.3-T5): timeline\nis \"what changed in the graph at all in this window\"; history is\n\"what changed for THIS specific resource\". Resolved via the G9.1\nresolver :func:`~meho_backplane.topology.resolvers.resolve_node` so\nname + optional kind disambiguation use the same surface every\nG9.1 + G9.2 verb does.\n\nQuery parameters:\n\n* ``kind`` -- optional ``graph_node.kind`` pin to disambiguate\n  when a bare *name* resolves to multiple kinds in the tenant.\n* ``since`` / ``until`` -- ISO-8601 absolute datetime bounds on\n  ``valid_from`` (inclusive at both ends). The CLI front resolves\n  duration shorthand (``\"24h\"`` / ``\"7d\"``) to an absolute\n  timestamp before crossing the wire, mirroring the timeline\n  route's split.\n* ``include_edges`` -- when ``true``, also walk every history row\n  for edges incident to the resolved node (joined via the inner\n  subquery ``edge_id IN (SELECT id FROM graph_edge WHERE\n  from_node_id = anchor OR to_node_id = anchor)``). The merged\n  result still orders newest-first.\n* ``limit`` -- hard cap on returned rows (1..``_HISTORY_LIMIT_MAX``).\n  Defaults to the ceiling because per-resource history is bounded\n  by retention; tighter caps would silently truncate the walk.\n\nErrors:\n\n* **404 ``node_not_found``** -- *name* (and *kind*, when supplied)\n  does not resolve to any node in the tenant. Cross-tenant names\n  surface identically -- the tenant boundary is opaque to the\n  caller.\n* **409 ``ambiguous_node``** -- bare *name* resolves to multiple\n  kinds; pass ``kind`` to disambiguate.\n\nThe route binds ``audit_op_id=\"topology.history\"`` /\n``audit_op_class=\"audit_query\"`` per [decision #3](docs/planning/v0.2-decisions.md)\n-- temporal graph queries are inspections of system state,\nparallel to G8's audit-log query surface; the broadcast event\ncarries only ``{op_id, result_status, row_count}`` so the\nresponse rows (which may carry the snapshot of a sensitive\nresource's pre/post payload) never leak onto the SSE / Slack\nfeed. Same shape T5's timeline route uses.",
+        "operationId": "history_route_api_v1_topology_history__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "include_edges",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Edges"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 5000,
+              "minimum": 1,
+              "default": 5000,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologyHistoryResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/feed": {
       "get": {
         "tags": [
@@ -6105,6 +6213,85 @@
         ],
         "title": "TopologyEdgeEndpoint",
         "description": "One endpoint of a :class:`TopologyEdge` \u2014 the ``from`` or ``to`` node.\n\nCompact node identity for the flat edge-listing helper. Carries the\nthree fields a human-readable edge summary needs: the node ``id``\n(caller may follow it back to the full :class:`TopologyNode`), the\n``kind`` (the closed enum from migration ``0007``), and the\n``name`` (unique within ``(tenant_id, kind)``). The full node\n``properties`` bag is intentionally **not** included \u2014 an edge\nlisting is a survey of relationships, not a node dump; callers that\nneed the bag look the node up separately via\n:func:`meho_backplane.topology.resolvers.resolve_node`."
+      },
+      "TopologyHistoryEntry": {
+        "properties": {
+          "valid_from": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Valid From"
+          },
+          "history_id": {
+            "type": "integer",
+            "title": "History Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "change_kind": {
+            "type": "string",
+            "title": "Change Kind"
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Resource Id"
+          },
+          "snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Snapshot"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "valid_from",
+          "history_id",
+          "source",
+          "change_kind",
+          "resource_id",
+          "snapshot",
+          "audit_id"
+        ],
+        "title": "TopologyHistoryEntry",
+        "description": "One row of the per-resource history walk (G9.3-T3).\n\nTask #859 ships the operator surface ``meho topology history\n<node>`` -- \"what changed for THIS resource?\" The differentiator\nfrom :class:`TopologyTimelineEntry` (G9.3-T5) is that history\ncarries the full ``snapshot`` JSONB (``{before, after}``) per row\nrather than a one-line summary -- the forensic shape for ``--json``\nreconstruction. Field-to-column mapping otherwise matches\ntimeline:\n\n* ``valid_from`` -- ``*_history.valid_from``.\n* ``history_id`` -- ``*_history.history_id``.\n* ``source`` -- ``\"node\"`` for :class:`GraphNodeHistory`, ``\"edge\"``\n  for :class:`GraphEdgeHistory` (only ``\"edge\"`` rows ever appear\n  when the caller passed ``include_edges=True``).\n* ``change_kind`` -- one of ``\"created\"`` / ``\"updated\"`` /\n  ``\"removed\"`` per :class:`GraphHistoryChangeKind`.\n* ``resource_id`` -- ``node_id`` for node-side rows, ``edge_id``\n  for edge-side rows. ``None`` only after the referenced live row\n  has been hard-deleted (``ON DELETE SET NULL``).\n* ``snapshot`` -- the full ``{before, after}`` JSONB. ``None``\n  only for legacy / mid-rollout rows that pre-date the\n  diff-on-write hook; every hook-emitted row populates it.\n* ``audit_id`` -- soft-FK to the ``audit_log.id`` of the\n  operation that caused the mutation."
+      },
+      "TopologyHistoryResult": {
+        "properties": {
+          "anchor_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Anchor Node Id"
+          },
+          "include_edges": {
+            "type": "boolean",
+            "title": "Include Edges"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyHistoryEntry"
+            },
+            "type": "array",
+            "title": "Rows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "anchor_node_id",
+          "include_edges",
+          "rows"
+        ],
+        "title": "TopologyHistoryResult",
+        "description": "The full per-resource history walk plus the resolved anchor.\n\nUnlike :class:`TopologyTimelineResult` (which is cursor-paginated),\nthe per-resource walk returns one page bounded by the substrate's\n``_MAX_HISTORY_ROWS`` cap -- per-resource history is bounded by\nthe retention window (default 90 days) and the operator typically\nwants the complete chronology in one response. No ``next_cursor``;\na caller that overflows the cap narrows ``since`` / ``until``.\n\n``anchor_node_id`` is the resolved :class:`GraphNode.id` of the\nanchor. Echoing it lets the CLI / MCP fronts surface \"I resolved\nyour name X to node Y\" in the human-readable header without a\nsecond resolver round trip.\n\n``include_edges`` echoes the call-site flag so a consumer can\nbranch on whether edge rows are expected to appear in ``rows``."
       },
       "TopologyNode": {
         "properties": {

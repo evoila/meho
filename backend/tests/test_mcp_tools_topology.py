@@ -188,7 +188,14 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     assert entry is not None
     stored_schema = entry[0].inputSchema
     conditionals = stored_schema["allOf"]
-    by_kind = {c["if"]["properties"]["kind"]["const"]: c["then"]["required"] for c in conditionals}
+    # Skip per-kind ``limit.maximum`` tightening clauses (no ``required``
+    # key) — those intersect a stricter ``limit`` ceiling for ``edges``
+    # / ``timeline`` and aren't part of the required-field contract.
+    by_kind = {
+        c["if"]["properties"]["kind"]["const"]: c["then"]["required"]
+        for c in conditionals
+        if "required" in c["then"]
+    }
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     assert sorted(by_kind["path"]) == ["from_name", "to_name"]

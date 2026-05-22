@@ -520,7 +520,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
+        # persist-credentials: false — this job only does a read-only
+        # checkout + a working-tree `git diff`; it never pushes, so it
+        # has no need for the checkout token persisted in local git config.
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         # `make generate` runs the pinned oapi-codegen (installed by the
@@ -530,6 +535,24 @@ jobs:
         with:
           go-version: '1.25'
           cache-dependency-path: cli/go.sum
+
+      - name: Ensure make is available
+        # The minimal meho-runners-ci image ships no `make` (the Go lane
+        # never needed it — it calls `go` directly). Install it via apt so
+        # this job can drive the canonical Makefile targets rather than
+        # duplicating their commands (which would drift from the Makefile).
+        # Same `sudo -n apt-get` pattern as the go-lint-test C-toolchain
+        # step; baking make into the base image is the long-term fix.
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if command -v make >/dev/null 2>&1; then
+            echo "make ready: $(make --version | head -1)"
+            exit 0
+          fi
+          echo "make missing; installing via apt..."
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends make
 
       - name: Install uv
         # `make snapshot-openapi` drives the backplane FastAPI app via

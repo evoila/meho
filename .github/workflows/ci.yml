@@ -290,8 +290,27 @@ jobs:
         # coverage caveat (requires `env.PYBEHAVIOR.branch_right_left`)
         # does not apply.
         run: |
+          # Perf-budget guard — early warning for CI-perf creep (the #898 / G3.6
+          # timeout class). The Goal #11 unit budget is 10 min, but it was
+          # aspirational (comment-only): the G3.6 batch crept 9.3 -> 19 min and
+          # nothing failed until the 20-min `timeout-minutes` cliff, blocking a
+          # release. This step measures the pytest wall, always prints it (trend
+          # visibility), and FAILS at the budget — well below the hard cap, so a
+          # regression is caught at the PR that causes it, not at release time.
+          # `timeout-minutes` stays as the hang backstop.
+          # MEASURE before raising budget_s (see #793/#827/#898): re-run with
+          #   MEHO_FIXTURE_TIMING_FILE=/tmp/fixt MEHO_LIFESPAN_TIMING=/tmp/lifespan
+          # then `uv run python tests/_perf_timing_report.py` to attribute the wall.
+          budget_s=600
+          start=$(date +%s)
           COVERAGE_CORE=sysmon uv run pytest -n 6 --dist loadscope --maxfail=1 --ignore=tests/integration \
             --cov=meho_backplane --cov-report=xml tests/
+          dur=$(( $(date +%s) - start ))
+          echo "::notice title=Unit pytest wall::${dur}s (budget ${budget_s}s = Goal #11 10-min; hard cap = job timeout-minutes)"
+          if [ "$dur" -gt "$budget_s" ]; then
+            echo "::error title=Unit perf budget exceeded::unit pytest ${dur}s > budget ${budget_s}s. Early-warning gate for CI-perf creep (#898 / G3.6 class). MEASURE the slow path before raising budget_s: MEHO_FIXTURE_TIMING_FILE + MEHO_LIFESPAN_TIMING + tests/_perf_timing_report.py (#793/#827). Amortize the cost; do not just bump the budget."
+            exit 1
+          fi
 
       - name: Upload Python coverage artifact
         # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).

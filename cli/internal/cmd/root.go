@@ -31,6 +31,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
+	vcfautomation "github.com/evoila/meho/cli/internal/cmd/vcf-automation"
 	vcffleet "github.com/evoila/meho/cli/internal/cmd/vcf-fleet"
 	vcflogs "github.com/evoila/meho/cli/internal/cmd/vcf-logs"
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
@@ -299,6 +300,23 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())
+
+	// G3.6-T12 (#840) -- vcfa-rest-9.0 operator alias verbs for
+	// Initiative #369. The verb tree pre-bakes connector_id=
+	// "vcfa-rest-9.0" on top of the existing /api/v1/operations/call
+	// dispatcher route. VCFA 9.x is **dual-plane** (provider /cloudapi/*
+	// + tenant /iaas/api/*) on one appliance; the persistent --plane
+	// flag picks the op namespace and the backend dispatcher routes
+	// each call to the correct auth plane via the descriptor's
+	// spec_source tag (G3.6-T11 #836). The persistent --fqdn flag is
+	// the per-call vhost override the appliance's strict Host: routing
+	// requires when reached by IP (without it every path returns 404
+	// with empty body). Ships 11 read-only verbs (6 provider + 5
+	// tenant) plus operation search/call meta-tool wrappers; replaces
+	// ./scripts/vcf-automation.sh for the read-only surface.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `vcf-automation` parent.
+	root.AddCommand(vcfautomation.NewRootCmd())
 
 	// G5.3-T1 (#608) -- laptop-local memory migration verb tree for
 	// Initiative #375. v0.1 ships the skeleton (migrate parent +

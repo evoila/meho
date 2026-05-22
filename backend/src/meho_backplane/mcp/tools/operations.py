@@ -305,10 +305,26 @@ register_mcp_tool(
                         "since they only need the name. See "
                         "`docs/architecture/mcp.md` ('Target-reference "
                         "shape convention') for the canonical forward "
-                        "convention any new tool should follow."
+                        "convention any new tool should follow. The "
+                        "optional `fqdn` field is a per-call override "
+                        "for the resolved target's vhost name; honoured "
+                        "by connectors that route by `Host:` header "
+                        "(notably `vcfa-rest-9.0` where reaching the "
+                        "appliance by IP without an `fqdn` returns 404 "
+                        "with empty body)."
                     ),
                     "properties": {
                         "name": {"type": "string", "minLength": 1},
+                        "fqdn": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": (
+                                "Per-call override for the resolved "
+                                "target's `fqdn` column. Threaded into "
+                                "the connector for vhost routing; the "
+                                "DB row is not modified."
+                            ),
+                        },
                     },
                 },
                 "params": {

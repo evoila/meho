@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -73,9 +74,9 @@ func bindKVAddrFlags(cmd *cobra.Command) *kvAddrFlags {
 // (kv list) arrive already reduced to the JSONFlux sample + handle by
 // the dispatcher.
 func dispatchKV(cmd *cobra.Command, f *kvAddrFlags, opID string, params map[string]any) error {
-	backplaneURL, err := resolveBackplane(f.backplaneOverride)
+	backplaneURL, err := backplane.Resolve(f.backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), f.jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), f.jsonOut)
 	}
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, f.targetName, params)
 	if err != nil {

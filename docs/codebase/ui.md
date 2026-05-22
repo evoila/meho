@@ -5,9 +5,11 @@ Frontend chassis) introduces a server-rendered web UI inside the
 backplane FastAPI process at `/ui/*`. This doc covers the **chassis**
 that Task [#863](https://github.com/evoila/meho/issues/863) (G10.0-T2)
 landed — module layout, template-rendering shape, Tailwind 4 build
-pipeline, vendored JS assets. Subsequent Tasks fill in the missing
-pieces (`#864` session storage, `#865` auth flow, `#866` FastAPI
-mount + dashboard + smoke test); this doc grows with each Task.
+pipeline, vendored JS assets — plus the **session storage** that Task
+[#864](https://github.com/evoila/meho/issues/864) (G10.0-T3) layered on
+top. Subsequent Tasks fill in the remaining pieces (`#865` auth
+flow, `#866` FastAPI mount + dashboard + smoke test); this doc grows
+with each Task.
 
 ## Overview
 
@@ -39,7 +41,8 @@ Locked decisions:
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
 | `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.__version__`. |
 | `meho_backplane.ui.routes` | Stub package for chassis Task. T5 (#866) lands the `APIRouter` instance + dashboard view + the five surface stub routes. |
-| `meho_backplane.ui.auth` | Stub package for chassis Task. T3 (#864) lands `web_session` ORM + encrypted token custody; T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
+| `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
+| `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
 
 The Jinja2 `Environment` is a module-level singleton (constructed on
 first `get_jinja_env()` call); the template cache it holds is keyed
@@ -98,6 +101,51 @@ cd backend && uv run uvicorn meho_backplane.main:app --reload
 The watcher writes to the same `static/dist/` path the image build
 populates; no `npm` / `pnpm` / `node` enters this loop. The Tailwind
 download (~38 MB binary) is the one-time cost.
+
+## Session storage (Task #864)
+
+The BFF (Backend-for-Frontend) shape locked by
+[decision #11](../planning/v0.2-decisions.md) keeps tokens
+server-side. Task #864 ships the storage substrate the
+upcoming T4 login flow writes to:
+
+- **`web_session` Postgres table** — migration
+  [`0012_create_web_session.py`](../../backend/alembic/versions/0012_create_web_session.py).
+  Columns: `id` (UUID PK, the cookie value the browser holds),
+  `operator_sub` (Keycloak `sub` claim), `tenant_id`,
+  `created_at`, `expires_at`, `access_token` (bytea, Fernet
+  ciphertext), `refresh_token` (bytea, Fernet ciphertext),
+  `last_seen_at`, `revoked_at` (nullable; non-null = soft-deleted).
+  Indexes on `operator_sub` and `expires_at` (future
+  bulk-revoke / idle-sweep surfaces).
+- **ORM model** — [`WebSession` in
+  `db/models.py`](../../backend/src/meho_backplane/db/models.py).
+  Mirrors the column shape; no helper methods (write-once /
+  read-mostly).
+- **Encryption** — every token write goes through one
+  [`cryptography.fernet.Fernet`](https://cryptography.io/en/latest/fernet/)
+  instance constructed from `UI_SESSION_ENCRYPTION_KEY` (URL-safe
+  base64-encoded 32-byte key). Production deploys render this from
+  Vault into the pod environment by the same chain that lands
+  `DATABASE_URL` / Keycloak client secrets. Empty value =
+  fail-fast: any session-store call raises
+  `EncryptionKeyMissingError`. The key is process-wide
+  (one-key-per-deploy in v0.2); rotation is a future Initiative
+  (every active session becomes un-decryptable on rotation).
+- **Refresh-token rotation** — `rotate_refresh` implements the
+  [RFC 9700 § 4.14](https://datatracker.ietf.org/doc/rfc9700/)
+  one-time-use contract. The happy path swaps both columns to
+  fresh ciphertext on the caller's session; the replay path
+  (mismatched / already-revoked / expired / missing session)
+  revokes the row and writes a `ui.session.refresh_replay`
+  `audit_log` row on a **dedicated session** so the security
+  signal commits independently of the caller's transaction. The
+  raised `RefreshReplayError` carries the revoked session id +
+  the freshly-written audit row id so the caller (T4 refresh
+  handler) can map both into the 401 + cookie-clear response.
+
+T4 (#865) builds the login / callback / logout flow + the BFF
+middleware on top of this substrate; T3 ships storage only.
 
 ## Vendored asset versions
 
@@ -158,9 +206,12 @@ Initiatives fill the routes in.
 
 - **`jinja2 >= 3.1.6`** — already a backplane dependency; no
   pyproject change.
-- **No new Python deps** for the chassis. T3 (#864) adds `cryptography`
-  (already a dev dep) to runtime; T4 (#865) leans on the existing
-  `authlib` dependency.
+- **`cryptography >= 42`** — already a backplane dependency (vendored
+  for Vault TLS + JWT). T3 (#864) uses
+  `cryptography.fernet.Fernet` for at-rest session-token
+  encryption.
+- **No new Python deps** for the chassis. T4 (#865) leans on the
+  existing `authlib` dependency.
 - **Tailwind standalone CLI** — runtime-of-image-build dependency
   only; never enters the running container or the wheel.
 

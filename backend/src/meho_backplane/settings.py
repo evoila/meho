@@ -344,6 +344,28 @@ class Settings(BaseModel):
         :func:`~meho_backplane.memory._internal.is_expired` until the
         external job reaps them. Read once at lifespan startup; toggling
         post-start requires a pod restart to take effect.
+    ui_session_encryption_key:
+        URL-safe base64-encoded 32-byte key used by
+        :mod:`meho_backplane.ui.auth.session_store` to Fernet-encrypt
+        the OAuth access + refresh tokens stored in the ``web_session``
+        table. Initiative #337 (G10.0 Frontend chassis), Task #864.
+        The chassis-locked decision #11 keeps tokens server-side; this
+        key is the chassis-wide encryption seam that makes
+        "server-side" mean "ciphertext at rest". Default ``""`` is
+        fail-fast: any session-store call raises
+        :class:`~meho_backplane.ui.auth.session_store.EncryptionKeyMissingError`
+        until the key is provisioned. Production deploys render this
+        from a Vault-managed secret into the pod's environment (same
+        chain that lands ``DATABASE_URL`` / Keycloak client secrets
+        in the env); dev/test pin a per-run key via
+        :meth:`pytest.MonkeyPatch.setenv` (see the autouse fixture in
+        ``backend/tests/conftest.py``). Generate one with
+        ``python -c 'from cryptography.fernet import Fernet;
+        print(Fernet.generate_key().decode())'``. Rotating the key is
+        an Initiative-#337-follow-up surface (every active session
+        becomes un-decryptable on key rotation; the operator-facing
+        contract is "log everyone out, then bump the key"); v0.2
+        ships one key end-to-end.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -394,6 +416,7 @@ class Settings(BaseModel):
     memory_user_default_ttl_days: int = Field(default=7, ge=1, le=365)
     memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
     memory_expiry_enabled: bool = True
+    ui_session_encryption_key: str = ""
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -527,4 +550,5 @@ def get_settings() -> Settings:
         memory_expiry_enabled=parse_bool_env(
             os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
         ),
+        ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", ""),
     )

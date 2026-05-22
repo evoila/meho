@@ -7,9 +7,19 @@ Importing this package registers :class:`GcloudConnector` against the
 v2 connector registry under
 ``(product="gcloud", version="1.0", impl_id="gcloud-rest")``.
 
-Registration is purely synchronous (import-time only): the v2 registry
-entry lands via :func:`~meho_backplane.connectors.registry.register_connector_v2`.
-No typed-op upserts are queued here — operations ship in G3.7-T5 (#848).
+Two-phase registration (same shape as
+:mod:`meho_backplane.connectors.bind9.__init__` and
+:mod:`meho_backplane.connectors.kubernetes.__init__`):
+
+* **Synchronous (import time)** — the v2 registry entry lands via
+  :func:`~meho_backplane.connectors.registry.register_connector_v2`
+  inside this module.
+
+* **Asynchronous (lifespan startup)** —
+  :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+  invokes :meth:`GcloudConnector.register_gcloud_typed_operations`, which
+  delegates to :func:`~meho_backplane.operations.typed_register.register_typed_operation`
+  for each of the eight G3.7-T5 (#848) read-only ops.
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called. The connector advertises an explicit
@@ -28,6 +38,7 @@ from meho_backplane.connectors.gcloud.session import (
     load_credentials_from_vault,
 )
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 register_connector_v2(
     product="gcloud",
@@ -35,6 +46,12 @@ register_connector_v2(
     impl_id="gcloud-rest",
     cls=GcloudConnector,
 )
+
+# Queue the typed-op upsert onto the lifespan-driven registrar list.
+# run_typed_op_registrars() (called during app lifespan startup) will
+# invoke this after all connector modules have been eager-imported, so
+# every connector's v2 registry entry exists before the op walk begins.
+register_typed_op_registrar(GcloudConnector.register_gcloud_typed_operations)
 
 __all__ = [
     "GcloudConnector",

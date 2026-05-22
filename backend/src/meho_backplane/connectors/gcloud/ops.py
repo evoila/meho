@@ -102,14 +102,11 @@ _GCLOUD_ABOUT_OP = GcloudOp(
         "properties": {
             "project_id": {"type": ["string", "null"]},
             "project_number": {"type": ["string", "null"]},
-            "name": {"type": ["string", "null"]},
             "lifecycle_state": {"type": ["string", "null"]},
             "organization": {"type": ["string", "null"]},
-            "create_time": {"type": ["string", "null"]},
-            "labels": {"type": "object"},
         },
         "required": ["project_id"],
-        "additionalProperties": True,
+        "additionalProperties": False,
     },
     group_key="identity",
     tags=("read-only", "identity", "gcloud", "cloudresourcemanager"),
@@ -125,9 +122,8 @@ _GCLOUD_ABOUT_OP = GcloudOp(
         ),
         "parameter_hints": {},
         "output_shape": (
-            "Flat dict: project_id (string), project_number (string), name (display "
-            "name), lifecycle_state (string), organization (org-ID string or null), "
-            "create_time (RFC3339 string or null), labels (dict)."
+            "Flat dict: project_id (string), project_number (string), "
+            "lifecycle_state (string), organization (org-ID string or null)."
         ),
     },
 )

@@ -29,8 +29,8 @@ func newResourceCmd() *cobra.Command {
 // GET:/suite-api/api/resources.
 //
 // --params is the escape hatch for filter query parameters
-// (``resourceKind`` / ``adapterKind`` / ``name`` / ``page`` /
-// ``pageSize``). Passing them as raw JSON keeps the verb thin and
+// (“resourceKind“ / “adapterKind“ / “name“ / “page“ /
+// “pageSize“). Passing them as raw JSON keeps the verb thin and
 // avoids the trap of declaring every vROps query string as a
 // dedicated flag — the resource list takes >10 documented filters.
 func newResourceListCmd() *cobra.Command {
@@ -116,10 +116,10 @@ func printResourceList(w io.Writer, r *CallResult) {
 // newResourceGetCmd returns `meho vcf-operations resource get <id>` →
 // GET:/suite-api/api/resources/{id}.
 //
-// The descriptor declares ``{id}`` as a path parameter; the CLI
-// passes it under params so the dispatcher's ``_substitute_path``
+// The descriptor declares “{id}“ as a path parameter; the CLI
+// passes it under params so the dispatcher's “_substitute_path“
 // fills it in at dispatch time (same pattern Harbor uses for
-// ``{project_name}``).
+// “{project_name}“).
 func newResourceGetCmd() *cobra.Command {
 	var (
 		targetName        string

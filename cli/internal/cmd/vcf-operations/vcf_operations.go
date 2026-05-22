@@ -91,9 +91,9 @@ func NewRootCmd() *cobra.Command {
 type vropsEntry = map[string]any
 
 // vropsListKeysByOp maps each list op's wrapper key (vROps wraps lists
-// under noun-specific keys: ``resourceList``, ``alerts``,
-// ``alertDefinitions``, ``symptoms``, ``recommendations``,
-// ``superMetrics``). The renderers consult this map to find the rows
+// under noun-specific keys: “resourceList“, “alerts“,
+// “alertDefinitions“, “symptoms“, “recommendations“,
+// “superMetrics“). The renderers consult this map to find the rows
 // regardless of which list op they are handling.
 var vropsListKeysByOp = map[string]string{
 	"GET:/suite-api/api/resources":        "resourceList",
@@ -105,8 +105,8 @@ var vropsListKeysByOp = map[string]string{
 }
 
 // decodeVropsListResult unwraps a vROps suite-api list payload from
-// the documented per-noun wrapper key. ``key`` is the expected
-// wrapper (one of ``resourceList`` / ``alerts`` / etc.). The fallback
+// the documented per-noun wrapper key. “key“ is the expected
+// wrapper (one of “resourceList“ / “alerts“ / etc.). The fallback
 // path accepts a bare array so future spec drift to a flat shape
 // doesn't break the renderer; the fallback is best-effort, not part
 // of the documented contract.
@@ -148,9 +148,9 @@ func vropsStringField(e vropsEntry, key string) string {
 	return ""
 }
 
-// vropsResourceName extracts the ``resourceKey.name`` from a vROps
+// vropsResourceName extracts the “resourceKey.name“ from a vROps
 // resource entry. The list payload nests the human-readable name
-// inside the ``resourceKey`` object alongside the adapterKindKey and
+// inside the “resourceKey“ object alongside the adapterKindKey and
 // resourceKindKey; surfacing it flat in the column makes the table
 // readable without the operator running --json | jq.
 func vropsResourceName(e vropsEntry) string {
@@ -164,7 +164,7 @@ func vropsResourceName(e vropsEntry) string {
 	return ""
 }
 
-// vropsResourceKindKey extracts ``resourceKey.resourceKindKey`` from a
+// vropsResourceKindKey extracts “resourceKey.resourceKindKey“ from a
 // vROps resource entry. Same nesting rationale as
 // :func:`vropsResourceName`.
 func vropsResourceKindKey(e vropsEntry) string {

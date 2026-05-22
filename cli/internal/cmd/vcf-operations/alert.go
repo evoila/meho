@@ -28,8 +28,8 @@ func newAlertCmd() *cobra.Command {
 // GET:/suite-api/api/alerts.
 //
 // --params is the escape hatch for filter query parameters
-// (``activeOnly`` / ``alertCriticality`` / ``alertStatus`` /
-// ``resourceId`` / ``page`` / ``pageSize``).
+// (“activeOnly“ / “alertCriticality“ / “alertStatus“ /
+// “resourceId“ / “page“ / “pageSize“).
 func newAlertListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -100,15 +100,17 @@ func printAlertList(w io.Writer, r *CallResult) {
 		fmt.Fprintln(w, "  (0 alerts)")
 		return
 	}
-	fmt.Fprintf(w, "%-38s %-40s %-10s %-10s\n", "alertId", "definition", "level", "status")
+	fmt.Fprintf(w, "%-38s %-32s %-22s %-10s %-10s\n",
+		"alertId", "definition", "resourceId", "level", "status")
 	for _, e := range entries {
 		level := ""
 		if v, ok := e["alertLevel"].(float64); ok {
 			level = fmt.Sprintf("%d", int(v))
 		}
-		fmt.Fprintf(w, "%-38s %-40s %-10s %-10s\n",
+		fmt.Fprintf(w, "%-38s %-32s %-22s %-10s %-10s\n",
 			truncate(vropsStringField(e, "alertId"), 38),
-			truncate(vropsStringField(e, "alertDefinitionName"), 40),
+			truncate(vropsStringField(e, "alertDefinitionName"), 32),
+			truncate(vropsStringField(e, "resourceId"), 22),
 			level,
 			truncate(vropsStringField(e, "status"), 10),
 		)

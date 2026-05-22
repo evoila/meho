@@ -270,12 +270,14 @@ func TestPrintResourceGet(t *testing.T) {
 func TestPrintAlertList(t *testing.T) {
 	r := &CallResult{
 		Status: "ok",
-		Result: json.RawMessage(`{"alerts":[{"alertId":"a-1","alertDefinitionName":"CPU high","alertLevel":3,"status":"ACTIVE"}],"pageInfo":{"totalCount":1}}`),
+		Result: json.RawMessage(`{"alerts":[{"alertId":"a-1","alertDefinitionName":"CPU high","resourceId":"res-1","alertLevel":3,"status":"ACTIVE"}],"pageInfo":{"totalCount":1}}`),
 	}
 	var buf bytes.Buffer
 	printAlertList(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"a-1", "CPU high", "ACTIVE", "3"} {
+	// The header advertises a `resourceId` column (alert.go Long text);
+	// pin that the renderer actually emits it and the row's value.
+	for _, want := range []string{"a-1", "CPU high", "ACTIVE", "3", "resourceId", "res-1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printAlertList missing %q in:\n%s", want, out)
 		}
@@ -309,12 +311,14 @@ func TestPrintAlertDefinitionList(t *testing.T) {
 func TestPrintSymptomList(t *testing.T) {
 	r := &CallResult{
 		Status: "ok",
-		Result: json.RawMessage(`{"symptoms":[{"id":"sym-1","symptomDefinitionName":"CPU breach","severity":"WARNING"}],"pageInfo":{"totalCount":1}}`),
+		Result: json.RawMessage(`{"symptoms":[{"id":"sym-1","symptomDefinitionName":"CPU breach","resourceId":"res-1","severity":"WARNING"}],"pageInfo":{"totalCount":1}}`),
 	}
 	var buf bytes.Buffer
 	printSymptomList(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"sym-1", "CPU breach", "WARNING"} {
+	// The header advertises a `resourceId` column (symptom.go Long text);
+	// pin that the renderer actually emits it and the row's value.
+	for _, want := range []string{"sym-1", "CPU breach", "WARNING", "resourceId", "res-1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printSymptomList missing %q in:\n%s", want, out)
 		}
@@ -348,6 +352,46 @@ func TestPrintSupermetricList(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("printSupermetricList missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+// TestPrintRecommendationListFirstLineOnly pins the "first line"
+// contract advertised in the recommendation list help text — a
+// multi-line description must be collapsed so embedded newlines
+// don't spill across multiple table rows.
+func TestPrintRecommendationListFirstLineOnly(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		Result: json.RawMessage(`{"recommendations":[{"id":"rec-1","description":"Reduce workload\nthen restart\nthe VM","actionId":""}],"pageInfo":{"totalCount":1}}`),
+	}
+	var buf bytes.Buffer
+	printRecommendationList(&buf, r)
+	out := buf.String()
+	if !strings.Contains(out, "Reduce workload") {
+		t.Errorf("printRecommendationList missing first line in:\n%s", out)
+	}
+	if strings.Contains(out, "then restart") || strings.Contains(out, "the VM") {
+		t.Errorf("printRecommendationList must render only the first line; got:\n%s", out)
+	}
+}
+
+// TestPrintSupermetricListFirstLineOnly pins the "first line"
+// contract advertised in the super-metric list help text — a
+// multi-line formula must be collapsed so embedded newlines don't
+// spill across multiple table rows.
+func TestPrintSupermetricListFirstLineOnly(t *testing.T) {
+	r := &CallResult{
+		Status: "ok",
+		Result: json.RawMessage(`{"superMetrics":[{"id":"sm-1","name":"cpu-ratio","formula":"$This, metric=cpu\n+ $This, metric=ready"}],"pageInfo":{"totalCount":1}}`),
+	}
+	var buf bytes.Buffer
+	printSupermetricList(&buf, r)
+	out := buf.String()
+	if !strings.Contains(out, "$This, metric=cpu") {
+		t.Errorf("printSupermetricList missing first line in:\n%s", out)
+	}
+	if strings.Contains(out, "metric=ready") {
+		t.Errorf("printSupermetricList must render only the first line; got:\n%s", out)
 	}
 }
 
@@ -673,7 +717,7 @@ func TestResourceSubtreeAssemblesListAndGet(t *testing.T) {
 
 // TestSingleListSubtreesAssembleListVerb checks that each list-only
 // noun (alert / alertdefinition / symptom / recommendation /
-// supermetric) carries its single ``list`` sub-verb.
+// supermetric) carries its single “list“ sub-verb.
 func TestSingleListSubtreesAssembleListVerb(t *testing.T) {
 	root := NewRootCmd()
 	for _, parent := range []string{"alert", "alertdefinition", "symptom", "recommendation", "supermetric"} {

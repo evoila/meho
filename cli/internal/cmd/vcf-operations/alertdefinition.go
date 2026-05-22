@@ -29,8 +29,8 @@ func newAlertDefinitionCmd() *cobra.Command {
 // GET:/suite-api/api/alertdefinitions.
 //
 // --params is the escape hatch for filter query parameters
-// (``id`` (repeatable) / ``adapterKind`` / ``resourceKind`` /
-// ``name`` / ``page`` / ``pageSize``).
+// (“id“ (repeatable) / “adapterKind“ / “resourceKind“ /
+// “name“ / “page“ / “pageSize“).
 func newAlertDefinitionListCmd() *cobra.Command {
 	var (
 		targetName        string

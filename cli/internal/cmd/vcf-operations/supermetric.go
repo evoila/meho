@@ -6,6 +6,7 @@ package vcfoperations
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -28,7 +29,7 @@ func newSupermetricCmd() *cobra.Command {
 // GET:/suite-api/api/supermetrics.
 //
 // --params is the escape hatch for filter query parameters
-// (``id`` (repeatable) / ``name`` / ``page`` / ``pageSize``).
+// (“id“ (repeatable) / “name“ / “page“ / “pageSize“).
 func newSupermetricListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -97,10 +98,11 @@ func printSupermetricList(w io.Writer, r *CallResult) {
 	}
 	fmt.Fprintf(w, "%-38s %-40s %-50s\n", "id", "name", "formula")
 	for _, e := range entries {
+		formulaFirstLine := strings.SplitN(vropsStringField(e, "formula"), "\n", 2)[0]
 		fmt.Fprintf(w, "%-38s %-40s %-50s\n",
 			truncate(vropsStringField(e, "id"), 38),
 			truncate(vropsStringField(e, "name"), 40),
-			truncate(vropsStringField(e, "formula"), 50),
+			truncate(formulaFirstLine, 50),
 		)
 	}
 }

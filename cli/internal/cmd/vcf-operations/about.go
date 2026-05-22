@@ -77,8 +77,8 @@ func printAbout(w io.Writer, r *CallResult) {
 		return
 	}
 	var version struct {
-		ReleaseName               string `json:"releaseName"`
-		BuildNumber               int64  `json:"buildNumber"`
+		ReleaseName                string `json:"releaseName"`
+		BuildNumber                int64  `json:"buildNumber"`
 		HumanlyReadableReleaseName string `json:"humanlyReadableReleaseName"`
 	}
 	if err := jsonUnmarshalStrict(r.Result, &version); err != nil || version.ReleaseName == "" {

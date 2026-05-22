@@ -28,8 +28,8 @@ func newSymptomCmd() *cobra.Command {
 // GET:/suite-api/api/symptoms.
 //
 // --params is the escape hatch for filter query parameters
-// (``id`` (repeatable) / ``resourceId`` / ``activeOnly`` /
-// ``statusType`` / ``page`` / ``pageSize``).
+// (“id“ (repeatable) / “resourceId“ / “activeOnly“ /
+// “statusType“ / “page“ / “pageSize“).
 func newSymptomListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -98,11 +98,13 @@ func printSymptomList(w io.Writer, r *CallResult) {
 		fmt.Fprintln(w, "  (0 symptoms)")
 		return
 	}
-	fmt.Fprintf(w, "%-38s %-40s %-12s\n", "id", "definition", "severity")
+	fmt.Fprintf(w, "%-38s %-32s %-22s %-12s\n",
+		"id", "definition", "resourceId", "severity")
 	for _, e := range entries {
-		fmt.Fprintf(w, "%-38s %-40s %-12s\n",
+		fmt.Fprintf(w, "%-38s %-32s %-22s %-12s\n",
 			truncate(vropsStringField(e, "id"), 38),
-			truncate(vropsStringField(e, "symptomDefinitionName"), 40),
+			truncate(vropsStringField(e, "symptomDefinitionName"), 32),
+			truncate(vropsStringField(e, "resourceId"), 22),
 			truncate(vropsStringField(e, "severity"), 12),
 		)
 	}

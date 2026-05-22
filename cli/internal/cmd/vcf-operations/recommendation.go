@@ -6,6 +6,7 @@ package vcfoperations
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -29,7 +30,7 @@ func newRecommendationCmd() *cobra.Command {
 // GET:/suite-api/api/recommendations.
 //
 // --params is the escape hatch for filter query parameters
-// (``id`` (repeatable) / ``page`` / ``pageSize``).
+// (“id“ (repeatable) / “page“ / “pageSize“).
 func newRecommendationListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -98,9 +99,10 @@ func printRecommendationList(w io.Writer, r *CallResult) {
 	}
 	fmt.Fprintf(w, "%-38s %-60s %-12s\n", "id", "description", "actionId")
 	for _, e := range entries {
+		descriptionFirstLine := strings.SplitN(vropsStringField(e, "description"), "\n", 2)[0]
 		fmt.Fprintf(w, "%-38s %-60s %-12s\n",
 			truncate(vropsStringField(e, "id"), 38),
-			truncate(vropsStringField(e, "description"), 60),
+			truncate(descriptionFirstLine, 60),
 			truncate(vropsStringField(e, "actionId"), 12),
 		)
 	}

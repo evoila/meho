@@ -176,6 +176,59 @@ semantics (e.g. `getIamPolicy`). Same 401-refresh-retry pattern.
 - **`httpx>=0.27`** — GCP REST HTTP client (via `HttpConnector`).
 - **`tenacity>=9.0`** — retry policy for idempotent verbs (via `HttpConnector`).
 
+## CLI verbs (G3.7-T6 #851)
+
+All 8 ops are reachable via `meho gcloud …`. Source:
+`cli/internal/cmd/gcloud/`.
+
+| File | Commands |
+|---|---|
+| `gcloud.go` | `NewRootCmd()`, helper types (`CallResult`, `dispatchOp`, decoders) |
+| `about.go` | `meho gcloud about` |
+| `project.go` | `meho gcloud project describe` |
+| `services.go` | `meho gcloud services list [--all]` |
+| `iam.go` | `meho gcloud iam sa list`, `meho gcloud iam policy read` |
+| `compute.go` | `meho gcloud compute instances list [--zone Z]`, `meho gcloud compute networks list`, `meho gcloud compute subnets list [--region R]` |
+
+All verbs support `--target <slug>`, `--json`, `--backplane <url>`.
+`meho gcloud compute instances list` and `meho gcloud compute subnets list`
+additionally accept `--zone` / `--region` to restrict the aggregatedList
+to a single zone/region.
+
+## E2E tests (G3.7-T6 #851)
+
+`backend/tests/test_connectors_gcloud_e2e.py` — httpx_mock (respx) unit-
+level E2E tests covering all 8 ops. A `_StubTarget` dataclass satisfies
+`GcloudTargetLike`; `google.auth` calls are patched so no live GCP
+credentials are needed.
+
+Key tests:
+
+| Test | What it verifies |
+|---|---|
+| `test_gcloud_e2e_about_dispatches_crm_get` | `gcloud.about` calls CRM v1 project GET |
+| `test_gcloud_e2e_project_describe_returns_full_resource` | Full CRM v1 dict returned |
+| `test_gcloud_e2e_services_list_follows_pagination` | `nextPageToken` loop |
+| `test_gcloud_e2e_services_list_enabled_only_flag` | `enabled_only=false` param |
+| `test_gcloud_e2e_iam_service_accounts_list` | SA inventory with pagination |
+| `test_gcloud_e2e_compute_instances_list_jsonflux_envelope` | `rows`+`total` envelope shape |
+| `test_gcloud_e2e_instances_list_zone_filter_uses_per_zone_api` | `--zone` sends per-zone URL |
+| `test_gcloud_e2e_instances_list_empty_project_returns_empty_envelope` | Empty aggregated list → `{rows:[], total:0}` |
+| `test_gcloud_e2e_compute_networks_list` | VPC network inventory |
+| `test_gcloud_e2e_compute_subnetworks_list_region_filter` | `--region` sends per-region URL |
+| `test_gcloud_e2e_iam_policy_read` | IAM policy bindings |
+| `test_gcloud_e2e_audit_params_hash_field_present_in_all_ops` | All 8 handlers return non-None results |
+| `test_gcloud_e2e_all_ops_have_op_id_registered` | All 8 op IDs registered, handler methods exist |
+| `test_gcloud_live_integration_about` _(gated)_ | Live GCP probe; skips unless `CI_GCLOUD_CREDENTIALS_PRESENT=1` |
+| `test_gcloud_live_integration_all_8_ops_return_ok_status` _(gated)_ | Live 8-ops sweep |
+
+**Design note:** The always-on tests use handler method calls directly
+(not `call_operation`) because the `Target` ORM model does not yet have
+`gcp_project` / `gcp_impersonate_sa` as first-class columns (planned for
+a future `extras` migration). The live `@_SKIP_LIVE` tests use
+`CI_GCLOUD_PROJECT` + `CI_GCLOUD_IMPERSONATE_SA` env vars to construct a
+real `GcloudConnector` against a live project.
+
 ## Known issues
 
 - `load_credentials_from_vault` is a stub until Goal #214 (Connector
@@ -189,7 +242,6 @@ semantics (e.g. `getIamPolicy`). Same 401-refresh-retry pattern.
 - `gcloud.compute.instances.list` inlines all instance rows in v0.2
   (no handle spill). The JSONFlux reducer Initiative will add threshold-
   based spill without connector changes.
-- CLI verbs and gated integration tests land in G3.7-T6 (#851).
 
 ## References
 
@@ -202,7 +254,8 @@ semantics (e.g. `getIamPolicy`). Same 401-refresh-retry pattern.
   https://cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys
 - Precedent: `backend/src/meho_backplane/connectors/harbor/` (HttpConnector
   skeleton pattern + per-target credential cache).
+- Operator onboarding: `docs/cross-repo/gcloud-onboarding.md`.
 - G3.7 Initiative: https://github.com/evoila/meho/issues/370
-- G3.7-T4 (this task): https://github.com/evoila/meho/issues/845
-- G3.7-T5 (ops): https://github.com/evoila/meho/issues/848
-- G3.7-T6 (CLI + onboarding): https://github.com/evoila/meho/issues/851
+- G3.7-T4 (skeleton + auth): https://github.com/evoila/meho/issues/845
+- G3.7-T5 (8 ops): https://github.com/evoila/meho/issues/848
+- G3.7-T6 (CLI + E2E + onboarding): https://github.com/evoila/meho/issues/851

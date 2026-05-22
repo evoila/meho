@@ -144,6 +144,7 @@ from meho_backplane.operations.ingest import (
     build_version_mismatch_detail,
     default_llm_client_factory,
     list_ingested_connectors,
+    load_catalog,
 )
 from meho_backplane.operations.ingest.api_schemas import ConnectorStatusFilter
 
@@ -359,6 +360,29 @@ async def list_endpoint(
         status=status,
     )
     return {"connectors": [item.model_dump(mode="json") for item in items]}
+
+
+@router.get("/catalog")
+async def catalog_endpoint(
+    operator: Operator = _require_operator,
+) -> dict[str, list[dict[str, object]]]:
+    """Return the curated connector-spec catalog (Goal #214 on-ramp; #743).
+
+    The catalog maps ``(product, version)`` to the recommended OpenAPI
+    spec source(s) + the registered connector class that covers the
+    version label. It is global, built-in reference data (not tenant-
+    scoped), so operator role is the only gate; the read carries no
+    tenant filter. The ``meho connector catalog list`` / ``ingest
+    --catalog`` verbs (#915) consume this route — the CLI ships as a
+    separate binary and cannot read the server's packaged catalog file.
+
+    Declared before the ``/{connector_id}/...`` routes so the literal
+    ``/catalog`` segment is matched ahead of the path-parameter
+    patterns. Wrapped in ``{"catalog": [...]}`` for non-breaking paging
+    room, mirroring the ``GET /`` list shape.
+    """
+    catalog = load_catalog()
+    return {"catalog": [entry.model_dump(mode="json") for entry in catalog.entries]}
 
 
 @router.get("/{connector_id}/review", response_model=ConnectorReviewPayload)

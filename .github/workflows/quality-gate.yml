@@ -80,6 +80,20 @@ jobs:
             && echo "coverage source root set to backend/" \
             || echo "::warning::coverage <source> not rewritten — sonar may report 0% coverage"
 
+      - name: Download Go coverage from CI workflow
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: go-coverage
+          # Extract into cli/ so the file lands at cli/coverage.out, matching
+          # sonar.go.coverage.reportPaths. The Go profile uses module import
+          # paths (github.com/evoila/meho/cli/...), which SonarCloud's Go
+          # sensor resolves via cli/go.mod — no path rewrite needed (unlike
+          # the Python report).
+          path: cli
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true  # missing artifact degrades to "no Go coverage", never blocks
+
       - name: Ensure dirmngr is available (for sonar-scanner GPG verify)
         run: |
           set -euo pipefail

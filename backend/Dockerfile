@@ -115,14 +115,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ARG TAILWIND_VER=v4.3.0
 ARG TAILWIND_SHA_AMD64=73f0e5459054e5cfaa8ab6f3b940f3fbe0f13cc7fd83bc24e7c655033c203400
 ARG TAILWIND_SHA_ARM64=8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a166e87cbd
+# python:3.12-slim ships Python but NOT curl; rather than apt-get'ing curl just
+# to download one file (and re-cleaning the apt lists afterwards), we use the
+# stdlib `urllib.request` already on PATH. The `sha256sum -c -` integrity
+# check below is the load-bearing trust gate -- the transport layer is HTTPS
+# either way -- so dropping curl removes one moving part without weakening
+# the supply-chain story. `sha256sum` ships in coreutils, which the slim
+# image already includes.
 RUN set -eux; \
     case "${TARGETPLATFORM:-linux/amd64}" in \
       linux/amd64) TW_ARCH=linux-x64; TW_SHA="${TAILWIND_SHA_AMD64}" ;; \
       linux/arm64) TW_ARCH=linux-arm64; TW_SHA="${TAILWIND_SHA_ARM64}" ;; \
       *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/tailwindcss \
-      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}"; \
+    python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" \
+      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}" \
+      /tmp/tailwindcss; \
     echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -; \
     install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss; \
     rm /tmp/tailwindcss; \

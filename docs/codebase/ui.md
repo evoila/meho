@@ -65,7 +65,7 @@ Two artifacts ship in the backend image:
    [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)),
    selects the right arch by `$TARGETPLATFORM`, then runs:
 
-   ```
+   ```bash
    tailwindcss \
      -i src/meho_backplane/ui/static/src/styles.css \
      -o src/meho_backplane/ui/static/dist/tailwind.css \
@@ -84,7 +84,7 @@ Two artifacts ship in the backend image:
 The same standalone CLI runs locally in watch mode alongside
 `uvicorn --reload`:
 
-```
+```bash
 # Terminal 1 -- watch + recompile on template edits
 tailwindcss \
   -i backend/src/meho_backplane/ui/static/src/styles.css \
@@ -120,7 +120,7 @@ backplane Python base image already follows).
 
 `base.html` is the only template Task #863 ships. Its structure:
 
-```
+```html
 <html data-theme="corporate">
   <head>
     <link href="/ui/static/dist/tailwind.css">

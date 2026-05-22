@@ -656,12 +656,25 @@ async def _diff_facet(
             f"query_topology(kind=diff): 'ts2' is not ISO-8601: {ts2_str!r}",
         ) from exc
 
+    # Reject non-boolean ``changed_only`` rather than coercing with
+    # ``bool(...)``: ``bool("false")`` is ``True``, so a malformed client
+    # sending the string ``"false"`` would silently flip the
+    # heartbeat-suppression flag and surface the opposite of what was
+    # asked for. Same input-validation discipline as the ts1 / ts2
+    # ISO-8601 parse above.
+    changed_only_raw = arguments.get("changed_only", False)
+    if not isinstance(changed_only_raw, bool):
+        raise McpInvalidParamsError(
+            f"query_topology(kind=diff): 'changed_only' must be a boolean; "
+            f"got {type(changed_only_raw).__name__}",
+        )
+
     try:
         result = await query_diff(
             operator,
             ts1=ts1_dt,
             ts2=ts2_dt,
-            changed_only=bool(arguments.get("changed_only", False)),
+            changed_only=changed_only_raw,
             kind_filter=arguments.get("kind_filter"),
         )
     except ValueError as exc:

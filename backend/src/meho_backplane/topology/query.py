@@ -101,7 +101,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from sqlalchemy import DateTime, bindparam, text
@@ -1569,7 +1569,7 @@ def _pick_name_for_node_entry(rows: list[Row[Any]], net_kind: str) -> str | None
     return None
 
 
-def _fold_to_net_kind(rows: list[Row[Any]]) -> str:
+def _fold_to_net_kind(rows: list[Row[Any]]) -> Literal["created", "updated", "removed"]:
     """Fold a resource's in-window history rows into one net ``change_kind``.
 
     The fold rule per resource over the window ``(ts1, ts2]``:
@@ -1616,7 +1616,7 @@ def _all_window_rows_are_last_seen_only(rows: list[Row[Any]]) -> bool:
 def _build_diff_entry(
     rows: list[Row[Any]],
     *,
-    source: str,
+    source: Literal["node", "edge"],
     resource_id: UUID | None,
     changed_only: bool,
 ) -> TopologyDiffEntry | None:
@@ -1745,7 +1745,11 @@ async def query_diff(
     # deterministic. Across sides, nodes come before edges -- a stable
     # presentation order that mirrors the timeline tie-breaker (node
     # before edge at the same key).
-    for source_label, raw_rows in (("node", node_rows), ("edge", edge_rows)):
+    sides: tuple[tuple[Literal["node", "edge"], Sequence[Row[Any]]], ...] = (
+        ("node", node_rows),
+        ("edge", edge_rows),
+    )
+    for source_label, raw_rows in sides:
         groups = _group_rows_by_resource(raw_rows)
         for resource_id, group_rows in groups:
             entry = _build_diff_entry(

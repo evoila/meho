@@ -756,7 +756,7 @@ narrows to one resource kind (node `kind` like `vm` or edge `kind`
 like `runs-on`), applied **after** the fold so the cap fires on the
 post-filter cohort.
 
-**1000-row hard cap.** v0.2 enforces a strict cap at
+**1000-row hard cap.** [Unreleased] enforces a strict cap at
 `_DIFF_HARD_CAP = 1000` -- on overflow the result returns
 `truncated=True` plus the canonical "narrow the time window"
 remediation hint. The CLI / REST / MCP fronts surface the hint

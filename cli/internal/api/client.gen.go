@@ -162,6 +162,19 @@ const (
 	SurfaceResultVerdictYellow SurfaceResultVerdict = "yellow"
 )
 
+// Defines values for TopologyDiffEntryChangeKind.
+const (
+	Created TopologyDiffEntryChangeKind = "created"
+	Removed TopologyDiffEntryChangeKind = "removed"
+	Updated TopologyDiffEntryChangeKind = "updated"
+)
+
+// Defines values for TopologyDiffEntrySource.
+const (
+	Edge TopologyDiffEntrySource = "edge"
+	Node TopologyDiffEntrySource = "node"
+)
+
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
 	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
@@ -1575,13 +1588,19 @@ type Thresholds struct {
 //     “"<change_kind> <source> <kind>"“ for edges, matching the
 //     timeline-entry summary style.
 type TopologyDiffEntry struct {
-	ChangeKind string              `json:"change_kind"`
-	Kind       string              `json:"kind"`
-	Name       *string             `json:"name"`
-	ResourceId *openapi_types.UUID `json:"resource_id"`
-	Source     string              `json:"source"`
-	Summary    string              `json:"summary"`
+	ChangeKind TopologyDiffEntryChangeKind `json:"change_kind"`
+	Kind       string                      `json:"kind"`
+	Name       *string                     `json:"name"`
+	ResourceId *openapi_types.UUID         `json:"resource_id"`
+	Source     TopologyDiffEntrySource     `json:"source"`
+	Summary    string                      `json:"summary"`
 }
+
+// TopologyDiffEntryChangeKind defines model for TopologyDiffEntry.ChangeKind.
+type TopologyDiffEntryChangeKind string
+
+// TopologyDiffEntrySource defines model for TopologyDiffEntry.Source.
+type TopologyDiffEntrySource string
 
 // TopologyDiffResult Result of :func:`query_diff` -- the diff entries plus a truncation flag.
 //
@@ -8864,8 +8883,15 @@ type DiffRouteApiV1TopologyDiffGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *TopologyDiffResult
-	JSON422      *HTTPValidationError
+	JSON400      *struct {
+		Detail struct {
+			Error   DiffRouteApiV1TopologyDiffGet400DetailError `json:"error"`
+			Message string                                      `json:"message"`
+		} `json:"detail"`
+	}
+	JSON422 *HTTPValidationError
 }
+type DiffRouteApiV1TopologyDiffGet400DetailError string
 
 // Status returns HTTPResponse.Status
 func (r DiffRouteApiV1TopologyDiffGetResponse) Status() string {
@@ -11289,6 +11315,18 @@ func ParseDiffRouteApiV1TopologyDiffGetResponse(rsp *http.Response) (*DiffRouteA
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest struct {
+			Detail struct {
+				Error   DiffRouteApiV1TopologyDiffGet400DetailError `json:"error"`
+				Message string                                      `json:"message"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
@@ -330,8 +330,12 @@ class TopologyDiffEntry(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    change_kind: str
-    source: str
+    # ``Literal`` rather than ``str`` so the autogen OpenAPI / MCP tool
+    # schemas carry the closed enum constraint. Generated Go / TS / Python
+    # SDK clients then enforce the closed vocabulary at compile time
+    # rather than parsing free-form strings.
+    change_kind: Literal["created", "updated", "removed"]
+    source: Literal["node", "edge"]
     resource_id: UUID | None
     kind: str
     name: str | None

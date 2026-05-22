@@ -560,12 +560,19 @@ async def test_changed_only_keeps_created_and_removed_entries(
 async def test_high_churn_fixture_truncates_at_1000_rows(
     session: AsyncSession,
 ) -> None:
-    """Seed 1100 created resources in the window; result is capped at 1000.
+    """Seed 1100 created resources; 1099 fall strictly after ts1; cap is 1000.
 
     The 1000-row hard cap with truncation marker + 'narrow the time
     window' hint is the load-bearing AC for Task #860 -- the cap
     protects the front from a hostile / wide time window where every
     resource in a churning tenant landed in the same diff.
+
+    Off-by-one note: ``ts1`` is exclusive (``valid_from > ts1``), and the
+    test seeds the first row at ``valid_from == base`` (``i == 0``), so
+    that row falls **outside** the queried window. Only 1099 in-window
+    rows are eligible -- still well above the 1000 cap, so the
+    truncation assertion below remains stable regardless of the
+    boundary-inclusive vs boundary-exclusive question.
     """
     tenant_id = await _seed_tenant(session)
     base = datetime(2026, 5, 22, 9, 0, 0, tzinfo=UTC)

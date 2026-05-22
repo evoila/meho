@@ -1543,6 +1543,39 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid window (``ts1 >= ts2``).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "invalid_window"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -6129,10 +6162,19 @@
         "properties": {
           "change_kind": {
             "type": "string",
+            "enum": [
+              "created",
+              "updated",
+              "removed"
+            ],
             "title": "Change Kind"
           },
           "source": {
             "type": "string",
+            "enum": [
+              "node",
+              "edge"
+            ],
             "title": "Source"
           },
           "resource_id": {

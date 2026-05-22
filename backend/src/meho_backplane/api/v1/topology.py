@@ -1015,7 +1015,42 @@ async def timeline_route(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/diff", response_model=TopologyDiffResult)
+@router.get(
+    "/diff",
+    response_model=TopologyDiffResult,
+    responses={
+        # 400 ``invalid_window`` -- ``ts1 >= ts2``. Declared explicitly so
+        # FastAPI's autogen OpenAPI surfaces the 400 to SDK clients; the
+        # route handler below raises ``HTTPException(400, detail={"error":
+        # "invalid_window", "message": ...})``. Without this declaration
+        # the spec only listed 200 + 422 and clients had no schema-driven
+        # signal that 400 is a documented response.
+        400: {
+            "description": "Invalid window (``ts1 >= ts2``).",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "error": {
+                                        "type": "string",
+                                        "enum": ["invalid_window"],
+                                    },
+                                    "message": {"type": "string"},
+                                },
+                                "required": ["error", "message"],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
+)
 async def diff_route(
     ts1: datetime = Query(..., description="exclusive lower bound on valid_from"),
     ts2: datetime = Query(..., description="inclusive upper bound on valid_from"),

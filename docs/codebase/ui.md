@@ -325,12 +325,16 @@ Initiative #337 work-item #6:
 * A 3x2 grid of DaisyUI `card` tiles linking to the five surface
   routes. The sixth tile shows the backplane version + readiness
   badge sourced from `meho_backplane.health.run_probes_async`.
-* A live "recent activity" snippet wired to `/api/v1/feed?limit=5`
-  via the HTMX 2 SSE extension (`hx-ext="sse"` +
-  `sse-connect="..."` + `sse-swap="broadcast"`). The feed endpoint
-  itself runs the chassis JWT dependency, but the browser carries
-  the session cookie and the same operator's JWT will be issued by
-  Keycloak; G10.1 (`#338`) wires the live-token round-trip.
+* A live "recent activity" snippet wired to `/api/v1/feed` via the
+  HTMX 2 SSE extension (`hx-ext="sse"` + `sse-connect="..."` +
+  `sse-swap="broadcast"`). The feed endpoint itself runs the chassis
+  JWT dependency, but the browser carries the session cookie and the
+  same operator's JWT will be issued by Keycloak; G10.1 (`#338`)
+  wires the live-token round-trip and the client-side
+  trim-to-last-N rendering (the feed endpoint streams the live tail
+  unbounded -- it does not accept a `limit` query parameter, so a
+  hardcoded `?limit=N` would be a silent no-op given FastAPI's
+  unknown-query-param drop semantics).
 * A "readiness checks" panel listing every registered probe with a
   green/orange pill matching `/ready`'s shape.
 

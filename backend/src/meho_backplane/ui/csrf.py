@@ -101,6 +101,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth.routes import SESSION_COOKIE_NAME
+from meho_backplane.ui.auth.session_store import EncryptionKeyMissingError
 
 __all__ = [
     "CSRF_COOKIE_NAME",
@@ -170,16 +171,29 @@ def _csrf_secret() -> bytes:
     HMAC-SHA256) over distinct input domains (session token bytes vs
     ``session_id || random``).
 
+    Empty key (``UI_SESSION_ENCRYPTION_KEY`` unset) is a deployment-
+    time misconfiguration. Raising
+    :class:`~meho_backplane.ui.auth.session_store.EncryptionKeyMissingError`
+    surfaces the failure with the same exception type and remediation
+    pointer the session store uses (``_get_fernet`` line 252), so the
+    chassis fail-fast contract claimed in the docstring above is
+    actually enforced rather than papered over with a zero-byte HMAC
+    key (which would silently mint deterministic tokens an attacker
+    could forge off-line).
+
     Returns the key bytes verbatim -- :func:`hmac.new` accepts any
-    bytes-like key. Empty key (``UI_SESSION_ENCRYPTION_KEY`` unset) is
-    a deployment-time misconfiguration that the chassis already
-    surfaces from the session store
-    (:class:`~meho_backplane.ui.auth.session_store.EncryptionKeyMissingError`);
-    the CSRF middleware short-circuits with a deterministic 503-shape
-    only on a state-changing request, mirroring the chassis fail-fast
-    convention.
+    bytes-like key.
     """
-    return get_settings().ui_session_encryption_key.encode("utf-8")
+    key = get_settings().ui_session_encryption_key
+    if not key:
+        raise EncryptionKeyMissingError(
+            "UI_SESSION_ENCRYPTION_KEY is not set; the operator-console "
+            "CSRF middleware cannot derive its HMAC keying material. "
+            "Generate a key with `python -c 'from cryptography.fernet "
+            "import Fernet; print(Fernet.generate_key().decode())'` and "
+            "surface it as the UI_SESSION_ENCRYPTION_KEY env var."
+        )
+    return key.encode("utf-8")
 
 
 def mint_csrf_token(session_id: str) -> str:
@@ -488,6 +502,27 @@ class CSRFMiddleware:
         log = structlog.get_logger(__name__)
         session_id = _extract_cookie(scope, SESSION_COOKIE_NAME)
         cookie_token = _extract_cookie(scope, CSRF_COOKIE_NAME)
+
+        # Cheap pre-checks BEFORE draining the body. ``_resolve_presented_token``
+        # can buffer up to 256 KiB of form body to read the ``csrf_token``
+        # field; doing that work for a request that's about to be rejected
+        # on a missing session cookie or missing CSRF cookie is wasted
+        # allocation and a DoS-amplification vector (an unauthenticated
+        # attacker forces the chassis to buffer a 256 KiB body per request
+        # before the inevitable 403). The validation chain in
+        # ``_validate_csrf`` already short-circuits on these two reasons,
+        # so we run the same checks here -- ahead of the body parse -- and
+        # only call ``_resolve_presented_token`` when both halves of the
+        # double-submit cookie are actually present.
+        if not session_id:
+            log.info("ui_csrf_rejected", path=path, method=method, reason="no_session")
+            await _send_forbidden(send, "no_session")
+            return
+        if not cookie_token:
+            log.info("ui_csrf_rejected", path=path, method=method, reason="missing_token")
+            await _send_forbidden(send, "missing_token")
+            return
+
         presented_token, replay = await _resolve_presented_token(scope, receive)
 
         rejection = _validate_csrf(

@@ -10,13 +10,15 @@ renders three components per the Initiative work-item #6:
   routes G10.1-G10.5 fill in. The sixth tile is a static
   "deploy details" card so the grid layout is balanced without a
   trailing empty slot.
-* A live "last 5 events" snippet wired to ``/api/v1/feed`` via the
+* A live recent-activity snippet wired to ``/api/v1/feed`` via the
   HTMX 2 SSE extension (``hx-ext="sse"`` + ``sse-connect="..."`` +
   ``sse-swap="broadcast"``). The feed endpoint validates the JWT via
   the Bearer header on ``/api/v1/feed``; the dashboard surface only
   renders the HTMX wiring -- the actual subscription happens
   browser-side once the page loads (and the operator's session cookie
-  is the auth boundary that gates ``/ui/``).
+  is the auth boundary that gates ``/ui/``). Trimming the rendered
+  tray to the last N events is G10.1 (#338) client-side surface work;
+  the underlying feed endpoint streams the live tail unbounded.
 * A version + readiness card sourced from
   :data:`meho_backplane.__version__` (always rendered) and the chassis
   readiness probe registry (``meho_backplane.health.run_probes_async``)
@@ -150,8 +152,14 @@ async def _render_dashboard(
         "csrf_token": csrf_token,
         # Endpoint the HTMX SSE snippet subscribes to. Lifted out so a
         # future deploy can swap to a CDN-hosted edge proxy without
-        # editing the template.
-        "feed_endpoint": "/api/v1/feed?limit=5",
+        # editing the template. ``/api/v1/feed`` is the canonical
+        # tenant-scoped SSE stream from G6.1-T4 (#310); the route does
+        # not accept a ``limit`` query parameter (FastAPI silently
+        # ignores unknown query params, so a hardcoded ``?limit=5``
+        # would be a no-op surface promise), so the dashboard subscribes
+        # to the full live stream. Trimming the tray to the last N
+        # events client-side is G10.1 (#338) surface work.
+        "feed_endpoint": "/api/v1/feed",
     }
     response = get_templates().TemplateResponse(request, "dashboard.html", context)
     # Mirror the SameSite + Secure posture of the session cookie. The

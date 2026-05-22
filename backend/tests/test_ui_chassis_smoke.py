@@ -46,12 +46,14 @@ import httpx
 import pytest
 import respx
 from cryptography.fernet import Fernet
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
 from meho_backplane.auth.jwt import clear_jwks_cache
+from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
+from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import (
     SESSION_COOKIE_NAME,
@@ -63,6 +65,7 @@ from meho_backplane.ui.auth.flow import (
     reset_verifier_store_for_testing,
 )
 from meho_backplane.ui.auth.session_store import (
+    EncryptionKeyMissingError,
     create_session,
     reset_fernet_cache_for_testing,
 )
@@ -70,6 +73,7 @@ from meho_backplane.ui.csrf import (
     CSRF_COOKIE_NAME,
     CSRF_HEADER_NAME,
     CSRFMiddleware,
+    _csrf_secret,
     mint_csrf_token,
 )
 from meho_backplane.ui.paths import static_root_dir
@@ -162,6 +166,13 @@ def _mock_oidc_metadata(
         )
 
 
+#: Dependency reference for the JWT-gated ``/api/sentinel`` route below.
+#: Lifted to module scope so the function signature stays compatible
+#: with ruff's B008 ("do not call function as default argument") which
+#: would trip on ``Depends(...)`` inlined into the parameter list.
+_REQUIRE_JWT = Depends(verify_jwt_and_bind)
+
+
 def _build_app() -> FastAPI:
     """Construct a minimal FastAPI app with the full UI chassis wired in.
 
@@ -169,12 +180,16 @@ def _build_app() -> FastAPI:
     StaticFiles at ``/ui/static`` + the BFF auth router + the
     surface router + ``UISessionMiddleware`` outermost +
     ``CSRFMiddleware`` next. The chassis smoke test does NOT
-    register the chassis JWT / Audit / RequestContext middlewares
-    because the test only exercises the ``/ui/*`` surface; the
-    inner-chain coverage lives in their own per-middleware suites.
-    A sentinel ``/api/sentinel`` route validates that the session
-    middleware passes ``/api/*`` paths through untouched (the
-    middleware-order acceptance criterion).
+    register the chassis Audit / RequestContext middlewares because
+    the test only exercises the ``/ui/*`` surface; the inner-chain
+    coverage lives in their own per-middleware suites. The
+    ``/api/sentinel`` route declares
+    :func:`~meho_backplane.middleware.verify_jwt_and_bind` so the
+    middleware-order acceptance criterion #4 ("/api/* still uses
+    JWT") is exercised end-to-end -- a missing Bearer header yields
+    401 from the JWT dependency, proving both that the UI session
+    middleware passed the request through AND that the production
+    JWT contract still gates the API surface.
     """
     app = FastAPI()
     # CSRF middleware registered first so the session middleware
@@ -191,13 +206,16 @@ def _build_app() -> FastAPI:
     app.include_router(build_ui_router())
 
     @app.get("/api/sentinel")
-    async def _api_sentinel() -> dict[str, str]:
-        # Stand-in for the ``/api/v1/*`` JWT-protected surface. If
-        # the session middleware ever stops gating on the ``/ui/``
-        # prefix and starts redirecting all paths, this sanity check
-        # catches it -- the dedicated middleware-order test below
-        # asserts the 200.
-        return {"ok": "true"}
+    async def _api_sentinel(operator: Operator = _REQUIRE_JWT) -> dict[str, str]:
+        # Stand-in for the ``/api/v1/*`` JWT-protected surface. Uses
+        # the same :func:`verify_jwt_and_bind` dependency the
+        # production ``/api/v1/*`` routes rely on -- so a missing
+        # Bearer header yields 401 from the JWT dependency (proving
+        # the UI session middleware passed the request through AND
+        # the JWT layer rejected it), while a valid Bearer with a
+        # mocked JWKS yields 200 (proving the JWT dependency
+        # resolves cleanly end-to-end).
+        return {"ok": "true", "operator_sub": operator.sub}
 
     return app
 
@@ -352,8 +370,13 @@ def test_dashboard_authenticated_renders_console_html() -> None:
     # 3x2 surface card grid present (DaisyUI ``card`` markup).
     # Five surface cards + one deploy card = 6 ``card`` blocks.
     assert body.count('class="card-body"') >= 6
-    # HTMX SSE wiring on the recent-activity tray.
-    assert 'sse-connect="/api/v1/feed?limit=5"' in body
+    # HTMX SSE wiring on the recent-activity tray. The dashboard
+    # subscribes to ``/api/v1/feed`` with no query parameters; the
+    # feed endpoint (G6.1-T4 #310) does not accept a ``limit`` knob
+    # and FastAPI silently drops unknown query params, so any
+    # ``?limit=N`` here would only be a no-op surface promise. Trim-
+    # to-last-N is G10.1 (#338) client-side surface work.
+    assert 'sse-connect="/api/v1/feed"' in body
     assert 'sse-swap="broadcast"' in body
     # Version footer renders the chassis version global.
     assert "MEHO backplane v" in body
@@ -480,27 +503,90 @@ def test_csrf_rejects_forged_signature() -> None:
     assert response.status_code == 403
 
 
+def test_csrf_secret_fails_fast_on_empty_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_csrf_secret`` raises ``EncryptionKeyMissingError`` when the key is empty.
+
+    The CSRF middleware reuses ``UI_SESSION_ENCRYPTION_KEY`` as its HMAC
+    keying material (see ``_csrf_secret`` docstring + the OWASP signed
+    double-submit cookie pattern). The previous implementation silently
+    returned ``b""`` on a missing key, which would mint deterministic
+    HMAC tokens an attacker could forge off-line. Mirrors the
+    ``_get_fernet`` fail-fast pattern in
+    :mod:`meho_backplane.ui.auth.session_store` so a single chassis
+    convention covers both the session-store and the CSRF keying
+    material.
+    """
+    monkeypatch.setenv("UI_SESSION_ENCRYPTION_KEY", "")
+    get_settings.cache_clear()
+    with pytest.raises(EncryptionKeyMissingError, match="UI_SESSION_ENCRYPTION_KEY"):
+        _csrf_secret()
+
+
 # ---------------------------------------------------------------------------
 # AC 7: middleware order -- /ui/* uses cookie auth; /api/* untouched
 # ---------------------------------------------------------------------------
 
 
-def test_middleware_passes_api_routes_through_untouched() -> None:
-    """``GET /api/sentinel`` is NOT 302'd by the UI session middleware.
+def test_middleware_passes_api_routes_through_to_jwt_layer() -> None:
+    """``GET /api/sentinel`` without a Bearer header -> 401 from the JWT dependency.
 
-    The session middleware is ``/ui/``-scoped; out-of-prefix paths
-    must reach the route handler unchanged. This is the "JWT
-    middleware still applies on /api/*" property the Initiative
-    #337 acceptance criterion #4 calls out -- the UI session check
-    must not steal requests from the chassis API surface.
+    The UI session middleware is ``/ui/``-scoped; out-of-prefix paths
+    must reach the route handler unchanged. ``/api/sentinel`` declares
+    :func:`verify_jwt_and_bind` (the production JWT contract on every
+    ``/api/v1/*`` route), so an unauthenticated request transits the
+    UI middlewares unchanged and is rejected by the JWT dependency
+    with a 401 ``missing_token``. The 401 proves BOTH halves of AC4
+    ("/ui/* uses session-cookie auth, /api/* uses JWT") --
+
+    * 401 (not 302) -> UI session middleware passed it through.
+    * 401 (not 200) -> the JWT dependency is in the call chain.
+
+    Replaces the prior 200 expectation (which only exercised the UI
+    middleware half and let the unprotected route silently violate
+    AC4's other half, the "/api/* JWT" claim).
     """
     with respx.mock(assert_all_called=False):
         client = TestClient(_build_app(), follow_redirects=False)
-        # No session cookie; the route is on /api/sentinel so the
-        # middleware should pass it through.
+        # No session cookie + no Bearer header; the UI middleware
+        # passes /api/sentinel through, the JWT dependency rejects.
         response = client.get("/api/sentinel")
-    assert response.status_code == 200
-    assert response.json() == {"ok": "true"}
+    assert response.status_code == 401, (
+        f"expected JWT layer to reject without Bearer; got {response.status_code}: {response.text}"
+    )
+    # Specific detail code surfaced by ``verify_jwt`` on a missing
+    # ``Authorization`` header (see ``auth.jwt._extract_bearer_token``).
+    assert response.json() == {"detail": "missing_token"}
+
+
+def test_middleware_lets_jwt_protected_api_route_through_with_valid_bearer() -> None:
+    """Positive control: a valid Bearer reaches ``/api/sentinel`` and returns 200.
+
+    Mirrors the production wiring: a JWT signed by the mocked Keycloak
+    JWKS validates cleanly through ``verify_jwt_and_bind`` and the
+    sentinel handler returns 200 with the operator's ``sub``. Confirms
+    the JWT chain (issuer + audience + signature + tenant claims) is
+    actually exercisable by the smoke harness -- without this assertion
+    the negative test above could pass simply because the route was
+    misconfigured into a permanent 401.
+    """
+    key = make_rsa_keypair("test-kid")
+    access_token = mint_token(key)
+    jwks = public_jwks(key)
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router, jwks=jwks)
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get(
+            "/api/sentinel",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    assert response.status_code == 200, (
+        f"expected 200 with valid Bearer; got {response.status_code}: {response.text}"
+    )
+    payload = response.json()
+    assert payload["ok"] == "true"
+    assert payload["operator_sub"] == "op-42"
 
 
 def test_middleware_redirects_ui_routes_without_session() -> None:

@@ -13,10 +13,12 @@
       via the X-CSRF-Token header (double-submit cookie pattern).
     * Three content blocks:
       1. The 3x2 surface card grid (5 cards + 1 "deploy info" cell).
-      2. The live "last 5 events" snippet -- HTMX SSE extension
-         subscribes to /api/v1/feed?limit=5 and swaps events into the
+      2. The live recent-activity snippet -- HTMX SSE extension
+         subscribes to /api/v1/feed and swaps events into the
          ``#meho-feed-tray`` container as they arrive. Pre-render
          placeholder text covers the SSE-not-yet-connected window.
+         (Trim-to-last-N is G10.1 client-side surface work; the feed
+         endpoint streams the live tail.)
       3. Version + readiness card.
 -#}
 {% extends "base.html" %}

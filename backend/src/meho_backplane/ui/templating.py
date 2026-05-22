@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Jinja2 environment factory for the UI chassis.
+
+A single :class:`jinja2.Environment` is constructed once per process
+and reused across requests. Construction-time cost (FileSystemLoader
+scan + template-cache initialisation) is paid up-front; per-request
+``Environment.get_template`` reads from the cache.
+
+Configuration decisions:
+
+* :class:`jinja2.FileSystemLoader` over :class:`PackageLoader` because
+  the dev workflow runs ``tailwindcss --watch`` against the same
+  template tree on disk; ``FileSystemLoader`` picks up template edits
+  without a process restart when ``auto_reload=True`` is honoured by
+  uvicorn's ``--reload``. The image deploy doesn't depend on reload
+  (gunicorn/uvicorn workers are immutable).
+* ``autoescape=select_autoescape(["html", "htm", "xml"])`` so every
+  ``{{ user_input }}`` substitution HTML-escapes by default. The
+  Jinja2 docs explicitly recommend ``select_autoescape`` over a
+  blanket ``True`` because the latter also escapes ``.txt`` /
+  ``.json`` templates we may add later; the former gates the
+  behaviour on the template file extension. Source:
+  https://jinja.palletsprojects.com/en/stable/api/#autoescaping
+* :class:`jinja2.StrictUndefined` so a typo in a template variable
+  name (``{{ apv_version }}`` instead of ``{{ app_version }}``) raises
+  :class:`jinja2.UndefinedError` at render time instead of silently
+  rendering an empty string. FastAPI's exception middleware turns the
+  500 into a structlog event the operator sees in CI / kubectl logs.
+
+The environment exposes one extra global, ``app_version``, bound from
+:data:`meho_backplane.__version__` so every template can show the
+backplane version in the footer without each route having to pass it
+explicitly. Tenant / operator-identity globals will be wired by T4
+(#865) once the session middleware lands.
+
+This module deliberately does **not** wire FastAPI dependencies or
+``Request`` objects. T5 (#866) builds the ``TemplateResponse`` helper
+on top of this Environment; the helper signature stays a v0.2 design
+question (FastAPI's :class:`starlette.templating.Jinja2Templates` is
+the candidate, but the factory below leaves the choice open).
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+
+from meho_backplane import __version__
+from meho_backplane.ui.paths import templates_dir
+
+# Cached environment singleton. Module-level cache rather than
+# functools.lru_cache so the type checker sees the concrete return
+# type without ``cast``; lru_cache + Jinja2 + mypy has a known
+# False-positive on the cached return type at strict mode.
+_ENV: Environment | None = None
+
+_AUTOESCAPE_EXTS: Final[tuple[str, ...]] = ("html", "htm", "xml")
+
+
+def get_jinja_env() -> Environment:
+    """Return the lazily-constructed UI Jinja2 environment.
+
+    The environment is constructed the first time a UI route renders
+    a template; subsequent calls return the cached instance. The
+    template cache inside the environment is keyed by filename, so
+    edits in dev are picked up automatically when uvicorn reload
+    re-imports the module (the singleton lives in module scope so
+    a reload throws it away).
+    """
+    global _ENV
+    if _ENV is None:
+        _ENV = Environment(
+            loader=FileSystemLoader(str(templates_dir())),
+            autoescape=select_autoescape(_AUTOESCAPE_EXTS),
+            undefined=StrictUndefined,
+            # ``trim_blocks`` + ``lstrip_blocks`` reduce the
+            # whitespace noise the {% if %} blocks otherwise leave in
+            # the rendered HTML. Matches the DaisyUI snippet
+            # conventions; no functional behaviour change.
+            trim_blocks=True,
+            lstrip_blocks=True,
+            # ``keep_trailing_newline`` keeps the trailing \n on the
+            # base.html output so curl-style introspection lines
+            # cleanly.
+            keep_trailing_newline=True,
+        )
+        _ENV.globals["app_version"] = __version__
+    return _ENV

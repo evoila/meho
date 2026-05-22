@@ -82,6 +82,59 @@ COPY alembic.ini ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
+# ---------- Operator-console CSS (Initiative #337, Task #863) ---------------
+# Build the compiled Tailwind 4 + DaisyUI 5 bundle for the /ui surface using
+# the **standalone Tailwind CLI binary** -- no `node_modules`, no `npm`, no
+# parallel CI job (decision #10 in docs/planning/v0.2-decisions.md).
+#
+# The CLI is pinned by version AND SHA256, mirroring the kubeconform install
+# pattern in .github/workflows/ci.yml so the supply-chain audit trail records
+# the exact byte sequence we trust to run. Refresh policy: bump in a
+# dedicated PR titled "chore(ui): bump Tailwind CLI to <version>" that
+# updates BOTH the version and the per-arch SHA256s here AND the version
+# row in backend/src/meho_backplane/ui/static/src/vendor/VENDOR.md
+# (DaisyUI / HTMX / Alpine / Cytoscape vendor manifest); the two move
+# together because Tailwind 4 + DaisyUI 5 are co-versioned in our stack
+# decision.
+#
+# Multi-arch: TARGETPLATFORM is set by buildx (e.g. linux/amd64,
+# linux/arm64). We pick the matching glibc binary -- the python:3.12-slim
+# base is Debian (glibc), not Alpine (musl), so the -musl variants are not
+# used.
+#
+# The CLI compiles against the **installed wheel's** static/src tree -- the
+# wheel install above puts templates/ + static/src/ at
+# /app/.venv/lib/python3.12/site-packages/meho_backplane/ui/. We write the
+# minified output to .../static/dist/tailwind.css INSIDE the installed
+# package tree so the runtime stage's `COPY --from=builder /app/.venv` picks
+# up the artifact automatically (no extra COPY layer required).
+#
+# `static/dist/` is .gitignore'd; only built artifacts live there. Local dev
+# runs the same CLI in --watch mode against the source tree (see
+# docs/codebase/ui.md).
+ARG TAILWIND_VER=v4.3.0
+ARG TAILWIND_SHA_AMD64=73f0e5459054e5cfaa8ab6f3b940f3fbe0f13cc7fd83bc24e7c655033c203400
+ARG TAILWIND_SHA_ARM64=8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a166e87cbd
+RUN set -eux; \
+    case "${TARGETPLATFORM:-linux/amd64}" in \
+      linux/amd64) TW_ARCH=linux-x64; TW_SHA="${TAILWIND_SHA_AMD64}" ;; \
+      linux/arm64) TW_ARCH=linux-arm64; TW_SHA="${TAILWIND_SHA_ARM64}" ;; \
+      *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/tailwindcss \
+      "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VER}/tailwindcss-${TW_ARCH}"; \
+    echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -; \
+    install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss; \
+    rm /tmp/tailwindcss; \
+    UI_SP="/app/.venv/lib/python3.12/site-packages/meho_backplane/ui"; \
+    test -f "${UI_SP}/static/src/styles.css"; \
+    mkdir -p "${UI_SP}/static/dist"; \
+    tailwindcss \
+      -i "${UI_SP}/static/src/styles.css" \
+      -o "${UI_SP}/static/dist/tailwind.css" \
+      --minify; \
+    test -s "${UI_SP}/static/dist/tailwind.css"
+
 # ---------- Runtime ----------------------------------------------------------
 FROM python@${PYTHON_BASE_DIGEST} AS runtime
 

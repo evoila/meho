@@ -48,6 +48,11 @@ venv/
 # JavaScript / Frontend
 # =============================================================================
 node_modules/
+# ``dist/`` covers every compiled JS/CSS output tree, including the operator-
+# console Tailwind 4 bundle the backend Dockerfile produces at
+# ``backend/src/meho_backplane/ui/static/dist/tailwind.css`` (Initiative #337,
+# Task #863) -- the path was previously held only by the catch-all rule;
+# explicit comment landed alongside the chassis so the intent is grep-able.
 dist/
 .next/
 .astro/

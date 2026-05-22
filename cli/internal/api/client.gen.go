@@ -25,6 +25,41 @@ const (
 	SharedServiceAccount AuthModel = "shared_service_account"
 )
 
+// Defines values for BroadcastOverrideCreateDetail.
+const (
+	Aggregate BroadcastOverrideCreateDetail = "aggregate"
+	Full      BroadcastOverrideCreateDetail = "full"
+)
+
+// Defines values for BroadcastOverrideCreateScopeField.
+const (
+	Namespace  BroadcastOverrideCreateScopeField = "namespace"
+	TargetName BroadcastOverrideCreateScopeField = "target_name"
+)
+
+// Defines values for CandidateHintConfidence.
+const (
+	High   CandidateHintConfidence = "high"
+	Low    CandidateHintConfidence = "low"
+	Medium CandidateHintConfidence = "medium"
+)
+
+// Defines values for CriterionResultName.
+const (
+	DailyUseDuration CriterionResultName = "daily_use_duration"
+	EvalPrecision    CriterionResultName = "eval_precision"
+	MehoVsBaseline   CriterionResultName = "meho_vs_baseline"
+	OpenBlockers     CriterionResultName = "open_blockers"
+	OperatorBreadth  CriterionResultName = "operator_breadth"
+)
+
+// Defines values for CriterionResultVerdict.
+const (
+	CriterionResultVerdictGreen  CriterionResultVerdict = "green"
+	CriterionResultVerdictRed    CriterionResultVerdict = "red"
+	CriterionResultVerdictYellow CriterionResultVerdict = "yellow"
+)
+
 // Defines values for DailyUsageBucketSurface.
 const (
 	DailyUsageBucketSurfaceKb         DailyUsageBucketSurface = "kb"
@@ -54,6 +89,58 @@ const (
 	EvalResultOverallVerdictYellow EvalResultOverallVerdict = "yellow"
 )
 
+// Defines values for GraphEdgeKind.
+const (
+	AuthenticatesVia GraphEdgeKind = "authenticates-via"
+	BackedUpBy       GraphEdgeKind = "backed-up-by"
+	BelongsTo        GraphEdgeKind = "belongs-to"
+	DependsOn        GraphEdgeKind = "depends-on"
+	Mounts           GraphEdgeKind = "mounts"
+	PolicyBinds      GraphEdgeKind = "policy-binds"
+	ReplicatesTo     GraphEdgeKind = "replicates-to"
+	RoutesThrough    GraphEdgeKind = "routes-through"
+	RoutesVia        GraphEdgeKind = "routes-via"
+	RunsOn           GraphEdgeKind = "runs-on"
+)
+
+// Defines values for MemoryScope.
+const (
+	MemoryScopeTarget     MemoryScope = "target"
+	MemoryScopeTenant     MemoryScope = "tenant"
+	MemoryScopeUser       MemoryScope = "user"
+	MemoryScopeUserTarget MemoryScope = "user-target"
+	MemoryScopeUserTenant MemoryScope = "user-tenant"
+)
+
+// Defines values for RetireChecklistReportOverallVerdict.
+const (
+	RetireChecklistReportOverallVerdictNOTYET         RetireChecklistReportOverallVerdict = "NOT YET"
+	RetireChecklistReportOverallVerdictREADYTORETIRE  RetireChecklistReportOverallVerdict = "READY TO RETIRE"
+	RetireChecklistReportOverallVerdictREVIEWMANUALLY RetireChecklistReportOverallVerdict = "REVIEW MANUALLY"
+)
+
+// Defines values for RetireChecklistRequestSurface.
+const (
+	RetireChecklistRequestSurfaceAll        RetireChecklistRequestSurface = "all"
+	RetireChecklistRequestSurfaceKb         RetireChecklistRequestSurface = "kb"
+	RetireChecklistRequestSurfaceMemory     RetireChecklistRequestSurface = "memory"
+	RetireChecklistRequestSurfaceOperations RetireChecklistRequestSurface = "operations"
+)
+
+// Defines values for SurfaceChecklistSurface.
+const (
+	SurfaceChecklistSurfaceKb         SurfaceChecklistSurface = "kb"
+	SurfaceChecklistSurfaceMemory     SurfaceChecklistSurface = "memory"
+	SurfaceChecklistSurfaceOperations SurfaceChecklistSurface = "operations"
+)
+
+// Defines values for SurfaceChecklistVerdict.
+const (
+	SurfaceChecklistVerdictNOTYET         SurfaceChecklistVerdict = "NOT YET"
+	SurfaceChecklistVerdictREADYTORETIRE  SurfaceChecklistVerdict = "READY TO RETIRE"
+	SurfaceChecklistVerdictREVIEWMANUALLY SurfaceChecklistVerdict = "REVIEW MANUALLY"
+)
+
 // Defines values for SurfaceResultBaselineVerdict.
 const (
 	SurfaceResultBaselineVerdictGreen  SurfaceResultBaselineVerdict = "green"
@@ -70,9 +157,9 @@ const (
 
 // Defines values for SurfaceResultVerdict.
 const (
-	Green  SurfaceResultVerdict = "green"
-	Red    SurfaceResultVerdict = "red"
-	Yellow SurfaceResultVerdict = "yellow"
+	SurfaceResultVerdictGreen  SurfaceResultVerdict = "green"
+	SurfaceResultVerdictRed    SurfaceResultVerdict = "red"
+	SurfaceResultVerdictYellow SurfaceResultVerdict = "yellow"
 )
 
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
@@ -90,6 +177,83 @@ const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceMemory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
 )
+
+// AuditEntry One row of the audit query result.
+//
+// Field-to-column mapping (see module docstring for the substrate
+// reconciliation):
+//
+//   - “id“ ← “audit_log.id“
+//   - “ts“ ← “audit_log.occurred_at“
+//   - “tenant_id“ ← “audit_log.tenant_id“
+//   - “principal_sub“ ← “audit_log.operator_sub“
+//   - “target_id“ ← “audit_log.target_id“
+//   - “target_name“ ← LEFT JOIN “targets.name“ ON “audit_log.target_id“
+//   - “method“ / “path“ / “status_code“ / “request_id“ / “duration_ms“
+//     / “payload“ ← columns of the same name
+//   - “op_id“ / “op_class“ / “result_status“ — computed at query time
+//   - “principal_name“ / “parent_audit_id“ / “agent_session_id“ /
+//     “broadcast_event_id“ — v0.2 placeholders, always None
+type AuditEntry struct {
+	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
+	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	DurationMs       *string                `json:"duration_ms"`
+	Id               openapi_types.UUID     `json:"id"`
+	Method           string                 `json:"method"`
+	OpClass          string                 `json:"op_class"`
+	OpId             string                 `json:"op_id"`
+	ParentAuditId    *openapi_types.UUID    `json:"parent_audit_id"`
+	Path             string                 `json:"path"`
+	Payload          map[string]interface{} `json:"payload"`
+	PrincipalName    *string                `json:"principal_name"`
+	PrincipalSub     string                 `json:"principal_sub"`
+	RequestId        *openapi_types.UUID    `json:"request_id"`
+	ResultStatus     string                 `json:"result_status"`
+	StatusCode       int                    `json:"status_code"`
+	TargetId         *openapi_types.UUID    `json:"target_id"`
+	TargetName       *string                `json:"target_name"`
+	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	Ts               time.Time              `json:"ts"`
+}
+
+// AuditQueryRequest POST body for “/api/v1/audit/query“.
+//
+// Mirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`
+// except “since“ / “until“ are strings parsed by
+// :func:`~meho_backplane.audit_query.parse_duration` at the router
+// layer. All other fields pass through to the substrate filter
+// object unchanged. The empty body shape “{}“ is the no-filter
+// case — every field defaults to None or the substrate-side default.
+//
+// “extra="forbid"“ rejects unknown fields with 422
+// “extra_forbidden“ so a typo or a client passing “tenant_id“
+// in the body fails loud at the framework boundary — the route
+// always uses “operator.tenant_id“ from the JWT, never the body.
+type AuditQueryRequest struct {
+	AgentSessionId *openapi_types.UUID `json:"agent_session_id"`
+	AuditId        *openapi_types.UUID `json:"audit_id"`
+	Cursor         *string             `json:"cursor"`
+	Limit          *int                `json:"limit,omitempty"`
+	OpClass        *string             `json:"op_class"`
+	OpId           *string             `json:"op_id"`
+	ParentAuditId  *openapi_types.UUID `json:"parent_audit_id"`
+	Principal      *string             `json:"principal"`
+	ResultStatus   *string             `json:"result_status"`
+	Since          *string             `json:"since"`
+	Target         *string             `json:"target"`
+	Until          *string             `json:"until"`
+}
+
+// AuditQueryResult Page of audit rows plus the forward-only continuation cursor.
+//
+// “next_cursor“ is :data:`None` when fewer than “limit“ rows were
+// available (the query reached the end of the matching set). Consumers
+// iterate by re-issuing the same filter with “cursor = next_cursor“
+// until “next_cursor“ is None.
+type AuditQueryResult struct {
+	NextCursor *string      `json:"next_cursor"`
+	Rows       []AuditEntry `json:"rows"`
+}
 
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
 //
@@ -109,6 +273,74 @@ type AuthConfigResponse struct {
 // AuthModel Per-target identity model per v0.1-spec L447-454.
 type AuthModel string
 
+// BaselineMetricsOverride Per-surface baseline metrics supplied by the caller.
+//
+// Criterion 4 (MEHO ≥ baseline) needs side-by-side numbers from a
+// baseline retrieval (“grep -r kb/“ for kb; “grep paths.txt +
+// yq“ for operations). The v0.2 backplane has no checked-in
+// corpus snapshot to evaluate the baseline against (see
+// :mod:`meho_backplane.api.v1.retrieve_eval` — explicit
+// “baseline=grep“ on that route is rejected with 501); the CLI
+// runs the baseline locally against the operator's kb/ checkout and
+// can pass the resulting numbers here so the retire-checklist
+// verdict honestly reflects criterion 4 instead of always reporting
+// yellow ("baseline did not run") on the API path.
+//
+// Without an override, criterion 4 stays yellow for v0.2 production
+// callers — the documented "READY TO RETIRE" path is unreachable
+// via the bare API alone, which is the honest v0.2 posture. T7
+// (#446) / v0.2.next is expected to wire a server-side corpus
+// snapshot and remove the need for this override.
+type BaselineMetricsOverride struct {
+	Coverage     float32 `json:"coverage"`
+	Kind         *string `json:"kind,omitempty"`
+	Mrr          float32 `json:"mrr"`
+	PrecisionAt5 float32 `json:"precision_at_5"`
+}
+
+// BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
+//
+// “extra="forbid"“ rejects unknown fields with 422 -- catches a
+// client typo (“"scope-field": "namespace"“ with the wrong kebab
+// case) before it silently lands as a no-op.
+//
+// “model_validator(mode="after")“ enforces the scope-pair
+// consistency invariant: “scope_field“ and “scope_value“ must
+// both be NULL (op-wide rule) or both be set (scoped rule). A half-
+// set pair is a client bug.
+//
+// “op_id_pattern“ is validated against the regex-character
+// blacklist by a second model_validator.
+type BroadcastOverrideCreate struct {
+	Detail      BroadcastOverrideCreateDetail      `json:"detail"`
+	OpIdPattern string                             `json:"op_id_pattern"`
+	ScopeField  *BroadcastOverrideCreateScopeField `json:"scope_field"`
+	ScopeValue  *string                            `json:"scope_value"`
+}
+
+// BroadcastOverrideCreateDetail defines model for BroadcastOverrideCreate.Detail.
+type BroadcastOverrideCreateDetail string
+
+// BroadcastOverrideCreateScopeField defines model for BroadcastOverrideCreate.ScopeField.
+type BroadcastOverrideCreateScopeField string
+
+// BroadcastOverrideRead Outgoing row representation.
+//
+// “model_config = ConfigDict(from_attributes=True)“ lets the
+// handler return the SQLAlchemy ORM object directly; FastAPI
+// serialises via this model rather than the ORM's “__dict__“.
+type BroadcastOverrideRead struct {
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub string             `json:"created_by_sub"`
+	Detail       string             `json:"detail"`
+	Id           openapi_types.UUID `json:"id"`
+	OpIdPattern  string             `json:"op_id_pattern"`
+	ScopeField   *string            `json:"scope_field"`
+	ScopeValue   *string            `json:"scope_value"`
+	TenantId     openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+}
+
 // CallOperationBody Request body for the “POST /api/v1/operations/call“ route.
 //
 // Mirrors the :func:`call_operation` “arguments“ shape so the route
@@ -117,11 +349,68 @@ type AuthModel string
 // :func:`~meho_backplane.targets.resolver.resolve_target`; “None“
 // means the operation does not need a target (typed handlers that
 // don't read it; composite handlers that do their own resolution).
+//
+// Recognised keys on the “target“ dict:
+//
+//   - “name“ (required when “target“ is supplied) -- the slug or
+//     alias the resolver looks up in the targets registry.
+//   - “fqdn“ (optional) -- per-call override for the resolved
+//     target's “fqdn“ column. Honoured by connectors that read
+//     “target.fqdn“ for vhost routing (G3.6 VCF Automation:
+//     the appliance enforces strict “Host:“ matching and returns
+//     404 with empty body when reached by IP without the correct
+//     vhost set). The override mutates the resolved Target in
+//     memory only; the database row is not modified. Any other key
+//     in the dict is silently ignored, mirroring the documented
+//     forward-compatibility posture in the MCP tool schema.
+//
+// “extra="forbid"“ (G0.9-T2 / #729) rejects unknown fields with
+// 422 “extra_forbidden“ -- a v0.2.1 client still sending “target:
+// str“ (the pre-rename single-name shape) or a typo in
+// “connector_id“ now fails loud at the framework boundary instead
+// of silently dispatching with the defaults. “params“ itself is a
+// free-form “dict“ because per-op parameter shape is enforced by
+// the descriptor's “parameter_schema“ further down the dispatch
+// path; only the meta-tool body's own fields are constrained here.
 type CallOperationBody struct {
 	ConnectorId string                  `json:"connector_id"`
 	OpId        string                  `json:"op_id"`
 	Params      *map[string]interface{} `json:"params,omitempty"`
 	Target      *map[string]interface{} `json:"target"`
+}
+
+// CandidateHint One candidate target a connector's :meth:`Connector.list_candidates` returns.
+//
+// Candidates are potentially-reachable targets the connector inferred
+// from an existing seed (e.g. a vCenter exposing its managed ESXi
+// hosts; a kubeconfig listing peer cluster contexts). The
+// G9.1-T6 “meho targets discover“ CLI verb surfaces these to the
+// operator; auto-registration is intentionally out of scope per
+// Initiative #363 (operator runs “meho targets create“ after review).
+//
+// “evidence“ is the debugging payload — whatever made the connector
+// think this candidate exists (e.g. “{"source": "kubeconfig",
+// "context_name": "cluster-2"}“); “confidence“ is the connector's
+// self-assessment of probe-vs-curation reliability.
+type CandidateHint struct {
+	Confidence CandidateHintConfidence `json:"confidence"`
+	Evidence   map[string]interface{}  `json:"evidence"`
+	Host       string                  `json:"host"`
+	Name       string                  `json:"name"`
+	Port       *int                    `json:"port"`
+}
+
+// CandidateHintConfidence defines model for CandidateHint.Confidence.
+type CandidateHintConfidence string
+
+// CatalogListResponse Wire envelope for “GET /api/v1/connectors/catalog“.
+//
+// Wrapped in “catalog“ (not a bare list) so future paging fields can
+// land non-breakingly, mirroring the “GET /“ list shape. Used as the
+// route's “response_model“ so the OpenAPI contract explicitly types
+// the envelope + entry fields (rather than a free-form object map).
+type CatalogListResponse struct {
+	Catalog []ConnectorSpecEntry `json:"catalog"`
 }
 
 // ConnectorReviewGroup One group within the review payload.
@@ -185,6 +474,43 @@ type ConnectorReviewPayload struct {
 	Version      string                 `json:"version"`
 }
 
+// ConnectorSpecEntry One curated “(product, version)“ -> spec-source mapping.
+//
+// “upstream is None“ marks a typed connector with no ingestable spec;
+// the CLI's “ingest --catalog“ path (#915) refuses such an entry rather
+// than POSTing an empty “specs“ list.
+type ConnectorSpecEntry struct {
+	ImplId                 string    `json:"impl_id"`
+	Notes                  *string   `json:"notes,omitempty"`
+	Product                string    `json:"product"`
+	RequiresConnectorClass string    `json:"requires_connector_class"`
+	Sha256                 *string   `json:"sha256"`
+	SpecInfoVersion        *string   `json:"spec_info_version"`
+	Upstream               *[]string `json:"upstream"`
+	Version                string    `json:"version"`
+}
+
+// CriterionResult One row of the per-surface checklist.
+//
+// Frozen + “extra="forbid"“ so the structured output is stable for
+// the CLI table renderer and any future dashboard consumer. The
+// “observed_value“ + “threshold_summary“ pair is what the
+// human-readable table prints verbatim — keep both short (≤ 32
+// chars each) so the table stays scannable in an 80-column terminal.
+type CriterionResult struct {
+	Name             CriterionResultName    `json:"name"`
+	Notes            *string                `json:"notes"`
+	ObservedValue    string                 `json:"observed_value"`
+	ThresholdSummary string                 `json:"threshold_summary"`
+	Verdict          CriterionResultVerdict `json:"verdict"`
+}
+
+// CriterionResultName defines model for CriterionResult.Name.
+type CriterionResultName string
+
+// CriterionResultVerdict defines model for CriterionResult.Verdict.
+type CriterionResultVerdict string
+
 // DailyUsageBucket One “(date, surface)“ row of the usage report.
 //
 // Frozen so callers (CLI table renderer, “--json“ consumers,
@@ -231,6 +557,12 @@ type DbStatus struct {
 // :class:`OperationGroup.name` columns. Empty strings are
 // rejected — operators that want to "clear" the field should
 // re-run grouping rather than blank it.
+//
+// “extra="forbid"“ (G0.9-T2 / #729) means an unknown field —
+// e.g. a client mis-spelling “when_to_use“ as “whentouse“ —
+// fails 422 instead of being silently dropped (which would
+// surface as a confusing 400 "at least one field must be set"
+// from the route layer).
 type EditGroupBody struct {
 	Name      *string `json:"name"`
 	WhenToUse *string `json:"when_to_use"`
@@ -256,6 +588,10 @@ type EditGroupBody struct {
 // that the agent surfaces in place of the upstream spec's
 // “description“ field; capped at 4096 chars to keep audit-log
 // payloads bounded.
+//
+// “extra="forbid"“ (G0.9-T2 / #729) rejects unknown fields with
+// 422 “extra_forbidden“ — same fail-loud posture as every other
+// public v1 request schema.
 type EditOpBody struct {
 	CustomDescription *string                `json:"custom_description"`
 	IsEnabled         *bool                  `json:"is_enabled"`
@@ -324,6 +660,54 @@ type FingerprintResult struct {
 	Version     *string                 `json:"version"`
 }
 
+// GraphEdgeKind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
+//
+// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
+// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
+// operator-curated cross-system kinds that auto-discovery cannot infer
+// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
+// is closed -- widening it is a coordinated DB + model change (new
+// migration, new enum member, new decision row) so the v0.2.next
+// policy-engine grammar parsing “kind“ stays portable across tenants.
+//
+// The four auto-discoverable kinds (refresh service writes these on
+// every probe-derived edge):
+//
+//   - :attr:`RUNS_ON` -- “vm“ “runs-on“ “host“, “pod“ “runs-on“
+//     “node“: the physical / scheduling host of a workload.
+//   - :attr:`MOUNTS` -- “vm“ “mounts“ “datastore“, “pod“ “mounts“
+//     “volume“: storage attachment.
+//   - :attr:`ROUTES_THROUGH` -- “ingress“ “routes-through“ “service“,
+//     “service“ “routes-through“ “pod“: network routing path.
+//   - :attr:`BELONGS_TO` -- “pod“ “belongs-to“ “namespace“, “vm“
+//     “belongs-to“ “host“ (logical group membership).
+//
+// The six curated-only kinds (operator-asserted via
+// “meho topology annotate“; cannot be derived from probes):
+//
+//   - :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
+//     (e.g. “k8s-sa-foo“ -> “vault-role-bar“). The canonical
+//     cross-system example.
+//   - :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
+//     “service-X“ -> “database-Y“ where neither side knows about the
+//     other in its own probe output).
+//   - :attr:`REPLICATES_TO` -- operator-asserted replication relationship
+//     between two storage / database nodes.
+//   - :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
+//   - :attr:`ROUTES_VIA` -- operator-asserted network path through an
+//     intermediary (e.g., “vm-A“ -> “firewall-X“ -> “vm-B“ when the
+//     probes only see point-to-point reachability).
+//   - :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
+//     connector boundaries (e.g., “kubernetes-namespace-prod“ ->
+//     “vault-policy-prod-read“).
+//
+// Mirrors the closed-enum pattern :class:`AuthModel`
+// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
+// :class:`enum.StrEnum` paired with a portable DB “CHECK“ constraint,
+// both moved in lock-step by one Alembic migration so the enum and the
+// constraint cannot drift.
+type GraphEdgeKind string
+
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
 //
@@ -376,6 +760,23 @@ type HealthResponse struct {
 	Vault VaultStatus `json:"vault"`
 }
 
+// IngestKbRequest POST body for “/api/v1/kb/ingest“ -- server-side bulk ingest.
+//
+// Exactly one of “directory“ / “tarball_url“ must be set; the
+// constraint is validated by a model-level
+// :func:`~pydantic.model_validator`. “dry_run“ short-circuits the
+// write path (matches :meth:`KbService.ingest_directory`'s contract).
+//
+// “tarball_url“ is accepted by the schema for forward-compat with
+// the task body's stated contract but :class:`KbService` (T1)
+// only exposes “ingest_directory“; a request with “tarball_url“
+// set returns **501 Not Implemented** from the route handler.
+type IngestKbRequest struct {
+	Directory  *string `json:"directory"`
+	DryRun     *bool   `json:"dry_run,omitempty"`
+	TarballUrl *string `json:"tarball_url"`
+}
+
 // IngestRequest POST body for “/api/v1/connectors/ingest“.
 //
 // Drives a full pipeline run: parse every spec in *specs*, call
@@ -395,6 +796,11 @@ type HealthResponse struct {
 // registered :class:`GenericRestConnector` shim; “None“ leaves
 // the shim unconfigured (the connector's eventual hand-coded
 // subclass at G3.x will set its own base URL).
+//
+// “extra="forbid"“ rejects unknown body fields with 422
+// “extra_forbidden“ (G0.9-T2 / #729) — silent-drop on a typo
+// would otherwise mean the pipeline runs with the wrong impl_id
+// and the operator only finds out at review-time.
 type IngestRequest struct {
 	BaseUrl *string      `json:"base_url"`
 	DryRun  *bool        `json:"dry_run,omitempty"`
@@ -450,6 +856,174 @@ type IngestionResultModel struct {
 	UpdatedCount        int    `json:"updated_count"`
 }
 
+// KbEntry One kb entry -- mirrors a row in the “documents“ table.
+//
+// Returned by :meth:`KbService.get_entry`, :meth:`KbService.create_entry`,
+// and (in list form) :meth:`KbService.list_entries`. “slug“ is the
+// operator-facing identifier (“documents.source_id“ on the SQL
+// side); the underlying “Document.id“ UUID is also surfaced for
+// cross-correlation with audit-log rows and future MCP resource
+// URIs.
+type KbEntry struct {
+	Body      string                 `json:"body"`
+	CreatedAt time.Time              `json:"created_at"`
+	Id        openapi_types.UUID     `json:"id"`
+	Metadata  map[string]interface{} `json:"metadata"`
+	Slug      string                 `json:"slug"`
+	TenantId  openapi_types.UUID     `json:"tenant_id"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
+
+// KbEntryCreate POST body for “/api/v1/kb“ -- create / re-index one entry.
+//
+// “slug“ is validated by :func:`validate_slug` inside the route
+// handler (the substrate's contract) rather than as a pydantic
+// constraint here -- the regex lives on the substrate side so the
+// error message is identical across REST / MCP / CLI consumers.
+// “frozen=True“ mirrors the rest of the kb / retrieve schemas
+// (a handler accidentally mutating a parsed request body surfaces
+// as a pydantic error instead of a confused-deputy bug).
+// “extra="forbid"“ rejects unknown fields at 422 so a typo
+// ("body_text") doesn't silently become a no-op.
+type KbEntryCreate struct {
+	Body     string                  `json:"body"`
+	Metadata *map[string]interface{} `json:"metadata"`
+
+	// Slug Operator-facing identifier in kebab-case. Must start with a lowercase letter, end with a lowercase letter or digit, and contain only lowercase letters, digits, hyphens, or dots. The leading-letter rule (G0.9.1-T8, Signal #15) is the most common surprise: '657-recovery' is rejected; rewrite as 'ticket-657-recovery'.
+	Slug string `json:"slug"`
+}
+
+// KbEntryPreview Lightweight projection of :class:`KbEntry` for list responses.
+//
+// Drops the full body and emits a 200-char preview instead --
+// consumers that need the full body issue a follow-up “GET
+// /{slug}“. Mirrors the kb-search-hit snippet shape (T1's
+// :class:`KbEntrySearchHit`) so an operator can do
+// “list → identify slug → fetch full body“ without learning a
+// different field name on each surface.
+type KbEntryPreview struct {
+	CreatedAt string                 `json:"created_at"`
+	Metadata  map[string]interface{} `json:"metadata"`
+	Preview   string                 `json:"preview"`
+	Slug      string                 `json:"slug"`
+	UpdatedAt string                 `json:"updated_at"`
+}
+
+// KbIngestionResult Summary of one :meth:`KbService.ingest_directory` run.
+//
+// The four counters partition every discovered “.md“ file into
+// exactly one of four buckets:
+//
+//   - “inserted_count“ -- file's slug had no prior row in the tenant;
+//     a new document row was created and embedded.
+//   - “updated_count“ -- file's slug had a prior row whose
+//     “body_hash“ differed from the current body; the row was
+//     re-embedded and updated.
+//   - “skipped_count“ -- file's slug had a prior row whose
+//     “body_hash“ matched (dominant case on the second run against
+//     an unchanged corpus -- the body-hash short-circuit from
+//     G0.4-T3 means no embedding compute happened).
+//   - “error_count“ -- the file could not be read or parsed
+//     (binary masquerading as “.md“, invalid slug, malformed
+//     front-matter). The matching error message is appended to
+//     :attr:`errors`; the ingestion run continues with the remaining
+//     files.
+//
+// Sum invariant: “inserted_count + updated_count + skipped_count
+// + error_count == <total discovered .md files>“.
+//
+// The “errors“ list is bounded in practice by the corpus size --
+// no per-file error string exceeds ~200 chars (the file path plus a
+// short reason), so even a worst-case all-error run on a 1000-file
+// corpus stays under ~200 KB of allocated memory. Truncation /
+// sampling can land in v0.2.next if real corpora drive that.
+type KbIngestionResult struct {
+	ErrorCount    int      `json:"error_count"`
+	Errors        []string `json:"errors"`
+	InsertedCount int      `json:"inserted_count"`
+	SkippedCount  int      `json:"skipped_count"`
+	UpdatedCount  int      `json:"updated_count"`
+}
+
+// KbListResponse Response envelope for “GET /api/v1/kb“.
+//
+// Wrapped in “{"entries": [...]}“ so a future paging / cursor
+// field can land non-breakingly -- same shape
+// :mod:`meho_backplane.api.v1.connectors_ingest` adopted for its
+// list response. Per-entry shape matches :class:`KbEntryPreview`;
+// the body is truncated to a 200-char preview so a casual
+// “meho kb list“ does not stream every entry's full body.
+type KbListResponse struct {
+	Entries []KbEntryPreview `json:"entries"`
+}
+
+// MemoryEntry Read shape -- one memory row as the service returns it.
+//
+// Frozen so callers can stash the entry in audit / log records
+// without mutation surprises. “expires_at“ is lifted out of
+// “doc_metadata“ for filter convenience -- the read-side filter in
+// :meth:`~meho_backplane.memory.service.MemoryService.list_memories`
+// and :meth:`~meho_backplane.memory.service.MemoryService.recall`
+// compares it without re-parsing the dict. The raw “metadata“ is
+// still carried so callers (audit middleware, MCP resource handlers)
+// see the original payload.
+type MemoryEntry struct {
+	Body      string                 `json:"body"`
+	CreatedAt time.Time              `json:"created_at"`
+	ExpiresAt *time.Time             `json:"expires_at"`
+	Id        openapi_types.UUID     `json:"id"`
+	Metadata  map[string]interface{} `json:"metadata"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope      MemoryScope        `json:"scope"`
+	Slug       string             `json:"slug"`
+	TargetName *string            `json:"target_name"`
+	TenantId   openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt  time.Time          `json:"updated_at"`
+	UserSub    *string            `json:"user_sub"`
+}
+
+// MemoryListResponse Response envelope for “GET /api/v1/memory“.
+//
+// Wrapped in “{"entries": [...]}“ so a future cursor field can
+// land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`
+// adopted for its list response. Per-entry shape is the full
+// :class:`MemoryEntry` (no preview truncation); memory bodies are
+// expected to be short hand-written notes rather than the multi-KB
+// blobs the kb surface carries, so streaming the full body is the
+// right default. A future preview / pagination contract lives in
+// G5.2 #374's promote / expire verbs.
+type MemoryListResponse struct {
+	Entries []MemoryEntry `json:"entries"`
+}
+
+// MemoryScope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+//
+// The string value is the wire-level identifier (route path segment,
+// CLI flag value, MCP tool arg). Each value maps to a single
+// “documents.kind“ row prefixed with “memory-“ --
+// :func:`kind_for_scope` is the canonical translation. The mapping is
+// one-to-one and bijective with :func:`scope_for_kind`, so callers
+// never round-trip through ad-hoc string-prefixing.
+//
+// “StrEnum“ (PEP 663, stdlib in 3.11+) gives the members “str“
+// semantics for free: “f"scope={MemoryScope.USER}"“ renders as
+// “"scope=user"“ rather than “"scope=MemoryScope.USER"“, matching
+// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+type MemoryScope string
+
 // OperationDescriptor Full :class:`~meho_backplane.db.models.EndpointDescriptor` read shape.
 //
 // Returned by :func:`describe_descriptor` (and the
@@ -496,6 +1070,46 @@ type OperatorIdentity struct {
 	Sub   string  `json:"sub"`
 }
 
+// PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
+//
+// G5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a
+// target-scope name for the “user -> user-target“ / “user-target ->
+// target“ ladder steps; “frozen=True“ + “extra="forbid"“ mirror
+// :class:`RememberBody`.
+//
+//   - “to“ -- the target scope. The route delegates ladder validation
+//     to :func:`~meho_backplane.memory.rbac.assert_can_promote`, which
+//     raises :class:`InvalidPromotionStepError` on non-ladder pairs (the
+//     route maps that to 400).
+//   - “move“ -- when “True“, delete the source row in the same
+//     transaction as the target insert (broadens-and-leaves vs.
+//     broadens-and-rewires). Default “False“ per the issue body.
+//   - “target_name“ -- required when “to“ is target-flavoured AND
+//     the source scope is not (“user -> user-target“). For
+//     “user-target -> target“ the service inherits “target_name“
+//     from the source row, so the caller may omit it; we still accept
+//     it for forward-compat with the CLI verb (T5 #627). Omitted
+//     values land as “None“.
+type PromoteBody struct {
+	Move       *bool   `json:"move,omitempty"`
+	TargetName *string `json:"target_name"`
+
+	// To One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	To MemoryScope `json:"to"`
+}
+
 // QueryResult Per-query eval row — what the runner produces for each corpus entry.
 //
 // “meho_hits“ is the surface-formatted top-“k“ slug list from
@@ -518,6 +1132,108 @@ type QueryResult struct {
 	ReciprocalRank         float32   `json:"reciprocal_rank"`
 }
 
+// RefreshResult Per-target reconcile outcome returned by :func:`refresh_target_topology`.
+//
+// Counts are disjoint per object class: a node is counted in exactly
+// one of added / updated / removed (or none, when unchanged). The same
+// holds for edges. “duration_ms“ is wall-clock for the whole
+// resolve + discover + reconcile + commit cycle.
+type RefreshResult struct {
+	AddedEdges   int                `json:"added_edges"`
+	AddedNodes   int                `json:"added_nodes"`
+	DurationMs   float32            `json:"duration_ms"`
+	RemovedEdges int                `json:"removed_edges"`
+	RemovedNodes int                `json:"removed_nodes"`
+	TargetId     openapi_types.UUID `json:"target_id"`
+	UpdatedEdges int                `json:"updated_edges"`
+	UpdatedNodes int                `json:"updated_nodes"`
+}
+
+// RememberBody POST body for “/api/v1/memory“ -- create one memory.
+//
+// “slug“ is constrained to :data:`SLUG_PATTERN` at the model
+// boundary; the service-layer
+// :func:`~meho_backplane.memory.schemas.validate_slug` is the
+// parallel gate for non-Pydantic callers. “frozen=True“ matches
+// the rest of the memory + kb schemas (a handler accidentally
+// mutating a parsed request body surfaces as a pydantic error
+// instead of a confused-deputy bug). “extra="forbid"“ rejects
+// unknown fields at 422 so a typo (“"bodytext"“) doesn't
+// silently become a no-op.
+//
+// “target_name“ is required when “scope“ is “user-target“ or
+// “target“; the service-level
+// :meth:`MemoryService._require_target_name` raises “ValueError“
+// when missing, which this route maps to 422 (parity with
+// pydantic's own missing-field shape).
+type RememberBody struct {
+	Body      string                  `json:"body"`
+	ExpiresAt *time.Time              `json:"expires_at"`
+	Metadata  *map[string]interface{} `json:"metadata"`
+
+	// Scope One of the five memory scopes from consumer-needs.md §G5 L137-141.
+	//
+	// The string value is the wire-level identifier (route path segment,
+	// CLI flag value, MCP tool arg). Each value maps to a single
+	// ``documents.kind`` row prefixed with ``memory-`` --
+	// :func:`kind_for_scope` is the canonical translation. The mapping is
+	// one-to-one and bijective with :func:`scope_for_kind`, so callers
+	// never round-trip through ad-hoc string-prefixing.
+	//
+	// ``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``
+	// semantics for free: ``f"scope={MemoryScope.USER}"`` renders as
+	// ``"scope=user"`` rather than ``"scope=MemoryScope.USER"``, matching
+	// the :class:`~meho_backplane.auth.operator.TenantRole` convention.
+	Scope      MemoryScope `json:"scope"`
+	Slug       *string     `json:"slug"`
+	TargetName *string     `json:"target_name"`
+}
+
+// RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
+//
+// Frozen + “extra="forbid"“ so the CLI's “--json“ consumers can
+// pin the shape; “ran_at“ lets two saved reports be compared
+// chronologically without external metadata.
+type RetireChecklistReport struct {
+	CountedSurfaces *[]string                           `json:"counted_surfaces,omitempty"`
+	OverallVerdict  RetireChecklistReportOverallVerdict `json:"overall_verdict"`
+	RanAt           time.Time                           `json:"ran_at"`
+	RestExcluded    *bool                               `json:"rest_excluded,omitempty"`
+	Since           time.Time                           `json:"since"`
+	Surfaces        []SurfaceChecklist                  `json:"surfaces"`
+	TenantId        *openapi_types.UUID                 `json:"tenant_id"`
+	Until           time.Time                           `json:"until"`
+}
+
+// RetireChecklistReportOverallVerdict defines model for RetireChecklistReport.OverallVerdict.
+type RetireChecklistReportOverallVerdict string
+
+// RetireChecklistRequest POST body for “/api/v1/retrieve/retire-checklist“.
+//
+// Frozen + “extra="forbid"“ so a typo (“surfaces“ instead of
+// “surface“, or “blocker_count“ instead of “blocker_counts“)
+// fails 422 at the framework boundary rather than silently running
+// the default and giving the caller a confusing report.
+//
+// “blocker_counts“ is the surface→count mapping the CLI fills in
+// from a local “gh issue list“ lookup. “None“ (the default) is
+// valid — the service reports criterion 5 as yellow (unknown). Every
+// key must be one of the three supported surfaces; the
+// “dict[Literal, int]“ shape pins that at the Pydantic boundary.
+//
+// “baseline_overrides“ is the surface→baseline-metrics mapping the
+// CLI can fill in from a local “meho retrieval eval --baseline grep“
+// run. Without it, criterion 4 stays yellow for v0.2 production
+// callers because the backplane has no server-side corpus snapshot.
+type RetireChecklistRequest struct {
+	BaselineOverrides *map[string]BaselineMetricsOverride `json:"baseline_overrides"`
+	BlockerCounts     *map[string]int                     `json:"blocker_counts"`
+	Surface           *RetireChecklistRequestSurface      `json:"surface,omitempty"`
+}
+
+// RetireChecklistRequestSurface defines model for RetireChecklistRequest.Surface.
+type RetireChecklistRequestSurface string
+
 // RetrievalHit One document in a ranked retrieval response.
 //
 // Frozen pydantic v2 model: the retrieve helper builds these once
@@ -532,12 +1248,21 @@ type QueryResult struct {
 // top-:data:`CANDIDATE_LIMIT`). Likewise “bm25_rank“ /
 // “cosine_rank“ are the 1-based ranks (1 = best) the document
 // held in each signal's list, None when absent.
+//
+// “created_at“ / “updated_at“ mirror the persisted
+// :class:`~meho_backplane.db.models.Document` columns so downstream
+// consumers (memory “search_memory“, kb search projections) can
+// surface real write-time / mtime values instead of substituting a
+// placeholder. The retriever already issues a full “SELECT * FROM
+// documents WHERE id IN (...)“ for each top-fused row, so carrying
+// the columns through is a free pass-through, not an extra query.
 type RetrievalHit struct {
 	Bm25Rank    *int                   `json:"bm25_rank"`
 	Bm25Score   *float32               `json:"bm25_score"`
 	Body        string                 `json:"body"`
 	CosineRank  *int                   `json:"cosine_rank"`
 	CosineScore *float32               `json:"cosine_score"`
+	CreatedAt   time.Time              `json:"created_at"`
 	DocMetadata map[string]interface{} `json:"doc_metadata"`
 	DocumentId  openapi_types.UUID     `json:"document_id"`
 	FusedScore  float32                `json:"fused_score"`
@@ -545,6 +1270,7 @@ type RetrievalHit struct {
 	Source      string                 `json:"source"`
 	SourceId    string                 `json:"source_id"`
 	TenantId    openapi_types.UUID     `json:"tenant_id"`
+	UpdatedAt   time.Time              `json:"updated_at"`
 }
 
 // RetrieveRequest POST body for “/api/v1/retrieve“.
@@ -557,6 +1283,12 @@ type RetrievalHit struct {
 // free-form operator queries; operators with longer payloads
 // should use the embedding pipeline directly via G4 / G5 ingestion
 // paths.
+//
+// “extra="forbid"“ rejects unknown fields at 422 with
+// “extra_forbidden“ detail so a v0.2.1 client still sending the
+// pre-rename “q“ / “top_k“ keys fails loud instead of silently
+// running with the defaults (Signal #2 from the 2026-05-20 RDC
+// dogfood). Same posture as every public v1 request schema.
 type RetrieveRequest struct {
 	Kind   *string `json:"kind"`
 	Limit  *int    `json:"limit,omitempty"`
@@ -577,6 +1309,19 @@ type RetrieveResponse struct {
 	QueryDurationMs float32        `json:"query_duration_ms"`
 }
 
+// SkippedConnector One connector that did not contribute candidates for a product.
+//
+// “name“ is the connector implementation key (the “impl_id“ from
+// the v2 registry, or the class name for a v1-only registration).
+// “reason“ is a short human string — “"no candidates"“ when the
+// connector ran cleanly but inferred nothing, or the exception class
+// + message when “list_candidates“ raised (one bad connector must
+// not fail the whole discover sweep).
+type SkippedConnector struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
 // SpecSource One spec to ingest under a connector triple.
 //
 // “uri“ carries the operator's spec identifier. Three forms are
@@ -590,10 +1335,26 @@ type RetrieveResponse struct {
 //
 // Wrapped in its own model so future per-spec knobs (auth headers,
 // dialect pinning, content-type override) can land without
-// reshaping :class:`IngestRequest`.
+// reshaping :class:`IngestRequest`. “extra="forbid"“ rejects
+// unknown fields (per the request-schema-strictness rule) so a
+// typo in a nested “specs[*]“ entry fails 422 at the body parse
+// instead of being silently dropped.
 type SpecSource struct {
 	Uri string `json:"uri"`
 }
+
+// SurfaceChecklist Per-surface checklist: the five criteria + the surface verdict.
+type SurfaceChecklist struct {
+	Criteria []CriterionResult       `json:"criteria"`
+	Surface  SurfaceChecklistSurface `json:"surface"`
+	Verdict  SurfaceChecklistVerdict `json:"verdict"`
+}
+
+// SurfaceChecklistSurface defines model for SurfaceChecklist.Surface.
+type SurfaceChecklistSurface string
+
+// SurfaceChecklistVerdict defines model for SurfaceChecklist.Verdict.
+type SurfaceChecklistVerdict string
 
 // SurfaceResult Per-surface aggregate: corpus-wide metrics + verdict + per-query rows.
 //
@@ -739,6 +1500,19 @@ type TargetUpdate struct {
 	VpnRequired     *bool                   `json:"vpn_required"`
 }
 
+// TargetsDiscoverResult Aggregated discover output across every connector for a product.
+//
+// “discovered“ is the merged candidate list from every connector
+// registered for the requested product; “skipped“ records the
+// connectors that contributed nothing (clean-but-empty or errored).
+// The verb never auto-creates “targets“ rows — the operator reviews
+// “discovered“ and runs “meho targets create“ (Initiative #363:
+// auto-registration is v0.2.next).
+type TargetsDiscoverResult struct {
+	Discovered []CandidateHint    `json:"discovered"`
+	Skipped    []SkippedConnector `json:"skipped"`
+}
+
 // Thresholds Per-metric green-band thresholds for a verdict computation.
 //
 // Frozen so the threshold object passed into :func:`verdict` cannot
@@ -758,6 +1532,168 @@ type Thresholds struct {
 	PrecisionAt5 *float32 `json:"precision_at_5,omitempty"`
 }
 
+// TopologyEdge One “graph_edge“ row returned by :func:`list_edges`.
+//
+// Flat edge summary (no traversal context — there is no “depth“ or
+// “via_edge_kind“; those concepts only mean something during a
+// walk). The frozen Pydantic shape mirrors the immutability discipline
+// of :class:`TopologyNode`: “properties“ is deep-frozen so the
+// conflict-marker arrays (“conflicts_with“) and the supersede UUID
+// (“superseded_by“) — both written by G9.2-T3 (#595) and read by
+// this helper's “conflicts_only=True“ filter — cannot be mutated by
+// a caller and leak back into shared result state.
+//
+// “last_seen“ is the refresh service's "I observed this edge at"
+// timestamp (NULL after a soft-delete; soft-deleted edges are
+// excluded from :func:`list_edges` by default). It doubles as the
+// stable total-order key the helper paginates against:
+// “ORDER BY last_seen DESC NULLS LAST, id“ is total because “id“
+// is a UUID primary key, and “DESC“ puts the most-recently-observed
+// edges first — the order an operator scanning a fresh inventory
+// expects.
+type TopologyEdge struct {
+	// From One endpoint of a :class:`TopologyEdge` — the ``from`` or ``to`` node.
+	//
+	// Compact node identity for the flat edge-listing helper. Carries the
+	// three fields a human-readable edge summary needs: the node ``id``
+	// (caller may follow it back to the full :class:`TopologyNode`), the
+	// ``kind`` (the closed enum from migration ``0007``), and the
+	// ``name`` (unique within ``(tenant_id, kind)``). The full node
+	// ``properties`` bag is intentionally **not** included — an edge
+	// listing is a survey of relationships, not a node dump; callers that
+	// need the bag look the node up separately via
+	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	From       TopologyEdgeEndpoint    `json:"from"`
+	Id         openapi_types.UUID      `json:"id"`
+	Kind       string                  `json:"kind"`
+	LastSeen   *time.Time              `json:"last_seen"`
+	Properties *map[string]interface{} `json:"properties,omitempty"`
+	Source     string                  `json:"source"`
+
+	// To One endpoint of a :class:`TopologyEdge` — the ``from`` or ``to`` node.
+	//
+	// Compact node identity for the flat edge-listing helper. Carries the
+	// three fields a human-readable edge summary needs: the node ``id``
+	// (caller may follow it back to the full :class:`TopologyNode`), the
+	// ``kind`` (the closed enum from migration ``0007``), and the
+	// ``name`` (unique within ``(tenant_id, kind)``). The full node
+	// ``properties`` bag is intentionally **not** included — an edge
+	// listing is a survey of relationships, not a node dump; callers that
+	// need the bag look the node up separately via
+	// :func:`meho_backplane.topology.resolvers.resolve_node`.
+	To TopologyEdgeEndpoint `json:"to"`
+}
+
+// TopologyEdgeEndpoint One endpoint of a :class:`TopologyEdge` — the “from“ or “to“ node.
+//
+// Compact node identity for the flat edge-listing helper. Carries the
+// three fields a human-readable edge summary needs: the node “id“
+// (caller may follow it back to the full :class:`TopologyNode`), the
+// “kind“ (the closed enum from migration “0007“), and the
+// “name“ (unique within “(tenant_id, kind)“). The full node
+// “properties“ bag is intentionally **not** included — an edge
+// listing is a survey of relationships, not a node dump; callers that
+// need the bag look the node up separately via
+// :func:`meho_backplane.topology.resolvers.resolve_node`.
+type TopologyEdgeEndpoint struct {
+	Id   openapi_types.UUID `json:"id"`
+	Kind string             `json:"kind"`
+	Name string             `json:"name"`
+}
+
+// TopologyNode One “graph_node“ row reached during a traversal.
+//
+// “depth“ is the distance from the query root: the root itself is
+// depth “0“, its immediate dependents/dependencies are depth “1“,
+// transitive ones depth “2“, and so on. “via_edge_kind“ is the
+// “graph_edge.kind“ of the edge used to reach this node, or
+// “None“ for the root (which is reached by no edge).
+type TopologyNode struct {
+	Depth       int                     `json:"depth"`
+	Id          openapi_types.UUID      `json:"id"`
+	Kind        string                  `json:"kind"`
+	Name        string                  `json:"name"`
+	Properties  *map[string]interface{} `json:"properties,omitempty"`
+	ViaEdgeKind *string                 `json:"via_edge_kind"`
+}
+
+// TopologyPath An ordered shortest path between two nodes.
+//
+// “nodes“ runs from the “from“ node (“depth == 0“) to the
+// “to“ node (“depth == total_hops“) inclusive. “total_hops“ is
+// the number of edges traversed, i.e. “len(nodes) - 1“. v0.2 is
+// unweighted: every edge costs one hop.
+type TopologyPath struct {
+	Nodes     []TopologyNode `json:"nodes"`
+	TotalHops int            `json:"total_hops"`
+}
+
+// TopologyTimelineEntry One row of the topology timeline (G9.3-T5).
+//
+// Task #861 ships the tenant-wide chronological feed of graph
+// changes -- "what's been happening in the graph in the last hour"
+// without rooting at a specific resource. Each row projects one
+// “graph_node_history“ or “graph_edge_history“ mutation into a
+// compact summary the CLI / REST / MCP fronts can render or page
+// through.
+//
+// Field-to-column mapping:
+//
+//   - “valid_from“ -- “*_history.valid_from“; every history row
+//     from one operation carries the same timestamp (the diff-on-write
+//     hook is the single source per :mod:`.history`).
+//   - “history_id“ -- “*_history.history_id“. Required because the
+//     cursor's tie-breaker discriminator is “(valid_from, history_id,
+//     source)“ -- “valid_from“ alone is not unique within a refresh.
+//   - “source“ -- “"node"“ for :class:`GraphNodeHistory`, “"edge"“
+//     for :class:`GraphEdgeHistory`. The discriminator the UNION
+//     preserves.
+//   - “change_kind“ -- one of “"created"“ / “"updated"“ /
+//     “"removed"“ per :class:`GraphHistoryChangeKind`.
+//   - “resource_id“ -- “node_id“ or “edge_id“ of the mutated row.
+//     “None“ only after the referenced live row has been
+//     hard-deleted (“ON DELETE SET NULL“) -- a rare survivability
+//     shape; most timeline rows carry the FK intact.
+//   - “summary“ -- one-line human-readable description derived from
+//     “snapshot.before“ / “snapshot.after“. Format:
+//     “"<change_kind> <kind> <name>"“ for nodes (e.g. “"created vm
+//     vm-prod"“); “"<change_kind> <edge_kind> <from> -> <to>"“ for
+//     edges (e.g. “"removed runs-on vm-prod -> host-a"“). Falls back
+//     to “"<change_kind> <source>"“ when the live row is gone and
+//     the snapshot did not preserve enough context.
+//   - “audit_id“ -- the soft-FK to the “audit_log.id“ of the
+//     operation that caused the mutation. “None“ only for legacy
+//     / mid-rollout rows; the diff-on-write hook always populates it.
+type TopologyTimelineEntry struct {
+	AuditId    *openapi_types.UUID `json:"audit_id"`
+	ChangeKind string              `json:"change_kind"`
+	HistoryId  int                 `json:"history_id"`
+	ResourceId *openapi_types.UUID `json:"resource_id"`
+	Source     string              `json:"source"`
+	Summary    string              `json:"summary"`
+	ValidFrom  time.Time           `json:"valid_from"`
+}
+
+// TopologyTimelineResult Page of timeline rows plus the forward-only continuation cursor.
+//
+// “next_cursor“ is :data:`None` when fewer than “limit“ rows
+// were available (the query reached the end of the matching set).
+// Consumers iterate by re-issuing the same filter with
+// “cursor = next_cursor“ until “next_cursor“ is None.
+//
+// The cursor is opaque (base64-encoded JSON over “(valid_from,
+// history_id, source)“) -- consumers treat it as a token. Stability
+// under concurrent inserts: a new history row landing in the window
+// between page N and page N+1 is naturally placed by the keyset
+// compare (“(valid_from, history_id) < (cursor.ts, cursor.id)“)
+// and either appears on a later page (if it falls below the cursor)
+// or never (if it lands above the cursor). No row is duplicated or
+// skipped by the act of paging.
+type TopologyTimelineResult struct {
+	NextCursor *string                 `json:"next_cursor"`
+	Rows       []TopologyTimelineEntry `json:"rows"`
+}
+
 // UsageReport Top-level shape returned by :func:`compute_usage` + the API route.
 //
 // “buckets“ is sorted by “(date, surface)“ ascending — the text
@@ -773,12 +1709,14 @@ type Thresholds struct {
 // effectively a v0.2.next placeholder, but the shape is locked
 // today so consumers don't break when the cross-tenant verb lands.
 type UsageReport struct {
-	Buckets       []DailyUsageBucket  `json:"buckets"`
-	Since         time.Time           `json:"since"`
-	Surfaces      []string            `json:"surfaces"`
-	TenantId      *openapi_types.UUID `json:"tenant_id"`
-	TotalSearches int                 `json:"total_searches"`
-	Until         time.Time           `json:"until"`
+	Buckets         []DailyUsageBucket  `json:"buckets"`
+	CountedSurfaces *[]string           `json:"counted_surfaces,omitempty"`
+	RestExcluded    *bool               `json:"rest_excluded,omitempty"`
+	Since           time.Time           `json:"since"`
+	Surfaces        []string            `json:"surfaces"`
+	TenantId        *openapi_types.UUID `json:"tenant_id"`
+	TotalSearches   int                 `json:"total_searches"`
+	Until           time.Time           `json:"until"`
 }
 
 // ValidationError defines model for ValidationError.
@@ -814,6 +1752,279 @@ type VaultStatus struct {
 	ReadOk    bool    `json:"read_ok"`
 }
 
+// UnderscoreAnnotateEdgeRequest Inbound body for “POST /api/v1/topology/edges“.
+//
+// “kind“ is typed against :class:`GraphEdgeKind` so an unknown kind
+// fails Pydantic validation (HTTP 422) **before** the service runs —
+// the service still raises :class:`InvalidEdgeKindError` for
+// non-route callers, but at the HTTP boundary the operator gets the
+// standard FastAPI validation error shape (with the candidate list in
+// the error context) rather than a 500-shaped diagnostic.
+//
+// The keyword “from“ is reserved in Python so the attribute name is
+// “from_endpoint“; “alias="from"“ keeps the wire shape the issue
+// body specifies (“{from, kind, to, note?, evidence_url?}“).
+// “populate_by_name“ lets the alias **and** the attribute name both
+// work — handy for hand-written test fixtures that use the Python
+// attribute names.
+type UnderscoreAnnotateEdgeRequest struct {
+	EvidenceUrl *string `json:"evidence_url"`
+
+	// From Inbound JSON shape for one annotation endpoint.
+	//
+	// Mirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:
+	// ``name`` is required, ``kind`` is the optional disambiguator for a
+	// bare name that resolves to multiple :class:`GraphNode` rows in the
+	// tenant. Frozen so the route handler cannot accidentally rebind the
+	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
+	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
+	From UnderscoreEdgeEndpoint `json:"from"`
+
+	// Kind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
+	//
+	// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
+	// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
+	// operator-curated cross-system kinds that auto-discovery cannot infer
+	// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
+	// is closed -- widening it is a coordinated DB + model change (new
+	// migration, new enum member, new decision row) so the v0.2.next
+	// policy-engine grammar parsing ``kind`` stays portable across tenants.
+	//
+	// The four auto-discoverable kinds (refresh service writes these on
+	// every probe-derived edge):
+	//
+	// * :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``
+	//   ``node``: the physical / scheduling host of a workload.
+	// * :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``
+	//   ``volume``: storage attachment.
+	// * :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,
+	//   ``service`` ``routes-through`` ``pod``: network routing path.
+	// * :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``
+	//   ``belongs-to`` ``host`` (logical group membership).
+	//
+	// The six curated-only kinds (operator-asserted via
+	// ``meho topology annotate``; cannot be derived from probes):
+	//
+	// * :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
+	//   (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical
+	//   cross-system example.
+	// * :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
+	//   ``service-X`` -> ``database-Y`` where neither side knows about the
+	//   other in its own probe output).
+	// * :attr:`REPLICATES_TO` -- operator-asserted replication relationship
+	//   between two storage / database nodes.
+	// * :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
+	// * :attr:`ROUTES_VIA` -- operator-asserted network path through an
+	//   intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the
+	//   probes only see point-to-point reachability).
+	// * :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
+	//   connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
+	//   ``vault-policy-prod-read``).
+	//
+	// Mirrors the closed-enum pattern :class:`AuthModel`
+	// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
+	// :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
+	// both moved in lock-step by one Alembic migration so the enum and the
+	// constraint cannot drift.
+	Kind GraphEdgeKind `json:"kind"`
+	Note *string       `json:"note"`
+
+	// To Inbound JSON shape for one annotation endpoint.
+	//
+	// Mirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:
+	// ``name`` is required, ``kind`` is the optional disambiguator for a
+	// bare name that resolves to multiple :class:`GraphNode` rows in the
+	// tenant. Frozen so the route handler cannot accidentally rebind the
+	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
+	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
+	To UnderscoreEdgeEndpoint `json:"to"`
+}
+
+// UnderscoreBulkImportEdge One edge in the “POST /api/v1/topology/edges/bulk“ body.
+//
+// Same wire shape as :class:`_AnnotateEdgeRequest` (“{from, kind, to,
+// note?, evidence_url?}“) — “from“ is bound via “alias“ because
+// it is a Python keyword. “kind“ is typed against
+// :class:`GraphEdgeKind` so an unknown kind fails at the boundary
+// (HTTP 422) before any service call runs, and the per-row error
+// surfaces inside the standard FastAPI validation envelope with the
+// row index in “loc“. “extra="forbid"“ rejects typo'd keys so a
+// misspelled “evidnce_url“ is caught at the boundary rather than
+// silently dropped.
+type UnderscoreBulkImportEdge struct {
+	EvidenceUrl *string `json:"evidence_url"`
+
+	// From Inbound JSON shape for one annotation endpoint.
+	//
+	// Mirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:
+	// ``name`` is required, ``kind`` is the optional disambiguator for a
+	// bare name that resolves to multiple :class:`GraphNode` rows in the
+	// tenant. Frozen so the route handler cannot accidentally rebind the
+	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
+	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
+	From UnderscoreEdgeEndpoint `json:"from"`
+
+	// Kind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
+	//
+	// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
+	// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
+	// operator-curated cross-system kinds that auto-discovery cannot infer
+	// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
+	// is closed -- widening it is a coordinated DB + model change (new
+	// migration, new enum member, new decision row) so the v0.2.next
+	// policy-engine grammar parsing ``kind`` stays portable across tenants.
+	//
+	// The four auto-discoverable kinds (refresh service writes these on
+	// every probe-derived edge):
+	//
+	// * :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``
+	//   ``node``: the physical / scheduling host of a workload.
+	// * :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``
+	//   ``volume``: storage attachment.
+	// * :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,
+	//   ``service`` ``routes-through`` ``pod``: network routing path.
+	// * :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``
+	//   ``belongs-to`` ``host`` (logical group membership).
+	//
+	// The six curated-only kinds (operator-asserted via
+	// ``meho topology annotate``; cannot be derived from probes):
+	//
+	// * :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
+	//   (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical
+	//   cross-system example.
+	// * :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
+	//   ``service-X`` -> ``database-Y`` where neither side knows about the
+	//   other in its own probe output).
+	// * :attr:`REPLICATES_TO` -- operator-asserted replication relationship
+	//   between two storage / database nodes.
+	// * :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
+	// * :attr:`ROUTES_VIA` -- operator-asserted network path through an
+	//   intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the
+	//   probes only see point-to-point reachability).
+	// * :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
+	//   connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
+	//   ``vault-policy-prod-read``).
+	//
+	// Mirrors the closed-enum pattern :class:`AuthModel`
+	// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
+	// :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
+	// both moved in lock-step by one Alembic migration so the enum and the
+	// constraint cannot drift.
+	Kind GraphEdgeKind `json:"kind"`
+	Note *string       `json:"note"`
+
+	// To Inbound JSON shape for one annotation endpoint.
+	//
+	// Mirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:
+	// ``name`` is required, ``kind`` is the optional disambiguator for a
+	// bare name that resolves to multiple :class:`GraphNode` rows in the
+	// tenant. Frozen so the route handler cannot accidentally rebind the
+	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
+	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
+	To UnderscoreEdgeEndpoint `json:"to"`
+}
+
+// UnderscoreBulkImportRequest Inbound body for “POST /api/v1/topology/edges/bulk“.
+//
+// “edges“ is a non-empty list bounded at the HTTP boundary by
+// :data:`_BULK_IMPORT_MAX_EDGES`. Zero rows are rejected at 422
+// rather than silently no-op'ing — an empty body is almost always a
+// mistake in the operator's YAML / JSON file, and 422 surfaces it
+// immediately. “dry_run“ defaults to “False“ per the issue
+// body's "the CLI calls --dry-run explicitly" convention.
+type UnderscoreBulkImportRequest struct {
+	DryRun *bool                      `json:"dry_run,omitempty"`
+	Edges  []UnderscoreBulkImportEdge `json:"edges"`
+}
+
+// UnderscoreBulkImportResponse Response body for “POST /api/v1/topology/edges/bulk“.
+//
+// “dry_run“ echoes the call-site flag so a CLI rendering the JSON
+// response can branch on it; “created“ / “updated“ / “conflicts“
+// are the aggregate counts the service computed; “rows“ carries the
+// per-row outcome in source order.
+type UnderscoreBulkImportResponse struct {
+	Conflicts int                               `json:"conflicts"`
+	Created   int                               `json:"created"`
+	DryRun    bool                              `json:"dry_run"`
+	Rows      []UnderscoreBulkImportRowResponse `json:"rows"`
+	Updated   int                               `json:"updated"`
+}
+
+// UnderscoreBulkImportRowResponse One row's outcome in the “POST /edges/bulk“ response.
+//
+// Mirrors :class:`~meho_backplane.topology.bulk_import.BulkEdgeResult`
+// on the wire. “edge_id“ is null in dry-run mode (no row exists)
+// and on the apply-pass “create“ rows where the service hasn't
+// been called yet at validation time — the apply path always
+// populates it.
+type UnderscoreBulkImportRowResponse struct {
+	Action     string   `json:"action"`
+	Conflicts  []string `json:"conflicts"`
+	EdgeId     *string  `json:"edge_id"`
+	FromKind   string   `json:"from_kind"`
+	FromName   string   `json:"from_name"`
+	Index      int      `json:"index"`
+	Kind       string   `json:"kind"`
+	Superseded []string `json:"superseded"`
+	ToKind     string   `json:"to_kind"`
+	ToName     string   `json:"to_name"`
+}
+
+// UnderscoreEdgeEndpoint Inbound JSON shape for one annotation endpoint.
+//
+// Mirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:
+// “name“ is required, “kind“ is the optional disambiguator for a
+// bare name that resolves to multiple :class:`GraphNode` rows in the
+// tenant. Frozen so the route handler cannot accidentally rebind the
+// field; “extra="forbid"“ rejects typo'd keys at the boundary
+// (“{from: {nme: ...}}“ is a 422, not a silently-ignored body).
+type UnderscoreEdgeEndpoint struct {
+	Kind *string `json:"kind"`
+	Name string  `json:"name"`
+}
+
+// MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
+type MyRecentApiV1AuditMyRecentGetParams struct {
+	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// QueryApiV1AuditQueryPostParams defines parameters for QueryApiV1AuditQueryPost.
+type QueryApiV1AuditQueryPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowApiV1AuditShowAuditIdGetParams defines parameters for ShowApiV1AuditShowAuditIdGet.
+type ShowApiV1AuditShowAuditIdGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// WhoTouchedApiV1AuditWhoTouchedTargetGetParams defines parameters for WhoTouchedApiV1AuditWhoTouchedTargetGet.
+type WhoTouchedApiV1AuditWhoTouchedTargetGetParams struct {
+	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListOverridesApiV1BroadcastOverridesGetParams defines parameters for ListOverridesApiV1BroadcastOverridesGet.
+type ListOverridesApiV1BroadcastOverridesGetParams struct {
+	// OpIdPattern Exact-match filter on op_id_pattern (not a glob match).
+	OpIdPattern   *string `form:"op_id_pattern,omitempty" json:"op_id_pattern,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CreateOverrideApiV1BroadcastOverridesPostParams defines parameters for CreateOverrideApiV1BroadcastOverridesPost.
+type CreateOverrideApiV1BroadcastOverridesPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams defines parameters for DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete.
+type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
 type ListEndpointApiV1ConnectorsGetParams struct {
 	Status        *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -822,6 +2033,11 @@ type ListEndpointApiV1ConnectorsGetParams struct {
 
 // ListEndpointApiV1ConnectorsGetParamsStatus defines parameters for ListEndpointApiV1ConnectorsGet.
 type ListEndpointApiV1ConnectorsGetParamsStatus string
+
+// CatalogEndpointApiV1ConnectorsCatalogGetParams defines parameters for CatalogEndpointApiV1ConnectorsCatalogGet.
+type CatalogEndpointApiV1ConnectorsCatalogGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
 
 // IngestEndpointApiV1ConnectorsIngestPostParams defines parameters for IngestEndpointApiV1ConnectorsIngestPost.
 type IngestEndpointApiV1ConnectorsIngestPostParams struct {
@@ -874,6 +2090,66 @@ type AuthenticatedHealthApiV1HealthGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListKbApiV1KbGetParams defines parameters for ListKbApiV1KbGet.
+type ListKbApiV1KbGetParams struct {
+	Filter        *string `form:"filter,omitempty" json:"filter,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CreateKbApiV1KbPostParams defines parameters for CreateKbApiV1KbPost.
+type CreateKbApiV1KbPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// IngestKbApiV1KbIngestPostParams defines parameters for IngestKbApiV1KbIngestPost.
+type IngestKbApiV1KbIngestPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteKbApiV1KbSlugDeleteParams defines parameters for DeleteKbApiV1KbSlugDelete.
+type DeleteKbApiV1KbSlugDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowKbApiV1KbSlugGetParams defines parameters for ShowKbApiV1KbSlugGet.
+type ShowKbApiV1KbSlugGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListMemoriesApiV1MemoryGetParams defines parameters for ListMemoriesApiV1MemoryGet.
+type ListMemoriesApiV1MemoryGetParams struct {
+	Scope          *MemoryScope `form:"scope,omitempty" json:"scope,omitempty"`
+	SlugPattern    *string      `form:"slug_pattern,omitempty" json:"slug_pattern,omitempty"`
+	Tag            *string      `form:"tag,omitempty" json:"tag,omitempty"`
+	IncludeExpired *bool        `form:"include_expired,omitempty" json:"include_expired,omitempty"`
+	Limit          *int         `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization  *string      `json:"authorization,omitempty"`
+}
+
+// RememberApiV1MemoryPostParams defines parameters for RememberApiV1MemoryPost.
+type RememberApiV1MemoryPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ForgetApiV1MemoryScopeSlugDeleteParams defines parameters for ForgetApiV1MemoryScopeSlugDelete.
+type ForgetApiV1MemoryScopeSlugDeleteParams struct {
+	TargetName    *string `form:"target_name,omitempty" json:"target_name,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RecallApiV1MemoryScopeSlugGetParams defines parameters for RecallApiV1MemoryScopeSlugGet.
+type RecallApiV1MemoryScopeSlugGetParams struct {
+	TargetName    *string `form:"target_name,omitempty" json:"target_name,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PromoteApiV1MemoryScopeSlugPromotePostParams defines parameters for PromoteApiV1MemoryScopeSlugPromotePost.
+type PromoteApiV1MemoryScopeSlugPromotePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // PostCallApiV1OperationsCallPostParams defines parameters for PostCallApiV1OperationsCallPost.
 type PostCallApiV1OperationsCallPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -881,12 +2157,14 @@ type PostCallApiV1OperationsCallPostParams struct {
 
 // GetGroupsApiV1OperationsGroupsGetParams defines parameters for GetGroupsApiV1OperationsGroupsGet.
 type GetGroupsApiV1OperationsGroupsGetParams struct {
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId   string  `form:"connector_id" json:"connector_id"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
 // GetSearchApiV1OperationsSearchGetParams defines parameters for GetSearchApiV1OperationsSearchGet.
 type GetSearchApiV1OperationsSearchGetParams struct {
+	// ConnectorId Connector implementation id in `<impl_id>-<version>` form — e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.
 	ConnectorId   string  `form:"connector_id" json:"connector_id"`
 	Query         string  `form:"query" json:"query"`
 	Group         *string `form:"group,omitempty" json:"group,omitempty"`
@@ -907,6 +2185,12 @@ type RetrieveEndpointApiV1RetrievePostParams struct {
 // EvalEndpointApiV1RetrieveEvalPostParams defines parameters for EvalEndpointApiV1RetrieveEvalPost.
 type EvalEndpointApiV1RetrieveEvalPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams defines parameters for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost.
+type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
 }
 
 // UsageEndpointApiV1RetrieveUsageGetParams defines parameters for UsageEndpointApiV1RetrieveUsageGet.
@@ -933,6 +2217,13 @@ type CreateTargetApiV1TargetsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DiscoverTargetsApiV1TargetsDiscoverGetParams defines parameters for DiscoverTargetsApiV1TargetsDiscoverGet.
+type DiscoverTargetsApiV1TargetsDiscoverGetParams struct {
+	Product       string  `form:"product" json:"product"`
+	SeedTarget    *string `form:"seed_target,omitempty" json:"seed_target,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DescribeTargetApiV1TargetsNameGetParams defines parameters for DescribeTargetApiV1TargetsNameGet.
 type DescribeTargetApiV1TargetsNameGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -948,10 +2239,84 @@ type ProbeTargetApiV1TargetsNameProbePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DependenciesApiV1TopologyDependenciesNameGetParams defines parameters for DependenciesApiV1TopologyDependenciesNameGet.
+type DependenciesApiV1TopologyDependenciesNameGetParams struct {
+	Depth         *int    `form:"depth,omitempty" json:"depth,omitempty"`
+	Kind          *string `form:"kind,omitempty" json:"kind,omitempty"`
+	KindFilter    *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DependentsApiV1TopologyDependentsNameGetParams defines parameters for DependentsApiV1TopologyDependentsNameGet.
+type DependentsApiV1TopologyDependentsNameGetParams struct {
+	Depth         *int    `form:"depth,omitempty" json:"depth,omitempty"`
+	Kind          *string `form:"kind,omitempty" json:"kind,omitempty"`
+	KindFilter    *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListEdgesRouteApiV1TopologyEdgesGetParams defines parameters for ListEdgesRouteApiV1TopologyEdgesGet.
+type ListEdgesRouteApiV1TopologyEdgesGetParams struct {
+	Kind          *GraphEdgeKind `form:"kind,omitempty" json:"kind,omitempty"`
+	Source        *string        `form:"source,omitempty" json:"source,omitempty"`
+	From          *string        `form:"from,omitempty" json:"from,omitempty"`
+	To            *string        `form:"to,omitempty" json:"to,omitempty"`
+	Conflicts     *bool          `form:"conflicts,omitempty" json:"conflicts,omitempty"`
+	Limit         *int           `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int           `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string        `json:"authorization,omitempty"`
+}
+
+// AnnotateEdgeRouteApiV1TopologyEdgesPostParams defines parameters for AnnotateEdgeRouteApiV1TopologyEdgesPost.
+type AnnotateEdgeRouteApiV1TopologyEdgesPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams defines parameters for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost.
+type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams defines parameters for UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete.
+type UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PathApiV1TopologyPathGetParams defines parameters for PathApiV1TopologyPathGet.
+type PathApiV1TopologyPathGetParams struct {
+	From          string  `form:"from" json:"from"`
+	To            string  `form:"to" json:"to"`
+	FromKind      *string `form:"from_kind,omitempty" json:"from_kind,omitempty"`
+	ToKind        *string `form:"to_kind,omitempty" json:"to_kind,omitempty"`
+	MaxHops       *int    `form:"max_hops,omitempty" json:"max_hops,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RefreshApiV1TopologyRefreshTargetNamePostParams defines parameters for RefreshApiV1TopologyRefreshTargetNamePost.
+type RefreshApiV1TopologyRefreshTargetNamePostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// TimelineRouteApiV1TopologyTimelineGetParams defines parameters for TimelineRouteApiV1TopologyTimelineGet.
+type TimelineRouteApiV1TopologyTimelineGetParams struct {
+	Target        *string    `form:"target,omitempty" json:"target,omitempty"`
+	Since         *time.Time `form:"since,omitempty" json:"since,omitempty"`
+	Until         *time.Time `form:"until,omitempty" json:"until,omitempty"`
+	Limit         *int       `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Authorization *string    `json:"authorization,omitempty"`
+}
+
 // McpDispatchMcpPostParams defines parameters for McpDispatchMcpPost.
 type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
+
+// QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
+type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
+
+// CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody defines body for CreateOverrideApiV1BroadcastOverridesPost for application/json ContentType.
+type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrideCreate
 
 // IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody defines body for IngestEndpointApiV1ConnectorsIngestPost for application/json ContentType.
 type IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody = IngestRequest
@@ -962,6 +2327,18 @@ type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBo
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody defines body for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch for application/json ContentType.
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody = EditOpBody
 
+// CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
+type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
+
+// IngestKbApiV1KbIngestPostJSONRequestBody defines body for IngestKbApiV1KbIngestPost for application/json ContentType.
+type IngestKbApiV1KbIngestPostJSONRequestBody = IngestKbRequest
+
+// RememberApiV1MemoryPostJSONRequestBody defines body for RememberApiV1MemoryPost for application/json ContentType.
+type RememberApiV1MemoryPostJSONRequestBody = RememberBody
+
+// PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody defines body for PromoteApiV1MemoryScopeSlugPromotePost for application/json ContentType.
+type PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody = PromoteBody
+
 // PostCallApiV1OperationsCallPostJSONRequestBody defines body for PostCallApiV1OperationsCallPost for application/json ContentType.
 type PostCallApiV1OperationsCallPostJSONRequestBody = CallOperationBody
 
@@ -971,11 +2348,20 @@ type RetrieveEndpointApiV1RetrievePostJSONRequestBody = RetrieveRequest
 // EvalEndpointApiV1RetrieveEvalPostJSONRequestBody defines body for EvalEndpointApiV1RetrieveEvalPost for application/json ContentType.
 type EvalEndpointApiV1RetrieveEvalPostJSONRequestBody = EvalRequest
 
+// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody defines body for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost for application/json ContentType.
+type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody = RetireChecklistRequest
+
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
 
 // UpdateTargetApiV1TargetsNamePatchJSONRequestBody defines body for UpdateTargetApiV1TargetsNamePatch for application/json ContentType.
 type UpdateTargetApiV1TargetsNamePatchJSONRequestBody = TargetUpdate
+
+// AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody defines body for AnnotateEdgeRouteApiV1TopologyEdgesPost for application/json ContentType.
+type AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody = UnderscoreAnnotateEdgeRequest
+
+// BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody defines body for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost for application/json ContentType.
+type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody = UnderscoreBulkImportRequest
 
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
@@ -1118,11 +2504,39 @@ type ClientInterface interface {
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGet request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// MyRecentApiV1AuditMyRecentGet request
+	MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// QueryApiV1AuditQueryPostWithBody request with any body
+	QueryApiV1AuditQueryPostWithBody(ctx context.Context, params *QueryApiV1AuditQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowApiV1AuditShowAuditIdGet request
+	ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// WhoTouchedApiV1AuditWhoTouchedTargetGet request
+	WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// AuthConfigApiV1AuthConfigGet request
 	AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListOverridesApiV1BroadcastOverridesGet request
+	ListOverridesApiV1BroadcastOverridesGet(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateOverrideApiV1BroadcastOverridesPostWithBody request with any body
+	CreateOverrideApiV1BroadcastOverridesPostWithBody(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateOverrideApiV1BroadcastOverridesPost(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, body CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete request
+	DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListEndpointApiV1ConnectorsGet request
 	ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CatalogEndpointApiV1ConnectorsCatalogGet request
+	CatalogEndpointApiV1ConnectorsCatalogGet(ctx context.Context, params *CatalogEndpointApiV1ConnectorsCatalogGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// IngestEndpointApiV1ConnectorsIngestPostWithBody request with any body
 	IngestEndpointApiV1ConnectorsIngestPostWithBody(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1154,6 +2568,44 @@ type ClientInterface interface {
 	// AuthenticatedHealthApiV1HealthGet request
 	AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListKbApiV1KbGet request
+	ListKbApiV1KbGet(ctx context.Context, params *ListKbApiV1KbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateKbApiV1KbPostWithBody request with any body
+	CreateKbApiV1KbPostWithBody(ctx context.Context, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// IngestKbApiV1KbIngestPostWithBody request with any body
+	IngestKbApiV1KbIngestPostWithBody(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	IngestKbApiV1KbIngestPost(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, body IngestKbApiV1KbIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteKbApiV1KbSlugDelete request
+	DeleteKbApiV1KbSlugDelete(ctx context.Context, slug string, params *DeleteKbApiV1KbSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowKbApiV1KbSlugGet request
+	ShowKbApiV1KbSlugGet(ctx context.Context, slug string, params *ShowKbApiV1KbSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListMemoriesApiV1MemoryGet request
+	ListMemoriesApiV1MemoryGet(ctx context.Context, params *ListMemoriesApiV1MemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RememberApiV1MemoryPostWithBody request with any body
+	RememberApiV1MemoryPostWithBody(ctx context.Context, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RememberApiV1MemoryPost(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ForgetApiV1MemoryScopeSlugDelete request
+	ForgetApiV1MemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RecallApiV1MemoryScopeSlugGet request
+	RecallApiV1MemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, params *RecallApiV1MemoryScopeSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PromoteApiV1MemoryScopeSlugPromotePostWithBody request with any body
+	PromoteApiV1MemoryScopeSlugPromotePostWithBody(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PromoteApiV1MemoryScopeSlugPromotePost(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, body PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostCallApiV1OperationsCallPostWithBody request with any body
 	PostCallApiV1OperationsCallPostWithBody(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -1178,6 +2630,11 @@ type ClientInterface interface {
 
 	EvalEndpointApiV1RetrieveEvalPost(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody request with any body
+	RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UsageEndpointApiV1RetrieveUsageGet request
 	UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -1189,6 +2646,9 @@ type ClientInterface interface {
 
 	CreateTargetApiV1TargetsPost(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DiscoverTargetsApiV1TargetsDiscoverGet request
+	DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DescribeTargetApiV1TargetsNameGet request
 	DescribeTargetApiV1TargetsNameGet(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -1199,6 +2659,37 @@ type ClientInterface interface {
 
 	// ProbeTargetApiV1TargetsNameProbePost request
 	ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DependenciesApiV1TopologyDependenciesNameGet request
+	DependenciesApiV1TopologyDependenciesNameGet(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DependentsApiV1TopologyDependentsNameGet request
+	DependentsApiV1TopologyDependentsNameGet(ctx context.Context, name string, params *DependentsApiV1TopologyDependentsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListEdgesRouteApiV1TopologyEdgesGet request
+	ListEdgesRouteApiV1TopologyEdgesGet(ctx context.Context, params *ListEdgesRouteApiV1TopologyEdgesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AnnotateEdgeRouteApiV1TopologyEdgesPostWithBody request with any body
+	AnnotateEdgeRouteApiV1TopologyEdgesPostWithBody(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AnnotateEdgeRouteApiV1TopologyEdgesPost(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, body AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBody request with any body
+	BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBody(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	BulkImportEdgesRouteApiV1TopologyEdgesBulkPost(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, body BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete request
+	UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PathApiV1TopologyPathGet request
+	PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RefreshApiV1TopologyRefreshTargetNamePost request
+	RefreshApiV1TopologyRefreshTargetNamePost(ctx context.Context, targetName string, params *RefreshApiV1TopologyRefreshTargetNamePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// TimelineRouteApiV1TopologyTimelineGet request
+	TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// HealthzHealthzGet request
 	HealthzHealthzGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -1240,6 +2731,66 @@ func (c *Client) ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx
 	return c.Client.Do(req)
 }
 
+func (c *Client) MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewMyRecentApiV1AuditMyRecentGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) QueryApiV1AuditQueryPostWithBody(ctx context.Context, params *QueryApiV1AuditQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewQueryApiV1AuditQueryPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewQueryApiV1AuditQueryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowApiV1AuditShowAuditIdGetRequest(c.Server, auditId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewWhoTouchedApiV1AuditWhoTouchedTargetGetRequest(c.Server, target, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAuthConfigApiV1AuthConfigGetRequest(c.Server)
 	if err != nil {
@@ -1252,8 +2803,68 @@ func (c *Client) AuthConfigApiV1AuthConfigGet(ctx context.Context, reqEditors ..
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListOverridesApiV1BroadcastOverridesGet(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListOverridesApiV1BroadcastOverridesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateOverrideApiV1BroadcastOverridesPostWithBody(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateOverrideApiV1BroadcastOverridesPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateOverrideApiV1BroadcastOverridesPost(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, body CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateOverrideApiV1BroadcastOverridesPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(c.Server, overrideId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListEndpointApiV1ConnectorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CatalogEndpointApiV1ConnectorsCatalogGet(ctx context.Context, params *CatalogEndpointApiV1ConnectorsCatalogGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCatalogEndpointApiV1ConnectorsCatalogGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -1396,6 +3007,174 @@ func (c *Client) AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListKbApiV1KbGet(ctx context.Context, params *ListKbApiV1KbGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListKbApiV1KbGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateKbApiV1KbPostWithBody(ctx context.Context, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateKbApiV1KbPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateKbApiV1KbPost(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateKbApiV1KbPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IngestKbApiV1KbIngestPostWithBody(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestKbApiV1KbIngestPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) IngestKbApiV1KbIngestPost(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, body IngestKbApiV1KbIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewIngestKbApiV1KbIngestPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteKbApiV1KbSlugDelete(ctx context.Context, slug string, params *DeleteKbApiV1KbSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteKbApiV1KbSlugDeleteRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowKbApiV1KbSlugGet(ctx context.Context, slug string, params *ShowKbApiV1KbSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowKbApiV1KbSlugGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListMemoriesApiV1MemoryGet(ctx context.Context, params *ListMemoriesApiV1MemoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListMemoriesApiV1MemoryGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RememberApiV1MemoryPostWithBody(ctx context.Context, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRememberApiV1MemoryPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RememberApiV1MemoryPost(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRememberApiV1MemoryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ForgetApiV1MemoryScopeSlugDelete(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewForgetApiV1MemoryScopeSlugDeleteRequest(c.Server, scope, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RecallApiV1MemoryScopeSlugGet(ctx context.Context, scope MemoryScope, slug string, params *RecallApiV1MemoryScopeSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRecallApiV1MemoryScopeSlugGetRequest(c.Server, scope, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PromoteApiV1MemoryScopeSlugPromotePostWithBody(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPromoteApiV1MemoryScopeSlugPromotePostRequestWithBody(c.Server, scope, slug, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PromoteApiV1MemoryScopeSlugPromotePost(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, body PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPromoteApiV1MemoryScopeSlugPromotePostRequest(c.Server, scope, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) PostCallApiV1OperationsCallPostWithBody(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostCallApiV1OperationsCallPostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
@@ -1504,6 +3283,30 @@ func (c *Client) EvalEndpointApiV1RetrieveEvalPost(ctx context.Context, params *
 	return c.Client.Do(req)
 }
 
+func (c *Client) RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UsageEndpointApiV1RetrieveUsageGet(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUsageEndpointApiV1RetrieveUsageGetRequest(c.Server, params)
 	if err != nil {
@@ -1552,6 +3355,18 @@ func (c *Client) CreateTargetApiV1TargetsPost(ctx context.Context, params *Creat
 	return c.Client.Do(req)
 }
 
+func (c *Client) DiscoverTargetsApiV1TargetsDiscoverGet(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) DescribeTargetApiV1TargetsNameGet(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDescribeTargetApiV1TargetsNameGetRequest(c.Server, name, params)
 	if err != nil {
@@ -1590,6 +3405,138 @@ func (c *Client) UpdateTargetApiV1TargetsNamePatch(ctx context.Context, name str
 
 func (c *Client) ProbeTargetApiV1TargetsNameProbePost(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewProbeTargetApiV1TargetsNameProbePostRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DependenciesApiV1TopologyDependenciesNameGet(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDependenciesApiV1TopologyDependenciesNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DependentsApiV1TopologyDependentsNameGet(ctx context.Context, name string, params *DependentsApiV1TopologyDependentsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDependentsApiV1TopologyDependentsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListEdgesRouteApiV1TopologyEdgesGet(ctx context.Context, params *ListEdgesRouteApiV1TopologyEdgesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListEdgesRouteApiV1TopologyEdgesGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnnotateEdgeRouteApiV1TopologyEdgesPostWithBody(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateEdgeRouteApiV1TopologyEdgesPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AnnotateEdgeRouteApiV1TopologyEdgesPost(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, body AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAnnotateEdgeRouteApiV1TopologyEdgesPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBody(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBulkImportEdgesRouteApiV1TopologyEdgesBulkPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) BulkImportEdgesRouteApiV1TopologyEdgesBulkPost(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, body BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewBulkImportEdgesRouteApiV1TopologyEdgesBulkPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteRequest(c.Server, edgeId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPathApiV1TopologyPathGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RefreshApiV1TopologyRefreshTargetNamePost(ctx context.Context, targetName string, params *RefreshApiV1TopologyRefreshTargetNamePostParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRefreshApiV1TopologyRefreshTargetNamePostRequest(c.Server, targetName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) TimelineRouteApiV1TopologyTimelineGet(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewTimelineRouteApiV1TopologyTimelineGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -1714,6 +3661,277 @@ func NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(serve
 	return req, nil
 }
 
+// NewMyRecentApiV1AuditMyRecentGetRequest generates requests for MyRecentApiV1AuditMyRecentGet
+func NewMyRecentApiV1AuditMyRecentGetRequest(server string, params *MyRecentApiV1AuditMyRecentGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/my-recent")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewQueryApiV1AuditQueryPostRequest calls the generic QueryApiV1AuditQueryPost builder with application/json body
+func NewQueryApiV1AuditQueryPostRequest(server string, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewQueryApiV1AuditQueryPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewQueryApiV1AuditQueryPostRequestWithBody generates requests for QueryApiV1AuditQueryPost with any type of body
+func NewQueryApiV1AuditQueryPostRequestWithBody(server string, params *QueryApiV1AuditQueryPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/query")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowApiV1AuditShowAuditIdGetRequest generates requests for ShowApiV1AuditShowAuditIdGet
+func NewShowApiV1AuditShowAuditIdGetRequest(server string, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "audit_id", runtime.ParamLocationPath, auditId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/show/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewWhoTouchedApiV1AuditWhoTouchedTargetGetRequest generates requests for WhoTouchedApiV1AuditWhoTouchedTargetGet
+func NewWhoTouchedApiV1AuditWhoTouchedTargetGetRequest(server string, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "target", runtime.ParamLocationPath, target)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/who-touched/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewAuthConfigApiV1AuthConfigGetRequest generates requests for AuthConfigApiV1AuthConfigGet
 func NewAuthConfigApiV1AuthConfigGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -1736,6 +3954,174 @@ func NewAuthConfigApiV1AuthConfigGetRequest(server string) (*http.Request, error
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewListOverridesApiV1BroadcastOverridesGetRequest generates requests for ListOverridesApiV1BroadcastOverridesGet
+func NewListOverridesApiV1BroadcastOverridesGetRequest(server string, params *ListOverridesApiV1BroadcastOverridesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/broadcast/overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.OpIdPattern != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id_pattern", runtime.ParamLocationQuery, *params.OpIdPattern); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateOverrideApiV1BroadcastOverridesPostRequest calls the generic CreateOverrideApiV1BroadcastOverridesPost builder with application/json body
+func NewCreateOverrideApiV1BroadcastOverridesPostRequest(server string, params *CreateOverrideApiV1BroadcastOverridesPostParams, body CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateOverrideApiV1BroadcastOverridesPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateOverrideApiV1BroadcastOverridesPostRequestWithBody generates requests for CreateOverrideApiV1BroadcastOverridesPost with any type of body
+func NewCreateOverrideApiV1BroadcastOverridesPostRequestWithBody(server string, params *CreateOverrideApiV1BroadcastOverridesPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/broadcast/overrides")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest generates requests for DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete
+func NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(server string, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "override_id", runtime.ParamLocationPath, overrideId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/broadcast/overrides/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
 	}
 
 	return req, nil
@@ -1780,6 +4166,48 @@ func NewListEndpointApiV1ConnectorsGetRequest(server string, params *ListEndpoin
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCatalogEndpointApiV1ConnectorsCatalogGetRequest generates requests for CatalogEndpointApiV1ConnectorsCatalogGet
+func NewCatalogEndpointApiV1ConnectorsCatalogGetRequest(server string, params *CatalogEndpointApiV1ConnectorsCatalogGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/connectors/catalog")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -2299,6 +4727,718 @@ func NewAuthenticatedHealthApiV1HealthGetRequest(server string, params *Authenti
 	return req, nil
 }
 
+// NewListKbApiV1KbGetRequest generates requests for ListKbApiV1KbGet
+func NewListKbApiV1KbGetRequest(server string, params *ListKbApiV1KbGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Filter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "filter", runtime.ParamLocationQuery, *params.Filter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateKbApiV1KbPostRequest calls the generic CreateKbApiV1KbPost builder with application/json body
+func NewCreateKbApiV1KbPostRequest(server string, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateKbApiV1KbPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateKbApiV1KbPostRequestWithBody generates requests for CreateKbApiV1KbPost with any type of body
+func NewCreateKbApiV1KbPostRequestWithBody(server string, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewIngestKbApiV1KbIngestPostRequest calls the generic IngestKbApiV1KbIngestPost builder with application/json body
+func NewIngestKbApiV1KbIngestPostRequest(server string, params *IngestKbApiV1KbIngestPostParams, body IngestKbApiV1KbIngestPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewIngestKbApiV1KbIngestPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewIngestKbApiV1KbIngestPostRequestWithBody generates requests for IngestKbApiV1KbIngestPost with any type of body
+func NewIngestKbApiV1KbIngestPostRequestWithBody(server string, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb/ingest")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteKbApiV1KbSlugDeleteRequest generates requests for DeleteKbApiV1KbSlugDelete
+func NewDeleteKbApiV1KbSlugDeleteRequest(server string, slug string, params *DeleteKbApiV1KbSlugDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowKbApiV1KbSlugGetRequest generates requests for ShowKbApiV1KbSlugGet
+func NewShowKbApiV1KbSlugGetRequest(server string, slug string, params *ShowKbApiV1KbSlugGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/kb/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListMemoriesApiV1MemoryGetRequest generates requests for ListMemoriesApiV1MemoryGet
+func NewListMemoriesApiV1MemoryGetRequest(server string, params *ListMemoriesApiV1MemoryGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Scope != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "scope", runtime.ParamLocationQuery, *params.Scope); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.SlugPattern != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "slug_pattern", runtime.ParamLocationQuery, *params.SlugPattern); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Tag != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tag", runtime.ParamLocationQuery, *params.Tag); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeExpired != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_expired", runtime.ParamLocationQuery, *params.IncludeExpired); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRememberApiV1MemoryPostRequest calls the generic RememberApiV1MemoryPost builder with application/json body
+func NewRememberApiV1MemoryPostRequest(server string, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRememberApiV1MemoryPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRememberApiV1MemoryPostRequestWithBody generates requests for RememberApiV1MemoryPost with any type of body
+func NewRememberApiV1MemoryPostRequestWithBody(server string, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewForgetApiV1MemoryScopeSlugDeleteRequest generates requests for ForgetApiV1MemoryScopeSlugDelete
+func NewForgetApiV1MemoryScopeSlugDeleteRequest(server string, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TargetName != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target_name", runtime.ParamLocationQuery, *params.TargetName); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRecallApiV1MemoryScopeSlugGetRequest generates requests for RecallApiV1MemoryScopeSlugGet
+func NewRecallApiV1MemoryScopeSlugGetRequest(server string, scope MemoryScope, slug string, params *RecallApiV1MemoryScopeSlugGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TargetName != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target_name", runtime.ParamLocationQuery, *params.TargetName); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPromoteApiV1MemoryScopeSlugPromotePostRequest calls the generic PromoteApiV1MemoryScopeSlugPromotePost builder with application/json body
+func NewPromoteApiV1MemoryScopeSlugPromotePostRequest(server string, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, body PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPromoteApiV1MemoryScopeSlugPromotePostRequestWithBody(server, scope, slug, params, "application/json", bodyReader)
+}
+
+// NewPromoteApiV1MemoryScopeSlugPromotePostRequestWithBody generates requests for PromoteApiV1MemoryScopeSlugPromotePost with any type of body
+func NewPromoteApiV1MemoryScopeSlugPromotePostRequestWithBody(server string, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "scope", runtime.ParamLocationPath, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/memory/%s/%s/promote", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPostCallApiV1OperationsCallPostRequest calls the generic PostCallApiV1OperationsCallPost builder with application/json body
 func NewPostCallApiV1OperationsCallPostRequest(server string, params *PostCallApiV1OperationsCallPostParams, body PostCallApiV1OperationsCallPostJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -2677,6 +5817,83 @@ func NewEvalEndpointApiV1RetrieveEvalPostRequestWithBody(server string, params *
 	return req, nil
 }
 
+// NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequest calls the generic RetireChecklistEndpointApiV1RetrieveRetireChecklistPost builder with application/json body
+func NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequest(server string, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody generates requests for RetireChecklistEndpointApiV1RetrieveRetireChecklistPost with any type of body
+func NewRetireChecklistEndpointApiV1RetrieveRetireChecklistPostRequestWithBody(server string, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/retrieve/retire-checklist")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewUsageEndpointApiV1RetrieveUsageGetRequest generates requests for UsageEndpointApiV1RetrieveUsageGet
 func NewUsageEndpointApiV1RetrieveUsageGetRequest(server string, params *UsageEndpointApiV1RetrieveUsageGetParams) (*http.Request, error) {
 	var err error
@@ -2924,6 +6141,82 @@ func NewCreateTargetApiV1TargetsPostRequestWithBody(server string, params *Creat
 	return req, nil
 }
 
+// NewDiscoverTargetsApiV1TargetsDiscoverGetRequest generates requests for DiscoverTargetsApiV1TargetsDiscoverGet
+func NewDiscoverTargetsApiV1TargetsDiscoverGetRequest(server string, params *DiscoverTargetsApiV1TargetsDiscoverGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/targets/discover")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "product", runtime.ParamLocationQuery, params.Product); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.SeedTarget != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "seed_target", runtime.ParamLocationQuery, *params.SeedTarget); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDescribeTargetApiV1TargetsNameGetRequest generates requests for DescribeTargetApiV1TargetsNameGet
 func NewDescribeTargetApiV1TargetsNameGetRequest(server string, name string, params *DescribeTargetApiV1TargetsNameGetParams) (*http.Request, error) {
 	var err error
@@ -3062,6 +6355,828 @@ func NewProbeTargetApiV1TargetsNameProbePostRequest(server string, name string, 
 	}
 
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDependenciesApiV1TopologyDependenciesNameGetRequest generates requests for DependenciesApiV1TopologyDependenciesNameGet
+func NewDependenciesApiV1TopologyDependenciesNameGetRequest(server string, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/dependencies/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Depth != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "depth", runtime.ParamLocationQuery, *params.Depth); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.KindFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind_filter", runtime.ParamLocationQuery, *params.KindFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDependentsApiV1TopologyDependentsNameGetRequest generates requests for DependentsApiV1TopologyDependentsNameGet
+func NewDependentsApiV1TopologyDependentsNameGetRequest(server string, name string, params *DependentsApiV1TopologyDependentsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/dependents/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Depth != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "depth", runtime.ParamLocationQuery, *params.Depth); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.KindFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind_filter", runtime.ParamLocationQuery, *params.KindFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListEdgesRouteApiV1TopologyEdgesGetRequest generates requests for ListEdgesRouteApiV1TopologyEdgesGet
+func NewListEdgesRouteApiV1TopologyEdgesGetRequest(server string, params *ListEdgesRouteApiV1TopologyEdgesGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/edges")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Source != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "source", runtime.ParamLocationQuery, *params.Source); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "from", runtime.ParamLocationQuery, *params.From); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "to", runtime.ParamLocationQuery, *params.To); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Conflicts != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "conflicts", runtime.ParamLocationQuery, *params.Conflicts); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewAnnotateEdgeRouteApiV1TopologyEdgesPostRequest calls the generic AnnotateEdgeRouteApiV1TopologyEdgesPost builder with application/json body
+func NewAnnotateEdgeRouteApiV1TopologyEdgesPostRequest(server string, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, body AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAnnotateEdgeRouteApiV1TopologyEdgesPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewAnnotateEdgeRouteApiV1TopologyEdgesPostRequestWithBody generates requests for AnnotateEdgeRouteApiV1TopologyEdgesPost with any type of body
+func NewAnnotateEdgeRouteApiV1TopologyEdgesPostRequestWithBody(server string, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/edges")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewBulkImportEdgesRouteApiV1TopologyEdgesBulkPostRequest calls the generic BulkImportEdgesRouteApiV1TopologyEdgesBulkPost builder with application/json body
+func NewBulkImportEdgesRouteApiV1TopologyEdgesBulkPostRequest(server string, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, body BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewBulkImportEdgesRouteApiV1TopologyEdgesBulkPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewBulkImportEdgesRouteApiV1TopologyEdgesBulkPostRequestWithBody generates requests for BulkImportEdgesRouteApiV1TopologyEdgesBulkPost with any type of body
+func NewBulkImportEdgesRouteApiV1TopologyEdgesBulkPostRequestWithBody(server string, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/edges/bulk")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteRequest generates requests for UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete
+func NewUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteRequest(server string, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "edge_id", runtime.ParamLocationPath, edgeId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/edges/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPathApiV1TopologyPathGetRequest generates requests for PathApiV1TopologyPathGet
+func NewPathApiV1TopologyPathGetRequest(server string, params *PathApiV1TopologyPathGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/path")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "from", runtime.ParamLocationQuery, params.From); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "to", runtime.ParamLocationQuery, params.To); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.FromKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "from_kind", runtime.ParamLocationQuery, *params.FromKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ToKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "to_kind", runtime.ParamLocationQuery, *params.ToKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.MaxHops != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "max_hops", runtime.ParamLocationQuery, *params.MaxHops); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRefreshApiV1TopologyRefreshTargetNamePostRequest generates requests for RefreshApiV1TopologyRefreshTargetNamePost
+func NewRefreshApiV1TopologyRefreshTargetNamePostRequest(server string, targetName string, params *RefreshApiV1TopologyRefreshTargetNamePostParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "target_name", runtime.ParamLocationPath, targetName)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/refresh/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewTimelineRouteApiV1TopologyTimelineGetRequest generates requests for TimelineRouteApiV1TopologyTimelineGet
+func NewTimelineRouteApiV1TopologyTimelineGetRequest(server string, params *TimelineRouteApiV1TopologyTimelineGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/timeline")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -3283,11 +7398,39 @@ type ClientWithResponsesInterface interface {
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse, error)
 
+	// MyRecentApiV1AuditMyRecentGetWithResponse request
+	MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error)
+
+	// QueryApiV1AuditQueryPostWithBodyWithResponse request with any body
+	QueryApiV1AuditQueryPostWithBodyWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error)
+
+	QueryApiV1AuditQueryPostWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error)
+
+	// ShowApiV1AuditShowAuditIdGetWithResponse request
+	ShowApiV1AuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*ShowApiV1AuditShowAuditIdGetResponse, error)
+
+	// WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse request
+	WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error)
+
 	// AuthConfigApiV1AuthConfigGetWithResponse request
 	AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error)
 
+	// ListOverridesApiV1BroadcastOverridesGetWithResponse request
+	ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOverridesApiV1BroadcastOverridesGetResponse, error)
+
+	// CreateOverrideApiV1BroadcastOverridesPostWithBodyWithResponse request with any body
+	CreateOverrideApiV1BroadcastOverridesPostWithBodyWithResponse(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateOverrideApiV1BroadcastOverridesPostResponse, error)
+
+	CreateOverrideApiV1BroadcastOverridesPostWithResponse(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, body CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateOverrideApiV1BroadcastOverridesPostResponse, error)
+
+	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse request
+	DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse, error)
+
 	// ListEndpointApiV1ConnectorsGetWithResponse request
 	ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error)
+
+	// CatalogEndpointApiV1ConnectorsCatalogGetWithResponse request
+	CatalogEndpointApiV1ConnectorsCatalogGetWithResponse(ctx context.Context, params *CatalogEndpointApiV1ConnectorsCatalogGetParams, reqEditors ...RequestEditorFn) (*CatalogEndpointApiV1ConnectorsCatalogGetResponse, error)
 
 	// IngestEndpointApiV1ConnectorsIngestPostWithBodyWithResponse request with any body
 	IngestEndpointApiV1ConnectorsIngestPostWithBodyWithResponse(ctx context.Context, params *IngestEndpointApiV1ConnectorsIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestEndpointApiV1ConnectorsIngestPostResponse, error)
@@ -3319,6 +7462,44 @@ type ClientWithResponsesInterface interface {
 	// AuthenticatedHealthApiV1HealthGetWithResponse request
 	AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error)
 
+	// ListKbApiV1KbGetWithResponse request
+	ListKbApiV1KbGetWithResponse(ctx context.Context, params *ListKbApiV1KbGetParams, reqEditors ...RequestEditorFn) (*ListKbApiV1KbGetResponse, error)
+
+	// CreateKbApiV1KbPostWithBodyWithResponse request with any body
+	CreateKbApiV1KbPostWithBodyWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error)
+
+	CreateKbApiV1KbPostWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error)
+
+	// IngestKbApiV1KbIngestPostWithBodyWithResponse request with any body
+	IngestKbApiV1KbIngestPostWithBodyWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error)
+
+	IngestKbApiV1KbIngestPostWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, body IngestKbApiV1KbIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error)
+
+	// DeleteKbApiV1KbSlugDeleteWithResponse request
+	DeleteKbApiV1KbSlugDeleteWithResponse(ctx context.Context, slug string, params *DeleteKbApiV1KbSlugDeleteParams, reqEditors ...RequestEditorFn) (*DeleteKbApiV1KbSlugDeleteResponse, error)
+
+	// ShowKbApiV1KbSlugGetWithResponse request
+	ShowKbApiV1KbSlugGetWithResponse(ctx context.Context, slug string, params *ShowKbApiV1KbSlugGetParams, reqEditors ...RequestEditorFn) (*ShowKbApiV1KbSlugGetResponse, error)
+
+	// ListMemoriesApiV1MemoryGetWithResponse request
+	ListMemoriesApiV1MemoryGetWithResponse(ctx context.Context, params *ListMemoriesApiV1MemoryGetParams, reqEditors ...RequestEditorFn) (*ListMemoriesApiV1MemoryGetResponse, error)
+
+	// RememberApiV1MemoryPostWithBodyWithResponse request with any body
+	RememberApiV1MemoryPostWithBodyWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error)
+
+	RememberApiV1MemoryPostWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error)
+
+	// ForgetApiV1MemoryScopeSlugDeleteWithResponse request
+	ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error)
+
+	// RecallApiV1MemoryScopeSlugGetWithResponse request
+	RecallApiV1MemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, params *RecallApiV1MemoryScopeSlugGetParams, reqEditors ...RequestEditorFn) (*RecallApiV1MemoryScopeSlugGetResponse, error)
+
+	// PromoteApiV1MemoryScopeSlugPromotePostWithBodyWithResponse request with any body
+	PromoteApiV1MemoryScopeSlugPromotePostWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PromoteApiV1MemoryScopeSlugPromotePostResponse, error)
+
+	PromoteApiV1MemoryScopeSlugPromotePostWithResponse(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, body PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody, reqEditors ...RequestEditorFn) (*PromoteApiV1MemoryScopeSlugPromotePostResponse, error)
+
 	// PostCallApiV1OperationsCallPostWithBodyWithResponse request with any body
 	PostCallApiV1OperationsCallPostWithBodyWithResponse(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostCallApiV1OperationsCallPostResponse, error)
 
@@ -3343,6 +7524,11 @@ type ClientWithResponsesInterface interface {
 
 	EvalEndpointApiV1RetrieveEvalPostWithResponse(ctx context.Context, params *EvalEndpointApiV1RetrieveEvalPostParams, body EvalEndpointApiV1RetrieveEvalPostJSONRequestBody, reqEditors ...RequestEditorFn) (*EvalEndpointApiV1RetrieveEvalPostResponse, error)
 
+	// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse request with any body
+	RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error)
+
+	RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error)
+
 	// UsageEndpointApiV1RetrieveUsageGetWithResponse request
 	UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error)
 
@@ -3354,6 +7540,9 @@ type ClientWithResponsesInterface interface {
 
 	CreateTargetApiV1TargetsPostWithResponse(ctx context.Context, params *CreateTargetApiV1TargetsPostParams, body CreateTargetApiV1TargetsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateTargetApiV1TargetsPostResponse, error)
 
+	// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request
+	DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error)
+
 	// DescribeTargetApiV1TargetsNameGetWithResponse request
 	DescribeTargetApiV1TargetsNameGetWithResponse(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*DescribeTargetApiV1TargetsNameGetResponse, error)
 
@@ -3364,6 +7553,37 @@ type ClientWithResponsesInterface interface {
 
 	// ProbeTargetApiV1TargetsNameProbePostWithResponse request
 	ProbeTargetApiV1TargetsNameProbePostWithResponse(ctx context.Context, name string, params *ProbeTargetApiV1TargetsNameProbePostParams, reqEditors ...RequestEditorFn) (*ProbeTargetApiV1TargetsNameProbePostResponse, error)
+
+	// DependenciesApiV1TopologyDependenciesNameGetWithResponse request
+	DependenciesApiV1TopologyDependenciesNameGetWithResponse(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*DependenciesApiV1TopologyDependenciesNameGetResponse, error)
+
+	// DependentsApiV1TopologyDependentsNameGetWithResponse request
+	DependentsApiV1TopologyDependentsNameGetWithResponse(ctx context.Context, name string, params *DependentsApiV1TopologyDependentsNameGetParams, reqEditors ...RequestEditorFn) (*DependentsApiV1TopologyDependentsNameGetResponse, error)
+
+	// ListEdgesRouteApiV1TopologyEdgesGetWithResponse request
+	ListEdgesRouteApiV1TopologyEdgesGetWithResponse(ctx context.Context, params *ListEdgesRouteApiV1TopologyEdgesGetParams, reqEditors ...RequestEditorFn) (*ListEdgesRouteApiV1TopologyEdgesGetResponse, error)
+
+	// AnnotateEdgeRouteApiV1TopologyEdgesPostWithBodyWithResponse request with any body
+	AnnotateEdgeRouteApiV1TopologyEdgesPostWithBodyWithResponse(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnotateEdgeRouteApiV1TopologyEdgesPostResponse, error)
+
+	AnnotateEdgeRouteApiV1TopologyEdgesPostWithResponse(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, body AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AnnotateEdgeRouteApiV1TopologyEdgesPostResponse, error)
+
+	// BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBodyWithResponse request with any body
+	BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBodyWithResponse(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse, error)
+
+	BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithResponse(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, body BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody, reqEditors ...RequestEditorFn) (*BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse, error)
+
+	// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse request
+	UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error)
+
+	// PathApiV1TopologyPathGetWithResponse request
+	PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error)
+
+	// RefreshApiV1TopologyRefreshTargetNamePostWithResponse request
+	RefreshApiV1TopologyRefreshTargetNamePostWithResponse(ctx context.Context, targetName string, params *RefreshApiV1TopologyRefreshTargetNamePostParams, reqEditors ...RequestEditorFn) (*RefreshApiV1TopologyRefreshTargetNamePostResponse, error)
+
+	// TimelineRouteApiV1TopologyTimelineGetWithResponse request
+	TimelineRouteApiV1TopologyTimelineGetWithResponse(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*TimelineRouteApiV1TopologyTimelineGetResponse, error)
 
 	// HealthzHealthzGetWithResponse request
 	HealthzHealthzGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*HealthzHealthzGetResponse, error)
@@ -3425,6 +7645,98 @@ func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) Sta
 	return 0
 }
 
+type MyRecentApiV1AuditMyRecentGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditQueryResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r MyRecentApiV1AuditMyRecentGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r MyRecentApiV1AuditMyRecentGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type QueryApiV1AuditQueryPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditQueryResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r QueryApiV1AuditQueryPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r QueryApiV1AuditQueryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowApiV1AuditShowAuditIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditEntry
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowApiV1AuditShowAuditIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowApiV1AuditShowAuditIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type WhoTouchedApiV1AuditWhoTouchedTargetGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditQueryResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r WhoTouchedApiV1AuditWhoTouchedTargetGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r WhoTouchedApiV1AuditWhoTouchedTargetGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type AuthConfigApiV1AuthConfigGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3441,6 +7753,74 @@ func (r AuthConfigApiV1AuthConfigGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListOverridesApiV1BroadcastOverridesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]BroadcastOverrideRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListOverridesApiV1BroadcastOverridesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListOverridesApiV1BroadcastOverridesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateOverrideApiV1BroadcastOverridesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *BroadcastOverrideRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateOverrideApiV1BroadcastOverridesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateOverrideApiV1BroadcastOverridesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -3464,6 +7844,29 @@ func (r ListEndpointApiV1ConnectorsGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ListEndpointApiV1ConnectorsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CatalogEndpointApiV1ConnectorsCatalogGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *CatalogListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CatalogEndpointApiV1ConnectorsCatalogGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CatalogEndpointApiV1ConnectorsCatalogGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -3650,6 +8053,234 @@ func (r AuthenticatedHealthApiV1HealthGetResponse) StatusCode() int {
 	return 0
 }
 
+type ListKbApiV1KbGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KbListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListKbApiV1KbGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListKbApiV1KbGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateKbApiV1KbPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *KbEntry
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateKbApiV1KbPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateKbApiV1KbPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type IngestKbApiV1KbIngestPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KbIngestionResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r IngestKbApiV1KbIngestPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r IngestKbApiV1KbIngestPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteKbApiV1KbSlugDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteKbApiV1KbSlugDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteKbApiV1KbSlugDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowKbApiV1KbSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *KbEntry
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowKbApiV1KbSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowKbApiV1KbSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListMemoriesApiV1MemoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *MemoryListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListMemoriesApiV1MemoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListMemoriesApiV1MemoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RememberApiV1MemoryPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *MemoryEntry
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RememberApiV1MemoryPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RememberApiV1MemoryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ForgetApiV1MemoryScopeSlugDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ForgetApiV1MemoryScopeSlugDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ForgetApiV1MemoryScopeSlugDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RecallApiV1MemoryScopeSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *MemoryEntry
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RecallApiV1MemoryScopeSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RecallApiV1MemoryScopeSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PromoteApiV1MemoryScopeSlugPromotePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *MemoryEntry
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PromoteApiV1MemoryScopeSlugPromotePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PromoteApiV1MemoryScopeSlugPromotePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PostCallApiV1OperationsCallPostResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3788,6 +8419,29 @@ func (r EvalEndpointApiV1RetrieveEvalPostResponse) StatusCode() int {
 	return 0
 }
 
+type RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RetireChecklistReport
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UsageEndpointApiV1RetrieveUsageGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3857,6 +8511,29 @@ func (r CreateTargetApiV1TargetsPostResponse) StatusCode() int {
 	return 0
 }
 
+type DiscoverTargetsApiV1TargetsDiscoverGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TargetsDiscoverResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DiscoverTargetsApiV1TargetsDiscoverGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DescribeTargetApiV1TargetsNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -3920,6 +8597,212 @@ func (r ProbeTargetApiV1TargetsNameProbePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ProbeTargetApiV1TargetsNameProbePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DependenciesApiV1TopologyDependenciesNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]TopologyNode
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DependenciesApiV1TopologyDependenciesNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DependenciesApiV1TopologyDependenciesNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DependentsApiV1TopologyDependentsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]TopologyNode
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DependentsApiV1TopologyDependentsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DependentsApiV1TopologyDependentsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListEdgesRouteApiV1TopologyEdgesGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]TopologyEdge
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListEdgesRouteApiV1TopologyEdgesGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListEdgesRouteApiV1TopologyEdgesGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type AnnotateEdgeRouteApiV1TopologyEdgesPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *TopologyEdge
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r AnnotateEdgeRouteApiV1TopologyEdgesPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AnnotateEdgeRouteApiV1TopologyEdgesPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *UnderscoreBulkImportResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PathApiV1TopologyPathGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TopologyPath
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PathApiV1TopologyPathGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PathApiV1TopologyPathGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RefreshApiV1TopologyRefreshTargetNamePostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RefreshResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RefreshApiV1TopologyRefreshTargetNamePostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RefreshApiV1TopologyRefreshTargetNamePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type TimelineRouteApiV1TopologyTimelineGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TopologyTimelineResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r TimelineRouteApiV1TopologyTimelineGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r TimelineRouteApiV1TopologyTimelineGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -4055,6 +8938,50 @@ func (c *ClientWithResponses) ProtectedResourceMetadataWellKnownOauthProtectedRe
 	return ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rsp)
 }
 
+// MyRecentApiV1AuditMyRecentGetWithResponse request returning *MyRecentApiV1AuditMyRecentGetResponse
+func (c *ClientWithResponses) MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
+	rsp, err := c.MyRecentApiV1AuditMyRecentGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseMyRecentApiV1AuditMyRecentGetResponse(rsp)
+}
+
+// QueryApiV1AuditQueryPostWithBodyWithResponse request with arbitrary body returning *QueryApiV1AuditQueryPostResponse
+func (c *ClientWithResponses) QueryApiV1AuditQueryPostWithBodyWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error) {
+	rsp, err := c.QueryApiV1AuditQueryPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseQueryApiV1AuditQueryPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) QueryApiV1AuditQueryPostWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error) {
+	rsp, err := c.QueryApiV1AuditQueryPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseQueryApiV1AuditQueryPostResponse(rsp)
+}
+
+// ShowApiV1AuditShowAuditIdGetWithResponse request returning *ShowApiV1AuditShowAuditIdGetResponse
+func (c *ClientWithResponses) ShowApiV1AuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*ShowApiV1AuditShowAuditIdGetResponse, error) {
+	rsp, err := c.ShowApiV1AuditShowAuditIdGet(ctx, auditId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowApiV1AuditShowAuditIdGetResponse(rsp)
+}
+
+// WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse request returning *WhoTouchedApiV1AuditWhoTouchedTargetGetResponse
+func (c *ClientWithResponses) WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse(ctx context.Context, target string, params *WhoTouchedApiV1AuditWhoTouchedTargetGetParams, reqEditors ...RequestEditorFn) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error) {
+	rsp, err := c.WhoTouchedApiV1AuditWhoTouchedTargetGet(ctx, target, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseWhoTouchedApiV1AuditWhoTouchedTargetGetResponse(rsp)
+}
+
 // AuthConfigApiV1AuthConfigGetWithResponse request returning *AuthConfigApiV1AuthConfigGetResponse
 func (c *ClientWithResponses) AuthConfigApiV1AuthConfigGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AuthConfigApiV1AuthConfigGetResponse, error) {
 	rsp, err := c.AuthConfigApiV1AuthConfigGet(ctx, reqEditors...)
@@ -4064,6 +8991,41 @@ func (c *ClientWithResponses) AuthConfigApiV1AuthConfigGetWithResponse(ctx conte
 	return ParseAuthConfigApiV1AuthConfigGetResponse(rsp)
 }
 
+// ListOverridesApiV1BroadcastOverridesGetWithResponse request returning *ListOverridesApiV1BroadcastOverridesGetResponse
+func (c *ClientWithResponses) ListOverridesApiV1BroadcastOverridesGetWithResponse(ctx context.Context, params *ListOverridesApiV1BroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*ListOverridesApiV1BroadcastOverridesGetResponse, error) {
+	rsp, err := c.ListOverridesApiV1BroadcastOverridesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListOverridesApiV1BroadcastOverridesGetResponse(rsp)
+}
+
+// CreateOverrideApiV1BroadcastOverridesPostWithBodyWithResponse request with arbitrary body returning *CreateOverrideApiV1BroadcastOverridesPostResponse
+func (c *ClientWithResponses) CreateOverrideApiV1BroadcastOverridesPostWithBodyWithResponse(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateOverrideApiV1BroadcastOverridesPostResponse, error) {
+	rsp, err := c.CreateOverrideApiV1BroadcastOverridesPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateOverrideApiV1BroadcastOverridesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateOverrideApiV1BroadcastOverridesPostWithResponse(ctx context.Context, params *CreateOverrideApiV1BroadcastOverridesPostParams, body CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateOverrideApiV1BroadcastOverridesPostResponse, error) {
+	rsp, err := c.CreateOverrideApiV1BroadcastOverridesPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateOverrideApiV1BroadcastOverridesPostResponse(rsp)
+}
+
+// DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse request returning *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse
+func (c *ClientWithResponses) DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse, error) {
+	rsp, err := c.DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx, overrideId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp)
+}
+
 // ListEndpointApiV1ConnectorsGetWithResponse request returning *ListEndpointApiV1ConnectorsGetResponse
 func (c *ClientWithResponses) ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error) {
 	rsp, err := c.ListEndpointApiV1ConnectorsGet(ctx, params, reqEditors...)
@@ -4071,6 +9033,15 @@ func (c *ClientWithResponses) ListEndpointApiV1ConnectorsGetWithResponse(ctx con
 		return nil, err
 	}
 	return ParseListEndpointApiV1ConnectorsGetResponse(rsp)
+}
+
+// CatalogEndpointApiV1ConnectorsCatalogGetWithResponse request returning *CatalogEndpointApiV1ConnectorsCatalogGetResponse
+func (c *ClientWithResponses) CatalogEndpointApiV1ConnectorsCatalogGetWithResponse(ctx context.Context, params *CatalogEndpointApiV1ConnectorsCatalogGetParams, reqEditors ...RequestEditorFn) (*CatalogEndpointApiV1ConnectorsCatalogGetResponse, error) {
+	rsp, err := c.CatalogEndpointApiV1ConnectorsCatalogGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCatalogEndpointApiV1ConnectorsCatalogGetResponse(rsp)
 }
 
 // IngestEndpointApiV1ConnectorsIngestPostWithBodyWithResponse request with arbitrary body returning *IngestEndpointApiV1ConnectorsIngestPostResponse
@@ -4169,6 +9140,128 @@ func (c *ClientWithResponses) AuthenticatedHealthApiV1HealthGetWithResponse(ctx 
 	return ParseAuthenticatedHealthApiV1HealthGetResponse(rsp)
 }
 
+// ListKbApiV1KbGetWithResponse request returning *ListKbApiV1KbGetResponse
+func (c *ClientWithResponses) ListKbApiV1KbGetWithResponse(ctx context.Context, params *ListKbApiV1KbGetParams, reqEditors ...RequestEditorFn) (*ListKbApiV1KbGetResponse, error) {
+	rsp, err := c.ListKbApiV1KbGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListKbApiV1KbGetResponse(rsp)
+}
+
+// CreateKbApiV1KbPostWithBodyWithResponse request with arbitrary body returning *CreateKbApiV1KbPostResponse
+func (c *ClientWithResponses) CreateKbApiV1KbPostWithBodyWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error) {
+	rsp, err := c.CreateKbApiV1KbPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateKbApiV1KbPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateKbApiV1KbPostWithResponse(ctx context.Context, params *CreateKbApiV1KbPostParams, body CreateKbApiV1KbPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateKbApiV1KbPostResponse, error) {
+	rsp, err := c.CreateKbApiV1KbPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateKbApiV1KbPostResponse(rsp)
+}
+
+// IngestKbApiV1KbIngestPostWithBodyWithResponse request with arbitrary body returning *IngestKbApiV1KbIngestPostResponse
+func (c *ClientWithResponses) IngestKbApiV1KbIngestPostWithBodyWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error) {
+	rsp, err := c.IngestKbApiV1KbIngestPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestKbApiV1KbIngestPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) IngestKbApiV1KbIngestPostWithResponse(ctx context.Context, params *IngestKbApiV1KbIngestPostParams, body IngestKbApiV1KbIngestPostJSONRequestBody, reqEditors ...RequestEditorFn) (*IngestKbApiV1KbIngestPostResponse, error) {
+	rsp, err := c.IngestKbApiV1KbIngestPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseIngestKbApiV1KbIngestPostResponse(rsp)
+}
+
+// DeleteKbApiV1KbSlugDeleteWithResponse request returning *DeleteKbApiV1KbSlugDeleteResponse
+func (c *ClientWithResponses) DeleteKbApiV1KbSlugDeleteWithResponse(ctx context.Context, slug string, params *DeleteKbApiV1KbSlugDeleteParams, reqEditors ...RequestEditorFn) (*DeleteKbApiV1KbSlugDeleteResponse, error) {
+	rsp, err := c.DeleteKbApiV1KbSlugDelete(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteKbApiV1KbSlugDeleteResponse(rsp)
+}
+
+// ShowKbApiV1KbSlugGetWithResponse request returning *ShowKbApiV1KbSlugGetResponse
+func (c *ClientWithResponses) ShowKbApiV1KbSlugGetWithResponse(ctx context.Context, slug string, params *ShowKbApiV1KbSlugGetParams, reqEditors ...RequestEditorFn) (*ShowKbApiV1KbSlugGetResponse, error) {
+	rsp, err := c.ShowKbApiV1KbSlugGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowKbApiV1KbSlugGetResponse(rsp)
+}
+
+// ListMemoriesApiV1MemoryGetWithResponse request returning *ListMemoriesApiV1MemoryGetResponse
+func (c *ClientWithResponses) ListMemoriesApiV1MemoryGetWithResponse(ctx context.Context, params *ListMemoriesApiV1MemoryGetParams, reqEditors ...RequestEditorFn) (*ListMemoriesApiV1MemoryGetResponse, error) {
+	rsp, err := c.ListMemoriesApiV1MemoryGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListMemoriesApiV1MemoryGetResponse(rsp)
+}
+
+// RememberApiV1MemoryPostWithBodyWithResponse request with arbitrary body returning *RememberApiV1MemoryPostResponse
+func (c *ClientWithResponses) RememberApiV1MemoryPostWithBodyWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error) {
+	rsp, err := c.RememberApiV1MemoryPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRememberApiV1MemoryPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RememberApiV1MemoryPostWithResponse(ctx context.Context, params *RememberApiV1MemoryPostParams, body RememberApiV1MemoryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RememberApiV1MemoryPostResponse, error) {
+	rsp, err := c.RememberApiV1MemoryPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRememberApiV1MemoryPostResponse(rsp)
+}
+
+// ForgetApiV1MemoryScopeSlugDeleteWithResponse request returning *ForgetApiV1MemoryScopeSlugDeleteResponse
+func (c *ClientWithResponses) ForgetApiV1MemoryScopeSlugDeleteWithResponse(ctx context.Context, scope MemoryScope, slug string, params *ForgetApiV1MemoryScopeSlugDeleteParams, reqEditors ...RequestEditorFn) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error) {
+	rsp, err := c.ForgetApiV1MemoryScopeSlugDelete(ctx, scope, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseForgetApiV1MemoryScopeSlugDeleteResponse(rsp)
+}
+
+// RecallApiV1MemoryScopeSlugGetWithResponse request returning *RecallApiV1MemoryScopeSlugGetResponse
+func (c *ClientWithResponses) RecallApiV1MemoryScopeSlugGetWithResponse(ctx context.Context, scope MemoryScope, slug string, params *RecallApiV1MemoryScopeSlugGetParams, reqEditors ...RequestEditorFn) (*RecallApiV1MemoryScopeSlugGetResponse, error) {
+	rsp, err := c.RecallApiV1MemoryScopeSlugGet(ctx, scope, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRecallApiV1MemoryScopeSlugGetResponse(rsp)
+}
+
+// PromoteApiV1MemoryScopeSlugPromotePostWithBodyWithResponse request with arbitrary body returning *PromoteApiV1MemoryScopeSlugPromotePostResponse
+func (c *ClientWithResponses) PromoteApiV1MemoryScopeSlugPromotePostWithBodyWithResponse(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PromoteApiV1MemoryScopeSlugPromotePostResponse, error) {
+	rsp, err := c.PromoteApiV1MemoryScopeSlugPromotePostWithBody(ctx, scope, slug, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePromoteApiV1MemoryScopeSlugPromotePostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PromoteApiV1MemoryScopeSlugPromotePostWithResponse(ctx context.Context, scope MemoryScope, slug string, params *PromoteApiV1MemoryScopeSlugPromotePostParams, body PromoteApiV1MemoryScopeSlugPromotePostJSONRequestBody, reqEditors ...RequestEditorFn) (*PromoteApiV1MemoryScopeSlugPromotePostResponse, error) {
+	rsp, err := c.PromoteApiV1MemoryScopeSlugPromotePost(ctx, scope, slug, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePromoteApiV1MemoryScopeSlugPromotePostResponse(rsp)
+}
+
 // PostCallApiV1OperationsCallPostWithBodyWithResponse request with arbitrary body returning *PostCallApiV1OperationsCallPostResponse
 func (c *ClientWithResponses) PostCallApiV1OperationsCallPostWithBodyWithResponse(ctx context.Context, params *PostCallApiV1OperationsCallPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostCallApiV1OperationsCallPostResponse, error) {
 	rsp, err := c.PostCallApiV1OperationsCallPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -4247,6 +9340,23 @@ func (c *ClientWithResponses) EvalEndpointApiV1RetrieveEvalPostWithResponse(ctx 
 	return ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp)
 }
 
+// RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse request with arbitrary body returning *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse
+func (c *ClientWithResponses) RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBodyWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
+	rsp, err := c.RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithResponse(ctx context.Context, params *RetireChecklistEndpointApiV1RetrieveRetireChecklistPostParams, body RetireChecklistEndpointApiV1RetrieveRetireChecklistPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
+	rsp, err := c.RetireChecklistEndpointApiV1RetrieveRetireChecklistPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse(rsp)
+}
+
 // UsageEndpointApiV1RetrieveUsageGetWithResponse request returning *UsageEndpointApiV1RetrieveUsageGetResponse
 func (c *ClientWithResponses) UsageEndpointApiV1RetrieveUsageGetWithResponse(ctx context.Context, params *UsageEndpointApiV1RetrieveUsageGetParams, reqEditors ...RequestEditorFn) (*UsageEndpointApiV1RetrieveUsageGetResponse, error) {
 	rsp, err := c.UsageEndpointApiV1RetrieveUsageGet(ctx, params, reqEditors...)
@@ -4282,6 +9392,15 @@ func (c *ClientWithResponses) CreateTargetApiV1TargetsPostWithResponse(ctx conte
 	return ParseCreateTargetApiV1TargetsPostResponse(rsp)
 }
 
+// DiscoverTargetsApiV1TargetsDiscoverGetWithResponse request returning *DiscoverTargetsApiV1TargetsDiscoverGetResponse
+func (c *ClientWithResponses) DiscoverTargetsApiV1TargetsDiscoverGetWithResponse(ctx context.Context, params *DiscoverTargetsApiV1TargetsDiscoverGetParams, reqEditors ...RequestEditorFn) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error) {
+	rsp, err := c.DiscoverTargetsApiV1TargetsDiscoverGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp)
+}
+
 // DescribeTargetApiV1TargetsNameGetWithResponse request returning *DescribeTargetApiV1TargetsNameGetResponse
 func (c *ClientWithResponses) DescribeTargetApiV1TargetsNameGetWithResponse(ctx context.Context, name string, params *DescribeTargetApiV1TargetsNameGetParams, reqEditors ...RequestEditorFn) (*DescribeTargetApiV1TargetsNameGetResponse, error) {
 	rsp, err := c.DescribeTargetApiV1TargetsNameGet(ctx, name, params, reqEditors...)
@@ -4315,6 +9434,103 @@ func (c *ClientWithResponses) ProbeTargetApiV1TargetsNameProbePostWithResponse(c
 		return nil, err
 	}
 	return ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp)
+}
+
+// DependenciesApiV1TopologyDependenciesNameGetWithResponse request returning *DependenciesApiV1TopologyDependenciesNameGetResponse
+func (c *ClientWithResponses) DependenciesApiV1TopologyDependenciesNameGetWithResponse(ctx context.Context, name string, params *DependenciesApiV1TopologyDependenciesNameGetParams, reqEditors ...RequestEditorFn) (*DependenciesApiV1TopologyDependenciesNameGetResponse, error) {
+	rsp, err := c.DependenciesApiV1TopologyDependenciesNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDependenciesApiV1TopologyDependenciesNameGetResponse(rsp)
+}
+
+// DependentsApiV1TopologyDependentsNameGetWithResponse request returning *DependentsApiV1TopologyDependentsNameGetResponse
+func (c *ClientWithResponses) DependentsApiV1TopologyDependentsNameGetWithResponse(ctx context.Context, name string, params *DependentsApiV1TopologyDependentsNameGetParams, reqEditors ...RequestEditorFn) (*DependentsApiV1TopologyDependentsNameGetResponse, error) {
+	rsp, err := c.DependentsApiV1TopologyDependentsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDependentsApiV1TopologyDependentsNameGetResponse(rsp)
+}
+
+// ListEdgesRouteApiV1TopologyEdgesGetWithResponse request returning *ListEdgesRouteApiV1TopologyEdgesGetResponse
+func (c *ClientWithResponses) ListEdgesRouteApiV1TopologyEdgesGetWithResponse(ctx context.Context, params *ListEdgesRouteApiV1TopologyEdgesGetParams, reqEditors ...RequestEditorFn) (*ListEdgesRouteApiV1TopologyEdgesGetResponse, error) {
+	rsp, err := c.ListEdgesRouteApiV1TopologyEdgesGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListEdgesRouteApiV1TopologyEdgesGetResponse(rsp)
+}
+
+// AnnotateEdgeRouteApiV1TopologyEdgesPostWithBodyWithResponse request with arbitrary body returning *AnnotateEdgeRouteApiV1TopologyEdgesPostResponse
+func (c *ClientWithResponses) AnnotateEdgeRouteApiV1TopologyEdgesPostWithBodyWithResponse(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AnnotateEdgeRouteApiV1TopologyEdgesPostResponse, error) {
+	rsp, err := c.AnnotateEdgeRouteApiV1TopologyEdgesPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateEdgeRouteApiV1TopologyEdgesPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) AnnotateEdgeRouteApiV1TopologyEdgesPostWithResponse(ctx context.Context, params *AnnotateEdgeRouteApiV1TopologyEdgesPostParams, body AnnotateEdgeRouteApiV1TopologyEdgesPostJSONRequestBody, reqEditors ...RequestEditorFn) (*AnnotateEdgeRouteApiV1TopologyEdgesPostResponse, error) {
+	rsp, err := c.AnnotateEdgeRouteApiV1TopologyEdgesPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAnnotateEdgeRouteApiV1TopologyEdgesPostResponse(rsp)
+}
+
+// BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBodyWithResponse request with arbitrary body returning *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse
+func (c *ClientWithResponses) BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBodyWithResponse(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse, error) {
+	rsp, err := c.BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithResponse(ctx context.Context, params *BulkImportEdgesRouteApiV1TopologyEdgesBulkPostParams, body BulkImportEdgesRouteApiV1TopologyEdgesBulkPostJSONRequestBody, reqEditors ...RequestEditorFn) (*BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse, error) {
+	rsp, err := c.BulkImportEdgesRouteApiV1TopologyEdgesBulkPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseBulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse(rsp)
+}
+
+// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse request returning *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse
+func (c *ClientWithResponses) UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error) {
+	rsp, err := c.UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx, edgeId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp)
+}
+
+// PathApiV1TopologyPathGetWithResponse request returning *PathApiV1TopologyPathGetResponse
+func (c *ClientWithResponses) PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error) {
+	rsp, err := c.PathApiV1TopologyPathGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePathApiV1TopologyPathGetResponse(rsp)
+}
+
+// RefreshApiV1TopologyRefreshTargetNamePostWithResponse request returning *RefreshApiV1TopologyRefreshTargetNamePostResponse
+func (c *ClientWithResponses) RefreshApiV1TopologyRefreshTargetNamePostWithResponse(ctx context.Context, targetName string, params *RefreshApiV1TopologyRefreshTargetNamePostParams, reqEditors ...RequestEditorFn) (*RefreshApiV1TopologyRefreshTargetNamePostResponse, error) {
+	rsp, err := c.RefreshApiV1TopologyRefreshTargetNamePost(ctx, targetName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRefreshApiV1TopologyRefreshTargetNamePostResponse(rsp)
+}
+
+// TimelineRouteApiV1TopologyTimelineGetWithResponse request returning *TimelineRouteApiV1TopologyTimelineGetResponse
+func (c *ClientWithResponses) TimelineRouteApiV1TopologyTimelineGetWithResponse(ctx context.Context, params *TimelineRouteApiV1TopologyTimelineGetParams, reqEditors ...RequestEditorFn) (*TimelineRouteApiV1TopologyTimelineGetResponse, error) {
+	rsp, err := c.TimelineRouteApiV1TopologyTimelineGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp)
 }
 
 // HealthzHealthzGetWithResponse request returning *HealthzHealthzGetResponse
@@ -4414,6 +9630,138 @@ func ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rs
 	return response, nil
 }
 
+// ParseMyRecentApiV1AuditMyRecentGetResponse parses an HTTP response from a MyRecentApiV1AuditMyRecentGetWithResponse call
+func ParseMyRecentApiV1AuditMyRecentGetResponse(rsp *http.Response) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &MyRecentApiV1AuditMyRecentGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseQueryApiV1AuditQueryPostResponse parses an HTTP response from a QueryApiV1AuditQueryPostWithResponse call
+func ParseQueryApiV1AuditQueryPostResponse(rsp *http.Response) (*QueryApiV1AuditQueryPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &QueryApiV1AuditQueryPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowApiV1AuditShowAuditIdGetResponse parses an HTTP response from a ShowApiV1AuditShowAuditIdGetWithResponse call
+func ParseShowApiV1AuditShowAuditIdGetResponse(rsp *http.Response) (*ShowApiV1AuditShowAuditIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowApiV1AuditShowAuditIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseWhoTouchedApiV1AuditWhoTouchedTargetGetResponse parses an HTTP response from a WhoTouchedApiV1AuditWhoTouchedTargetGetWithResponse call
+func ParseWhoTouchedApiV1AuditWhoTouchedTargetGetResponse(rsp *http.Response) (*WhoTouchedApiV1AuditWhoTouchedTargetGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &WhoTouchedApiV1AuditWhoTouchedTargetGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseAuthConfigApiV1AuthConfigGetResponse parses an HTTP response from a AuthConfigApiV1AuthConfigGetWithResponse call
 func ParseAuthConfigApiV1AuthConfigGetResponse(rsp *http.Response) (*AuthConfigApiV1AuthConfigGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -4440,6 +9788,98 @@ func ParseAuthConfigApiV1AuthConfigGetResponse(rsp *http.Response) (*AuthConfigA
 	return response, nil
 }
 
+// ParseListOverridesApiV1BroadcastOverridesGetResponse parses an HTTP response from a ListOverridesApiV1BroadcastOverridesGetWithResponse call
+func ParseListOverridesApiV1BroadcastOverridesGetResponse(rsp *http.Response) (*ListOverridesApiV1BroadcastOverridesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListOverridesApiV1BroadcastOverridesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []BroadcastOverrideRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateOverrideApiV1BroadcastOverridesPostResponse parses an HTTP response from a CreateOverrideApiV1BroadcastOverridesPostWithResponse call
+func ParseCreateOverrideApiV1BroadcastOverridesPostResponse(rsp *http.Response) (*CreateOverrideApiV1BroadcastOverridesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateOverrideApiV1BroadcastOverridesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest BroadcastOverrideRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse parses an HTTP response from a DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse call
+func ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp *http.Response) (*DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListEndpointApiV1ConnectorsGetResponse parses an HTTP response from a ListEndpointApiV1ConnectorsGetWithResponse call
 func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpointApiV1ConnectorsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -4456,6 +9896,39 @@ func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpo
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest map[string][]map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCatalogEndpointApiV1ConnectorsCatalogGetResponse parses an HTTP response from a CatalogEndpointApiV1ConnectorsCatalogGetWithResponse call
+func ParseCatalogEndpointApiV1ConnectorsCatalogGetResponse(rsp *http.Response) (*CatalogEndpointApiV1ConnectorsCatalogGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CatalogEndpointApiV1ConnectorsCatalogGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest CatalogListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -4709,6 +10182,322 @@ func ParseAuthenticatedHealthApiV1HealthGetResponse(rsp *http.Response) (*Authen
 	return response, nil
 }
 
+// ParseListKbApiV1KbGetResponse parses an HTTP response from a ListKbApiV1KbGetWithResponse call
+func ParseListKbApiV1KbGetResponse(rsp *http.Response) (*ListKbApiV1KbGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListKbApiV1KbGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateKbApiV1KbPostResponse parses an HTTP response from a CreateKbApiV1KbPostWithResponse call
+func ParseCreateKbApiV1KbPostResponse(rsp *http.Response) (*CreateKbApiV1KbPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateKbApiV1KbPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest KbEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseIngestKbApiV1KbIngestPostResponse parses an HTTP response from a IngestKbApiV1KbIngestPostWithResponse call
+func ParseIngestKbApiV1KbIngestPostResponse(rsp *http.Response) (*IngestKbApiV1KbIngestPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &IngestKbApiV1KbIngestPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbIngestionResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteKbApiV1KbSlugDeleteResponse parses an HTTP response from a DeleteKbApiV1KbSlugDeleteWithResponse call
+func ParseDeleteKbApiV1KbSlugDeleteResponse(rsp *http.Response) (*DeleteKbApiV1KbSlugDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteKbApiV1KbSlugDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowKbApiV1KbSlugGetResponse parses an HTTP response from a ShowKbApiV1KbSlugGetWithResponse call
+func ParseShowKbApiV1KbSlugGetResponse(rsp *http.Response) (*ShowKbApiV1KbSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowKbApiV1KbSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest KbEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListMemoriesApiV1MemoryGetResponse parses an HTTP response from a ListMemoriesApiV1MemoryGetWithResponse call
+func ParseListMemoriesApiV1MemoryGetResponse(rsp *http.Response) (*ListMemoriesApiV1MemoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListMemoriesApiV1MemoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MemoryListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRememberApiV1MemoryPostResponse parses an HTTP response from a RememberApiV1MemoryPostWithResponse call
+func ParseRememberApiV1MemoryPostResponse(rsp *http.Response) (*RememberApiV1MemoryPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RememberApiV1MemoryPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest MemoryEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseForgetApiV1MemoryScopeSlugDeleteResponse parses an HTTP response from a ForgetApiV1MemoryScopeSlugDeleteWithResponse call
+func ParseForgetApiV1MemoryScopeSlugDeleteResponse(rsp *http.Response) (*ForgetApiV1MemoryScopeSlugDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ForgetApiV1MemoryScopeSlugDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRecallApiV1MemoryScopeSlugGetResponse parses an HTTP response from a RecallApiV1MemoryScopeSlugGetWithResponse call
+func ParseRecallApiV1MemoryScopeSlugGetResponse(rsp *http.Response) (*RecallApiV1MemoryScopeSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RecallApiV1MemoryScopeSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MemoryEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePromoteApiV1MemoryScopeSlugPromotePostResponse parses an HTTP response from a PromoteApiV1MemoryScopeSlugPromotePostWithResponse call
+func ParsePromoteApiV1MemoryScopeSlugPromotePostResponse(rsp *http.Response) (*PromoteApiV1MemoryScopeSlugPromotePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PromoteApiV1MemoryScopeSlugPromotePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest MemoryEntry
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePostCallApiV1OperationsCallPostResponse parses an HTTP response from a PostCallApiV1OperationsCallPostWithResponse call
 func ParsePostCallApiV1OperationsCallPostResponse(rsp *http.Response) (*PostCallApiV1OperationsCallPostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -4907,6 +10696,39 @@ func ParseEvalEndpointApiV1RetrieveEvalPostResponse(rsp *http.Response) (*EvalEn
 	return response, nil
 }
 
+// ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse parses an HTTP response from a RetireChecklistEndpointApiV1RetrieveRetireChecklistPostWithResponse call
+func ParseRetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse(rsp *http.Response) (*RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RetireChecklistEndpointApiV1RetrieveRetireChecklistPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RetireChecklistReport
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseUsageEndpointApiV1RetrieveUsageGetResponse parses an HTTP response from a UsageEndpointApiV1RetrieveUsageGetWithResponse call
 func ParseUsageEndpointApiV1RetrieveUsageGetResponse(rsp *http.Response) (*UsageEndpointApiV1RetrieveUsageGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -5006,6 +10828,39 @@ func ParseCreateTargetApiV1TargetsPostResponse(rsp *http.Response) (*CreateTarge
 	return response, nil
 }
 
+// ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse parses an HTTP response from a DiscoverTargetsApiV1TargetsDiscoverGetWithResponse call
+func ParseDiscoverTargetsApiV1TargetsDiscoverGetResponse(rsp *http.Response) (*DiscoverTargetsApiV1TargetsDiscoverGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DiscoverTargetsApiV1TargetsDiscoverGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TargetsDiscoverResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDescribeTargetApiV1TargetsNameGetResponse parses an HTTP response from a DescribeTargetApiV1TargetsNameGetWithResponse call
 func ParseDescribeTargetApiV1TargetsNameGetResponse(rsp *http.Response) (*DescribeTargetApiV1TargetsNameGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -5088,6 +10943,296 @@ func ParseProbeTargetApiV1TargetsNameProbePostResponse(rsp *http.Response) (*Pro
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest FingerprintResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDependenciesApiV1TopologyDependenciesNameGetResponse parses an HTTP response from a DependenciesApiV1TopologyDependenciesNameGetWithResponse call
+func ParseDependenciesApiV1TopologyDependenciesNameGetResponse(rsp *http.Response) (*DependenciesApiV1TopologyDependenciesNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DependenciesApiV1TopologyDependenciesNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []TopologyNode
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDependentsApiV1TopologyDependentsNameGetResponse parses an HTTP response from a DependentsApiV1TopologyDependentsNameGetWithResponse call
+func ParseDependentsApiV1TopologyDependentsNameGetResponse(rsp *http.Response) (*DependentsApiV1TopologyDependentsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DependentsApiV1TopologyDependentsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []TopologyNode
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListEdgesRouteApiV1TopologyEdgesGetResponse parses an HTTP response from a ListEdgesRouteApiV1TopologyEdgesGetWithResponse call
+func ParseListEdgesRouteApiV1TopologyEdgesGetResponse(rsp *http.Response) (*ListEdgesRouteApiV1TopologyEdgesGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListEdgesRouteApiV1TopologyEdgesGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []TopologyEdge
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAnnotateEdgeRouteApiV1TopologyEdgesPostResponse parses an HTTP response from a AnnotateEdgeRouteApiV1TopologyEdgesPostWithResponse call
+func ParseAnnotateEdgeRouteApiV1TopologyEdgesPostResponse(rsp *http.Response) (*AnnotateEdgeRouteApiV1TopologyEdgesPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AnnotateEdgeRouteApiV1TopologyEdgesPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest TopologyEdge
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseBulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse parses an HTTP response from a BulkImportEdgesRouteApiV1TopologyEdgesBulkPostWithResponse call
+func ParseBulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse(rsp *http.Response) (*BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &BulkImportEdgesRouteApiV1TopologyEdgesBulkPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest UnderscoreBulkImportResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse parses an HTTP response from a UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse call
+func ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp *http.Response) (*UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePathApiV1TopologyPathGetResponse parses an HTTP response from a PathApiV1TopologyPathGetWithResponse call
+func ParsePathApiV1TopologyPathGetResponse(rsp *http.Response) (*PathApiV1TopologyPathGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PathApiV1TopologyPathGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TopologyPath
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRefreshApiV1TopologyRefreshTargetNamePostResponse parses an HTTP response from a RefreshApiV1TopologyRefreshTargetNamePostWithResponse call
+func ParseRefreshApiV1TopologyRefreshTargetNamePostResponse(rsp *http.Response) (*RefreshApiV1TopologyRefreshTargetNamePostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RefreshApiV1TopologyRefreshTargetNamePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RefreshResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseTimelineRouteApiV1TopologyTimelineGetResponse parses an HTTP response from a TimelineRouteApiV1TopologyTimelineGetWithResponse call
+func ParseTimelineRouteApiV1TopologyTimelineGetResponse(rsp *http.Response) (*TimelineRouteApiV1TopologyTimelineGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &TimelineRouteApiV1TopologyTimelineGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TopologyTimelineResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

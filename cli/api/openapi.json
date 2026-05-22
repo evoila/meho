@@ -1467,6 +1467,95 @@
         }
       }
     },
+    "/api/v1/topology/diff": {
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Diff Route",
+        "description": "Tenant-scoped graph-level diff between ``ts1`` and ``ts2``.\n\nWraps :func:`~meho_backplane.topology.query.query_diff` (G9.3-T4\n#860). Returns one entry per resource that mutated in\n``(ts1, ts2]``, folded into a net ``created`` / ``updated`` /\n``removed`` change_kind. Output is capped at 1000 entries with a\ntruncation marker + remediation hint -- the diff is the heavy\ntemporal query and the cap protects the API from a hostile / wide\ntime window.\n\nQuery parameters:\n\n* ``ts1`` -- exclusive lower bound on ``valid_from``.\n* ``ts2`` -- inclusive upper bound on ``valid_from``.\n* ``changed_only`` -- when ``true``, suppress ``updated`` entries\n  whose only mutation in the window was a ``last_seen``-bump\n  (refresh-service heartbeats). ``created`` / ``removed`` entries\n  always surface.\n* ``kind`` -- optional resource-kind filter (node ``kind`` like\n  ``vm`` or edge ``kind`` like ``runs-on``); applied after the\n  fold so the cap fires on the post-filter cohort.\n\nErrors:\n\n* **400 ``invalid_window``** -- ``ts1 >= ts2``. The substrate\n  raises :class:`ValueError`; the route surfaces it as a 400 with\n  the canonical message so the CLI / MCP fronts render a\n  consistent diagnostic.\n\nThe route binds ``audit_op_id=\"topology.diff\"`` /\n``audit_op_class=\"audit_query\"`` per the G9 audit-query convention\n(decision #3) -- temporal graph queries are inspections of system\nstate, parallel to G8's audit-log query surface, so the broadcast\nevent carries only ``{op_id, result_status, row_count}`` and the\nper-row payload never leaks onto the SSE / Slack feed. One\n``audit_log`` row per call from the chassis middleware.",
+        "operationId": "diff_route_api_v1_topology_diff_get",
+        "parameters": [
+          {
+            "name": "ts1",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "exclusive lower bound on valid_from",
+              "title": "Ts1"
+            },
+            "description": "exclusive lower bound on valid_from"
+          },
+          {
+            "name": "ts2",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "inclusive upper bound on valid_from",
+              "title": "Ts2"
+            },
+            "description": "inclusive upper bound on valid_from"
+          },
+          {
+            "name": "changed_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Changed Only"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologyDiffResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/feed": {
       "get": {
         "tags": [
@@ -6035,6 +6124,76 @@
         "type": "object",
         "title": "Thresholds",
         "description": "Per-metric green-band thresholds for a verdict computation.\n\nFrozen so the threshold object passed into :func:`verdict` cannot\nbe mutated mid-run (a stale or rewritten threshold mid-eval would\ninvalidate every subsequent verdict and silently shift the CI\ngate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,\nnot stored \u2014 keeping it derived means the contract \"yellow is 70%\nof green\" can't drift between green-threshold customisation and\nthe yellow boundary.\n\nDefaults match the Initiative #373 / Task #441 contract; tests and\nfuture re-tunings construct ``Thresholds(...)`` with explicit\nvalues."
+      },
+      "TopologyDiffEntry": {
+        "properties": {
+          "change_kind": {
+            "type": "string",
+            "title": "Change Kind"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Resource Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Name"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "change_kind",
+          "source",
+          "resource_id",
+          "kind",
+          "name",
+          "summary"
+        ],
+        "title": "TopologyDiffEntry",
+        "description": "One resource's net delta between ``ts1`` and ``ts2`` (G9.3-T4 #860).\n\nTask #860 ships the graph-level *diff* between two timestamps. Each\nentry summarises **one node or edge** that mutated in the window:\n\n* ``change_kind`` is the **net** change for the resource in\n  ``(ts1, ts2]``. The fold rule per resource:\n\n  - ``created`` -- the first history row in window is ``created``\n    and the last in-window row is not ``removed``.\n  - ``removed`` -- the last in-window row is ``removed``.\n  - ``updated`` -- the resource existed before ``ts1`` and has at\n    least one in-window mutation.\n\n  A resource ``created`` *and* ``removed`` inside the same window\n  nets to ``removed`` (the post-window state is \"gone\"). This is\n  the operator's mental model for \"what changed since ts1?\".\n\n* ``source`` -- ``\"node\"`` or ``\"edge\"`` (which history table the\n  resource was projected from).\n* ``resource_id`` -- ``graph_node.id`` or ``graph_edge.id`` of the\n  mutated resource. ``None`` only when the live row has been\n  hard-deleted post-window via ``ON DELETE SET NULL``; rare.\n* ``kind`` -- the resource's domain ``kind`` (``vm``, ``host``,\n  ``runs-on``, ``mounts``, ...). Picked from the post-state for\n  ``created``/``updated`` and from the pre-state for ``removed``\n  so the entry always carries a renderable kind even for\n  tombstones.\n* ``name`` -- ``graph_node.name`` for nodes; ``None`` for edges\n  (the edge snapshot does not carry endpoint names -- the snapshot\n  stores FKs, not names; the CLI uses ``--json`` + a separate node\n  lookup if the operator wants full endpoint detail).\n* ``summary`` -- one-line human-readable description, format\n  ``\"<change_kind> <source> <kind> <name>\"`` for nodes and\n  ``\"<change_kind> <source> <kind>\"`` for edges, matching the\n  timeline-entry summary style."
+      },
+      "TopologyDiffResult": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyDiffEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "truncation_hint": {
+            "type": "string",
+            "nullable": true,
+            "title": "Truncation Hint"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries",
+          "truncated",
+          "truncation_hint"
+        ],
+        "title": "TopologyDiffResult",
+        "description": "Result of :func:`query_diff` -- the diff entries plus a truncation flag.\n\nThe v0.2 diff surface enforces a **1000-row hard cap** (the substrate\ncap, mirrored by the CLI / REST / MCP fronts). When the seeded\ncohort of changed resources exceeds the cap, the result is truncated\nat 1000 entries and ``truncated`` flips to ``True``; ``truncation_hint``\ncarries the canonical operator-facing remediation line. Callers\nrendering a structured summary should surface the hint verbatim so\nevery front shows the same \"narrow the time window\" recovery path.\n\nAggregate counts (``created`` / ``updated`` / ``removed``) are\nderived from ``entries`` -- both the substrate result and the\nfronts compute the totals from the same source so a UI re-rendering\nthe JSON can rely on the counts matching the entries.\n\nOrdering: entries are returned in the same insertion order the\nsubstrate folds them in -- ``(source, resource_id)`` after a\nper-resource fold. Consumers wanting a presentation order\n(``removed`` first, then ``updated``, then ``created``) sort\nclient-side; the substrate stays out of presentation."
       },
       "TopologyEdge": {
         "properties": {

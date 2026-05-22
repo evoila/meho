@@ -109,6 +109,7 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_diff,
     query_timeline,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
@@ -161,7 +162,14 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "kind": {
             "type": "string",
-            "enum": ["dependents", "dependencies", "path", "edges", "timeline"],
+            "enum": [
+                "dependents",
+                "dependencies",
+                "path",
+                "edges",
+                "timeline",
+                "diff",
+            ],
             "description": (
                 "Which read shape to run. `dependents` = reverse closure "
                 "(what depends on `target`); `dependencies` = forward "
@@ -174,7 +182,11 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "the G9.3 `graph_node_history` + `graph_edge_history` "
                 "tables, cursor-paginated -- 'what's been happening in "
                 "the graph in the last hour?' without rooting at a "
-                "specific resource."
+                "specific resource; `diff` = net per-resource delta "
+                "between two timestamps (`ts1` exclusive, `ts2` "
+                "inclusive) -- 'what changed between 9am and 11am?'. "
+                "Output is hard-capped at 1000 entries with a "
+                "truncation marker + 'narrow the time window' hint."
             ),
         },
         "target": {
@@ -349,6 +361,38 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             ),
             "maxLength": 1024,
         },
+        "ts1": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 EXCLUSIVE lower bound for `kind=diff` -- "
+                "rows with `valid_from > ts1` enter the fold. Required "
+                "for `kind=diff`; ignored for the other kinds. Must "
+                "be strictly less than `ts2`; an inverted window "
+                "returns -32602."
+            ),
+            "format": "date-time",
+        },
+        "ts2": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 INCLUSIVE upper bound for `kind=diff` -- "
+                "rows with `valid_from <= ts2` enter the fold. Required "
+                "for `kind=diff`."
+            ),
+            "format": "date-time",
+        },
+        "changed_only": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When `true` with `kind=diff`, suppress `updated` "
+                "entries whose every in-window history row was a "
+                "`last_seen`-only refresh heartbeat (the refresh "
+                "service's 'I observed this row again at T+15m' "
+                "emission). `created` / `removed` entries always "
+                "surface. Ignored for the other kinds."
+            ),
+        },
     },
     "required": ["kind"],
     "additionalProperties": False,
@@ -369,6 +413,10 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
         {
             "if": {"properties": {"kind": {"const": "path"}}},
             "then": {"required": ["from_name", "to_name"]},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "diff"}}},
+            "then": {"required": ["ts1", "ts2"]},
         },
     ],
 }
@@ -416,7 +464,21 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "means more rows exist -- pass it back as `cursor` on the next "
     "call to walk forward. Returns "
     '`{kind: "timeline", rows: [TopologyTimelineEntry, ...], '
-    "next_cursor: <token|null>}`."
+    "next_cursor: <token|null>}`.\n\n"
+    "For `kind=diff`: graph-level net delta between two timestamps -- "
+    "'what changed between 9am and 11am?' → `query_topology {kind: "
+    "diff, ts1: 2026-05-22T09:00:00Z, ts2: 2026-05-22T11:00:00Z}`. "
+    "Each entry is one resource's NET change in `(ts1, ts2]` "
+    "(`created` / `updated` / `removed`); a resource created and "
+    "removed in the same window nets to `removed`. Use "
+    "`changed_only: true` to suppress refresh-heartbeat updates "
+    "(rows whose only mutation was a `last_seen` bump). Output is "
+    "hard-capped at 1000 entries -- when the cap fires, "
+    "`truncated: true` and `truncation_hint` carries the canonical "
+    "'narrow the time window' message; the operator narrows `ts1` / "
+    "`ts2` or filters by `kind_filter` and retries. Returns "
+    '`{kind: "diff", entries: [TopologyDiffEntry, ...], '
+    "truncated: bool, truncation_hint: <str|null>}`."
 )
 
 
@@ -463,6 +525,8 @@ async def _query_topology_handler(
             return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
         if kind == "timeline":
             return await _timeline_facet(operator, arguments)
+        if kind == "diff":
+            return await _diff_facet(operator, arguments)
         # kind == "path" — the enum + schema guarantee no other value.
         result = await find_path(
             operator,
@@ -546,6 +610,75 @@ async def _timeline_facet(
     }
 
 
+async def _diff_facet(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch the ``kind="diff"`` facet to G9.3-T4's substrate.
+
+    Parses ISO-8601 strings from ``ts1`` / ``ts2`` (the MCP wire only
+    carries strings -- the CLI adds duration-shorthand convenience and
+    resolves to absolute timestamps before crossing the wire, mirroring
+    the timeline facet's split). The substrate raises
+    :class:`ValueError` on an inverted window (``ts1 >= ts2``); that is
+    an operator-actionable input problem and surfaces as JSON-RPC
+    ``-32602`` so the agent sees the diagnostic inline.
+
+    The 1000-row cap is enforced inside :func:`query_diff`; this facet
+    is a thin parameter shim that does not re-implement the cap.
+    """
+    ts1_str = arguments.get("ts1")
+    ts2_str = arguments.get("ts2")
+    # ``ts1`` / ``ts2`` are required by the inputSchema's allOf clause
+    # for ``kind=diff``, but a non-string sentinel (None / numeric)
+    # would slip past the jsonschema ``type: string`` check on a
+    # client that bypasses the validator. The isinstance guards
+    # therefore stay -- they parse the happy path and reject the
+    # never-validated path consistently.
+    if not isinstance(ts1_str, str):
+        raise McpInvalidParamsError(
+            "query_topology(kind=diff): 'ts1' must be an ISO-8601 string",
+        )
+    if not isinstance(ts2_str, str):
+        raise McpInvalidParamsError(
+            "query_topology(kind=diff): 'ts2' must be an ISO-8601 string",
+        )
+    try:
+        ts1_dt = datetime.fromisoformat(ts1_str)
+    except ValueError as exc:
+        raise McpInvalidParamsError(
+            f"query_topology(kind=diff): 'ts1' is not ISO-8601: {ts1_str!r}",
+        ) from exc
+    try:
+        ts2_dt = datetime.fromisoformat(ts2_str)
+    except ValueError as exc:
+        raise McpInvalidParamsError(
+            f"query_topology(kind=diff): 'ts2' is not ISO-8601: {ts2_str!r}",
+        ) from exc
+
+    try:
+        result = await query_diff(
+            operator,
+            ts1=ts1_dt,
+            ts2=ts2_dt,
+            changed_only=bool(arguments.get("changed_only", False)),
+            kind_filter=arguments.get("kind_filter"),
+        )
+    except ValueError as exc:
+        # Empty / inverted window -- the substrate raises ValueError
+        # with both timestamps named in the message. Surface as -32602
+        # so the agent sees the diagnostic inline rather than as a
+        # -32603 Internal Error.
+        raise McpInvalidParamsError(str(exc)) from exc
+
+    return {
+        "kind": "diff",
+        "entries": [e.model_dump(mode="json") for e in result.entries],
+        "truncated": result.truncated,
+        "truncation_hint": result.truncation_hint,
+    }
+
+
 async def _list_edges_facet(
     operator: Operator,
     arguments: dict[str, Any],
@@ -596,6 +729,7 @@ register_mcp_tool(
                         "path",
                         "edges",
                         "timeline",
+                        "diff",
                     ],
                 },
                 "nodes": {
@@ -639,6 +773,33 @@ register_mcp_tool(
                         "Present for `kind=timeline`. Opaque next-page "
                         "token, or null when the page is the end of the "
                         "matching set."
+                    ),
+                },
+                "entries": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Present for `kind=diff`. TopologyDiffEntry rows "
+                        "in substrate insertion order (node side first, "
+                        "then edge side; first-seen `resource_id` order "
+                        "within each side). See `meho_backplane.topology."
+                        "schemas.TopologyDiffEntry`."
+                    ),
+                },
+                "truncated": {
+                    "type": "boolean",
+                    "description": (
+                        "Present for `kind=diff`. `true` when the 1000-"
+                        "row hard cap fired; pair with `truncation_hint` "
+                        "for the operator-facing remediation."
+                    ),
+                },
+                "truncation_hint": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Present for `kind=diff`. Operator-facing "
+                        "'narrow the time window' message when "
+                        "`truncated=true`; null otherwise."
                     ),
                 },
             },

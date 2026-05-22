@@ -123,11 +123,13 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_diff,
     query_timeline,
 )
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import (
+    TopologyDiffResult,
     TopologyEdge,
     TopologyEdgeEndpoint,
     TopologyNode,
@@ -166,6 +168,7 @@ _OP_UNANNOTATE = "topology.unannotate"
 _OP_LIST_EDGES = "topology.list_edges"
 _OP_BULK_IMPORT = "topology.bulk_import"
 _OP_TIMELINE = "topology.timeline"
+_OP_DIFF = "topology.diff"
 
 #: HTTP-boundary ceiling on the number of edges accepted in one
 #: ``POST /edges/bulk`` body. The consumer's INVENTORY.md
@@ -1004,4 +1007,80 @@ async def timeline_route(
 
     # Broadcast aggregate signal: row count only, never per-row payload.
     structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T4 (#860) — graph-level diff between two timestamps
+# ---------------------------------------------------------------------------
+
+
+@router.get("/diff", response_model=TopologyDiffResult)
+async def diff_route(
+    ts1: datetime = Query(..., description="exclusive lower bound on valid_from"),
+    ts2: datetime = Query(..., description="inclusive upper bound on valid_from"),
+    changed_only: bool = Query(default=False),
+    kind: str | None = Query(default=None, max_length=64),
+    operator: Operator = _require_operator,
+) -> TopologyDiffResult:
+    """Tenant-scoped graph-level diff between ``ts1`` and ``ts2``.
+
+    Wraps :func:`~meho_backplane.topology.query.query_diff` (G9.3-T4
+    #860). Returns one entry per resource that mutated in
+    ``(ts1, ts2]``, folded into a net ``created`` / ``updated`` /
+    ``removed`` change_kind. Output is capped at 1000 entries with a
+    truncation marker + remediation hint -- the diff is the heavy
+    temporal query and the cap protects the API from a hostile / wide
+    time window.
+
+    Query parameters:
+
+    * ``ts1`` -- exclusive lower bound on ``valid_from``.
+    * ``ts2`` -- inclusive upper bound on ``valid_from``.
+    * ``changed_only`` -- when ``true``, suppress ``updated`` entries
+      whose only mutation in the window was a ``last_seen``-bump
+      (refresh-service heartbeats). ``created`` / ``removed`` entries
+      always surface.
+    * ``kind`` -- optional resource-kind filter (node ``kind`` like
+      ``vm`` or edge ``kind`` like ``runs-on``); applied after the
+      fold so the cap fires on the post-filter cohort.
+
+    Errors:
+
+    * **400 ``invalid_window``** -- ``ts1 >= ts2``. The substrate
+      raises :class:`ValueError`; the route surfaces it as a 400 with
+      the canonical message so the CLI / MCP fronts render a
+      consistent diagnostic.
+
+    The route binds ``audit_op_id="topology.diff"`` /
+    ``audit_op_class="audit_query"`` per the G9 audit-query convention
+    (decision #3) -- temporal graph queries are inspections of system
+    state, parallel to G8's audit-log query surface, so the broadcast
+    event carries only ``{op_id, result_status, row_count}`` and the
+    per-row payload never leaks onto the SSE / Slack feed. One
+    ``audit_log`` row per call from the chassis middleware.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_DIFF,
+        audit_op_class="audit_query",
+    )
+    try:
+        result = await query_diff(
+            operator,
+            ts1=ts1,
+            ts2=ts2,
+            changed_only=changed_only,
+            kind_filter=kind,
+        )
+    except ValueError as exc:
+        # ``ts1 >= ts2`` -- empty / inverted window. The substrate's
+        # message names both values; surface as 400 so the operator
+        # gets the diagnostic without a 500 round trip.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_window", "message": str(exc)},
+        ) from exc
+
+    # Broadcast aggregate signal: entry count only, never per-row payload.
+    structlog.contextvars.bind_contextvars(audit_row_count=len(result.entries))
     return result

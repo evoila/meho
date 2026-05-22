@@ -239,12 +239,12 @@ def test_no_separate_list_edges_tool_registered() -> None:
 
 
 def test_query_topology_input_schema_includes_edges_facet() -> None:
-    """The kind enum widened to include 'edges' / 'timeline' with no extra
-    required field.
+    """The kind enum widened to include 'edges' / 'timeline' / 'diff'.
 
-    G9.2-T7 (#598) added ``edges``; G9.3-T5 (#861) added ``timeline``.
-    Both extra kinds have no conditional required clause -- every
-    filter on either facet is optional.
+    G9.2-T7 (#598) added ``edges``; G9.3-T5 (#861) added ``timeline``;
+    G9.3-T4 (#860) added ``diff``. ``edges`` / ``timeline`` have no
+    conditional required clause -- every filter on either facet is
+    optional. ``diff`` requires both timestamps (``ts1``, ``ts2``).
     """
     entry = get_tool("query_topology")
     assert entry is not None
@@ -256,14 +256,16 @@ def test_query_topology_input_schema_includes_edges_facet() -> None:
         "path",
         "edges",
         "timeline",
+        "diff",
     ]
-    # No extra `allOf` clauses for `edges` / `timeline` -- both have
-    # no required fields. The other three branches stay as-is.
+    # `edges` / `timeline` have no required field; `diff` requires
+    # `ts1` + `ts2`. The other three branches stay as-is.
     by_kind = {
         c["if"]["properties"]["kind"]["const"]: c["then"]["required"] for c in schema["allOf"]
     }
     assert "edges" not in by_kind
     assert "timeline" not in by_kind
+    assert sorted(by_kind["diff"]) == ["ts1", "ts2"]
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     # The new filter knobs surface as optional properties on the schema.

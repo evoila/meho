@@ -99,8 +99,9 @@ f-string with the join columns swapped.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from sqlalchemy import DateTime, bindparam, text
@@ -117,6 +118,8 @@ from meho_backplane.topology.resolvers import (
     resolve_node,
 )
 from meho_backplane.topology.schemas import (
+    TopologyDiffEntry,
+    TopologyDiffResult,
     TopologyEdge,
     TopologyEdgeEndpoint,
     TopologyNode,
@@ -144,6 +147,7 @@ __all__ = [
     "find_dependents",
     "find_path",
     "list_edges",
+    "query_diff",
     "query_timeline",
 ]
 
@@ -1347,3 +1351,422 @@ def _merge_has_leftovers(
     consumed_nodes = sum(1 for r in merged if r.source == "node")
     consumed_edges = len(merged) - consumed_nodes
     return consumed_nodes < len(node_rows) or consumed_edges < len(edge_rows)
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T4 (#860) — graph-level diff between two timestamps
+# ---------------------------------------------------------------------------
+#
+# ``query_diff`` is the heavy temporal query: per resource, fold every
+# in-window history row into a single net delta (created / updated /
+# removed) for ``(ts1, ts2]``. The fold rule:
+#
+#   * created -- first in-window row is ``created`` AND last is not
+#     ``removed``.
+#   * removed -- last in-window row is ``removed``. (Includes the
+#     "created and removed in the same window" case: the post-window
+#     state is "gone".)
+#   * updated -- otherwise (the resource existed before ``ts1`` and has
+#     at least one in-window mutation that isn't a net delete).
+#
+# ``--changed-only`` suppresses ``updated`` entries whose only mutation
+# in the window was a ``last_seen``-bump (the refresh service's "I
+# observed this row again at T+15m" emission). The substrate folds these
+# by comparing the snapshot's ``before`` and ``after`` projections: if
+# the only differing field is ``last_seen``, the row is a refresh
+# heartbeat and gets dropped under the flag.
+#
+# The 1000-row cap is enforced at the substrate -- the CLI / REST / MCP
+# fronts mirror it but the substrate is authoritative. Truncation
+# returns a partial result with ``truncated=True`` plus the canonical
+# "narrow the time window" hint; consumers render the hint verbatim.
+
+#: Hard ceiling on diff entries returned in one call. v0.2 contract per
+#: the Task #860 acceptance criterion ("output exceeding 1000 rows
+#: returns a truncation marker + remediation hint"). The cap is at the
+#: substrate so a non-route caller (REPL, MCP front, CLI) cannot
+#: accidentally request an unbounded fold.
+_DIFF_HARD_CAP: Final[int] = 1000
+
+#: Canonical operator-facing remediation surfaced verbatim on every
+#: front when the cap fires. Pinned as a module constant so the CLI /
+#: REST / MCP wording stays in lock-step without duplicating the string
+#: across three layers.
+_DIFF_TRUNCATION_HINT: Final[str] = (
+    "diff output truncated at the 1000-row hard cap; narrow the "
+    "time window (ts1..ts2) or filter by --kind to reduce churn."
+)
+
+
+# Two literal SQL statements -- one per history table -- pulling every
+# in-window row tenant-scoped. The fold is Python-side because the
+# per-resource "first vs last in-window row" rule is awkward in pure
+# SQL and the projection-shape diff for ``--changed-only`` needs access
+# to the deserialised snapshot. Indexes the queries lean on (migration
+# 0012): ``graph_*_history_tenant_valid_from_idx`` -- composite
+# ``(tenant_id, valid_from DESC)`` so the per-tenant slice is sub-ms
+# under realistic load.
+#
+# ``valid_from`` is ``>`` ``ts1`` (exclusive lower) and ``<=`` ``ts2``
+# (inclusive upper) per the Task #860 contract.
+#
+# Ordering: ``valid_from ASC, history_id ASC`` so the fold sees the
+# in-window rows in chronological order. The "first vs last" rule then
+# falls out of a single left-to-right pass per resource.
+_DIFF_NODE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.node_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.valid_from    AS valid_from
+    FROM graph_node_history h
+    WHERE h.tenant_id = :tenant_id
+      AND h.valid_from > :ts1
+      AND h.valid_from <= :ts2
+    ORDER BY h.valid_from ASC, h.history_id ASC
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("ts1", type_=DateTime(timezone=True)),
+    bindparam("ts2", type_=DateTime(timezone=True)),
+)
+
+_DIFF_EDGE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.edge_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.valid_from    AS valid_from
+    FROM graph_edge_history h
+    WHERE h.tenant_id = :tenant_id
+      AND h.valid_from > :ts1
+      AND h.valid_from <= :ts2
+    ORDER BY h.valid_from ASC, h.history_id ASC
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("ts1", type_=DateTime(timezone=True)),
+    bindparam("ts2", type_=DateTime(timezone=True)),
+)
+
+
+def _deserialise_snapshot(snapshot_raw: Any) -> dict[str, Any] | None:
+    """Coerce a snapshot column value into a dict-or-None.
+
+    Asyncpg's JSONB codec returns ``dict``; SQLite (the test DB) returns
+    a JSON-encoded string because the ``text()`` literal bypasses the
+    ORM column-type round-trip. Mirrors :func:`_row_to_timeline_entry`'s
+    snapshot coercion so the same deserialisation rule applies to every
+    history-table read path.
+    """
+    if isinstance(snapshot_raw, dict):
+        return snapshot_raw
+    if isinstance(snapshot_raw, str):
+        try:
+            parsed = json.loads(snapshot_raw)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    return None
+
+
+def _snapshot_side(snapshot: dict[str, Any] | None, key: str) -> dict[str, Any] | None:
+    """Pick the ``before`` or ``after`` side of a snapshot, or None.
+
+    Returns the side as a plain dict; ``None`` when the side is absent
+    or non-dict (e.g. ``created`` rows have ``before=None``).
+    """
+    if snapshot is None:
+        return None
+    side = snapshot.get(key)
+    if isinstance(side, dict):
+        return side
+    return None
+
+
+def _is_last_seen_only_change(snapshot: dict[str, Any] | None) -> bool:
+    """Detect an ``updated`` row whose only diff is ``last_seen``.
+
+    The refresh service emits an ``updated`` history row whenever a
+    probed live row's column changes -- including ``last_seen``-only
+    bumps from the periodic refresh ("I observed this row again at
+    T+15m"). The ``--changed-only`` flag exists precisely to suppress
+    these refresh heartbeats from a diff so the operator sees only
+    substantive change.
+
+    Returns ``True`` only when both snapshot sides are dicts that share
+    every key with identical values *except* ``last_seen``. A snapshot
+    missing either side (a ``created`` or ``removed`` row, where the
+    flag is irrelevant in the first place) returns ``False`` so the
+    caller never accidentally drops a non-``updated`` row.
+    """
+    before = _snapshot_side(snapshot, "before")
+    after = _snapshot_side(snapshot, "after")
+    if before is None or after is None:
+        return False
+    # Same key set -- if a key was added or removed that itself is a
+    # substantive change worth surfacing.
+    if set(before.keys()) != set(after.keys()):
+        return False
+    for key, before_value in before.items():
+        if key == "last_seen":
+            continue
+        if before_value != after.get(key):
+            return False
+    return True
+
+
+def _pick_kind_for_entry(rows: list[Row[Any]], net_kind: str) -> str:
+    """Pick a renderable ``kind`` from a resource's in-window history rows.
+
+    For a ``removed`` resource the operator wants to see what was
+    removed -- pull the ``kind`` from the pre-state of the last row.
+    For ``created`` / ``updated`` the post-state of the last row
+    carries the current kind. Falls back to ``"unknown"`` only when
+    both snapshot sides are missing (a legacy row from a pre-hook
+    era), preserving the entry rather than dropping it.
+    """
+    last = rows[-1]
+    snapshot = _deserialise_snapshot(last._mapping["snapshot"])
+    if net_kind == "removed":
+        side = _snapshot_side(snapshot, "before")
+        if side is not None and "kind" in side:
+            return str(side["kind"])
+    side = _snapshot_side(snapshot, "after")
+    if side is not None and "kind" in side:
+        return str(side["kind"])
+    side = _snapshot_side(snapshot, "before")
+    if side is not None and "kind" in side:
+        return str(side["kind"])
+    return "unknown"
+
+
+def _pick_name_for_node_entry(rows: list[Row[Any]], net_kind: str) -> str | None:
+    """Pick a renderable ``name`` for a node entry from its history rows.
+
+    Mirror of :func:`_pick_kind_for_entry` for the ``name`` column.
+    Edges return ``None`` (the edge snapshot does not carry a name --
+    only endpoint FKs).
+    """
+    last = rows[-1]
+    snapshot = _deserialise_snapshot(last._mapping["snapshot"])
+    if net_kind == "removed":
+        side = _snapshot_side(snapshot, "before")
+        if side is not None and "name" in side:
+            return str(side["name"])
+    side = _snapshot_side(snapshot, "after")
+    if side is not None and "name" in side:
+        return str(side["name"])
+    side = _snapshot_side(snapshot, "before")
+    if side is not None and "name" in side:
+        return str(side["name"])
+    return None
+
+
+def _fold_to_net_kind(rows: list[Row[Any]]) -> str:
+    """Fold a resource's in-window history rows into one net ``change_kind``.
+
+    The fold rule per resource over the window ``(ts1, ts2]``:
+
+    * First in-window row is ``created`` AND last is not ``removed``
+      -> ``created``.
+    * Last in-window row is ``removed`` -> ``removed`` (includes the
+      created-and-removed-in-same-window case; the post-window state
+      is "gone").
+    * Otherwise -> ``updated`` (the resource existed before ``ts1`` and
+      mutated in window).
+    """
+    first_kind = rows[0]._mapping["change_kind"]
+    last_kind = rows[-1]._mapping["change_kind"]
+    if last_kind == "removed":
+        return "removed"
+    if first_kind == "created":
+        return "created"
+    return "updated"
+
+
+def _all_window_rows_are_last_seen_only(rows: list[Row[Any]]) -> bool:
+    """True when every in-window ``updated`` row is a ``last_seen``-only bump.
+
+    For ``--changed-only`` we suppress an entry whose net kind is
+    ``updated`` AND every constituent in-window row is a ``last_seen``-only
+    refresh heartbeat. If any in-window row is a substantive change
+    (kind changed, properties changed, target_id moved, etc.) the entry
+    survives because the operator does want to see the substantive
+    column flip even if the cohort also includes refresh bumps. A
+    ``created`` or ``removed`` entry is never a refresh heartbeat by
+    construction, so this check is only relevant for the
+    ``updated`` net-kind branch.
+    """
+    for row in rows:
+        if row._mapping["change_kind"] != "updated":
+            return False
+        snapshot = _deserialise_snapshot(row._mapping["snapshot"])
+        if not _is_last_seen_only_change(snapshot):
+            return False
+    return True
+
+
+def _build_diff_entry(
+    rows: list[Row[Any]],
+    *,
+    source: str,
+    resource_id: UUID | None,
+    changed_only: bool,
+) -> TopologyDiffEntry | None:
+    """Fold one resource's history rows into a single :class:`TopologyDiffEntry`.
+
+    Returns ``None`` when the entry should be suppressed under
+    ``changed_only`` (an ``updated`` net-kind whose every in-window row
+    is a ``last_seen``-only refresh heartbeat).
+
+    Summary format mirrors :func:`_format_node_summary` /
+    :func:`_format_edge_summary` so the diff and timeline surfaces read
+    consistently: ``"<change_kind> <source> <kind>[ <name>]"``.
+    """
+    net_kind = _fold_to_net_kind(rows)
+    if changed_only and net_kind == "updated" and _all_window_rows_are_last_seen_only(rows):
+        return None
+    domain_kind = _pick_kind_for_entry(rows, net_kind)
+    name = _pick_name_for_node_entry(rows, net_kind) if source == "node" else None
+    if name is None:
+        summary = f"{net_kind} {source} {domain_kind}"
+    else:
+        summary = f"{net_kind} {source} {domain_kind} {name}"
+    return TopologyDiffEntry(
+        change_kind=net_kind,
+        source=source,
+        resource_id=resource_id,
+        kind=domain_kind,
+        name=name,
+        summary=summary,
+    )
+
+
+def _group_rows_by_resource(
+    rows: Sequence[Row[Any]],
+) -> list[tuple[UUID | None, list[Row[Any]]]]:
+    """Group history rows by ``resource_id`` preserving first-occurrence order.
+
+    The SQL returns rows in ``(valid_from ASC, history_id ASC)`` order;
+    grouping by ``resource_id`` while keeping the first-seen order
+    gives the substrate a deterministic per-resource ordering for the
+    cap. Tombstone rows (``resource_id IS NULL``) are grouped together
+    under the ``None`` key -- they are rare and represent post-window
+    hard-deletes, where the operator sees them as one combined
+    "deleted resources" entry rather than per-row chatter.
+
+    Returns a list of ``(resource_id, rows)`` tuples in first-occurrence
+    order, so a caller iterating it sees the same order in every call
+    (important for the cap-stable truncation behaviour).
+    """
+    by_id: dict[UUID | None, list[Row[Any]]] = {}
+    order: list[UUID | None] = []
+    for row in rows:
+        rid = row._mapping["resource_id"]
+        if rid not in by_id:
+            by_id[rid] = []
+            order.append(rid)
+        by_id[rid].append(row)
+    return [(rid, by_id[rid]) for rid in order]
+
+
+async def query_diff(
+    operator: Operator,
+    *,
+    ts1: datetime,
+    ts2: datetime,
+    changed_only: bool = False,
+    kind_filter: str | None = None,
+) -> TopologyDiffResult:
+    """Graph-level diff between ``ts1`` (exclusive) and ``ts2`` (inclusive).
+
+    Initiative #365 (G9.3), Task #860 (T4). Walks
+    :class:`GraphNodeHistory` + :class:`GraphEdgeHistory` tenant-scoped
+    on ``operator.tenant_id`` and folds every in-window row per
+    resource into one net ``created`` / ``updated`` / ``removed``
+    entry. Returns at most :data:`_DIFF_HARD_CAP` entries; on overflow,
+    ``truncated=True`` and ``truncation_hint`` carries the canonical
+    "narrow the time window" remediation.
+
+    Args:
+        operator: The calling operator. ``tenant_id`` lifted from the
+            JWT; never sourced from caller-controllable args.
+        ts1: Exclusive lower bound on ``valid_from``.
+        ts2: Inclusive upper bound on ``valid_from``.
+        changed_only: When ``True``, suppress ``updated`` entries
+            whose every in-window history row is a ``last_seen``-only
+            refresh heartbeat. ``created`` / ``removed`` entries are
+            never affected (by construction they are not heartbeats).
+        kind_filter: Optional resource-kind filter -- restrict the
+            result to entries whose domain ``kind`` matches (node
+            ``kind`` like ``vm``, or edge ``kind`` like ``runs-on``).
+            Filter is applied **after** the fold so the cap fires on
+            the post-filter cohort.
+
+    Returns:
+        :class:`TopologyDiffResult`. ``entries`` is ordered by
+        first-seen ``resource_id`` from the underlying SQL scan;
+        consumers wanting a presentation order sort client-side.
+
+    Raises:
+        ValueError: ``ts1 >= ts2`` -- the window must be non-empty;
+            an empty / inverted window is an operator-actionable input
+            problem and surfaced before any DB call.
+    """
+    if not ts1 < ts2:
+        raise ValueError(f"query_diff requires ts1 < ts2; got ts1={ts1!r}, ts2={ts2!r}")
+
+    bind_params: dict[str, Any] = {
+        "tenant_id": operator.tenant_id,
+        "ts1": ts1,
+        "ts2": ts2,
+    }
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        node_result = await session.execute(_DIFF_NODE_SQL, bind_params)
+        node_rows = node_result.fetchall()
+        edge_result = await session.execute(_DIFF_EDGE_SQL, bind_params)
+        edge_rows = edge_result.fetchall()
+
+    entries: list[TopologyDiffEntry] = []
+    truncated = False
+
+    # Fold node side first, then edge side. Within a side the SQL's
+    # ``ORDER BY valid_from ASC, history_id ASC`` ordering is preserved
+    # by :func:`_group_rows_by_resource`, so the per-side iteration is
+    # deterministic. Across sides, nodes come before edges -- a stable
+    # presentation order that mirrors the timeline tie-breaker (node
+    # before edge at the same key).
+    for source_label, raw_rows in (("node", node_rows), ("edge", edge_rows)):
+        groups = _group_rows_by_resource(raw_rows)
+        for resource_id, group_rows in groups:
+            entry = _build_diff_entry(
+                group_rows,
+                source=source_label,
+                resource_id=resource_id,
+                changed_only=changed_only,
+            )
+            if entry is None:
+                continue
+            if kind_filter is not None and entry.kind != kind_filter:
+                continue
+            if len(entries) >= _DIFF_HARD_CAP:
+                truncated = True
+                break
+            entries.append(entry)
+        if truncated:
+            break
+
+    return TopologyDiffResult(
+        entries=tuple(entries),
+        truncated=truncated,
+        truncation_hint=_DIFF_TRUNCATION_HINT if truncated else None,
+    )

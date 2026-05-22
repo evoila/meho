@@ -161,14 +161,17 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     # G9.2-T7 (#598) widened the enum with the `edges` facet (replaces a
     # standalone list_edges meta-tool); G9.3-T5 (#861) added the
     # `timeline` facet (tenant-wide chronological feed of graph
-    # changes from the *_history tables). The closure / path branches
-    # and their conditional requireds stay unchanged.
+    # changes from the *_history tables); G9.3-T4 (#860) added the
+    # `diff` facet (net per-resource delta between two timestamps).
+    # The closure / path branches and their conditional requireds stay
+    # unchanged.
     assert wire_schema["properties"]["kind"]["enum"] == [
         "dependents",
         "dependencies",
         "path",
         "edges",
         "timeline",
+        "diff",
     ]
     # The wire shape carries NO top-level combinator — Anthropic 400s on
     # it (#905); the conditional logic moved to the stored schema below.
@@ -189,6 +192,8 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     assert sorted(by_kind["path"]) == ["from_name", "to_name"]
+    # `diff` requires both timestamps.
+    assert sorted(by_kind["diff"]) == ["ts1", "ts2"]
     # `edges` and `timeline` have no required field — every filter is
     # optional on both facets.
     assert "edges" not in by_kind

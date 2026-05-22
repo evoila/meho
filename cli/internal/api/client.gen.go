@@ -1532,6 +1532,83 @@ type Thresholds struct {
 	PrecisionAt5 *float32 `json:"precision_at_5,omitempty"`
 }
 
+// TopologyDiffEntry One resource's net delta between “ts1“ and “ts2“ (G9.3-T4 #860).
+//
+// Task #860 ships the graph-level *diff* between two timestamps. Each
+// entry summarises **one node or edge** that mutated in the window:
+//
+//   - “change_kind“ is the **net** change for the resource in
+//     “(ts1, ts2]“. The fold rule per resource:
+//
+//   - “created“ -- the first history row in window is “created“
+//     and the last in-window row is not “removed“.
+//
+//   - “removed“ -- the last in-window row is “removed“.
+//
+//   - “updated“ -- the resource existed before “ts1“ and has at
+//     least one in-window mutation.
+//
+//     A resource “created“ *and* “removed“ inside the same window
+//     nets to “removed“ (the post-window state is "gone"). This is
+//     the operator's mental model for "what changed since ts1?".
+//
+//   - “source“ -- “"node"“ or “"edge"“ (which history table the
+//     resource was projected from).
+//
+//   - “resource_id“ -- “graph_node.id“ or “graph_edge.id“ of the
+//     mutated resource. “None“ only when the live row has been
+//     hard-deleted post-window via “ON DELETE SET NULL“; rare.
+//
+//   - “kind“ -- the resource's domain “kind“ (“vm“, “host“,
+//     “runs-on“, “mounts“, ...). Picked from the post-state for
+//     “created“/“updated“ and from the pre-state for “removed“
+//     so the entry always carries a renderable kind even for
+//     tombstones.
+//
+//   - “name“ -- “graph_node.name“ for nodes; “None“ for edges
+//     (the edge snapshot does not carry endpoint names -- the snapshot
+//     stores FKs, not names; the CLI uses “--json“ + a separate node
+//     lookup if the operator wants full endpoint detail).
+//
+//   - “summary“ -- one-line human-readable description, format
+//     “"<change_kind> <source> <kind> <name>"“ for nodes and
+//     “"<change_kind> <source> <kind>"“ for edges, matching the
+//     timeline-entry summary style.
+type TopologyDiffEntry struct {
+	ChangeKind string              `json:"change_kind"`
+	Kind       string              `json:"kind"`
+	Name       *string             `json:"name"`
+	ResourceId *openapi_types.UUID `json:"resource_id"`
+	Source     string              `json:"source"`
+	Summary    string              `json:"summary"`
+}
+
+// TopologyDiffResult Result of :func:`query_diff` -- the diff entries plus a truncation flag.
+//
+// The v0.2 diff surface enforces a **1000-row hard cap** (the substrate
+// cap, mirrored by the CLI / REST / MCP fronts). When the seeded
+// cohort of changed resources exceeds the cap, the result is truncated
+// at 1000 entries and “truncated“ flips to “True“; “truncation_hint“
+// carries the canonical operator-facing remediation line. Callers
+// rendering a structured summary should surface the hint verbatim so
+// every front shows the same "narrow the time window" recovery path.
+//
+// Aggregate counts (“created“ / “updated“ / “removed“) are
+// derived from “entries“ -- both the substrate result and the
+// fronts compute the totals from the same source so a UI re-rendering
+// the JSON can rely on the counts matching the entries.
+//
+// Ordering: entries are returned in the same insertion order the
+// substrate folds them in -- “(source, resource_id)“ after a
+// per-resource fold. Consumers wanting a presentation order
+// (“removed“ first, then “updated“, then “created“) sort
+// client-side; the substrate stays out of presentation.
+type TopologyDiffResult struct {
+	Entries        []TopologyDiffEntry `json:"entries"`
+	Truncated      bool                `json:"truncated"`
+	TruncationHint *string             `json:"truncation_hint"`
+}
+
 // TopologyEdge One “graph_edge“ row returned by :func:`list_edges`.
 //
 // Flat edge summary (no traversal context — there is no “depth“ or
@@ -2255,6 +2332,18 @@ type DependentsApiV1TopologyDependentsNameGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DiffRouteApiV1TopologyDiffGetParams defines parameters for DiffRouteApiV1TopologyDiffGet.
+type DiffRouteApiV1TopologyDiffGetParams struct {
+	// Ts1 exclusive lower bound on valid_from
+	Ts1 time.Time `form:"ts1" json:"ts1"`
+
+	// Ts2 inclusive upper bound on valid_from
+	Ts2           time.Time `form:"ts2" json:"ts2"`
+	ChangedOnly   *bool     `form:"changed_only,omitempty" json:"changed_only,omitempty"`
+	Kind          *string   `form:"kind,omitempty" json:"kind,omitempty"`
+	Authorization *string   `json:"authorization,omitempty"`
+}
+
 // ListEdgesRouteApiV1TopologyEdgesGetParams defines parameters for ListEdgesRouteApiV1TopologyEdgesGet.
 type ListEdgesRouteApiV1TopologyEdgesGetParams struct {
 	Kind          *GraphEdgeKind `form:"kind,omitempty" json:"kind,omitempty"`
@@ -2665,6 +2754,9 @@ type ClientInterface interface {
 
 	// DependentsApiV1TopologyDependentsNameGet request
 	DependentsApiV1TopologyDependentsNameGet(ctx context.Context, name string, params *DependentsApiV1TopologyDependentsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DiffRouteApiV1TopologyDiffGet request
+	DiffRouteApiV1TopologyDiffGet(ctx context.Context, params *DiffRouteApiV1TopologyDiffGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListEdgesRouteApiV1TopologyEdgesGet request
 	ListEdgesRouteApiV1TopologyEdgesGet(ctx context.Context, params *ListEdgesRouteApiV1TopologyEdgesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3429,6 +3521,18 @@ func (c *Client) DependenciesApiV1TopologyDependenciesNameGet(ctx context.Contex
 
 func (c *Client) DependentsApiV1TopologyDependentsNameGet(ctx context.Context, name string, params *DependentsApiV1TopologyDependentsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDependentsApiV1TopologyDependentsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DiffRouteApiV1TopologyDiffGet(ctx context.Context, params *DiffRouteApiV1TopologyDiffGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDiffRouteApiV1TopologyDiffGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6583,6 +6687,110 @@ func NewDependentsApiV1TopologyDependentsNameGetRequest(server string, name stri
 	return req, nil
 }
 
+// NewDiffRouteApiV1TopologyDiffGetRequest generates requests for DiffRouteApiV1TopologyDiffGet
+func NewDiffRouteApiV1TopologyDiffGetRequest(server string, params *DiffRouteApiV1TopologyDiffGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/diff")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "ts1", runtime.ParamLocationQuery, params.Ts1); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "ts2", runtime.ParamLocationQuery, params.Ts2); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.ChangedOnly != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "changed_only", runtime.ParamLocationQuery, *params.ChangedOnly); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListEdgesRouteApiV1TopologyEdgesGetRequest generates requests for ListEdgesRouteApiV1TopologyEdgesGet
 func NewListEdgesRouteApiV1TopologyEdgesGetRequest(server string, params *ListEdgesRouteApiV1TopologyEdgesGetParams) (*http.Request, error) {
 	var err error
@@ -7559,6 +7767,9 @@ type ClientWithResponsesInterface interface {
 
 	// DependentsApiV1TopologyDependentsNameGetWithResponse request
 	DependentsApiV1TopologyDependentsNameGetWithResponse(ctx context.Context, name string, params *DependentsApiV1TopologyDependentsNameGetParams, reqEditors ...RequestEditorFn) (*DependentsApiV1TopologyDependentsNameGetResponse, error)
+
+	// DiffRouteApiV1TopologyDiffGetWithResponse request
+	DiffRouteApiV1TopologyDiffGetWithResponse(ctx context.Context, params *DiffRouteApiV1TopologyDiffGetParams, reqEditors ...RequestEditorFn) (*DiffRouteApiV1TopologyDiffGetResponse, error)
 
 	// ListEdgesRouteApiV1TopologyEdgesGetWithResponse request
 	ListEdgesRouteApiV1TopologyEdgesGetWithResponse(ctx context.Context, params *ListEdgesRouteApiV1TopologyEdgesGetParams, reqEditors ...RequestEditorFn) (*ListEdgesRouteApiV1TopologyEdgesGetResponse, error)
@@ -8649,6 +8860,29 @@ func (r DependentsApiV1TopologyDependentsNameGetResponse) StatusCode() int {
 	return 0
 }
 
+type DiffRouteApiV1TopologyDiffGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TopologyDiffResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DiffRouteApiV1TopologyDiffGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DiffRouteApiV1TopologyDiffGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListEdgesRouteApiV1TopologyEdgesGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -9452,6 +9686,15 @@ func (c *ClientWithResponses) DependentsApiV1TopologyDependentsNameGetWithRespon
 		return nil, err
 	}
 	return ParseDependentsApiV1TopologyDependentsNameGetResponse(rsp)
+}
+
+// DiffRouteApiV1TopologyDiffGetWithResponse request returning *DiffRouteApiV1TopologyDiffGetResponse
+func (c *ClientWithResponses) DiffRouteApiV1TopologyDiffGetWithResponse(ctx context.Context, params *DiffRouteApiV1TopologyDiffGetParams, reqEditors ...RequestEditorFn) (*DiffRouteApiV1TopologyDiffGetResponse, error) {
+	rsp, err := c.DiffRouteApiV1TopologyDiffGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDiffRouteApiV1TopologyDiffGetResponse(rsp)
 }
 
 // ListEdgesRouteApiV1TopologyEdgesGetWithResponse request returning *ListEdgesRouteApiV1TopologyEdgesGetResponse
@@ -11009,6 +11252,39 @@ func ParseDependentsApiV1TopologyDependentsNameGetResponse(rsp *http.Response) (
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest []TopologyNode
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDiffRouteApiV1TopologyDiffGetResponse parses an HTTP response from a DiffRouteApiV1TopologyDiffGetWithResponse call
+func ParseDiffRouteApiV1TopologyDiffGetResponse(rsp *http.Response) (*DiffRouteApiV1TopologyDiffGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DiffRouteApiV1TopologyDiffGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TopologyDiffResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

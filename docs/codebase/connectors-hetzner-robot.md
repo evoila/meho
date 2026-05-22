@@ -72,8 +72,11 @@ Vault path as `{"username": ..., "password": ...}`.
 
 ### Auth flow
 
-1. `auth_headers(target, raw_jwt)` checks `target.auth_model` — must be
-   `shared_service_account` or `None`.
+1. `auth_headers(target, operator)` checks `target.auth_model` — must be
+   `shared_service_account` or `None`. The `operator` is accepted for the
+   shared HTTP auth surface (G3.9-T1) but unused — `shared_service_account`
+   mode authenticates with a Vault-sourced Webservice-user credential, not
+   the operator's OIDC token.
 2. `_load_credentials(target)` checks `_creds_cache`; on miss, calls the
    injectable loader.
 3. Loader returns `{"username": ..., "password": ...}`; connector computes

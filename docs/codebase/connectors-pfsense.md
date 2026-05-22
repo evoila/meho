@@ -24,7 +24,7 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   attributes: `product="pfsense"`, `version="2.7"`, `impl_id="pfsense-ssh"`.
   Inherits the per-target asyncssh connection pool and `aclose()` from the
   adapter; overrides `_auth_config` to reject password auth, plus `fingerprint`,
-  `probe`, `execute`, and adds the `about` op handler.
+  `probe`, `execute`, `about`, and the 7 T2 read-op bound-method shims.
 
 - **`_auth_config()` override** — the load-bearing auth constraint. Requires
   `ssh_private_key` in `target.secret_ref`; raises `ValueError` with a message
@@ -34,10 +34,19 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   connected via SSH with a password opens the console menu (an interactive PHP
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
-- **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass plus the `PFSENSE_OPS`
-  tuple the connector's `register_operations` walks at startup. T1 ships a
-  single-element tuple with `pfsense.about`; T2 will extend via a
-  `_pfsense_ops()` composition function.
+- **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
+  composition function, and the `PFSENSE_OPS` tuple (8 ops total after T2).
+  T1 shipped `pfsense.about`; T2 adds 7 read ops via the `ops_read` module.
+
+- **Read op parsers** (`ops_read.py`) — pure parsers for pfctl and config.xml
+  output, plus the 7 T2 handler functions and the `READ_OPS` tuple:
+  - `parse_pfctl_rules` / `parse_pfctl_states` / `parse_pfctl_nat` — pfctl
+    output parsers.
+  - `parse_ifconfig` / `_netmask_to_cidr` — ifconfig output parser.
+  - `parse_gateways_xml` — XML parser for the `<gateways>` block.
+  - Handler functions: `pfsense_version`, `pfsense_firewall_rules`,
+    `pfsense_firewall_state`, `pfsense_nat_rules`, `pfsense_interface_list`,
+    `pfsense_gateway_list`, `pfsense_config_show`.
 
 ## Control flow
 
@@ -118,19 +127,36 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
+## Op surface (T1 + T2, 8 ops)
+
+| Op ID | Command | Group |
+|---|---|---|
+| `pfsense.about` | `cat /etc/version` | `identity` |
+| `pfsense.version` | `cat /etc/version` | `config` |
+| `pfsense.firewall.rules` | `pfctl -sr` | `firewall` |
+| `pfsense.firewall.state` | `pfctl -ss` | `firewall` |
+| `pfsense.nat.rules` | `pfctl -sn` | `nat` |
+| `pfsense.interface.list` | `ifconfig -a` | `network` |
+| `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) | `network` |
+| `pfsense.config.show` | `cat /cf/conf/config.xml` (full) | `config` |
+
+All 8 ops are `safety_level="safe"`, `requires_approval=False`.
+
+`pfsense.firewall.state` returns `{rows, total}` and is the primary JSONFlux
+reduction candidate on busy firewalls (large state tables). The future reducer
+(key `pfsense_firewall_state`) spills to the HandleStore when `total` exceeds
+its threshold; today's `PassThroughReducer` returns the inline payload.
+
 ## Known issues
 
 - `known_hosts=None` in the SSH adapter disables host-key verification for
   v0.2. Key pinning is deferred to v0.2.next once a Vault-managed key store
   is in place.
-- The T1 skeleton ships only `pfsense.about`. The 7 pfSense read ops
-  (`pfctl -sr`, `pfctl -ss`, `pfctl -sn`, `ifconfig -a`, config.xml reads)
-  land in T2 (#847).
 
 ## References
 
 - Task #844 (this skeleton): G3.7-T1 PfSenseConnector skeleton.
-- Task #847 (next): G3.7-T2 pfSense 7 read ops.
+- Task #847 (this): G3.7-T2 pfSense 7 read ops (landed).
 - Task #850 (final): G3.7-T3 pfSense CLI verbs + E2E + onboarding doc.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.

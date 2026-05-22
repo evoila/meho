@@ -35,9 +35,11 @@ G3.7-T1 (#844) skeleton -- the second ``SshConnector`` tier-3 child
   as :meth:`Bind9Connector.execute`) that routes a typed ``op_id``
   to its registered handler via the ``endpoint_descriptor`` substrate.
 
-The remaining 7 ops (``pfctl``/config.xml reads) land under G3.7-T2
-(#847) by extending :data:`PFSENSE_OPS` from their own module; the
-dispatcher shim does not change.
+G3.7-T2 (#847) adds 7 read ops (``pfctl``/config.xml reads) via
+:mod:`~meho_backplane.connectors.pfsense.ops_read`. Each op has a
+bound-method shim on :class:`PfSenseConnector` that delegates to the
+pure handler function in that module. The dispatcher shim does not
+change.
 """
 
 from __future__ import annotations
@@ -132,7 +134,10 @@ def parse_pfsense_version(content: str) -> dict[str, str | None]:
     return {"version": version, "build": build, "kernel": kernel}
 
 
-#: Curated ``when_to_use`` string for the single ``identity`` group.
+#: Curated ``when_to_use`` strings per group key, indexed by
+#: :meth:`PfSenseConnector.register_operations`. Each entry is the
+#: operator-facing prose answering "which group for my question?".
+#: Must cover every ``group_key`` declared in :data:`PFSENSE_OPS`.
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "identity": (
         "Use for pfSense firewall identity questions before any "
@@ -143,6 +148,35 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Call this first when the agent needs to confirm the firewall "
         "is reachable over SSH with shell access before issuing "
         "higher-level pfctl or config.xml ops."
+    ),
+    "firewall": (
+        "Use for pfSense firewall operations: reading active filter rules "
+        "(``pfsense.firewall.rules``) or the active state table "
+        "(``pfsense.firewall.state``). Call ``pfsense.firewall.rules`` when "
+        "the operator wants to audit the ruleset; call "
+        "``pfsense.firewall.state`` when the operator wants to inspect active "
+        "connections. The state table can be large on busy firewalls."
+    ),
+    "nat": (
+        "Use for pfSense NAT operations: reading the active NAT ruleset "
+        "(``pfsense.nat.rules``). Call when the operator wants to audit "
+        "port-forwarding, outbound NAT, or 1:1 NAT rules."
+    ),
+    "network": (
+        "Use for pfSense network-interface operations: listing all "
+        "interfaces (``pfsense.interface.list``) or listing configured "
+        "gateways (``pfsense.gateway.list``). Call "
+        "``pfsense.interface.list`` when the operator wants IP address, "
+        "MAC, MTU, or link-status information. Call "
+        "``pfsense.gateway.list`` when the operator wants routing-gateway "
+        "configuration from the pfSense config."
+    ),
+    "config": (
+        "Use for pfSense configuration operations: reading the full "
+        "pfSense configuration (``pfsense.config.show``) or getting a "
+        "structured version summary (``pfsense.version``). Call "
+        "``pfsense.config.show`` when the operator needs to inspect or "
+        "export the complete pfSense config.xml."
     ),
 }
 
@@ -350,6 +384,125 @@ class PfSenseConnector(SshConnector):
             "build": result.build,
             "kernel": result.extras.get("kernel"),
         }
+
+    async def get_version(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.version`` (G3.7-T2 #847).
+
+        Named ``get_version`` to avoid shadowing the class-level
+        ``version = "2.7"`` registry attribute. The ``handler_attr``
+        on the op metadata is ``"get_version"`` accordingly. Delegates
+        to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_version`.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_version as _pfsense_version,
+        )
+
+        return await _pfsense_version(self, target, params)
+
+    async def firewall_rules(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.firewall.rules`` (G3.7-T2 #847).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_firewall_rules`.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_firewall_rules as _pfsense_firewall_rules,
+        )
+
+        return await _pfsense_firewall_rules(self, target, params)
+
+    async def firewall_state(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.firewall.state`` (G3.7-T2 #847).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_firewall_state`.
+        The state table can contain thousands of rows on busy firewalls;
+        the future JSONFlux reducer spills to the HandleStore
+        (key ``pfsense_firewall_state``) when ``total`` exceeds its
+        configured threshold.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_firewall_state as _pfsense_firewall_state,
+        )
+
+        return await _pfsense_firewall_state(self, target, params)
+
+    async def nat_rules(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.nat.rules`` (G3.7-T2 #847).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_nat_rules`.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_nat_rules as _pfsense_nat_rules,
+        )
+
+        return await _pfsense_nat_rules(self, target, params)
+
+    async def interface_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.interface.list`` (G3.7-T2 #847).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_interface_list`.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_interface_list as _pfsense_interface_list,
+        )
+
+        return await _pfsense_interface_list(self, target, params)
+
+    async def gateway_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.gateway.list`` (G3.7-T2 #847).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_gateway_list`.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_gateway_list as _pfsense_gateway_list,
+        )
+
+        return await _pfsense_gateway_list(self, target, params)
+
+    async def config_show(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.config.show`` (G3.7-T2 #847).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_config_show`.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_config_show as _pfsense_config_show,
+        )
+
+        return await _pfsense_config_show(self, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

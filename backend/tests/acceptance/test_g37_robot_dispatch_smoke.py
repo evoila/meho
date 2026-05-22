@@ -48,9 +48,12 @@ import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 from meho_backplane.connectors.hetzner_robot import ROBOT_CORE_OPS
 from meho_backplane.connectors.schemas import ResultHandle
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.meta_tools import call_operation
@@ -265,6 +268,113 @@ async def test_server_list_returns_jsonflux_handle(
         f"expected {expected_rows} servers; got handle.total_rows={handle['total_rows']}"
     )
     assert handle["summary_md"], "handle.summary_md must be non-empty"
+
+
+# ---------------------------------------------------------------------------
+# AC3 — every dispatch writes an audit row with op_id + target_id +
+# params_hash in the payload.
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_writes_audit_row_with_op_id_target_id_params_hash(
+    ingested_robot_canary: IngestedRobotCanary,
+) -> None:
+    """AC3: dispatching an op writes one DISPATCH audit row with the required fields.
+
+    Dispatches ``hetzner-robot.about`` (``GET:/query``) — the lightest read
+    op, no path parameters — and then queries the backplane's ``audit_log``
+    table for the resulting row. Asserts:
+
+    * ``method='DISPATCH'`` + ``path=op_id`` — the canonical audit-row shape
+      the dispatcher writes (documented in
+      :mod:`meho_backplane.operations._audit`).
+    * ``payload['op_id']`` matches the dispatched op.
+    * ``payload['params_hash']`` is present (non-empty string) — proves the
+      dispatcher hashed the call parameters before writing the row, satisfying
+      the AC3 "params_hash present" requirement.
+    * ``target_id`` is a non-null UUID on the audit row — proves the
+      dispatcher resolved the target and wrote its FK into the row.
+
+    Uses a baseline/delta approach (count before + count after) so the test
+    is isolated from any audit rows written by the fixture setup (ingest,
+    edit_group, etc.) that share the same ``operator_sub``.
+
+    Proves AC3 of #852: dispatch writes audit row with op_id + target_id +
+    params_hash.
+    """
+    ac3_op_id = "GET:/query"
+
+    sessionmaker = get_sessionmaker()
+
+    async def _count_dispatch_rows() -> int:
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(AuditLog).where(
+                    AuditLog.method == "DISPATCH",
+                    AuditLog.path == ac3_op_id,
+                    AuditLog.operator_sub == ingested_robot_canary.operator.sub,
+                )
+            )
+            return len(list(result.scalars().all()))
+
+    baseline = await _count_dispatch_rows()
+
+    result = await call_operation(
+        ingested_robot_canary.operator,
+        {
+            "connector_id": ingested_robot_canary.connector_id,
+            "op_id": ac3_op_id,
+            "target": {"name": ingested_robot_canary.target_name},
+            "params": {},
+        },
+    )
+
+    assert result["status"] == "ok", (
+        f"Hetzner Robot {ac3_op_id!r} did not succeed against respx mock: "
+        f"{result.get('error')!r}; full result={result!r}"
+    )
+
+    # Delta must be exactly +1.
+    final = await _count_dispatch_rows()
+    assert final - baseline == 1, (
+        f"expected exactly one new DISPATCH audit row for {ac3_op_id!r}; "
+        f"baseline={baseline} final={final}"
+    )
+
+    # Fetch the row and assert payload fields.
+    async with sessionmaker() as session:
+        rows_result = await session.execute(
+            select(AuditLog).where(
+                AuditLog.method == "DISPATCH",
+                AuditLog.path == ac3_op_id,
+                AuditLog.operator_sub == ingested_robot_canary.operator.sub,
+            )
+        )
+        rows = list(rows_result.scalars().all())
+
+    assert rows, "audit rows vanished between count and fetch"
+    audit = rows[-1]  # most recent row
+
+    # op_id in payload
+    assert audit.payload.get("op_id") == ac3_op_id, (
+        f"audit payload['op_id'] should be {ac3_op_id!r}; "
+        f"got {audit.payload.get('op_id')!r}; full payload={audit.payload!r}"
+    )
+
+    # params_hash in payload and non-empty
+    params_hash = audit.payload.get("params_hash")
+    assert params_hash is not None, (
+        f"audit payload missing 'params_hash'; full payload={audit.payload!r}"
+    )
+    assert isinstance(params_hash, str) and params_hash, (
+        f"audit payload['params_hash'] must be a non-empty string; got {params_hash!r}"
+    )
+
+    # target_id on the audit row must be a non-null UUID
+    assert audit.target_id is not None, (
+        f"audit_log.target_id must be populated for a target-bound dispatch; "
+        f"got target_id=None on audit row id={audit.id!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

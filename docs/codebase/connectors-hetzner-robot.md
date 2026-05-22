@@ -8,7 +8,11 @@ G3.7-T6 (#846) ships the skeleton — HTTP Basic auth, fingerprint, probe,
 `_post_form` helper, and the G0.6 dispatch shim. G3.7-T8 (#849) ships the
 read-only v0.2 core: the Robot Webservice OpenAPI spec is ingested via G0.7
 into the `endpoint_descriptor` table, and the curated 10-op core is staged
-for operator review in `core_ops.py`.
+for operator review in `core_ops.py`. G3.7-T9 (#852) ships the CLI verbs
+(`hetzner-robot target add/list/delete/set`), the dispatch smoke test suite
+(AC1–AC5 covering all 10 read ops, JSONFlux handle path, audit-row
+assertions, and sandbox empty-array tolerance), and the operator onboarding
+doc.
 
 Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 

@@ -55,6 +55,14 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true  # coverage artifact may not exist yet (no tests)
 
+      - name: Ensure dirmngr is available (for sonar-scanner GPG verify)
+        run: |
+          set -euo pipefail
+          if ! command -v dirmngr >/dev/null 2>&1; then
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -y
+            sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dirmngr
+          fi
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995  # v8.1.0
         with: 

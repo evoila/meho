@@ -8964,8 +8964,24 @@ type HistoryRouteApiV1TopologyHistoryNameGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 	JSON200      *TopologyHistoryResult
-	JSON422      *HTTPValidationError
+	JSON404      *struct {
+		Detail struct {
+			Error HistoryRouteApiV1TopologyHistoryNameGet404DetailError `json:"error"`
+			Kind  *string                                               `json:"kind,omitempty"`
+			Name  string                                                `json:"name"`
+		} `json:"detail"`
+	}
+	JSON409 *struct {
+		Detail struct {
+			Error HistoryRouteApiV1TopologyHistoryNameGet409DetailError `json:"error"`
+			Kinds []string                                              `json:"kinds"`
+			Name  string                                                `json:"name"`
+		} `json:"detail"`
+	}
+	JSON422 *HTTPValidationError
 }
+type HistoryRouteApiV1TopologyHistoryNameGet404DetailError string
+type HistoryRouteApiV1TopologyHistoryNameGet409DetailError string
 
 // Status returns HTTPResponse.Status
 func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) Status() string {
@@ -11423,6 +11439,32 @@ func ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp *http.Response) (*
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest struct {
+			Detail struct {
+				Error HistoryRouteApiV1TopologyHistoryNameGet404DetailError `json:"error"`
+				Kind  *string                                               `json:"kind,omitempty"`
+				Name  string                                                `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				Error HistoryRouteApiV1TopologyHistoryNameGet409DetailError `json:"error"`
+				Kinds []string                                              `json:"kinds"`
+				Name  string                                                `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError

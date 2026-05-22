@@ -1025,7 +1025,81 @@ async def timeline_route(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/history/{name}", response_model=TopologyHistoryResult)
+@router.get(
+    "/history/{name}",
+    response_model=TopologyHistoryResult,
+    responses={
+        # 404 ``node_not_found`` / 409 ``ambiguous_node`` -- declared
+        # explicitly so FastAPI's autogen OpenAPI surfaces both runtime
+        # error shapes to SDK clients. The route handler below raises
+        # via ``_node_not_found_http`` / ``_ambiguous_node_http`` which
+        # produce ``HTTPException(404, detail={"error": "node_not_found",
+        # ...})`` and ``HTTPException(409, detail={"error":
+        # "ambiguous_node", ...})`` respectively. Without these
+        # declarations the spec only listed 200 + 422 and clients had no
+        # schema-driven signal for the recoverable per-anchor errors
+        # (the operator's first-line diagnostics).
+        404: {
+            "description": (
+                "Anchor node not found by ``name`` (and ``kind`` when "
+                "supplied)."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "error": {
+                                        "type": "string",
+                                        "enum": ["node_not_found"],
+                                    },
+                                    "name": {"type": "string"},
+                                    "kind": {"type": "string"},
+                                },
+                                "required": ["error", "name"],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+        409: {
+            "description": (
+                "Bare ``name`` resolves to multiple ``kind`` candidates; "
+                "client should re-issue with an explicit ``kind``."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "error": {
+                                        "type": "string",
+                                        "enum": ["ambiguous_node"],
+                                    },
+                                    "name": {"type": "string"},
+                                    "kinds": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": ["error", "name", "kinds"],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
+)
 async def history_route(
     name: str,
     kind: str | None = Query(default=None, max_length=64),

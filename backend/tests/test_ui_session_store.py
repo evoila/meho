@@ -388,6 +388,114 @@ async def test_rotate_refresh_missing_session_writes_audit(
 
 
 # ---------------------------------------------------------------------------
+# Concurrent rotation: row-lock serializes (RFC 9700 § 4.14 single-use)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rotate_refresh_emits_select_for_update_against_session_row(
+    session: AsyncSession,
+) -> None:
+    """``rotate_refresh`` must read the session row with ``FOR UPDATE``.
+
+    Regression for the RFC 9700 § 4.14 single-use refresh-token
+    property. Before the fix, ``rotate_refresh`` did a non-locking
+    ``await session.get(WebSession, cookie_id)`` -- two concurrent
+    presenters with the same valid refresh value could both pass
+    the mismatch / revoked / expired gate and both successfully
+    rotate, breaking single-use.
+
+    The fix replaces the read with
+    ``select(WebSession).where(WebSession.id == cookie_id).with_for_update()``
+    so the row is row-level-locked for the rotating transaction on
+    PostgreSQL (production); the second concurrent caller blocks,
+    re-reads after the first commits, and falls into the
+    value_mismatch branch -- exactly the one-time-use shape the
+    RFC mandates.
+
+    SQLite caveat (per the punch-list): the test suite's dev/test
+    engine is aiosqlite, whose locking is database-level rather
+    than row-level -- ``FOR UPDATE`` is parsed but does not
+    actually serialise concurrent transactions the way PG's does.
+    A behavioural ``asyncio.gather`` test against two concurrent
+    ``rotate_refresh`` calls therefore cannot prove the fix on
+    SQLite: both attempts may legitimately succeed when the lock
+    is a no-op. The behavioural Postgres-flavour proof would
+    require a testcontainers-PG fixture (the
+    ``backend/tests/integration/`` precedent); the unit suite
+    instead asserts the SQL that goes onto the wire -- the
+    deterministic, dialect-portable signal that the fix is in
+    place. If a future refactor reverts to ``session.get`` (or to
+    a plain ``select`` without ``.with_for_update()``), this
+    assertion fails immediately even on SQLite, surfacing the
+    regression before it ships.
+    """
+    tenant_id = uuid.uuid4()
+    original_refresh = "rt-original-CCCCCCCCCCCCCCCCCCCC"
+
+    async with session.begin():
+        created = await create_session(
+            session,
+            operator_sub="op-alice",
+            tenant_id=tenant_id,
+            access_token="at-initial",
+            refresh_token=original_refresh,
+            lifetime=timedelta(minutes=10),
+        )
+
+    # Spy on the rotation session's ``execute`` so we can inspect
+    # the actual ``Select`` object handed to SQLAlchemy. SQLite's
+    # dialect omits the ``FOR UPDATE`` clause from rendered SQL
+    # entirely (it parses but no-ops the lock), so capturing the
+    # text-on-the-wire is not portable -- the dialect-portable
+    # signal is the ``_for_update_arg`` attribute on the
+    # ``Select`` itself, which ``with_for_update()`` sets and the
+    # plain ``session.get`` / unlocked ``select`` path leaves
+    # ``None``. Both engines compile the same statement object;
+    # only the rendered output differs.
+    from sqlalchemy import Select
+
+    sessionmaker = get_sessionmaker()
+    captured_selects: list[Select[tuple[WebSession]]] = []
+
+    async with sessionmaker() as rotation_session, rotation_session.begin():
+        original_execute = rotation_session.execute
+
+        async def _spy_execute(stmt, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if isinstance(stmt, Select):
+                froms = {t.name for t in stmt.get_final_froms() if hasattr(t, "name")}
+                if "web_session" in froms:
+                    captured_selects.append(stmt)
+            return await original_execute(stmt, *args, **kwargs)
+
+        rotation_session.execute = _spy_execute  # type: ignore[method-assign]
+        await rotate_refresh(
+            rotation_session,
+            created.id,
+            presented_refresh=original_refresh,
+            new_access_token="at-new-EEEEEEEEEEEEEEEEEEE",
+            new_refresh_token="rt-new-FFFFFFFFFFFFFFFFFFFFFFF",
+        )
+
+    assert captured_selects, (
+        "rotate_refresh must execute a Select against web_session; "
+        "if it reverted to session.get, this captures zero Select objects"
+    )
+    # ``with_for_update()`` sets ``_for_update_arg`` on the Select;
+    # the unlocked path leaves it ``None``. Cross-dialect signal,
+    # observable on SQLite even though SQLite renders no FOR UPDATE
+    # clause and applies no row lock at runtime.
+    lock_bearing = [s for s in captured_selects if s._for_update_arg is not None]
+    assert lock_bearing, (
+        "rotate_refresh's SELECT against web_session must call "
+        "`.with_for_update()` to satisfy RFC 9700 § 4.14 single-use "
+        "refresh-token rotation on PostgreSQL; the unlocked read "
+        "regression is back if no captured Select has "
+        "_for_update_arg set"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Expired session returns None (AC 4)
 # ---------------------------------------------------------------------------
 

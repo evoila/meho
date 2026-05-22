@@ -100,6 +100,7 @@ from decimal import Decimal
 from typing import Final
 
 from cryptography.fernet import Fernet
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -548,7 +549,32 @@ async def rotate_refresh(
         **independently of the caller's transaction** before the
         exception propagates.
     """
-    row = await session.get(WebSession, cookie_id)
+    # RFC 9700 § 4.14 demands single-use refresh tokens, which means
+    # two concurrent requests presenting the same valid refresh value
+    # must not BOTH pass the mismatch / revoked / expired gate and
+    # both successfully rotate. A naive ``session.get`` is a
+    # non-locking read; two transactions could each load the row,
+    # each check ``refresh_token == stored``, and each write a new
+    # ciphertext on top -- the second-writer wins but the
+    # second-presenter still received a "rotation OK" response,
+    # which is exactly the one-time-use breach the RFC closes.
+    #
+    # ``SELECT ... FOR UPDATE`` row-locks the session row for the
+    # duration of the caller's transaction. The second concurrent
+    # rotation blocks until the first commits; when it unblocks and
+    # re-reads, the stored refresh value has already rotated, so
+    # ``presented_refresh != stored_refresh`` and the replay branch
+    # fires -- exactly the one-time-use property the RFC mandates.
+    #
+    # SQLite caveat: aiosqlite's locking is database-level rather
+    # than row-level, so on the dev/test path the serialization
+    # comes from the connection-level write lock rather than a true
+    # row lock. The behavioural contract (exactly one rotation
+    # wins; the other surfaces as replay) holds on both engines.
+    result = await session.execute(
+        select(WebSession).where(WebSession.id == cookie_id).with_for_update()
+    )
+    row = result.scalar_one_or_none()
     now = datetime.now(UTC)
 
     if row is None:

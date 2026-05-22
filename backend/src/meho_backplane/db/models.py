@@ -200,6 +200,7 @@ import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     JSON,
+    BigInteger,
     DateTime,
     ForeignKey,
     Index,
@@ -221,8 +222,11 @@ __all__ = [
     "Document",
     "EndpointDescriptor",
     "GraphEdge",
+    "GraphEdgeHistory",
     "GraphEdgeKind",
+    "GraphHistoryChangeKind",
     "GraphNode",
+    "GraphNodeHistory",
     "OperationGroup",
     "Target",
     "Tenant",
@@ -1649,5 +1653,278 @@ class BroadcastOverride(Base):
             "broadcast_override_tenant_idx",
             "tenant_id",
             postgresql_using="btree",
+        ),
+    )
+
+
+class GraphHistoryChangeKind(StrEnum):
+    """Closed enum of :attr:`GraphNodeHistory.change_kind` /
+    :attr:`GraphEdgeHistory.change_kind` values.
+
+    Initiative #365 (G9.3) locks the temporal-change vocabulary at three
+    members -- one per discoverable mutation shape against the live
+    :class:`GraphNode` / :class:`GraphEdge` tables. The diff-on-write
+    hook (T2 #857) chooses one of these three values per history-row
+    emission; the closed enum + DB-layer ``CHECK`` constraint move in
+    lock-step via migration ``0012``, mirroring the discipline
+    :class:`GraphEdgeKind` follows (migration ``0010``).
+
+    The vocabulary is intentionally **not** the union of every possible
+    mutation -- a noisy ``soft_deleted`` / ``rediscovered`` /
+    ``last_seen_advanced`` split would push the diff-on-write hook
+    toward expressing field-level deltas in the row shape, when the
+    structured ``snapshot`` JSONB already carries that information.
+    Three coarse change kinds keep the history row shape stable across
+    refresh / annotate / unannotate paths.
+
+    Members:
+
+    * :attr:`CREATED` -- the row did not exist before this mutation;
+      ``snapshot.before`` is NULL-shaped, ``snapshot.after`` carries the
+      full post-insert row JSON.
+    * :attr:`UPDATED` -- the row existed and one or more columns
+      changed in place; ``snapshot.before`` carries the pre-mutation
+      row JSON, ``snapshot.after`` the post-mutation row JSON.
+    * :attr:`REMOVED` -- the row was hard-deleted or soft-deleted
+      (``last_seen`` reset to NULL by the refresh service);
+      ``snapshot.before`` carries the final row JSON, ``snapshot.after``
+      is NULL-shaped. Drives the partial tombstone-replay index on
+      both history tables.
+    """
+
+    CREATED = "created"
+    UPDATED = "updated"
+    REMOVED = "removed"
+
+
+#: Closed enum of ``change_kind`` values used by both history tables.
+#: Derived from :class:`GraphHistoryChangeKind` so the enum and the
+#: DB-layer ``CHECK`` constraint cannot drift; the drift guard at
+#: :mod:`tests.test_topology_history_migration` enforces the equality
+#: at unit-test time. Mirrors the :data:`_GRAPH_EDGE_KINDS` pattern
+#: :class:`GraphEdge` uses.
+_GRAPH_HISTORY_CHANGE_KINDS: tuple[str, ...] = tuple(k.value for k in GraphHistoryChangeKind)
+
+
+#: Dialect-portable ``BIGSERIAL`` substitute -- :class:`BigInteger` on
+#: PostgreSQL (compiles to ``BIGSERIAL`` when paired with
+#: ``primary_key=True`` + ``autoincrement=True``), :class:`Integer` on
+#: SQLite (``INTEGER PRIMARY KEY`` is the rowid alias, the only shape
+#: SQLite auto-increments; ``BIGINT PRIMARY KEY`` would not). The
+#: ``with_variant`` swap keeps the Python contract a 64-bit signed
+#: integer on PG and the actual width SQLite can rowid-alias on the
+#: dev/test path. Used by both history tables for ``history_id``.
+_PORTABLE_BIG_SERIAL: TypeEngine[int] = BigInteger().with_variant(Integer(), "sqlite")
+
+
+class GraphNodeHistory(Base):
+    """An append-only history row for one :class:`GraphNode` mutation.
+
+    Initiative #365 (G9.3) substrate, Task #856 (T1). Mirrors the
+    :class:`AuditLog` append-only recipe (one row per
+    discovery-driven mutation, indexed by tenant + time, JSONB
+    snapshot) and is the storage half of the diff-on-write hook T2
+    (#857) lands. T1 ships only the table + the ORM model; no write
+    path exists yet.
+
+    Append-only semantics: the application never issues an UPDATE or
+    DELETE against this table. ``removed`` rows are tombstones, not
+    deletions -- the row stays for the operator-visible "when was
+    this node removed?" query. Retention is bounded by the prune
+    task T6 (#858) at ``TOPOLOGY_HISTORY_RETENTION_DAYS`` (default
+    90); rows older than the retention window are dropped in one
+    audited batch per run.
+
+    Schema decisions for :class:`GraphNodeHistory`:
+
+    * ``history_id`` -- ``BIGSERIAL`` on PG, autoincrementing
+      ``INTEGER`` on SQLite. Insert-ordered, monotonic, cheap. The
+      append-only shape makes a 64-bit counter the right primary key
+      -- UUIDs would force the diff-on-write hook to either generate
+      one Python-side (extra entropy on a write-heavy path) or read
+      back the server-default (extra round-trip). See migration
+      ``0012`` docstring for the dialect-portability rationale.
+    * ``node_id`` -- ``UUID`` with a real
+      ``REFERENCES graph_node(id) ON DELETE SET NULL`` FK. Nullable in
+      the ORM signature so the SET NULL transition compiles; the diff-
+      on-write hook always populates it. ``SET NULL`` rather than
+      ``CASCADE`` is the load-bearing decision: history rows must
+      survive the deletion of the live node they reference. A hard
+      cascade would drop the entire history of a removed node -- the
+      data G9.3 exists to preserve.
+    * ``tenant_id`` -- ``UUID`` NOT NULL with a real
+      ``REFERENCES tenant(id)`` FK. Same brand-new-substrate rationale
+      as :class:`GraphNode` / :class:`GraphEdge` / :class:`Document` /
+      :class:`BroadcastOverride`.
+    * ``change_kind`` -- ``TEXT`` NOT NULL with a DB-layer
+      ``CHECK change_kind IN ('created', 'updated', 'removed')``
+      constraint. Mirrored in :class:`GraphHistoryChangeKind`.
+    * ``snapshot`` -- portable JSON -> JSONB NOT NULL DEFAULT ``{}``.
+      ``{before, after}`` projection; semantics per change-kind member
+      docstrings on :class:`GraphHistoryChangeKind`.
+    * ``audit_id`` -- ``UUID`` nullable. Soft-FK to
+      :class:`AuditLog.id` -- the request whose contextvar carried
+      the operation that caused this mutation. Same soft-FK discipline
+      as :attr:`AuditLog.tenant_id` / :attr:`AuditLog.target_id` /
+      :attr:`AuditLog.parent_audit_id` -- see migration ``0012``
+      docstring for the retention-coupling rationale.
+    * ``valid_from`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
+      server default; the ORM also declares
+      ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
+
+    Indexes on :class:`GraphNodeHistory`:
+
+    * ``graph_node_history_tenant_node_valid_from_idx`` -- composite
+      b-tree on ``(tenant_id, node_id, valid_from DESC)``. Drives the
+      per-resource history walk (T3 ``meho topology history``).
+    * ``graph_node_history_tenant_valid_from_idx`` -- composite b-tree
+      on ``(tenant_id, valid_from DESC)``. Drives the tenant-wide
+      timeline scan (T5 ``meho topology timeline``).
+    * ``graph_node_history_tenant_removed_idx`` -- **partial** b-tree
+      on ``(tenant_id, valid_from DESC) WHERE change_kind = 'removed'``.
+      Drives the tombstone-replay query. The partial keeps only the
+      tombstone rows (typically << 5% of table volume on a healthy
+      refresh cadence) so the query is a single indexed scan rather
+      than a full timeline scan + post-filter.
+
+    The model deliberately ships with no helper methods -- write paths
+    land in T2's diff-on-write hook, read paths in T3 / T4 / T5's
+    temporal-query verbs. Indexes are declared at the **migration**
+    level (with DESC ordering on ``valid_from``) rather than via
+    ``__table_args__`` because ``Index(... sa.text("col DESC") ...)``
+    does not round-trip through Alembic's autogenerate detection; the
+    migration is the single source of truth.
+    """
+
+    __tablename__ = "graph_node_history"
+
+    history_id: Mapped[int] = mapped_column(
+        _PORTABLE_BIG_SERIAL,
+        primary_key=True,
+        autoincrement=True,
+        nullable=False,
+    )
+    # Nullable so the ON DELETE SET NULL transition compiles. The
+    # diff-on-write hook in T2 always populates it on insert; the NULL
+    # state only appears after the referenced node is hard-deleted.
+    node_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        ForeignKey("graph_node.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    change_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    # Soft-FK to audit_log.id -- see class / migration 0012 docstring.
+    audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    valid_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    # CHECK constraint mirrors :class:`GraphHistoryChangeKind`. Indexes
+    # are declared at the migration layer (not here) because their DESC
+    # ordering on ``valid_from`` does not round-trip through Alembic's
+    # autogenerate path; the migration is the single source of truth
+    # for index DDL.
+    __table_args__ = (
+        sa.CheckConstraint(
+            _ck_in("change_kind", _GRAPH_HISTORY_CHANGE_KINDS),
+            name="ck_graph_node_history_change_kind",
+        ),
+    )
+
+
+class GraphEdgeHistory(Base):
+    """An append-only history row for one :class:`GraphEdge` mutation.
+
+    Initiative #365 (G9.3) substrate, Task #856 (T1). Mirror of
+    :class:`GraphNodeHistory` for the edge side of the topology graph;
+    every refresh-driven or operator-annotated edge mutation produces
+    one row in this table inside the same transaction as the live-row
+    mutation (T2 #857).
+
+    Schema decisions match :class:`GraphNodeHistory` exactly, with one
+    column substitution: ``node_id`` becomes ``edge_id`` and points at
+    :class:`GraphEdge.id` instead of :class:`GraphNode.id`. The
+    ``ON DELETE SET NULL`` semantics, soft-FK to :class:`AuditLog.id`,
+    closed-enum ``change_kind`` CHECK constraint, JSONB snapshot, and
+    ``valid_from`` server defaults are all identical -- the two history
+    tables are symmetric by design so the temporal-query verbs
+    (T3 / T4 / T5) can compose against both with one query shape.
+
+    Indexes on :class:`GraphEdgeHistory`:
+
+    * ``graph_edge_history_tenant_edge_valid_from_idx`` -- composite
+      b-tree on ``(tenant_id, edge_id, valid_from DESC)``. Drives the
+      per-resource history walk for an edge (T3
+      ``meho topology history --include-edges``).
+    * ``graph_edge_history_tenant_valid_from_idx`` -- composite b-tree
+      on ``(tenant_id, valid_from DESC)``. Drives the tenant-wide
+      timeline scan (T5).
+    * ``graph_edge_history_tenant_removed_idx`` -- **partial** b-tree
+      on ``(tenant_id, valid_from DESC) WHERE change_kind = 'removed'``.
+      Drives the edge-side tombstone-replay query.
+
+    Same migration-layer-owned-DDL discipline as
+    :class:`GraphNodeHistory`: indexes are declared in migration
+    ``0012`` with explicit DESC ordering on ``valid_from``, not via
+    ``__table_args__``.
+    """
+
+    __tablename__ = "graph_edge_history"
+
+    history_id: Mapped[int] = mapped_column(
+        _PORTABLE_BIG_SERIAL,
+        primary_key=True,
+        autoincrement=True,
+        nullable=False,
+    )
+    # Nullable so the ON DELETE SET NULL transition compiles -- same
+    # rationale as :attr:`GraphNodeHistory.node_id`.
+    edge_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        ForeignKey("graph_edge.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    change_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    valid_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            _ck_in("change_kind", _GRAPH_HISTORY_CHANGE_KINDS),
+            name="ck_graph_edge_history_change_kind",
         ),
     )

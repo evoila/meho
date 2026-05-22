@@ -7,8 +7,14 @@ dispatches VCF Automation REST operations under the
 `(product="vcf-automation", version="9.0", impl_id="vcfa-rest")` registry
 triple. G3.6-T10 (#832) shipped the skeleton — dual-plane auth (provider +
 tenant), vhost / FQDN routing, fingerprint, probe, and the G0.6 dispatch shim.
-G3.6-T11 (#836) will add dual-plane spec ingestion + operator-review curation;
-G3.6-T12 (#840) will ship the CLI verb tree + recorded-fixture E2E.
+G3.6-T11 (#836) added the dual-plane spec ingestion + operator-review
+curation: `core_ops.py` carries `VCFA_CORE_GROUPS` (8 groups: 4 provider + 4
+tenant) and `VCFA_CORE_OPS` (11 ops: 6 provider + 5 tenant) plus the
+`apply_vcfa_core_curation` helper that drives `ReviewService.edit_group` +
+`enable_group` + `edit_op(llm_instructions=…)` to make exactly the 11 ops
+dispatchable. G3.6-T12 (#840) will ship the CLI verb tree + recorded-fixture
+E2E. The operator runbook lives at
+`docs/cross-repo/g36-vcfa-canary.md`.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
 
@@ -55,6 +61,38 @@ domains.
   lands. Mirrors `load_credentials_from_vault` in `connectors/sddc_manager/`
   and `load_session_credentials_from_vault` in `connectors/nsx/` /
   `connectors/vmware_rest/`.
+- **`VcfaCoreGroup` / `VcfaCoreOp`** (`core_ops.py`) — frozen dataclasses
+  carrying the operator-review metadata for one curated group / op. Each
+  entry includes a `plane` field (`"provider"` or `"tenant"`) that is
+  asserted at module import time to match
+  `_routing.plane_for_path(path)` — a path-vs-plane drift fails import
+  rather than surfacing as a misrouted 401 in production.
+- **`VCFA_CORE_GROUPS` / `VCFA_CORE_OPS`** (`core_ops.py`) — the
+  read-only v0.5 core: 8 curated groups (4 provider + 4 tenant) and 11
+  curated ops (6 provider + 5 tenant). Every group's `when_to_use`
+  names its plane explicitly so the agent's `list_operation_groups`
+  step routes correctly across the dual-plane surface.
+- **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
+  `VCFA_CONNECTOR_ID`** (`core_ops.py`) — DB-side keys. Note
+  `VCFA_PRODUCT = "vcfa"` (what `parse_connector_id("vcfa-rest-9.0")`
+  extracts) is **not** the same as `VcfAutomationConnector.product =
+  "vcf-automation"` (the v2 registry key). All `endpoint_descriptor`
+  and `operation_group` rows carry `product="vcfa"`; the same split
+  the SDDC Manager precedent established (`"sddc"` vs
+  `"sddc-manager"`).
+- **`apply_vcfa_core_curation`** (`core_ops.py`) — async helper
+  driving `ReviewService.edit_group` + `enable_group` +
+  `edit_op(is_enabled=False)` (for non-core ops in curated groups)
+  + `edit_op(llm_instructions=…)` (for the 11 core ops) so exactly
+  the curated set is dispatchable after the call returns. Mirrors
+  `apply_nsx_core_curation` / `apply_harbor_core_curation`
+  verbatim; the audit-log-driven operator-override exclusion is the
+  mechanism that threads "enable only ops X, Y, Z under group G"
+  through `ReviewService.enable_group`'s cascade.
+- **`classify_vcfa_op` / `VCFA_PATH_RULES`** (`core_ops.py`) —
+  path-prefix classifier. Tenant rules (`/iaas/api/*`) are listed
+  first defensively; the two planes never share a path family so
+  ordering is not load-bearing today.
 
 ## Control flow
 
@@ -208,6 +246,37 @@ under their respective locks (no server-side session revoke is issued —
 VCFA's session has an idle timeout, and a per-target network call during
 lifespan shutdown is more risk than benefit) and delegates to
 `HttpConnector.aclose()` which closes every per-target httpx client.
+
+### Operator-review curation (G3.6-T11 #836)
+
+`apply_vcfa_core_curation(review_service, *, tenant_id)` is the
+post-ingest helper that drives the substrate so exactly the 11 curated
+ops in `VCFA_CORE_OPS` end `is_enabled=True` and the 8 curated groups
+in `VCFA_CORE_GROUPS` end `review_status='enabled'`. The control flow
+mirrors `apply_nsx_core_curation`:
+
+1. `ReviewService.get_review_payload("vcfa-rest-9.0", tenant_id)` loads
+   the post-ingest state.
+2. For each non-core op in a curated group, `ReviewService.edit_op(...,
+   is_enabled=False)` writes an operator-override audit row so the
+   follow-on `enable_group` cascade skips it.
+3. `ReviewService.edit_group` lands the curated `name` +
+   plane-named `when_to_use`; `ReviewService.enable_group` flips
+   `review_status='enabled'` and cascades `is_enabled=True` only to
+   the 11 core ops.
+4. `ReviewService.edit_op(..., llm_instructions=…)` lands the per-op
+   guidance blob on each of the 11 curated ops.
+
+The helper is safe to re-run (end-state idempotent) but emits redundant
+audit rows on re-runs — the intended posture is one-shot per ingest.
+The ingestion + operator-review wiring expects both VCFA specs
+(`vcf-automation-9.0/cloudapi.yaml` + `vcf-automation-9.0/iaas.yaml`)
+to be ingested under the same `(product, version, impl_id) = ("vcfa",
+"9.0", "vcfa-rest")` triple **before** the helper runs — the same
+multi-spec-merge contract `register_ingested_operations` implements
+for vSphere's `vcenter.yaml` + `vi-json.yaml`. Each row carries a
+`spec:cloudapi` or `spec:iaas` tag so operators can filter the review
+payload per plane.
 
 ## Dependencies
 

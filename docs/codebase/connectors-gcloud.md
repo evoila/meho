@@ -24,6 +24,35 @@ constraint: SA JSON key material in any Vault `secret_ref` payload is
 refused before any token is built. This is not a soft warning — it raises
 `ValueError` and no token is returned.
 
+## Typed ops (G3.7-T5 #848)
+
+Eight read-only ops registered via `register_gcloud_typed_operations()`
+at lifespan startup. All ops have `safety_level="safe"` and
+`requires_approval=False`. They land in the `endpoint_descriptor` table
+under `connector_id="gcloud-rest-1.0"`.
+
+| Op ID | API surface | HTTP verb | Notes |
+|---|---|---|---|
+| `gcloud.about` | CRM v1 `projects.get` | GET | Identity summary; wraps `fingerprint()` |
+| `gcloud.project.describe` | CRM v1 `projects.get` | GET | Full CRM resource dict |
+| `gcloud.services.list` | Service Usage v1 | GET | Follows `nextPageToken`; `enabled_only` param |
+| `gcloud.iam.service_accounts.list` | IAM v1 | GET | Follows `nextPageToken` |
+| `gcloud.compute.instances.list` | Compute v1 `aggregatedList` | GET | JSONFlux-compatible `rows`+`total`; `zone` param |
+| `gcloud.compute.networks.list` | Compute v1 global networks | GET | Follows `nextPageToken` |
+| `gcloud.compute.subnetworks.list` | Compute v1 `aggregatedList` | GET | Follows `nextPageToken`; `region` param |
+| `gcloud.iam.policy.read` | CRM v1 `getIamPolicy` | POST | Returns `version`, `etag`, `bindings` |
+
+Groups and `when_to_use` blurbs are defined in `_WHEN_TO_USE_BY_GROUP`
+in `connector.py`: `identity`, `project`, `services`, `iam`, `compute`.
+
+### JSONFlux handle note
+
+`gcloud.compute.instances.list` returns a `rows`+`total` envelope
+compatible with the future JSONFlux reducer. In v0.2 the `PassThroughReducer`
+never populates `OperationResult.handle` — the full row list is inlined.
+The reducer (a separate Initiative) will spill large lists to MinIO/S3
+and return a `ResultHandle` without any connector-side changes.
+
 ## Key types
 
 - **`GcloudConnector`** (`connector.py`) — `HttpConnector` subclass.
@@ -31,6 +60,13 @@ refused before any token is built. This is not a soft warning — it raises
   `impl_id="gcloud-rest"`, `priority=1`. Auth via Google ADC +
   `impersonated_credentials.Credentials`; per-target token cache;
   auto-refresh on 401 via `refresh_token()`.
+- **`GcloudOp`** (`ops.py`) — frozen dataclass holding metadata for one
+  typed op. Fields mirror `register_typed_operation()` kwargs:
+  `op_id`, `handler_attr`, `summary`, `description`, `parameter_schema`,
+  `response_schema`, `group_key`, `tags`, `safety_level`,
+  `requires_approval`, `llm_instructions`.
+- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 8 `GcloudOp` entries.
+  `register_gcloud_typed_operations()` walks this tuple.
 - **`GcloudTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
   `gcp_project`, `gcp_impersonate_sa`, `secret_ref`, and `auth_model`.
@@ -114,7 +150,22 @@ Returns `ok=True` on success, `ok=False + reason` on failure.
 ### execute()
 
 G0.6 dispatch shim — delegates to `meho_backplane.operations.dispatch` with
-`connector_id="gcloud-rest-1.0"`. Operations register in G3.7-T5 (#848).
+`connector_id="gcloud-rest-1.0"`. Routes to the handler registered via
+`register_gcloud_typed_operations()`.
+
+### register_gcloud_typed_operations()
+
+Classmethod called from the lifespan after `_eager_import_connectors()` has
+run. Walks `GCLOUD_OPS`, resolves `handler_attr` to the bound method on the
+class, and calls `register_typed_operation()` for each op. Idempotent across
+pod restarts. Raises `AttributeError` if a `handler_attr` is missing (deploy
+bug, not a runtime degradation). Raises `ValueError` if a `group_key` has no
+entry in `_WHEN_TO_USE_BY_GROUP`.
+
+### _post_json_abs(target, abs_url, json_body)
+
+POST variant of `_get_json_abs` for ops that call GCP APIs with POST
+semantics (e.g. `getIamPolicy`). Same 401-refresh-retry pattern.
 
 ## Dependencies
 
@@ -130,14 +181,15 @@ G0.6 dispatch shim — delegates to `meho_backplane.operations.dispatch` with
 - `load_credentials_from_vault` is a stub until Goal #214 (Connector
   parity) wires the live Vault read. Inject `credentials_loader` on
   construction to test or run pre-production.
-- Operations (T5 #848) are not registered yet; `call_operation` against
-  any `op_id` resolves to "unknown operation" at the dispatcher layer.
-  This is correct for the skeleton stage.
 - `_fetch_token_sync` and `refresh_token` run synchronous
   `google.auth.transport.requests.Request()` calls in a thread pool
   executor. The executor is the event loop's default (unbounded); a
-  bounded executor is a G3.7-T5 follow-up if token fetch latency becomes
+  bounded executor is a future follow-up if token fetch latency becomes
   a concern.
+- `gcloud.compute.instances.list` inlines all instance rows in v0.2
+  (no handle spill). The JSONFlux reducer Initiative will add threshold-
+  based spill without connector changes.
+- CLI verbs and gated integration tests land in G3.7-T6 (#851).
 
 ## References
 

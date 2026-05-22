@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -71,9 +72,9 @@ func newRecordGetCmd() *cobra.Command {
 }
 
 func runRecordGet(cmd *cobra.Command, fqdn, recordType, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"fqdn": fqdn}
 	if recordType != "" {
@@ -185,9 +186,9 @@ func newRecordAddCmd() *cobra.Command {
 }
 
 func runRecordAdd(cmd *cobra.Command, fqdn, ip, zone, recordType, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{
 		"fqdn": fqdn,
@@ -246,9 +247,9 @@ func newRecordRemoveCmd() *cobra.Command {
 }
 
 func runRecordRemove(cmd *cobra.Command, fqdn, zone, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"fqdn": fqdn}
 	if zone != "" {

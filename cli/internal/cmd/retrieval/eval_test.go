@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 )
 
 // TestDiffEvalResultsNoRegression — identical metrics on every
@@ -178,7 +179,7 @@ func TestMaybeCompareBaselineMissingFileReturnsError(t *testing.T) {
 // TestNormaliseURLStripsTrailingSlash — backplane URLs are
 // canonicalised so the same URL maps to the same store key.
 func TestNormaliseURLStripsTrailingSlash(t *testing.T) {
-	got, err := normaliseURL("https://meho.test/")
+	got, err := backplane.NormaliseURL("https://meho.test/")
 	if err != nil {
 		t.Fatalf("normaliseURL: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestNormaliseURLStripsTrailingSlash(t *testing.T) {
 // TestNormaliseURLRejectsEmpty — empty URL returns an error
 // (operator forgot to pass --backplane).
 func TestNormaliseURLRejectsEmpty(t *testing.T) {
-	_, err := normaliseURL("   ")
+	_, err := backplane.NormaliseURL("   ")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("expected 'empty' error; got %v", err)
 	}
@@ -199,7 +200,7 @@ func TestNormaliseURLRejectsEmpty(t *testing.T) {
 // TestNormaliseURLRejectsHostless — URL without a host (e.g. just a
 // path) is rejected at the boundary.
 func TestNormaliseURLRejectsHostless(t *testing.T) {
-	_, err := normaliseURL("/no-host")
+	_, err := backplane.NormaliseURL("/no-host")
 	if err == nil {
 		t.Fatalf("expected error for hostless URL; got nil")
 	}
@@ -224,14 +225,14 @@ func TestErrEvalGateIsSentinel(t *testing.T) {
 // operators down the `meho login` path even for a typo in
 // `--backplane http:/example`.
 func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
-	wrappedNotFound := &errNoBackplaneConfigured{inner: auth.ErrConfigNotFound}
-	se := classifyBackplaneError(wrappedNotFound)
+	wrappedNotFound := &backplane.NotConfiguredError{Inner: auth.ErrConfigNotFound}
+	se := backplane.ClassifyError(wrappedNotFound)
 	if se == nil || se.Code != "auth_expired" {
 		t.Fatalf("ErrConfigNotFound wrapper should classify as auth_expired; got %+v", se)
 	}
 
 	parseFailure := errors.New("invalid backplane URL")
-	se = classifyBackplaneError(parseFailure)
+	se = backplane.ClassifyError(parseFailure)
 	if se == nil || se.Code != "unexpected_response" {
 		t.Fatalf("parse failure should classify as unexpected; got %+v", se)
 	}

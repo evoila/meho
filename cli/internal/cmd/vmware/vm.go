@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -98,9 +99,9 @@ type vmListOpts struct {
 }
 
 func runVMList(cmd *cobra.Command, opts vmListOpts) error {
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 	params, perr := buildListParams(opts.FilterNames, opts.FilterPowerStates, opts.FilterRaw)
 	if perr != nil {
@@ -280,9 +281,9 @@ func newVMInfoCmd() *cobra.Command {
 }
 
 func runVMInfo(cmd *cobra.Command, nameOrID, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	moid, err := resolveName(cmd.Context(), backplaneURL, targetName, "vm", nameOrID)
 	if err != nil {
@@ -397,9 +398,9 @@ func newVMCreateCmd() *cobra.Command {
 }
 
 func runVMCreate(cmd *cobra.Command, targetName, specFlag string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params, err := loadParamsFlag(specFlag)
 	if err != nil {

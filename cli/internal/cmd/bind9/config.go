@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -70,9 +71,9 @@ func newConfigShowCmd() *cobra.Command {
 }
 
 func runConfigShow(cmd *cobra.Command, path, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"path": path}
 	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.config.show", targetName, params)
@@ -169,9 +170,9 @@ func runConfigApplyViews(
 	viewsConfPath, zonesDir, primaryPath, verifyFQDN, targetName string,
 	jsonOut bool, backplaneOverride string,
 ) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	files, err := assembleViewsBundle(viewsConfPath, zonesDir)
 	if err != nil {
@@ -320,9 +321,9 @@ func newConfigApplyFileCmd() *cobra.Command {
 }
 
 func runConfigApplyFile(cmd *cobra.Command, name, localSrc, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	content, err := readLocalFile(localSrc)
 	if err != nil {
@@ -381,9 +382,9 @@ func newConfigBackupCmd() *cobra.Command {
 }
 
 func runConfigBackup(cmd *cobra.Command, tag, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{}
 	if tag != "" {
@@ -472,9 +473,9 @@ func newConfigReloadCmd() *cobra.Command {
 }
 
 func runConfigReload(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.config.reload", targetName, nil)
 	if err != nil {

@@ -47,14 +47,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -110,69 +108,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newNetworkCmd())
 	cmd.AddCommand(newOperationCmd())
 	return cmd
-}
-
-// errNoBackplaneConfigured wraps auth.ErrConfigNotFound so callers
-// can distinguish "operator never logged in" (→ auth_expired exit
-// code 2 — the right fix is `meho login`) from URL-parse failures
-// (→ unexpected exit code 4 — the right fix is correcting argv).
-// Same shape as the operation / connector / kb siblings; kept
-// independent because cmd/{operation,connector,kb,vmware} can't
-// import each other without an import cycle (cmd/root.go grafts each
-// onto the tree).
-type errNoBackplaneConfigured struct{ inner error }
-
-func (e *errNoBackplaneConfigured) Error() string {
-	return "no backplane URL configured; run `meho login <url>` first or pass --backplane <url>"
-}
-func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
-
-// resolveBackplane mirrors the operation / connector sibling
-// helpers: --backplane override flag wins; otherwise read the URL
-// the most recent `meho login` wrote to config.json. Missing config
-// surfaces as errNoBackplaneConfigured so classifyBackplaneError
-// can route it to auth_expired.
-func resolveBackplane(override string) (string, error) {
-	if override != "" {
-		return normaliseURL(override)
-	}
-	cfg, err := auth.LoadConfig()
-	if err != nil {
-		if errors.Is(err, auth.ErrConfigNotFound) {
-			return "", &errNoBackplaneConfigured{inner: err}
-		}
-		return "", err
-	}
-	return normaliseURL(cfg.BackplaneURL)
-}
-
-// classifyBackplaneError maps a resolveBackplane error to the right
-// output.StructuredError category. Identical routing to the operation
-// sibling: missing-config → auth_expired; everything else (parse
-// errors, fs errors) → unexpected.
-func classifyBackplaneError(err error) *output.StructuredError {
-	if errors.Is(err, auth.ErrConfigNotFound) {
-		return output.AuthExpired(err.Error())
-	}
-	return output.Unexpected(err.Error())
-}
-
-// normaliseURL strips trailing slashes + parses the URL to fail fast
-// on garbage input. Mirrors the operation / connector siblings.
-func normaliseURL(s string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(s), "/")
-	if trimmed == "" {
-		return "", errors.New("backplane URL is empty")
-	}
-	u, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("backplane URL %q has no host", s)
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
 }
 
 // renderRequestError translates an error from doAuthedRequest into

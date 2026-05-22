@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -53,9 +54,9 @@ func newArtifactListCmd() *cobra.Command {
 }
 
 func runArtifactList(cmd *cobra.Command, projectName, repoName, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	opID := "GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts"
 	params := map[string]any{
@@ -140,9 +141,9 @@ func newArtifactInfoCmd() *cobra.Command {
 }
 
 func runArtifactInfo(cmd *cobra.Command, projectName, repoName, reference, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	opID := "GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}"
 	params := map[string]any{

@@ -6,6 +6,7 @@ package k8s
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
@@ -52,9 +53,9 @@ func bindK8sAddrFlags(cmd *cobra.Command) *k8sAddrFlags {
 // every K8s verb shares. opID + params come from the verb; the shared
 // address flags carry target / json / backplane.
 func dispatchVerb(cmd *cobra.Command, f *k8sAddrFlags, opID string, params map[string]any) error {
-	backplaneURL, err := resolveBackplane(f.backplaneOverride)
+	backplaneURL, err := backplane.Resolve(f.backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), f.jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), f.jsonOut)
 	}
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, f.targetName, params)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -61,9 +62,9 @@ func newZoneListCmd() *cobra.Command {
 }
 
 func runZoneList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.zone.list", targetName, nil)
 	if err != nil {
@@ -139,9 +140,9 @@ func newZoneReadCmd() *cobra.Command {
 }
 
 func runZoneRead(cmd *cobra.Command, zone, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"zone": zone}
 	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.zone.read", targetName, params)

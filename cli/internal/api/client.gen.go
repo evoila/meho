@@ -2703,6 +2703,33 @@ type ClientInterface interface {
 	// ReadyReadyGet request
 	ReadyReadyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiDashboardUiGet request
+	UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthCallbackUiAuthCallbackGet request
+	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthLoginUiAuthLoginGet request
+	UiAuthLoginUiAuthLoginGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthLogoutUiAuthLogoutGet request
+	UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubBroadcastUiBroadcastGet request
+	UiStubBroadcastUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubConnectorsUiConnectorsGet request
+	UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubKnowledgeUiKnowledgeGet request
+	UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubMemoryUiMemoryGet request
+	UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubTopologyUiTopologyGet request
+	UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// VersionVersionGet request
 	VersionVersionGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 }
@@ -3585,6 +3612,114 @@ func (c *Client) MetricsMetricsGet(ctx context.Context, reqEditors ...RequestEdi
 
 func (c *Client) ReadyReadyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReadyReadyGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiDashboardUiGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthCallbackUiAuthCallbackGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthCallbackUiAuthCallbackGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthLoginUiAuthLoginGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthLoginUiAuthLoginGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthLogoutUiAuthLogoutGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubBroadcastUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubBroadcastUiBroadcastGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubConnectorsUiConnectorsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubKnowledgeUiKnowledgeGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubMemoryUiMemoryGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubTopologyUiTopologyGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -7322,6 +7457,249 @@ func NewReadyReadyGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiDashboardUiGetRequest generates requests for UiDashboardUiGet
+func NewUiDashboardUiGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthCallbackUiAuthCallbackGetRequest generates requests for UiAuthCallbackUiAuthCallbackGet
+func NewUiAuthCallbackUiAuthCallbackGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/callback")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthLoginUiAuthLoginGetRequest generates requests for UiAuthLoginUiAuthLoginGet
+func NewUiAuthLoginUiAuthLoginGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/login")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthLogoutUiAuthLogoutGetRequest generates requests for UiAuthLogoutUiAuthLogoutGet
+func NewUiAuthLogoutUiAuthLogoutGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/logout")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubBroadcastUiBroadcastGetRequest generates requests for UiStubBroadcastUiBroadcastGet
+func NewUiStubBroadcastUiBroadcastGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubConnectorsUiConnectorsGetRequest generates requests for UiStubConnectorsUiConnectorsGet
+func NewUiStubConnectorsUiConnectorsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubKnowledgeUiKnowledgeGetRequest generates requests for UiStubKnowledgeUiKnowledgeGet
+func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/knowledge")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubMemoryUiMemoryGetRequest generates requests for UiStubMemoryUiMemoryGet
+func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubTopologyUiTopologyGetRequest generates requests for UiStubTopologyUiTopologyGet
+func NewUiStubTopologyUiTopologyGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVersionVersionGetRequest generates requests for VersionVersionGet
 func NewVersionVersionGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -7596,6 +7974,33 @@ type ClientWithResponsesInterface interface {
 
 	// ReadyReadyGetWithResponse request
 	ReadyReadyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReadyReadyGetResponse, error)
+
+	// UiDashboardUiGetWithResponse request
+	UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error)
+
+	// UiAuthCallbackUiAuthCallbackGetWithResponse request
+	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
+
+	// UiAuthLoginUiAuthLoginGetWithResponse request
+	UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error)
+
+	// UiAuthLogoutUiAuthLogoutGetWithResponse request
+	UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error)
+
+	// UiStubBroadcastUiBroadcastGetWithResponse request
+	UiStubBroadcastUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubBroadcastUiBroadcastGetResponse, error)
+
+	// UiStubConnectorsUiConnectorsGetWithResponse request
+	UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error)
+
+	// UiStubKnowledgeUiKnowledgeGetWithResponse request
+	UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error)
+
+	// UiStubMemoryUiMemoryGetWithResponse request
+	UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error)
+
+	// UiStubTopologyUiTopologyGetWithResponse request
+	UiStubTopologyUiTopologyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubTopologyUiTopologyGetResponse, error)
 
 	// VersionVersionGetWithResponse request
 	VersionVersionGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VersionVersionGetResponse, error)
@@ -8898,6 +9303,198 @@ func (r ReadyReadyGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiDashboardUiGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiDashboardUiGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiDashboardUiGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthCallbackUiAuthCallbackGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthCallbackUiAuthCallbackGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthCallbackUiAuthCallbackGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthLoginUiAuthLoginGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthLoginUiAuthLoginGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthLoginUiAuthLoginGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthLogoutUiAuthLogoutGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthLogoutUiAuthLogoutGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthLogoutUiAuthLogoutGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubBroadcastUiBroadcastGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubBroadcastUiBroadcastGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubBroadcastUiBroadcastGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubConnectorsUiConnectorsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubConnectorsUiConnectorsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubConnectorsUiConnectorsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubKnowledgeUiKnowledgeGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubKnowledgeUiKnowledgeGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubKnowledgeUiKnowledgeGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubMemoryUiMemoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubMemoryUiMemoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubMemoryUiMemoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubTopologyUiTopologyGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubTopologyUiTopologyGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubTopologyUiTopologyGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type VersionVersionGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -9567,6 +10164,87 @@ func (c *ClientWithResponses) ReadyReadyGetWithResponse(ctx context.Context, req
 		return nil, err
 	}
 	return ParseReadyReadyGetResponse(rsp)
+}
+
+// UiDashboardUiGetWithResponse request returning *UiDashboardUiGetResponse
+func (c *ClientWithResponses) UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error) {
+	rsp, err := c.UiDashboardUiGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiDashboardUiGetResponse(rsp)
+}
+
+// UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
+func (c *ClientWithResponses) UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error) {
+	rsp, err := c.UiAuthCallbackUiAuthCallbackGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthCallbackUiAuthCallbackGetResponse(rsp)
+}
+
+// UiAuthLoginUiAuthLoginGetWithResponse request returning *UiAuthLoginUiAuthLoginGetResponse
+func (c *ClientWithResponses) UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error) {
+	rsp, err := c.UiAuthLoginUiAuthLoginGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthLoginUiAuthLoginGetResponse(rsp)
+}
+
+// UiAuthLogoutUiAuthLogoutGetWithResponse request returning *UiAuthLogoutUiAuthLogoutGetResponse
+func (c *ClientWithResponses) UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error) {
+	rsp, err := c.UiAuthLogoutUiAuthLogoutGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp)
+}
+
+// UiStubBroadcastUiBroadcastGetWithResponse request returning *UiStubBroadcastUiBroadcastGetResponse
+func (c *ClientWithResponses) UiStubBroadcastUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubBroadcastUiBroadcastGetResponse, error) {
+	rsp, err := c.UiStubBroadcastUiBroadcastGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubBroadcastUiBroadcastGetResponse(rsp)
+}
+
+// UiStubConnectorsUiConnectorsGetWithResponse request returning *UiStubConnectorsUiConnectorsGetResponse
+func (c *ClientWithResponses) UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error) {
+	rsp, err := c.UiStubConnectorsUiConnectorsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubConnectorsUiConnectorsGetResponse(rsp)
+}
+
+// UiStubKnowledgeUiKnowledgeGetWithResponse request returning *UiStubKnowledgeUiKnowledgeGetResponse
+func (c *ClientWithResponses) UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
+	rsp, err := c.UiStubKnowledgeUiKnowledgeGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp)
+}
+
+// UiStubMemoryUiMemoryGetWithResponse request returning *UiStubMemoryUiMemoryGetResponse
+func (c *ClientWithResponses) UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error) {
+	rsp, err := c.UiStubMemoryUiMemoryGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubMemoryUiMemoryGetResponse(rsp)
+}
+
+// UiStubTopologyUiTopologyGetWithResponse request returning *UiStubTopologyUiTopologyGetResponse
+func (c *ClientWithResponses) UiStubTopologyUiTopologyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubTopologyUiTopologyGetResponse, error) {
+	rsp, err := c.UiStubTopologyUiTopologyGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubTopologyUiTopologyGetResponse(rsp)
 }
 
 // VersionVersionGetWithResponse request returning *VersionVersionGetResponse
@@ -11356,6 +12034,180 @@ func ParseReadyReadyGetResponse(rsp *http.Response) (*ReadyReadyGetResponse, err
 		}
 		response.JSON200 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiDashboardUiGetResponse parses an HTTP response from a UiDashboardUiGetWithResponse call
+func ParseUiDashboardUiGetResponse(rsp *http.Response) (*UiDashboardUiGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiDashboardUiGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthCallbackUiAuthCallbackGetResponse parses an HTTP response from a UiAuthCallbackUiAuthCallbackGetWithResponse call
+func ParseUiAuthCallbackUiAuthCallbackGetResponse(rsp *http.Response) (*UiAuthCallbackUiAuthCallbackGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthCallbackUiAuthCallbackGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthLoginUiAuthLoginGetResponse parses an HTTP response from a UiAuthLoginUiAuthLoginGetWithResponse call
+func ParseUiAuthLoginUiAuthLoginGetResponse(rsp *http.Response) (*UiAuthLoginUiAuthLoginGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthLoginUiAuthLoginGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthLogoutUiAuthLogoutGetResponse parses an HTTP response from a UiAuthLogoutUiAuthLogoutGetWithResponse call
+func ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp *http.Response) (*UiAuthLogoutUiAuthLogoutGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthLogoutUiAuthLogoutGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiStubBroadcastUiBroadcastGetResponse parses an HTTP response from a UiStubBroadcastUiBroadcastGetWithResponse call
+func ParseUiStubBroadcastUiBroadcastGetResponse(rsp *http.Response) (*UiStubBroadcastUiBroadcastGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubBroadcastUiBroadcastGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubConnectorsUiConnectorsGetResponse parses an HTTP response from a UiStubConnectorsUiConnectorsGetWithResponse call
+func ParseUiStubConnectorsUiConnectorsGetResponse(rsp *http.Response) (*UiStubConnectorsUiConnectorsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubConnectorsUiConnectorsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubKnowledgeUiKnowledgeGetResponse parses an HTTP response from a UiStubKnowledgeUiKnowledgeGetWithResponse call
+func ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp *http.Response) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubKnowledgeUiKnowledgeGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubMemoryUiMemoryGetResponse parses an HTTP response from a UiStubMemoryUiMemoryGetWithResponse call
+func ParseUiStubMemoryUiMemoryGetResponse(rsp *http.Response) (*UiStubMemoryUiMemoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubMemoryUiMemoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubTopologyUiTopologyGetResponse parses an HTTP response from a UiStubTopologyUiTopologyGetWithResponse call
+func ParseUiStubTopologyUiTopologyGetResponse(rsp *http.Response) (*UiStubTopologyUiTopologyGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubTopologyUiTopologyGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

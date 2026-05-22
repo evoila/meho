@@ -47,6 +47,7 @@ from typing import Final
 
 import structlog
 from fastapi import FastAPI, Response
+from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
@@ -105,6 +106,11 @@ from meho_backplane.topology import (
     stop_topology_history_retention_sweeper,
     stop_topology_refresh_scheduler,
 )
+from meho_backplane.ui.auth import UISessionMiddleware
+from meho_backplane.ui.auth import build_router as build_ui_auth_router
+from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
+from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.version import router as version_router
 
 _APP_NAME: Final[str] = "meho-backplane"
@@ -248,6 +254,14 @@ async def _run_lifespan_startup() -> None:
     # 401s with no signal. Crash loudly here with the remediation
     # instead of serving a dark, silent surface.
     _assert_mcp_resource_uri_configured()
+    # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
+    # StaticFiles mount does not crash on a fresh clone where
+    # ``tailwindcss --watch`` has not yet materialised the compiled
+    # stylesheet. Idempotent; mkdir(exist_ok=True). The mount serves
+    # a 404 on ``/ui/static/dist/tailwind.css`` until the operator
+    # runs the Tailwind build -- the operator-facing remediation is
+    # documented in ``docs/codebase/ui.md``.
+    ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
 
@@ -353,10 +367,33 @@ app: FastAPI = FastAPI(
 # outermost layer (its ``__call__`` runs first on the request side and
 # last on the response side). The required runtime order for v0.2 is:
 #
-#   client → RequestContextMiddleware → BroadcastDetailMiddleware
+#   client → UISessionMiddleware → CSRFMiddleware
+#          → RequestContextMiddleware → BroadcastDetailMiddleware
 #          → AuditMiddleware → router → handler
 #
-# - ``RequestContextMiddleware`` outermost so ``request_id`` is bound
+# - ``UISessionMiddleware`` (G10.0-T4 #865, mounted by T5 #866)
+#   outermost so unauthenticated ``/ui/*`` requests 302 to
+#   ``/ui/auth/login`` BEFORE any inner middleware does
+#   request-context / audit work. Out-of-prefix paths
+#   (``/api/*`` / ``/mcp/*`` / ``/healthz`` / etc.) pass straight
+#   through to the inner chain -- the middleware is ``/ui/``-scoped
+#   by construction. Registering it *before* (i.e. outside) the
+#   JWT dependency chain is what the Initiative #337 acceptance
+#   criterion 4 means by "session middleware before JWT
+#   middleware": JWT verification is enforced as a route
+#   dependency on ``/api/*`` routes, and the session middleware
+#   short-circuits ``/ui/*`` requests so the JWT dependency never
+#   runs on them. The /api/* surface continues to flow through the
+#   inner chain unchanged.
+# - ``CSRFMiddleware`` (G10.0-T5 #866) runs second. It guards
+#   state-changing ``/ui/*`` requests (POST/PATCH/PUT/DELETE) with
+#   the OWASP double-submit cookie pattern. Out-of-prefix paths
+#   and read-only methods pass through. The middleware is
+#   intentionally registered *outside* the audit chain so a CSRF
+#   rejection produces a 403 without writing an unauthenticated
+#   audit row (the audit middleware skips when ``operator_sub`` is
+#   not bound, which is true on a CSRF rejection).
+# - ``RequestContextMiddleware`` next so ``request_id`` is bound
 #   before any inner middleware reads it; the
 #   :func:`~meho_backplane.middleware.verify_jwt_and_bind` dependency
 #   binds ``operator_sub`` deeper still, inside the handler invocation.
@@ -372,14 +409,17 @@ app: FastAPI = FastAPI(
 #
 # To achieve that with ``add_middleware``'s last-added-is-outermost
 # rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
-# then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``
-# (becomes outermost). Middleware is registered before routers so
-# every endpoint (including the Task #19 health/version/ready
-# surfaces and the Task #20 ``/metrics`` route) inherits the
-# request-id binding and the http_requests_total counter.
+# then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``,
+# then ``CSRFMiddleware``, then ``UISessionMiddleware`` (becomes
+# outermost). Middleware is registered before routers so every
+# endpoint (including the Task #19 health/version/ready surfaces
+# and the Task #20 ``/metrics`` route) inherits the request-id
+# binding and the http_requests_total counter.
 app.add_middleware(AuditMiddleware)
 app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
+app.add_middleware(CSRFMiddleware)
+app.add_middleware(UISessionMiddleware)
 
 app.include_router(health_router)
 app.include_router(version_router)
@@ -519,6 +559,33 @@ app.include_router(api_v1_broadcast_overrides_router)
 #   semantics on top.
 app.include_router(well_known_router)
 app.include_router(mcp_router)
+
+# G10.0-T5 (#866) -- Operator console surface. Three pieces ship
+# together: the static-asset mount for vendored JS + compiled
+# Tailwind, the BFF auth router (login/callback/logout), and the
+# umbrella UI router (dashboard + 5 surface stubs).
+#
+# Mount order:
+# * ``/ui/static`` -- StaticFiles wrapping the ``ui/static/``
+#   subtree. Covers both ``static/src/vendor/*.js`` (vendored HTMX /
+#   Alpine / Cytoscape) and ``static/dist/tailwind.css`` (compiled
+#   stylesheet, materialised by ``ensure_static_dist_dir`` at
+#   startup). The ``UISessionMiddleware`` short-circuits on the
+#   ``/ui/static/`` prefix so unauthenticated browsers can load
+#   the styled login page assets.
+# * UI auth router -- ``/ui/auth/{login,callback,logout}`` GET
+#   routes; reachable unauthenticated (the middleware exempts
+#   ``/ui/auth/``).
+# * UI router -- ``GET /ui/`` dashboard + the five
+#   ``GET /ui/{slug}`` surface stubs. All routes require a session;
+#   ``UISessionMiddleware`` redirects to login on miss.
+app.mount(
+    "/ui/static",
+    StaticFiles(directory=str(static_root_dir()), check_dir=False),
+    name="ui_static",
+)
+app.include_router(build_ui_auth_router())
+app.include_router(build_ui_router())
 
 # Opt-in stub routes for end-to-end verification of
 # :func:`~meho_backplane.auth.rbac.require_role`. Disabled by default

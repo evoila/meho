@@ -84,6 +84,14 @@ class ConnectorSpecEntry(BaseModel):
     sha256: str | None = Field(default=None, max_length=64)
     notes: str = Field(default="", max_length=2048)
 
+    @field_validator("product", "version", "impl_id", "requires_connector_class")
+    @classmethod
+    def _strip_required_identifier(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("identifier must not be blank or whitespace-only")
+        return normalized
+
     @field_validator("spec_info_version")
     @classmethod
     def _spec_info_version_is_pep440(cls, value: str | None) -> str | None:
@@ -111,9 +119,10 @@ class ConnectorSpecEntry(BaseModel):
             return value
         if not value:
             raise ValueError("upstream must be null (typed connector) or a non-empty URL list")
-        if any(not url.strip() for url in value):
+        normalized = tuple(url.strip() for url in value)
+        if any(not url for url in normalized):
             raise ValueError("upstream URLs must be non-empty")
-        return value
+        return normalized
 
 
 class ConnectorSpecCatalog(BaseModel):

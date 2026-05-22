@@ -67,15 +67,22 @@ _TYPED_PRODUCTS = {"vault", "k8s", "bind9"}
 
 @pytest.fixture(autouse=True)
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the Keycloak issuer/audience the auth dependency reads.
+    """Pin the Keycloak + Vault settings the auth dependency reads.
 
     The unauthenticated-401 route test drives a request through
-    ``require_role``, which constructs :class:`Settings`; without these
-    every test file pins them (see ``conftest.py`` and the sibling
-    ``test_api_v1_connectors_ingest.py``).
+    ``require_role``, which constructs :class:`Settings` (Keycloak *and*
+    Vault fields are required). Every test file pins these (see
+    ``conftest.py`` and the sibling ``test_api_v1_connectors_ingest.py``);
+    CI runs with a clean env, so the fixture — not the ambient shell —
+    must provide them.
     """
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("KEYCLOAK_JWKS_CACHE_TTL_SECONDS", "300")
+    monkeypatch.setenv("KEYCLOAK_JWT_LEEWAY_SECONDS", "30")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
 
 
 def _entry(**overrides: object) -> ConnectorSpecEntry:
@@ -215,6 +222,22 @@ def test_entry_rejects_bad_sha256() -> None:
 def test_entry_rejects_empty_upstream_list() -> None:
     with pytest.raises(ValidationError):
         _entry(upstream=[])
+
+
+def test_entry_strips_identifier_whitespace() -> None:
+    entry = _entry(product="  vmware  ", impl_id=" vmware-rest ")
+    assert entry.product == "vmware"
+    assert entry.impl_id == "vmware-rest"
+
+
+def test_entry_rejects_whitespace_only_identifier() -> None:
+    with pytest.raises(ValidationError, match="blank or whitespace-only"):
+        _entry(version="   ")
+
+
+def test_entry_strips_upstream_urls() -> None:
+    entry = _entry(upstream=["  https://example.test/spec.yaml  "])
+    assert entry.upstream == ("https://example.test/spec.yaml",)
 
 
 def test_catalog_rejects_duplicate_product_version() -> None:

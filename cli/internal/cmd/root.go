@@ -31,6 +31,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
+	vcffleet "github.com/evoila/meho/cli/internal/cmd/vcf-fleet"
 	vcflogs "github.com/evoila/meho/cli/internal/cmd/vcf-logs"
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
@@ -272,6 +273,17 @@ func newRootCmd() *cobra.Command {
 	// pods` wrapper. Registered before registerDynamicSubcommands so
 	// the backplane manifest cannot shadow the built-in `k8s` parent.
 	root.AddCommand(k8s.NewRootCmd())
+
+	// G3.6-T9 (#839) -- fleet-rest-9.0 operator alias verbs for Initiative
+	// #369. The verb tree pre-bakes connector_id="fleet-rest-9.0" on top of
+	// the existing /api/v1/operations/call dispatcher route so operators
+	// don't type the connector ID on every invocation. Ships the 8 read-only
+	// Fleet core verbs (about, datacenter list, vcenter list, environment
+	// list/info, product list, request list/info) plus operation search/call
+	// meta-tool wrappers. Replaces ./scripts/vcf-fleet.sh.
+	// Registered before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `vcf-fleet` parent.
+	root.AddCommand(vcffleet.NewRootCmd())
 
 	// G3.4-T5 (#591) -- bind9-ssh-9.x operator alias verbs for Initiative
 	// #367. The verb tree pre-bakes connector_id="bind9-ssh-9.x" on top

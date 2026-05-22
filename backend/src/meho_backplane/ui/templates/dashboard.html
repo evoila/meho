@@ -1,0 +1,151 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Dashboard view (Initiative #337, Task #866). Authenticated landing
+  page rendered for ``GET /ui/`` once the BFF session middleware loads
+  the operator's session.
+
+  Structure:
+    * <body> inherits the DaisyUI drawer chrome from base.html.
+    * <header>'s ``hx-headers`` directive wires every HTMX-issued
+      state-changing request from this page to echo the CSRF token
+      via the X-CSRF-Token header (double-submit cookie pattern).
+    * Three content blocks:
+      1. The 3x2 surface card grid (5 cards + 1 "deploy info" cell).
+      2. The live "last 5 events" snippet -- HTMX SSE extension
+         subscribes to /api/v1/feed?limit=5 and swaps events into the
+         ``#meho-feed-tray`` container as they arrive. Pre-render
+         placeholder text covers the SSE-not-yet-connected window.
+      3. Version + readiness card.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}MEHO Operator Console{% endblock %}
+
+{% block content %}
+{#-
+  HTMX 2 SSE extension wiring (https://htmx.org/extensions/sse/) --
+  ``hx-ext="sse"`` activates the extension on the wrapper element;
+  ``sse-connect`` points at the SSE endpoint;
+  ``sse-swap="broadcast"`` listens for ``event: broadcast`` frames the
+  feed emits per G6.1-T4 (#310) and swaps the data payload into
+  ``#meho-feed-tray``. The ``hx-headers`` on the wrapper forwards
+  the CSRF token on any state-changing HTMX request anywhere in this
+  page subtree.
+-#}
+<section
+  class="space-y-6"
+  hx-ext="sse"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+
+  {# -------- Greeting -------- #}
+  <header class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-semibold">Operator Console</h1>
+      <p class="text-sm opacity-70">
+        Signed in as <code class="badge badge-outline">{{ operator_sub }}</code>
+        in tenant <code class="badge badge-outline">{{ tenant_id }}</code>.
+      </p>
+    </div>
+  </header>
+
+  {# -------- 3x2 surface grid -------- #}
+  <div
+    class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"
+    aria-label="Operator surfaces"
+  >
+    {% for tile in surface_tiles %}
+      <a
+        href="{{ tile.href }}"
+        class="card bg-base-100 border-base-300 hover:border-primary border shadow-sm transition"
+      >
+        <div class="card-body">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl" aria-hidden="true">{{ tile.icon }}</span>
+            <h2 class="card-title">{{ tile.title }}</h2>
+          </div>
+          <p class="text-sm opacity-80">{{ tile.summary }}</p>
+        </div>
+      </a>
+    {% endfor %}
+
+    {# Sixth tile: deploy info. Keeps the grid 3x2 balanced. #}
+    <article class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body">
+        <div class="flex items-center gap-3">
+          <span class="text-2xl" aria-hidden="true">&#x2699;</span>
+          <h2 class="card-title">Deploy</h2>
+        </div>
+        <dl class="text-sm opacity-80">
+          <div class="flex justify-between">
+            <dt>Backplane version</dt>
+            <dd><code>v{{ app_version }}</code></dd>
+          </div>
+          <div class="mt-1 flex items-center justify-between">
+            <dt>Readiness</dt>
+            <dd>
+              <span
+                class="badge {% if ready %}badge-success{% else %}badge-warning{% endif %}"
+              >
+                {% if ready %}ready{% else %}starting{% endif %}
+              </span>
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </article>
+  </div>
+
+  {# -------- Live feed snippet (HTMX SSE) -------- #}
+  <section
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    aria-label="Last 5 broadcast events"
+  >
+    <div class="card-body">
+      <div class="flex items-baseline justify-between">
+        <h2 class="card-title">Recent activity</h2>
+        <a href="/ui/broadcast" class="link link-hover text-xs">
+          Open broadcast surface &rarr;
+        </a>
+      </div>
+      <ul
+        id="meho-feed-tray"
+        class="divide-base-300 divide-y text-sm"
+        sse-connect="{{ feed_endpoint }}"
+        sse-swap="broadcast"
+        hx-swap="afterbegin"
+      >
+        <li class="py-2 opacity-60">
+          Connecting to live feed&hellip;
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  {# -------- Readiness card (expanded; the badge above is the summary) -------- #}
+  {% if readiness_checks %}
+    <section class="card bg-base-100 border-base-300 border shadow-sm">
+      <div class="card-body">
+        <h2 class="card-title">Readiness checks</h2>
+        <ul class="text-sm">
+          {% for check in readiness_checks %}
+            <li class="flex items-center gap-2 py-1">
+              <span
+                class="inline-block h-2 w-2 rounded-full {% if check.ok %}bg-success{% else %}bg-warning{% endif %}"
+                aria-hidden="true"
+              ></span>
+              <span class="font-mono text-xs">{{ check.name }}</span>
+              {% if check.detail %}
+                <span class="opacity-60">&mdash; {{ check.detail }}</span>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </section>
+  {% endif %}
+
+</section>
+{% endblock %}

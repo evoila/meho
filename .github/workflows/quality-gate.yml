@@ -63,6 +63,23 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true  # missing artifact degrades to "no coverage", never blocks
 
+      - name: Point coverage report at the backend/ source root
+        # coverage.py (relative_files=true) writes an empty <source></source>
+        # and filenames like `src/meho_backplane/...` relative to backend/.
+        # SonarCloud resolves coverage paths from the repo root, so without
+        # the `backend/` prefix every file fails with "Cannot resolve the
+        # file path ... the file does not exist in all 'source'" and coverage
+        # imports as 0% (observed on the #920 merge run). Injecting the
+        # source root makes paths resolve to backend/src/meho_backplane/...
+        # Guarded on the file existing so a missing coverage artifact is a no-op.
+        if: hashFiles('backend/coverage.xml') != ''
+        run: |
+          set -euo pipefail
+          sed -i 's#<source></source>#<source>backend</source>#' backend/coverage.xml
+          grep -q '<source>backend</source>' backend/coverage.xml \
+            && echo "coverage source root set to backend/" \
+            || echo "::warning::coverage <source> not rewritten — sonar may report 0% coverage"
+
       - name: Ensure dirmngr is available (for sonar-scanner GPG verify)
         run: |
           set -euo pipefail

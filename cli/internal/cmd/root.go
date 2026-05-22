@@ -31,6 +31,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
+	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
 	"github.com/evoila/meho/cli/internal/discovery"
 )
@@ -211,6 +212,17 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `sddc-manager` parent.
 	root.AddCommand(sddcmanager.NewRootCmd())
+
+	// G3.6-T3 (#837) -- vrops-rest-9.0 operator alias verbs for
+	// Initiative #369. The verb tree pre-bakes connector_id=
+	// "vrops-rest-9.0" on top of the existing /api/v1/operations/call
+	// dispatcher route. Ships the 8 read-only vROps core verbs (about,
+	// resource list/get, alert list, alertdefinition list, symptom
+	// list, recommendation list, supermetric list) plus operation
+	// search/call meta-tool wrappers. Replaces ./scripts/vcf-operations.sh.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `vcf-operations` parent.
+	root.AddCommand(vcfoperations.NewRootCmd())
 
 	// G3.3-T6 (#550) -- vault-1.x operator alias verbs for Initiative
 	// #366. The verb tree pre-bakes connector_id="vault-1.x" on top of

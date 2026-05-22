@@ -111,6 +111,27 @@ connector-related release-notes line.
 
 ### Added
 
+- **`meho vcf-operations` CLI verbs + recorded-fixture E2E + operator
+  onboarding doc** (G3.6-T3
+  [#837](https://github.com/evoila/meho/issues/837)) — operator-facing
+  alias verbs over the 8 enabled vROps read ops (#833), each pre-baking
+  `connector_id="vrops-rest-9.0"` so operators don't type it on every
+  invocation: `meho vcf-operations about` (versions/current),
+  `resource list/get`, `alert list`, `alertdefinition list`,
+  `symptom list`, `recommendation list`, `supermetric list`, plus
+  `operation search/call` meta-tool wrappers. CLI is pure
+  Cobra-over-HTTP — every verb POSTs to `/api/v1/operations/call` on
+  the same dispatcher route the agent uses (CLAUDE.md postulate 5;
+  vendor logic stays out of the CLI). Recorded-fixture E2E at
+  [`backend/tests/test_connectors_vcf_operations_e2e.py`](backend/tests/test_connectors_vcf_operations_e2e.py)
+  replays the captured suite-api shape for every enabled op through
+  the full `call_operation` stack, asserts the JSONFlux handle path
+  on `resource list`, asserts audit rows carry `op_id` + `target_id`
+  + `params_hash`, and pins the Basic-auth credential-cache contract
+  (no session token, no 401-retry — same posture as Harbor and SDDC
+  Manager). Operator wrapper-flip recipe at
+  [`docs/cross-repo/vcf-operations-onboarding.md`](docs/cross-repo/vcf-operations-onboarding.md)
+  retires `./scripts/vcf-operations.sh`.
 - **vROps suite-api spec ingestion + curated read-only v0.5 core**
   (G3.6-T2 [#833](https://github.com/evoila/meho/issues/833)) —
   enables the `VcfOperationsConnector` (#829) for agent dispatch by

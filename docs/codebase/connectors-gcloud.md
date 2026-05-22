@@ -4,7 +4,7 @@
 
 The `gcloud` connector is the hand-rolled `HttpConnector` subclass that
 dispatches GCP REST operations under the
-`(product="gcloud", version="v1", impl_id="gcloud-rest")` registry triple.
+`(product="gcloud", version="1.0", impl_id="gcloud-rest")` registry triple.
 G3.7-T4 (#845) ships the skeleton — ADC+impersonation auth, SA-JSON-key
 refusal, fingerprint, probe, and the G0.6 dispatch shim. G3.7-T5 (#848)
 ships the ~7 read-only typed ops (cloudresourcemanager, compute, iam,
@@ -19,7 +19,7 @@ impersonated service-account credentials. Recorded as decision #12 in
 `gcloud` CLI) was rejected.
 
 **Org-policy constraint:** `constraints/iam.disableServiceAccountKeyCreation`
-is active on the consumer's GCP organisation. The connector encodes this
+is active on the consumer's GCP organization. The connector encodes this
 constraint: SA JSON key material in any Vault `secret_ref` payload is
 refused before any token is built. This is not a soft warning — it raises
 `ValueError` and no token is returned.
@@ -27,7 +27,7 @@ refused before any token is built. This is not a soft warning — it raises
 ## Key types
 
 - **`GcloudConnector`** (`connector.py`) — `HttpConnector` subclass.
-  Class attributes: `product="gcloud"`, `version="v1"`,
+  Class attributes: `product="gcloud"`, `version="1.0"`,
   `impl_id="gcloud-rest"`, `priority=1`. Auth via Google ADC +
   `impersonated_credentials.Credentials`; per-target token cache;
   auto-refresh on 401 via `refresh_token()`.
@@ -60,8 +60,8 @@ refused before any token is built. This is not a soft warning — it raises
 1. Lifespan calls `_eager_import_connectors()` which walks every
    `connectors/<product>/` subpackage in name-sorted order.
 2. Importing `meho_backplane.connectors.gcloud` triggers the module-level
-   `register_connector_v2(product="gcloud", version="v1", impl_id="gcloud-rest", cls=GcloudConnector)` call.
-3. The registry's v2 table resolves `("gcloud", "v1", "gcloud-rest")` to
+   `register_connector_v2(product="gcloud", version="1.0", impl_id="gcloud-rest", cls=GcloudConnector)` call.
+3. The registry's v2 table resolves `("gcloud", "1.0", "gcloud-rest")` to
    `GcloudConnector`. The G0.7 auto-shim's idempotency check no-ops on
    subsequent ingests against the same triple.
 
@@ -74,7 +74,7 @@ refused before any token is built. This is not a soft warning — it raises
    Any present → `ValueError` naming the target + fields.
 3. **Token resolution** — calls `_ensure_token(target)`:
    - Fast path: cached token + `creds.valid` → return cached.
-   - Slow path (under lock): calls `_fetch_token(target)` which:
+   - Slow path (under per-target lock): calls `_fetch_token(target)` which:
      - Runs `_fetch_token_sync(target)` in a thread pool executor.
      - `_fetch_token_sync` calls `google.auth.default()` for ADC source
        credentials, wraps with `impersonated_credentials.Credentials`,
@@ -87,7 +87,7 @@ refused before any token is built. This is not a soft warning — it raises
 GCP REST APIs return HTTP 401 when a bearer token has expired.
 `_get_json_abs(target, abs_url)`:
 - Issues the GET with the current bearer token.
-- On 401: calls `refresh_token(target)` (acquires lock, calls
+- On 401: calls `refresh_token(target)` (acquires per-target lock, calls
   `creds.refresh()` in executor, updates cache) and retries once.
 - Any subsequent non-2xx → `httpx.HTTPStatusError`.
 
@@ -114,7 +114,7 @@ Returns `ok=True` on success, `ok=False + reason` on failure.
 ### execute()
 
 G0.6 dispatch shim — delegates to `meho_backplane.operations.dispatch` with
-`connector_id="gcloud-rest-v1"`. Operations register in G3.7-T5 (#848).
+`connector_id="gcloud-rest-1.0"`. Operations register in G3.7-T5 (#848).
 
 ## Dependencies
 

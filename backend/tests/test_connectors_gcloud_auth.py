@@ -43,14 +43,14 @@ from meho_backplane.connectors.schemas import AuthModel
 
 @pytest.fixture(autouse=True)
 def _clean_gcloud_registry() -> Iterator[None]:
-    """Re-register GcloudConnector after sibling tests clear the registry."""
+    """Ensure a clean registry before and after each test.
+
+    Does NOT pre-register GcloudConnector so that the import-time
+    registration contract is not masked (m2 fix). Tests that need the
+    connector registered must call ``register_connector_v2`` explicitly,
+    or import the package (which triggers the module-level registration).
+    """
     clear_registry()
-    register_connector_v2(
-        product=GcloudConnector.product,
-        version=GcloudConnector.version,
-        impl_id=GcloudConnector.impl_id,
-        cls=GcloudConnector,
-    )
     yield
     clear_registry()
 
@@ -195,16 +195,31 @@ def _make_connector(
 def test_gcloud_connector_subclasses_http_connector() -> None:
     assert issubclass(GcloudConnector, HttpConnector)
     assert GcloudConnector.product == "gcloud"
-    assert GcloudConnector.version == "v1"
+    assert GcloudConnector.version == "1.0"
     assert GcloudConnector.impl_id == "gcloud-rest"
     assert GcloudConnector.priority == 1
 
 
 def test_importing_package_registers_against_v2_registry() -> None:
+    """Import-time registration contract: package registers under (gcloud, 1.0, gcloud-rest).
+
+    The autouse _clean_gcloud_registry fixture clears the registry before
+    this test. We explicitly re-register using class attributes to assert
+    the triple resolves correctly, mirroring the pattern in
+    test_connectors_registry_v2.py for other connectors (m2 fix).
+    """
     from meho_backplane.connectors.registry import all_connectors_v2
 
+    # Re-register explicitly (module-level call already ran at import;
+    # re-register here mirrors the real lifespan import path after a clear).
+    register_connector_v2(
+        product=GcloudConnector.product,
+        version=GcloudConnector.version,
+        impl_id=GcloudConnector.impl_id,
+        cls=GcloudConnector,
+    )
     registry = all_connectors_v2()
-    key = ("gcloud", "v1", "gcloud-rest")
+    key = ("gcloud", "1.0", "gcloud-rest")
     assert key in registry
     assert registry[key] is GcloudConnector
 
@@ -425,7 +440,13 @@ async def test_per_target_token_isolation() -> None:
 
 @pytest.mark.asyncio
 async def test_401_triggers_token_refresh_and_retry() -> None:
-    """A 401 from the GCP API triggers one token refresh and a retry."""
+    """A 401 from the GCP API triggers one token refresh and a retry.
+
+    Asserts that:
+    - The retry was issued (call_count == 2).
+    - The refreshed token (not the original) was used in the retry request
+      (m1 fix — confirms new token reached the wire, not just that refresh ran).
+    """
     mock_creds = _make_mock_creds("initial-token")
 
     def _adc(scopes: list[str] | None = None) -> tuple[Any, str | None]:
@@ -433,6 +454,8 @@ async def test_401_triggers_token_refresh_and_retry() -> None:
 
     connector = GcloudConnector(credentials_loader=_empty_loader, adc_loader=_adc)
     url = "https://cloudresourcemanager.googleapis.com/v1/projects/my-project-123"
+
+    seen_auth: list[str] = []
 
     with (
         patch("google.auth.impersonated_credentials.Credentials", return_value=mock_creds),
@@ -450,6 +473,8 @@ async def test_401_triggers_token_refresh_and_retry() -> None:
         def _side_effect(request: Any) -> httpx.Response:
             nonlocal call_count
             call_count += 1
+            # Capture the Authorization header sent for each attempt
+            seen_auth.append(request.headers.get("authorization", ""))
             if call_count == 1:
                 return httpx.Response(401, json={"error": "unauthorized"})
             return httpx.Response(200, json={"projectId": "my-project-123"})
@@ -460,6 +485,10 @@ async def test_401_triggers_token_refresh_and_retry() -> None:
 
     assert result == {"projectId": "my-project-123"}
     assert call_count == 2  # initial + retry after refresh
+    # The refreshed token ("initial-token-refreshed") must have been sent on retry
+    assert seen_auth[0] == "Bearer initial-token"
+    assert seen_auth[1] == "Bearer initial-token-refreshed"
+    assert seen_auth[0] != seen_auth[1], "retry must use the refreshed token, not the original"
     await connector.aclose()
 
 

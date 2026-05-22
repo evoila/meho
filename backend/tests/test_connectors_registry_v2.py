@@ -385,7 +385,7 @@ def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
 
 
 def test_gcloud_connector_registered_under_v2_triple() -> None:
-    """GcloudConnector package registers under (gcloud, v1, gcloud-rest) at import.
+    """GcloudConnector package registers under (gcloud, 1.0, gcloud-rest) at import.
 
     The autouse _clean_registry fixture clears the registry before this test,
     so we manually re-register using the class attributes to assert the triple
@@ -401,6 +401,6 @@ def test_gcloud_connector_registered_under_v2_triple() -> None:
         cls=GcloudConnector,
     )
     snapshot = all_connectors_v2()
-    key = ("gcloud", "v1", "gcloud-rest")
+    key = ("gcloud", "1.0", "gcloud-rest")
     assert key in snapshot
     assert snapshot[key] is GcloudConnector

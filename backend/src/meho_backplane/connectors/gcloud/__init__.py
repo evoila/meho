@@ -5,7 +5,7 @@
 
 Importing this package registers :class:`GcloudConnector` against the
 v2 connector registry under
-``(product="gcloud", version="v1", impl_id="gcloud-rest")``.
+``(product="gcloud", version="1.0", impl_id="gcloud-rest")``.
 
 Registration is purely synchronous (import-time only): the v2 registry
 entry lands via :func:`~meho_backplane.connectors.registry.register_connector_v2`.
@@ -13,7 +13,7 @@ No typed-op upserts are queued here — operations ship in G3.7-T5 (#848).
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called. The connector advertises an explicit
-``(version="v1", impl_id="gcloud-rest")`` key; the v1 entry would land as
+``(version="1.0", impl_id="gcloud-rest")`` key; the v1 entry would land as
 ``("gcloud", "", "")`` and confuse the resolver's tie-break ladder. Same
 pattern :mod:`meho_backplane.connectors.harbor` established.
 
@@ -31,7 +31,7 @@ from meho_backplane.connectors.registry import register_connector_v2
 
 register_connector_v2(
     product="gcloud",
-    version="v1",
+    version="1.0",
     impl_id="gcloud-rest",
     cls=GcloudConnector,
 )

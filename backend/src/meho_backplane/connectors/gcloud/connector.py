@@ -36,7 +36,7 @@ SA-JSON-key refusal
 -------------------
 
 Org policy ``constraints/iam.disableServiceAccountKeyCreation`` is in force
-on the consumer's GCP organisation. :meth:`auth_headers` inspects the Vault
+on the consumer's GCP organization. :meth:`auth_headers` inspects the Vault
 ``secret_ref`` payload for SA-JSON-key field names (``private_key``,
 ``private_key_id``, ``client_email``, etc.) and raises a :exc:`ValueError`
 with a clear message before building any token. The error names the target
@@ -135,7 +135,7 @@ class GcloudConnector(HttpConnector):
     SA-JSON-key material in the Vault ``secret_ref`` payload is refused
     before any token is built. The refusal is unconditional — org policy
     ``constraints/iam.disableServiceAccountKeyCreation`` applies at the
-    GCP organisation level and the connector encodes the same constraint.
+    GCP organization level and the connector encodes the same constraint.
 
     ``target.host`` is unused — all GCP calls use well-known public
     hostnames. ``_base_url()`` returns a placeholder; real calls use
@@ -143,7 +143,7 @@ class GcloudConnector(HttpConnector):
     """
 
     product = "gcloud"
-    version = "v1"
+    version = "1.0"
     impl_id = "gcloud-rest"
     supported_version_range: str | None = None
     priority = 1
@@ -175,10 +175,11 @@ class GcloudConnector(HttpConnector):
         )
         self._adc_loader = adc_loader
         # Per-target cache: token string + impersonated Credentials object.
-        # Lock serialises first-use and refresh for each target name.
+        # Per-target locks allow concurrent fetch/refresh for different targets
+        # without serialising across all targets (M1 fix).
         self._token_cache: dict[str, str] = {}
         self._creds_cache: dict[str, Any] = {}  # google.auth.impersonated_credentials.Credentials
-        self._token_lock = asyncio.Lock()
+        self._token_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # HttpConnector overrides
@@ -277,9 +278,10 @@ class GcloudConnector(HttpConnector):
         ``google.auth.default()`` + ``google.auth.impersonated_credentials.Credentials``.
         Caches the token string and the Credentials object.
 
-        The lock serialises concurrent first-use callers for the same
-        ``target.name``; subsequent calls take the fast path (cached token
-        still valid) without acquiring the lock.
+        A per-target lock (keyed by ``target.name``) serialises concurrent
+        first-use callers for the same target without blocking callers for
+        different targets (M1 fix). Subsequent calls take the fast path
+        (cached token still valid) without acquiring any lock.
         """
         # Fast path: cached and valid
         cached_token = self._token_cache.get(target.name)
@@ -288,7 +290,8 @@ class GcloudConnector(HttpConnector):
             if creds is not None and getattr(creds, "valid", False):
                 return cached_token
 
-        async with self._token_lock:
+        lock = self._token_locks.setdefault(target.name, asyncio.Lock())
+        async with lock:
             # Re-check under lock in case another coroutine fetched first.
             cached_token = self._token_cache.get(target.name)
             if cached_token is not None:
@@ -350,11 +353,12 @@ class GcloudConnector(HttpConnector):
         """Force-refresh the bearer token for *target* and return the new token.
 
         Called by :meth:`_get_json_abs` on a 401 response. Acquires the
-        token lock, calls ``creds.refresh()`` in the executor, updates the
-        cache, and returns the new token.
+        per-target token lock, calls ``creds.refresh()`` in the executor,
+        updates the cache, and returns the new token.
         """
         loop = asyncio.get_running_loop()
-        async with self._token_lock:
+        lock = self._token_locks.setdefault(target.name, asyncio.Lock())
+        async with lock:
             creds = self._creds_cache.get(target.name)
             if creds is None:
                 return await self._fetch_token(target)
@@ -542,7 +546,7 @@ class GcloudConnector(HttpConnector):
         server-side after ``lifetime`` seconds. The token cache is cleared
         so a post-aclose reuse of the same connector instance starts clean.
         """
-        async with self._token_lock:
-            self._token_cache.clear()
-            self._creds_cache.clear()
+        self._token_cache.clear()
+        self._creds_cache.clear()
+        self._token_locks.clear()
         await super().aclose()

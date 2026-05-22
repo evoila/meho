@@ -4,9 +4,11 @@
 
 The `hetzner-robot` connector is the hand-rolled `HttpConnector` subclass
 for the [Hetzner Robot Webservice API](https://robot.hetzner.com/doc/webservice/en.html).
-G3.7-T7 (#846) ships the skeleton — HTTP Basic auth, fingerprint, probe,
-`_post_form` helper, and the G0.6 dispatch shim. G3.7-T8 ships ops via
-G0.7 spec ingestion of the Robot Webservice OpenAPI spec.
+G3.7-T6 (#846) ships the skeleton — HTTP Basic auth, fingerprint, probe,
+`_post_form` helper, and the G0.6 dispatch shim. G3.7-T8 (#849) ships the
+read-only v0.2 core: the Robot Webservice OpenAPI spec is ingested via G0.7
+into the `endpoint_descriptor` table, and the curated 10-op core is staged
+for operator review in `core_ops.py`.
 
 Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 
@@ -26,6 +28,17 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 - **`load_credentials_from_vault`** (`session.py`) — default loader, stubbed
   `NotImplementedError` until Goal #214 lands the operator-context Vault
   read path.
+- **`ROBOT_CORE_GROUPS`** (`core_ops.py`) — 4 curated `RobotCoreGroup`
+  entries with operator-reviewed `when_to_use` hints spanning the read-only
+  core: `robot-about`, `robot-servers`, `robot-networking`, `robot-ssh-keys`.
+- **`ROBOT_CORE_OPS`** (`core_ops.py`) — 10 curated `RobotCoreOp` entries
+  (the read-only v0.2 core), each with `op_id` (`GET:/path` form), `group_key`,
+  and `llm_instructions` blob (`when_to_call` / `output_shape` / `next_step`).
+- **`apply_robot_core_curation`** (`core_ops.py`) — async function that
+  drives `ReviewService.edit_group` + `enable_group` + `edit_op` to flip the
+  10 curated ops to `is_enabled=True` and land `llm_instructions`.
+- **`classify_robot_op`** (`core_ops.py`) — path-prefix classifier mapping
+  a `GET:/path` op_id to its curated `group_key` via `ROBOT_PATH_RULES`.
 
 ## Key design decisions
 
@@ -108,15 +121,18 @@ Vault path as `{"username": ..., "password": ...}`.
 - Vault credential read stub: `load_credentials_from_vault` raises
   `NotImplementedError` until Goal #214 lands. Inject a loader at
   construction time for production deploys until then.
-- Operations: zero operations ship with this skeleton. Ops land in T8 via
-  G0.7 spec ingestion of the Robot Webservice OpenAPI spec.
+- Env-gated automated canary: the full spec ingest against
+  `IngestionPipelineService` with a real LLM stub is a follow-up to T8
+  requiring the Robot spec reachable from CI.
 - Writes: server reset, vSwitch mutation, cancellation, rDNS edits are out of
-  scope for G3.7. The `_post_form` helper is the write-path foundation.
+  scope for G3.7 v0.2. The `_post_form` helper is the write-path foundation.
 - Hetzner Cloud (the second Hetzner product): out of scope.
 
 ## References
 
 - Hetzner Robot Webservice docs: https://robot.hetzner.com/doc/webservice/en.html
-- G3.7-T7 issue: https://github.com/evoila/meho/issues/846
-- Precedent: `connectors/harbor/connector.py` (HTTP Basic + loader + fingerprint/probe)
+- G3.7-T6 skeleton issue: https://github.com/evoila/meho/issues/846
+- G3.7-T8 core-ops issue: https://github.com/evoila/meho/issues/849
+- Canary runbook: [`docs/cross-repo/g37-hetzner-canary.md`](../cross-repo/g37-hetzner-canary.md)
+- Precedent: `connectors/harbor/core_ops.py` (apply_harbor_core_curation pattern)
 - Precedent: `connectors/adapters/http.py` (`HttpConnector` + retry policy)

@@ -221,3 +221,16 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   session-token + 401 retry-once pattern; VCF Automation
   (`connectors/vcf_automation/`) for the most recent VCF management-
   plane skeleton.
+- CLI verb tree (G3.6-T6 #838):
+  [`cli/internal/cmd/vcf-logs/`](../../cli/internal/cmd/vcf-logs/) —
+  thin Cobra wrappers over `POST /api/v1/operations/call` with
+  `connector_id="vrli-rest-9.0"` pre-baked, mirroring the NSX /
+  SDDC Manager alias-verb pattern.
+- Operator-facing recipe (G3.6-T6 #838):
+  [`docs/cross-repo/vcf-logs-onboarding.md`](../cross-repo/vcf-logs-onboarding.md).
+- End-to-end recorded-fixture coverage (G3.6-T6 #838):
+  [`backend/tests/test_connectors_vcf_logs_e2e.py`](../../backend/tests/test_connectors_vcf_logs_e2e.py)
+  — exercises all 7 ops through the full dispatcher, the
+  session-establish + 401 retry-once + second-401-fails paths via
+  `_get_json_with_session_retry`, the audit-row contract, and the
+  JSONFlux handle path on `vrli.event.query`.

@@ -82,7 +82,17 @@ import structlog
 from sqlalchemy import select
 
 from meho_backplane.broadcast import BroadcastEvent, publish_event
-from meho_backplane.db.models import AuditLog, GraphEdge, GraphEdgeKind, GraphNode
+from meho_backplane.db.models import (
+    AuditLog,
+    GraphEdge,
+    GraphEdgeKind,
+    GraphHistoryChangeKind,
+    GraphNode,
+)
+from meho_backplane.topology.history import (
+    edge_snapshot,
+    record_edge_change,
+)
 from meho_backplane.topology.resolvers import resolve_node
 
 if TYPE_CHECKING:
@@ -278,7 +288,7 @@ async def _mark_same_kind_different_endpoint_superseded(
     from_id: uuid.UUID,
     to_id: uuid.UUID,
     kind: str,
-) -> list[uuid.UUID]:
+) -> list[tuple[GraphEdge, dict[str, Any]]]:
     """Stamp ``superseded_by`` on auto edges that the curated row replaces.
 
     Conflict §6 rule 1: a curated edge ``runs-on(vm-A → host-Y)``
@@ -289,9 +299,13 @@ async def _mark_same_kind_different_endpoint_superseded(
     the change when the attribute is reassigned, so we reassign
     rather than mutating the inner dict).
 
-    Returns the list of marked auto-edge ids — caller uses it for the
-    audit/broadcast payload's ``superseded_count`` so the visibility
-    of the conflict is not buried in a side effect.
+    Returns a list of ``(edge, pre_mutation_snapshot)`` pairs — the
+    caller emits one ``GraphEdgeHistory`` row per marked auto edge
+    (G9.3-T2 #857 diff-on-write hook), using the pre-mutation
+    snapshot as the history row's ``snapshot.before``. The audit /
+    broadcast payload's ``superseded`` array is built from
+    ``edge.id`` of each returned pair so the visibility of the
+    conflict is not buried in a side effect.
     """
     stmt = select(GraphEdge).where(
         GraphEdge.tenant_id == tenant_id,
@@ -301,12 +315,16 @@ async def _mark_same_kind_different_endpoint_superseded(
         GraphEdge.to_node_id != to_id,
     )
     rows = (await session.execute(stmt)).scalars().all()
-    marked: list[uuid.UUID] = []
+    marked: list[tuple[GraphEdge, dict[str, Any]]] = []
     for row in rows:
+        # Capture the pre-mutation snapshot **before** reassigning
+        # ``properties`` so the history row's ``before`` reflects the
+        # row as the operator last saw it without the supersede mark.
+        before = edge_snapshot(row)
         props = dict(row.properties or {})
         props[_SUPERSEDED_BY] = str(curated_edge_id)
         row.properties = props
-        marked.append(row.id)
+        marked.append((row, before))
     return marked
 
 
@@ -318,7 +336,7 @@ async def _mark_incompatible_kinds_conflict(
     from_id: uuid.UUID,
     to_id: uuid.UUID,
     kind: str,
-) -> list[uuid.UUID]:
+) -> list[tuple[GraphEdge, dict[str, Any]]]:
     """Stamp bidirectional ``conflicts_with`` on edges of other kinds.
 
     Conflict §6 rule 2: a curated edge ``depends-on(svc → db)``
@@ -328,8 +346,12 @@ async def _mark_incompatible_kinds_conflict(
     marker is a list so a single edge with several conflicting kinds
     accumulates every id (dedupe preserved).
 
-    Returns the list of conflicting edge ids — payload counterpart of
-    the superseded-list above.
+    Returns ``(edge, pre_mutation_snapshot)`` pairs for every
+    conflicting edge — caller emits one ``GraphEdgeHistory`` row per
+    pair (G9.3-T2 #857). The curated row's own marker write is
+    captured separately by the calling :func:`annotate_edge_in_txn`
+    so the curated row's history snapshot reflects the post-conflict
+    state.
     """
     stmt = select(GraphEdge).where(
         GraphEdge.tenant_id == tenant_id,
@@ -338,17 +360,21 @@ async def _mark_incompatible_kinds_conflict(
         GraphEdge.kind != kind,
     )
     rows = (await session.execute(stmt)).scalars().all()
-    conflicting_ids: list[uuid.UUID] = []
+    conflicting: list[tuple[GraphEdge, dict[str, Any]]] = []
     for row in rows:
-        conflicting_ids.append(row.id)
+        # Capture the pre-mutation snapshot before appending the marker.
+        before = edge_snapshot(row)
         _append_conflict_marker(row, curated_edge.id)
+        conflicting.append((row, before))
 
-    if conflicting_ids:
+    if conflicting:
         # Bidirectional: the curated row points back at every
-        # conflicting edge.
-        for other_id in conflicting_ids:
-            _append_conflict_marker(curated_edge, other_id)
-    return conflicting_ids
+        # conflicting edge. The curated row's own history row is
+        # written by the caller after both conflict scans complete,
+        # so we do not capture an intermediate snapshot here.
+        for other_edge, _ in conflicting:
+            _append_conflict_marker(curated_edge, other_edge.id)
+    return conflicting
 
 
 def _append_conflict_marker(edge: GraphEdge, other_id: uuid.UUID) -> None:
@@ -694,6 +720,251 @@ class AnnotatePlan:
     was_created: bool
 
 
+async def _insert_curated_edge(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    from_node: GraphNode,
+    to_node: GraphNode,
+    canonical_kind: str,
+    properties: dict[str, Any],
+    now: datetime,
+) -> GraphEdge:
+    """Insert a fresh ``source='curated'`` :class:`GraphEdge` and flush.
+
+    Flushing inside the helper ensures the row has its server-side
+    state (``id`` is already Python-side) before the §6 conflict
+    scans run -- they may need to read the freshly-inserted row back.
+    """
+    edge = GraphEdge(
+        id=uuid.uuid4(),
+        tenant_id=operator.tenant_id,
+        from_node_id=from_node.id,
+        to_node_id=to_node.id,
+        kind=canonical_kind,
+        source="curated",
+        properties=properties,
+        discovered_by=operator.sub,
+        first_seen=now,
+        last_seen=now,
+    )
+    session.add(edge)
+    await session.flush()
+    return edge
+
+
+def _merge_onto_existing_edge(
+    *,
+    existing: GraphEdge,
+    operator: Operator,
+    properties: dict[str, Any],
+    now: datetime,
+) -> tuple[GraphEdge, dict[str, Any]]:
+    """Idempotent upsert path: merge annotation onto an existing edge.
+
+    Covers two cases the single insert/upsert branch must handle:
+
+    1. **Re-annotate of an already-curated row.** Merge new free-text
+       fields onto the existing properties; the ``source='curated'``
+       and any reciprocal ``conflicts_with`` / ``superseded_by``
+       markers are preserved so the re-annotate does not silently
+       drop the §6 back-references.
+
+    2. **Annotate over an existing ``source='auto'`` edge with the
+       same triple.** The operator's intent is to take ownership of
+       that edge going forward — set notes / evidence, run §6
+       conflict detection from it, eventually revoke via
+       :func:`unannotate_edge`. Leaving the row as ``source='auto'``
+       would (a) make the triple-form unannotate raise
+       :class:`AutoEdgeDeletionError` so the operator cannot revoke
+       their own annotation; (b) let the next refresh's
+       :func:`_merge_edge_properties` overwrite the free-text props;
+       (c) make :func:`_mark_same_kind_different_endpoint_superseded`
+       on a future annotate mis-target the row as another auto
+       edge. The promotion to ``source='curated'`` and
+       ``discovered_by=operator.sub`` makes the operator the
+       canonical author from this call onward.
+
+    Returns ``(edge, pre_mutation_snapshot)`` so the caller can use
+    the snapshot as the history row's ``snapshot.before``.
+    """
+    # Capture the pre-mutation snapshot **before** rewriting
+    # ``properties`` / ``source`` so the history row's ``before``
+    # reflects the state the operator would have seen on a
+    # ``list-edges`` immediately prior to the re-annotate.
+    edge_before = edge_snapshot(existing)
+    merged = dict(existing.properties or {})
+    for key, value in properties.items():
+        merged[key] = value
+    promoting = existing.source != "curated"
+    if promoting:
+        # §6 invariant: a curated edge must never carry an
+        # ``superseded_by`` marker — that marker is meaningful only
+        # on ``source='auto'`` rows that the conflict-detection scan
+        # stamped against a different-endpoint curated assertion.
+        # When the same triple gets re-annotated, the auto row's
+        # stale marker would otherwise persist onto the promoted
+        # curated row and hide it from :func:`find_dependents` /
+        # :func:`find_dependencies` — the traversal CTE filters
+        # ``properties->>'superseded_by' IS NULL``. Drop the key
+        # here so the promoted curated edge is immediately visible.
+        #
+        # ``conflicts_with`` (bidirectional, list-shaped) is kept:
+        # the entries point at *other-kind* edges over the same
+        # endpoint pair, which still exist and still conflict; the
+        # incompatible-kinds scan below re-stamps the curated side
+        # without dropping the legitimate back-references.
+        merged.pop(_SUPERSEDED_BY, None)
+    existing.properties = merged
+    existing.last_seen = now
+    if promoting:
+        existing.source = "curated"
+        existing.discovered_by = operator.sub
+    return existing, edge_before
+
+
+def _emit_annotate_history(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    edge: GraphEdge,
+    edge_before: dict[str, Any] | None,
+    was_created: bool,
+    superseded_pairs: list[tuple[GraphEdge, dict[str, Any]]],
+    conflict_pairs: list[tuple[GraphEdge, dict[str, Any]]],
+    audit_id: uuid.UUID,
+    now: datetime,
+) -> None:
+    """Emit one history row per mutated edge in the annotate transaction.
+
+    Diff-on-write hook (G9.3-T2 #857): one row per mutated edge, all
+    sharing this annotate's pre-allocated ``audit_id`` and
+    ``valid_from=now`` so the temporal-query verbs (T3 / T4 / T5)
+    can reconstruct the operation as a single point-in-time event.
+    The curated row's history is emitted with the post-conflict-scan
+    snapshot so the ``conflicts_with`` marker is visible in
+    ``after`` -- the bidirectional view ``meho topology diff``
+    reconstructs.
+    """
+    edge_change_kind = (
+        GraphHistoryChangeKind.CREATED if was_created else GraphHistoryChangeKind.UPDATED
+    )
+    record_edge_change(
+        session,
+        edge_id=edge.id,
+        tenant_id=operator.tenant_id,
+        change_kind=edge_change_kind,
+        before=edge_before,
+        after=edge_snapshot(edge),
+        audit_id=audit_id,
+        valid_from=now,
+    )
+    for other_edge, other_before in (*superseded_pairs, *conflict_pairs):
+        # Each marked auto / other-kind edge survives -- the marker
+        # write is the only column that changed -- so the history
+        # row is ``updated`` with the marker visible in ``after``.
+        record_edge_change(
+            session,
+            edge_id=other_edge.id,
+            tenant_id=operator.tenant_id,
+            change_kind=GraphHistoryChangeKind.UPDATED,
+            before=other_before,
+            after=edge_snapshot(other_edge),
+            audit_id=audit_id,
+            valid_from=now,
+        )
+
+
+async def _upsert_curated_edge(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    from_node: GraphNode,
+    to_node: GraphNode,
+    canonical_kind: str,
+    note: str | None,
+    evidence_url: str | None,
+    now: datetime,
+) -> tuple[GraphEdge, dict[str, Any] | None, bool]:
+    """Resolve / upsert the curated edge; return ``(edge, before, was_created)``.
+
+    Wraps the insert-or-merge branch so :func:`annotate_edge_in_txn`
+    stays linear. ``before`` is ``None`` for a fresh insert, the
+    pre-mutation snapshot for the merge branch.
+    """
+    properties = {
+        "note": note,
+        "evidence_url": evidence_url,
+        "annotated_by": operator.sub,
+        "annotated_at": now.isoformat(),
+    }
+    existing = await _find_existing_edge(
+        session,
+        tenant_id=operator.tenant_id,
+        from_id=from_node.id,
+        to_id=to_node.id,
+        kind=canonical_kind,
+    )
+    if existing is None:
+        edge = await _insert_curated_edge(
+            session,
+            operator=operator,
+            from_node=from_node,
+            to_node=to_node,
+            canonical_kind=canonical_kind,
+            properties=properties,
+            now=now,
+        )
+        # ``before`` is None for the curated row's history -- the row
+        # did not exist prior to this transaction. ``after`` is captured
+        # by :func:`_emit_annotate_history` after both conflict scans
+        # have stamped any ``conflicts_with`` markers on this row.
+        return edge, None, True
+    edge, edge_before = _merge_onto_existing_edge(
+        existing=existing,
+        operator=operator,
+        properties=properties,
+        now=now,
+    )
+    return edge, edge_before, False
+
+
+async def _run_conflict_scans(
+    session: AsyncSession,
+    *,
+    edge: GraphEdge,
+    operator: Operator,
+    from_node: GraphNode,
+    to_node: GraphNode,
+    canonical_kind: str,
+) -> tuple[
+    list[tuple[GraphEdge, dict[str, Any]]],
+    list[tuple[GraphEdge, dict[str, Any]]],
+]:
+    """Run the §6 same-kind-supersede and incompatible-kinds scans.
+
+    Returns ``(superseded_pairs, conflict_pairs)``. Each pair is
+    ``(mutated_edge, pre_mutation_snapshot)`` for the history hook.
+    """
+    superseded_pairs = await _mark_same_kind_different_endpoint_superseded(
+        session,
+        tenant_id=operator.tenant_id,
+        curated_edge_id=edge.id,
+        from_id=from_node.id,
+        to_id=to_node.id,
+        kind=canonical_kind,
+    )
+    conflict_pairs = await _mark_incompatible_kinds_conflict(
+        session,
+        tenant_id=operator.tenant_id,
+        curated_edge=edge,
+        from_id=from_node.id,
+        to_id=to_node.id,
+        kind=canonical_kind,
+    )
+    return superseded_pairs, conflict_pairs
+
+
 async def annotate_edge_in_txn(
     session: AsyncSession,
     operator: Operator,
@@ -729,113 +1000,28 @@ async def annotate_edge_in_txn(
     :func:`annotate_edge` verbatim.
     """
     canonical_kind = _validate_kind(kind)
-
     from_node = await resolve_node(session, operator.tenant_id, from_ref.name, from_ref.kind)
     to_node = await resolve_node(session, operator.tenant_id, to_ref.name, to_ref.kind)
-
     now = datetime.now(UTC)
-    existing = await _find_existing_edge(
+
+    edge, edge_before, was_created = await _upsert_curated_edge(
         session,
-        tenant_id=operator.tenant_id,
-        from_id=from_node.id,
-        to_id=to_node.id,
-        kind=canonical_kind,
+        operator=operator,
+        from_node=from_node,
+        to_node=to_node,
+        canonical_kind=canonical_kind,
+        note=note,
+        evidence_url=evidence_url,
+        now=now,
     )
 
-    properties = {
-        "note": note,
-        "evidence_url": evidence_url,
-        "annotated_by": operator.sub,
-        "annotated_at": now.isoformat(),
-    }
-
-    if existing is None:
-        edge = GraphEdge(
-            id=uuid.uuid4(),
-            tenant_id=operator.tenant_id,
-            from_node_id=from_node.id,
-            to_node_id=to_node.id,
-            kind=canonical_kind,
-            source="curated",
-            properties=properties,
-            discovered_by=operator.sub,
-            first_seen=now,
-            last_seen=now,
-        )
-        session.add(edge)
-        await session.flush()
-        was_created = True
-    else:
-        # Idempotent path covers two cases:
-        #
-        # 1. **Re-annotate of an already-curated row.** Merge new
-        #    free-text fields onto the existing properties; the
-        #    ``source='curated'`` and any reciprocal ``conflicts_with``
-        #    / ``superseded_by`` markers are preserved so the
-        #    re-annotate does not silently drop the §6 back-references.
-        #
-        # 2. **Annotate over an existing ``source='auto'`` edge with
-        #    the same triple.** The operator's intent is to take
-        #    ownership of that edge going forward — set notes /
-        #    evidence, run §6 conflict detection from it, eventually
-        #    revoke via :func:`unannotate_edge`. Leaving the row as
-        #    ``source='auto'`` would (a) make the triple-form
-        #    unannotate raise :class:`AutoEdgeDeletionError` so the
-        #    operator cannot revoke their own annotation; (b) let the
-        #    next refresh's :func:`_merge_edge_properties` overwrite
-        #    the free-text props (only the reserved markers are
-        #    preserved on the merge path); (c) make
-        #    :func:`_mark_same_kind_different_endpoint_superseded` on
-        #    a future annotate mis-target the row as another auto
-        #    edge. The promotion to ``source='curated'`` and
-        #    ``discovered_by=operator.sub`` makes the operator the
-        #    canonical author from this call onward.
-        merged = dict(existing.properties or {})
-        for key, value in properties.items():
-            merged[key] = value
-        promoting = existing.source != "curated"
-        if promoting:
-            # §6 invariant: a curated edge must never carry an
-            # ``superseded_by`` marker — that marker is meaningful only
-            # on ``source='auto'`` rows that the conflict-detection
-            # scan stamped against a different-endpoint curated
-            # assertion. When the same triple gets re-annotated, the
-            # auto row's stale marker would otherwise persist onto the
-            # promoted curated row and hide it from
-            # :func:`find_dependents` / :func:`find_dependencies` —
-            # the traversal CTE filters
-            # ``properties->>'superseded_by' IS NULL``. Drop the key
-            # here so the promoted curated edge is immediately visible.
-            #
-            # ``conflicts_with`` (bidirectional, list-shaped) is kept:
-            # the entries point at *other-kind* edges over the same
-            # endpoint pair, which still exist and still conflict; the
-            # incompatible-kinds scan below re-stamps the curated side
-            # without dropping the legitimate back-references.
-            merged.pop(_SUPERSEDED_BY, None)
-        existing.properties = merged
-        existing.last_seen = now
-        if promoting:
-            existing.source = "curated"
-            existing.discovered_by = operator.sub
-        edge = existing
-        was_created = False
-
-    superseded = await _mark_same_kind_different_endpoint_superseded(
+    superseded_pairs, conflict_pairs = await _run_conflict_scans(
         session,
-        tenant_id=operator.tenant_id,
-        curated_edge_id=edge.id,
-        from_id=from_node.id,
-        to_id=to_node.id,
-        kind=canonical_kind,
-    )
-    conflicts = await _mark_incompatible_kinds_conflict(
-        session,
-        tenant_id=operator.tenant_id,
-        curated_edge=edge,
-        from_id=from_node.id,
-        to_id=to_node.id,
-        kind=canonical_kind,
+        edge=edge,
+        operator=operator,
+        from_node=from_node,
+        to_node=to_node,
+        canonical_kind=canonical_kind,
     )
 
     audit_id = uuid.uuid4()
@@ -847,8 +1033,8 @@ async def annotate_edge_in_txn(
         edge_id=edge.id,
         note=note,
         evidence_url=evidence_url,
-        superseded=superseded,
-        conflicts=conflicts,
+        superseded=[pair[0].id for pair in superseded_pairs],
+        conflicts=[pair[0].id for pair in conflict_pairs],
     )
     session.add(
         _build_audit_row(
@@ -860,6 +1046,17 @@ async def annotate_edge_in_txn(
             payload=payload,
         )
     )
+    _emit_annotate_history(
+        session,
+        operator=operator,
+        edge=edge,
+        edge_before=edge_before,
+        was_created=was_created,
+        superseded_pairs=superseded_pairs,
+        conflict_pairs=conflict_pairs,
+        audit_id=audit_id,
+        now=now,
+    )
 
     return AnnotatePlan(
         edge=edge,
@@ -868,6 +1065,132 @@ async def annotate_edge_in_txn(
         target_name=from_node.name,
         was_created=was_created,
     )
+
+
+def _check_unannotate_selectors(
+    *,
+    edge_id: uuid.UUID | None,
+    from_ref: NodeRef | None,
+    kind: str | None,
+    to_ref: NodeRef | None,
+) -> None:
+    """Reject the neither / both / partial-triple selector shapes."""
+    has_id = edge_id is not None
+    has_triple = from_ref is not None or kind is not None or to_ref is not None
+    if has_id == has_triple:
+        raise UnannotateSelectorError(
+            "unannotate_edge requires exactly one selector: edge_id "
+            "OR the full (from_ref, kind, to_ref) triple"
+        )
+    if has_triple and not (from_ref is not None and kind is not None and to_ref is not None):
+        raise UnannotateSelectorError(
+            "triple selector requires all three of (from_ref, kind, to_ref)"
+        )
+
+
+async def _resolve_unannotate_target(
+    session: AsyncSession,
+    operator: Operator,
+    *,
+    edge_id: uuid.UUID | None,
+    from_ref: NodeRef | None,
+    kind: str | None,
+    to_ref: NodeRef | None,
+) -> tuple[GraphEdge, GraphNode, GraphNode]:
+    """Resolve the curated edge + its endpoints from either selector form.
+
+    Either ``edge_id`` (primary-key selector) or the ``(from_ref,
+    kind, to_ref)`` triple is present; the caller is responsible for
+    enforcing exactly-one via :func:`_check_unannotate_selectors`.
+
+    Raises:
+        ValueError: target row not found in this tenant or the
+            triple form resolves to no row.
+        NodeNotFoundError / AmbiguousNodeError: triple-form endpoint
+            issues (propagated from :func:`resolve_node`).
+        InvalidEdgeKindError: triple-form ``kind`` outside the
+            v0.2 enum.
+    """
+    if edge_id is not None:
+        edge = await session.get(GraphEdge, edge_id)
+        if edge is None or edge.tenant_id != operator.tenant_id:
+            # Tenant boundary: a row in another tenant is
+            # indistinguishable from a missing row to the caller.
+            raise ValueError(f"graph_edge {edge_id} not found in this tenant")
+        from_node = await session.get(GraphNode, edge.from_node_id)
+        to_node = await session.get(GraphNode, edge.to_node_id)
+        # FK ON DELETE CASCADE protects against orphan rows, but a
+        # mid-flight node delete is still possible — treat as not
+        # found rather than crashing with a None attribute access.
+        if from_node is None or to_node is None:
+            raise ValueError(
+                f"graph_edge {edge_id} endpoints missing — graph in inconsistent state"
+            )
+        return edge, from_node, to_node
+
+    assert from_ref is not None  # narrowed for mypy
+    assert to_ref is not None
+    assert kind is not None
+    canonical_kind = _validate_kind(kind)
+    from_node = await resolve_node(session, operator.tenant_id, from_ref.name, from_ref.kind)
+    to_node = await resolve_node(session, operator.tenant_id, to_ref.name, to_ref.kind)
+    edge = await _find_existing_edge(
+        session,
+        tenant_id=operator.tenant_id,
+        from_id=from_node.id,
+        to_id=to_node.id,
+        kind=canonical_kind,
+    )
+    if edge is None:
+        raise ValueError(
+            f"no graph_edge {canonical_kind!r} from {from_ref.name!r} "
+            f"to {to_ref.name!r} in this tenant"
+        )
+    return edge, from_node, to_node
+
+
+def _emit_unannotate_history(
+    session: AsyncSession,
+    *,
+    operator: Operator,
+    removed_id: uuid.UUID,
+    removed_edge_snapshot_value: dict[str, Any],
+    referencing_befores: list[tuple[GraphEdge, dict[str, Any]]],
+    audit_id: uuid.UUID,
+    now: datetime,
+) -> None:
+    """Emit history rows for the unannotate before the live delete flushes.
+
+    Diff-on-write hook (G9.3-T2 #857): emit history rows **before**
+    the ``session.delete(edge)`` call so the ``removed`` row's
+    ``edge_id`` references a still-live ``graph_edge.id``. The
+    ON DELETE SET NULL on the FK kicks in only when the live row is
+    hard-deleted; SQLAlchemy may flush the delete before the insert
+    if the order is reversed, producing a NULL ``edge_id`` on the
+    freshly inserted history row -- defeating the per-resource
+    history walk in T3 (the walk filters on ``edge_id``).
+    """
+    record_edge_change(
+        session,
+        edge_id=removed_id,
+        tenant_id=operator.tenant_id,
+        change_kind=GraphHistoryChangeKind.REMOVED,
+        before=removed_edge_snapshot_value,
+        after=None,
+        audit_id=audit_id,
+        valid_from=now,
+    )
+    for ref_edge, ref_before in referencing_befores:
+        record_edge_change(
+            session,
+            edge_id=ref_edge.id,
+            tenant_id=operator.tenant_id,
+            change_kind=GraphHistoryChangeKind.UPDATED,
+            before=ref_before,
+            after=edge_snapshot(ref_edge),
+            audit_id=audit_id,
+            valid_from=now,
+        )
 
 
 async def unannotate_edge(
@@ -927,100 +1250,17 @@ async def unannotate_edge(
             :class:`GraphEdgeKind`.
         ValueError: The triple form resolves to no row.
     """
-    has_id = edge_id is not None
-    has_triple = from_ref is not None or kind is not None or to_ref is not None
-    if has_id == has_triple:
-        raise UnannotateSelectorError(
-            "unannotate_edge requires exactly one selector: edge_id "
-            "OR the full (from_ref, kind, to_ref) triple"
-        )
-    if has_triple and not (from_ref is not None and kind is not None and to_ref is not None):
-        raise UnannotateSelectorError(
-            "triple selector requires all three of (from_ref, kind, to_ref)"
-        )
+    _check_unannotate_selectors(edge_id=edge_id, from_ref=from_ref, kind=kind, to_ref=to_ref)
 
     async with session.begin():
-        if has_id:
-            assert edge_id is not None  # narrowed for mypy
-            edge = await session.get(GraphEdge, edge_id)
-            if edge is None or edge.tenant_id != operator.tenant_id:
-                # Tenant boundary: a row in another tenant is
-                # indistinguishable from a missing row to the caller.
-                raise ValueError(f"graph_edge {edge_id} not found in this tenant")
-            from_node = await session.get(GraphNode, edge.from_node_id)
-            to_node = await session.get(GraphNode, edge.to_node_id)
-            # FK ON DELETE CASCADE protects against orphan rows, but a
-            # mid-flight node delete is still possible — treat as not
-            # found rather than crashing with a None attribute access.
-            if from_node is None or to_node is None:
-                raise ValueError(
-                    f"graph_edge {edge_id} endpoints missing — graph in inconsistent state"
-                )
-        else:
-            assert from_ref is not None  # narrowed for mypy
-            assert to_ref is not None
-            assert kind is not None
-            canonical_kind = _validate_kind(kind)
-            from_node = await resolve_node(
-                session, operator.tenant_id, from_ref.name, from_ref.kind
-            )
-            to_node = await resolve_node(session, operator.tenant_id, to_ref.name, to_ref.kind)
-            edge = await _find_existing_edge(
-                session,
-                tenant_id=operator.tenant_id,
-                from_id=from_node.id,
-                to_id=to_node.id,
-                kind=canonical_kind,
-            )
-            if edge is None:
-                raise ValueError(
-                    f"no graph_edge {canonical_kind!r} from {from_ref.name!r} "
-                    f"to {to_ref.name!r} in this tenant"
-                )
-
-        if edge.source != "curated":
-            raise AutoEdgeDeletionError(edge.id)
-
-        removed_id = edge.id
-        canonical_kind_final = edge.kind
-
-        # Clear reciprocal markers BEFORE deleting the curated row so
-        # the SELECT scan still sees the row as a candidate (the scan
-        # is keyed on properties, not on the deleted edge — but the
-        # pre-clear keeps the bookkeeping simple).
-        referencing = await _find_edges_referencing(
+        removed_id, target_name, audit_id, payload = await _unannotate_in_txn(
             session,
-            tenant_id=operator.tenant_id,
-            edge_id=removed_id,
+            operator,
+            edge_id=edge_id,
+            from_ref=from_ref,
+            kind=kind,
+            to_ref=to_ref,
         )
-        _clear_reciprocal_markers(referencing, removed_edge_id=removed_id)
-
-        await session.delete(edge)
-        await session.flush()
-
-        audit_id = uuid.uuid4()
-        payload = _audit_payload(
-            op_id=_UNANNOTATE_OP_ID,
-            from_node=from_node,
-            to_node=to_node,
-            kind=canonical_kind_final,
-            edge_id=removed_id,
-            note=None,
-            evidence_url=None,
-            superseded=[],
-            conflicts=[r.id for r in referencing],
-        )
-        session.add(
-            _build_audit_row(
-                audit_id=audit_id,
-                operator=operator,
-                method=_AUDIT_METHOD_UNANNOTATE,
-                op_id=_UNANNOTATE_OP_ID,
-                target_id=_broadcast_target_id(from_node),
-                payload=payload,
-            )
-        )
-        target_name = from_node.name
 
     await _publish(
         audit_id=audit_id,
@@ -1030,3 +1270,90 @@ async def unannotate_edge(
         payload=payload,
     )
     return removed_id
+
+
+async def _unannotate_in_txn(
+    session: AsyncSession,
+    operator: Operator,
+    *,
+    edge_id: uuid.UUID | None,
+    from_ref: NodeRef | None,
+    kind: str | None,
+    to_ref: NodeRef | None,
+) -> tuple[uuid.UUID, str, uuid.UUID, dict[str, Any]]:
+    """In-transaction body of :func:`unannotate_edge`.
+
+    Resolves the curated row, clears its reciprocal §6 markers, emits
+    the diff-on-write history rows, hard-deletes the live row, and
+    writes the audit row. Returns ``(removed_id, target_name,
+    audit_id, audit_payload)`` so the caller can publish the
+    broadcast event after commit.
+    """
+    edge, from_node, to_node = await _resolve_unannotate_target(
+        session,
+        operator,
+        edge_id=edge_id,
+        from_ref=from_ref,
+        kind=kind,
+        to_ref=to_ref,
+    )
+    if edge.source != "curated":
+        raise AutoEdgeDeletionError(edge.id)
+
+    removed_id = edge.id
+    canonical_kind_final = edge.kind
+
+    # Clear reciprocal markers BEFORE deleting the curated row so the
+    # SELECT scan still sees the row as a candidate. Capture
+    # pre-mutation snapshots so the history rows' ``before`` reflects
+    # the supersede / conflict state the operator may have seen on a
+    # list-edges; capture the removed curated row's snapshot too --
+    # that is the ``before`` for its own ``removed`` history row.
+    referencing = await _find_edges_referencing(
+        session,
+        tenant_id=operator.tenant_id,
+        edge_id=removed_id,
+    )
+    removed_edge_snapshot_value = edge_snapshot(edge)
+    now = datetime.now(UTC)
+    referencing_befores: list[tuple[GraphEdge, dict[str, Any]]] = [
+        (ref_edge, edge_snapshot(ref_edge)) for ref_edge in referencing
+    ]
+    _clear_reciprocal_markers(referencing, removed_edge_id=removed_id)
+
+    audit_id = uuid.uuid4()
+    _emit_unannotate_history(
+        session,
+        operator=operator,
+        removed_id=removed_id,
+        removed_edge_snapshot_value=removed_edge_snapshot_value,
+        referencing_befores=referencing_befores,
+        audit_id=audit_id,
+        now=now,
+    )
+
+    await session.delete(edge)
+    await session.flush()
+
+    payload = _audit_payload(
+        op_id=_UNANNOTATE_OP_ID,
+        from_node=from_node,
+        to_node=to_node,
+        kind=canonical_kind_final,
+        edge_id=removed_id,
+        note=None,
+        evidence_url=None,
+        superseded=[],
+        conflicts=[r.id for r in referencing],
+    )
+    session.add(
+        _build_audit_row(
+            audit_id=audit_id,
+            operator=operator,
+            method=_AUDIT_METHOD_UNANNOTATE,
+            op_id=_UNANNOTATE_OP_ID,
+            target_id=_broadcast_target_id(from_node),
+            payload=payload,
+        )
+    )
+    return removed_id, from_node.name, audit_id, payload

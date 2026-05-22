@@ -54,9 +54,15 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
+from meho_backplane.db.models import AuditLog, GraphEdge, GraphHistoryChangeKind, GraphNode
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
+)
+from meho_backplane.topology.history import (
+    edge_snapshot,
+    node_snapshot,
+    record_edge_change,
+    record_node_change,
 )
 
 __all__ = ["RefreshResult", "refresh_target_topology"]
@@ -248,6 +254,129 @@ async def _load_reconcile_candidate_nodes(
     )
 
 
+def _insert_discovered_node(
+    session: AsyncSession,
+    *,
+    hint: NodeHint,
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    discovered_by: str,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> uuid.UUID:
+    """Insert one fresh :class:`GraphNode` + emit its ``created`` history row.
+
+    Returns the new node's id so the orchestrator can populate both
+    the live and all key maps.
+    """
+    new_id = uuid.uuid4()
+    new_node = GraphNode(
+        id=new_id,
+        tenant_id=tenant_id,
+        kind=hint.kind,
+        name=hint.name,
+        target_id=target_id,
+        properties=dict(hint.properties),
+        discovered_by=discovered_by,
+        first_seen=now,
+        last_seen=now,
+    )
+    session.add(new_node)
+    # Same-transaction history row: a ``created`` change with
+    # ``before=None`` and ``after=`` the post-insert projection. The
+    # hint's properties are already what landed on the row, so the
+    # snapshot captures the committed state.
+    record_node_change(
+        session,
+        node_id=new_id,
+        tenant_id=tenant_id,
+        change_kind=GraphHistoryChangeKind.CREATED,
+        before=None,
+        after=node_snapshot(new_node),
+        audit_id=audit_id,
+        valid_from=now,
+    )
+    return new_id
+
+
+def _update_existing_node(
+    session: AsyncSession,
+    *,
+    row: GraphNode,
+    hint: NodeHint,
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> bool:
+    """Update an existing :class:`GraphNode` row in place.
+
+    Returns ``True`` when the row carried a meaningful change (the
+    refresh ``updated`` counter increments + a history row fires).
+    A pure ``last_seen`` heartbeat (no observable column change)
+    returns ``False`` -- the row is touched but neither counted nor
+    recorded.
+
+    Adopts the row onto this target: a node first seen as a manual
+    annotation (``target_id IS NULL``) or discovered by another
+    target is now observed by *this* target's probe, so this target
+    owns its lifecycle (and its future soft-delete) going forward.
+    """
+    is_meaningful_update = (
+        row.last_seen is None
+        or row.target_id != target_id
+        or _properties_differ(row.properties, hint.properties)
+    )
+    # Capture the pre-mutation snapshot **before** reassigning the
+    # row's columns -- otherwise the captured ``before`` aliases the
+    # post-mutation state.
+    before = node_snapshot(row) if is_meaningful_update else None
+    row.properties = dict(hint.properties)
+    row.target_id = target_id
+    row.last_seen = now
+    if is_meaningful_update:
+        record_node_change(
+            session,
+            node_id=row.id,
+            tenant_id=tenant_id,
+            change_kind=GraphHistoryChangeKind.UPDATED,
+            before=before,
+            after=node_snapshot(row),
+            audit_id=audit_id,
+            valid_from=now,
+        )
+    return is_meaningful_update
+
+
+def _soft_remove_node(
+    session: AsyncSession,
+    *,
+    row: GraphNode,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> None:
+    """Null the row's ``last_seen`` and emit its ``removed`` history row.
+
+    Capture the pre-removal snapshot **before** nulling
+    ``last_seen`` so ``snapshot.before`` reflects the row as the
+    operator last saw it (last_seen non-NULL); ``snapshot.after``
+    is None per the ``removed`` change-kind contract.
+    """
+    before = node_snapshot(row)
+    row.last_seen = None
+    record_node_change(
+        session,
+        node_id=row.id,
+        tenant_id=tenant_id,
+        change_kind=GraphHistoryChangeKind.REMOVED,
+        before=before,
+        after=None,
+        audit_id=audit_id,
+        valid_from=now,
+    )
+
+
 async def _reconcile_nodes(
     session: AsyncSession,
     *,
@@ -256,6 +385,7 @@ async def _reconcile_nodes(
     discovered_by: str,
     nodes: tuple[NodeHint, ...],
     now: datetime,
+    audit_id: uuid.UUID,
 ) -> tuple[
     int,
     int,
@@ -294,39 +424,29 @@ async def _reconcile_nodes(
     for key, hint in discovered_by_key.items():
         row = existing_by_key.get(key)
         if row is None:
-            new_id = uuid.uuid4()
-            session.add(
-                GraphNode(
-                    id=new_id,
-                    tenant_id=tenant_id,
-                    kind=hint.kind,
-                    name=hint.name,
-                    target_id=target_id,
-                    properties=dict(hint.properties),
-                    discovered_by=discovered_by,
-                    first_seen=now,
-                    last_seen=now,
-                )
+            new_id = _insert_discovered_node(
+                session,
+                hint=hint,
+                tenant_id=tenant_id,
+                target_id=target_id,
+                discovered_by=discovered_by,
+                now=now,
+                audit_id=audit_id,
             )
             live_key_to_id[key] = new_id
             all_key_to_id[key] = new_id
             added += 1
             continue
-        # Present in both — refresh last_seen, and properties when
-        # changed. Also adopt the row onto this target: a node first
-        # seen as a manual annotation (``target_id IS NULL``) or
-        # discovered by another target is now observed by *this*
-        # target's probe, so this target owns its lifecycle (and its
-        # future soft-delete) going forward.
-        if (
-            row.last_seen is None
-            or row.target_id != target_id
-            or _properties_differ(row.properties, hint.properties)
+        if _update_existing_node(
+            session,
+            row=row,
+            hint=hint,
+            tenant_id=tenant_id,
+            target_id=target_id,
+            now=now,
+            audit_id=audit_id,
         ):
             updated += 1
-        row.properties = dict(hint.properties)
-        row.target_id = target_id
-        row.last_seen = now
         live_key_to_id[key] = row.id
 
     for key, row in existing_by_key.items():
@@ -340,7 +460,13 @@ async def _reconcile_nodes(
         if row.last_seen is None:
             # Already soft-deleted on a prior refresh; not a fresh removal.
             continue
-        row.last_seen = None
+        _soft_remove_node(
+            session,
+            row=row,
+            tenant_id=tenant_id,
+            now=now,
+            audit_id=audit_id,
+        )
         removed += 1
 
     return added, updated, removed, live_key_to_id, all_key_to_id
@@ -416,6 +542,158 @@ def _index_discovered_edges(
     return out
 
 
+def _insert_discovered_edge(
+    session: AsyncSession,
+    *,
+    hint: EdgeHint,
+    from_id: uuid.UUID,
+    to_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    discovered_by: str,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> None:
+    """Insert one fresh :class:`GraphEdge` + emit its ``created`` history row.
+
+    Sanitize before insert so a connector emitting a reserved marker
+    in its hint (buggy or hostile) cannot create a pre-superseded /
+    pre-conflicting auto edge that bypasses the §6 annotate-only
+    invariant (Initiative #364).
+    """
+    new_edge_id = uuid.uuid4()
+    new_edge = GraphEdge(
+        id=new_edge_id,
+        tenant_id=tenant_id,
+        from_node_id=from_id,
+        to_node_id=to_id,
+        kind=hint.kind,
+        source="auto",
+        properties=_strip_reserved_markers(hint.properties),
+        discovered_by=discovered_by,
+        first_seen=now,
+        last_seen=now,
+    )
+    session.add(new_edge)
+    record_edge_change(
+        session,
+        edge_id=new_edge_id,
+        tenant_id=tenant_id,
+        change_kind=GraphHistoryChangeKind.CREATED,
+        before=None,
+        after=edge_snapshot(new_edge),
+        audit_id=audit_id,
+        valid_from=now,
+    )
+
+
+def _refresh_curated_edge(
+    session: AsyncSession,
+    *,
+    existing_edge: GraphEdge,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> bool:
+    """Bump ``last_seen`` on a curated edge; return ``True`` if it was a
+    meaningful change.
+
+    Curated edges are operator-owned: the probe's view of the row's
+    properties is not authoritative. The refresh only records that
+    the probe still observes the edge (``last_seen`` bump); the
+    operator-supplied ``note`` / ``evidence_url`` / ``annotated_*``
+    and any §6 markers stay untouched. Without this branch the next
+    refresh after :func:`annotate_edge` of a previously-auto edge
+    would wipe the caller's free-text props (Initiative #364 §6 — M1
+    of PR #651 review).
+
+    A *resurrected* curated row (was soft-deleted, now re-observed)
+    is operator-observable and warrants an ``updated`` history row.
+    A pure heartbeat (already-live curated edge re-seen) is not
+    counted and no history row fires.
+    """
+    resurrected = existing_edge.last_seen is None
+    if resurrected:
+        before = edge_snapshot(existing_edge)
+        existing_edge.last_seen = now
+        record_edge_change(
+            session,
+            edge_id=existing_edge.id,
+            tenant_id=tenant_id,
+            change_kind=GraphHistoryChangeKind.UPDATED,
+            before=before,
+            after=edge_snapshot(existing_edge),
+            audit_id=audit_id,
+            valid_from=now,
+        )
+        return True
+    existing_edge.last_seen = now
+    return False
+
+
+def _update_existing_auto_edge(
+    session: AsyncSession,
+    *,
+    existing_edge: GraphEdge,
+    hint: EdgeHint,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> bool:
+    """Merge an :class:`EdgeHint` onto an existing auto :class:`GraphEdge`.
+
+    Returns ``True`` when the row carried a meaningful change.
+    Reserved §6 conflict markers (``superseded_by`` /
+    ``conflicts_with``) an operator's annotation may have stamped on
+    this row survive the refresh -- the wholesale-overwrite this
+    used to do silently cleared the sticky-supersede invariant; see
+    :func:`_merge_edge_properties`.
+    """
+    merged_properties = _merge_edge_properties(existing_edge.properties, hint.properties)
+    is_meaningful_update = existing_edge.last_seen is None or _properties_differ(
+        existing_edge.properties, merged_properties
+    )
+    before_merge: dict[str, Any] | None = (
+        edge_snapshot(existing_edge) if is_meaningful_update else None
+    )
+    existing_edge.properties = merged_properties
+    existing_edge.last_seen = now
+    if is_meaningful_update:
+        record_edge_change(
+            session,
+            edge_id=existing_edge.id,
+            tenant_id=tenant_id,
+            change_kind=GraphHistoryChangeKind.UPDATED,
+            before=before_merge,
+            after=edge_snapshot(existing_edge),
+            audit_id=audit_id,
+            valid_from=now,
+        )
+    return is_meaningful_update
+
+
+def _soft_remove_edge(
+    session: AsyncSession,
+    *,
+    row: GraphEdge,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> None:
+    """Null the edge's ``last_seen`` and emit its ``removed`` history row."""
+    before = edge_snapshot(row)
+    row.last_seen = None
+    record_edge_change(
+        session,
+        edge_id=row.id,
+        tenant_id=tenant_id,
+        change_kind=GraphHistoryChangeKind.REMOVED,
+        before=before,
+        after=None,
+        audit_id=audit_id,
+        valid_from=now,
+    )
+
+
 async def _reconcile_edges(
     session: AsyncSession,
     *,
@@ -425,6 +703,7 @@ async def _reconcile_edges(
     live_node_key_to_id: dict[tuple[str, str], uuid.UUID],
     all_node_key_to_id: dict[tuple[str, str], uuid.UUID],
     now: datetime,
+    audit_id: uuid.UUID,
 ) -> tuple[int, int, int]:
     """Apply the edge half of the diff against the resolved node id maps.
 
@@ -445,60 +724,51 @@ async def _reconcile_edges(
         from_id = live_node_key_to_id[_node_key(hint.from_kind, hint.from_name)]
         to_id = live_node_key_to_id[_node_key(hint.to_kind, hint.to_name)]
         if existing_edge is None:
-            # Sanitize before insert so a connector emitting a reserved
-            # marker in its hint (buggy or hostile) cannot create a
-            # pre-superseded / pre-conflicting auto edge that bypasses
-            # the §6 annotate-only invariant (Initiative #364).
-            session.add(
-                GraphEdge(
-                    id=uuid.uuid4(),
-                    tenant_id=tenant_id,
-                    from_node_id=from_id,
-                    to_node_id=to_id,
-                    kind=hint.kind,
-                    source="auto",
-                    properties=_strip_reserved_markers(hint.properties),
-                    discovered_by=discovered_by,
-                    first_seen=now,
-                    last_seen=now,
-                )
+            _insert_discovered_edge(
+                session,
+                hint=hint,
+                from_id=from_id,
+                to_id=to_id,
+                tenant_id=tenant_id,
+                discovered_by=discovered_by,
+                now=now,
+                audit_id=audit_id,
             )
             added += 1
             continue
         if existing_edge.source == "curated":
-            # Curated edges are operator-owned: the probe's view of the
-            # row's properties is not authoritative. The refresh only
-            # records that the probe still observes the edge
-            # (``last_seen`` bump); the operator-supplied ``note`` /
-            # ``evidence_url`` / ``annotated_*`` and any §6 markers
-            # stay untouched. Without this branch the next refresh
-            # after :func:`annotate_edge` of a previously-auto edge
-            # would wipe the caller's free-text props
-            # (Initiative #364 §6 — M1 of PR #651 review).
-            if existing_edge.last_seen is None:
+            if _refresh_curated_edge(
+                session,
+                existing_edge=existing_edge,
+                tenant_id=tenant_id,
+                now=now,
+                audit_id=audit_id,
+            ):
                 updated += 1
-            existing_edge.last_seen = now
             continue
 
-        # Merge — not overwrite — so the §6 conflict markers
-        # (``superseded_by`` / ``conflicts_with``) an operator's
-        # annotation may have stamped on this row survive the refresh.
-        # The wholesale-overwrite this used to do silently cleared the
-        # sticky-supersede invariant; see :func:`_merge_edge_properties`.
-        merged_properties = _merge_edge_properties(existing_edge.properties, hint.properties)
-        if existing_edge.last_seen is None or _properties_differ(
-            existing_edge.properties, merged_properties
+        if _update_existing_auto_edge(
+            session,
+            existing_edge=existing_edge,
+            hint=hint,
+            tenant_id=tenant_id,
+            now=now,
+            audit_id=audit_id,
         ):
             updated += 1
-        existing_edge.properties = merged_properties
-        existing_edge.last_seen = now
 
     for key, row in existing_by_key.items():
         if key in discovered_by_key:
             continue
         if row.last_seen is None:
             continue
-        row.last_seen = None
+        _soft_remove_edge(
+            session,
+            row=row,
+            tenant_id=tenant_id,
+            now=now,
+            audit_id=audit_id,
+        )
         removed += 1
 
     return added, updated, removed
@@ -598,12 +868,19 @@ async def _apply_reconcile(
     audit_id: uuid.UUID,
     started: float,
 ) -> RefreshResult:
-    """Run the node + edge diff + audit write in one transaction.
+    """Run the node + edge diff + history writes + audit write in one txn.
 
     A failure anywhere inside the ``session.begin()`` block raises out
-    of it, rolling everything (inserts, updates, soft-deletes, the audit
-    row) back together — the graph is never left half-applied and no
-    audit row lands for a refresh that didn't commit.
+    of it, rolling everything (inserts, updates, soft-deletes, the
+    paired ``*_history`` rows, the audit row) back together — the
+    graph is never left half-applied, no history row lands for a live
+    mutation that did not commit, and no audit row lands for a refresh
+    that didn't commit. The diff-on-write hook (G9.3-T2 #857) emits one
+    ``graph_node_history`` row per added / updated / removed node and
+    one ``graph_edge_history`` row per added / updated / removed edge,
+    all carrying the pre-allocated ``audit_id`` so a downstream
+    operator can join history back against ``audit_log`` to recover
+    the causing principal / session / target.
     """
     tenant_id = operator.tenant_id
     sessionmaker = get_sessionmaker()
@@ -622,6 +899,7 @@ async def _apply_reconcile(
             discovered_by=discovered_by,
             nodes=hints.nodes,
             now=now,
+            audit_id=audit_id,
         )
         added_edges, updated_edges, removed_edges = await _reconcile_edges(
             session,
@@ -631,6 +909,7 @@ async def _apply_reconcile(
             live_node_key_to_id=live_key_to_id,
             all_node_key_to_id=all_key_to_id,
             now=now,
+            audit_id=audit_id,
         )
         result = RefreshResult(
             target_id=target_id,

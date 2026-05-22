@@ -486,6 +486,135 @@ so the guard runs only where the column is JSONB.
    `op_class="write"`). Commit. Publish one broadcast event
    (fail-open).
 
+## Diff-on-write history hook (write half — G9.3-T2 #857)
+
+The append-only `graph_node_history` + `graph_edge_history` tables
+(shipped by G9.3-T1 #856) are populated by a **single shared writer**
+the refresh + annotate paths both call:
+`backend/src/meho_backplane/topology/history.py`. The hook emits one
+history row per applied live mutation inside the **same**
+`session.begin()` block as the mutation itself — atomicity is the
+load-bearing contract: the live graph and the history table can
+never disagree about which mutations committed.
+
+### Snapshot shape
+
+Every history row's `snapshot` JSONB is
+`{"before": <row-json>|None, "after": <row-json>|None}`:
+
+* `created` — `before=None`, `after=<post-insert row>`.
+* `updated` — `before=<pre-mutation row>`, `after=<post-mutation row>`.
+* `removed` — `before=<final row>`, `after=None`.
+
+The bidirectional projection is what makes `meho topology diff
+<ts1> <ts2>` (T4 #860) reconstructible without joining back against
+live tables — a tombstone row carries enough state to render the
+removed resource. Column selection is deliberately narrow (the
+`_NODE_SNAPSHOT_COLUMNS` / `_EDGE_SNAPSHOT_COLUMNS` constants in
+`history.py`) rather than `vars(row)` or `sqlalchemy.inspect`-based
+reflection: a future column that should *not* enter the snapshot
+(e.g. a derived counter) opts in via the projection list.
+
+### audit_id linkage
+
+Every history row carries the **causing operation's**
+`audit_log.id` (soft-FK column `audit_id`). The refresh / annotate
+service pre-allocates one `audit_id` at the top of the request via
+`uuid.uuid4()`, writes one audit row with that id, and threads the
+same id down to every history row the operation emits. Re-using one
+audit row per operation (rather than per history row) keeps
+`audit_log` at one row per operation — the contract `audit_log`
+consumers rely on — and lets `meho topology diff` / `history` /
+`timeline` (T3-T5) join history back to the principal / session /
+target via `audit_log.id`.
+
+### Refresh path
+
+`_reconcile_nodes` and `_reconcile_edges` (in `topology/refresh.py`)
+each take an `audit_id` parameter threaded from
+`_apply_reconcile` → `refresh_target_topology`. Per applied
+mutation:
+
+* **Insert branch** — capture nothing (no prior state); emit
+  `created` with `before=None`, `after=node_snapshot(new_row)`.
+* **Update branch** — capture `before = node_snapshot(row)` **before**
+  reassigning the row's columns (otherwise the snapshot aliases the
+  post-mutation state); reassign columns; emit `updated` with
+  `after=node_snapshot(row)`. The history row fires under the same
+  predicate the refresh `updated` counter uses (`last_seen IS NULL`
+  OR `target_id` changed OR properties differ) — a pure `last_seen`
+  heartbeat is not a recorded mutation.
+* **Soft-remove branch** — capture `before` before nulling
+  `last_seen`; emit `removed` with `after=None`.
+
+Edge reconciliation is identical, with one extra wrinkle: the
+*resurrected curated edge* case (`last_seen IS NULL → now`) emits an
+`updated` history row even though the only changed column is
+`last_seen` — the resurrection is operator-observable (the edge
+returned to traversal), so it warrants a row. A pure heartbeat on
+an already-live curated edge does not.
+
+### Annotate path
+
+`annotate_edge_in_txn` emits history rows for **every mutated edge**
+inside the same `session.begin()` block as the upsert:
+
+* The curated row itself — `created` (fresh insert) or `updated`
+  (idempotent re-annotate or auto→curated promotion). The `after`
+  snapshot is captured *after* both §6 conflict scans run so any
+  `conflicts_with` marker stamped on the curated row by
+  `_mark_incompatible_kinds_conflict` is visible in `snapshot.after`.
+* Each auto edge marked `superseded_by` (same-kind /
+  different-endpoint, §6 rule 1) — `updated`, with `before` captured
+  before the marker write so `snapshot.before` shows the row as the
+  operator last saw it on `list-edges`.
+* Each edge of a different kind over the same endpoint pair (§6
+  rule 2) — `updated` with the same before/after discipline.
+
+`_mark_same_kind_different_endpoint_superseded` and
+`_mark_incompatible_kinds_conflict` now return
+`list[tuple[GraphEdge, snapshot_before]]` instead of plain id lists;
+the audit payload's `superseded` / `conflicts` arrays are derived
+from `pair[0].id`.
+
+### Unannotate path
+
+`unannotate_edge` emits:
+
+* One `removed` history row for the curated edge. The history row
+  is staged in the session **before** `session.delete(edge)` so the
+  insert and the delete flush in a stable order — flushing the
+  delete first would let the FK `ON DELETE SET NULL` kick in and
+  the freshly-inserted history row would land with
+  `edge_id = NULL`, defeating the per-resource history walk in T3
+  (the walk filters on `edge_id`).
+* One `updated` row per referencing edge whose `superseded_by` /
+  `conflicts_with` marker the unannotate just cleared. `before` is
+  captured before `_clear_reciprocal_markers` runs so the cleared
+  marker is visible in `snapshot.before` and absent in
+  `snapshot.after` — the temporal-query verb can render the
+  inverse of the original annotate as a single point-in-time
+  mutation.
+
+### No own audit rows
+
+The hook never writes its own `audit_log` rows. Acceptance criterion
+#5 of #857 — re-emitting an audit row per history row would balloon
+the audit log on a topology refresh that touches dozens of resources,
+and would also break the "one operation, one audit row" invariant
+`audit_log` consumers rely on. The single audit row the refresh /
+annotate service writes is the canonical audit record; history rows
+reference it.
+
+### Bulk import composition
+
+`bulk_import_edges` (G9.2-T8 #600) calls `annotate_edge_in_txn` once
+per row inside a shared `session.begin()` block — every per-row
+history emission lands inside the same batch transaction and rolls
+back atomically with the batch. No additional wiring was needed for
+G9.3-T2: the hook is on the call path the bulk importer already
+uses.
+
 ## Manual node seed control flow (write half — G0.9.1-T6 #778)
 
 ### `create_or_get_node`

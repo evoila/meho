@@ -428,7 +428,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, datacenterListOpID, "rdc-fleet", nil)
+	r, err := conn.Call(context.Background(), srv.URL, datacenterListOpID, "rdc-fleet", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, datacenterListOpID, "", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, datacenterListOpID, "", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -486,7 +486,7 @@ func TestDispatchVcenterListSendsDataCenterVmidParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"dataCenterVmid": "dc-001"}
-	if _, err := dispatchOp(context.Background(), srv.URL, vcenterListOpID, "rdc-fleet", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, vcenterListOpID, "rdc-fleet", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -515,7 +515,7 @@ func TestDispatchEnvironmentInfoSendsEnvironmentIDParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"environmentId": "env-vrops"}
-	if _, err := dispatchOp(context.Background(), srv.URL, environmentGetOpID, "rdc-fleet", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, environmentGetOpID, "rdc-fleet", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -541,7 +541,7 @@ func TestDispatchRequestInfoSendsRequestIDParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"requestId": "req-001"}
-	if _, err := dispatchOp(context.Background(), srv.URL, requestGetOpID, "rdc-fleet", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, requestGetOpID, "rdc-fleet", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

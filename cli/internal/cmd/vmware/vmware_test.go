@@ -575,7 +575,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "GET:/api/about", "rdc-vcenter", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/about", "rdc-vcenter", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "x", "", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "x", "", nil); err != nil {
 		t.Fatalf("dispatchOp empty-target: %v", err)
 	}
 }
@@ -633,7 +633,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "x", "rdc-vcenter", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "x", "rdc-vcenter", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -804,7 +804,7 @@ func TestRenderCallResultUnknownStatus(t *testing.T) {
 	cmd := newOperationCallCmd()
 	cmd.SetErr(&buf)
 	cmd.SetOut(&buf)
-	err := renderCallResult(cmd, "x", r, false, nil)
+	err := conn.Render(cmd, "x", r, false, nil)
 	if err == nil {
 		t.Fatalf("unknown status should surface as error")
 	}

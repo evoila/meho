@@ -62,17 +62,17 @@ func runClusterList(cmd *cobra.Command, targetName, domainID string, jsonOut boo
 	if domainID != "" {
 		params = map[string]any{"domainId": domainID}
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/clusters", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/clusters", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/clusters", r, jsonOut, printClusterList)
+	return conn.Render(cmd, "GET:/v1/clusters", r, jsonOut, printClusterList)
 }
 
 func printClusterList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/clusters", r)
+		conn.PrintGeneric(w, "GET:/v1/clusters", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF clusters (%d)\n", len(entries))

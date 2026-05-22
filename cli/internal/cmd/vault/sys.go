@@ -86,11 +86,11 @@ func newSysVerbCmd(use, opID, short, long, example string) *cobra.Command {
 			if err != nil {
 				return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 			}
-			r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, nil)
+			r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
 			}
-			return renderCallResult(cmd, opID, r, jsonOut, nil)
+			return conn.Render(cmd, opID, r, jsonOut, nil)
 		},
 	}
 	cmd.Flags().StringVar(&targetName, "target", "",

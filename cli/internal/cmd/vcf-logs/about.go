@@ -50,11 +50,11 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v2/version", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2/version", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v2/version", r, jsonOut, printAbout)
+	return conn.Render(cmd, "GET:/api/v2/version", r, jsonOut, printAbout)
 }
 
 func printAbout(w io.Writer, r *CallResult) {

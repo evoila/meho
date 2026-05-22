@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -64,11 +65,11 @@ func runEnvironmentList(cmd *cobra.Command, targetName string, jsonOut bool, bac
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, environmentListOpID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, environmentListOpID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, environmentListOpID, r, jsonOut, printEnvironmentList)
+	return conn.Render(cmd, environmentListOpID, r, jsonOut, printEnvironmentList)
 }
 
 func printEnvironmentList(w io.Writer, r *CallResult) {
@@ -79,7 +80,7 @@ func printEnvironmentList(w io.Writer, r *CallResult) {
 	}
 	entries, err := decodeListResult(r.Result)
 	if err != nil {
-		printGenericResult(w, environmentListOpID, r)
+		conn.PrintGeneric(w, environmentListOpID, r)
 		return
 	}
 	if len(entries) == 0 {
@@ -131,11 +132,11 @@ func runEnvironmentInfo(cmd *cobra.Command, environmentID, targetName string, js
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	params := map[string]any{"environmentId": environmentID}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, environmentGetOpID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, environmentGetOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, environmentGetOpID, r, jsonOut, printEnvironmentInfo)
+	return conn.Render(cmd, environmentGetOpID, r, jsonOut, printEnvironmentInfo)
 }
 
 func printEnvironmentInfo(w io.Writer, r *CallResult) {
@@ -166,7 +167,7 @@ func printEnvironmentInfo(w io.Writer, r *CallResult) {
 		} `json:"products"`
 	}
 	if err := jsonUnmarshalStrict(r.Result, &env); err != nil || env.EnvironmentID == "" {
-		if pretty, perr := prettyJSON(r.Result); perr == nil {
+		if pretty, perr := dispatch.PrettyJSON(r.Result); perr == nil {
 			fmt.Fprintln(w, pretty)
 		} else {
 			fmt.Fprintln(w, string(r.Result))

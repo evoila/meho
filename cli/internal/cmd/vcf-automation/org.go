@@ -178,7 +178,7 @@ func runProviderListVerb(
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }
 
 // runProviderGetVerb is the shared dispatch path for provider-plane
@@ -204,5 +204,5 @@ func runProviderGetVerb(
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }

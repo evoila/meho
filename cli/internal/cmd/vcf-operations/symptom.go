@@ -75,11 +75,11 @@ func runSymptomList(cmd *cobra.Command, targetName, paramsFlag string, jsonOut b
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 	}
 	const opID = "GET:/suite-api/api/symptoms"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printSymptomList)
+	return conn.Render(cmd, opID, r, jsonOut, printSymptomList)
 }
 
 func printSymptomList(w io.Writer, r *CallResult) {

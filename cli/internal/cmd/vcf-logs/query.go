@@ -105,11 +105,11 @@ func runQuery(
 		params["limit"] = strconv.Itoa(limit)
 	}
 	const opID = "GET:/api/v2/events/{constraints}"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printQuery)
+	return conn.Render(cmd, opID, r, jsonOut, printQuery)
 }
 
 func printQuery(w io.Writer, r *CallResult) {

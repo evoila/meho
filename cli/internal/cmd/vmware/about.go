@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -78,11 +79,11 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/about", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/about", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/about", r, jsonOut, printAbout)
+	return conn.Render(cmd, "GET:/api/about", r, jsonOut, printAbout)
 }
 
 // printAbout renders the about endpoint's result fields. The vSphere
@@ -110,7 +111,7 @@ func printAbout(w io.Writer, r *CallResult) {
 		// Fallback to raw JSON dump when the shape doesn't match the
 		// documented /api/about contract. Contract drift surfaces at
 		// the inspection layer rather than as a panic.
-		pretty, perr := prettyJSON(r.Result)
+		pretty, perr := dispatch.PrettyJSON(r.Result)
 		if perr == nil {
 			fmt.Fprintln(w, pretty)
 		} else {
@@ -175,7 +176,7 @@ func printErrorTrailer(w io.Writer, r *CallResult) {
 	}
 	if len(r.Extras) > 0 && string(r.Extras) != "null" {
 		fmt.Fprintln(w, "extras:")
-		pretty, err := prettyJSON(r.Extras)
+		pretty, err := dispatch.PrettyJSON(r.Extras)
 		if err == nil {
 			fmt.Fprintln(w, pretty)
 		} else {

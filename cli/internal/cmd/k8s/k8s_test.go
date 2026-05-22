@@ -203,7 +203,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, opAbout, "rke2-meho", nil)
+	r, err := conn.Call(context.Background(), srv.URL, opAbout, "rke2-meho", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "x", "rke2-meho", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "x", "rke2-meho", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

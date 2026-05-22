@@ -72,7 +72,7 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
 	printer := func(w io.Writer, res *CallResult) { printAbout(w, plane, res) }
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }
 
 // aboutOpForPlane returns the op_id the `about` verb dispatches for

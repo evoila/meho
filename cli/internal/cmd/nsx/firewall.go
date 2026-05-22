@@ -85,11 +85,11 @@ func runFirewallPolicyList(cmd *cobra.Command, scope, targetName string, jsonOut
 	}
 	const opID = "GET:/policy/api/v1/infra/domains/{domain-id}/security-policies"
 	params := map[string]any{"domain-id": scope}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printFirewallPolicyList)
+	return conn.Render(cmd, opID, r, jsonOut, printFirewallPolicyList)
 }
 
 func printFirewallPolicyList(w io.Writer, r *CallResult) {
@@ -182,11 +182,11 @@ func runFirewallRuleList(cmd *cobra.Command, policyID, scope, targetName string,
 		"domain-id":          scope,
 		"security-policy-id": policyID,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printFirewallRuleList)
+	return conn.Render(cmd, opID, r, jsonOut, printFirewallRuleList)
 }
 
 func printFirewallRuleList(w io.Writer, r *CallResult) {

@@ -55,17 +55,17 @@ func runDomainList(cmd *cobra.Command, targetName string, jsonOut bool, backplan
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/domains", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/domains", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/domains", r, jsonOut, printDomainList)
+	return conn.Render(cmd, "GET:/v1/domains", r, jsonOut, printDomainList)
 }
 
 func printDomainList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/domains", r)
+		conn.PrintGeneric(w, "GET:/v1/domains", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF domains (%d)\n", len(entries))
@@ -116,16 +116,16 @@ func runDomainInfo(cmd *cobra.Command, domainID, targetName string, jsonOut bool
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	params := map[string]any{"id": domainID}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/domains/{id}", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/domains/{id}", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/domains/{id}", r, jsonOut, printDomainInfo)
+	return conn.Render(cmd, "GET:/v1/domains/{id}", r, jsonOut, printDomainInfo)
 }
 
 func printDomainInfo(w io.Writer, r *CallResult) {
 	if r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/domains/{id}", r)
+		conn.PrintGeneric(w, "GET:/v1/domains/{id}", r)
 		return
 	}
 	var d struct {
@@ -148,7 +148,7 @@ func printDomainInfo(w io.Writer, r *CallResult) {
 		SSOName string `json:"ssoName"`
 	}
 	if err := jsonUnmarshalStrict(r.Result, &d); err != nil || d.ID == "" {
-		printGenericResult(w, "GET:/v1/domains/{id}", r)
+		conn.PrintGeneric(w, "GET:/v1/domains/{id}", r)
 		return
 	}
 	fmt.Fprintf(w, "domain:  %s (%s) — type=%s\n", d.Name, d.ID, d.Type)

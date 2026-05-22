@@ -452,7 +452,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "GET:/v1/releases/system", "rdc-sddc", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/v1/releases/system", "rdc-sddc", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/v1/domains", "", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "GET:/v1/domains", "", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -511,7 +511,7 @@ func TestDispatchDomainInfoSendsIDParam(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"id": "domain-mgmt"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/v1/domains/{id}", "rdc-sddc", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "GET:/v1/domains/{id}", "rdc-sddc", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -538,7 +538,7 @@ func TestDispatchWorkflowListSendsStatusFilter(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"status": "In_Progress"}
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/v1/tasks", "rdc-sddc", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "GET:/v1/tasks", "rdc-sddc", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

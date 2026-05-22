@@ -93,11 +93,11 @@ func dispatchAuth(cmd *cobra.Command, f *authAddrFlags, opID string, params map[
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), f.jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, f.targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, f.targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, f.jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, f.jsonOut, nil)
+	return conn.Render(cmd, opID, r, f.jsonOut, nil)
 }
 
 // newAuthListVerbCmd builds one no-arg, no-param list verb (userpass-

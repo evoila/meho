@@ -62,11 +62,11 @@ func runClusterList(cmd *cobra.Command, targetName string, jsonOut bool, backpla
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/vcenter/cluster", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/vcenter/cluster", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/vcenter/cluster", r, jsonOut, printClusterList)
+	return conn.Render(cmd, "GET:/vcenter/cluster", r, jsonOut, printClusterList)
 }
 
 func printClusterList(w io.Writer, r *CallResult) {
@@ -156,9 +156,9 @@ func runClusterPatch(cmd *cobra.Command, nameOrID, targetName, specFlag string, 
 	}
 	params["cluster"] = moid
 	opID := "vmware.composite.cluster.patch"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, nil)
+	return conn.Render(cmd, opID, r, jsonOut, nil)
 }

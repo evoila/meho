@@ -75,11 +75,11 @@ func runConfigShow(cmd *cobra.Command, path, targetName string, jsonOut bool, ba
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	params := map[string]any{"path": path}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.config.show", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.config.show", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.config.show", r, jsonOut, printConfigShow)
+	return conn.Render(cmd, "bind9.config.show", r, jsonOut, printConfigShow)
 }
 
 // printConfigShow renders `{"file": <abs-path>, "content": <text>}`.
@@ -184,11 +184,11 @@ func runConfigApplyViews(
 	if verifyFQDN != "" {
 		params["verify_fqdn"] = verifyFQDN
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.config.apply_views", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.config.apply_views", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.config.apply_views", r, jsonOut, printWriteResult)
+	return conn.Render(cmd, "bind9.config.apply_views", r, jsonOut, printWriteResult)
 }
 
 // assembleViewsBundle reads the local views.conf and every regular
@@ -332,11 +332,11 @@ func runConfigApplyFile(cmd *cobra.Command, name, localSrc, targetName string, j
 		"path":    name,
 		"content": content,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.config.apply_file", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.config.apply_file", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.config.apply_file", r, jsonOut, printWriteResult)
+	return conn.Render(cmd, "bind9.config.apply_file", r, jsonOut, printWriteResult)
 }
 
 // newConfigBackupCmd returns `meho bind9 config backup [--tag T]`.
@@ -392,11 +392,11 @@ func runConfigBackup(cmd *cobra.Command, tag, targetName string, jsonOut bool, b
 	if len(params) == 0 {
 		params = nil
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.config.backup", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.config.backup", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.config.backup", r, jsonOut, printConfigBackup)
+	return conn.Render(cmd, "bind9.config.backup", r, jsonOut, printConfigBackup)
 }
 
 // printConfigBackup renders the backup result. Surfaces backup_id +
@@ -476,11 +476,11 @@ func runConfigReload(cmd *cobra.Command, targetName string, jsonOut bool, backpl
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.config.reload", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.config.reload", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.config.reload", r, jsonOut, printConfigReload)
+	return conn.Render(cmd, "bind9.config.reload", r, jsonOut, printConfigReload)
 }
 
 // printConfigReload renders the rndc reload result. Surfaces ok +

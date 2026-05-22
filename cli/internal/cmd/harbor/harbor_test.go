@@ -380,7 +380,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "GET:/api/v2.0/systeminfo", "prod-harbor", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/v2.0/systeminfo", "prod-harbor", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/api/v2.0/systeminfo", "", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "GET:/api/v2.0/systeminfo", "", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -435,7 +435,7 @@ func TestDispatchProjectInfoSendsParams(t *testing.T) {
 
 	const opID = "GET:/api/v2.0/projects/{project_name}"
 	params := map[string]any{"project_name": "library"}
-	if _, err := dispatchOp(context.Background(), srv.URL, opID, "prod-harbor", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, opID, "prod-harbor", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -476,7 +476,7 @@ func TestDispatchRobotCreateSendsAllParams(t *testing.T) {
 	primeToken(t, srv.URL)
 
 	params := map[string]any{"name": "ci-push", "project": "myproject", "duration": 90}
-	r, err := dispatchOp(context.Background(), srv.URL, "harbor.robot.create", "prod-harbor", params)
+	r, err := conn.Call(context.Background(), srv.URL, "harbor.robot.create", "prod-harbor", params)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}

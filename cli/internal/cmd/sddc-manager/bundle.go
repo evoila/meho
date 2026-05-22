@@ -55,17 +55,17 @@ func runBundleList(cmd *cobra.Command, targetName string, jsonOut bool, backplan
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/bundles", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/bundles", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/bundles", r, jsonOut, printBundleList)
+	return conn.Render(cmd, "GET:/v1/bundles", r, jsonOut, printBundleList)
 }
 
 func printBundleList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/bundles", r)
+		conn.PrintGeneric(w, "GET:/v1/bundles", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF LCM bundles (%d)\n", len(entries))

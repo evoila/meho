@@ -96,7 +96,7 @@ func runTenantListVerb(
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }
 
 // runTenantGetVerb dispatches a tenant-plane read-by-id op_id with the
@@ -120,5 +120,5 @@ func runTenantGetVerb(
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }

@@ -60,11 +60,11 @@ func runVcenterList(cmd *cobra.Command, datacenterVmid, targetName string, jsonO
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
 	params := map[string]any{"dataCenterVmid": datacenterVmid}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, vcenterListOpID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, vcenterListOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, vcenterListOpID, r, jsonOut, printVcenterList)
+	return conn.Render(cmd, vcenterListOpID, r, jsonOut, printVcenterList)
 }
 
 func printVcenterList(w io.Writer, r *CallResult) {
@@ -75,7 +75,7 @@ func printVcenterList(w io.Writer, r *CallResult) {
 	}
 	entries, err := decodeListResult(r.Result)
 	if err != nil {
-		printGenericResult(w, vcenterListOpID, r)
+		conn.PrintGeneric(w, vcenterListOpID, r)
 		return
 	}
 	if len(entries) == 0 {

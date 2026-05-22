@@ -57,11 +57,11 @@ func runFieldList(cmd *cobra.Command, targetName string, jsonOut bool, backplane
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v2/fields", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2/fields", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v2/fields", r, jsonOut, printFieldList)
+	return conn.Render(cmd, "GET:/api/v2/fields", r, jsonOut, printFieldList)
 }
 
 func printFieldList(w io.Writer, r *CallResult) {

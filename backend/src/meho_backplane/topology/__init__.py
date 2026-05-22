@@ -104,6 +104,10 @@ from meho_backplane.topology.bulk_import import (
     BulkImportValidationError,
     bulk_import_edges,
 )
+from meho_backplane.topology.history_retention import (
+    start_topology_history_retention_sweeper,
+    stop_topology_history_retention_sweeper,
+)
 from meho_backplane.topology.nodes import (
     CreateNodeResult,
     InvalidNodeKindError,
@@ -148,7 +152,9 @@ __all__ = [
     "list_edges",
     "refresh_target_topology",
     "resolve_node",
+    "start_topology_history_retention_sweeper",
     "start_topology_refresh_scheduler",
+    "stop_topology_history_retention_sweeper",
     "stop_topology_refresh_scheduler",
     "unannotate_edge",
 ]

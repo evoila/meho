@@ -366,6 +366,47 @@ class Settings(BaseModel):
         becomes un-decryptable on key rotation; the operator-facing
         contract is "log everyone out, then bump the key"); v0.2
         ships one key end-to-end.
+    topology_history_retention_days:
+        Maximum age (in days) of ``graph_node_history`` /
+        ``graph_edge_history`` rows the G9.3-T6 (#858) retention prune
+        task preserves. Rows whose ``valid_from`` is older than
+        ``now() - topology_history_retention_days`` are deleted in one
+        bounded batch per run. Default 90 matches Initiative #365
+        work-item #8 ("quarterly ops review without unbounded growth").
+        ``0`` is the opt-out sentinel: when set, the prune is a no-op
+        and history grows forever (disk-growth tradeoff flagged in the
+        Helm chart values comment + topology runbook). Range ``[0, 3650]``:
+        the upper bound is 10 years, which is functionally permanent for
+        a v0.2 chassis -- operators wanting longer retention export via
+        ``meho topology timeline --json`` to cold storage rather than
+        pinning to the chassis's prune cadence. Read once per prune-tick
+        through :func:`get_settings`'s cache.
+    topology_history_prune_interval_seconds:
+        Cadence of the G9.3-T6 (#858) retention prune background loop,
+        in seconds. The prune task (registered in the FastAPI lifespan)
+        sleeps this long between scans of the history tables. Default
+        604800 (7 d / weekly) matches Initiative #365's stated cadence
+        ("a weekly background task prunes rows"). Range ``[60, 604800]``:
+        below one minute the prune competes with normal write load; the
+        ceiling is the documented weekly cadence -- operators wanting
+        slower pruning raise ``topology_history_retention_days`` instead
+        (it pushes the deletion horizon further out without changing the
+        sweep cadence). Tests override to sub-second values via env-var
+        monkeypatch + :func:`get_settings` cache-clear, mirroring the
+        memory-expiry sweeper test pattern.
+    topology_history_prune_enabled:
+        Whether to start the G9.3-T6 (#858) retention prune background
+        task in the FastAPI lifespan. Default ``True``: the in-process
+        ``asyncio`` loop is the shipped retention mechanism. Operators
+        running a different retention mechanism (k8s CronJob hitting the
+        DB directly, archive-then-delete via cold storage, etc.) flip
+        ``TOPOLOGY_HISTORY_PRUNE_ENABLED=false`` so the chassis does not
+        race the external job. Distinct from
+        ``topology_history_retention_days=0``: ``0`` keeps the loop
+        running but every tick is a no-op (cheap heartbeat that proves
+        retention is policy-driven); ``enabled=False`` skips starting
+        the loop entirely (no audit-row noise, no log line). Read once
+        at lifespan startup; toggling post-start requires a pod restart.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -417,6 +458,15 @@ class Settings(BaseModel):
     memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
     memory_expiry_enabled: bool = True
     ui_session_encryption_key: str = ""
+    # G9.3-T6 #858 — topology history retention prune knobs. ``days=0`` is
+    # the opt-out sentinel ("keep forever"); ``enabled=False`` skips the
+    # background task entirely. The two flags are deliberately distinct
+    # (see field docstring): ``days=0`` keeps a cheap heartbeat that proves
+    # retention is policy-driven, while ``enabled=False`` matches the
+    # MEMORY_EXPIRY_ENABLED shape for operators with external retention.
+    topology_history_retention_days: int = Field(default=90, ge=0, le=3650)
+    topology_history_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
+    topology_history_prune_enabled: bool = True
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -551,4 +601,13 @@ def get_settings() -> Settings:
             os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
         ),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", ""),
+        topology_history_retention_days=int(
+            os.environ.get("TOPOLOGY_HISTORY_RETENTION_DAYS", "90"),
+        ),
+        topology_history_prune_interval_seconds=int(
+            os.environ.get("TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS", "604800"),
+        ),
+        topology_history_prune_enabled=parse_bool_env(
+            os.environ.get("TOPOLOGY_HISTORY_PRUNE_ENABLED", "true"),
+        ),
     )

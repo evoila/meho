@@ -270,6 +270,47 @@ memory:
   # consumers until the external job runs.
   expiryEnabled: true
 
+# Topology layer (G9 #220). The backplane ships history tables
+# (`graph_node_history` / `graph_edge_history`, G9.3-T1 #856) that
+# accumulate one append-only row per refresh-driven or operator-
+# annotated graph mutation. Without a retention policy these tables
+# grow unbounded -- a 1-h refresh cadence on a churning tenant adds
+# tens of thousands of rows per week, indefinitely. The G9.3-T6 (#858)
+# retention prune task -- registered in the FastAPI lifespan as a
+# weekly `asyncio.create_task` loop -- deletes rows older than
+# `historyRetentionDays`. Disable `historyPruneEnabled` only when an
+# external retention mechanism (k8s CronJob hitting the DB, cold-
+# storage archive + delete) reaps rows instead.
+topology:
+  # -- Maximum age (in days) of `graph_node_history` /
+  # `graph_edge_history` rows the retention prune preserves. Rows
+  # whose `valid_from` is older than `now() - historyRetentionDays`
+  # are deleted in one bounded batch per run. Default 90 matches
+  # Initiative #365 work-item #8 ("quarterly ops review without
+  # unbounded growth"). Set `0` for keep-forever -- the prune task
+  # still runs as a heartbeat but every tick is a no-op. Operators
+  # picking 0 accept unbounded disk growth in exchange for full
+  # historical retention; export via `meho topology timeline --json`
+  # to cold storage if quarterly-plus retention is operationally
+  # required. Range [0, 3650] (10 years upper bound).
+  historyRetentionDays: 90
+  # -- Cadence of the in-process history retention prune sweeper, in
+  # seconds. Default 604800 (7d / weekly) matches Initiative #365's
+  # stated cadence ("a weekly background task prunes rows"). Range
+  # [60, 604800]: below one minute the prune competes with normal
+  # write load; the ceiling is the documented weekly cadence --
+  # operators wanting slower pruning raise `historyRetentionDays`
+  # instead (pushes the deletion horizon further out without changing
+  # the sweep cadence).
+  historyPruneIntervalSeconds: 604800
+  # -- Whether to start the in-process history retention prune
+  # sweeper. Set false when an external retention mechanism reaps
+  # rows instead. Distinct from `historyRetentionDays: 0`: `0` keeps
+  # the loop running but every tick is a no-op (cheap heartbeat that
+  # proves retention is policy-driven); `false` here skips starting
+  # the loop entirely (no audit-row noise, no log line).
+  historyPruneEnabled: true
+
 postgres:
   # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
   # explicitly excludes a bundled PG subchart); typically reached over the

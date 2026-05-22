@@ -287,7 +287,8 @@ def test_catalog_unauthenticated_returns_401() -> None:
 async def test_catalog_endpoint_returns_all_entries() -> None:
     # The handler ignores the operator (it returns global reference data);
     # require_role already gates auth, exercised by the 401 test above.
-    body = await catalog_endpoint(operator=MagicMock())
-    assert set(body) == {"catalog"}
-    returned = {(e["product"], e["version"]) for e in body["catalog"]}
+    # response_model=CatalogListResponse → the handler returns the typed
+    # model (not a dict).
+    response = await catalog_endpoint(operator=MagicMock())
+    returned = {(e.product, e.version) for e in response.catalog}
     assert returned == _EXPECTED_PRODUCT_VERSION

@@ -153,6 +153,20 @@ class ConnectorSpecCatalog(BaseModel):
         return None
 
 
+class CatalogListResponse(BaseModel):
+    """Wire envelope for ``GET /api/v1/connectors/catalog``.
+
+    Wrapped in ``catalog`` (not a bare list) so future paging fields can
+    land non-breakingly, mirroring the ``GET /`` list shape. Used as the
+    route's ``response_model`` so the OpenAPI contract explicitly types
+    the envelope + entry fields (rather than a free-form object map).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    catalog: tuple[ConnectorSpecEntry, ...]
+
+
 def parse_catalog(raw: str) -> ConnectorSpecCatalog:
     """Parse + schema-validate raw catalog YAML.
 

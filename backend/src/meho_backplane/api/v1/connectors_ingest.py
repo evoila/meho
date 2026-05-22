@@ -122,6 +122,7 @@ from fastapi.responses import Response
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.operations.ingest import (
+    CatalogListResponse,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
     EditGroupBody,
@@ -362,10 +363,10 @@ async def list_endpoint(
     return {"connectors": [item.model_dump(mode="json") for item in items]}
 
 
-@router.get("/catalog")
+@router.get("/catalog", response_model=CatalogListResponse)
 async def catalog_endpoint(
     operator: Operator = _require_operator,
-) -> dict[str, list[dict[str, object]]]:
+) -> CatalogListResponse:
     """Return the curated connector-spec catalog (Goal #214 on-ramp; #743).
 
     The catalog maps ``(product, version)`` to the recommended OpenAPI
@@ -379,10 +380,13 @@ async def catalog_endpoint(
     Declared before the ``/{connector_id}/...`` routes so the literal
     ``/catalog`` segment is matched ahead of the path-parameter
     patterns. Wrapped in ``{"catalog": [...]}`` for non-breaking paging
-    room, mirroring the ``GET /`` list shape.
+    room, mirroring the ``GET /`` list shape. Typed via
+    ``response_model=CatalogListResponse`` so the OpenAPI contract for
+    this public route declares the envelope + entry fields explicitly;
+    unlike the ``GET /`` list route it has no per-row UUID-serialisation
+    reason to stay an untyped object map.
     """
-    catalog = load_catalog()
-    return {"catalog": [entry.model_dump(mode="json") for entry in catalog.entries]}
+    return CatalogListResponse(catalog=load_catalog().entries)
 
 
 @router.get("/{connector_id}/review", response_model=ConnectorReviewPayload)

@@ -1109,7 +1109,7 @@
           "connectors"
         ],
         "summary": "Catalog Endpoint",
-        "description": "Return the curated connector-spec catalog (Goal #214 on-ramp; #743).\n\nThe catalog maps ``(product, version)`` to the recommended OpenAPI\nspec source(s) + the registered connector class that covers the\nversion label. It is global, built-in reference data (not tenant-\nscoped), so operator role is the only gate; the read carries no\ntenant filter. The ``meho connector catalog list`` / ``ingest\n--catalog`` verbs (#915) consume this route \u2014 the CLI ships as a\nseparate binary and cannot read the server's packaged catalog file.\n\nDeclared before the ``/{connector_id}/...`` routes so the literal\n``/catalog`` segment is matched ahead of the path-parameter\npatterns. Wrapped in ``{\"catalog\": [...]}`` for non-breaking paging\nroom, mirroring the ``GET /`` list shape.",
+        "description": "Return the curated connector-spec catalog (Goal #214 on-ramp; #743).\n\nThe catalog maps ``(product, version)`` to the recommended OpenAPI\nspec source(s) + the registered connector class that covers the\nversion label. It is global, built-in reference data (not tenant-\nscoped), so operator role is the only gate; the read carries no\ntenant filter. The ``meho connector catalog list`` / ``ingest\n--catalog`` verbs (#915) consume this route \u2014 the CLI ships as a\nseparate binary and cannot read the server's packaged catalog file.\n\nDeclared before the ``/{connector_id}/...`` routes so the literal\n``/catalog`` segment is matched ahead of the path-parameter\npatterns. Wrapped in ``{\"catalog\": [...]}`` for non-breaking paging\nroom, mirroring the ``GET /`` list shape. Typed via\n``response_model=CatalogListResponse`` so the OpenAPI contract for\nthis public route declares the envelope + entry fields explicitly;\nunlike the ``GET /`` list route it has no per-row UUID-serialisation\nreason to stay an untyped object map.",
         "operationId": "catalog_endpoint_api_v1_connectors_catalog_get",
         "parameters": [
           {
@@ -1129,15 +1129,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "additionalProperties": true
-                    }
-                  },
-                  "title": "Response Catalog Endpoint Api V1 Connectors Catalog Get"
+                  "$ref": "#/components/schemas/CatalogListResponse"
                 }
               }
             }
@@ -3063,6 +3055,87 @@
         ],
         "title": "VaultStatus",
         "description": "Vault federation-chain status.\n\n``reachable`` is true when the OIDC login succeeded (TCP + TLS +\nJWT forward all worked). ``read_ok`` is true when the test secret\nread succeeded against the resulting Vault token. ``detail`` carries\na short structured string for the CLI to render on failure paths \u2014\nnever an unbounded exception message."
+      },
+      "CatalogListResponse": {
+        "properties": {
+          "catalog": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorSpecEntry"
+            },
+            "type": "array",
+            "title": "Catalog"
+          }
+        },
+        "type": "object",
+        "required": [
+          "catalog"
+        ],
+        "title": "CatalogListResponse",
+        "description": "Wire envelope for ``GET /api/v1/connectors/catalog``.\n\nWrapped in ``catalog`` (not a bare list) so future paging fields can\nland non-breakingly, mirroring the ``GET /`` list shape. Used as the\nroute's ``response_model`` so the OpenAPI contract explicitly types\nthe envelope + entry fields (rather than a free-form object map)."
+      },
+      "ConnectorSpecEntry": {
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Version"
+          },
+          "impl_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Impl Id"
+          },
+          "requires_connector_class": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Requires Connector Class"
+          },
+          "upstream": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Upstream"
+          },
+          "spec_info_version": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Spec Info Version"
+          },
+          "sha256": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Sha256"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2048,
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "product",
+          "version",
+          "impl_id",
+          "requires_connector_class"
+        ],
+        "title": "ConnectorSpecEntry",
+        "description": "One curated ``(product, version)`` -> spec-source mapping.\n\n``upstream is None`` marks a typed connector with no ingestable spec;\nthe CLI's ``ingest --catalog`` path (#915) refuses such an entry rather\nthan POSTing an empty ``specs`` list."
       }
     }
   }

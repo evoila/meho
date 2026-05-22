@@ -289,7 +289,7 @@ async def test_tenant_scoping_no_rows_for_empty_tenant(session: AsyncSession) ->
     tenant_a = await _seed_tenant(session)
     await session.commit()
     result = await query_timeline(_make_operator(tenant_a))
-    assert result.rows == []
+    assert result.rows == ()
     assert result.next_cursor is None
 
 
@@ -543,6 +543,48 @@ async def test_target_filter_scopes_to_one_targets_resources(
     assert result.rows[0].resource_id == node_a
 
 
+@pytest.mark.asyncio
+async def test_target_filter_includes_edge_when_either_endpoint_matches(
+    session: AsyncSession,
+) -> None:
+    """An edge spanning two targets surfaces in either target's timeline.
+
+    The ``--target`` filter on the edge branch keys on **either**
+    endpoint's ``target_id`` (an edge crossing two targets is part of
+    both timelines). The node-only branch is covered above; this test
+    locks down the edge-history branch of the same filter so a
+    regression in the OR-of-endpoint-targets predicate (e.g. an
+    accidental AND or a one-sided filter) does not silently drop
+    cross-target edges from one side's view.
+    """
+    tenant_id = await _seed_tenant(session)
+    target_a = await _seed_target(session, tenant_id, name="vc-a")
+    target_b = await _seed_target(session, tenant_id, name="vc-b")
+    node_a = await _seed_node(session, tenant_id, name="vm-a", target_id=target_a)
+    node_b = await _seed_node(session, tenant_id, name="vm-b", target_id=target_b)
+    edge_id = await _seed_edge(session, tenant_id, node_a, node_b)
+    await session.flush()
+
+    base = datetime(2026, 5, 22, 9, 0, 0, tzinfo=UTC)
+    await _seed_edge_history(
+        session,
+        tenant_id=tenant_id,
+        edge_id=edge_id,
+        valid_from=base,
+    )
+    await session.commit()
+
+    result_a = await query_timeline(_make_operator(tenant_id), target_id=target_a)
+    edge_rows_a = [r for r in result_a.rows if r.source == "edge"]
+    assert len(edge_rows_a) == 1, "edge should surface in target_a's timeline"
+    assert edge_rows_a[0].resource_id == edge_id
+
+    result_b = await query_timeline(_make_operator(tenant_id), target_id=target_b)
+    edge_rows_b = [r for r in result_b.rows if r.source == "edge"]
+    assert len(edge_rows_b) == 1, "same edge should surface in target_b's timeline"
+    assert edge_rows_b[0].resource_id == edge_id
+
+
 # ---------------------------------------------------------------------------
 # Tombstone replay
 # ---------------------------------------------------------------------------
@@ -587,7 +629,7 @@ async def test_timeline_returns_tombstone_with_null_resource_id(
 
 @pytest.mark.asyncio
 async def test_timeline_ordered_newest_first(session: AsyncSession) -> None:
-    """Rows return in ``(valid_from DESC, history_id DESC)`` order."""
+    """Rows return in ``(valid_from DESC, history_id DESC, source DESC)`` order."""
     tenant_id = await _seed_tenant(session)
     node_id = await _seed_node(session, tenant_id, name="vm-a")
     base = datetime(2026, 5, 22, 9, 0, 0, tzinfo=UTC)
@@ -601,8 +643,15 @@ async def test_timeline_ordered_newest_first(session: AsyncSession) -> None:
     await session.commit()
 
     result = await query_timeline(_make_operator(tenant_id))
-    timestamps = [r.valid_from for r in result.rows]
-    assert timestamps == sorted(timestamps, reverse=True)
+    # Full keyset ordering check (not just ``valid_from``): the merge
+    # in ``query_timeline`` uses ``(valid_from, history_id, source)`` as
+    # the descending tie-breaker chain, and cursor stability depends on
+    # every level of the chain being respected. Asserting only the
+    # outermost ``valid_from`` would miss a regression in the
+    # history_id / source tie-breaker that would surface as duplicated
+    # or skipped rows across paginated cursors on same-timestamp ties.
+    keys = [(r.valid_from, r.history_id, r.source) for r in result.rows]
+    assert keys == sorted(keys, reverse=True)
 
 
 # ---------------------------------------------------------------------------

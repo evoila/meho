@@ -56,7 +56,7 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 __all__ = [
     "InvalidTimelineCursorError",
@@ -101,9 +101,19 @@ def encode_timeline_cursor(position: TimelineCursorPosition) -> str:
     out-of-vocabulary value is a bug, not an operator-facing condition,
     so this function does not validate it. The decoder, which receives
     untrusted bytes, does.
+
+    Naive timestamps are normalised to UTC before encoding. The
+    ``graph_*_history.valid_from`` column is declared ``timezone=True``
+    in the ORM (migration 0012) so production PG always returns
+    tz-aware values; SQLite (dev/test) strips tz on the asyncpg/aiosqlite
+    round-trip and returns naive. Stamping UTC at encode time keeps the
+    wire shape uniform across both dialects and lets the decoder enforce
+    the tz-aware invariant on incoming tokens without false positives
+    from the SQLite path.
     """
+    ts = position.ts if position.ts.tzinfo is not None else position.ts.replace(tzinfo=UTC)
     payload = {
-        "ts": position.ts.isoformat(),
+        "ts": ts.isoformat(),
         "id": position.history_id,
         "src": position.source,
     }
@@ -152,5 +162,14 @@ def decode_timeline_cursor(token: str) -> TimelineCursorPosition:
         ts = datetime.fromisoformat(ts_raw)
     except ValueError as exc:
         raise InvalidTimelineCursorError("cursor 'ts' is not ISO-8601") from exc
+    if ts.tzinfo is None:
+        # Naive ts would propagate into the keyset comparison against
+        # tz-aware ``graph_*_history.valid_from`` rows and raise
+        # ``TypeError: can't compare offset-naive and offset-aware
+        # datetimes`` at runtime. ``encode_timeline_cursor`` only emits
+        # UTC-aware strings, so a naive ts on the wire is either client
+        # tampering or a future server bug -- either way, surface it as
+        # a structured cursor error rather than a 500.
+        raise InvalidTimelineCursorError("cursor 'ts' must include timezone offset")
 
     return TimelineCursorPosition(ts=ts, history_id=id_raw, source=src_raw)

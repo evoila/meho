@@ -251,12 +251,19 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": "integer",
             "minimum": 1,
             "maximum": _EDGES_LIMIT_MAX,
-            "default": _EDGES_LIMIT_DEFAULT,
+            # No schema-level ``default`` -- the effective default
+            # varies by ``kind`` (``edges`` -> ``_EDGES_LIMIT_DEFAULT``,
+            # ``timeline`` -> ``_TIMELINE_LIMIT_DEFAULT``). A single
+            # default in the schema would mislead schema-driven MCP
+            # clients into pre-populating the edges default on every
+            # call, over-requesting timeline pages.
             "description": (
-                f"Page size for `kind=edges` (default "
-                f"{_EDGES_LIMIT_DEFAULT}; ceiling {_EDGES_LIMIT_MAX}, "
-                "matching the substrate `list_edges` cap). Ignored for "
-                "the closure kinds and `path`."
+                f"Page size for paginated facets. `kind=edges` defaults "
+                f"to {_EDGES_LIMIT_DEFAULT}; `kind=timeline` defaults to "
+                f"{_TIMELINE_LIMIT_DEFAULT}. Shared ceiling "
+                f"{_EDGES_LIMIT_MAX}, matching the substrate "
+                "`list_edges` cap. Ignored for the closure kinds and "
+                "`path`."
             ),
         },
         "offset": {

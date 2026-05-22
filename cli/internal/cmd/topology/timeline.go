@@ -88,7 +88,7 @@ func newTimelineCmd() *cobra.Command {
 	cmd.Flags().StringVar(&target, "target", "",
 		"narrow to one target (name or alias; server-side resolution)")
 	cmd.Flags().StringVar(&since, "since", "",
-		"earliest valid_from; accepts 24h / 7d / 30m / 2w shorthand or ISO-8601")
+		"earliest valid_from; accepts 24h / 7d / 30m / 2w shorthand, RFC3339, or YYYY-MM-DD")
 	cmd.Flags().StringVar(&until, "until", "",
 		"latest valid_from; accepts the same shorthand as --since")
 	cmd.Flags().IntVar(&limit, "limit", 0,
@@ -211,13 +211,13 @@ func getTimeline(ctx context.Context, backplaneURL string, opts timelineOptions)
 // the audit `Entry` shape is — the topology package stays decoupled
 // from oapi churn, matching the sibling-package convention.
 type TimelineEntry struct {
-	ValidFrom   string  `json:"valid_from"`
-	HistoryID   int64   `json:"history_id"`
-	Source      string  `json:"source"`
-	ChangeKind  string  `json:"change_kind"`
-	ResourceID  *string `json:"resource_id"`
-	Summary     string  `json:"summary"`
-	AuditID     *string `json:"audit_id"`
+	ValidFrom  string  `json:"valid_from"`
+	HistoryID  int64   `json:"history_id"`
+	Source     string  `json:"source"`
+	ChangeKind string  `json:"change_kind"`
+	ResourceID *string `json:"resource_id"`
+	Summary    string  `json:"summary"`
+	AuditID    *string `json:"audit_id"`
 }
 
 // TimelineResult mirrors the backend `TopologyTimelineResult`.

@@ -1327,7 +1327,7 @@ async def query_timeline(
 
     merged = _merge_timeline_pages(node_rows, edge_rows, limit)
     next_cursor = _compute_next_cursor(node_rows, edge_rows, merged, limit)
-    return TopologyTimelineResult(rows=merged, next_cursor=next_cursor)
+    return TopologyTimelineResult(rows=tuple(merged), next_cursor=next_cursor)
 
 
 def _merge_has_leftovers(

@@ -279,5 +279,9 @@ class TopologyTimelineResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    rows: list[TopologyTimelineEntry]
+    # ``tuple`` (not ``list``) so the ``frozen=True`` immutability
+    # contract extends to in-place mutation: a list would still accept
+    # ``.append`` / ``.pop`` despite the ``frozen`` block on attribute
+    # reassignment. Consumers iterating over ``rows`` see the same shape.
+    rows: tuple[TopologyTimelineEntry, ...]
     next_cursor: str | None

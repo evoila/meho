@@ -101,18 +101,20 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "topology",
-		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / annotate / unannotate / list-edges)",
+		Short: "Query and refresh the MEHO topology graph (refresh / dependents / dependencies / path / timeline / annotate / unannotate / list-edges)",
 		Long: "Operate the tenant-scoped topology graph wired by G9.1 + " +
-			"G9.2. Refresh a target's discovered topology, walk what " +
-			"depends on a node (dependents), walk what a node depends " +
-			"on (dependencies), find the shortest path between two " +
-			"nodes, assert a curated cross-system edge (annotate), " +
-			"delete a curated edge (unannotate), or list the tenant's " +
-			"edges (list-edges). Read verbs are operator-level; " +
-			"annotate / unannotate require tenant_admin. Tenant " +
-			"scoping is enforced server-side via the JWT — no surface " +
-			"accepts a tenant id, and cross-tenant queries return the " +
-			"same empty/404 shape as a node that does not exist.",
+			"G9.2 + G9.3. Refresh a target's discovered topology, walk " +
+			"what depends on a node (dependents), walk what a node " +
+			"depends on (dependencies), find the shortest path between " +
+			"two nodes, walk the tenant's chronological change feed " +
+			"from the diff-on-write history substrate (timeline), " +
+			"assert a curated cross-system edge (annotate), delete a " +
+			"curated edge (unannotate), or list the tenant's edges " +
+			"(list-edges). Read verbs are operator-level; annotate / " +
+			"unannotate require tenant_admin. Tenant scoping is " +
+			"enforced server-side via the JWT — no surface accepts a " +
+			"tenant id, and cross-tenant queries return the same " +
+			"empty/404 shape as a node that does not exist.",
 		SilenceUsage: true,
 	}
 	cmd.AddCommand(newRefreshCmd())

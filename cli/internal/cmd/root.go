@@ -31,6 +31,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
+	vcflogs "github.com/evoila/meho/cli/internal/cmd/vcf-logs"
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
 	"github.com/evoila/meho/cli/internal/discovery"
@@ -190,6 +191,19 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `nsx` parent.
 	root.AddCommand(nsx.NewRootCmd())
+
+	// G3.6-T6 (#838) -- vrli-rest-9.0 operator alias verbs for
+	// Initiative #369 (G3.6 tier-3 VCF management plane). The verb tree
+	// pre-bakes connector_id="vrli-rest-9.0" on top of the existing
+	// /api/v1/operations/call dispatcher route so operators don't type
+	// the connector ID on every invocation. Ships the 7 curated read-only
+	// vRLI core verbs (about, query, aggregated, field list, host list,
+	// content-pack list, alert list) plus operation search/call
+	// meta-tool wrappers. `meho vcf-logs query --time-range 1h
+	// --target rdc-vrli` replaces the consumer's `./scripts/vcf-logs.sh`
+	// wrapper. Registered before registerDynamicSubcommands so the
+	// backplane manifest cannot shadow the built-in `vcf-logs` parent.
+	root.AddCommand(vcflogs.NewRootCmd())
 
 	// G3.5-T10 (#622) -- harbor-rest-2.x operator alias verbs for
 	// Initiative #368. The verb tree pre-bakes connector_id=

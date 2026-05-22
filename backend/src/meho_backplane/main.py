@@ -96,6 +96,7 @@ from meho_backplane.memory import (
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars
+from meho_backplane.operations.ingest import load_catalog
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
@@ -222,6 +223,16 @@ async def _run_lifespan_startup() -> None:
     # `register_connector_v2` calls in each product's `__init__.py`
     # run before the first request arrives.
     _eager_import_connectors()
+    # Connector-spec catalog parse + schema validation (#743). Loads the
+    # packaged catalog.yaml once; a malformed catalog (bad YAML, unknown
+    # field, non-PEP-440 spec_info_version, duplicate (product, version))
+    # raises here and crashes the lifespan, so CI's app-boot smoke fails
+    # instead of the bad catalog surfacing as a 500 on first
+    # GET /api/v1/connectors/catalog. Registry-coverage of each entry's
+    # requires_connector_class is a CI regression test, not a startup
+    # guard (the registry's populated-ness is import-order-dependent
+    # under pytest-xdist; see catalog.py).
+    load_catalog()
     # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
     # docstring for the contract; runs registrars connectors appended
     # to during the import pass above so descriptor rows are populated

@@ -30,6 +30,7 @@ from meho_backplane.operations.ingest.api_schemas import (
 )
 from meho_backplane.operations.ingest.catalog import (
     CatalogError,
+    CatalogListResponse,
     ConnectorSpecCatalog,
     ConnectorSpecEntry,
     load_catalog,
@@ -97,6 +98,7 @@ from meho_backplane.operations.ingest.service import ReviewService
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
     "CatalogError",
+    "CatalogListResponse",
     "ConnectorListItem",
     "ConnectorListResponse",
     "ConnectorNotFoundError",

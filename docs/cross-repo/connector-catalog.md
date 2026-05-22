@@ -80,20 +80,26 @@ of each connector's first verified `--catalog` ingest.
 
 ## Operator workflow
 
-1. `meho connector catalog list` — see which `(product, version)` entries
-   exist and which connector classes are registered.
+1. `meho connector catalog list` — print the catalog table: each
+   `(product, version)` entry's `impl_id`, the connector class that
+   covers it, whether that class is registered on this backplane (`reg`
+   column), the observed `spec_info_version`, and notes. Read-only;
+   operator role suffices.
 2. `meho connector ingest --catalog <product>/<version>` — resolve the
-   entry, fetch the upstream spec(s), and ingest under the recommended
-   triple.
+   entry and ingest its recommended triple + upstream spec URL(s) (the
+   backplane fetches each URL). Typed-connector entries (`upstream:
+   null`) and fqdn-templated upstream URLs are refused with a hint to
+   use the explicit `--spec` form instead. `--catalog` is mutually
+   exclusive with the manual `--product`/`--version`/`--impl`/`--spec`
+   flags. Add `--dry-run` to validate before committing.
 3. `meho connector review <connector_id>` → `meho connector enable <id>` —
    vet the LLM-summarised groups and turn the operations on.
 
-> The `catalog list` and `ingest --catalog` verbs are tracked in
-> [#915](https://github.com/evoila/meho/issues/915) (the CLI half split
-> out of #743 per the connector `-T` convention). Until they land, use the
-> explicit `meho connector ingest --spec <url>` form from
-> [`connector-ingestion.md`](connector-ingestion.md), reading the `upstream`
-> URL(s) from the catalog by hand.
+For an entry the catalog can't ingest directly (typed, or fqdn-templated
+upstream such as `nsx`), fall back to the explicit `meho connector ingest
+--product … --version … --impl … --spec <url>` form documented in
+[`connector-ingestion.md`](connector-ingestion.md), reading the `upstream`
+URL(s) from `catalog list`.
 
 ## Adding or updating an entry
 

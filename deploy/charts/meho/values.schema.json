@@ -723,6 +723,10 @@
         "memory": {
           "type": "string",
           "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$"
+        },
+        "ephemeral-storage": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$"
         }
       }
     }

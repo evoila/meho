@@ -155,9 +155,15 @@ resources:
   limits:
     cpu: 1000m
     memory: 1Gi
+    # -- Bounds writable-layer + emptyDir (tmp, fastembed-cache) + log
+    # growth so a runaway write can't trigger node-pressure eviction of
+    # co-located pods (kubernetes:S6870). The default model is baked into
+    # the image layer, not ephemeral storage.
+    ephemeral-storage: 1Gi
   requests:
     cpu: 100m
     memory: 256Mi
+    ephemeral-storage: 256Mi
 
 # -- ConfigMap-sourced environment variables (non-secret).
 # These map 1:1 to `backend/src/meho_backplane/settings.py` env-var contract.
@@ -398,9 +404,13 @@ broadcast:
     limits:
       cpu: 500m
       memory: 512Mi
+      # -- Node-pressure guard for the broadcast container's ephemeral
+      # data emptyDir + logs (kubernetes:S6870).
+      ephemeral-storage: 512Mi
     requests:
       cpu: 50m
       memory: 128Mi
+      ephemeral-storage: 128Mi
   service:
     type: ClusterIP
     port: 6379
@@ -430,9 +440,13 @@ migrationJob:
     limits:
       cpu: 500m
       memory: 512Mi
+      # -- Short-lived migration runner; small ephemeral footprint
+      # (kubernetes:S6870).
+      ephemeral-storage: 256Mi
     requests:
       cpu: 50m
       memory: 256Mi
+      ephemeral-storage: 64Mi
 
 connectors:
   # -- v0.1 ships the chassis with no connectors enabled. The connector

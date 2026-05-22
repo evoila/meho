@@ -1,21 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""BFF (Backend-for-Frontend) auth for the operator console (stub).
+"""BFF (Backend-for-Frontend) auth for the operator console.
 
-Empty package for chassis Task #863. The order subsequent Tasks fill
-this package in:
+Initiative #337 (G10.0 Frontend chassis) splits the BFF surface
+across four submodules so the layering is grep-explicit:
 
-* T3 (#864) -- ``session.py``: ``web_session`` ORM model +
-  ``SessionService`` with encrypted access-token / refresh-token
-  custody, refresh-rotation per RFC 9700, Alembic migration.
-* T4 (#865) -- ``flow.py`` + ``middleware.py``: OAuth 2.1
-  Authorization Code + PKCE flow against Keycloak, ``meho-web``
-  client registration, session-cookie middleware that loads operator
-  identity on every ``/ui/*`` request and 302-redirects to
-  ``/ui/auth/login`` when missing/expired.
+* :mod:`meho_backplane.ui.auth.session_store` (Task #864) -- the
+  encrypted token-custody substrate. ``create_session`` /
+  ``load_session`` / ``revoke_session`` /
+  ``rotate_refresh`` against the ``web_session`` Postgres table.
+* :mod:`meho_backplane.ui.auth.flow` (Task #865) -- OAuth 2.1
+  Authorization Code + PKCE client primitives.
+  ``build_authorization_request`` mints the IdP redirect URL +
+  registers the PKCE verifier server-side; ``exchange_code_for_tokens``
+  finishes the round-trip at the token endpoint.
+  ``resolve_oidc_endpoints`` exposes the cached discovery doc.
+* :mod:`meho_backplane.ui.auth.routes` (Task #865) -- the FastAPI
+  :class:`APIRouter` carrying ``GET /ui/auth/{login,callback,logout}``.
+  ``build_router`` returns the router; ``SESSION_COOKIE_NAME`` /
+  ``LOGIN_PATH`` are exported for the middleware to share.
+* :mod:`meho_backplane.ui.auth.middleware` (Task #865) -- the pure-ASGI
+  :class:`UISessionMiddleware` that loads operator identity from the
+  ``meho_session`` cookie on every ``/ui/*`` request and 302-redirects
+  to login on missing/expired session.
 
-This package is imported once T3 + T4 land; the stub keeps
-``from meho_backplane.ui.auth import ...`` failing loudly while the
-chassis is the only thing in place.
+T5 (#866) mounts the router and the middleware onto the FastAPI app;
+this subpackage exposes only the build-time surface.
 """
+
+from meho_backplane.ui.auth.middleware import (
+    AUTH_PREFIX,
+    STATIC_PREFIX,
+    UISessionContext,
+    UISessionMiddleware,
+    require_ui_session,
+)
+from meho_backplane.ui.auth.routes import (
+    LOGIN_PATH,
+    SESSION_COOKIE_NAME,
+    build_router,
+)
+
+__all__ = [
+    "AUTH_PREFIX",
+    "LOGIN_PATH",
+    "SESSION_COOKIE_NAME",
+    "STATIC_PREFIX",
+    "UISessionContext",
+    "UISessionMiddleware",
+    "build_router",
+    "require_ui_session",
+]

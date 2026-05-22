@@ -198,8 +198,9 @@ class RobotCoreOp:
 
 #: Path-prefix → group_key classifier rules for Hetzner Robot.
 #:
-#: **Order is load-bearing.** Each rule is checked via
-#: ``path.startswith(prefix)``. More-specific prefixes must precede
+#: **Order is load-bearing.** Each rule is checked via exact match or
+#: proper ``prefix/``-anchored prefix so that ``/ip`` never falsely
+#: matches ``/ip_address``.  More-specific prefixes must precede
 #: less-specific ones where overlap exists (e.g. ``/vswitch/{id}``
 #: before ``/vswitch``). The rules encode every root-level path the
 #: 10 curated ops use; paths outside these prefixes are un-curated
@@ -235,6 +236,11 @@ def classify_robot_op(op_id: str) -> str:
     ``/boot``, ``/reset``, ``/wol``); those rows are un-curated and
     stay ``is_enabled=False`` after :func:`apply_robot_core_curation`
     runs.
+
+    The prefix check is **anchored**: a path matches a *prefix* only
+    when it equals the prefix exactly or when it continues with a ``/``
+    separator.  This prevents ``/ip`` from matching ``/ip_address`` (or
+    any other path that merely begins with the same characters).
     """
     try:
         method, path = op_id.split(":", 1)
@@ -243,7 +249,7 @@ def classify_robot_op(op_id: str) -> str:
     if method != "GET":
         return "none"
     for prefix, group_key in ROBOT_PATH_RULES:
-        if path.startswith(prefix):
+        if path == prefix or path.startswith(f"{prefix}/"):
             return group_key
     return "none"
 

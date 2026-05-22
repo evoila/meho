@@ -35,7 +35,7 @@ End-to-end correctness of the G0.7 ingestion pipeline driven against the
    [`register_ingested_operations`](../../backend/src/meho_backplane/operations/ingest/register_ingested.py)
    bulk-upserts every parsed operation into the `endpoint_descriptor`
    table under the
-   `(product="hetzner-robot", version="2026.04", impl_id="hetzner-rest")`
+   `(product="hetzner", version="2026.04", impl_id="hetzner-rest")`
    connector triple. The first ingest finds the hand-rolled
    [`HetznerRobotConnector`](../../backend/src/meho_backplane/connectors/hetzner_robot/connector.py)
    already registered (G3.7-T6 #846); the auto-shim's idempotency check
@@ -116,7 +116,7 @@ the auth_failed posture.
 
 ```bash
 meho connector ingest \
-  --product hetzner-robot --version 2026.04 --impl hetzner-rest \
+  --product hetzner --version 2026.04 --impl hetzner-rest \
   --spec docs:hetzner-robot-2026-04/<robot-api>.yaml \
   --json
 ```
@@ -125,7 +125,7 @@ Or using the absolute path form:
 
 ```bash
 meho connector ingest \
-  --product hetzner-robot --version 2026.04 --impl hetzner-rest \
+  --product hetzner --version 2026.04 --impl hetzner-rest \
   --spec /path/to/hetzner-robot-2026-04/<robot-api>.yaml \
   --json
 ```

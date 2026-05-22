@@ -238,6 +238,15 @@ func resolveCatalogEntry(ctx context.Context, backplaneURL, ref string) (*Catalo
 		e := catalog.Catalog[i]
 		available = append(available, e.Product+"/"+e.Version)
 		if e.Product == product && e.Version == version {
+			// The backend model enforces (product, version) uniqueness,
+			// but don't trust the response blindly — a second match means
+			// duplicated catalog data, and silently taking the last would
+			// ingest an ambiguous impl_id.
+			if entry != nil {
+				return nil, fmt.Errorf(
+					"%w: catalog has multiple entries for %q; disambiguate catalog data before ingest",
+					errCatalogResolve, ref)
+			}
 			entry = &catalog.Catalog[i]
 		}
 	}
@@ -250,7 +259,13 @@ func resolveCatalogEntry(ctx context.Context, backplaneURL, ref string) (*Catalo
 			"%w: %q is a typed connector with no ingestable spec; nothing to ingest",
 			errCatalogResolve, ref)
 	}
-	for _, u := range entry.Upstream {
+	for i, u := range entry.Upstream {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			return nil, fmt.Errorf("%w: %q has an empty upstream URL entry",
+				errCatalogResolve, ref)
+		}
+		entry.Upstream[i] = u
 		if strings.ContainsAny(u, "<>") {
 			return nil, fmt.Errorf(
 				"%w: %q upstream URL %q is fqdn-templated; supply the concrete spec via "+

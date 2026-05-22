@@ -213,6 +213,36 @@ func TestResolveCatalogEntryTemplatedRefused(t *testing.T) {
 	}
 }
 
+func TestResolveCatalogEntryDuplicateRejected(t *testing.T) {
+	url := catalogServer(t, []CatalogEntry{
+		{Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
+			Upstream: []string{"https://example.test/a.yaml"}},
+		{Product: "vmware", Version: "9.0", ImplID: "vmware-rest-2",
+			Upstream: []string{"https://example.test/b.yaml"}},
+	})
+	_, err := resolveCatalogEntry(context.Background(), url, "vmware/9.0")
+	if err == nil || !errors.Is(err, errCatalogResolve) {
+		t.Fatalf("want errCatalogResolve, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "multiple entries") {
+		t.Errorf("duplicate message wrong: %v", err)
+	}
+}
+
+func TestResolveCatalogEntryEmptyUpstreamRejected(t *testing.T) {
+	url := catalogServer(t, []CatalogEntry{{
+		Product: "vmware", Version: "9.0", ImplID: "vmware-rest",
+		Upstream: []string{"   "},
+	}})
+	_, err := resolveCatalogEntry(context.Background(), url, "vmware/9.0")
+	if err == nil || !errors.Is(err, errCatalogResolve) {
+		t.Fatalf("want errCatalogResolve, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "empty upstream") {
+		t.Errorf("empty-upstream message wrong: %v", err)
+	}
+}
+
 // --- printCatalogTable -----------------------------------------------------
 
 func TestPrintCatalogTableHappyPath(t *testing.T) {

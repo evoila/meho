@@ -18,7 +18,19 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        # Vendored third-party JS/CSS bundles
+        # (backend/src/meho_backplane/ui/static/src/vendor/) ship
+        # byte-identical to their upstream releases; pinned SHA256s
+        # in VENDOR.md cover content authenticity, so any local
+        # rewrite (even whitespace stripping) breaks the manifest.
+        # Same shape as the chart-template exclude below.
+        exclude: ^backend/src/meho_backplane/ui/static/src/vendor/.+\.(?:js|css)$
       - id: end-of-file-fixer
+        # Same reasoning as trailing-whitespace above -- some
+        # upstream bundles (e.g. htmx.min.js) don't terminate with a
+        # trailing newline, and pinning byte-identical content
+        # means we don't add one.
+        exclude: ^backend/src/meho_backplane/ui/static/src/vendor/.+\.(?:js|css)$
       - id: check-yaml
         # Helm chart templates are Go-template-pre-YAML, not pure YAML;
         # they only become valid YAML after `helm template` renders

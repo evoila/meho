@@ -1,0 +1,81 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026 evoila Group
+ *
+ * Tailwind 4 input stylesheet for the MEHO Operator Console.
+ *
+ * The standalone ``tailwindcss`` CLI compiles this file into
+ * ``static/dist/tailwind.css`` (one minified output) using the
+ * Tailwind 4 content-detection scanner against ``templates/**`` --
+ * no explicit ``content: [...]`` array required. Build invocation:
+ *
+ *   tailwindcss -i static/src/styles.css \
+ *               -o static/dist/tailwind.css --minify
+ *
+ * Driven from ``backend/Dockerfile`` at image build; from the
+ * developer-watch loop locally:
+ *
+ *   tailwindcss -i .../static/src/styles.css \
+ *               -o .../static/dist/tailwind.css --watch
+ *
+ * No ``node_modules`` participates in either path. The standalone
+ * Tailwind binary is pinned by SHA256 in the Dockerfile.
+ */
+
+/*
+ * Tailwind 4 entrypoint -- preflight, theme defaults, and the
+ * `@apply`/utility surface. Per Tailwind 4 docs, this single import
+ * replaces the v3 `@tailwind base; @tailwind components; @tailwind
+ * utilities;` triplet (https://tailwindcss.com/docs/installation).
+ */
+@import "tailwindcss";
+
+/*
+ * DaisyUI 5 plugin loader. The vendored plugin sits beside this CSS
+ * (same directory) so the relative `./vendor/daisyui.js` resolves
+ * during the Tailwind CLI build. DaisyUI's docs cover the Tailwind 4
+ * loading path explicitly: https://daisyui.com/docs/install/
+ */
+@plugin "./vendor/daisyui.js" {
+  /*
+   * Enabled themes. ``corporate`` is the chassis default
+   * (cool blues, professional feel); ``dim`` is the dark-mode
+   * sibling. ``themes: false`` would disable DaisyUI's component
+   * theming entirely; we keep two so dark mode is trivially
+   * addable later (out of scope for v0.2 per Initiative #337
+   * "Out of scope").
+   */
+  themes: corporate --default, dim --prefersdark;
+  /*
+   * Strip DaisyUI's default rounded-element radii globally; the
+   * console aesthetic is squarish-corporate. Override per-component
+   * with the standard DaisyUI utilities.
+   */
+  root: ":root";
+  logs: false;
+}
+
+/*
+ * Operator-console palette overrides. Tailwind 4 reads the
+ * `@theme` block (CSS-first config) to extend the default token set.
+ * DaisyUI consumes the theme tokens so the brand-tinted variants
+ * flow through every component without per-component overrides.
+ *
+ * Keep this block intentionally small in the chassis -- per-surface
+ * Initiatives can extend with their own tokens as they land.
+ */
+@theme {
+  --color-meho-50: oklch(0.97 0.02 250);
+  --color-meho-500: oklch(0.55 0.18 250);
+  --color-meho-900: oklch(0.25 0.08 250);
+}
+
+/*
+ * Alpine.js `x-cloak`: hides elements until Alpine has initialised
+ * them. Without this rule the user-menu briefly flashes open on
+ * page load before the `x-show="false"` directive applies. Alpine
+ * docs: https://alpinejs.dev/directives/cloak
+ */
+[x-cloak] {
+  display: none !important;
+}

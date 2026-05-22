@@ -1,0 +1,208 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Base layout for the MEHO Operator Console (Initiative #337, Task #863).
+
+  Structure:
+    * <head> -- vendored DaisyUI/Tailwind CSS (one compiled file at
+      /ui/static/dist/tailwind.css), vendored htmx + alpine JS, plus
+      the chassis meta tags. The HEAD intentionally has zero inline
+      script -- a forthcoming nonce-based CSP would otherwise have to
+      special-case inline.
+    * <body> -- DaisyUI ``drawer`` shell: top navbar + collapsible
+      sidebar + content slot + footer. Alpine wires sidebar collapse
+      (persisted to localStorage) and the user-menu open/close.
+    * The sidebar enumerates the 5 surface routes G10.1-G10.5 fill in.
+      Stub URLs land in T5 #866; this template references them by
+      name today so the chassis renders end-to-end.
+
+  Conventions every G10.x surface follows when extending this base:
+    * Inherits via {% extends "base.html" %}.
+    * Override {% block content %} for the main pane.
+    * Override {% block page_title %} for the <title> suffix.
+    * HTMX partial responses bypass this base entirely (render only
+      the fragment template).
+-#}
+<!doctype html>
+<html lang="en" data-theme="corporate" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block page_title %}MEHO Operator Console{% endblock %}</title>
+    {# Compiled Tailwind 4 + DaisyUI 5 bundle; built by the
+       ``tailwindcss`` CLI step in backend/Dockerfile from
+       static/src/styles.css. Cache-busted by image rebuild
+       (immutable per backplane version). #}
+    <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
+    {# Vendored HTMX 2 + Alpine 3 -- pinned SHA256 in
+       static/src/vendor/VENDOR.md. Alpine's ``defer`` is
+       load-bearing: x-data initialisation must run after the DOM is
+       parsed (Alpine docs, "Manually starting Alpine"). #}
+    <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
+    <script src="/ui/static/src/vendor/alpine.min.js" defer></script>
+  </head>
+  <body class="min-h-full bg-base-200 text-base-content">
+    <div
+      class="drawer lg:drawer-open"
+      x-data="{
+        sidebarOpen: (localStorage.getItem('meho.sidebar') ?? 'open') === 'open',
+        userMenuOpen: false,
+        toggleSidebar() {
+          this.sidebarOpen = !this.sidebarOpen;
+          localStorage.setItem('meho.sidebar', this.sidebarOpen ? 'open' : 'closed');
+        }
+      }"
+    >
+      <input
+        id="meho-drawer-toggle"
+        type="checkbox"
+        class="drawer-toggle"
+        x-bind:checked="sidebarOpen"
+        x-on:change="toggleSidebar()"
+      />
+
+      {# ---------- Main pane: navbar + content + footer ---------- #}
+      <div class="drawer-content flex flex-col">
+        {# ---------- Top navbar ---------- #}
+        <header class="navbar bg-base-100 border-base-300 border-b shadow-sm">
+          <div class="flex-none lg:hidden">
+            <label
+              for="meho-drawer-toggle"
+              class="btn btn-ghost btn-square"
+              aria-label="Toggle navigation sidebar"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-5 w-5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M4 6h16M4 12h16M4 18h16"
+                />
+              </svg>
+            </label>
+          </div>
+          <div class="flex-1">
+            <a href="/ui/" class="btn btn-ghost text-xl font-semibold">MEHO</a>
+            <span class="badge badge-outline ml-2 hidden sm:inline-flex">
+              Operator Console
+            </span>
+          </div>
+          <div class="flex-none gap-2">
+            {# Tenant selector placeholder. T4 #865 wires the live
+               selector against the operator's accessible tenants;
+               the chassis renders a disabled stub. #}
+            <div class="form-control hidden md:block">
+              <select
+                class="select select-bordered select-sm"
+                disabled
+                aria-label="Active tenant"
+              >
+                <option>tenant: (sign in to choose)</option>
+              </select>
+            </div>
+            {# User menu. Alpine-driven open/close with click-outside
+               dismissal. Real menu items land in T4 #865. #}
+            <div class="relative" x-on:click.outside="userMenuOpen = false">
+              <button
+                type="button"
+                class="btn btn-ghost btn-circle avatar placeholder"
+                aria-haspopup="menu"
+                x-bind:aria-expanded="userMenuOpen.toString()"
+                x-on:click="userMenuOpen = !userMenuOpen"
+              >
+                <div class="bg-neutral text-neutral-content w-8 rounded-full">
+                  <span class="text-xs">OP</span>
+                </div>
+              </button>
+              <ul
+                class="menu menu-sm bg-base-100 rounded-box absolute right-0 z-50 mt-2 w-52 p-2 shadow"
+                role="menu"
+                x-show="userMenuOpen"
+                x-transition
+                x-cloak
+              >
+                <li>
+                  <a href="/ui/auth/logout">Sign out</a>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </header>
+
+        {# ---------- Content slot ---------- #}
+        <main class="flex-1 p-6">
+          {% block content %}{% endblock %}
+        </main>
+
+        {# ---------- Footer ---------- #}
+        <footer
+          class="footer footer-center bg-base-100 text-base-content border-base-300 border-t p-4"
+        >
+          <aside class="flex items-center gap-4 text-xs">
+            <span>MEHO backplane v{{ app_version }}</span>
+            <span class="flex items-center gap-1">
+              <span
+                class="inline-block h-2 w-2 rounded-full {% if ready %}bg-success{% else %}bg-warning{% endif %}"
+                aria-hidden="true"
+              ></span>
+              <span>{% if ready %}ready{% else %}starting{% endif %}</span>
+            </span>
+          </aside>
+        </footer>
+      </div>
+
+      {# ---------- Sidebar drawer ---------- #}
+      <aside class="drawer-side z-40">
+        <label
+          for="meho-drawer-toggle"
+          aria-label="Close navigation sidebar"
+          class="drawer-overlay"
+        ></label>
+        <nav class="menu bg-base-100 border-base-300 min-h-full w-64 border-r p-4">
+          <div class="mb-4 px-2 text-xs font-semibold tracking-wider uppercase opacity-60">
+            Surfaces
+          </div>
+          <ul class="menu-vertical w-full gap-1">
+            <li>
+              <a href="/ui/broadcast" class="flex items-center gap-2">
+                <span aria-hidden="true">&#x1F4E1;</span>
+                <span>Broadcast</span>
+              </a>
+            </li>
+            <li>
+              <a href="/ui/knowledge" class="flex items-center gap-2">
+                <span aria-hidden="true">&#x1F4DA;</span>
+                <span>Knowledge</span>
+              </a>
+            </li>
+            <li>
+              <a href="/ui/topology" class="flex items-center gap-2">
+                <span aria-hidden="true">&#x1F578;</span>
+                <span>Topology</span>
+              </a>
+            </li>
+            <li>
+              <a href="/ui/connectors" class="flex items-center gap-2">
+                <span aria-hidden="true">&#x1F50C;</span>
+                <span>Connectors</span>
+              </a>
+            </li>
+            <li>
+              <a href="/ui/memory" class="flex items-center gap-2">
+                <span aria-hidden="true">&#x1F9E0;</span>
+                <span>Memory</span>
+              </a>
+            </li>
+          </ul>
+        </nav>
+      </aside>
+    </div>
+  </body>
+</html>

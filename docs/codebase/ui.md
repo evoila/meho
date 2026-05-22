@@ -43,6 +43,9 @@ Locked decisions:
 | `meho_backplane.ui.routes` | Stub package for chassis Task. T5 (#866) lands the `APIRouter` instance + dashboard view + the five surface stub routes. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
+| `meho_backplane.ui.auth.flow` | OAuth 2.1 + PKCE client primitives layered on authlib's `AsyncOAuth2Client`. `build_authorization_request` mints the Keycloak redirect URL (S256 PKCE + RFC 8707 `resource` parameter) and registers the per-flow verifier in a server-side `PKCEVerifierStore`. `exchange_code_for_tokens` pops the verifier and exchanges code+verifier at the token endpoint. `resolve_oidc_endpoints` caches the discovery doc on the same TTL the JWKS cache uses. |
+| `meho_backplane.ui.auth.routes` | FastAPI `APIRouter` for `/ui/auth/{login,callback,logout}`. `build_router()` returns the router for T5 to mount. Callback verifies the access token through the chassis JWT chain (`verify_jwt_for_audience`) so the BFF inherits issuer / audience / sub / tenant_id / tenant_role checks. Sets `meho_session` cookie with `HttpOnly; Secure; SameSite=Strict; Path=/`. Logout revokes the session, clears the cookie, and 302s to Keycloak's `end_session_endpoint` (best-effort -- a missing endpoint falls back to a local `/ui/auth/login` redirect). |
+| `meho_backplane.ui.auth.middleware` | Pure-ASGI `UISessionMiddleware` for `/ui/*`. Loads operator identity from the session cookie on every request; 302s to login on missing/expired session. Bypasses `/ui/static/*` (chassis assets) and `/ui/auth/*` (the BFF surfaces themselves). Per-request `UISessionContext` (frozen dataclass: `session_id`, `operator_sub`, `tenant_id`) lands on `request.state.ui_session`; route handlers read it via `Depends(require_ui_session)`. |
 
 The Jinja2 `Environment` is a module-level singleton (constructed on
 first `get_jinja_env()` call); the template cache it holds is keyed
@@ -146,6 +149,59 @@ upcoming T4 login flow writes to:
 
 T4 (#865) builds the login / callback / logout flow + the BFF
 middleware on top of this substrate; T3 ships storage only.
+
+## Login flow (Task #865)
+
+The BFF login flow is OAuth 2.1 Authorization Code + PKCE against
+the `meho-web` confidential Keycloak client (see
+[`docs/cross-repo/keycloak-web-client.md`](../cross-repo/keycloak-web-client.md)).
+Tokens stay server-side; the browser holds only the opaque
+`meho_session` cookie.
+
+Round-trip shape:
+
+1. **Operator hits a `/ui/*` page unauthenticated.** The
+   `UISessionMiddleware` finds no usable session and 302s to
+   `/ui/auth/login?return_to=<original-path>`.
+2. **`/ui/auth/login`.** `build_authorization_request` generates a
+   per-flow PKCE `code_verifier`, asks authlib to build the
+   authorization URL (carries `code_challenge`,
+   `code_challenge_method=S256`, and the RFC 8707 `resource` parameter
+   set to `<backplane_url>/api`), and registers the verifier +
+   `return_to` in the `PKCEVerifierStore` keyed on `state`. The
+   verifier never leaves the server.
+3. **Keycloak authenticates the operator.** Browser arrives at
+   `/ui/auth/callback?code=...&state=...`.
+4. **`/ui/auth/callback`.** `exchange_code_for_tokens` pops the
+   verifier from the store (single-use), POSTs `code + code_verifier
+   + client_secret` to Keycloak's token endpoint, and returns the
+   access + refresh tokens. The callback then validates the access
+   token through the chassis JWT chain
+   (`verify_jwt_for_audience`) so the BFF inherits issuer / audience
+   / sub / tenant_id / tenant_role defences; on success it calls
+   `create_session` to write the encrypted row and sets the
+   `meho_session` cookie.
+5. **302 to the original `return_to`.** Operator lands on the page
+   they were originally bounced from.
+
+Per-flow state custody:
+
+| What | Where | Lifetime |
+| --- | --- | --- |
+| `code_verifier` | Server-side `PKCEVerifierStore` keyed on `state` | One authorization round-trip (≤10 min) |
+| `state` (CSRF) | On the IdP's authorization URL + echoed in callback | Same one round-trip |
+| `meho_session` cookie | Browser, `HttpOnly` + `Secure` + `SameSite=Strict` | Session lifetime (until access-token expiry minus 60s margin) |
+| Access + refresh tokens | `web_session` row, Fernet-encrypted | Same session lifetime |
+
+The `code_verifier` deliberately does NOT live in a cookie -- a
+verifier alongside the code on the redirect URI would defeat the
+property PKCE protects (an attacker capturing one captures both).
+Server-side custody is the whole point.
+
+Logout: revoke the row, clear the cookie, 302 to Keycloak's
+`end_session_endpoint` with `client_id` + `post_logout_redirect_uri`
+pointing back to `/ui/auth/login`. The IdP-side hop is best-effort
+-- the local session is already revoked when the redirect fires.
 
 ## Vendored asset versions
 

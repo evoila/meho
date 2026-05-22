@@ -223,8 +223,22 @@ class CallOperationBody(BaseModel):
     means the operation does not need a target (typed handlers that
     don't read it; composite handlers that do their own resolution).
 
+    Recognised keys on the ``target`` dict:
+
+    * ``name`` (required when ``target`` is supplied) -- the slug or
+      alias the resolver looks up in the targets registry.
+    * ``fqdn`` (optional) -- per-call override for the resolved
+      target's ``fqdn`` column. Honoured by connectors that read
+      ``target.fqdn`` for vhost routing (G3.6 VCF Automation:
+      the appliance enforces strict ``Host:`` matching and returns
+      404 with empty body when reached by IP without the correct
+      vhost set). The override mutates the resolved Target in
+      memory only; the database row is not modified. Any other key
+      in the dict is silently ignored, mirroring the documented
+      forward-compatibility posture in the MCP tool schema.
+
     ``extra="forbid"`` (G0.9-T2 / #729) rejects unknown fields with
-    422 ``extra_forbidden`` — a v0.2.1 client still sending ``target:
+    422 ``extra_forbidden`` -- a v0.2.1 client still sending ``target:
     str`` (the pre-rename single-name shape) or a typo in
     ``connector_id`` now fails loud at the framework boundary instead
     of silently dispatching with the defaults. ``params`` itself is a
@@ -478,6 +492,16 @@ async def call_operation(
             # Bind into structlog so AuditMiddleware picks up the target_id
             # on the eventual audit row. Same shape as the targets routes.
             structlog.contextvars.bind_contextvars(audit_target_id=str(resolved_target.id))
+        # Per-call ``fqdn`` override -- applied in memory only. The DB row
+        # is not touched; the override travels with the resolved Target
+        # for the lifetime of this dispatch and is read by connectors that
+        # honour vhost routing (G3.6 VCF Automation). Non-string / empty
+        # values fall through silently rather than overriding with a bad
+        # value; an explicit ``None`` override is not supported (use a
+        # fresh ``meho targets update`` to clear the column).
+        fqdn_override = target_arg.get("fqdn")
+        if isinstance(fqdn_override, str) and fqdn_override:
+            resolved_target.fqdn = fqdn_override
     result = await dispatch(
         operator=operator,
         connector_id=connector_id,

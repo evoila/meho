@@ -106,3 +106,11 @@ data:
   MEMORY_USER_DEFAULT_TTL_DAYS: {{ .Values.memory.userDefaultTtlDays | quote }}
   MEMORY_EXPIRY_TICK_INTERVAL_SECONDS: {{ .Values.memory.expiryTickIntervalSeconds | quote }}
   MEMORY_EXPIRY_ENABLED: {{ .Values.memory.expiryEnabled | quote }}
+  # G9.3-T6 (#858) — topology history retention knobs. The env-var
+  # names are the backplane's contract
+  # (`backend/src/meho_backplane/settings.py`). `historyRetentionDays: 0`
+  # is the keep-forever sentinel; `historyPruneEnabled: false` skips
+  # starting the in-process prune loop entirely.
+  TOPOLOGY_HISTORY_RETENTION_DAYS: {{ .Values.topology.historyRetentionDays | quote }}
+  TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS: {{ .Values.topology.historyPruneIntervalSeconds | quote }}
+  TOPOLOGY_HISTORY_PRUNE_ENABLED: {{ .Values.topology.historyPruneEnabled | quote }}

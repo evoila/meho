@@ -960,7 +960,10 @@ tables, happy path, `--json`, cross-tenant seed 404).
   `tenant_id` against it.
 - `meho_backplane.broadcast` — `BroadcastEvent` / `publish_event`
   (fail-open, G6.1).
-- `meho_backplane.settings` — `topology_refresh_interval_seconds`.
+- `meho_backplane.settings` — `topology_refresh_interval_seconds`,
+  `topology_history_retention_days`,
+  `topology_history_prune_interval_seconds`,
+  `topology_history_prune_enabled` (the G9.3-T6 retention knobs).
 - `meho_backplane.metrics` — `TOPOLOGY_REFRESH_TOTAL` counter
   (`outcome` label: `ok` / `error` / `skipped_locked`).
 - SQLAlchemy 2.0 `text()` with `:named` binds — same raw-SQL pattern
@@ -968,6 +971,79 @@ tables, happy path, `--json`, cross-tenant seed 404).
   OR ...` for optional filters, UUIDs passed as `str`). Every read
   statement is a module-level fully-literal `text("...")`; nothing is
   interpolated so the `avoid-sqlalchemy-text` SAST rule does not fire.
+
+## History retention prune (G9.3-T6 #858)
+
+The G9.3-T1 (#856) `graph_node_history` / `graph_edge_history` tables
+are append-only by contract — the diff-on-write hook (T2) is the only
+INSERT writer, and the application never issues UPDATE or DELETE
+statements against them under normal operation. Without bounded
+retention these tables grow indefinitely; a 1-h refresh cadence on a
+churning tenant adds tens of thousands of rows per week.
+
+`backend/src/meho_backplane/topology/history_retention.py` ships the
+physical cleanup: an `asyncio.create_task` loop registered in the
+FastAPI lifespan that ticks on `TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS`
+(default 604800s / weekly) and deletes rows where `valid_from <
+now() - TOPOLOGY_HISTORY_RETENTION_DAYS` (default 90 days). Both
+DELETEs ride the migration-0012-declared `(tenant_id, valid_from
+DESC)` index in reverse, so even multi-million-row history tables
+prune in seconds.
+
+**Same `asyncio.create_task` pattern as the G9.1-T3 topology refresh
+scheduler and the G5.2-T1 memory-expiry sweeper.** Issue #858
+references APScheduler in its task body as a name; the established
+chassis precedent is the in-lifespan `asyncio` loop — zero-dependency,
+matches "no new substrate" discipline, and gives one disposal pattern
+across every long-lived lifespan-owned task.
+
+**Knobs (`backend/src/meho_backplane/settings.py` + Helm
+`deploy/charts/meho/values.yaml` `topology.*`):**
+
+- `TOPOLOGY_HISTORY_RETENTION_DAYS` (default `90`, range `[0, 3650]`).
+  Rows older than `now() - days` are deleted per tick. **`0` is the
+  "keep forever" opt-out sentinel**: the prune loop still runs but
+  every tick is a logged heartbeat with no DELETE and no audit row —
+  operators picking `0` accept unbounded disk growth in exchange for
+  full historical retention. Quarterly-plus retention with bounded
+  growth is the export path: `meho topology timeline --json > out.jsonl`
+  to cold storage of choice.
+- `TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS` (default `604800` / 7d,
+  range `[60, 604800]`). Sleep between ticks. Below one minute
+  competes with normal write load; weekly cadence is the documented
+  ceiling — slower pruning is expressed by raising
+  `TOPOLOGY_HISTORY_RETENTION_DAYS`.
+- `TOPOLOGY_HISTORY_PRUNE_ENABLED` (default `true`). Skips starting
+  the loop entirely in the lifespan when `false` — distinct from
+  `RETENTION_DAYS=0`'s heartbeat-only shape. Use `false` only when an
+  external retention mechanism (k8s CronJob, archive-then-delete via
+  cold storage) reaps rows instead.
+
+**Audit-row shape (one row per non-no-op tick).** Channel `INTERNAL`,
+path `topology.history.prune`, operator_sub
+`system:topology-history-retention`, tenant_id the per-deploy sentinel
+`00000000-0000-0000-0000-0000000858a1` (system-wide ops, not
+attributable to a real tenant — `audit_log.tenant_id` is a soft-FK so
+the sentinel value writes without a matching `tenant` row). Payload:
+`{"dropped_node_rows": N, "dropped_edge_rows": M, "retention_days":
+D, "cutoff": <iso-ts>}`. The no-op case (`RETENTION_DAYS=0`) writes
+no audit row — weekly empty-payload rows would flood `audit_log` for
+no operator value. The G8.2 audit-query verb picks this up via
+`meho audit query --op topology.history.prune`.
+
+**Failure isolation.** Per-tick `try` / `except` so a transient DB
+blip logs `topology_history_retention_tick_failed` and the loop
+continues to the next cadence. Audit-write failures after the DELETE
+are caught locally and logged loud-but-non-fatal — the rows are
+already gone; surfacing the audit failure is the closest we get to
+two-phase commit consistency.
+
+**No per-pod leader election.** Initiative #374 defers leader
+election to v0.2.next. Two replicas racing on the same prune tick
+issue two identical bounded DELETEs in the same second; the second
+one hits zero rows. Below the noise floor of normal DB load — same
+calculus the memory-expiry sweeper documents for its own no-leader
+shape.
 
 ## Known issues / out of scope
 

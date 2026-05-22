@@ -42,6 +42,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Final
 
 import structlog
@@ -98,7 +99,9 @@ from meho_backplane.operations import run_typed_op_registrars
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
+    start_topology_history_retention_sweeper,
     start_topology_refresh_scheduler,
+    stop_topology_history_retention_sweeper,
     stop_topology_refresh_scheduler,
 )
 from meho_backplane.version import router as version_router
@@ -181,49 +184,27 @@ async def _run_lifespan_shutdown() -> None:
         log.exception("dispose_broadcast_client_failed")
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan hook.
+async def _run_lifespan_startup() -> None:
+    """Eager init phase of the lifespan: probes, pools, registrars, model.
 
-    Configures structlog at startup so every log line emitted from
-    this point onwards (including the very first request) is JSON-
-    formatted, and registers the Keycloak + Vault + DB-migration-state
-    readiness probes with the registry so ``/ready`` reflects whether
-    each dependency is reachable. Probes are registered even though
-    no request-path consumer of the dependency may have landed yet -
-    readiness is a deployment-shape concern, not a request-path
-    concern.
+    Extracted from :func:`lifespan` so the lifespan body stays under
+    the chassis code-quality limit on function size. Each helper /
+    constructor here owns its own success-or-warn shape; this function
+    only sequences them. The order is load-bearing:
 
-    The SQLAlchemy async engine is **eagerly** instantiated here
-    (via :func:`get_engine`) so that the pool is built and the
-    ``DATABASE_URL`` is validated at startup, not on the first
-    request. The fastembed model (G0.4-T2 #259) and the async Valkey
-    client backing G6's activity broadcast (#228) are similarly
-    eagerly initialised — each owns a helper above for its
-    success-or-warn shape.
-
-    G0.6 (#388) added the typed-op registration step: after
-    :func:`_eager_import_connectors` runs every connector
-    subpackage's import-time ``register_connector_v2`` call,
-    :func:`run_typed_op_registrars` walks the registrar list each
-    subpackage appended to and runs each registrar against the DB so
-    the ``endpoint_descriptor`` rows the dispatcher reads are
-    populated before the first request arrives. Failure here is a
-    deploy bug, not a runtime condition — the exception propagates
-    and the lifespan crashes so the operator sees CrashLoopBackOff
-    instead of a quietly-broken dispatch.
-
-    The G5.2-T1 memory-expiry sweeper (#623) starts last among
-    background tasks and stops first on shutdown so its session-borrow
-    can never outlive the engine pool teardown. The sweeper is
-    enabled by ``MEMORY_EXPIRY_ENABLED`` (default ``True``); operators
-    using an external cleanup mechanism (k8s CronJob, etc.) flip the
-    env var off and the task handle stays ``None``, which the
-    ``finally`` branch tolerates.
-
-    On shutdown :func:`_run_lifespan_shutdown` releases the
-    SQLAlchemy + Valkey pools with per-disposer try/except so a
-    single failure can't leak a sibling pool.
+    1. Logging configured first so every subsequent ``structlog`` call
+       lands in the JSON output the rest of the chassis assumes.
+    2. Readiness probes registered before any eager resource so
+       ``/ready`` accurately reports state even if a later step crashes.
+    3. Eager engine + broadcast-client construction so URL-parse / pool-
+       build failures surface at startup rather than first request.
+    4. Connector + MCP module auto-discovery so import-time
+       ``register_*`` calls run before the first request arrives.
+    5. Typed-op registrars run **after** connector discovery (the
+       registrars are appended during the import pass).
+    6. MCP audience guard last — the eager-init failures above raise
+       before this, so the guard's CrashLoopBackOff carries the
+       MCP-audience message, not a stale earlier failure.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
@@ -258,28 +239,95 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _assert_mcp_resource_uri_configured()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
-    # Scheduled topology refresh (G9.1-T3 #450). Started after connector
-    # auto-discovery (it resolves connectors per target) so the first
-    # sweep can dispatch ``discover_topology``. The task handle is kept
-    # so shutdown can cancel + await its unwind before the DB/redis
-    # pools are disposed (a sweep mid-flight must not race pool teardown).
-    topology_scheduler_task = start_topology_refresh_scheduler()
-    # Scheduled memory-expiry sweeper (G5.2-T1 #623). Gated on
-    # ``MEMORY_EXPIRY_ENABLED`` so operators relying on an external
-    # cleanup mechanism (k8s CronJob, etc.) can disable the in-process
-    # loop without forking the chassis. ``None`` when disabled; the
-    # finally branch tolerates that shape so disable-and-shutdown does
-    # not raise.
-    memory_expiry_task: asyncio.Task[None] | None = None
-    if get_settings().memory_expiry_enabled:
-        memory_expiry_task = start_memory_expiry_sweeper()
+
+
+@dataclass
+class _BackgroundTasks:
+    """Lifespan-owned background ``asyncio`` task handles.
+
+    Returned from :func:`_start_background_tasks`; consumed by
+    :func:`_stop_background_tasks` on shutdown. The shape (one optional
+    per gated task, one required per always-on task) is what lets the
+    ``finally`` branch tolerate the disabled-by-settings shape without
+    a per-task ``if``-ladder inside the lifespan body itself.
+    """
+
+    topology_scheduler: asyncio.Task[None]
+    memory_expiry: asyncio.Task[None] | None
+    topology_history: asyncio.Task[None] | None
+
+
+def _start_background_tasks() -> _BackgroundTasks:
+    """Start every lifespan-owned background loop, return their handles.
+
+    Started after :func:`_run_lifespan_startup` returns -- they depend
+    on the engine pool, the typed-op registrars, and the connector
+    table the eager-init phase populates. Each handle is kept on the
+    returned dataclass so :func:`_stop_background_tasks` can cancel +
+    await unwind before the DB/redis pools are disposed (an in-flight
+    sweep must not race pool teardown).
+    """
+    settings = get_settings()
+    # G9.1-T3 #450 — always on; the cadence + advisory-lock guard live
+    # in the scheduler module itself.
+    topology_scheduler = start_topology_refresh_scheduler()
+    # G5.2-T1 #623 — gated on MEMORY_EXPIRY_ENABLED so operators using
+    # an external cleanup mechanism don't double-sweep.
+    memory_expiry: asyncio.Task[None] | None = None
+    if settings.memory_expiry_enabled:
+        memory_expiry = start_memory_expiry_sweeper()
+    # G9.3-T6 #858 — gated on TOPOLOGY_HISTORY_PRUNE_ENABLED.
+    # ``RETENTION_DAYS=0`` keeps the loop running but every tick is a
+    # no-op (heartbeat-only); ``PRUNE_ENABLED=false`` skips starting
+    # the loop entirely.
+    topology_history: asyncio.Task[None] | None = None
+    if settings.topology_history_prune_enabled:
+        topology_history = start_topology_history_retention_sweeper()
+    return _BackgroundTasks(
+        topology_scheduler=topology_scheduler,
+        memory_expiry=memory_expiry,
+        topology_history=topology_history,
+    )
+
+
+async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
+    """Cancel + await every background task, then dispose pooled resources.
+
+    Stop order is the reverse of start order so each task's session
+    borrow can never outlive the engine pool teardown. The opted-out
+    branches (``None`` task handles) are tolerated cleanly so a
+    disable-and-shutdown sequence does not raise.
+    """
+    if tasks.topology_history is not None:
+        await stop_topology_history_retention_sweeper(tasks.topology_history)
+    if tasks.memory_expiry is not None:
+        await stop_memory_expiry_sweeper(tasks.memory_expiry)
+    await stop_topology_refresh_scheduler(tasks.topology_scheduler)
+    await _run_lifespan_shutdown()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan hook.
+
+    Sequences three phases: :func:`_run_lifespan_startup` (probes,
+    eager pools, registrars, audience guard, embedding preload),
+    :func:`_start_background_tasks` (lifespan-owned ``asyncio`` loops),
+    yield (request-handling window), and :func:`_stop_background_tasks`
+    (reverse-order shutdown so background tasks don't outlive the
+    pools they borrow from).
+
+    Each phase helper carries the load-bearing detail in its own
+    docstring; the lifespan body stays thin so the chassis function-
+    size budget is not the first thing a future contributor has to
+    refactor when adding a fourth background loop.
+    """
+    await _run_lifespan_startup()
+    tasks = _start_background_tasks()
     try:
         yield
     finally:
-        if memory_expiry_task is not None:
-            await stop_memory_expiry_sweeper(memory_expiry_task)
-        await stop_topology_refresh_scheduler(topology_scheduler_task)
-        await _run_lifespan_shutdown()
+        await _stop_background_tasks(tasks)
 
 
 app: FastAPI = FastAPI(

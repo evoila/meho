@@ -258,3 +258,12 @@ markers = [
 # warning is intentional — it's the only signal the test run carries
 # of the v0.2 ``joserfc`` migration backlog item, and silencing it
 # would risk obscuring future authlib deprecations.
+
+[tool.coverage.run]
+# Store file paths in coverage.xml *relative* to the project root rather
+# than as absolute runner paths. The unit-test + coverage step (CI's
+# `Pytest (unit + coverage)`) and the SonarCloud scan (quality-gate.yml)
+# run in separate jobs on separate runners, so absolute paths captured by
+# the first never resolve in the second. Relative paths make the report
+# portable so SonarCloud can map coverage onto the analysed sources.
+relative_files = true

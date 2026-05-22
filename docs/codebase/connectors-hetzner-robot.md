@@ -13,7 +13,7 @@ Source: `backend/src/meho_backplane/connectors/hetzner_robot/`.
 ## Key types
 
 - **`HetznerRobotConnector`** (`connector.py`) — `HttpConnector` subclass.
-  Class attributes: `product="hetzner-robot"`, `version="2026-04"`,
+  Class attributes: `product="hetzner-robot"`, `version="2026.04"`,
   `impl_id="hetzner-rest"`, `priority=1`. The priority outranks a future
   `GenericRestConnector` auto-shim (priority=0) defensively.
 - **`HetznerRobotTargetLike`** (`session.py`) — runtime-checkable Protocol
@@ -66,8 +66,8 @@ Vault path as `{"username": ..., "password": ...}`.
    `connectors/<product>/` subpackage in name-sorted order.
 2. Importing `meho_backplane.connectors.hetzner_robot` triggers the
    module-level `register_connector_v2(product="hetzner-robot",
-   version="2026-04", impl_id="hetzner-rest", cls=HetznerRobotConnector)`.
-3. The registry's v2 table resolves `("hetzner-robot", "2026-04",
+   version="2026.04", impl_id="hetzner-rest", cls=HetznerRobotConnector)`.
+3. The registry's v2 table resolves `("hetzner-robot", "2026.04",
    "hetzner-rest")` to `HetznerRobotConnector`.
 
 ### Auth flow

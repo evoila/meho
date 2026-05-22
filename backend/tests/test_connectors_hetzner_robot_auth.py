@@ -108,7 +108,7 @@ def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
 def test_hetzner_robot_connector_subclasses_http_connector() -> None:
     assert issubclass(HetznerRobotConnector, HttpConnector)
     assert HetznerRobotConnector.product == "hetzner-robot"
-    assert HetznerRobotConnector.version == "2026-04"
+    assert HetznerRobotConnector.version == "2026.04"
     assert HetznerRobotConnector.impl_id == "hetzner-rest"
     assert HetznerRobotConnector.priority == 1
 
@@ -117,7 +117,7 @@ def test_importing_package_registers_against_v2_registry() -> None:
     from meho_backplane.connectors.registry import all_connectors_v2
 
     registry = all_connectors_v2()
-    key = ("hetzner-robot", "2026-04", "hetzner-rest")
+    key = ("hetzner-robot", "2026.04", "hetzner-rest")
     assert key in registry
     assert registry[key] is HetznerRobotConnector
 

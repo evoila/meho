@@ -385,13 +385,13 @@ def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
 
 
 def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
-    """HetznerRobotConnector package registers under (hetzner-robot, 2026-04, hetzner-rest).
+    """HetznerRobotConnector package registers under (hetzner-robot, 2026.04, hetzner-rest).
 
     The autouse _clean_registry fixture clears the registry before this test,
     so we manually re-register using the class attributes to assert the triple
     resolves correctly. Same pattern as the SDDC Manager / Harbor tests above.
     """
-    from meho_backplane.connectors.hetzner_robot import HetznerRobotConnector
+    from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
 
     register_connector_v2(
         product=HetznerRobotConnector.product,
@@ -400,6 +400,6 @@ def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
         cls=HetznerRobotConnector,
     )
     snapshot = all_connectors_v2()
-    key = ("hetzner-robot", "2026-04", "hetzner-rest")
+    key = ("hetzner-robot", "2026.04", "hetzner-rest")
     assert key in snapshot
     assert snapshot[key] is HetznerRobotConnector

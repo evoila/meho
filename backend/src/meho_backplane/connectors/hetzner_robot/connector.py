@@ -141,7 +141,7 @@ class HetznerRobotConnector(HttpConnector):
     """
 
     product = "hetzner-robot"
-    version = "2026-04"
+    version = "2026.04"
     impl_id = "hetzner-rest"
     supported_version_range = None  # Webservice API versioned by date, not semver
     priority = 1
@@ -234,7 +234,12 @@ class HetznerRobotConnector(HttpConnector):
                 f"{target.name!r} (host={target.host!r}). {_AUTH_FAILED_HINT}"
             )
         resp.raise_for_status()
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Non-JSON response from {path}: {resp.status_code} {resp.text[:200]}"
+            ) from exc
 
     async def _post_form(
         self,
@@ -262,7 +267,12 @@ class HetznerRobotConnector(HttpConnector):
                 f"{target.name!r} (host={target.host!r}). {_AUTH_FAILED_HINT}"
             )
         resp.raise_for_status()
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Non-JSON response from {path}: {resp.status_code} {resp.text[:200]}"
+            ) from exc
 
     async def fingerprint(self, target: HetznerRobotTargetLike) -> FingerprintResult:
         """Canonical fingerprint built from ``GET /server``.
@@ -353,8 +363,8 @@ class HetznerRobotConnector(HttpConnector):
         directly — they don't reach this method.
 
         The connector's natural key is encoded as the dispatcher's
-        ``connector_id``: ``"hetzner-rest-2026-04"`` →
-        (product=``"hetzner-robot"``, version=``"2026-04"``,
+        ``connector_id``: ``"hetzner-rest-2026.04"`` →
+        (product=``"hetzner-robot"``, version=``"2026.04"``,
         impl_id=``"hetzner-rest"``).
         """
         from uuid import UUID

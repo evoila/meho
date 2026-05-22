@@ -443,11 +443,11 @@ def test_re_running_migration_is_idempotent(
     #
     # Pinning the target to ``0011`` (not ``head``) keeps the replay
     # scoped to the migration under test -- downstream schema
-    # migrations (e.g. 0012's ``CREATE TABLE graph_*_history``) are
-    # not idempotent by design (Alembic gates them on
-    # ``alembic_version`` in production) and would raise
-    # ``table already exists`` if the second ``upgrade`` walked past
-    # 0011.
+    # migrations (e.g. 0012's ``CREATE TABLE graph_*_history`` and
+    # 0013's ``CREATE TABLE web_session``) are not idempotent by
+    # design (Alembic gates them on ``alembic_version`` in
+    # production) and would raise ``table already exists`` if the
+    # second ``upgrade`` walked past 0011.
     command.stamp(cfg, "0010")
     command.upgrade(cfg, "0011")
 

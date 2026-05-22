@@ -205,6 +205,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     Text,
     Uuid,
@@ -230,6 +231,7 @@ __all__ = [
     "OperationGroup",
     "Target",
     "Tenant",
+    "WebSession",
 ]
 
 
@@ -1926,5 +1928,134 @@ class GraphEdgeHistory(Base):
         sa.CheckConstraint(
             _ck_in("change_kind", _GRAPH_HISTORY_CHANGE_KINDS),
             name="ck_graph_edge_history_change_kind",
+        ),
+    )
+
+
+class WebSession(Base):
+    """One row per active BFF (Backend-for-Frontend) operator session.
+
+    Initiative #337 (G10.0 Frontend chassis), Task #864 (T3). The
+    operator-console is locked to the BFF custody shape per decision
+    #11 (``docs/planning/v0.2-decisions.md``): the browser holds an
+    opaque session-cookie value (the row's ``id``), the real OAuth
+    access + refresh tokens live encrypted in this row, and every
+    authenticated ``/ui/*`` request resolves operator identity by
+    looking up the row and decrypting the tokens server-side.
+
+    This model is **storage-only** -- the encryption / rotation /
+    replay-detection contract lives in
+    :mod:`meho_backplane.ui.auth.session_store`. No helper methods on
+    the model itself; the discipline ``AuditLog`` already follows
+    (write-once + helper logic at the call site).
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. The cookie value the browser holds
+      is the canonical 36-char form (``str(uuid)``). PG production
+      gets ``gen_random_uuid()`` via migration ``0013``;
+      :func:`uuid.uuid4` (CSPRNG-backed) is the ORM default for the
+      SQLite dev/test path. ~122 bits of entropy makes session-id
+      guessing computationally infeasible.
+
+    * ``operator_sub`` -- Keycloak ``sub`` claim of the logged-in
+      operator. Mirrors :attr:`AuditLog.operator_sub`; the chassis
+      has no ``operator`` table, so the JWT ``sub`` is the operator's
+      stable identifier end-to-end.
+
+    * ``tenant_id`` -- The operator's active tenant at session-creation
+      time, sourced from the JWT ``tenant_id`` claim. Soft-FK
+      discipline: no FK to ``tenant.id``, matching the audit-log
+      pattern (``audit_log.tenant_id``). Tenant deletion is a major
+      ops operation that scrubs dependent sessions explicitly before
+      removing the tenant row.
+
+    * ``access_token`` / ``refresh_token`` -- Fernet-encrypted bytes.
+      ``LargeBinary`` -> ``bytea`` on PG, ``BLOB`` on SQLite. The
+      plaintext never lands in this column: every write passes
+      through :mod:`meho_backplane.ui.auth.session_store` which
+      :class:`cryptography.fernet.Fernet`-encrypts before insert and
+      decrypts on read using the chassis-wide key resolved from
+      :attr:`Settings.ui_session_encryption_key`. Storing bytes (not
+      the URL-safe base64 string Fernet emits) avoids text-search
+      tooling (``psql \\d``, future grep-the-audit-export flows)
+      ever surfacing what looks like an OAuth token in stable
+      storage.
+
+    * ``created_at`` / ``expires_at`` -- timestamptz. ``created_at``
+      gets a PG ``now()`` server default + ORM
+      ``datetime.now(UTC)`` for SQLite; ``expires_at`` is supplied
+      by the session-creation caller (#865) from the access-token's
+      ``exp`` claim. :func:`load_session` filters on
+      ``expires_at > now()``.
+
+    * ``last_seen_at`` -- timestamptz, refreshed on every successful
+      :func:`load_session` call. Drives future idle-revocation
+      sweeps; never accepts a client-controlled value.
+
+    * ``revoked_at`` -- timestamptz, NULL means active.
+      Soft-delete shape: a revoked session row stays queryable for
+      forensics and so the audit row written on refresh-token
+      replay (which references the session id) remains back-
+      traceable. The read-side filter in :func:`load_session` is
+      ``revoked_at IS NULL AND expires_at > now()``.
+
+    Indexes
+    -------
+
+    * ``web_session_operator_sub_idx`` -- btree on ``operator_sub``,
+      drives the future "list / revoke all sessions for operator X"
+      surface.
+    * ``web_session_expires_at_idx`` -- btree on ``expires_at``,
+      drives the future background sweep of naturally-expired
+      sessions. The hot-path ``load_session`` query is a PK probe
+      and does not need this index.
+    """
+
+    __tablename__ = "web_session"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    operator_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    # Fernet ciphertext (bytes). Never plaintext -- the session_store
+    # module is the only seam that reads or writes these columns.
+    access_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    refresh_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    # NULL = active; non-NULL = revoked (logout, replay, op-revoke).
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "web_session_operator_sub_idx",
+            "operator_sub",
+            postgresql_using="btree",
+        ),
+        Index(
+            "web_session_expires_at_idx",
+            "expires_at",
+            postgresql_using="btree",
         ),
     )

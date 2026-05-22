@@ -512,6 +512,62 @@ jobs:
           CGO_ENABLED: '1'
         run: go test -race -cover ./...
 
+  cli-api-snapshot-freshness:
+    name: CLI API snapshot freshness
+    # Fork-PR guard mirrors the other jobs — needs the internal runner pool.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: meho-runners-ci
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Go
+        # `make generate` runs the pinned oapi-codegen (installed by the
+        # Makefile `tools` target) which needs Go. Same version + cache
+        # shape as the go-lint-test lane.
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli/go.sum
+
+      - name: Install uv
+        # `make snapshot-openapi` drives the backplane FastAPI app via
+        # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
+        # and calls app.openapi()), so the backend env must resolve. Same
+        # action + cache shape as the Python lanes.
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Sync backend environment (locked)
+        working-directory: backend
+        run: uv sync --locked --all-groups
+
+      - name: Regenerate OpenAPI snapshot + Go client
+        # Run the same Make targets the maintainer runs so the drift check
+        # compares like-for-like. snapshot-openapi writes cli/api/openapi.json
+        # (downgrading OpenAPI 3.1->3.0 for oapi-codegen v2, see the script
+        # header); generate (which depends on `tools`) rebuilds
+        # cli/internal/api/client.gen.go from it. The regen is idempotent,
+        # so a clean tree means the committed artifacts are already current.
+        working-directory: cli
+        run: |
+          make snapshot-openapi
+          make generate
+
+      - name: Fail if the committed snapshot / client are stale
+        # The snapshot + generated client are checked-in artifacts derived
+        # from the backend OpenAPI document. If a backend route changed
+        # without re-running the two targets above, the working tree now
+        # differs from HEAD — fail with the remediation command. Same
+        # rationale as a `go mod tidy` / `uv.lock --locked` drift gate.
+        run: |
+          if ! git diff --exit-code -- cli/api/openapi.json cli/internal/api/client.gen.go; then
+            echo "::error title=CLI API snapshot stale::cli/api/openapi.json and/or cli/internal/api/client.gen.go are out of date relative to the backend OpenAPI document. Run 'cd cli && make snapshot-openapi && make generate' and commit the result."
+            exit 1
+          fi
+
   helm-lint-template:
     name: Helm (lint + template + kubeconform)
     # Fork-PR guard mirrors the other jobs.

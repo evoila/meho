@@ -65,6 +65,7 @@ Used by:
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
@@ -152,9 +153,15 @@ def node_snapshot(node: GraphNode) -> dict[str, Any]:
     for column in _NODE_SNAPSHOT_COLUMNS:
         raw = getattr(node, column)
         if column == "properties":
-            # Deep-copy via dict() so a later in-place edit of the live
-            # row's properties does not bleed back into the snapshot.
-            snapshot[column] = dict(raw or {})
+            # ``deepcopy`` rather than ``dict()`` so a later in-place edit
+            # of a *nested* value inside ``node.properties`` (e.g. a list
+            # value reassigned to a new list, or a nested dict updated)
+            # does not bleed back into the snapshot. A shallow ``dict()``
+            # copies the top-level keys but aliases any container value
+            # underneath — fine for the flat ``{note, evidence_url, ...}``
+            # shape annotate writes today, but forward-fragile for any
+            # future caller that stamps nested structure into properties.
+            snapshot[column] = deepcopy(raw or {})
             continue
         snapshot[column] = _serialise(raw)
     return snapshot
@@ -173,7 +180,13 @@ def edge_snapshot(edge: GraphEdge) -> dict[str, Any]:
     for column in _EDGE_SNAPSHOT_COLUMNS:
         raw = getattr(edge, column)
         if column == "properties":
-            snapshot[column] = dict(raw or {})
+            # ``deepcopy`` rather than ``dict()`` — same forward-compat
+            # rationale as :func:`node_snapshot`. Nested list / dict
+            # values inside ``properties`` (the §6 ``conflicts_with`` is
+            # a list) would otherwise alias the live row's container and
+            # any later in-place mutation of that list would
+            # retroactively rewrite this captured snapshot.
+            snapshot[column] = deepcopy(raw or {})
             continue
         snapshot[column] = _serialise(raw)
     return snapshot

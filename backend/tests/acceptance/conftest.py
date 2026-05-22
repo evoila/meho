@@ -155,6 +155,16 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "broadcast_override",
     "documents",
     "endpoint_descriptor",
+    # ``graph_edge_history`` carries a real FK ``graph_edge(id) ON DELETE
+    # SET NULL`` per migration ``0012`` (#856 T1); the same applies to
+    # ``graph_node_history``. PG rejects a TRUNCATE on the parent table
+    # unless the referencing tables are truncated in the same statement
+    # (``cannot truncate a table referenced in a foreign key constraint``).
+    # Without these two entries the per-test TRUNCATE the acceptance
+    # fixture runs raises ``FeatureNotSupportedError`` and every
+    # PG-backed acceptance test errors at setup. The integration conftest's
+    # ``_TRUNCATE_TABLES`` already includes both; the acceptance side was
+    # missed when T1 landed and is repaired here together with T2's hook.
     "graph_edge",
     "graph_edge_history",
     "graph_node",

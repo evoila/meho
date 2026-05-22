@@ -86,6 +86,43 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _enforce_sqlite_foreign_keys(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Opt this module in to SQLite foreign-key enforcement.
+
+    The diff-on-write hook's ``unannotate_edge`` path hard-deletes the
+    curated row and relies on PG's ``ON DELETE SET NULL`` cascade
+    nulling the just-inserted ``graph_edge_history.edge_id`` -- the
+    intended migration semantic that lets tombstones outlive the live
+    row (see :class:`~meho_backplane.db.models.GraphEdgeHistory` /
+    migration ``0012``). SQLite's default is FK-off, which silently
+    masks the cascade; without this fixture the test asserting
+    ``removed[0].edge_id is None`` would pass on SQLite by accident
+    (the row's ``edge_id`` would stay populated because the cascade
+    never fires) while PG would diverge.
+
+    Setting ``MEHO_SQLITE_FOREIGN_KEYS=1`` flips
+    :func:`db.engine.create_engine_for_url` into the gated branch that
+    attaches a ``PRAGMA foreign_keys=ON`` listener on every new SQLite
+    connection (it is per-connection on SQLite, not per-database).
+    :func:`reset_engine_for_testing` drops the cached engine so the
+    next ``get_engine()`` rebuilds with the PRAGMA listener attached.
+
+    The env var is module-scoped via autouse rather than chassis-wide
+    because a blanket SQLite-FK-on flip surfaces a large pre-existing
+    tape of test fixtures that insert FK-referencing rows without
+    seeding the parent. Tearing that out is a chassis-wide refactor;
+    G9.3-T2 only needs the FK enforced for this module's cascade
+    assertions. A follow-up Task under #364 can widen the gate.
+    """
+    from meho_backplane.db.engine import reset_engine_for_testing
+
+    monkeypatch.setenv("MEHO_SQLITE_FOREIGN_KEYS", "1")
+    reset_engine_for_testing()
+    yield
+    reset_engine_for_testing()
+
+
+@pytest.fixture(autouse=True)
 def _clean_registry() -> Iterator[None]:
     """Isolate the connector registry + instance cache per test."""
     clear_registry()
@@ -450,28 +487,45 @@ async def test_refresh_failure_rolls_back_both_live_and_history_rows() -> None:
         await refresh_target_topology(target, _operator(tenant_id))
 
     # Neither the live tables nor the history tables should carry any
-    # rows for this tenant -- the rollback was atomic.
+    # rows for this tenant -- the rollback was atomic. Materialize the
+    # ``.scalars().all()`` results *inside* the session context: a
+    # ``ScalarResult`` iterator returned out of an ``AsyncSession``
+    # context manager iterates against a closed session, which raises
+    # under SQLAlchemy 2.x. Pulling the list inside the context and
+    # asserting against the list outside is the documented pattern.
     async with sessionmaker() as session:
-        live_nodes = (
-            await session.execute(select(GraphNode).where(GraphNode.tenant_id == tenant_id))
-        ).scalars()
-        live_edges = (
-            await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id))
-        ).scalars()
-        node_hist = (
-            await session.execute(
-                select(GraphNodeHistory).where(GraphNodeHistory.tenant_id == tenant_id)
+        live_nodes_list = (
+            (await session.execute(select(GraphNode).where(GraphNode.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+        live_edges_list = (
+            (await session.execute(select(GraphEdge).where(GraphEdge.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+        node_hist_list = (
+            (
+                await session.execute(
+                    select(GraphNodeHistory).where(GraphNodeHistory.tenant_id == tenant_id)
+                )
             )
-        ).scalars()
-        edge_hist = (
-            await session.execute(
-                select(GraphEdgeHistory).where(GraphEdgeHistory.tenant_id == tenant_id)
+            .scalars()
+            .all()
+        )
+        edge_hist_list = (
+            (
+                await session.execute(
+                    select(GraphEdgeHistory).where(GraphEdgeHistory.tenant_id == tenant_id)
+                )
             )
-        ).scalars()
-    assert list(live_nodes) == [], "live graph_node should be empty after rollback"
-    assert list(live_edges) == [], "live graph_edge should be empty after rollback"
-    assert list(node_hist) == [], "graph_node_history should be empty after rollback"
-    assert list(edge_hist) == [], "graph_edge_history should be empty after rollback"
+            .scalars()
+            .all()
+        )
+    assert list(live_nodes_list) == [], "live graph_node should be empty after rollback"
+    assert list(live_edges_list) == [], "live graph_edge should be empty after rollback"
+    assert list(node_hist_list) == [], "graph_node_history should be empty after rollback"
+    assert list(edge_hist_list) == [], "graph_edge_history should be empty after rollback"
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +606,29 @@ async def test_unannotate_emits_removed_history_and_clears_marker_history() -> N
 
     assert len(removed) == 1, "exactly one ``removed`` history row for the curated edge"
     assert removed[0].audit_id == unannotate_audit_id
-    assert removed[0].edge_id == curated_id
+    # ``graph_edge_history.edge_id`` is FK ``ON DELETE SET NULL`` on
+    # :class:`GraphEdge.id`. :func:`unannotate_edge` hard-deletes the
+    # curated row in the same transaction as the history insert; on PG
+    # (and on SQLite once ``PRAGMA foreign_keys=ON`` is in force -- see
+    # :func:`db.engine.create_engine_for_url`) the FK cascade fires
+    # during flush and nulls the just-inserted history row's
+    # ``edge_id``. This is the **intended** migration semantic: history
+    # rows must survive live-row deletion, so identity recovery for the
+    # tombstone walk routes through ``snapshot.before.id`` (the
+    # ``_EDGE_SNAPSHOT_COLUMNS`` includes ``id``) plus the
+    # ``graph_edge_history_tenant_removed_idx`` partial index, not
+    # through the live ``edge_id`` column. The temporal-query verbs
+    # (T3 / T4 / T5) read identity from the snapshot, not the FK.
+    assert removed[0].edge_id is None, (
+        "FK ON DELETE SET NULL must null edge_id after the curated "
+        "row is hard-deleted; identity lives on snapshot.before.id"
+    )
+    before_state = removed[0].snapshot["before"]
+    assert isinstance(before_state, dict)
+    assert before_state["id"] == str(curated_id), (
+        "snapshot.before.id must carry the deleted edge's identity so "
+        "the per-resource tombstone walk in T3 can recover it"
+    )
 
     assert len(updated) == 1, (
         "exactly one ``updated`` history row for the auto edge whose "
@@ -675,6 +751,99 @@ async def test_unchanged_refresh_emits_no_history_rows() -> None:
     )
     assert len(after_edge) == len(before_edge), (
         "second identical refresh should not emit additional edge history rows"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Negative -- an idempotent re-annotate emits no history rows
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_idempotent_annotate_emits_no_history_rows() -> None:
+    """A second annotate with byte-identical inputs produces zero history rows.
+
+    Mirrors :func:`test_unchanged_refresh_emits_no_history_rows` on the
+    annotate side -- a pure ``last_seen`` / ``annotated_at`` heartbeat
+    is not a recorded mutation. Covers both shapes the iter-1 review
+    flagged (CodeRabbit B2 on PR #904):
+
+    * Curated edge itself -- ``_emit_annotate_history`` skips when
+      :func:`_annotate_curated_is_meaningful` returns ``False``.
+    * §6 markers -- ``_mark_same_kind_different_endpoint_superseded``
+      and ``_mark_incompatible_kinds_conflict`` skip rows whose
+      marker already equals the target value.
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    _FakeConnector.hints = TopologyHints(
+        discovered_at=datetime.now(UTC),
+        nodes=(
+            NodeHint(kind="vm", name="vm-a"),
+            NodeHint(kind="host", name="host-old"),
+            NodeHint(kind="host", name="host-new"),
+        ),
+        edges=(
+            # vm-a runs-on host-old as an auto edge -- the first
+            # annotate of vm-a runs-on host-new will mark this row
+            # superseded.
+            EdgeHint(
+                from_kind="vm",
+                from_name="vm-a",
+                to_kind="host",
+                to_name="host-old",
+                kind="runs-on",
+            ),
+        ),
+    )
+    operator = _operator(tenant_id)
+    with patch(_PUBLISH_REFRESH, new=AsyncMock()):
+        await refresh_target_topology(target, operator)
+
+    sessionmaker = get_sessionmaker()
+    # First annotate -- creates curated edge, stamps superseded_by on
+    # the auto edge. Both history rows are expected.
+    async with sessionmaker() as session:
+        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
+            await annotate_edge(
+                session,
+                operator,
+                NodeRef(name="vm-a", kind="vm"),
+                "runs-on",
+                NodeRef(name="host-new", kind="host"),
+                note="initial",
+            )
+
+    history_after_first = await _all_edge_history(tenant_id)
+    audits_after_first = await _all_audit_log(tenant_id)
+
+    # Second annotate with byte-identical inputs -- must be a no-op
+    # for the diff-on-write hook: zero new history rows on either the
+    # curated edge or the previously-superseded auto edge.
+    async with sessionmaker() as session:
+        with patch(_PUBLISH_ANNOTATE, new=AsyncMock()):
+            await annotate_edge(
+                session,
+                operator,
+                NodeRef(name="vm-a", kind="vm"),
+                "runs-on",
+                NodeRef(name="host-new", kind="host"),
+                note="initial",
+            )
+
+    history_after_second = await _all_edge_history(tenant_id)
+    audits_after_second = await _all_audit_log(tenant_id)
+
+    assert len(history_after_second) == len(history_after_first), (
+        "second identical annotate should not emit additional edge history rows; "
+        f"first={len(history_after_first)} second={len(history_after_second)}"
+    )
+    # Annotate still writes its own ``audit_log`` row per call (the
+    # audit row is the operation receipt, not a mutation receipt) --
+    # only history rows are the no-op contract.
+    assert len(audits_after_second) == len(audits_after_first) + 1, (
+        "annotate's own audit_log row still writes per call; only the "
+        "history hook is no-op for an idempotent re-annotate"
     )
 
 

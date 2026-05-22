@@ -316,13 +316,23 @@ async def _mark_same_kind_different_endpoint_superseded(
     )
     rows = (await session.execute(stmt)).scalars().all()
     marked: list[tuple[GraphEdge, dict[str, Any]]] = []
+    target_marker = str(curated_edge_id)
     for row in rows:
+        # No-op guard: an idempotent re-annotate of an already-superseded
+        # row would otherwise rewrite ``properties`` (a new dict with the
+        # same content) and emit a phantom ``UPDATED`` history row with
+        # byte-identical ``before``/``after``. Skip when the marker
+        # already points at the curated row — mirrors refresh's
+        # ``test_unchanged_refresh_emits_no_history_rows`` contract on
+        # the annotate side.
+        if (row.properties or {}).get(_SUPERSEDED_BY) == target_marker:
+            continue
         # Capture the pre-mutation snapshot **before** reassigning
         # ``properties`` so the history row's ``before`` reflects the
         # row as the operator last saw it without the supersede mark.
         before = edge_snapshot(row)
         props = dict(row.properties or {})
-        props[_SUPERSEDED_BY] = str(curated_edge_id)
+        props[_SUPERSEDED_BY] = target_marker
         row.properties = props
         marked.append((row, before))
     return marked
@@ -360,8 +370,31 @@ async def _mark_incompatible_kinds_conflict(
         GraphEdge.kind != kind,
     )
     rows = (await session.execute(stmt)).scalars().all()
+    curated_marker = str(curated_edge.id)
     conflicting: list[tuple[GraphEdge, dict[str, Any]]] = []
     for row in rows:
+        # No-op guard: an idempotent re-annotate would otherwise re-stamp
+        # an already-present bidirectional ``conflicts_with`` reference
+        # and emit a phantom ``UPDATED`` history row on a row that did
+        # not actually change. The marker is bidirectional, so the row
+        # is a no-op only when *both* sides already carry it:
+        #   * ``row.properties.conflicts_with`` contains the curated id
+        #   * ``curated_edge.properties.conflicts_with`` contains the
+        #     other row's id
+        # Either side missing means the previous annotate left the
+        # graph in a half-stamped state (e.g. interrupted before the
+        # bidirectional pass) and we must complete the linkage.
+        other_marker = str(row.id)
+        row_conflicts = (row.properties or {}).get(_CONFLICTS_WITH) or []
+        curated_conflicts = (curated_edge.properties or {}).get(_CONFLICTS_WITH) or []
+        already_linked = (
+            isinstance(row_conflicts, list)
+            and curated_marker in row_conflicts
+            and isinstance(curated_conflicts, list)
+            and other_marker in curated_conflicts
+        )
+        if already_linked:
+            continue
         # Capture the pre-mutation snapshot before appending the marker.
         before = edge_snapshot(row)
         _append_conflict_marker(row, curated_edge.id)
@@ -823,6 +856,47 @@ def _merge_onto_existing_edge(
     return existing, edge_before
 
 
+#: Snapshot fields that change on every re-annotate even when the
+#: operator's input is byte-identical. ``last_seen`` is a heartbeat the
+#: refresh pattern already excludes from the meaningful-change test;
+#: ``annotated_at`` is the same shape on the annotate side -- a
+#: ``datetime.now(UTC).isoformat()`` stamped into ``properties`` on every
+#: call. Excluding them both is what makes an idempotent re-annotate a
+#: no-op for history purposes, mirroring
+#: :func:`refresh._properties_differ`'s contract on the refresh side.
+_ANNOTATE_HEARTBEAT_PROPERTY_KEYS: tuple[str, ...] = ("annotated_at",)
+
+
+def _annotate_curated_is_meaningful(
+    *, before: dict[str, Any] | None, after: dict[str, Any]
+) -> bool:
+    """Return ``True`` when the curated edge's snapshot reflects a real change.
+
+    Compares ``before`` to ``after`` after stripping the heartbeat
+    fields (top-level ``last_seen`` and ``properties.annotated_at``)
+    that change on every call regardless of operator intent. Mirrors
+    :func:`refresh._properties_differ` on the refresh side so the two
+    history-emission paths agree on what counts as a mutation.
+
+    ``before`` is ``None`` on a fresh insert; that path is always
+    meaningful (the row did not exist), so the caller treats ``None``
+    as the "always emit" case before calling this helper.
+    """
+    if before is None:
+        return True
+
+    def _strip(snapshot: dict[str, Any]) -> dict[str, Any]:
+        stripped = {k: v for k, v in snapshot.items() if k != "last_seen"}
+        props = stripped.get("properties")
+        if isinstance(props, dict):
+            stripped["properties"] = {
+                k: v for k, v in props.items() if k not in _ANNOTATE_HEARTBEAT_PROPERTY_KEYS
+            }
+        return stripped
+
+    return _strip(before) != _strip(after)
+
+
 def _emit_annotate_history(
     session: AsyncSession,
     *,
@@ -845,20 +919,33 @@ def _emit_annotate_history(
     snapshot so the ``conflicts_with`` marker is visible in
     ``after`` -- the bidirectional view ``meho topology diff``
     reconstructs.
+
+    No-op guard: an idempotent re-annotate of an already-curated row
+    whose §6 markers are already in place must not emit a phantom
+    ``UPDATED`` history row -- the curated row's ``last_seen`` /
+    ``annotated_at`` change every call but those are heartbeats, not
+    mutations. :func:`_annotate_curated_is_meaningful` decides;
+    ``was_created=True`` always emits (the row did not exist before).
+    The marker-scan helpers (``_mark_same_kind_different_endpoint_superseded``
+    / ``_mark_incompatible_kinds_conflict``) already skip already-marked
+    rows, so ``superseded_pairs`` / ``conflict_pairs`` here carry only
+    rows that genuinely changed.
     """
-    edge_change_kind = (
-        GraphHistoryChangeKind.CREATED if was_created else GraphHistoryChangeKind.UPDATED
-    )
-    record_edge_change(
-        session,
-        edge_id=edge.id,
-        tenant_id=operator.tenant_id,
-        change_kind=edge_change_kind,
-        before=edge_before,
-        after=edge_snapshot(edge),
-        audit_id=audit_id,
-        valid_from=now,
-    )
+    after_snapshot = edge_snapshot(edge)
+    if was_created or _annotate_curated_is_meaningful(before=edge_before, after=after_snapshot):
+        edge_change_kind = (
+            GraphHistoryChangeKind.CREATED if was_created else GraphHistoryChangeKind.UPDATED
+        )
+        record_edge_change(
+            session,
+            edge_id=edge.id,
+            tenant_id=operator.tenant_id,
+            change_kind=edge_change_kind,
+            before=edge_before,
+            after=after_snapshot,
+            audit_id=audit_id,
+            valid_from=now,
+        )
     for other_edge, other_before in (*superseded_pairs, *conflict_pairs):
         # Each marked auto / other-kind edge survives -- the marker
         # write is the only column that changed -- so the history
@@ -1162,13 +1249,27 @@ def _emit_unannotate_history(
     """Emit history rows for the unannotate before the live delete flushes.
 
     Diff-on-write hook (G9.3-T2 #857): emit history rows **before**
-    the ``session.delete(edge)`` call so the ``removed`` row's
-    ``edge_id`` references a still-live ``graph_edge.id``. The
-    ON DELETE SET NULL on the FK kicks in only when the live row is
-    hard-deleted; SQLAlchemy may flush the delete before the insert
-    if the order is reversed, producing a NULL ``edge_id`` on the
-    freshly inserted history row -- defeating the per-resource
-    history walk in T3 (the walk filters on ``edge_id``).
+    the ``session.delete(edge)`` call so the insert is ordered ahead
+    of the delete in the unit-of-work flush.
+
+    **Important PG semantic**: ``graph_edge_history.edge_id`` is
+    ``FK graph_edge(id) ON DELETE SET NULL`` (see migration ``0012`` /
+    :class:`~meho_backplane.db.models.GraphEdgeHistory`). On PG (and on
+    SQLite once ``PRAGMA foreign_keys=ON`` is in force) the cascade
+    fires when the live row is hard-deleted during the same flush --
+    the freshly-inserted ``removed`` row's ``edge_id`` ends up NULL.
+    This is **intended**: history rows must survive live-row deletion,
+    and ``ON DELETE SET NULL`` is the migration's chosen mechanism for
+    preserving the tombstone after the live row is gone.
+
+    Consequence for the temporal-query verbs (T3 / T4 / T5): the
+    per-resource history walk does **not** filter on ``edge_id``
+    (which would lose tombstones); it filters on
+    ``(tenant_id, change_kind='removed', valid_from DESC)`` using the
+    ``graph_edge_history_tenant_removed_idx`` partial index, and
+    recovers the edge's identity from ``snapshot.before.id`` (the
+    ``_EDGE_SNAPSHOT_COLUMNS`` constant includes ``id`` for this
+    exact reason).
     """
     record_edge_change(
         session,
@@ -1319,6 +1420,30 @@ async def _unannotate_in_txn(
     referencing_befores: list[tuple[GraphEdge, dict[str, Any]]] = [
         (ref_edge, edge_snapshot(ref_edge)) for ref_edge in referencing
     ]
+
+    # Partition referencing edges by which §6 marker they carried at
+    # the moment we resolved them -- read the snapshot's ``properties``
+    # rather than the live row so we are immune to the upcoming
+    # :func:`_clear_reciprocal_markers` mutation. The audit / broadcast
+    # payload then surfaces ``superseded`` and ``conflicts`` as two
+    # distinct buckets so the recovery flow can tell which auto edges
+    # are reappearing in traversal (the supersede-cleared bucket) vs
+    # which other-kind edges merely lost a back-reference (the
+    # conflict-cleared bucket). The pre-fix code conflated both into
+    # a single ``conflicts=[r.id for r in referencing]`` array, which
+    # made the diagnostic ambiguous on any unannotate that cleared
+    # both marker shapes.
+    removed_marker = str(removed_id)
+    superseded_ids: list[uuid.UUID] = []
+    conflicts_ids: list[uuid.UUID] = []
+    for ref_edge, ref_before in referencing_befores:
+        before_props = ref_before.get("properties") or {}
+        if before_props.get(_SUPERSEDED_BY) == removed_marker:
+            superseded_ids.append(ref_edge.id)
+        before_conflicts = before_props.get(_CONFLICTS_WITH)
+        if isinstance(before_conflicts, list) and removed_marker in before_conflicts:
+            conflicts_ids.append(ref_edge.id)
+
     _clear_reciprocal_markers(referencing, removed_edge_id=removed_id)
 
     audit_id = uuid.uuid4()
@@ -1343,8 +1468,8 @@ async def _unannotate_in_txn(
         edge_id=removed_id,
         note=None,
         evidence_url=None,
-        superseded=[],
-        conflicts=[r.id for r in referencing],
+        superseded=superseded_ids,
+        conflicts=conflicts_ids,
     )
     session.add(
         _build_audit_row(

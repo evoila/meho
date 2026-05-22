@@ -1040,10 +1040,7 @@ async def timeline_route(
         # schema-driven signal for the recoverable per-anchor errors
         # (the operator's first-line diagnostics).
         404: {
-            "description": (
-                "Anchor node not found by ``name`` (and ``kind`` when "
-                "supplied)."
-            ),
+            "description": ("Anchor node not found by ``name`` (and ``kind`` when supplied)."),
             "content": {
                 "application/json": {
                     "schema": {

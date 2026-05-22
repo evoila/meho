@@ -26,7 +26,7 @@ push / PR ──► CI workflow ──► uploads python-coverage artifact (back
 | Project + scope config | [`sonar-project.properties`](../../sonar-project.properties) |
 | Scan trigger + coverage handoff | [`.github/workflows/quality-gate.yml`](../../.github/workflows/quality-gate.yml) |
 | Coverage production | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) — `Pytest (unit + coverage)` |
-| Coverage path portability | `[tool.coverage.run] relative_files` in [`backend/pyproject.toml`](../../backend/pyproject.toml) |
+| Coverage path portability | `[tool.coverage.run] relative_files` ([`backend/pyproject.toml`](../../backend/pyproject.toml)) + quality-gate.yml's `Point coverage report at the backend/ source root` step (injects `<source>backend</source>` so paths resolve from the repo root) |
 | Auth | `SONAR_TOKEN` repo secret (write/scan only) |
 
 Coverage is the **unit sweep only** (`--cov=meho_backplane`); integration tests

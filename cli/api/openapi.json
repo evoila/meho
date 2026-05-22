@@ -1103,6 +1103,58 @@
         }
       }
     },
+    "/api/v1/connectors/catalog": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Catalog Endpoint",
+        "description": "Return the curated connector-spec catalog (Goal #214 on-ramp; #743).\n\nThe catalog maps ``(product, version)`` to the recommended OpenAPI\nspec source(s) + the registered connector class that covers the\nversion label. It is global, built-in reference data (not tenant-\nscoped), so operator role is the only gate; the read carries no\ntenant filter. The ``meho connector catalog list`` / ``ingest\n--catalog`` verbs (#915) consume this route \u2014 the CLI ships as a\nseparate binary and cannot read the server's packaged catalog file.\n\nDeclared before the ``/{connector_id}/...`` routes so the literal\n``/catalog`` segment is matched ahead of the path-parameter\npatterns. Wrapped in ``{\"catalog\": [...]}`` for non-breaking paging\nroom, mirroring the ``GET /`` list shape.",
+        "operationId": "catalog_endpoint_api_v1_connectors_catalog_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "title": "Response Catalog Endpoint Api V1 Connectors Catalog Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/connectors/{connector_id}/review": {
       "get": {
         "tags": [

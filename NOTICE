@@ -2,3 +2,16 @@ MEHO
 Copyright 2026 evoila Group
 
 This product includes software developed at evoila Group (https://evoila.com/).
+
+---
+
+This product bundles JSONFlux, located at
+src/meho_backplane/jsonflux/, originally authored by Ilhan Karić
+(@ikaric) and published as ikaric/jsonflux under the MIT License.
+The vendored copy is sourced from the MEHO.X fork
+(meho_app/jsonflux/) at commit fc82cf93, which carries additional
+work by the MEHO team (smart register() with unwrap/append, plus
+mypy/ruff/SonarQube hygiene). With the copyright holder's consent,
+this vendored tree is relicensed to Apache-2.0 to match the rest of
+MEHO; see docs/decisions/jsonflux-license.md for the license-chain
+provenance and signoff of record.

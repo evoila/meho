@@ -19,13 +19,29 @@ would land as ``("vcf-fleet", "", "")`` and confuse
 tie-break ladder. Same pattern :mod:`meho_backplane.connectors.harbor`
 and :mod:`meho_backplane.connectors.vcf_automation` established.
 
-Operations for this connector arrive in #835 via G0.7 spec ingestion
-against the Fleet (vRSLCM-derived) OpenAPI surface. This Task ships
-only the skeleton.
+Operations for this connector arrive via G0.7 spec ingestion against
+the Fleet (vRSLCM-derived) OpenAPI surface. G3.6-T7 (#831) shipped the
+connector skeleton; G3.6-T8 (#835) adds the curated read-only v0.5
+core — 8 operator-enabled ops + 6 reviewed groups — via the
+:func:`~meho_backplane.connectors.vcf_fleet.core_ops.apply_fleet_core_curation`
+substrate call against an already-ingested connector.
 """
 
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_fleet.connector import VcfFleetConnector
+from meho_backplane.connectors.vcf_fleet.core_ops import (
+    FLEET_CONNECTOR_ID,
+    FLEET_CORE_GROUPS,
+    FLEET_CORE_OPS,
+    FLEET_IMPL_ID,
+    FLEET_PATH_RULES,
+    FLEET_PRODUCT,
+    FLEET_VERSION,
+    FleetCoreGroup,
+    FleetCoreOp,
+    apply_fleet_core_curation,
+    classify_fleet_op,
+)
 from meho_backplane.connectors.vcf_fleet.session import (
     SessionCredentials,
     VcfFleetCredentialsLoader,
@@ -41,9 +57,20 @@ register_connector_v2(
 )
 
 __all__ = [
+    "FLEET_CONNECTOR_ID",
+    "FLEET_CORE_GROUPS",
+    "FLEET_CORE_OPS",
+    "FLEET_IMPL_ID",
+    "FLEET_PATH_RULES",
+    "FLEET_PRODUCT",
+    "FLEET_VERSION",
+    "FleetCoreGroup",
+    "FleetCoreOp",
     "SessionCredentials",
     "VcfFleetConnector",
     "VcfFleetCredentialsLoader",
     "VcfFleetTargetLike",
+    "apply_fleet_core_curation",
+    "classify_fleet_op",
     "load_credentials_from_vault",
 ]

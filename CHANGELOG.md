@@ -90,6 +90,56 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-22
+
+**Connector raw-REST ingest on-ramp + topology change-history + UI
+chassis groundwork.** This patch lands the Goal #214 connector-spec
+catalog (the curated entry point that turns "ingest the vendor's full
+REST surface" from tribal knowledge into a discoverable command, on both
+the API and CLI), the G9.3 topology change-history substrate (history
+tables, diff-on-write capture, a `timeline` query, and retention), and
+the first G10 operator-UI chassis pieces (the `ui/` module + BFF session
+storage). It also fixes the MCP `tools/list` combinator rejection that
+broke Claude Code sessions, and tightens CI (a unit-job time budget,
+SonarCloud signature verification + coverage wiring, and a CLI
+OpenAPI-snapshot freshness gate). No breaking changes.
+
+### Added
+
+- **Connector-spec catalog — the raw-REST ingest on-ramp (Goal
+  [#214](https://github.com/evoila/meho/issues/214)).** A curated,
+  server-side catalog mapping `(product, version)` → recommended OpenAPI
+  spec source(s) + the registered connector class that covers the version
+  label. It ships as package data, is loaded + schema-validated at
+  backplane startup (a malformed catalog fails the app-boot smoke), and
+  is served read-only at `GET /api/v1/connectors/catalog`
+  ([#743](https://github.com/evoila/meho/issues/743) / #917). The
+  matching `meho connector catalog list` and `meho connector ingest
+  --catalog <product>/<version>` CLI verbs resolve an entry and ingest
+  its recommended triple + upstream spec URLs, refusing typed-only and
+  fqdn-templated entries with an actionable hint
+  ([#915](https://github.com/evoila/meho/issues/915) / #926). This is the
+  operator on-ramp for the generic-ingestion (raw-REST) half of the
+  two-layer connector model — the answer to the v0.3.0 dogfood's "only 13
+  vmware ops?".
+- **Topology change history (G9.3).** New `graph_node_history` +
+  `graph_edge_history` tables (Alembic migration 0012) capture every
+  node/edge mutation ([#900](https://github.com/evoila/meho/issues/900)),
+  populated by a diff-on-write hook that also stamps `audit_id` on
+  refresh / annotate ([#904](https://github.com/evoila/meho/issues/904)).
+  A new `meho topology timeline` verb + `GET /api/v1/topology/timeline` +
+  `query_topology(kind=timeline)` expose the history
+  ([#909](https://github.com/evoila/meho/issues/909)), and a weekly
+  retention prune (`TOPOLOGY_HISTORY_RETENTION_DAYS`, `0` = keep forever)
+  bounds growth ([#902](https://github.com/evoila/meho/issues/902)).
+- **Operator web UI chassis (G10.0, groundwork — no operator surface
+  enabled yet).** A new `ui/` module with a FastAPI BFF mount point,
+  Jinja2 base templates, and a Tailwind 4 build pipeline
+  ([#897](https://github.com/evoila/meho/issues/897)), plus BFF session
+  storage — a `web_session` table with encrypted token custody and RFC
+  9700 refresh-token rotation
+  ([#903](https://github.com/evoila/meho/issues/903)).
+
 ### Fixed
 
 - MCP `tools/list` no longer publishes a top-level `oneOf` / `allOf` /
@@ -105,7 +155,29 @@ connector-related release-notes line.
   schema stays on `inputSchema`, so server-side jsonschema validation
   (the `-32602` rejections for bad argument shapes) is unchanged. Found
   dogfooding from `claude-rdc-hetzner-dc` after its static `.mcp.json`
-  wire-up. (#905)
+  wire-up. (#905 / #910)
+
+### Documentation
+
+- Add [`docs/RELEASING.md`](docs/RELEASING.md) — a step-ordered release
+  runbook that is the source of truth for cutting a `v*` tag (CHANGELOG
+  roll → tag → artefact verification → deploy + smoke)
+  ([#914](https://github.com/evoila/meho/issues/914)).
+
+### Internal (CI / build / quality — no operator-facing change)
+
+- Enforce a 10-minute unit-job budget as an early-warning gate against
+  CI-perf creep ([#899](https://github.com/evoila/meho/issues/899)).
+- Add a CLI OpenAPI-snapshot freshness gate: regenerate the drifted
+  `cli/api/openapi.json` snapshot + generated client and fail CI when a
+  backend route change leaves them stale
+  ([#928](https://github.com/evoila/meho/issues/928) / #929).
+- Install `dirmngr` + enable SonarCloud GPG signature verification in the
+  quality gate ([#770](https://github.com/evoila/meho/issues/770)); scope
+  Sonar to tests + wire coverage with a documented new-code baseline
+  ([#920](https://github.com/evoila/meho/issues/920)); resolve coverage
+  paths via the `backend/` source root so import coverage isn't reported
+  as 0% ([#927](https://github.com/evoila/meho/issues/927)).
 
 ## [0.5.0] - 2026-05-22
 

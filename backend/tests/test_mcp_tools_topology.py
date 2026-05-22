@@ -44,11 +44,12 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.db.models import Tenant
-from meho_backplane.mcp.registry import get_tool
+from meho_backplane.mcp.registry import all_tools_for, get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from meho_backplane.topology.schemas import TopologyNode, TopologyPath
 from tests.mcp_test_fixtures import (
     OPERATOR_TENANT_ID,
+    build_operator,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
@@ -136,35 +137,83 @@ def test_query_topology_description_names_blast_radius_verbatim(
 def test_query_topology_input_schema_is_conditional_on_kind(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """inputSchema encodes the per-kind required fields via allOf/if/then."""
+    """Per-kind required fields are enforced via allOf/if/then on the STORED schema.
+
+    The conditional ``allOf`` lives on the *stored* ``inputSchema`` (what
+    the dispatcher jsonschema-validates ``tools/call.arguments`` against),
+    NOT on the wire shape: the Anthropic Messages API rejects a top-level
+    ``allOf`` / ``oneOf`` / ``anyOf`` in a tool's ``input_schema`` and the
+    rejection 400s the whole session (#905), so
+    :meth:`ToolDefinition.to_wire` strips it from the published copy. This
+    test pins both halves of that split — the wire shape carries no
+    combinator, the stored schema still does (its live effect is proven by
+    the two ``-32602`` tests below).
+    """
     client, _op = client_with_operator
     response = client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
     )
     tools = {t["name"]: t for t in response.json()["result"]["tools"]}
-    schema = tools["query_topology"]["inputSchema"]
-    assert schema["required"] == ["kind"]
-    assert schema["additionalProperties"] is False
+    wire_schema = tools["query_topology"]["inputSchema"]
+    assert wire_schema["required"] == ["kind"]
+    assert wire_schema["additionalProperties"] is False
     # G9.2-T7 (#598) widened the enum with the `edges` facet (replaces a
     # standalone list_edges meta-tool); the closure / path branches and
     # their conditional requireds stay unchanged.
-    assert schema["properties"]["kind"]["enum"] == [
+    assert wire_schema["properties"]["kind"]["enum"] == [
         "dependents",
         "dependencies",
         "path",
         "edges",
     ]
-    conditionals = schema["allOf"]
+    # The wire shape carries NO top-level combinator — Anthropic 400s on
+    # it (#905); the conditional logic moved to the stored schema below.
+    assert "allOf" not in wire_schema
+    assert "oneOf" not in wire_schema
+    assert "anyOf" not in wire_schema
+    # MEHO-internal fields stripped from the wire shape.
+    assert "required_role" not in tools["query_topology"]
+    assert "op_class" not in tools["query_topology"]
+
+    # The conditional requireds survive on the stored schema (the one the
+    # dispatcher validates against).
+    entry = get_tool("query_topology")
+    assert entry is not None
+    stored_schema = entry[0].inputSchema
+    conditionals = stored_schema["allOf"]
     by_kind = {c["if"]["properties"]["kind"]["const"]: c["then"]["required"] for c in conditionals}
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     assert sorted(by_kind["path"]) == ["from_name", "to_name"]
     # `edges` has no required field — all filters are optional.
     assert "edges" not in by_kind
-    # MEHO-internal fields stripped from the wire shape.
-    assert "required_role" not in tools["query_topology"]
-    assert "op_class" not in tools["query_topology"]
+
+
+def test_no_published_tool_wire_schema_has_top_level_combinator() -> None:
+    """Registry-wide invariant: no tool's wire ``inputSchema`` has a top-level combinator.
+
+    The guard for #905 at the level it actually bites: every tool the
+    backplane publishes via ``tools/list`` is forwarded verbatim by MCP
+    clients (Claude Code) as a custom tool's ``input_schema``, and the
+    Anthropic Messages API 400s the *entire* request if any one of them
+    carries ``oneOf`` / ``allOf`` / ``anyOf`` at the top level. This walks
+    the full registered tool set (tenant_admin sees every tool) and
+    asserts each :meth:`ToolDefinition.to_wire` output is API-legal. It
+    would have caught both ``query_topology`` (allOf) and
+    ``meho.topology.unannotate`` (oneOf), and catches any future tool that
+    reintroduces the pattern at the source rather than at first 400.
+    """
+    forbidden = ("oneOf", "allOf", "anyOf")
+    offenders = {
+        defn.name: [k for k in forbidden if k in defn.to_wire()["inputSchema"]]
+        for defn in all_tools_for(build_operator(TenantRole.TENANT_ADMIN))
+        if any(k in defn.to_wire()["inputSchema"] for k in forbidden)
+    }
+    assert offenders == {}, (
+        "tools publish a top-level JSON-Schema combinator in their wire "
+        f"inputSchema (Anthropic Messages API rejects these): {offenders}"
+    )
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

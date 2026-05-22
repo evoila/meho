@@ -252,6 +252,20 @@ connector-related release-notes line.
 
 ### Fixed
 
+- MCP `tools/list` no longer publishes a top-level `oneOf` / `allOf` /
+  `anyOf` in any tool's `inputSchema`. The Anthropic Messages API
+  rejects a top-level JSON-Schema combinator in a tool's `input_schema`
+  (`400 ... input_schema does not support oneOf, allOf, or anyOf at the
+  top level`), and because it validates the whole `tools` array a single
+  offender 400'd *every* call in a Claude Code session with the MEHO MCP
+  server connected. `query_topology` (top-level `allOf` for its per-`kind`
+  conditional requireds) and `meho.topology.unannotate` (top-level
+  `oneOf` for its XOR selector) both tripped it. `ToolDefinition.to_wire`
+  now strips top-level combinators from the published copy while the full
+  schema stays on `inputSchema`, so server-side jsonschema validation
+  (the `-32602` rejections for bad argument shapes) is unchanged. Found
+  dogfooding from `claude-rdc-hetzner-dc` after its static `.mcp.json`
+  wire-up. (#905)
 - `search_memory` now returns real `created_at` / `updated_at` for
   each hit instead of the `1970-01-01T00:00:00Z` epoch placeholder
   that v0.3.1 surfaced. The retrieval substrate's `RetrievalHit`

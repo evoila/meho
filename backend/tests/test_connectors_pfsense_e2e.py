@@ -364,7 +364,7 @@ def _wire_seeded_connector(host: str, port: int) -> PfSenseConnector:
     class _SeededPfSenseConnector(PfSenseConnector):  # type: ignore[misc]
         """Subclass that injects the test client key into _auth_config."""
 
-        def _auth_config(self, target: Any) -> dict[str, Any]:
+        async def _auth_config(self, target: Any) -> dict[str, Any]:
             return {
                 "username": "admin",
                 "client_keys": [_CLIENT_KEY],
@@ -482,14 +482,17 @@ async def test_pfsense_e2e_about_dispatches_ok(
     """pfsense.about returns vendor/product/version via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.about",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.about",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.about failed: {result.error}"
-    assert result.result is not None
-    assert result.result.get("vendor") == "netgate"
-    assert result.result.get("version") is not None
+    assert result["status"] == "ok", f"pfsense.about failed: {result.get('error')}"
+    assert result.get("result") is not None
+    assert result["result"].get("vendor") == "netgate"
+    assert result["result"].get("version") is not None
 
 
 @pytest.mark.asyncio
@@ -500,14 +503,17 @@ async def test_pfsense_e2e_version_dispatches_ok(
     """pfsense.version returns version/build/kernel via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.version",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.version",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.version failed: {result.error}"
-    assert result.result is not None
-    assert result.result.get("version") == "2.7.2-RELEASE"
-    assert "FreeBSD" in (result.result.get("kernel") or "")
+    assert result["status"] == "ok", f"pfsense.version failed: {result.get('error')}"
+    assert result.get("result") is not None
+    assert result["result"].get("version") == "2.7.2-RELEASE"
+    assert "FreeBSD" in (result["result"].get("kernel") or "")
 
 
 @pytest.mark.asyncio
@@ -518,13 +524,16 @@ async def test_pfsense_e2e_firewall_rules_dispatches_ok(
     """pfsense.firewall.rules returns parsed rule rows via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.firewall.rules",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.firewall.rules",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.firewall.rules failed: {result.error}"
-    assert result.result is not None
-    rows = result.result.get("rows", [])
+    assert result["status"] == "ok", f"pfsense.firewall.rules failed: {result.get('error')}"
+    assert result.get("result") is not None
+    rows = result["result"].get("rows", [])
     assert len(rows) == 2
     actions = {row["action"] for row in rows}
     assert "pass" in actions
@@ -539,13 +548,16 @@ async def test_pfsense_e2e_firewall_state_dispatches_ok(
     """pfsense.firewall.state returns state-table rows via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.firewall.state",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.firewall.state",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.firewall.state failed: {result.error}"
-    assert result.result is not None
-    rows = result.result.get("rows", [])
+    assert result["status"] == "ok", f"pfsense.firewall.state failed: {result.get('error')}"
+    assert result.get("result") is not None
+    rows = result["result"].get("rows", [])
     assert len(rows) == 3
     protos = {row.get("proto") for row in rows}
     assert "tcp" in protos
@@ -560,13 +572,16 @@ async def test_pfsense_e2e_nat_rules_dispatches_ok(
     """pfsense.nat.rules returns parsed NAT rule rows via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.nat.rules",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.nat.rules",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.nat.rules failed: {result.error}"
-    assert result.result is not None
-    rows = result.result.get("rows", [])
+    assert result["status"] == "ok", f"pfsense.nat.rules failed: {result.get('error')}"
+    assert result.get("result") is not None
+    rows = result["result"].get("rows", [])
     assert len(rows) == 1
     assert rows[0]["action"] == "nat"
 
@@ -579,13 +594,16 @@ async def test_pfsense_e2e_interface_list_dispatches_ok(
     """pfsense.interface.list returns parsed interface rows via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.interface.list",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.interface.list",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.interface.list failed: {result.error}"
-    assert result.result is not None
-    rows = result.result.get("rows", [])
+    assert result["status"] == "ok", f"pfsense.interface.list failed: {result.get('error')}"
+    assert result.get("result") is not None
+    rows = result["result"].get("rows", [])
     # Two interfaces in fixture: em0 + lo0
     assert len(rows) >= 2
     names = {row.get("name") for row in rows}
@@ -600,13 +618,16 @@ async def test_pfsense_e2e_gateway_list_dispatches_ok(
     """pfsense.gateway.list returns parsed gateway rows via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.gateway.list",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.gateway.list",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.gateway.list failed: {result.error}"
-    assert result.result is not None
-    rows = result.result.get("rows", [])
+    assert result["status"] == "ok", f"pfsense.gateway.list failed: {result.get('error')}"
+    assert result.get("result") is not None
+    rows = result["result"].get("rows", [])
     assert len(rows) == 1
     assert rows[0]["name"] == "WAN_DHCP"
     assert rows[0]["defaultgw"] is True
@@ -620,15 +641,18 @@ async def test_pfsense_e2e_config_show_dispatches_ok(
     """pfsense.config.show returns config_xml and length via fake-shell."""
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.config.show",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.config.show",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.config.show failed: {result.error}"
-    assert result.result is not None
-    config_xml = result.result.get("config_xml", "")
+    assert result["status"] == "ok", f"pfsense.config.show failed: {result.get('error')}"
+    assert result.get("result") is not None
+    config_xml = result["result"].get("config_xml", "")
     assert "pfsense" in config_xml.lower() or "WAN_DHCP" in config_xml
-    assert result.result.get("length", 0) > 0
+    assert result["result"].get("length", 0) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -658,19 +682,24 @@ async def test_pfsense_e2e_firewall_state_jsonflux_handle(
 
     result = await call_operation(
         _OPERATOR,
-        op_id="pfsense.firewall.state",
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": "pfsense.firewall.state",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
-    assert result.status == "ok", f"pfsense.firewall.state (force-handle) failed: {result.error}"
+    assert result["status"] == "ok", (
+        f"pfsense.firewall.state (force-handle) failed: {result.get('error')}"
+    )
 
     # The result payload is the reducer's summary (not the raw rows).
-    assert result.result is not None
-    assert "row_count" in result.result
-    assert result.result["row_count"] == 3
+    assert result.get("result") is not None
+    assert "row_count" in result["result"]
+    assert result["result"]["row_count"] == 3
 
     # The extras dict must carry the ResultHandle.
-    extras = result.extras or {}
+    extras = result.get("extras") or {}
     assert "handle" in extras, (
         f"Expected extras['handle'] from _ForceHandleReducer; got extras={extras!r}"
     )
@@ -715,9 +744,12 @@ async def test_pfsense_e2e_dispatch_writes_audit_row(
 
     await call_operation(
         _OPERATOR,
-        op_id=op_id,
-        target={"name": _TARGET_NAME},
-        params={},
+        {
+            "connector_id": "pfsense-ssh-2.7",
+            "op_id": op_id,
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
     )
 
     after = await _count_rows()
@@ -763,11 +795,14 @@ async def test_pfsense_e2e_all_ops_write_audit_rows(
     for op_id in EXPECTED_OP_IDS:
         result = await call_operation(
             _OPERATOR,
-            op_id=op_id,
-            target={"name": _TARGET_NAME},
-            params={},
+            {
+                "connector_id": "pfsense-ssh-2.7",
+                "op_id": op_id,
+                "target": {"name": _TARGET_NAME},
+                "params": {},
+            },
         )
-        assert result.status == "ok", f"Op {op_id} failed: {result.error}"
+        assert result["status"] == "ok", f"Op {op_id} failed: {result.get('error')}"
 
         async with sessionmaker() as session:
             db_result = await session.execute(

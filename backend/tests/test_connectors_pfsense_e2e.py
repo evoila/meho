@@ -384,13 +384,17 @@ def _wire_seeded_connector(host: str, port: int) -> PfSenseConnector:
 async def pfsense_e2e(
     fake_shell_server: types.SimpleNamespace,
     captured_events: list[Any],
-) -> _PfsenseE2EBundle:
+) -> AsyncIterator[_PfsenseE2EBundle]:
     """Set up end-to-end pfSense test state.
 
     Seeds the fake-shell server on the ephemeral port, registers the
     connector ops, and pre-wires the connector instance with injected
     SSH credentials.  Caller gets a :class:`_PfsenseE2EBundle` with
     target + connector.
+
+    Teardown: closes the connector's SSH connection pool so asyncssh
+    background reader tasks do not leak into subsequent tests and block
+    the fake-shell server teardown (``srv.wait_closed``).
     """
     set_default_reducer(PassThroughReducer())
     await PfSenseConnector.register_operations()
@@ -403,7 +407,8 @@ async def pfsense_e2e(
         host=fake_shell_server.host,
         port=fake_shell_server.port,
     )
-    return _PfsenseE2EBundle(target=target, connector=connector)
+    yield _PfsenseE2EBundle(target=target, connector=connector)
+    await connector.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -672,7 +677,8 @@ async def test_pfsense_e2e_firewall_state_jsonflux_handle(
     that unconditionally wraps the ``{rows, total}`` payload in a
     ``ResultHandle``, then asserts:
 
-    * The ``OperationResult.extras["handle"]`` key is present.
+    * The ``OperationResult.handle`` (top-level ``result["handle"]``) is
+      present and non-None.
     * The handle's ``total_rows`` equals the fixture row count (3).
     * The handle's ``sample_rows`` contains up to 5 rows.
     * ``result.result["row_count"]`` is the summary payload the reducer
@@ -698,12 +704,12 @@ async def test_pfsense_e2e_firewall_state_jsonflux_handle(
     assert "row_count" in result["result"]
     assert result["result"]["row_count"] == 3
 
-    # The extras dict must carry the ResultHandle.
-    extras = result.get("extras") or {}
-    assert "handle" in extras, (
-        f"Expected extras['handle'] from _ForceHandleReducer; got extras={extras!r}"
+    # The top-level "handle" key must carry the ResultHandle
+    # (OperationResult serialises handle as a top-level field, not inside extras).
+    handle = result.get("handle")
+    assert handle is not None, (
+        f"Expected result['handle'] from _ForceHandleReducer; got result={result!r}"
     )
-    handle = extras["handle"]
     assert handle["total_rows"] == 3
     assert handle["sample_rows"] is not None
 

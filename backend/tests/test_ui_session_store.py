@@ -103,7 +103,7 @@ def test_alembic_round_trip_web_session_table(
     """``alembic upgrade head`` then ``downgrade -1`` round-trips cleanly.
 
     Exercises the reversibility contract documented on
-    ``0012_create_web_session``: ``upgrade`` creates the table + two
+    ``0013_create_web_session``: ``upgrade`` creates the table + two
     indexes; ``downgrade`` drops them in inverse order.
 
     The test function is **sync** (not ``async def``) because

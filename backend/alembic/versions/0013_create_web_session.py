@@ -3,8 +3,8 @@
 
 """Create the ``web_session`` table for BFF session custody.
 
-Revision ID: 0012
-Revises: 0011
+Revision ID: 0013
+Revises: 0012
 Create Date: 2026-05-22
 
 Initiative #337 (G10.0 Frontend chassis), Task #864 (G10.0-T3). The
@@ -149,8 +149,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0012"
-down_revision: str | None = "0011"
+revision: str = "0013"
+down_revision: str | None = "0012"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

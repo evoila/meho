@@ -1954,7 +1954,7 @@ class WebSession(Base):
 
     * ``id`` -- UUID primary key. The cookie value the browser holds
       is the canonical 36-char form (``str(uuid)``). PG production
-      gets ``gen_random_uuid()`` via migration ``0012``;
+      gets ``gen_random_uuid()`` via migration ``0013``;
       :func:`uuid.uuid4` (CSPRNG-backed) is the ORM default for the
       SQLite dev/test path. ~122 bits of entropy makes session-id
       guessing computationally infeasible.

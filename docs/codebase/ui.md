@@ -110,7 +110,7 @@ server-side. Task #864 ships the storage substrate the
 upcoming T4 login flow writes to:
 
 - **`web_session` Postgres table** — migration
-  [`0012_create_web_session.py`](../../backend/alembic/versions/0012_create_web_session.py).
+  [`0013_create_web_session.py`](../../backend/alembic/versions/0013_create_web_session.py).
   Columns: `id` (UUID PK, the cookie value the browser holds),
   `operator_sub` (Keycloak `sub` claim), `tenant_id`,
   `created_at`, `expires_at`, `access_token` (bytea, Fernet

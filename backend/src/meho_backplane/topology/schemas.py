@@ -28,12 +28,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 __all__ = [
+    "TopologyDiffEntry",
+    "TopologyDiffResult",
     "TopologyEdge",
     "TopologyEdgeEndpoint",
     "TopologyHistoryEntry",
@@ -352,3 +354,86 @@ class TopologyTimelineResult(BaseModel):
     # reassignment. Consumers iterating over ``rows`` see the same shape.
     rows: tuple[TopologyTimelineEntry, ...]
     next_cursor: str | None
+
+
+class TopologyDiffEntry(BaseModel):
+    """One resource's net delta between ``ts1`` and ``ts2`` (G9.3-T4 #860).
+
+    Task #860 ships the graph-level *diff* between two timestamps. Each
+    entry summarises **one node or edge** that mutated in the window:
+
+    * ``change_kind`` is the **net** change for the resource in
+      ``(ts1, ts2]``. The fold rule per resource:
+
+      - ``created`` -- the first history row in window is ``created``
+        and the last in-window row is not ``removed``.
+      - ``removed`` -- the last in-window row is ``removed``.
+      - ``updated`` -- the resource existed before ``ts1`` and has at
+        least one in-window mutation.
+
+      A resource ``created`` *and* ``removed`` inside the same window
+      nets to ``removed`` (the post-window state is "gone"). This is
+      the operator's mental model for "what changed since ts1?".
+
+    * ``source`` -- ``"node"`` or ``"edge"`` (which history table the
+      resource was projected from).
+    * ``resource_id`` -- ``graph_node.id`` or ``graph_edge.id`` of the
+      mutated resource. ``None`` only when the live row has been
+      hard-deleted post-window via ``ON DELETE SET NULL``; rare.
+    * ``kind`` -- the resource's domain ``kind`` (``vm``, ``host``,
+      ``runs-on``, ``mounts``, ...). Picked from the post-state for
+      ``created``/``updated`` and from the pre-state for ``removed``
+      so the entry always carries a renderable kind even for
+      tombstones.
+    * ``name`` -- ``graph_node.name`` for nodes; ``None`` for edges
+      (the edge snapshot does not carry endpoint names -- the snapshot
+      stores FKs, not names; the CLI uses ``--json`` + a separate node
+      lookup if the operator wants full endpoint detail).
+    * ``summary`` -- one-line human-readable description, format
+      ``"<change_kind> <source> <kind> <name>"`` for nodes and
+      ``"<change_kind> <source> <kind>"`` for edges, matching the
+      timeline-entry summary style.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # ``Literal`` rather than ``str`` so the autogen OpenAPI / MCP tool
+    # schemas carry the closed enum constraint. Generated Go / TS / Python
+    # SDK clients then enforce the closed vocabulary at compile time
+    # rather than parsing free-form strings.
+    change_kind: Literal["created", "updated", "removed"]
+    source: Literal["node", "edge"]
+    resource_id: UUID | None
+    kind: str
+    name: str | None
+    summary: str
+
+
+class TopologyDiffResult(BaseModel):
+    """Result of :func:`query_diff` -- the diff entries plus a truncation flag.
+
+    The v0.2 diff surface enforces a **1000-row hard cap** (the substrate
+    cap, mirrored by the CLI / REST / MCP fronts). When the seeded
+    cohort of changed resources exceeds the cap, the result is truncated
+    at 1000 entries and ``truncated`` flips to ``True``; ``truncation_hint``
+    carries the canonical operator-facing remediation line. Callers
+    rendering a structured summary should surface the hint verbatim so
+    every front shows the same "narrow the time window" recovery path.
+
+    Aggregate counts (``created`` / ``updated`` / ``removed``) are
+    derived from ``entries`` -- both the substrate result and the
+    fronts compute the totals from the same source so a UI re-rendering
+    the JSON can rely on the counts matching the entries.
+
+    Ordering: entries are returned in the same insertion order the
+    substrate folds them in -- ``(source, resource_id)`` after a
+    per-resource fold. Consumers wanting a presentation order
+    (``removed`` first, then ``updated``, then ``created``) sort
+    client-side; the substrate stays out of presentation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entries: tuple[TopologyDiffEntry, ...]
+    truncated: bool
+    truncation_hint: str | None

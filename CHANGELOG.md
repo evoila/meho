@@ -147,7 +147,13 @@ OpenAPI-snapshot freshness gate). No breaking changes.
   refresh / annotate ([#904](https://github.com/evoila/meho/issues/904)).
   A new `meho topology timeline` verb + `GET /api/v1/topology/timeline` +
   `query_topology(kind=timeline)` expose the history
-  ([#909](https://github.com/evoila/meho/issues/909)), and a weekly
+  ([#909](https://github.com/evoila/meho/issues/909)); a
+  `meho topology diff <ts1> <ts2>` verb + `GET /api/v1/topology/diff` +
+  `query_topology(kind="diff", ts1=..., ts2=...)` returns the net change
+  set between two timestamps folded to `created` / `updated` / `removed`
+  (with `--changed-only` to suppress `last_seen`-bump heartbeats and a
+  1000-entry hard cap + truncation marker)
+  ([#860](https://github.com/evoila/meho/issues/860)). A weekly
   retention prune (`TOPOLOGY_HISTORY_RETENTION_DAYS`, `0` = keep forever)
   bounds growth ([#902](https://github.com/evoila/meho/issues/902)).
 - **Operator web UI chassis (G10.0, groundwork — no operator surface

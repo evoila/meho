@@ -818,10 +818,53 @@ will adopt the node onto the target (`target_id` gets set, the
 node's properties pick up probe-derived shape) without losing the
 manual-seed audit trail.
 
-## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861 + G9.3-T3 #859)
+## Diff query (read half — G9.3-T4 #860)
+
+`backend/src/meho_backplane/topology/query.py::query_diff` is the
+graph-level **net delta** between two timestamps -- the heavy temporal
+query that surfaces what changed between `ts1` (exclusive) and `ts2`
+(inclusive). Each entry folds one resource's in-window history rows
+into one of `created` / `updated` / `removed`:
+
+* First in-window row is `created` AND last is not `removed` ->
+  `created`.
+* Last in-window row is `removed` -> `removed`. (Includes the
+  created-and-removed-in-same-window case: post-window state is "gone".)
+* Otherwise -> `updated`.
+
+`changed_only=True` suppresses `updated` entries whose every in-window
+history row is a `last_seen`-only refresh heartbeat. `kind_filter`
+narrows to one resource kind (node `kind` like `vm` or edge `kind`
+like `runs-on`), applied **after** the fold so the cap fires on the
+post-filter cohort.
+
+**1000-row hard cap.** [Unreleased] enforces a strict cap at
+`_DIFF_HARD_CAP = 1000` -- on overflow the result returns
+`truncated=True` plus the canonical "narrow the time window"
+remediation hint. The CLI / REST / MCP fronts surface the hint
+verbatim; the substrate is authoritative. The cap exists because a
+hostile / wide time window over a churning tenant could otherwise
+return tens of thousands of resources.
+
+Surfaces:
+
+* `meho topology diff <ts1> <ts2> [--kind ...] [--changed-only] [--json]`
+  -- the CLI verb. ts1 / ts2 accept duration shorthand (24h / 7d /
+  30m / 2w) resolved client-side or RFC3339 / ISO-8601 absolute.
+  Default output is a structured summary
+  (`node  created=N  updated=M  removed=K` per side, total + truncation
+  banner); `--json` carries the full `TopologyDiffResult`.
+* `GET /api/v1/topology/diff?ts1=...&ts2=...` -- the REST route.
+  `op_class="audit_query"` per the G9 audit-query convention
+  (broadcast event carries only aggregate counts, never per-entry
+  payload).
+* `query_topology(kind="diff", ts1=..., ts2=...)` -- the MCP facet on
+  the parametric `query_topology` meta-tool.
+
+## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861 + G9.3-T4 #860 + G9.3-T3 #859)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Eleven routes total — ten on the topology
+the read + write halves. Twelve routes total — eleven on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -835,6 +878,7 @@ router, one on the targets router:
 | `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
 | `POST /api/v1/topology/edges/bulk` | `bulk_import_edges` (T8 #600) | `topology.bulk_import` | **tenant_admin** |
 | `GET /api/v1/topology/timeline` | `query_timeline` (G9.3-T5 #861) | `topology.timeline` | operator |
+| `GET /api/v1/topology/diff` | `query_diff` (G9.3-T4 #860) | `topology.diff` | operator |
 | `GET /api/v1/topology/history/{name}` | `query_history` (G9.3-T3 #859) | `topology.history` | operator |
 | `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
 

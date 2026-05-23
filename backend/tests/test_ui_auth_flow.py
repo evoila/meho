@@ -848,3 +848,57 @@ def test_full_login_round_trip_lets_authenticated_page_through() -> None:
             assert decrypted.operator_sub == "op-roundtrip"
 
     asyncio.run(_check_loaded())
+
+
+# ---------------------------------------------------------------------------
+# RFC 8707 resource indicator -- fail-closed on unset BACKPLANE_URL (#964)
+# ---------------------------------------------------------------------------
+
+
+def test_resource_indicator_fails_closed_when_backplane_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_resource_indicator`` raises when ``BACKPLANE_URL`` is empty.
+
+    Regression for #964 M1. Previously the helper returned ``""`` on an
+    unset ``backplane_url``; authlib forwarded ``resource=`` verbatim
+    and Keycloak silently dropped it, so the OAuth flow proceeded
+    without the RFC 8707 audience binding. The fail-closed shape
+    surfaces the misconfig via the route handlers' existing
+    :class:`OAuthFlowConfigurationError` catch (503 with remediation).
+    """
+    from meho_backplane.ui.auth.flow import (
+        OAuthFlowConfigurationError,
+        _resource_indicator,
+    )
+
+    monkeypatch.setenv("BACKPLANE_URL", "")
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert settings.backplane_url == ""
+
+    with pytest.raises(OAuthFlowConfigurationError) as exc_info:
+        _resource_indicator(settings)
+    assert "backplane_url_unset_cannot_derive_resource_indicator" in str(exc_info.value)
+
+
+def test_build_authorization_request_503s_when_backplane_url_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty ``BACKPLANE_URL`` propagates to a 503 on ``/ui/auth/login``.
+
+    The new :class:`OAuthFlowConfigurationError` raised from
+    ``_resource_indicator`` reaches the route handler via
+    :func:`build_authorization_request`; the existing
+    ``except OAuthFlowConfigurationError`` block at
+    ``routes.py:288`` maps it to a 503. This confirms the call-chain
+    plumbing the task body's AC #2 calls out -- no new route plumbing
+    needed.
+    """
+    monkeypatch.setenv("BACKPLANE_URL", "")
+    get_settings.cache_clear()
+    with respx.mock(assert_all_called=False) as mock_router:
+        _mock_oidc_metadata(mock_router)
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get("/ui/auth/login")
+    assert response.status_code == 503

@@ -328,12 +328,19 @@ def _resource_indicator(settings: Settings) -> str:
     audiences keeps an MCP-bound token from being accepted on a
     ``/api/v1/*`` request and vice versa.
 
-    Falls back to an empty string when :attr:`Settings.backplane_url`
-    is unset; authlib forwards the parameter verbatim and Keycloak
-    silently ignores an empty value.
+    Fails closed when :attr:`Settings.backplane_url` is empty: an
+    empty ``resource=`` is forwarded by authlib verbatim and Keycloak
+    silently ignores it, so the audience binding the chassis depends
+    on would just not exist with no operator-visible signal. Raising
+    here surfaces an operator-facing 503 via the route handlers'
+    existing :class:`OAuthFlowConfigurationError` catch instead.
     """
     base = settings.backplane_url.rstrip("/")
-    return f"{base}/api" if base else ""
+    if not base:
+        raise OAuthFlowConfigurationError(
+            "backplane_url_unset_cannot_derive_resource_indicator",
+        )
+    return f"{base}/api"
 
 
 async def build_authorization_request(

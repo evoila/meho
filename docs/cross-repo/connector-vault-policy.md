@@ -327,6 +327,9 @@ v0.x — see the carve-out in
   (role/mount from `vault_oidc_role` / `vault_oidc_mount_path`)
 - Connector secret-ref convention (k8s `kubeconfig` field):
   [`kubernetes-onboarding.md`](./kubernetes-onboarding.md)
+- First connector wired against this runbook (vSphere `{username,password}`
+  read, rubric State 2): [`vmware-rest-onboarding.md`](./vmware-rest-onboarding.md)
+  (G3.9-T3 #942)
 - Vault — [ACL policy templating](https://developer.hashicorp.com/vault/docs/concepts/policies)
 - Vault — [JWT/OIDC auth method](https://developer.hashicorp.com/vault/docs/auth/jwt)
 - Vault — [Audit devices](https://developer.hashicorp.com/vault/docs/audit)

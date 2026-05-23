@@ -240,13 +240,14 @@ def test_no_separate_list_edges_tool_registered() -> None:
 
 
 def test_query_topology_input_schema_includes_edges_facet() -> None:
-    """The kind enum widened to include 'edges' / 'timeline' / 'history'.
+    """The kind enum widened to include 'edges' / 'timeline' / 'diff' / 'history'.
 
     G9.2-T7 (#598) added ``edges``; G9.3-T5 (#861) added ``timeline``
-    (no required field); G9.3-T3 (#859) added ``history`` (requires
-    ``target`` -- the anchor node name). ``edges`` and ``timeline``
-    have no conditional required clause; every filter on those two
-    facets is optional.
+    (no required field); G9.3-T4 (#860) added ``diff`` (requires both
+    timestamps ``ts1`` + ``ts2``); G9.3-T3 (#859) added ``history``
+    (requires ``target`` -- the anchor node name). ``edges`` and
+    ``timeline`` have no conditional required clause; every filter on
+    those two facets is optional.
     """
     entry = get_tool("query_topology")
     assert entry is not None
@@ -258,16 +259,18 @@ def test_query_topology_input_schema_includes_edges_facet() -> None:
         "path",
         "edges",
         "timeline",
+        "diff",
         "history",
     ]
-    # `history` requires `target`; `edges` and `timeline` have no
-    # required field. The other three branches stay as-is. The schema
-    # also carries per-kind ``limit.maximum`` tightening clauses for
-    # `edges` and `timeline` (intersecting the base permissive ceiling
-    # so MCP callers can't smuggle an over-cap value past the schema
-    # and trip the substrate's ``ValueError``); those clauses don't
-    # carry a ``required`` key, so the ``required``-only dict below
-    # skips them via ``.get`` rather than throwing on missing keys.
+    # `diff` requires `ts1` + `ts2`; `history` requires `target`;
+    # `edges` and `timeline` have no required field. The other three
+    # branches stay as-is. The schema also carries per-kind
+    # ``limit.maximum`` tightening clauses for `edges` and `timeline`
+    # (intersecting the base permissive ceiling so MCP callers can't
+    # smuggle an over-cap value past the schema and trip the
+    # substrate's ``ValueError``); those clauses don't carry a
+    # ``required`` key, so the ``required``-only dict below skips them
+    # via ``.get`` rather than throwing on missing keys.
     by_kind = {
         c["if"]["properties"]["kind"]["const"]: c["then"]["required"]
         for c in schema["allOf"]
@@ -275,6 +278,7 @@ def test_query_topology_input_schema_includes_edges_facet() -> None:
     }
     assert "edges" not in by_kind
     assert "timeline" not in by_kind
+    assert sorted(by_kind["diff"]) == ["ts1", "ts2"]
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     assert by_kind["history"] == ["target"]

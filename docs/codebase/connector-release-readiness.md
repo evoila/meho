@@ -137,8 +137,9 @@ flow is the only auth_model; loader is live; consumer confirmed
 | `k8s-1.x` | 1 | [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py#L86) — `NotImplementedError` | ❌ (mock loader in test only) |
 | `vmware-rest-9.0` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L116) — live operator-context Vault read (G3.9-T3 [#942](https://github.com/evoila/meho/issues/942)) | ✅ (`shared_service_account`) |
 | `vcf-automation-9.0` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vcf_automation/session.py) — live operator-context Vault read via the shared [`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py) helper; `operator` threaded through the bespoke dual-plane auth (G3.10-T3 [#947](https://github.com/evoila/meho/issues/947)) | ✅ (`shared_service_account`) |
-| `sddc-manager-9.0` | 0.5 | Class-side registered, no ops yet, loader stubbed | ❌ |
-| `harbor-2.x` | 0.5 | Class-side registered, no ops yet, loader stubbed | ❌ |
+| `nsx-4.2` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/nsx/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
+| `sddc-manager-9.0` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/sddc_manager/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
+| `harbor-2.x` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/harbor/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
 | `kubernetes-asyncio-1.x` | 1 (shadow) | Same as `k8s-1.x` | ❌ |
 
 State 0.5 = `register_connector_v2` called but no ops registered yet.

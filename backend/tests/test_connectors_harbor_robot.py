@@ -10,10 +10,11 @@ Covers:
 * ``redact_payload("credential_mint", ...)`` — aggregate-only, no secret.
 * No regression to ``credential_read`` classification for existing vault ops.
 
-Auth: HTTP Basic (shared service account) — handlers pass ``raw_jwt=""``
-to :meth:`HarborConnector.auth_headers`. Per-target credentials are
-injected via the ``credentials_loader`` seam so the Vault stub is never
-reached.
+Auth: HTTP Basic (shared service account) — handlers pass a synthesised
+system :class:`Operator` to :meth:`HarborConnector.auth_headers` (the
+SHARED_SERVICE_ACCOUNT mode ignores the operator identity). Per-target
+credentials are injected via the ``credentials_loader`` seam so the Vault
+stub is never reached.
 """
 
 from __future__ import annotations

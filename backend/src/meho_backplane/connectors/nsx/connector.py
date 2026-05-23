@@ -90,6 +90,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx.session import (
     NsxSessionLoader,
@@ -181,14 +183,15 @@ class NsxConnector(HttpConnector):
             session_loader if session_loader is not None else load_session_credentials_from_vault
         )
 
-    async def auth_headers(self, target: NsxTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: NsxTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"X-XSRF-TOKEN": <token>}`` for the request.
 
         Lazily establishes the session on first call against *target*;
-        subsequent calls reuse the cached token. ``raw_jwt`` is accepted
-        for ABC-signature compatibility but unused --
+        subsequent calls reuse the cached token. ``operator`` is accepted
+        for the shared HTTP auth surface (G3.9-T1) but unused --
         :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
         Vault-sourced service account, not the operator's OIDC token.
+        Threading the operator into NSX's credential loader is #G3.10.
 
         The JSESSIONID cookie that pairs with this XSRF token lives in
         the per-target client's cookie jar
@@ -199,7 +202,7 @@ class NsxConnector(HttpConnector):
         requested mode in the message) if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -298,7 +301,7 @@ class NsxConnector(HttpConnector):
         target: NsxTargetLike,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """GET *path* with single 401 -> re-login -> retry-once recovery.
@@ -316,13 +319,13 @@ class NsxConnector(HttpConnector):
         retry loop.
         """
         try:
-            return await self._get_json(target, path, raw_jwt=raw_jwt, params=params)
+            return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 401:
                 raise
             await self._invalidate_session(target)
         try:
-            return await self._get_json(target, path, raw_jwt=raw_jwt, params=params)
+            return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 raise RuntimeError(
@@ -350,7 +353,9 @@ class NsxConnector(HttpConnector):
         """
         probed_at = datetime.now(UTC)
         try:
-            payload = await self._get_json_with_session_retry(target, "/api/v1/node", raw_jwt="")
+            payload = await self._get_json_with_session_retry(
+                target, "/api/v1/node", operator=synthesise_system_operator()
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",

@@ -3398,6 +3398,193 @@
         }
       }
     },
+    "/ui/auth/login": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Login",
+        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Validated\nvia :func:`_safe_return_to` to block open-redirect abuse.",
+        "operationId": "ui_auth_login_ui_auth_login_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/auth/callback": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Callback",
+        "description": "Finish the OAuth round-trip, create the session, set the cookie.",
+        "operationId": "ui_auth_callback_ui_auth_callback_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/auth/logout": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Logout",
+        "description": "Revoke the session row, clear the cookie, 302 to the end-session URL.",
+        "operationId": "ui_auth_logout_ui_auth_logout_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Ui Dashboard",
+        "description": "Render ``GET /ui/`` for the authenticated operator.\n\nPer acceptance criterion 1 on #866: returns 200 with\n``<title>MEHO Operator Console`` plus the 3x2 grid + sidebar\nlinks to all five surfaces (the sidebar is inherited from\n``base.html``).\n\nThe handler also mints + sets the CSRF cookie so any subsequent\nHTMX ``hx-post`` / ``hx-delete`` from this page passes the\ndouble-submit check.",
+        "operationId": "ui_dashboard_ui__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/broadcast": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Broadcast",
+        "operationId": "ui_stub_broadcast_ui_broadcast_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/knowledge": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Knowledge",
+        "operationId": "ui_stub_knowledge_ui_knowledge_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Topology",
+        "operationId": "ui_stub_topology_ui_topology_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Connectors",
+        "operationId": "ui_stub_connectors_ui_connectors_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Memory",
+        "operationId": "ui_stub_memory_ui_memory_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",

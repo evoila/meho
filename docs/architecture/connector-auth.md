@@ -148,7 +148,10 @@ credential-read leaf of the chain.
 - A **deploy-time prerequisite** is created: the Vault `meho-mcp` role's policy
   must grant operators read on their target secret paths (templated policy), and
   the operator's Keycloak→Vault Identity entity must exist. This is an operator
-  onboarding/runbook item, not code — call it out in the first Initiative.
+  onboarding/runbook item, not code — documented in the deploy runbook
+  [`docs/cross-repo/connector-vault-policy.md`](../cross-repo/connector-vault-policy.md)
+  (templated ACL policy recipe + Keycloak→Vault identity prerequisite +
+  verification).
 
 ## Open question for the human (approval gate)
 

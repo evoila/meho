@@ -68,8 +68,42 @@ def static_dist_dir() -> Path:
       alongside ``uvicorn --reload``.
 
     The directory may not exist on first ``uvicorn`` start in a fresh
-    clone; T5 #866's startup hook surfaces the operator-facing remediation
-    (``run tailwindcss once``). For chassis-only use (this Task) the
-    directory is constructed but unused.
+    clone; T5 (#866) calls :func:`ensure_static_dist_dir` from the
+    FastAPI lifespan startup so the :class:`StaticFiles` mount does
+    not crash on construction.
     """
     return _UI_PACKAGE_ROOT / "static" / "dist"
+
+
+def static_root_dir() -> Path:
+    """Return the absolute path of the ``static/`` directory tree.
+
+    The single mount point T5 (#866) registers at ``/ui/static`` covers
+    *both* the vendored source tree (``static/src/vendor/*.js``) and
+    the compiled Tailwind output (``static/dist/tailwind.css``). One
+    mount keeps the URL shape ``/ui/static/{src,dist}/...`` consistent
+    with the references the chassis ``base.html`` already emits, while
+    avoiding a second :class:`StaticFiles` instance (each mount carries
+    its own ``check_dir`` constructor cost).
+    """
+    return _UI_PACKAGE_ROOT / "static"
+
+
+def ensure_static_dist_dir() -> Path:
+    """Create the ``static/dist/`` directory if missing, return its path.
+
+    Called from the FastAPI lifespan startup so the chassis
+    :class:`~starlette.staticfiles.StaticFiles` mount can subtree the
+    ``static/`` parent on a fresh clone where ``tailwindcss --watch``
+    has not yet materialised the directory. The mount succeeds; a
+    request for ``/ui/static/dist/tailwind.css`` returns 404 until the
+    Tailwind build writes the file, which is the documented behaviour
+    in ``docs/codebase/ui.md`` -- a missing compiled stylesheet is an
+    operator-facing remediation, not a chassis crash.
+
+    Idempotent: ``mkdir(parents=True, exist_ok=True)`` so repeat lifespan
+    starts (a uvicorn reload cycle) are no-ops.
+    """
+    dist = static_dist_dir()
+    dist.mkdir(parents=True, exist_ok=True)
+    return dist

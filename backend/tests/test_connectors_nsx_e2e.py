@@ -449,7 +449,7 @@ async def test_nsx_e2e_401_retry_via_connector_method(
     result = await bundle.connector_instance._get_json_with_session_retry(
         bundle.db_target,
         "/api/v1/node",
-        raw_jwt="",
+        operator=_OPERATOR,
     )
 
     assert result.get("node_version") == NSX_VERSION, (

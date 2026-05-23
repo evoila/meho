@@ -84,7 +84,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
@@ -103,6 +103,9 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+
+if TYPE_CHECKING:
+    from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = ["GcloudConnector"]
 
@@ -669,7 +672,9 @@ class GcloudConnector(HttpConnector):
     # ------------------------------------------------------------------
 
     @classmethod
-    async def register_gcloud_typed_operations(cls) -> None:
+    async def register_gcloud_typed_operations(
+        cls, *, embedding_service: EmbeddingService | None = None
+    ) -> None:
         """Register all G3.7-T5 gcloud typed ops into ``endpoint_descriptor``.
 
         Called from the application lifespan after the registry has
@@ -683,7 +688,18 @@ class GcloudConnector(HttpConnector):
 
         Idempotent across pod restarts — mirrors the
         :meth:`Bind9Connector.register_operations` shape.
+
+        The keyword-only ``embedding_service`` is required for
+        runner-compatibility:
+        :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+        passes the process-wide :class:`EmbeddingService` (or a chassis-test
+        stub) to every queued registrar via ``registrar(embedding_service=...)``,
+        so a registrar that does not accept the kwarg crashes the lifespan with
+        :class:`TypeError`. It is accepted-and-discarded here (matching the
+        bind9 / k8s siblings) because :func:`register_typed_operation` resolves
+        the embedding service via its process-wide singleton fallback.
         """
+        del embedding_service  # see docstring — kwarg accepted for runner-compatibility
         from meho_backplane.connectors.gcloud.ops import GCLOUD_OPS
         from meho_backplane.operations.typed_register import register_typed_operation
 

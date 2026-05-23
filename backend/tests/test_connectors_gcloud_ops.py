@@ -1003,6 +1003,32 @@ async def test_register_gcloud_typed_operations_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_register_gcloud_typed_operations_accepts_embedding_service_kwarg() -> None:
+    """The registrar must accept the ``embedding_service`` kwarg.
+
+    Regression: ``run_typed_op_registrars`` (the lifespan path) calls every
+    queued registrar as ``registrar(embedding_service=...)``. A registrar that
+    omits the keyword crashes the whole app lifespan with ``TypeError`` — which
+    the direct-call tests above never exercise. This pins the runner contract.
+    """
+    mock_register = AsyncMock()
+    with (
+        patch(
+            "meho_backplane.connectors.gcloud.connector.register_typed_operation",
+            mock_register,
+            create=True,
+        ),
+        patch(
+            "meho_backplane.operations.typed_register.register_typed_operation",
+            mock_register,
+        ),
+    ):
+        # Mirrors run_typed_op_registrars: the kwarg is always supplied.
+        await GcloudConnector.register_gcloud_typed_operations(embedding_service=None)
+    assert mock_register.call_count == 8
+
+
+@pytest.mark.asyncio
 async def test_register_gcloud_typed_operations_raises_on_missing_handler() -> None:
     """register_gcloud_typed_operations raises AttributeError for unknown handler_attr."""
     from meho_backplane.connectors.gcloud.ops import GcloudOp

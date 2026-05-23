@@ -7,7 +7,7 @@ dispatches GCP REST operations under the
 `(product="gcloud", version="1.0", impl_id="gcloud-rest")` registry triple.
 G3.7-T4 (#845) ships the skeleton — ADC+impersonation auth, SA-JSON-key
 refusal, fingerprint, probe, and the G0.6 dispatch shim. G3.7-T5 (#848)
-ships the ~7 read-only typed ops (cloudresourcemanager, compute, iam,
+ships the 8 read-only typed ops (cloudresourcemanager, compute, iam,
 serviceusage). G3.7-T6 (#851) adds the `meho gcloud ...` CLI verbs,
 gated integration tests, and `docs/cross-repo/gcloud-onboarding.md`.
 

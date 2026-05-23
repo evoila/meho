@@ -31,10 +31,17 @@ import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.gcloud import GcloudConnector, GcloudTargetLike
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import AuthModel
+
+# System operator used to drive ``auth_headers`` in unit tests. The mock
+# credentials loaders ignore it; it satisfies the operator-context signature
+# (the operator authenticates the Vault read, not the GCP request).
+_OPERATOR: Operator = synthesise_system_operator()
 
 # ---------------------------------------------------------------------------
 # Registry hygiene
@@ -145,12 +152,12 @@ def _make_adc_loader(
     return _adc_loader, _patch_impersonated, mock_impersonated
 
 
-async def _empty_loader(_target: GcloudTargetLike) -> dict[str, Any]:
+async def _empty_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
     """Return an empty Vault record (no SA key fields — compliant)."""
     return {}
 
 
-async def _sa_key_loader(_target: GcloudTargetLike) -> dict[str, Any]:
+async def _sa_key_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
     """Return a Vault record containing SA-JSON-key fields — must be refused."""
     return {
         "type": "service_account",
@@ -229,7 +236,7 @@ def test_default_credentials_loader_raises_until_g03_lands() -> None:
 
     async def _check() -> None:
         with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A)
+            await load_credentials_from_vault(_TARGET_A, _OPERATOR)
 
     asyncio.run(_check())
 
@@ -255,7 +262,7 @@ async def test_auth_headers_rejects_non_impersonation_modes(auth_model: str) -> 
     )
     connector = GcloudConnector(credentials_loader=_empty_loader)
     with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, raw_jwt="")
+        await connector.auth_headers(target, operator=_OPERATOR)
     assert "gcloud-per-user" in str(exc_info.value)
     assert auth_model in str(exc_info.value)
     await connector.aclose()
@@ -279,7 +286,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         "google.auth.impersonated_credentials.Credentials",
         side_effect=patch_fn,
     ):
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, operator=_OPERATOR)
 
     assert headers["Authorization"].startswith("Bearer ")
     await connector.aclose()
@@ -302,7 +309,7 @@ async def test_auth_headers_accepts_impersonation_enum_member() -> None:
         "google.auth.impersonated_credentials.Credentials",
         side_effect=patch_fn,
     ):
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, operator=_OPERATOR)
     assert headers["Authorization"].startswith("Bearer ")
     await connector.aclose()
 
@@ -317,7 +324,7 @@ async def test_auth_headers_refuses_sa_json_key_in_secret_ref() -> None:
     """SA-JSON-key fields in the Vault secret → ValueError naming target + fields."""
     connector = GcloudConnector(credentials_loader=_sa_key_loader)
     with pytest.raises(ValueError) as exc_info:
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
     msg = str(exc_info.value)
     assert "gcloud-a" in msg
     assert "private_key" in msg
@@ -332,7 +339,7 @@ async def test_auth_headers_sa_key_refusal_does_not_leak_token() -> None:
     """After a refusal, the token cache stays empty — no partial state."""
     connector = GcloudConnector(credentials_loader=_sa_key_loader)
     with contextlib.suppress(ValueError):
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
     assert not connector._token_cache
     assert not connector._creds_cache
     await connector.aclose()
@@ -353,7 +360,7 @@ async def test_auth_headers_applies_bearer_token_from_impersonation() -> None:
         "google.auth.impersonated_credentials.Credentials",
         side_effect=patch_fn,
     ):
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        headers = await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
 
     assert headers == {"Authorization": "Bearer tok-xyz"}
     await connector.aclose()
@@ -376,8 +383,8 @@ async def test_auth_headers_caches_token_across_calls() -> None:
         "google.auth.impersonated_credentials.Credentials",
         return_value=mock_creds,
     ):
-        h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        h1 = await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
+        h2 = await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
 
     assert h1 == h2
     assert fetch_count == 1  # ADC only called once
@@ -425,8 +432,8 @@ async def test_per_target_token_isolation() -> None:
         "google.auth.impersonated_credentials.Credentials",
         side_effect=_patch_impersonated,
     ):
-        h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+        h_a = await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
+        h_b = await connector.auth_headers(_TARGET_B, operator=_OPERATOR)
 
     assert h_a["Authorization"] == f"Bearer {tokens['gcloud-a']}"
     assert h_b["Authorization"] == f"Bearer {tokens['gcloud-b']}"
@@ -463,7 +470,7 @@ async def test_401_triggers_token_refresh_and_retry() -> None:
         respx.mock() as mock,
     ):
         # Pre-populate the token cache so the first call uses "initial-token"
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
         assert connector._token_cache.get("gcloud-a") == "initial-token"
 
         # First call: 401; second call: 200 (after token refresh)
@@ -684,7 +691,7 @@ async def test_aclose_clears_token_and_creds_cache() -> None:
         "google.auth.impersonated_credentials.Credentials",
         return_value=mock_creds,
     ):
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_OPERATOR)
 
     assert "gcloud-a" in connector._token_cache
     await connector.aclose()

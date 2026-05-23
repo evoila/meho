@@ -45,6 +45,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, runtime_checkable
 
+from meho_backplane.auth.operator import Operator
+
 __all__ = [
     "GcloudCredentialsLoader",
     "GcloudTargetLike",
@@ -88,8 +90,13 @@ class GcloudTargetLike(Protocol):
     auth_model: str | None
 
 
-GcloudCredentialsLoader = Callable[[GcloudTargetLike], Awaitable[dict[str, Any]]]
+GcloudCredentialsLoader = Callable[[GcloudTargetLike, Operator], Awaitable[dict[str, Any]]]
 """Async callable resolving a target to its Vault-stored credential record.
+
+The ``operator`` authenticates the Vault read under the operator's identity
+(``vault_client_for_operator(operator)`` once the live loader lands, G3.10);
+it is NOT forwarded to GCP — IMPERSONATION auth drives GCP calls through the
+google-auth chain, not the operator's OIDC JWT.
 
 The record is validated for SA-JSON-key fields before use. Expected shape for
 a compliant record: ``{}`` (empty — all auth is ADC-derived) or at most
@@ -107,8 +114,13 @@ def _contains_sa_key_fields(record: dict[str, Any]) -> bool:
 
 async def load_credentials_from_vault(
     target: GcloudTargetLike,
+    operator: Operator,
 ) -> dict[str, Any]:
     """Default credential loader — Vault read by ``target.secret_ref``.
+
+    The ``operator`` carries the identity the live loader will read Vault under
+    (G3.10); it is part of the stable signature so callers do not change when
+    the read is wired.
 
     Deliberate stub: the operator-context per-target Vault credential read is
     not yet wired for the GCloud connector. Raising :exc:`NotImplementedError`
@@ -121,7 +133,8 @@ async def load_credentials_from_vault(
     raise NotImplementedError(
         "load_credentials_from_vault is a deliberate stub: the operator-context "
         "per-target Vault credential read is not yet wired for the GCloud "
-        f"connector; target={target.name!r} secret_ref={target.secret_ref!r}. "
+        f"connector; target={target.name!r} secret_ref={target.secret_ref!r} "
+        f"operator={operator.sub!r}. "
         "Workaround: inject a custom credentials_loader on GcloudConnector. "
         "Tracked under open Goal #214 (Connector parity): "
         "https://github.com/evoila/meho/issues/214"

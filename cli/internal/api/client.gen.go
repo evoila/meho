@@ -1601,6 +1601,63 @@ type TopologyEdgeEndpoint struct {
 	Name string             `json:"name"`
 }
 
+// TopologyHistoryEntry One row of the per-resource history walk (G9.3-T3).
+//
+// Task #859 ships the operator surface “meho topology history
+// <node>“ -- "what changed for THIS resource?" The differentiator
+// from :class:`TopologyTimelineEntry` (G9.3-T5) is that history
+// carries the full “snapshot“ JSONB (“{before, after}“) per row
+// rather than a one-line summary -- the forensic shape for “--json“
+// reconstruction. Field-to-column mapping otherwise matches
+// timeline:
+//
+//   - “valid_from“ -- “*_history.valid_from“.
+//   - “history_id“ -- “*_history.history_id“.
+//   - “source“ -- “"node"“ for :class:`GraphNodeHistory`, “"edge"“
+//     for :class:`GraphEdgeHistory` (only “"edge"“ rows ever appear
+//     when the caller passed “include_edges=True“).
+//   - “change_kind“ -- one of “"created"“ / “"updated"“ /
+//     “"removed"“ per :class:`GraphHistoryChangeKind`.
+//   - “resource_id“ -- “node_id“ for node-side rows, “edge_id“
+//     for edge-side rows. “None“ only after the referenced live row
+//     has been hard-deleted (“ON DELETE SET NULL“).
+//   - “snapshot“ -- the full “{before, after}“ JSONB. “None“
+//     only for legacy / mid-rollout rows that pre-date the
+//     diff-on-write hook; every hook-emitted row populates it.
+//   - “audit_id“ -- soft-FK to the “audit_log.id“ of the
+//     operation that caused the mutation.
+type TopologyHistoryEntry struct {
+	AuditId    *openapi_types.UUID     `json:"audit_id"`
+	ChangeKind string                  `json:"change_kind"`
+	HistoryId  int                     `json:"history_id"`
+	ResourceId *openapi_types.UUID     `json:"resource_id"`
+	Snapshot   *map[string]interface{} `json:"snapshot"`
+	Source     string                  `json:"source"`
+	ValidFrom  time.Time               `json:"valid_from"`
+}
+
+// TopologyHistoryResult The full per-resource history walk plus the resolved anchor.
+//
+// Unlike :class:`TopologyTimelineResult` (which is cursor-paginated),
+// the per-resource walk returns one page bounded by the substrate's
+// “_MAX_HISTORY_ROWS“ cap -- per-resource history is bounded by
+// the retention window (default 90 days) and the operator typically
+// wants the complete chronology in one response. No “next_cursor“;
+// a caller that overflows the cap narrows “since“ / “until“.
+//
+// “anchor_node_id“ is the resolved :class:`GraphNode.id` of the
+// anchor. Echoing it lets the CLI / MCP fronts surface "I resolved
+// your name X to node Y" in the human-readable header without a
+// second resolver round trip.
+//
+// “include_edges“ echoes the call-site flag so a consumer can
+// branch on whether edge rows are expected to appear in “rows“.
+type TopologyHistoryResult struct {
+	AnchorNodeId openapi_types.UUID     `json:"anchor_node_id"`
+	IncludeEdges bool                   `json:"include_edges"`
+	Rows         []TopologyHistoryEntry `json:"rows"`
+}
+
 // TopologyNode One “graph_node“ row reached during a traversal.
 //
 // “depth“ is the distance from the query root: the root itself is
@@ -2282,6 +2339,16 @@ type UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// HistoryRouteApiV1TopologyHistoryNameGetParams defines parameters for HistoryRouteApiV1TopologyHistoryNameGet.
+type HistoryRouteApiV1TopologyHistoryNameGetParams struct {
+	Kind          *string    `form:"kind,omitempty" json:"kind,omitempty"`
+	Since         *time.Time `form:"since,omitempty" json:"since,omitempty"`
+	Until         *time.Time `form:"until,omitempty" json:"until,omitempty"`
+	IncludeEdges  *bool      `form:"include_edges,omitempty" json:"include_edges,omitempty"`
+	Limit         *int       `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string    `json:"authorization,omitempty"`
+}
+
 // PathApiV1TopologyPathGetParams defines parameters for PathApiV1TopologyPathGet.
 type PathApiV1TopologyPathGetParams struct {
 	From          string  `form:"from" json:"from"`
@@ -2694,6 +2761,9 @@ type ClientInterface interface {
 
 	// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete request
 	UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// HistoryRouteApiV1TopologyHistoryNameGet request
+	HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PathApiV1TopologyPathGet request
 	PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3541,6 +3611,18 @@ func (c *Client) BulkImportEdgesRouteApiV1TopologyEdgesBulkPost(ctx context.Cont
 
 func (c *Client) UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteRequest(c.Server, edgeId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewHistoryRouteApiV1TopologyHistoryNameGetRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -7050,6 +7132,141 @@ func NewUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteRequest(server string, 
 	return req, nil
 }
 
+// NewHistoryRouteApiV1TopologyHistoryNameGetRequest generates requests for HistoryRouteApiV1TopologyHistoryNameGet
+func NewHistoryRouteApiV1TopologyHistoryNameGetRequest(server string, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/history/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeEdges != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_edges", runtime.ParamLocationQuery, *params.IncludeEdges); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPathApiV1TopologyPathGetRequest generates requests for PathApiV1TopologyPathGet
 func NewPathApiV1TopologyPathGetRequest(server string, params *PathApiV1TopologyPathGetParams) (*http.Request, error) {
 	var err error
@@ -8058,6 +8275,9 @@ type ClientWithResponsesInterface interface {
 
 	// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse request
 	UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error)
+
+	// HistoryRouteApiV1TopologyHistoryNameGetWithResponse request
+	HistoryRouteApiV1TopologyHistoryNameGetWithResponse(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error)
 
 	// PathApiV1TopologyPathGetWithResponse request
 	PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error)
@@ -9250,6 +9470,45 @@ func (r UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse) StatusCode() 
 	return 0
 }
 
+type HistoryRouteApiV1TopologyHistoryNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TopologyHistoryResult
+	JSON404      *struct {
+		Detail struct {
+			Error HistoryRouteApiV1TopologyHistoryNameGet404DetailError `json:"error"`
+			Kind  *string                                               `json:"kind,omitempty"`
+			Name  string                                                `json:"name"`
+		} `json:"detail"`
+	}
+	JSON409 *struct {
+		Detail struct {
+			Error HistoryRouteApiV1TopologyHistoryNameGet409DetailError `json:"error"`
+			Kinds []string                                              `json:"kinds"`
+			Name  string                                                `json:"name"`
+		} `json:"detail"`
+	}
+	JSON422 *HTTPValidationError
+}
+type HistoryRouteApiV1TopologyHistoryNameGet404DetailError string
+type HistoryRouteApiV1TopologyHistoryNameGet409DetailError string
+
+// Status returns HTTPResponse.Status
+func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PathApiV1TopologyPathGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -10205,6 +10464,15 @@ func (c *ClientWithResponses) UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteW
 		return nil, err
 	}
 	return ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp)
+}
+
+// HistoryRouteApiV1TopologyHistoryNameGetWithResponse request returning *HistoryRouteApiV1TopologyHistoryNameGetResponse
+func (c *ClientWithResponses) HistoryRouteApiV1TopologyHistoryNameGetWithResponse(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error) {
+	rsp, err := c.HistoryRouteApiV1TopologyHistoryNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp)
 }
 
 // PathApiV1TopologyPathGetWithResponse request returning *PathApiV1TopologyPathGetResponse
@@ -11921,6 +12189,65 @@ func ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp *http.Re
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseHistoryRouteApiV1TopologyHistoryNameGetResponse parses an HTTP response from a HistoryRouteApiV1TopologyHistoryNameGetWithResponse call
+func ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp *http.Response) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &HistoryRouteApiV1TopologyHistoryNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TopologyHistoryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest struct {
+			Detail struct {
+				Error HistoryRouteApiV1TopologyHistoryNameGet404DetailError `json:"error"`
+				Kind  *string                                               `json:"kind,omitempty"`
+				Name  string                                                `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				Error HistoryRouteApiV1TopologyHistoryNameGet409DetailError `json:"error"`
+				Kinds []string                                              `json:"kinds"`
+				Name  string                                                `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

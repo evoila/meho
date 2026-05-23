@@ -109,6 +109,7 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_history,
     query_timeline,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
@@ -148,6 +149,16 @@ _EDGES_LIMIT_MAX: Final[int] = 1000
 _TIMELINE_LIMIT_DEFAULT: Final[int] = 50
 _TIMELINE_LIMIT_MAX: Final[int] = 1000
 
+#: ``history`` facet ceiling. Mirrors the T3 substrate cap
+#: (``query._MAX_HISTORY_ROWS`` = 5000) and the REST route cap
+#: (``api/v1/topology._HISTORY_LIMIT_MAX``) so the four fronts (REST /
+#: CLI / MCP / substrate) clamp the per-resource walk identically.
+#: Per-resource history is bounded by retention, so the default IS the
+#: ceiling -- a tighter MCP default would silently truncate the walk
+#: and operators would think they see the full history when they
+#: don't (same reasoning T3 used for the REST and CLI defaults).
+_HISTORY_LIMIT_MAX: Final[int] = 5000
+
 #: Canonical ``GraphEdgeKind`` values, materialised once at module load
 #: so the inputSchema enum + the kind_filter description stay in lock-step
 #: with :class:`~meho_backplane.db.models.GraphEdgeKind` without
@@ -161,7 +172,14 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "kind": {
             "type": "string",
-            "enum": ["dependents", "dependencies", "path", "edges", "timeline"],
+            "enum": [
+                "dependents",
+                "dependencies",
+                "path",
+                "edges",
+                "timeline",
+                "history",
+            ],
             "description": (
                 "Which read shape to run. `dependents` = reverse closure "
                 "(what depends on `target`); `dependencies` = forward "
@@ -174,7 +192,12 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "the G9.3 `graph_node_history` + `graph_edge_history` "
                 "tables, cursor-paginated -- 'what's been happening in "
                 "the graph in the last hour?' without rooting at a "
-                "specific resource."
+                "specific resource; `history` = per-resource history "
+                "walk for one named node (and optionally its incident "
+                "edges via `include_edges=true`) -- 'when did THIS "
+                "resource start depending on X, and what changed?' -- "
+                "carries the full `snapshot.before` / `snapshot.after` "
+                "JSONB per row."
             ),
         },
         "target": {
@@ -250,19 +273,28 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
         "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": _EDGES_LIMIT_MAX,
+            # Permissive base ceiling matches the loosest substrate cap
+            # (``query_history`` accepts 1..``_HISTORY_LIMIT_MAX``); the
+            # per-facet ``allOf`` clauses below tighten this to the
+            # ``edges`` (1000) and ``timeline`` (1000) substrate caps so
+            # MCP callers can't smuggle an over-cap value past the
+            # schema and trip the substrate's ``ValueError`` at runtime.
+            "maximum": _HISTORY_LIMIT_MAX,
             # No schema-level ``default`` -- the effective default
             # varies by ``kind`` (``edges`` -> ``_EDGES_LIMIT_DEFAULT``,
-            # ``timeline`` -> ``_TIMELINE_LIMIT_DEFAULT``). A single
-            # default in the schema would mislead schema-driven MCP
-            # clients into pre-populating the edges default on every
-            # call, over-requesting timeline pages.
+            # ``timeline`` -> ``_TIMELINE_LIMIT_DEFAULT``,
+            # ``history`` -> ``_HISTORY_LIMIT_MAX``). A single default
+            # in the schema would mislead schema-driven MCP clients
+            # into pre-populating the edges default on every call,
+            # over-requesting timeline / history pages.
             "description": (
                 f"Page size for paginated facets. `kind=edges` defaults "
-                f"to {_EDGES_LIMIT_DEFAULT}; `kind=timeline` defaults to "
-                f"{_TIMELINE_LIMIT_DEFAULT}. Shared ceiling "
-                f"{_EDGES_LIMIT_MAX}, matching the substrate "
-                "`list_edges` cap. Ignored for the closure kinds and "
+                f"to {_EDGES_LIMIT_DEFAULT} (ceiling {_EDGES_LIMIT_MAX}); "
+                f"`kind=timeline` defaults to {_TIMELINE_LIMIT_DEFAULT} "
+                f"(ceiling {_TIMELINE_LIMIT_MAX}); `kind=history` "
+                f"defaults to {_HISTORY_LIMIT_MAX} (also the ceiling -- "
+                "per-resource history is bounded by retention so the "
+                "default IS the cap). Ignored for the closure kinds and "
                 "`path`."
             ),
         },
@@ -349,6 +381,18 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
             ),
             "maxLength": 1024,
         },
+        "include_edges": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "For `kind=history` only: when `true`, also walk every "
+                "history row for edges incident to the anchor node "
+                "(joined via `edge_id IN (SELECT id FROM graph_edge "
+                "WHERE from_node_id = anchor OR to_node_id = "
+                "anchor)`). Default `false` -- the node-side history "
+                "is the common case. Ignored for the other kinds."
+            ),
+        },
     },
     "required": ["kind"],
     "additionalProperties": False,
@@ -369,6 +413,27 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
         {
             "if": {"properties": {"kind": {"const": "path"}}},
             "then": {"required": ["from_name", "to_name"]},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "history"}}},
+            "then": {"required": ["target"]},
+        },
+        # Per-facet ``limit`` ceilings. The base ``limit.maximum`` above
+        # is the loosest cap (5000 for ``history``); the ``edges`` and
+        # ``timeline`` substrates cap tighter (1000 each), so we
+        # intersect a stricter ``maximum`` for those kinds. JSON Schema
+        # 2020-12 ``allOf`` semantics: every applicable subschema must
+        # validate, so the effective ceiling for a given ``kind`` is
+        # ``min(base.maximum, then.maximum)``. Without this, an
+        # ``edges`` caller passing ``limit=1500`` would pass the schema
+        # but trip ``list_edges``'s ``ValueError`` at runtime.
+        {
+            "if": {"properties": {"kind": {"const": "edges"}}},
+            "then": {"properties": {"limit": {"maximum": _EDGES_LIMIT_MAX}}},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "timeline"}}},
+            "then": {"properties": {"limit": {"maximum": _TIMELINE_LIMIT_MAX}}},
         },
     ],
 }
@@ -416,7 +481,21 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "means more rows exist -- pass it back as `cursor` on the next "
     "call to walk forward. Returns "
     '`{kind: "timeline", rows: [TopologyTimelineEntry, ...], '
-    "next_cursor: <token|null>}`."
+    "next_cursor: <token|null>}`.\n\n"
+    "For `kind=history`: per-resource history walk for one named "
+    "node -- 'when did service-X start depending on database-Y, and "
+    "what changed each time?' → `query_topology {kind: history, "
+    "target: service-X, include_edges: true}`. Required: `target` "
+    "(the node name); optional: `node_kind` to disambiguate, `since` "
+    "/ `until` to bound the window, `include_edges=true` to also "
+    "walk every history row for edges incident to the anchor. "
+    "Carries the full `snapshot.before` / `snapshot.after` JSONB "
+    "per row (unlike `timeline`, which truncates to a one-line "
+    "summary) -- use for forensic 'what was the exact state before "
+    "this change?' questions. Unknown / cross-tenant target returns "
+    '-32602 `node_not_found`. Returns `{kind: "history", rows: '
+    "[TopologyHistoryEntry, ...], anchor_node_id: <uuid>, "
+    "include_edges: <bool>}`."
 )
 
 
@@ -463,6 +542,8 @@ async def _query_topology_handler(
             return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
         if kind == "timeline":
             return await _timeline_facet(operator, arguments)
+        if kind == "history":
+            return await _history_facet(operator, arguments)
         # kind == "path" — the enum + schema guarantee no other value.
         result = await find_path(
             operator,
@@ -473,6 +554,13 @@ async def _query_topology_handler(
             max_hops=int(arguments.get("max_hops", _MAX_HOPS_DEFAULT)),
         )
     except AmbiguousNodeError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+    except NodeNotFoundError as exc:
+        # ``kind=history`` resolves the anchor and surfaces a missing
+        # or cross-tenant name as :class:`NodeNotFoundError`; the
+        # closure / path verbs treat a missing name as an empty
+        # result (G9.1 contract) so they never raise this. The catch
+        # is keyed by the substrate, not by the dispatch branch.
         raise McpInvalidParamsError(str(exc)) from exc
     return {
         "kind": kind,
@@ -546,6 +634,71 @@ async def _timeline_facet(
     }
 
 
+async def _history_facet(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch the ``kind="history"`` facet to G9.3-T3's substrate.
+
+    Calls :func:`query_history` with the anchor name from ``target``
+    (reused for the agent-facing concept of "the resource I am
+    asking about") and the optional ``node_kind`` / ``since`` /
+    ``until`` / ``include_edges`` filters. Returns the full
+    :class:`TopologyHistoryResult` including the ``snapshot``
+    payload per row so the agent can reason about pre/post state --
+    this is the differentiator from ``kind=timeline``, which carries
+    only the one-line summary.
+
+    Failure-mode translation:
+
+    * :class:`NodeNotFoundError` (unknown / cross-tenant target) and
+      :class:`AmbiguousNodeError` (bare name resolves to multiple
+      kinds) bubble up to the outer ``try/except`` block which maps
+      both to JSON-RPC ``-32602`` -- the operator-actionable
+      input-problem shape the closure verbs use.
+
+    ``since`` / ``until`` are parsed as ISO-8601 absolute timestamps
+    (the same shape :func:`_timeline_facet` uses). The CLI front
+    resolves duration shorthand (``"24h"`` / ``"7d"``) to an
+    absolute string before crossing the wire.
+    """
+    target_name = arguments["target"]
+    since_str = arguments.get("since")
+    until_str = arguments.get("until")
+    since_dt: datetime | None = None
+    until_dt: datetime | None = None
+    if isinstance(since_str, str):
+        try:
+            since_dt = datetime.fromisoformat(since_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=history): 'since' is not ISO-8601: {since_str!r}",
+            ) from exc
+    if isinstance(until_str, str):
+        try:
+            until_dt = datetime.fromisoformat(until_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=history): 'until' is not ISO-8601: {until_str!r}",
+            ) from exc
+
+    result = await query_history(
+        operator,
+        target_name,
+        kind=arguments.get("node_kind"),
+        since=since_dt,
+        until=until_dt,
+        include_edges=bool(arguments.get("include_edges", False)),
+        limit=int(arguments.get("limit", _HISTORY_LIMIT_MAX)),
+    )
+    return {
+        "kind": "history",
+        "anchor_node_id": str(result.anchor_node_id),
+        "include_edges": result.include_edges,
+        "rows": [r.model_dump(mode="json") for r in result.rows],
+    }
+
+
 async def _list_edges_facet(
     operator: Operator,
     arguments: dict[str, Any],
@@ -596,6 +749,7 @@ register_mcp_tool(
                         "path",
                         "edges",
                         "timeline",
+                        "history",
                     ],
                 },
                 "nodes": {
@@ -627,10 +781,12 @@ register_mcp_tool(
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "Present for `kind=timeline`. TopologyTimelineEntry "
-                        "rows ordered (valid_from DESC, history_id DESC). "
-                        "See `meho_backplane.topology.schemas."
-                        "TopologyTimelineEntry`."
+                        "Present for `kind=timeline` (TopologyTimelineEntry "
+                        "rows, summary only) and `kind=history` "
+                        "(TopologyHistoryEntry rows, full snapshot.before/"
+                        "after payload). Both ordered (valid_from DESC, "
+                        "history_id DESC). See "
+                        "`meho_backplane.topology.schemas`."
                     ),
                 },
                 "next_cursor": {
@@ -639,6 +795,21 @@ register_mcp_tool(
                         "Present for `kind=timeline`. Opaque next-page "
                         "token, or null when the page is the end of the "
                         "matching set."
+                    ),
+                },
+                "anchor_node_id": {
+                    "type": "string",
+                    "description": (
+                        "Present for `kind=history`. The resolved "
+                        "`graph_node.id` of the anchor (UUID string)."
+                    ),
+                },
+                "include_edges": {
+                    "type": "boolean",
+                    "description": (
+                        "Present for `kind=history`. Echoes the call-"
+                        "site flag so a consumer can branch on whether "
+                        "edge rows are expected to appear in `rows`."
                     ),
                 },
             },

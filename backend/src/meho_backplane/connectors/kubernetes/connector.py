@@ -375,12 +375,12 @@ class KubernetesConnector(Connector):
         per-target Vault read under the operator's Identity entity).
         ``dispatch_typed`` passes ``operator`` here because the signature
         names it. The returned dict is intentionally flat -- no nested
-        ``extras`` -- because the dispatcher's
-        :class:`~meho_backplane.operations.reducer.PassThroughReducer`
-        forwards the value verbatim. Future reducers (real JSONFlux
-        reduction in a follow-on Initiative) flatten nested shapes
-        anyway; staying flat now means the v0.2 callers see the same
-        keys before and after the reducer swap.
+        ``extras`` -- so the dispatcher's default
+        :class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+        passes this scalar (non-set-shaped) payload through verbatim
+        into ``OperationResult.result`` with a ``None`` handle; only
+        set-shaped responses above the threshold are materialized into a
+        :class:`~meho_backplane.connectors.schemas.ResultHandle`.
         """
         del params  # declared in schema; the handler intentionally ignores them
         api_client = await self._get_api_client(target, operator)
@@ -657,9 +657,11 @@ class KubernetesConnector(Connector):
         Forwarding-through-execute (rather than calling
         ``CoreV1Api.list_namespaced_<kind>`` directly here) means the
         kind-specific ops' own dispatcher path -- parameter validation,
-        future reducer-driven handle creation, audit row, broadcast --
-        runs verbatim. The forwarding handler is structural plumbing, not
-        a semantic shortcut.
+        the default
+        :class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+        handle creation, audit row, broadcast -- runs verbatim. The
+        forwarding handler is structural plumbing, not a semantic
+        shortcut.
 
         ``operator`` is forwarded to :meth:`_get_api_client` (and to the
         sub-op forwarder); see :meth:`about` for the threading rationale.

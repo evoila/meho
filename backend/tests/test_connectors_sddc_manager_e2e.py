@@ -14,9 +14,10 @@ Covers all four acceptance criteria from Issue #618:
 (c) Audit rows: each dispatch inserts an ``AuditLog`` row carrying
     ``method='DISPATCH'``, a non-null ``target_id``, and a
     ``payload["params_hash"]`` key.
-(d) JSONFlux handle path: ``GET:/v1/hosts`` dispatched with a
-    ``ForceHandleReducer`` returns a populated ``OperationResult.handle``
-    with at least one ``sample_rows`` entry.
+(d) JSONFlux handle path: ``GET:/v1/hosts`` dispatched with the real
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    in force mode (``row_threshold=0``) returns a populated
+    ``OperationResult.handle`` with at least one ``sample_rows`` entry.
 
 Database: SQLite via the autouse ``_default_database_url`` conftest
 fixture (no ``pg_engine`` required). Runs in the ``meho-runners``
@@ -38,7 +39,6 @@ from sqlalchemy import select
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.connectors.sddc_manager import (
     SDDC_CONNECTOR_ID,
     SDDC_CORE_OPS,
@@ -51,6 +51,7 @@ from meho_backplane.db.models import AuditLog, Target
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._sddc_canary_fixtures import (
@@ -120,43 +121,6 @@ def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
     monkeypatch.setattr(audit_module, "publish_event", _capture)
     return events
-
-
-# ---------------------------------------------------------------------------
-# ForceHandleReducer (acceptance criterion d)
-# ---------------------------------------------------------------------------
-
-
-class _ForceHandleReducer:
-    """Test-only reducer that always wraps an SDDC Manager list payload in a ResultHandle."""
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        del schema, context
-        # SDDC Manager wraps lists in {"elements": [...]}
-        if isinstance(payload, dict) and "elements" in payload:
-            rows = payload["elements"]
-            total = len(rows) if isinstance(rows, list) else 1
-            sample: tuple[Any, ...] = tuple(rows[:5]) if isinstance(rows, list) and rows else ()
-        elif isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        else:
-            total = 1
-            sample = ()
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample or None,
-            ttl_seconds=3600,
-        )
-        return {"row_count": total, "sample": list(sample)}, handle
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +371,7 @@ async def test_sddc_e2e_dispatch_writes_audit_row(
 async def test_sddc_e2e_jsonflux_handle_populated_for_host_list(
     sddc_e2e_canary: _SddcE2EBundle,
 ) -> None:
-    """Host list dispatched with ForceHandleReducer returns a populated handle.
+    """Host list dispatched with the real JsonFluxReducer returns a populated handle.
 
     Exercises acceptance criterion (d): the JSONFlux dispatcher seam
     threads the reducer's :class:`ResultHandle` onto
@@ -425,7 +389,7 @@ async def test_sddc_e2e_jsonflux_handle_populated_for_host_list(
     """
     expected_rows = len(SDDC_CANARY_HOSTS["elements"])  # type: ignore[arg-type]
 
-    set_default_reducer(_ForceHandleReducer())
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         result_envelope = await call_operation(
             _OPERATOR,
@@ -445,7 +409,7 @@ async def test_sddc_e2e_jsonflux_handle_populated_for_host_list(
 
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        "Expected OperationResult.handle to be populated by _ForceHandleReducer; "
+        "Expected OperationResult.handle to be populated by JsonFluxReducer; "
         f"got handle=None on envelope={result_envelope!r}"
     )
 

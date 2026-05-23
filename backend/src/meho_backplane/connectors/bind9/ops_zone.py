@@ -39,7 +39,7 @@ handlers are the thin SSH-call + parse + shape layer. The unit suite
 pins the parsers directly against fixture text without booting an event
 loop.
 
-JSONFlux handle pattern -- deferred to the reducer
+JSONFlux handle pattern -- owned by the reducer
 --------------------------------------------------
 
 The Issue #588 body's acceptance language ("JSONFlux handle when the
@@ -47,9 +47,9 @@ parsed record list exceeds ~20 rows / 4 KB") was patterned on Issue
 #322's identical clause for the K8s connector. The K8s landing
 (``ops_core.py``) **deliberately did not implement** per-handler
 threshold logic; that module's docstring spells out the rationale and
-points at :mod:`~meho_backplane.operations.reducer` (the v0.2 default is
-:class:`PassThroughReducer` -- handle creation is the future real
-reducer's job, not the connector's). The bind9 read group adopts the
+points at :mod:`~meho_backplane.operations.reducer` (handle creation is
+the dispatcher's default ``JsonFluxReducer``'s job, not the connector's,
+per ``docs/architecture/jsonflux.md``). The bind9 read group adopts the
 same posture for the same reasons:
 
 * Coupling every connector to the reducer's threshold calibration
@@ -75,9 +75,11 @@ References
 * Sibling precedent: G3.2-T2 K8s core ops (#322 / ``ops_core.py``)
   documents the reducer-side-handle decision verbatim.
 * Substrate: :mod:`meho_backplane.operations.reducer` (the
-  ``PassThroughReducer`` default + the
-  :class:`~meho_backplane.operations.reducer.Reducer` Protocol the
-  future JSONFlux reducer satisfies).
+  :class:`~meho_backplane.operations.reducer.Reducer` Protocol) +
+  :class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
+  the live dispatcher default (installed in ``main.py`` via
+  ``set_default_reducer``) that satisfies it. See
+  ``docs/architecture/jsonflux.md``.
 * ISC bind9 9.18 docs:
   https://bind9.readthedocs.io/en/v9.18/manpages.html#named-checkconf
   (named-checkconf), https://bind9.readthedocs.io/en/v9.18/chapter3.html
@@ -363,10 +365,11 @@ async def bind9_zone_read(
     own configuration.
 
     Returns ``{zone, file, rows, total}``. The full row list lands
-    inline -- a future JSONFlux reducer is responsible for spilling
-    large zonefiles to handles per the module-docstring rationale; this
-    handler emits the raw shape so the reducer has the inlined sample
-    size + total count to drive its threshold check.
+    inline -- the dispatcher's default
+    :class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    spills large zonefiles to handles per the module-docstring
+    rationale; this handler emits the raw shape so the reducer has the
+    inlined sample size + total count to drive its threshold check.
     """
     zone_name: str = params["zone"]
     # Step 1 -- locate the zonefile path. Reuses the same
@@ -454,8 +457,9 @@ _BIND9_ZONE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "description": (
                 "Row count emitted in ``rows``. Useful as the "
-                "pre-reduction count -- a future JSONFlux reducer "
-                "tracks both the inlined sample size and this total."
+                "pre-reduction count -- the dispatcher's default "
+                "JsonFluxReducer tracks both the inlined sample size "
+                "and this total."
             ),
         },
     },
@@ -538,9 +542,9 @@ BIND9_ZONE_READ_LLM_INSTRUCTIONS: dict[str, Any] = {
         "passes the zone *name*, not the file path. Each rrset member "
         "lands as its own row (an MX rrset with two priorities yields "
         "two rows, not one row with a list rdata). For large zones the "
-        "full row list lands inline today; once the JSONFlux reducer "
-        "ships, a zone with thousands of records will be wrapped in a "
-        "``ResultHandle`` and the agent will drill in via "
+        "full row list lands inline; the dispatcher's default "
+        "JsonFluxReducer wraps a zone with thousands of records in a "
+        "``ResultHandle`` and the agent drills in via "
         "``result_query`` / ``result_aggregate`` rather than receiving "
         "the full row list in the inline result."
     ),
@@ -608,8 +612,8 @@ ZONE_OPS: tuple[Bind9Op, ...] = (
             "priorities yields two rows. Useful for the operator "
             "questions 'what's the current value of <fqdn>?' and "
             "'list everything in zone X'. The handler emits the full "
-            "row list inline today; once the JSONFlux reducer ships, "
-            "large zones will be wrapped in a result handle that the "
+            "row list inline; the dispatcher's default JsonFluxReducer "
+            "wraps large zones in a result handle that the "
             "agent drills into via ``result_query`` / "
             "``result_aggregate`` rather than receiving the full row "
             "list. Read-only; safe against any zone bind9 has loaded."

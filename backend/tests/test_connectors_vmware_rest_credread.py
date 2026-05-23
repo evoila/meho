@@ -179,7 +179,11 @@ class _CredReadTarget:
     Carries the resolver attributes (``product`` / ``fingerprint`` /
     ``preferred_impl_id`` / ``id``) plus the vmware-loader attributes
     (``name`` / ``host`` / ``port`` / ``secret_ref`` / ``auth_model``).
-    ``secret_ref`` is the Vault KV-v2 path the live default loader reads.
+    ``secret_ref`` is the **logical** KV-v2 path the live default loader
+    reads — relative to the mount root, no ``secret/`` prefix and no
+    ``/data/`` segment (hvac inserts ``/data/`` itself). This is the
+    exact shape an operator stores per
+    ``docs/cross-repo/vmware-rest-onboarding.md``.
     """
 
     def __init__(self) -> None:
@@ -190,7 +194,7 @@ class _CredReadTarget:
         self.name = "vcenter-credread"
         self.host = _VCENTER_HOST
         self.port = 443
-        self.secret_ref = "secret/targets/op-credread/vcenter-credread"
+        self.secret_ref = "targets/op-credread/vcenter-credread"
         self.auth_model = "shared_service_account"
 
 

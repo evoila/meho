@@ -101,11 +101,28 @@ Use the per-target convention from the
 scoped to the operator identity segment the templated policy renders:
 
 ```text
-secret/data/targets/<operator-identity>/<target-name>
+targets/<operator-identity>/<target-name>
 ```
 
+This is the **logical KV-v2 path relative to the mount root** — no
+`secret/` mount prefix and no `/data/` segment. It is exactly the
+string you store as the target's `secret_ref` (see [Registering the
+target](#registering-the-target)) and the string the loader passes to
+hvac's `read_secret_version(path=…, mount_point="secret")`, which
+inserts the `/data/` itself
+([`connectors/_shared/vault_creds.py`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)).
+
+> The KV-v2 **API/policy** form of the same secret is
+> `secret/data/targets/<operator-identity>/<target-name>` — that is the
+> shape the [Vault ACL policy](./connector-vault-policy.md) §2 grants
+> read on and the shape `vault kv get` shows in a `No value found at …`
+> error. **Do not** put that form in `secret_ref`; the loader would then
+> read `secret/data/secret/data/targets/…` and 404. The `secret_ref`
+> value is always the logical path above.
+
 Write it with the `meho vault kv put` op (the same dispatch path,
-audited):
+audited) — the mount (`secret`) and the logical path are separate
+arguments, so no `secret/`/`data/` prefix appears here either:
 
 ```console
 $ meho vault kv put --target rdc-vault secret \
@@ -134,7 +151,7 @@ $ meho targets create \
     --name vcenter-lab-01 \
     --product vmware \
     --host vc.lab.evba \
-    --secret-ref secret/targets/<operator-identity>/vcenter-lab-01 \
+    --secret-ref targets/<operator-identity>/vcenter-lab-01 \
     --auth-model shared_service_account
 ```
 

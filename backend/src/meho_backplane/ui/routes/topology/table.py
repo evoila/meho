@@ -41,7 +41,6 @@ contract change.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from enum import StrEnum
 from typing import Final
 
@@ -50,7 +49,8 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_raw_session
-from meho_backplane.topology.query import TopologyNodeListEntry, list_nodes
+from meho_backplane.db.models import _GRAPH_NODE_KINDS
+from meho_backplane.topology.query import list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.templating import get_templates
@@ -166,7 +166,7 @@ async def _render_table(
         "name_filter": name_contains or "",
         "csrf_token": csrf_token,
         "next_direction_for": _next_direction_factory(sort, direction),
-        "node_kind_options": _node_kind_options(nodes),
+        "node_kind_options": _node_kind_options(),
         # The footer in ``base.html`` reads ``ready`` to colour the
         # readiness pill; topology does not poll readiness itself
         # (the dashboard owns that surface), so ship ``False`` so
@@ -215,15 +215,26 @@ def _next_direction_factory(
     return _call
 
 
-def _node_kind_options(nodes: Iterable[TopologyNodeListEntry]) -> list[str]:
-    """Derive the kind-filter dropdown options from the current rows.
+def _node_kind_options() -> list[str]:
+    """Return the closed-enum list of kinds for the filter dropdown.
 
-    The dropdown shows only kinds the operator's tenant actually has
-    -- a v0.2-onboarding tenant with one connector should not see
-    eight irrelevant filter options. Sorted alphabetically for stable
-    rendering across page loads.
+    Sourced from :data:`meho_backplane.db.models._GRAPH_NODE_KINDS`,
+    the same closed vocabulary the DB-layer CHECK constraint pins.
+    Deriving the dropdown from the *current page's* rows was wrong
+    for two reasons:
+
+    * the table is paged (default 50, hard cap 500) so kinds beyond
+      page 1 silently vanish from the filter UI, and
+    * once a filter is applied the dropdown collapses to that one
+      kind, blocking the operator from clearing back to a different
+      kind without manually editing the URL.
+
+    Using the closed enum gives the operator the full kind vocabulary
+    regardless of paging or active filter, at zero substrate cost
+    (no extra ``SELECT DISTINCT`` round trip). Sorted alphabetically
+    for stable rendering across page loads.
     """
-    return sorted({node.kind for node in nodes})
+    return sorted(_GRAPH_NODE_KINDS)
 
 
 #: Module-level :class:`fastapi.Depends` closures -- required to satisfy

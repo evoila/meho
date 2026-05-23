@@ -586,6 +586,118 @@ def test_drawer_isolates_other_tenants_node_id() -> None:
 
 
 # ---------------------------------------------------------------------------
+# URL encoding -- node names with reserved characters round-trip safely
+# ---------------------------------------------------------------------------
+
+
+def test_drawer_dependents_href_percent_encodes_node_name_with_reserved_chars() -> None:
+    """A node name containing ``&`` and a space renders a percent-encoded href.
+
+    Regression test for the pre-fix ``f"...&root={node.name}&kind={node.kind}"``
+    builder: a connector-populated ``graph_node.name`` containing reserved URL
+    characters (``&`` ``?`` ``#`` ``+`` ``%`` space) would silently corrupt
+    the dependents-view query string. The route now wraps both segments in
+    ``urllib.parse.quote(safe='')`` so reserved bytes percent-encode the
+    same way Jinja2's ``urlencode`` filter handles operator-typed filter
+    values on the table page.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    tricky_node = _seed_node(
+        tenant_id=_TENANT_A,
+        kind="vm",
+        name="vm prod & staging",
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/topology/node/{tricky_node}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The raw "&" inside the name would break the URL's query parsing
+    # if interpolated verbatim. The percent-encoded form survives.
+    assert "root=vm%20prod%20%26%20staging" in body
+    assert "kind=vm" in body
+    # Negative assertion: the unencoded form must NOT appear in the
+    # dependents href -- the regression we are guarding against.
+    assert 'href="/ui/topology?view=graph&root=vm prod & staging' not in body
+
+
+def test_table_filter_href_percent_encodes_filters_with_reserved_chars() -> None:
+    """Sort-column hrefs URL-encode active ``kind`` / ``q`` filters.
+
+    Regression test for ``table.html``: the previous template
+    interpolated ``kind_filter`` and ``name_filter`` raw into the
+    sort-column ``href`` / ``hx-get`` attributes, so a search string
+    like ``prod & dev`` (or a kind containing reserved chars on a
+    future vocabulary extension) would silently corrupt the URL.
+    The template now pipes both through Jinja2's ``urlencode`` filter.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-prod-and-dev")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        # ``q`` contains an ``&`` and a space -- if interpolated raw
+        # into the sort-column href, the resulting URL would parse
+        # back as ``q=prod`` plus a stray ``dev`` segment.
+        response = client.get("/ui/topology?q=prod%20%26%20dev")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The sort-column hrefs carry the active filter back into the URL.
+    # Both forms (literal+ and percent) are acceptable urlencode outputs;
+    # Jinja2's filter uses ``%20`` for space rather than ``+``.
+    assert "q=prod%20%26%20dev" in body
+    # The raw form (with a bare ``&``) must NOT appear -- that would
+    # mean the regression slipped back in.
+    assert "q=prod & dev" not in body
+
+
+# ---------------------------------------------------------------------------
+# Kind-filter dropdown -- sourced from the closed enum, not the current page
+# ---------------------------------------------------------------------------
+
+
+def test_kind_dropdown_lists_all_kinds_regardless_of_active_filter() -> None:
+    """The kind dropdown surfaces the closed enum even when a filter narrows rows.
+
+    Before the fix the dropdown was derived from the current page's
+    rows (``sorted({node.kind for node in nodes})``); applying
+    ``?kind=vm`` left the dropdown with only ``vm`` as an option,
+    blocking the operator from switching kinds without manually
+    editing the URL. The dropdown is now sourced from
+    ``_GRAPH_NODE_KINDS`` so the full vocabulary stays available.
+
+    The acceptance shape also covers the "paged out" sibling failure:
+    51 ``vm`` rows + 1 ``target`` row at the default limit=50 would
+    show only ``vm`` in the dropdown under the old derivation.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    # Seed enough vm rows to push past the default page limit (50)
+    # plus one target row that would otherwise be paged off.
+    for index in range(51):
+        _seed_node(tenant_id=_TENANT_A, kind="vm", name=f"vm-{index:03d}")
+    _seed_node(tenant_id=_TENANT_A, kind="target", name="target-paged-off")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        # Apply ``?kind=vm`` -- under the old derivation this would
+        # collapse the dropdown to ``vm`` alone.
+        response = client.get("/ui/topology?kind=vm")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Both kinds plus several others from the closed enum render as
+    # ``<option>`` rows.
+    assert '<option value="vm"' in body
+    assert '<option value="target"' in body
+    # Sanity: a few more enum members from db.models._GRAPH_NODE_KINDS.
+    assert '<option value="host"' in body
+    assert '<option value="datastore"' in body
+
+
+# ---------------------------------------------------------------------------
 # Route mounting -- the real router wins the path lookup
 # ---------------------------------------------------------------------------
 

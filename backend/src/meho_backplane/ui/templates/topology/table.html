@@ -133,10 +133,17 @@
           ] -%}
           {% for col_value, col_label in columns %}
             {%- set next_dir = next_direction_for(col_value) -%}
+            {#- ``kind_filter`` is connector-populated text; ``name_filter``
+                is operator-typed search text. Both ride into the URL's
+                query string here and on every HTMX swap, so they must
+                be percent-encoded before interpolation. Jinja2's
+                ``urlencode`` filter (see https://jinja.palletsprojects.com/en/stable/templates/#jinja-filters.urlencode)
+                encodes the unreserved-byte set the same way
+                ``urllib.parse.quote(safe='')`` does on the Python side. -#}
             <th>
               <a
-                href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter }}{% endif %}{% if name_filter %}&q={{ name_filter }}{% endif %}"
-                hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter }}{% endif %}{% if name_filter %}&q={{ name_filter }}{% endif %}"
+                href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}"
+                hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}"
                 hx-target="#topology-table-body"
                 hx-swap="outerHTML"
                 hx-push-url="true"

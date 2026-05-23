@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
@@ -342,7 +343,19 @@ def build_detail_router() -> APIRouter:
             # rename. The dependents view rooted at this node lives
             # at ``/ui/topology?view=graph&root=<name>`` per the
             # Initiative #342 work-item #4 / #7 design.
-            "dependents_href": (f"/ui/topology?view=graph&root={node.name}&kind={node.kind}"),
+            #
+            # ``graph_node.name`` is unconstrained Text (connector-
+            # populated); a name containing ``&`` / ``?`` / ``#`` /
+            # ``+`` / ``%`` / space would silently corrupt the query
+            # string when interpolated raw. ``quote(..., safe='')``
+            # percent-encodes every byte that is not in the unreserved
+            # set, including ``/`` and ``&`` -- the dependents view
+            # decoder pairs with that on the way in.
+            "dependents_href": (
+                f"/ui/topology?view=graph"
+                f"&root={quote(node.name, safe='')}"
+                f"&kind={quote(node.kind, safe='')}"
+            ),
         }
         return get_templates().TemplateResponse(request, "topology/_drawer.html", context)
 

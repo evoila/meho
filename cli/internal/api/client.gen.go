@@ -162,6 +162,20 @@ const (
 	SurfaceResultVerdictYellow SurfaceResultVerdict = "yellow"
 )
 
+// Defines values for UnderscoreSortColumn.
+const (
+	FirstSeen UnderscoreSortColumn = "first_seen"
+	Kind      UnderscoreSortColumn = "kind"
+	LastSeen  UnderscoreSortColumn = "last_seen"
+	Name      UnderscoreSortColumn = "name"
+)
+
+// Defines values for UnderscoreSortDirection.
+const (
+	Asc  UnderscoreSortDirection = "asc"
+	Desc UnderscoreSortDirection = "desc"
+)
+
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
 	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
@@ -2041,6 +2055,21 @@ type UnderscoreEdgeEndpoint struct {
 	Name string  `json:"name"`
 }
 
+// UnderscoreSortColumn Closed enum of sort columns exposed in the URL.
+//
+// Mirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`
+// -- redeclared at the route boundary so an out-of-range value
+// fails Pydantic validation (422 with the candidate list in the
+// error context) before the substrate's defensive
+// :class:`ValueError` guard runs. The enum's “str“ mixin keeps
+// the template's “{{ sort }}“ rendering / “href“ building
+// stable -- “str(SortColumn.NAME)“ is “"name"“ (not
+// “"_SortColumn.NAME"“).
+type UnderscoreSortColumn string
+
+// UnderscoreSortDirection Sort direction enum -- “asc“ (default) or “desc“.
+type UnderscoreSortDirection string
+
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
@@ -2812,6 +2841,9 @@ type ClientInterface interface {
 
 	// UiStubTopologyUiTopologyGet request
 	UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiTopologyNodeDetailUiTopologyNodeNodeIdGet request
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VersionVersionGet request
 	VersionVersionGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3815,6 +3847,18 @@ func (c *Client) UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...Requ
 
 func (c *Client) UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiStubTopologyUiTopologyGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(c.Server, nodeId)
 	if err != nil {
 		return nil, err
 	}
@@ -8022,6 +8066,40 @@ func NewUiStubTopologyUiTopologyGetRequest(server string) (*http.Request, error)
 	return req, nil
 }
 
+// NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest generates requests for UiTopologyNodeDetailUiTopologyNodeNodeIdGet
+func NewUiTopologyNodeDetailUiTopologyNodeNodeIdGetRequest(server string, nodeId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "node_id", runtime.ParamLocationPath, nodeId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology/node/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVersionVersionGetRequest generates requests for VersionVersionGet
 func NewVersionVersionGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -8326,6 +8404,9 @@ type ClientWithResponsesInterface interface {
 
 	// UiStubTopologyUiTopologyGetWithResponse request
 	UiStubTopologyUiTopologyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubTopologyUiTopologyGetResponse, error)
+
+	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request
+	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
 
 	// VersionVersionGetWithResponse request
 	VersionVersionGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VersionVersionGetResponse, error)
@@ -9858,6 +9939,28 @@ func (r UiStubTopologyUiTopologyGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type VersionVersionGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -10617,6 +10720,15 @@ func (c *ClientWithResponses) UiStubTopologyUiTopologyGetWithResponse(ctx contex
 		return nil, err
 	}
 	return ParseUiStubTopologyUiTopologyGetResponse(rsp)
+}
+
+// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request returning *UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse
+func (c *ClientWithResponses) UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
+	rsp, err := c.UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx, nodeId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp)
 }
 
 // VersionVersionGetWithResponse request returning *VersionVersionGetResponse
@@ -12629,6 +12741,32 @@ func ParseUiStubTopologyUiTopologyGetResponse(rsp *http.Response) (*UiStubTopolo
 	response := &UiStubTopologyUiTopologyGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse parses an HTTP response from a UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse call
+func ParseUiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse(rsp *http.Response) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

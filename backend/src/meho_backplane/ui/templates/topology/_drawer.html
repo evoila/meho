@@ -34,13 +34,20 @@
         </h2>
         <p class="text-xs opacity-70">Node detail</p>
       </div>
+      {#-
+        Close button -- pure client-side reset of the drawer slot. We
+        intentionally do NOT use HTMX here: ``return false;`` in an
+        inline ``onclick`` does not cancel HTMX's separately-registered
+        click listener, so declaring both an ``hx-get`` and an inline
+        ``onclick`` fired two click handlers (a phantom GET to an
+        undefined endpoint plus the local DOM swap). Dropping the
+        ``hx-*`` attributes leaves the inline ``onclick`` as the sole
+        handler -- no network round trip required for a Close.
+      -#}
       <button
         type="button"
         class="btn btn-ghost btn-xs"
         aria-label="Close node detail drawer"
-        hx-get="/ui/topology/node-drawer-empty"
-        hx-swap="outerHTML"
-        hx-target="#node-drawer"
         onclick="
           const el = document.getElementById('node-drawer');
           if (el) {

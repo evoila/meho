@@ -3723,6 +3723,71 @@
         }
       }
     },
+    "/ui/topology": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Topology",
+        "operationId": "ui_stub_topology_ui_topology_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/node/{node_id}": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Ui Topology Node Detail",
+        "description": "``GET /ui/topology/node/{node_id}``.\n\nResolves the node tenant-scoped, then pulls the incoming +\noutgoing edges via :func:`list_edges` and the recent\noperations directly from ``audit_log``. Renders the\n``topology/_drawer.html`` fragment with the full context.",
+        "operationId": "ui_topology_node_detail_ui_topology_node__node_id__get",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/broadcast": {
       "get": {
         "tags": [
@@ -3751,27 +3816,6 @@
         ],
         "summary": "Ui Stub Knowledge",
         "operationId": "ui_stub_knowledge_ui_knowledge_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/topology": {
-      "get": {
-        "tags": [
-          "ui-stubs"
-        ],
-        "summary": "Ui Stub Topology",
-        "operationId": "ui_stub_topology_ui_topology_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -7096,6 +7140,26 @@
         ],
         "title": "_EdgeEndpoint",
         "description": "Inbound JSON shape for one annotation endpoint.\n\nMirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:\n``name`` is required, ``kind`` is the optional disambiguator for a\nbare name that resolves to multiple :class:`GraphNode` rows in the\ntenant. Frozen so the route handler cannot accidentally rebind the\nfield; ``extra=\"forbid\"`` rejects typo'd keys at the boundary\n(``{from: {nme: ...}}`` is a 422, not a silently-ignored body)."
+      },
+      "_SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "kind",
+          "last_seen",
+          "first_seen"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
+      },
+      "_SortDirection": {
+        "type": "string",
+        "enum": [
+          "asc",
+          "desc"
+        ],
+        "title": "_SortDirection",
+        "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
       }
     }
   }

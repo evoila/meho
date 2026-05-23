@@ -115,7 +115,7 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: VcfTargetLike) -> dict[str, str]:
+async def _stub_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
     """Return canned credentials regardless of the target."""
     return {"username": "svc-meho", "password": "stub-password"}
 
@@ -151,19 +151,42 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is VcfLogsConnector
 
 
-def test_default_credentials_loader_raises_until_vault_lands() -> None:
-    """The default Vault loader stays unimplemented until operator-context Vault wiring lands."""
+def test_default_credentials_loader_fails_closed_without_operator_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default loader is the live shared operator-context Vault read (G3.10-T2).
+
+    Empty ``raw_jwt`` is fail-closed — system-initiated calls have no
+    operator JWT to forward to Vault's JWT/OIDC auth method, so the
+    helper raises :class:`VaultCredentialsReadError` rather than
+    silently falling back to a backplane identity. End-to-end coverage
+    of the wired read lives in ``test_connectors_vcf_logs_credread.py``.
+    """
     import asyncio
 
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.vcf_logs.session import (
         load_credentials_from_vault,
     )
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"not yet wired"):
-            await load_credentials_from_vault(_TARGET_A)
+        with pytest.raises(VaultCredentialsReadError, match=r"vrli-a"):
+            await load_credentials_from_vault(_TARGET_A, _make_operator(raw_jwt=""))
 
-    asyncio.run(_check())
+    try:
+        asyncio.run(_check())
+    finally:
+        get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +373,7 @@ async def test_loader_missing_password_key_raises_clear_error_naming_target() ->
     surfaces as a confusing KeyError deep inside the connector.
     """
 
-    async def _bad_loader(_target: VcfTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "svc-meho"}
 
     connector = VcfLogsConnector(credentials_loader=_bad_loader)

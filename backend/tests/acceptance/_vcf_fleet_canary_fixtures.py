@@ -395,7 +395,7 @@ async def _insert_fleet_descriptors() -> None:
         await session.commit()
 
 
-async def _fleet_credentials_loader(_target: object) -> dict[str, str]:
+async def _fleet_credentials_loader(_target: object, _operator: Operator) -> dict[str, str]:
     """Stub credentials loader — bypasses the not-yet-wired Vault read.
 
     Returns illustrative HTTP Basic credentials. The respx routes match

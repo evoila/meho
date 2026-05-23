@@ -747,7 +747,8 @@ async def test_inverted_window_raises(session: AsyncSession) -> None:
 async def test_tombstone_with_null_resource_id_surfaces(
     session: AsyncSession,
 ) -> None:
-    """A ``removed`` row with ``node_id=NULL`` still surfaces with kind / name."""
+    """A ``removed`` row with ``node_id=NULL`` surfaces with kind / name and
+    recovers its resource id from the snapshot (``before.id``)."""
     tenant_id = await _seed_tenant(session)
     base = datetime(2026, 5, 22, 9, 0, 0, tzinfo=UTC)
     await _seed_node_history(
@@ -771,4 +772,55 @@ async def test_tombstone_with_null_resource_id_surfaces(
     assert entry.change_kind == "removed"
     assert entry.name == "vm-tombstone"
     assert entry.kind == "vm"
-    assert entry.resource_id is None
+    # node_id is NULL on the row, but the deleted resource's id survives in
+    # the snapshot and is recovered so the entry still identifies it.
+    assert entry.resource_id == uuid.UUID(_FIXED_SNAPSHOT_NODE_ID)
+
+
+@pytest.mark.asyncio
+async def test_two_distinct_tombstones_do_not_collapse(
+    session: AsyncSession,
+) -> None:
+    """Two distinct hard-deleted resources (both ``node_id=NULL``) must surface
+    as two separate diff entries, not one merged "deleted resources" entry.
+
+    Regression for the bug where every ``resource_id IS NULL`` tombstone was
+    grouped under a single ``None`` key, collapsing distinct deletions into
+    one entry, dropping identities, and undercounting the truncation cap.
+    """
+    tenant_id = await _seed_tenant(session)
+    base = datetime(2026, 5, 22, 9, 0, 0, tzinfo=UTC)
+    other_id = str(uuid.uuid4())
+    # Two removed rows, both with node_id=NULL, but distinct snapshot ids.
+    await _seed_node_history(
+        session,
+        tenant_id=tenant_id,
+        node_id=None,
+        valid_from=base + timedelta(seconds=1),
+        change_kind=GraphHistoryChangeKind.REMOVED,
+        before=_node_snapshot(name="vm-deleted-one"),
+        after=None,
+    )
+    await _seed_node_history(
+        session,
+        tenant_id=tenant_id,
+        node_id=None,
+        valid_from=base + timedelta(seconds=2),
+        change_kind=GraphHistoryChangeKind.REMOVED,
+        before=_node_snapshot(name="vm-deleted-two", extra={"id": other_id}),
+        after=None,
+    )
+    await session.commit()
+
+    result = await query_diff(
+        _make_operator(tenant_id),
+        ts1=base,
+        ts2=base + timedelta(seconds=10),
+    )
+    assert len(result.entries) == 2
+    by_id = {entry.resource_id: entry for entry in result.entries}
+    assert uuid.UUID(_FIXED_SNAPSHOT_NODE_ID) in by_id
+    assert uuid.UUID(other_id) in by_id
+    assert by_id[uuid.UUID(_FIXED_SNAPSHOT_NODE_ID)].name == "vm-deleted-one"
+    assert by_id[uuid.UUID(other_id)].name == "vm-deleted-two"
+    assert all(entry.change_kind == "removed" for entry in result.entries)

@@ -1944,32 +1944,79 @@ def _build_diff_entry(
     )
 
 
+def _recover_resource_id(row: Row[Any]) -> UUID | None:
+    """Recover a tombstone row's resource id from its snapshot payload.
+
+    A hard-deleted resource's history row carries ``resource_id``
+    (``node_id`` / ``edge_id``) NULL because the FK is ``ON DELETE SET
+    NULL`` (migration 0012) -- the cascade fires when the live row is
+    deleted in the same flush. The deleted resource's own id survives in
+    the snapshot (``before.id`` for the ``removed`` row; the
+    ``_*_SNAPSHOT_COLUMNS`` include ``id`` for exactly this reason -- see
+    :mod:`meho_backplane.topology.annotate`). Returns the UUID, or
+    ``None`` when the snapshot is missing/malformed (e.g. a legacy
+    pre-hook tombstone).
+    """
+    snapshot = _deserialise_snapshot(row._mapping["snapshot"])
+    for key in ("before", "after"):
+        side = _snapshot_side(snapshot, key)
+        if side is not None:
+            raw = side.get("id")
+            if raw is not None:
+                try:
+                    return UUID(str(raw))
+                except (ValueError, AttributeError):
+                    return None
+    return None
+
+
 def _group_rows_by_resource(
     rows: Sequence[Row[Any]],
 ) -> list[tuple[UUID | None, list[Row[Any]]]]:
-    """Group history rows by ``resource_id`` preserving first-occurrence order.
+    """Group history rows by resource preserving first-occurrence order.
 
     The SQL returns rows in ``(valid_from ASC, history_id ASC)`` order;
-    grouping by ``resource_id`` while keeping the first-seen order
-    gives the substrate a deterministic per-resource ordering for the
-    cap. Tombstone rows (``resource_id IS NULL``) are grouped together
-    under the ``None`` key -- they are rare and represent post-window
-    hard-deletes, where the operator sees them as one combined
-    "deleted resources" entry rather than per-row chatter.
+    grouping per resource while keeping the first-seen order gives the
+    substrate a deterministic per-resource ordering for the cap.
+
+    Tombstone rows (``resource_id IS NULL`` after an ``ON DELETE SET
+    NULL`` hard-delete) must NOT all collapse under a single ``None``
+    key -- that would merge two distinct deletions into one diff entry,
+    undercount the truncation cap, and drop the deleted resources'
+    identities. Instead the resource id is recovered from the snapshot
+    (:func:`_recover_resource_id`); a create-then-delete within the same
+    window re-joins its pre-delete rows because the recovered id equals
+    the original ``resource_id``. When the id is unrecoverable, the row
+    is keyed on its unique ``history_id`` so each such tombstone still
+    becomes its own entry rather than merging.
 
     Returns a list of ``(resource_id, rows)`` tuples in first-occurrence
     order, so a caller iterating it sees the same order in every call
-    (important for the cap-stable truncation behaviour).
+    (important for the cap-stable truncation behaviour). ``resource_id``
+    is the recovered UUID where known, else ``None``.
     """
-    by_id: dict[UUID | None, list[Row[Any]]] = {}
-    order: list[UUID | None] = []
+    by_key: dict[tuple[str, object], list[Row[Any]]] = {}
+    resource_id_for_key: dict[tuple[str, object], UUID | None] = {}
+    order: list[tuple[str, object]] = []
     for row in rows:
         rid = row._mapping["resource_id"]
-        if rid not in by_id:
-            by_id[rid] = []
-            order.append(rid)
-        by_id[rid].append(row)
-    return [(rid, by_id[rid]) for rid in order]
+        if rid is not None:
+            key: tuple[str, object] = ("id", rid)
+            resource_id: UUID | None = rid
+        else:
+            recovered = _recover_resource_id(row)
+            if recovered is not None:
+                key = ("id", recovered)
+                resource_id = recovered
+            else:
+                key = ("history", row._mapping["history_id"])
+                resource_id = None
+        if key not in by_key:
+            by_key[key] = []
+            resource_id_for_key[key] = resource_id
+            order.append(key)
+        by_key[key].append(row)
+    return [(resource_id_for_key[key], by_key[key]) for key in order]
 
 
 async def query_diff(

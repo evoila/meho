@@ -135,6 +135,36 @@ def role_at_least(actual: TenantRole, required: TenantRole) -> bool:
     return _ROLE_RANK.index(actual) >= _ROLE_RANK.index(required)
 
 
+#: JSON-Schema combinator keywords the Anthropic Messages API rejects at
+#: the *top level* of a tool's ``input_schema``. A request carrying one
+#: 400s with ``input_schema does not support oneOf, allOf, or anyOf at
+#: the top level`` — and because the API validates the whole ``tools``
+#: array, a single offender poisons *every* call in that session, not
+#: just its own. MEHO uses top-level ``allOf`` (``query_topology``'s
+#: per-``kind`` conditional required-args) and ``oneOf``
+#: (``meho.topology.unannotate``'s XOR selector) for *server-side*
+#: jsonschema validation in :mod:`~meho_backplane.mcp.handlers`; those
+#: stay on ``inputSchema`` and keep validating. Only the wire copy
+#: published via :meth:`ToolDefinition.to_wire` drops them. Nested
+#: occurrences (inside ``properties`` / ``items`` / ``$defs`` / …) are
+#: legal and preserved — the restriction is top-level only.
+_WIRE_FORBIDDEN_TOPLEVEL_KEYS: tuple[str, ...] = ("oneOf", "allOf", "anyOf")
+
+
+def _wire_safe_input_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return *schema* with any top-level combinator keyword removed.
+
+    See :data:`_WIRE_FORBIDDEN_TOPLEVEL_KEYS` for why. *schema* is not
+    mutated: when it carries no forbidden top-level key the same object is
+    returned (the common ~15-tool case, no needless copy); otherwise a
+    shallow copy minus those keys is returned. Nested combinators are
+    untouched — the Anthropic restriction is top-level only.
+    """
+    if not any(key in schema for key in _WIRE_FORBIDDEN_TOPLEVEL_KEYS):
+        return schema
+    return {key: value for key, value in schema.items() if key not in _WIRE_FORBIDDEN_TOPLEVEL_KEYS}
+
+
 class ToolDefinition(BaseModel):
     """MCP tool definition + MEHO-internal RBAC metadata.
 
@@ -166,11 +196,20 @@ class ToolDefinition(BaseModel):
         optional ``title`` / ``outputSchema``. MEHO fields dropped:
         ``required_role``, ``op_class``. The drop is deliberate — clients
         don't need server-side RBAC details and shouldn't see them.
+
+        ``inputSchema`` is additionally passed through
+        :func:`_wire_safe_input_schema`, which strips top-level
+        ``oneOf`` / ``allOf`` / ``anyOf`` — the Anthropic Messages API
+        rejects those at the top level of a tool's ``input_schema`` and
+        the rejection poisons the whole session. The full schema (with
+        the combinators) is retained on ``self.inputSchema`` so
+        server-side jsonschema validation in
+        :mod:`~meho_backplane.mcp.handlers` is unaffected.
         """
         out: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
-            "inputSchema": self.inputSchema,
+            "inputSchema": _wire_safe_input_schema(self.inputSchema),
         }
         if self.title is not None:
             out["title"] = self.title

@@ -311,11 +311,13 @@ def acceptance_operator() -> Operator:
     )
 
 
-async def _vcenter_rest_session_loader(_target: object) -> dict[str, str]:
+async def _vcenter_rest_session_loader(_target: object, _operator: Operator) -> dict[str, str]:
     """Stub session loader — bypasses the not-yet-wired Vault read.
 
     The respx router accepts any HTTP basic pair (it never validates
-    the credentials), so the values are illustrative only.
+    the credentials), so the values are illustrative only. The
+    ``_operator`` parameter matches the threaded ``VsphereSessionLoader``
+    signature (G3.9-T1); the stub ignores it.
     """
     return {"username": "canary-svc", "password": "canary-pw"}
 

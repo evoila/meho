@@ -24,11 +24,14 @@ import base64
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from uuid import UUID
 
 import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
     SessionLoginError,
@@ -50,8 +53,20 @@ class _StubTarget:
     name: str
     host: str
     port: int | None
-    secret_ref: str
+    secret_ref: str | None
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+
+
+def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 _TARGET_A = _StubTarget(
@@ -144,18 +159,75 @@ def test_is_acceptable_auth_model_rejects_everything_else(value: object) -> None
 
 
 # ---------------------------------------------------------------------------
-# load_credentials_from_vault — default stub raises pointing at #214
+# load_credentials_from_vault — live operator-context Vault read (G3.10-T2)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_default_credentials_loader_raises_until_g214_lands() -> None:
-    with pytest.raises(NotImplementedError) as exc_info:
-        await load_credentials_from_vault(_TARGET_A)
-    msg = str(exc_info.value)
-    assert "Goal #214" in msg
-    assert "vrops-a" in msg
-    assert "kv/data/vcf-operations/vrops-a" in msg
+async def test_default_credentials_loader_reads_under_operator_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default loader delegates to the shared operator-context KV-v2 read.
+
+    Patches ``meho_backplane.auth.vault._build_client`` with the
+    in-process fake so the real
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
+    helper runs verbatim against canned creds. Asserts the operator's
+    JWT was forwarded to the JWT/OIDC auth method and the read targeted
+    the secret_ref path.
+    """
+    from meho_backplane.settings import get_settings
+    from tests._vault_fakes import install_fake_client
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"username": "svc-shared-vcf", "password": "shared-vcf-pw"},
+    )
+    try:
+        operator = _make_operator(raw_jwt="op.shared.vcf.jwt")
+        creds = await load_credentials_from_vault(_TARGET_A, operator)
+
+        assert creds == {"username": "svc-shared-vcf", "password": "shared-vcf-pw"}
+        # JWT forwarded to Vault's JWT/OIDC auth method.
+        assert fake.auth.jwt.login_calls[-1]["jwt"] == "op.shared.vcf.jwt"
+        # Read targeted the stripped secret_ref path.
+        assert fake.secrets.kv.v2.read_calls[-1]["path"] == _TARGET_A.secret_ref
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_default_credentials_loader_rejects_empty_operator_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty ``raw_jwt`` is fail-closed — no silent fallback to a system role."""
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+
+    try:
+        operator = _make_operator(raw_jwt="")
+        with pytest.raises(VaultCredentialsReadError) as exc_info:
+            await load_credentials_from_vault(_TARGET_A, operator)
+        assert "vrops-a" in str(exc_info.value)
+    finally:
+        get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -163,14 +235,14 @@ async def test_default_credentials_loader_raises_until_g214_lands() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _stub_loader(_target: VcfTargetLike) -> dict[str, str]:
+async def _stub_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
     return {"username": "admin", "password": "stub-password"}
 
 
 @pytest.mark.asyncio
 async def test_credentials_cache_loads_and_returns_keys() -> None:
     cache = CredentialsCache(_stub_loader, product_label="vrops")
-    creds = await cache.get(_TARGET_A)
+    creds = await cache.get(_TARGET_A, _make_operator())
     assert creds == {"username": "admin", "password": "stub-password"}
 
 
@@ -179,16 +251,36 @@ async def test_credentials_cache_reuses_value_across_calls() -> None:
     """Second get() against the same target does NOT re-invoke the loader."""
     call_count = 0
 
-    async def _counting_loader(_target: VcfTargetLike) -> dict[str, str]:
+    async def _counting_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
         return {"username": "admin", "password": "stub-password"}
 
     cache = CredentialsCache(_counting_loader, product_label="vrops")
-    a = await cache.get(_TARGET_A)
-    b = await cache.get(_TARGET_A)
+    a = await cache.get(_TARGET_A, _make_operator())
+    b = await cache.get(_TARGET_A, _make_operator())
     assert a == b
     assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_credentials_cache_threads_operator_to_loader() -> None:
+    """The operator passed to ``get`` reaches the loader on first call.
+
+    Load-bearing for the operator-context Vault read: a stale or
+    missing operator would silently authenticate as the wrong identity.
+    """
+    captured: list[Operator] = []
+
+    async def _capture_loader(_target: VcfTargetLike, operator: Operator) -> dict[str, str]:
+        captured.append(operator)
+        return {"username": "admin", "password": "p"}
+
+    cache = CredentialsCache(_capture_loader, product_label="vrops")
+    operator = _make_operator(raw_jwt="captured.jwt")
+    await cache.get(_TARGET_A, operator)
+    assert captured == [operator]
+    assert captured[0].raw_jwt == "captured.jwt"
 
 
 @pytest.mark.asyncio
@@ -196,13 +288,13 @@ async def test_credentials_cache_isolates_per_target() -> None:
     """Two targets get two distinct cache entries; no cross-target leakage."""
     call_log: list[str] = []
 
-    async def _tracking_loader(target: VcfTargetLike) -> dict[str, str]:
+    async def _tracking_loader(target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
         call_log.append(target.name)
         return {"username": f"svc-{target.name}", "password": "pass"}
 
     cache = CredentialsCache(_tracking_loader, product_label="vrli")
-    a = await cache.get(_TARGET_A)
-    b = await cache.get(_TARGET_B)
+    a = await cache.get(_TARGET_A, _make_operator())
+    b = await cache.get(_TARGET_B, _make_operator())
     assert a["username"] == "svc-vrops-a"
     assert b["username"] == "svc-vrops-b"
     assert call_log == ["vrops-a", "vrops-b"]
@@ -212,8 +304,8 @@ async def test_credentials_cache_isolates_per_target() -> None:
 @pytest.mark.asyncio
 async def test_credentials_cache_invalidate_drops_only_that_target() -> None:
     cache = CredentialsCache(_stub_loader, product_label="vcf-fleet")
-    await cache.get(_TARGET_A)
-    await cache.get(_TARGET_B)
+    await cache.get(_TARGET_A, _make_operator())
+    await cache.get(_TARGET_B, _make_operator())
     await cache.invalidate(_TARGET_A)
     assert cache.cached_targets == frozenset({"vrops-b"})
 
@@ -221,8 +313,8 @@ async def test_credentials_cache_invalidate_drops_only_that_target() -> None:
 @pytest.mark.asyncio
 async def test_credentials_cache_clear_drops_all_entries() -> None:
     cache = CredentialsCache(_stub_loader, product_label="vcf-fleet")
-    await cache.get(_TARGET_A)
-    await cache.get(_TARGET_B)
+    await cache.get(_TARGET_A, _make_operator())
+    await cache.get(_TARGET_B, _make_operator())
     await cache.clear()
     assert cache.cached_targets == frozenset()
 
@@ -234,12 +326,12 @@ async def test_credentials_cache_clear_drops_all_entries() -> None:
 
 @pytest.mark.asyncio
 async def test_credentials_cache_missing_username_raises_runtime_error_naming_target() -> None:
-    async def _bad_loader(_target: VcfTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
         return {"password": "stub-password"}
 
     cache = CredentialsCache(_bad_loader, product_label="vrops")
     with pytest.raises(RuntimeError) as exc_info:
-        await cache.get(_TARGET_A)
+        await cache.get(_TARGET_A, _make_operator())
     msg = str(exc_info.value)
     assert "vrops" in msg
     assert "vrops-a" in msg
@@ -248,12 +340,12 @@ async def test_credentials_cache_missing_username_raises_runtime_error_naming_ta
 
 @pytest.mark.asyncio
 async def test_credentials_cache_missing_password_raises_runtime_error_naming_target() -> None:
-    async def _bad_loader(_target: VcfTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "admin"}
 
     cache = CredentialsCache(_bad_loader, product_label="vrli")
     with pytest.raises(RuntimeError) as exc_info:
-        await cache.get(_TARGET_A)
+        await cache.get(_TARGET_A, _make_operator())
     msg = str(exc_info.value)
     assert "vrli" in msg
     assert "vrops-a" in msg
@@ -271,7 +363,7 @@ async def test_credentials_cache_missing_key_does_not_poison_subsequent_attempts
     attempt = 0
 
     async def _eventually_correct_loader(
-        _target: VcfTargetLike,
+        _target: VcfTargetLike, _operator: Operator
     ) -> dict[str, str]:
         nonlocal attempt
         attempt += 1
@@ -281,9 +373,9 @@ async def test_credentials_cache_missing_key_does_not_poison_subsequent_attempts
 
     cache = CredentialsCache(_eventually_correct_loader, product_label="vrops")
     with pytest.raises(RuntimeError):
-        await cache.get(_TARGET_A)
+        await cache.get(_TARGET_A, _make_operator())
     # Second attempt must succeed; the cache must not have poisoned itself.
-    creds = await cache.get(_TARGET_A)
+    creds = await cache.get(_TARGET_A, _make_operator())
     assert creds == {"username": "admin", "password": "stub-password"}
     assert attempt == 2
 

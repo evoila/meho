@@ -60,6 +60,8 @@ import httpx
 import structlog
 from kubernetes_asyncio import client, config
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.kubernetes.kubeconfig import (
     KubeconfigLoader,
@@ -266,8 +268,20 @@ class KubernetesConnector(Connector):
         self._lock = asyncio.Lock()
 
     async def fingerprint(self, target: KubernetesTargetLike) -> FingerprintResult:
-        """Canonical fingerprint built from ``VersionApi.get_code()``."""
-        api_client = await self._get_api_client(target)
+        """Canonical fingerprint built from ``VersionApi.get_code()``.
+
+        The fingerprint path has no acting operator (it runs from
+        :func:`~meho_backplane.connectors.resolver.resolve_connector` and
+        readiness probes); synthesise a system operator with an empty
+        ``raw_jwt`` so the kubeconfig loader's fail-closed guard surfaces
+        a clear error when there's no kubeconfig in the cache yet, rather
+        than silently authenticating as a backplane identity. The
+        :class:`~meho_backplane.connectors.kubernetes.kubeconfig.KubeconfigLoader`
+        contract receives the same ``(target, operator)`` pair the
+        operator-aware dispatch path uses.
+        """
+        operator = synthesise_system_operator()
+        api_client = await self._get_api_client(target, operator)
         version_api = client.VersionApi(api_client)
         version = await version_api.get_code()
         return FingerprintResult(
@@ -339,6 +353,7 @@ class KubernetesConnector(Connector):
 
     async def about(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -354,7 +369,12 @@ class KubernetesConnector(Connector):
         ``k8s.about`` dispatch regardless of how many other ops touch
         ``VersionApi``.
 
-        The returned dict is intentionally flat -- no nested
+        ``operator`` is the dispatch op's operator; it is forwarded to
+        :meth:`_get_api_client` so a cold-cache kubeconfig load happens
+        under the operator's identity (the locked Option A decision —
+        per-target Vault read under the operator's Identity entity).
+        ``dispatch_typed`` passes ``operator`` here because the signature
+        names it. The returned dict is intentionally flat -- no nested
         ``extras`` -- because the dispatcher's
         :class:`~meho_backplane.operations.reducer.PassThroughReducer`
         forwards the value verbatim. Future reducers (real JSONFlux
@@ -363,7 +383,7 @@ class KubernetesConnector(Connector):
         keys before and after the reducer swap.
         """
         del params  # declared in schema; the handler intentionally ignores them
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         version_api = client.VersionApi(api_client)
         version = await version_api.get_code()
         return {
@@ -380,6 +400,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_namespace_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -392,13 +413,16 @@ class KubernetesConnector(Connector):
         ``namespace_row`` is unit-tested directly against synthetic
         :class:`V1Namespace` instances) and the live API path.
 
-        ``params`` is declared empty in the op's
+        ``operator`` is forwarded to :meth:`_get_api_client` so a
+        cold-cache kubeconfig load runs under the operator's identity;
+        see :meth:`about` for the threading rationale. ``params`` is
+        declared empty in the op's
         :attr:`~meho_backplane.connectors.kubernetes.ops_core.K8S_NAMESPACE_LIST_PARAMETER_SCHEMA`;
         the dispatcher's :class:`Draft202012Validator` rejects any extra
         keys before this handler runs.
         """
         del params
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         resp = await core_v1.list_namespace()
         rows = [namespace_row(ns) for ns in resp.items]
@@ -406,6 +430,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_node_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -418,9 +443,12 @@ class KubernetesConnector(Connector):
         the role-label derivation are both helpers in :mod:`ops_core` so
         the unit tests pin those mappings against synthetic
         :class:`V1Node` instances without an event loop.
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
         """
         del params
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         resp = await core_v1.list_node()
         rows = [node_row(n) for n in resp.items]
@@ -428,6 +456,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_service_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -439,10 +468,13 @@ class KubernetesConnector(Connector):
         :func:`~meho_backplane.connectors.kubernetes.ops_network.service_row`.
         The helper is pure so the unit suite pins the wire shape against
         synthetic fixtures without booting an event loop.
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_network import service_row
 
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         resp = await core_v1.list_namespaced_service(namespace=params["namespace"])
         rows = [service_row(s) for s in resp.items]
@@ -450,6 +482,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_ingress_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -459,10 +492,13 @@ class KubernetesConnector(Connector):
         ``NetworkingV1Api.list_namespaced_ingress(namespace)`` and
         projects each :class:`V1Ingress` through
         :func:`~meho_backplane.connectors.kubernetes.ops_network.ingress_row`.
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_network import ingress_row
 
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         networking_v1 = client.NetworkingV1Api(api_client)
         resp = await networking_v1.list_namespaced_ingress(namespace=params["namespace"])
         rows = [ingress_row(i) for i in resp.items]
@@ -470,6 +506,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_configmap_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -482,10 +519,13 @@ class KubernetesConnector(Connector):
         which deliberately omits ``data`` / ``binary_data`` values.
         Operators wanting values call ``k8s.configmap.info`` per
         configmap so the audit row records the targeted read.
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_config import configmap_list_row
 
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         resp = await core_v1.list_namespaced_config_map(namespace=params["namespace"])
         rows = [configmap_list_row(cm) for cm in resp.items]
@@ -493,6 +533,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_configmap_info(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -504,10 +545,13 @@ class KubernetesConnector(Connector):
         :func:`~meho_backplane.connectors.kubernetes.ops_config.configmap_info`.
         Counterpart to ``k8s.configmap.list``; the targeted read records
         a per-configmap audit row.
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_config import configmap_info
 
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         cm = await core_v1.read_namespaced_config_map(
             name=params["name"], namespace=params["namespace"]
@@ -516,6 +560,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_event_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -566,7 +611,7 @@ class KubernetesConnector(Connector):
             limit = MAX_EVENT_LIMIT
         field_selector = params.get("field_selector")
 
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         # Always pull up to MAX_EVENT_LIMIT rows so the client-side
         # sort sees the full recency-relevant superset; the caller's
@@ -583,6 +628,7 @@ class KubernetesConnector(Connector):
 
     async def k8s_ls(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -614,6 +660,9 @@ class KubernetesConnector(Connector):
         future reducer-driven handle creation, audit row, broadcast --
         runs verbatim. The forwarding handler is structural plumbing, not
         a semantic shortcut.
+
+        ``operator`` is forwarded to :meth:`_get_api_client` (and to the
+        sub-op forwarder); see :meth:`about` for the threading rationale.
         """
         raw_path = params.get("path", "/")
         # Normalise the path: empty string and "/" both map to the root;
@@ -628,9 +677,9 @@ class KubernetesConnector(Connector):
         segments = [s for s in raw_path.split("/") if s]
 
         if not segments:
-            return await self._k8s_ls_root(target)
+            return await self._k8s_ls_root(target, operator)
         if len(segments) == 1:
-            return await self._k8s_ls_namespace(target, segments[0])
+            return await self._k8s_ls_namespace(target, operator, segments[0])
         if len(segments) == 2:
             return await self._k8s_ls_namespace_kind(target, segments[0], segments[1])
         # Deeper paths aren't a documented v0.2 shape; collapse to the
@@ -641,9 +690,10 @@ class KubernetesConnector(Connector):
     async def _k8s_ls_root(
         self,
         target: KubernetesTargetLike,
+        operator: Operator,
     ) -> dict[str, Any]:
         """Cluster-root view: list namespace names + the fixed cluster-kind list."""
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         resp = await core_v1.list_namespace()
         names = sorted(
@@ -660,6 +710,7 @@ class KubernetesConnector(Connector):
     async def _k8s_ls_namespace(
         self,
         target: KubernetesTargetLike,
+        operator: Operator,
         namespace: str,
     ) -> dict[str, Any]:
         """Per-namespace kind summary -- one round-trip per probed kind.
@@ -677,7 +728,7 @@ class KubernetesConnector(Connector):
         operator sees which kinds aren't enumerable rather than a single
         500-shaped failure for the whole ls.
         """
-        api_client = await self._get_api_client(target)
+        api_client = await self._get_api_client(target, operator)
         core_v1 = client.CoreV1Api(api_client)
         kinds: list[dict[str, Any]] = []
         for kind_label, method_name in K8S_NAMESPACED_KIND_LISTERS:
@@ -757,6 +808,7 @@ class KubernetesConnector(Connector):
 
     async def logs(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -771,16 +823,19 @@ class KubernetesConnector(Connector):
         per-op-handler-file split (one ``ops_<verb>.py`` per op,
         without a class) keeps the API stable.
 
-        Schema validation runs in the dispatcher before this method
-        is called; the function-level handler re-reads only
-        validated values.
+        ``operator`` is forwarded to the module-level handler so it can
+        reach the cached :class:`ApiClient` (cold-cache load happens
+        under the operator's identity). Schema validation runs in the
+        dispatcher before this method is called; the function-level
+        handler re-reads only validated values.
         """
         from meho_backplane.connectors.kubernetes.ops_logs import k8s_logs
 
-        return await k8s_logs(self, target, params)
+        return await k8s_logs(self, target, operator, params)
 
     async def k8s_pod_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -790,48 +845,66 @@ class KubernetesConnector(Connector):
         :func:`~meho_backplane.connectors.kubernetes.ops_workload.k8s_pod_list`.
         Same module-level-function shape :meth:`logs` uses so a future
         per-op-handler-file split keeps the registration API stable.
+
+        ``operator`` is forwarded to the module-level handler; see
+        :meth:`about` for the threading rationale.
         """
         from meho_backplane.connectors.kubernetes.ops_workload import (
             k8s_pod_list as _k8s_pod_list,
         )
 
-        return await _k8s_pod_list(self, target, params)
+        return await _k8s_pod_list(self, target, operator, params)
 
     async def k8s_pod_info(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Bound-method shim for the ``k8s.pod.info`` op (G3.2-T3 #323)."""
+        """Bound-method shim for the ``k8s.pod.info`` op (G3.2-T3 #323).
+
+        ``operator`` is forwarded to the module-level handler; see
+        :meth:`about` for the threading rationale.
+        """
         from meho_backplane.connectors.kubernetes.ops_workload import (
             k8s_pod_info as _k8s_pod_info,
         )
 
-        return await _k8s_pod_info(self, target, params)
+        return await _k8s_pod_info(self, target, operator, params)
 
     async def k8s_deployment_list(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Bound-method shim for the ``k8s.deployment.list`` op (G3.2-T3 #323)."""
+        """Bound-method shim for the ``k8s.deployment.list`` op (G3.2-T3 #323).
+
+        ``operator`` is forwarded to the module-level handler; see
+        :meth:`about` for the threading rationale.
+        """
         from meho_backplane.connectors.kubernetes.ops_workload import (
             k8s_deployment_list as _k8s_deployment_list,
         )
 
-        return await _k8s_deployment_list(self, target, params)
+        return await _k8s_deployment_list(self, target, operator, params)
 
     async def k8s_deployment_info(
         self,
+        operator: Operator,
         target: KubernetesTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """Bound-method shim for the ``k8s.deployment.info`` op (G3.2-T3 #323)."""
+        """Bound-method shim for the ``k8s.deployment.info`` op (G3.2-T3 #323).
+
+        ``operator`` is forwarded to the module-level handler; see
+        :meth:`about` for the threading rationale.
+        """
         from meho_backplane.connectors.kubernetes.ops_workload import (
             k8s_deployment_info as _k8s_deployment_info,
         )
 
-        return await _k8s_deployment_info(self, target, params)
+        return await _k8s_deployment_info(self, target, operator, params)
 
     @classmethod
     async def register_operations(cls) -> None:
@@ -955,7 +1028,20 @@ class KubernetesConnector(Connector):
         (typed-connector internals, composite handlers) don't carry an
         :class:`~meho_backplane.auth.operator.Operator`, so the full
         dispatcher path (policy gate, audit, broadcast) doesn't run
-        from this entry point. The operator-aware surface is
+        from this entry point. To match the operator-aware handler
+        signatures the dispatcher now passes ``operator`` to, the shim
+        synthesises a system :class:`Operator` with an empty
+        ``raw_jwt`` (the same shape the fingerprint / probe paths use,
+        :func:`~meho_backplane.connectors._shared.system_operator.synthesise_system_operator`).
+        On a cold kubeconfig-cache miss this fails closed with a clear
+        error rather than silently authenticating as a backplane
+        identity — the system-call carve-out from
+        :doc:`docs/architecture/connector-auth.md`. The shim's
+        intra-connector callers (the ``k8s.ls /<ns>/<kind>`` forwarder)
+        run *after* the operator-aware op already warmed the
+        ``ApiClient`` cache, so the synthesised operator never reaches
+        the loader in practice; the fail-closed shape is the defensive
+        case. The operator-aware surface is
         ``POST /api/v1/operations/call`` via the G0.6 meta-tools; the
         pre-G0.6 chassis route was removed by G0.6-T11 (#412). Within
         the operator-less constraint the shim's contract is:
@@ -972,6 +1058,8 @@ class KubernetesConnector(Connector):
         # ``register_operations`` -- pure-python tests that exercise
         # ``fingerprint``/``probe`` shouldn't pay the operations
         # package's import cost.
+        import inspect
+
         from sqlalchemy import select
 
         from meho_backplane.db.engine import get_sessionmaker
@@ -1035,8 +1123,23 @@ class KubernetesConnector(Connector):
         if is_unbound_method(handler, type(self)):
             handler = handler.__get__(self, type(self))
 
+        # Signature introspection mirroring ``dispatch_typed``: the
+        # operator-aware handlers (every k8s op after #948) name
+        # ``operator`` in their signature so the dispatcher knows to
+        # forward it. The shim is operator-less, so it synthesises a
+        # system operator (empty ``raw_jwt``); the kubeconfig loader's
+        # fail-closed guard surfaces a clear error if the cache misses.
+        # The ``raw``/no-``operator``-named branch stays in place so
+        # the same shim works against an older handler that hasn't
+        # been re-shaped.
+        param_names = list(inspect.signature(handler).parameters.keys())
         try:
-            raw = await handler(target=target, params=params)
+            if "operator" in param_names:
+                raw = await handler(
+                    operator=synthesise_system_operator(), target=target, params=params
+                )
+            else:
+                raw = await handler(target=target, params=params)
         except Exception as exc:
             return result_connector_error(op_id, exc, _elapsed())
 
@@ -1072,20 +1175,43 @@ class KubernetesConnector(Connector):
         """
         return target.secret_ref
 
-    async def _get_api_client(self, target: KubernetesTargetLike) -> client.ApiClient:
+    async def _get_api_client(
+        self,
+        target: KubernetesTargetLike,
+        operator: Operator,
+    ) -> client.ApiClient:
         """Resolve (and cache) the :class:`ApiClient` for *target*.
 
         The single lock serialises concurrent first-use for any target;
         in practice the second caller hits the cache fast-path. The
         slow kubeconfig read happens under the lock so two concurrent
         callers for the same target don't both pay the cost.
+
+        ``operator`` is forwarded to the injected
+        :class:`~meho_backplane.connectors.kubernetes.kubeconfig.KubeconfigLoader`
+        so the default
+        :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubeconfig_from_vault`
+        can read the per-target kubeconfig under the operator's identity
+        (``vault_client_for_operator(operator)``). An injected test
+        loader receives the same ``(target, operator)`` pair so the
+        wiring is exercised by both the default and the injected path.
+
+        Cache-hit fast path: when the :class:`ApiClient` is already
+        cached for this target's :meth:`_cache_key`, the operator
+        argument is ignored (the kubeconfig has already been resolved
+        under a prior operator's identity). This is the v0.2 design
+        choice: kubeconfigs are tied to ``target.secret_ref`` (the
+        shared service account) rather than the acting operator, so the
+        client is shareable across operators. A future per-operator
+        auth model (impersonation) would re-key the cache on operator
+        identity; until then ``secret_ref`` is sufficient.
         """
         key = self._cache_key(target)
         async with self._lock:
             cached = self._api_clients.get(key)
             if cached is not None:
                 return cached
-            kubeconfig_dict = await self._kubeconfig_loader(target)
+            kubeconfig_dict = await self._kubeconfig_loader(target, operator)
             api_client = await config.new_client_from_config_dict(kubeconfig_dict)
             self._api_clients[key] = api_client
             _log.info(

@@ -32,11 +32,13 @@ from __future__ import annotations
 import base64
 from collections.abc import Iterator
 from dataclasses import dataclass
+from uuid import UUID
 
 import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -48,6 +50,18 @@ from meho_backplane.connectors.vcf_automation import (
     VcfAutomationConnector,
     VcfAutomationTargetLike,
 )
+
+
+def _make_operator(raw_jwt: str = "") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -104,8 +118,8 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: VcfAutomationTargetLike) -> dict[str, str]:
-    """Return canned credentials regardless of the target."""
+async def _stub_loader(_target: VcfAutomationTargetLike, _operator: Operator) -> dict[str, str]:
+    """Return canned credentials regardless of the target / operator."""
     return {"username": "svc-meho", "password": "stub-password"}
 
 
@@ -147,17 +161,29 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is VcfAutomationConnector
 
 
-def test_default_credentials_loader_raises_until_goal_214() -> None:
-    """The default Vault loader stays unimplemented until Goal #214."""
+def test_default_loader_fails_closed_for_system_initiated_call() -> None:
+    """The default loader rejects an empty operator JWT (system-initiated call).
+
+    The vmware-rest precedent (#942) wired
+    :func:`load_credentials_from_vault` to delegate to the shared
+    :func:`load_basic_credentials` helper, which fails closed when
+    ``operator.raw_jwt`` is empty -- the locked decision's
+    system-initiated carve-out. The same contract holds here: a system
+    operator (synthesised with ``raw_jwt=""``) cannot resolve target
+    credentials through the operator-context read path. The error is a
+    :class:`VaultCredentialsReadError` naming the target, not a bare
+    ``KeyError`` or a fallback to a backplane identity.
+    """
     import asyncio
 
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.vcf_automation.session import (
         load_credentials_from_vault,
     )
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A)
+        with pytest.raises(VaultCredentialsReadError, match=r"vcfa-a"):
+            await load_credentials_from_vault(_TARGET_A, _make_operator(raw_jwt=""))
 
     asyncio.run(_check())
 
@@ -233,7 +259,7 @@ async def test_auth_headers_requires_path_argument() -> None:
     """auth_headers() without path= rejects -- dual-plane has no plane-agnostic header set."""
     connector = _make_connector()
     with pytest.raises(VcfAutomationConfigurationError, match=r"path"):
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
     await connector.aclose()
 
 
@@ -248,7 +274,9 @@ async def test_provider_plane_path_returns_bearer_with_cloudapi_accept() -> None
             200,
             headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": jwt},
         )
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+        headers = await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
 
     assert headers == {
         "Authorization": f"Bearer {jwt}",
@@ -278,7 +306,9 @@ async def test_provider_plane_api_path_uses_versioned_classic_accept() -> None:
         mock.post("/cloudapi/1.0.0/sessions/provider").respond(
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": jwt}
         )
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="", path="/api/admin/extension")
+        headers = await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/api/admin/extension"
+        )
 
     assert headers == {
         "Authorization": f"Bearer {jwt}",
@@ -295,7 +325,9 @@ async def test_tenant_plane_path_returns_bearer_with_plain_accept() -> None:
 
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
         login = mock.post("/iaas/api/login").respond(200, json={"token": token})
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/projects")
+        headers = await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
+        )
 
     assert headers == {
         "Authorization": f"Bearer {token}",
@@ -329,7 +361,7 @@ async def test_tenant_login_forwards_domain_when_target_has_domain() -> None:
 
     async with respx.mock(base_url="https://vcfa-domain.test.invalid") as mock:
         login = mock.post("/iaas/api/login").respond(200, json={"token": token})
-        await connector.auth_headers(target, raw_jwt="", path="/iaas/api/projects")
+        await connector.auth_headers(target, operator=_make_operator(), path="/iaas/api/projects")
 
     import json as _json
 
@@ -356,8 +388,12 @@ async def test_provider_token_cached_across_calls_against_same_target() -> None:
         login = mock.post("/cloudapi/1.0.0/sessions/provider").respond(
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
         )
-        h1 = await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
-        h2 = await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/regions")
+        h1 = await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
+        h2 = await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/regions"
+        )
 
     assert h1["Authorization"] == h2["Authorization"]
     assert login.call_count == 1
@@ -371,8 +407,12 @@ async def test_tenant_token_cached_across_calls_against_same_target() -> None:
 
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
         login = mock.post("/iaas/api/login").respond(200, json={"token": "t-tok"})
-        h1 = await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/projects")
-        h2 = await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/deployments")
+        h1 = await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
+        )
+        h2 = await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/iaas/api/deployments"
+        )
 
     assert h1["Authorization"] == h2["Authorization"]
     assert login.call_count == 1
@@ -389,8 +429,12 @@ async def test_provider_and_tenant_caches_are_independent_per_target() -> None:
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt-1"}
         )
         mock.post("/iaas/api/login").respond(200, json={"token": "t-tok-1"})
-        await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
-        await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/projects")
+        await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
+        await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
+        )
 
     assert connector._provider_tokens == {"vcfa-a": "p-jwt-1"}
     assert connector._tenant_tokens == {"vcfa-a": "t-tok-1"}
@@ -412,10 +456,18 @@ async def test_per_target_isolation_keeps_both_plane_caches_separate() -> None:
         mock.post("https://vcfa-a.test.invalid/iaas/api/login").respond(200, json={"token": "t-a"})
         mock.post("https://vcfa-b.test.invalid/iaas/api/login").respond(200, json={"token": "t-b"})
 
-        await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
-        await connector.auth_headers(_TARGET_B, raw_jwt="", path="/cloudapi/1.0.0/orgs")
-        await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/projects")
-        await connector.auth_headers(_TARGET_B, raw_jwt="", path="/iaas/api/projects")
+        await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
+        await connector.auth_headers(
+            _TARGET_B, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
+        await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
+        )
+        await connector.auth_headers(
+            _TARGET_B, operator=_make_operator(), path="/iaas/api/projects"
+        )
 
     assert connector._provider_tokens == {"vcfa-a": "p-a", "vcfa-b": "p-b"}
     assert connector._tenant_tokens == {"vcfa-a": "t-a", "vcfa-b": "t-b"}
@@ -443,7 +495,7 @@ async def test_provider_username_override_is_used_verbatim() -> None:
         login = mock.post("/cloudapi/1.0.0/sessions/provider").respond(
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
         )
-        await connector.auth_headers(target, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+        await connector.auth_headers(target, operator=_make_operator(), path="/cloudapi/1.0.0/orgs")
 
     auth = login.calls[0].request.headers["Authorization"]
     user, password = _decode_basic_auth(auth)
@@ -471,7 +523,9 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
 
     seen_secret_refs: list[str] = []
 
-    async def _ref_tracking_loader(t: VcfAutomationTargetLike) -> dict[str, str]:
+    async def _ref_tracking_loader(
+        t: VcfAutomationTargetLike, _operator: Operator
+    ) -> dict[str, str]:
         seen_secret_refs.append(t.secret_ref)
         if t.secret_ref == "kv/data/vcfa/provider":
             return {"username": "admin", "password": "provider-secret"}
@@ -483,7 +537,7 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
         login = mock.post("/cloudapi/1.0.0/sessions/provider").respond(
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
         )
-        await connector.auth_headers(target, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+        await connector.auth_headers(target, operator=_make_operator(), path="/cloudapi/1.0.0/orgs")
 
     # Provider login carried the *provider-only* password.
     auth = login.calls[0].request.headers["Authorization"]
@@ -506,7 +560,9 @@ async def test_provider_login_401_surfaces_runtime_error_naming_target() -> None
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
         mock.post("/cloudapi/1.0.0/sessions/provider").respond(401)
         with pytest.raises(RuntimeError, match=r"vcfa-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+            await connector.auth_headers(
+                _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+            )
     assert "401" in str(exc_info.value)
     assert "provider" in str(exc_info.value)
     await connector.aclose()
@@ -520,7 +576,9 @@ async def test_provider_login_missing_token_header_raises() -> None:
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
         mock.post("/cloudapi/1.0.0/sessions/provider").respond(200)
         with pytest.raises(RuntimeError, match=r"vcfa-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+            await connector.auth_headers(
+                _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+            )
     assert "X-VMWARE-VCLOUD-ACCESS-TOKEN" in str(exc_info.value)
     await connector.aclose()
 
@@ -533,7 +591,9 @@ async def test_tenant_login_401_surfaces_runtime_error_naming_target() -> None:
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
         mock.post("/iaas/api/login").respond(401)
         with pytest.raises(RuntimeError, match=r"vcfa-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/projects")
+            await connector.auth_headers(
+                _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
+            )
     assert "401" in str(exc_info.value)
     assert "tenant" in str(exc_info.value)
     await connector.aclose()
@@ -547,7 +607,9 @@ async def test_tenant_login_empty_token_field_raises() -> None:
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
         mock.post("/iaas/api/login").respond(200, json={"sessionId": "wrong-shape"})
         with pytest.raises(RuntimeError, match=r"vcfa-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/projects")
+            await connector.auth_headers(
+                _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
+            )
     assert "token" in str(exc_info.value)
     await connector.aclose()
 
@@ -556,14 +618,16 @@ async def test_tenant_login_empty_token_field_raises() -> None:
 async def test_loader_missing_password_raises_clear_error() -> None:
     """A loader returning a dict without ``password`` raises naming the target."""
 
-    async def _bad_loader(_t: VcfAutomationTargetLike) -> dict[str, str]:
+    async def _bad_loader(_t: VcfAutomationTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "svc-meho"}  # type: ignore[return-value]
 
     connector = VcfAutomationConnector(credentials_loader=_bad_loader)
 
     async with respx.mock(base_url="https://vcfa-a.test.invalid"):
         with pytest.raises(RuntimeError, match=r"password"):
-            await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+            await connector.auth_headers(
+                _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+            )
     await connector.aclose()
 
 
@@ -589,7 +653,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
     connector = _make_connector()
 
     with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+        await connector.auth_headers(target, operator=_make_operator(), path="/cloudapi/1.0.0/orgs")
     assert "vcfa-per-user" in str(exc_info.value)
     assert auth_model in str(exc_info.value)
     await connector.aclose()
@@ -611,7 +675,9 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         mock.post("/cloudapi/1.0.0/sessions/provider").respond(
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "pre-g03-jwt"}
         )
-        headers = await connector.auth_headers(target, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+        headers = await connector.auth_headers(
+            target, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
     assert headers["Authorization"] == "Bearer pre-g03-jwt"
     await connector.aclose()
 
@@ -632,7 +698,9 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
         mock.post("/cloudapi/1.0.0/sessions/provider").respond(
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "enum-jwt"}
         )
-        headers = await connector.auth_headers(target, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+        headers = await connector.auth_headers(
+            target, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
     assert headers["Authorization"] == "Bearer enum-jwt"
     await connector.aclose()
 
@@ -659,7 +727,9 @@ async def test_provider_plane_401_triggers_relogin_and_retry_once() -> None:
             httpx.Response(200, json={"values": [{"name": "System"}]}),
         ]
 
-        result = await connector._request_json(_TARGET_A, "GET", "/cloudapi/1.0.0/orgs", raw_jwt="")
+        result = await connector._request_json(
+            _TARGET_A, "GET", "/cloudapi/1.0.0/orgs", operator=_make_operator()
+        )
 
     assert result == {"values": [{"name": "System"}]}
     assert login.call_count == 2
@@ -682,7 +752,9 @@ async def test_provider_plane_401_then_401_after_relogin_raises_runtime_error() 
         orgs = mock.get("/cloudapi/1.0.0/orgs").respond(401)
 
         with pytest.raises(RuntimeError, match=r"vcfa-a") as exc_info:
-            await connector._request_json(_TARGET_A, "GET", "/cloudapi/1.0.0/orgs", raw_jwt="")
+            await connector._request_json(
+                _TARGET_A, "GET", "/cloudapi/1.0.0/orgs", operator=_make_operator()
+            )
 
     assert "after refresh" in str(exc_info.value)
     assert "provider" in str(exc_info.value)
@@ -701,7 +773,9 @@ async def test_tenant_plane_401_triggers_independent_relogin_and_retry_once() ->
         mock.post("/cloudapi/1.0.0/sessions/provider").respond(
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt-stable"}
         )
-        await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
+        await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
 
         tenant_login = mock.post("/iaas/api/login")
         tenant_login.side_effect = [
@@ -714,7 +788,9 @@ async def test_tenant_plane_401_triggers_independent_relogin_and_retry_once() ->
             httpx.Response(200, json={"content": [{"name": "default"}]}),
         ]
 
-        result = await connector._request_json(_TARGET_A, "GET", "/iaas/api/projects", raw_jwt="")
+        result = await connector._request_json(
+            _TARGET_A, "GET", "/iaas/api/projects", operator=_make_operator()
+        )
 
     assert result == {"content": [{"name": "default"}]}
     assert tenant_login.call_count == 2
@@ -730,7 +806,9 @@ async def test_request_json_rejects_non_idempotent_method() -> None:
     """_request_json mirrors the base ABC: non-idempotent verbs raise ValueError."""
     connector = _make_connector()
     with pytest.raises(ValueError, match=r"idempotent"):
-        await connector._request_json(_TARGET_A, "POST", "/cloudapi/1.0.0/orgs", raw_jwt="")
+        await connector._request_json(
+            _TARGET_A, "POST", "/cloudapi/1.0.0/orgs", operator=_make_operator()
+        )
     await connector.aclose()
 
 
@@ -866,8 +944,12 @@ async def test_aclose_clears_both_plane_caches_and_pool() -> None:
             200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
         )
         mock.post("/iaas/api/login").respond(200, json={"token": "t-tok"})
-        await connector.auth_headers(_TARGET_A, raw_jwt="", path="/cloudapi/1.0.0/orgs")
-        await connector.auth_headers(_TARGET_A, raw_jwt="", path="/iaas/api/projects")
+        await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
+        )
+        await connector.auth_headers(
+            _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
+        )
 
     assert connector._provider_tokens == {"vcfa-a": "p-jwt"}
     assert connector._tenant_tokens == {"vcfa-a": "t-tok"}

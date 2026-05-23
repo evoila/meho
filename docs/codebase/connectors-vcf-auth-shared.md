@@ -66,7 +66,7 @@ The recorded-fixture refresh tool at
 
 1. Consumer constructs `CredentialsCache(loader, product_label="vrops")`
    in `__init__`.
-2. `auth_headers(target, raw_jwt)` checks
+2. `auth_headers(target, operator)` checks
    `is_acceptable_auth_model(target.auth_model)` → raises
    `NotImplementedError` if rejected.
 3. `auth_headers` calls `await self._creds.get(target)` → returns
@@ -79,7 +79,7 @@ The recorded-fixture refresh tool at
 
 1. Consumer constructs `CredentialsCache(loader, product_label="vrli")`
    **and** a per-target `_session_tokens: dict[str, str]` cache.
-2. `auth_headers(target, raw_jwt)` checks the auth-model gate.
+2. `auth_headers(target, operator)` checks the auth-model gate.
 3. `auth_headers` returns the cached session token under the product's
    token header name; on cache miss, calls a `_session_token(target)`
    helper that calls `vcf_session_login(...)` with the vRLI

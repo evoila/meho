@@ -19,10 +19,12 @@ from __future__ import annotations
 import base64
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from uuid import UUID
 
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -33,6 +35,18 @@ from meho_backplane.connectors.sddc_manager import (
     SddcManagerConnector,
     SddcTargetLike,
 )
+
+
+def _make_operator(raw_jwt: str = "") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -85,8 +99,8 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: SddcTargetLike) -> dict[str, str]:
-    """Return canned credentials regardless of the target."""
+async def _stub_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
+    """Return canned credentials regardless of the target or operator."""
     return {"username": "svc-meho", "password": "stub-password"}
 
 
@@ -128,15 +142,24 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is SddcManagerConnector
 
 
-def test_default_credentials_loader_raises_until_g03_lands() -> None:
-    """The default Vault loader stays unimplemented until G0.3."""
+def test_default_credentials_loader_delegates_to_shared_basic_loader() -> None:
+    """The default loader is the thin wrapper around ``load_basic_credentials``.
+
+    G3.10-T1 (#945) wired the live read; the loader now delegates to
+    :func:`load_basic_credentials` rather than raising
+    :exc:`NotImplementedError`. The fail-closed precondition (empty
+    ``operator.raw_jwt``) is asserted via a :class:`VaultCredentialsReadError`
+    on a system-initiated synthetic operator (no Vault is touched).
+    """
     import asyncio
 
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.sddc_manager.session import load_credentials_from_vault
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A)
+        system_operator = _make_operator(raw_jwt="")
+        with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
+            await load_credentials_from_vault(_TARGET_A, system_operator)
 
     asyncio.run(_check())
 
@@ -157,7 +180,7 @@ async def test_auth_headers_sends_basic_auth_with_default_sso_realm() -> None:
     cached credentials — so no respx mock is needed here.
     """
     connector = _make_connector()
-    headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "Authorization" in headers
     assert headers["Authorization"].startswith("Basic ")
@@ -179,7 +202,7 @@ async def test_auth_headers_honors_explicit_sso_realm_override() -> None:
     )
     connector = _make_connector()
 
-    headers = await connector.auth_headers(target, raw_jwt="")
+    headers = await connector.auth_headers(target, operator=_make_operator())
     username, _ = _decode_basic_auth(headers["Authorization"])
     assert username == "svc-meho@corp.example.com"
     await connector.aclose()
@@ -190,14 +213,14 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
     """Second auth_headers call against the same target does NOT re-invoke the loader."""
     call_count = 0
 
-    async def _counting_loader(_target: SddcTargetLike) -> dict[str, str]:
+    async def _counting_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
         return {"username": "svc-meho", "password": "stub-password"}
 
     connector = SddcManagerConnector(credentials_loader=_counting_loader)
-    h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
-    h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert h1 == h2
     assert call_count == 1
@@ -209,13 +232,13 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
     """Two targets get two distinct credential cache entries; no cross-target leakage."""
     call_log: list[str] = []
 
-    async def _tracking_loader(target: SddcTargetLike) -> dict[str, str]:
+    async def _tracking_loader(target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         call_log.append(target.name)
         return {"username": f"svc-{target.name}", "password": "pass"}
 
     connector = SddcManagerConnector(credentials_loader=_tracking_loader)
-    h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
-    h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+    h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
 
     username_a, _ = _decode_basic_auth(h_a["Authorization"])
     username_b, _ = _decode_basic_auth(h_b["Authorization"])
@@ -235,12 +258,12 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
 async def test_loader_missing_password_key_raises_runtime_error_naming_target() -> None:
     """A loader returning a dict without 'password' surfaces a clear RuntimeError."""
 
-    async def _bad_loader(_target: SddcTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "svc-meho"}  # type: ignore[return-value]
 
     connector = SddcManagerConnector(credentials_loader=_bad_loader)
     with pytest.raises(RuntimeError, match=r"password") as exc_info:
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "sddc-a" in str(exc_info.value)
     await connector.aclose()
@@ -250,12 +273,12 @@ async def test_loader_missing_password_key_raises_runtime_error_naming_target() 
 async def test_loader_missing_username_key_raises_runtime_error_naming_target() -> None:
     """A loader returning a dict without 'username' surfaces a clear RuntimeError."""
 
-    async def _bad_loader(_target: SddcTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         return {"password": "stub-password"}  # type: ignore[return-value]
 
     connector = SddcManagerConnector(credentials_loader=_bad_loader)
     with pytest.raises(RuntimeError, match=r"username") as exc_info:
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "sddc-a" in str(exc_info.value)
     await connector.aclose()
@@ -283,7 +306,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
     connector = _make_connector()
 
     with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, raw_jwt="")
+        await connector.auth_headers(target, operator=_make_operator())
 
     assert "sddc-per-user" in str(exc_info.value)
     assert auth_model in str(exc_info.value)
@@ -301,7 +324,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         auth_model=None,
     )
     connector = _make_connector()
-    headers = await connector.auth_headers(target, raw_jwt="")
+    headers = await connector.auth_headers(target, operator=_make_operator())
     assert headers["Authorization"].startswith("Basic ")
     await connector.aclose()
 
@@ -317,7 +340,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()
-    headers = await connector.auth_headers(target, raw_jwt="")
+    headers = await connector.auth_headers(target, operator=_make_operator())
     assert headers["Authorization"].startswith("Basic ")
     await connector.aclose()
 
@@ -448,7 +471,7 @@ async def test_probe_returns_ok_false_with_reason_when_unreachable() -> None:
 async def test_aclose_clears_credential_cache_and_pool() -> None:
     """aclose() clears the in-memory credential cache and tears down the httpx pool."""
     connector = _make_connector()
-    await connector.auth_headers(_TARGET_A, raw_jwt="")
+    await connector.auth_headers(_TARGET_A, operator=_make_operator())
     assert "sddc-a" in connector._creds_cache
     await connector.aclose()
     assert connector._creds_cache == {}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -55,25 +56,25 @@ func newWorkflowListCmd() *cobra.Command {
 }
 
 func runWorkflowList(cmd *cobra.Command, targetName, statusFilter string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	var params map[string]any
 	if statusFilter != "" {
 		params = map[string]any{"status": statusFilter}
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/v1/tasks", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/tasks", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/v1/tasks", r, jsonOut, printWorkflowList)
+	return conn.Render(cmd, "GET:/v1/tasks", r, jsonOut, printWorkflowList)
 }
 
 func printWorkflowList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		printGenericResult(w, "GET:/v1/tasks", r)
+		conn.PrintGeneric(w, "GET:/v1/tasks", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF workflow tasks (%d)\n", len(entries))

@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -61,15 +63,15 @@ func newRequestListCmd() *cobra.Command {
 }
 
 func runRequestList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, requestListOpID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, requestListOpID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, requestListOpID, r, jsonOut, printRequestList)
+	return conn.Render(cmd, requestListOpID, r, jsonOut, printRequestList)
 }
 
 func printRequestList(w io.Writer, r *CallResult) {
@@ -80,7 +82,7 @@ func printRequestList(w io.Writer, r *CallResult) {
 	}
 	entries, err := decodeListResult(r.Result)
 	if err != nil {
-		printGenericResult(w, requestListOpID, r)
+		conn.PrintGeneric(w, requestListOpID, r)
 		return
 	}
 	if len(entries) == 0 {
@@ -129,16 +131,16 @@ func newRequestInfoCmd() *cobra.Command {
 }
 
 func runRequestInfo(cmd *cobra.Command, requestID, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"requestId": requestID}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, requestGetOpID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, requestGetOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, requestGetOpID, r, jsonOut, printRequestInfo)
+	return conn.Render(cmd, requestGetOpID, r, jsonOut, printRequestInfo)
 }
 
 func printRequestInfo(w io.Writer, r *CallResult) {
@@ -162,7 +164,7 @@ func printRequestInfo(w io.Writer, r *CallResult) {
 		LastUpdatedOn   string `json:"lastUpdatedOn"`
 	}
 	if err := jsonUnmarshalStrict(r.Result, &req); err != nil || req.VMID == "" {
-		if pretty, perr := prettyJSON(r.Result); perr == nil {
+		if pretty, perr := dispatch.PrettyJSON(r.Result); perr == nil {
 			fmt.Fprintln(w, pretty)
 		} else {
 			fmt.Fprintln(w, string(r.Result))

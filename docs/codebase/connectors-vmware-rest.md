@@ -60,13 +60,19 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `Target` model once G0.3 (#224) lands; the model satisfies the
   Protocol structurally without code edits here.
 - **`VsphereSessionLoader`** (`session.py`) — async callable type
-  resolving a target to `{"username": ..., "password": ...}`.
-  Injectable on connector construction (`VmwareRestConnector(session_loader=…)`)
-  so unit tests, integration tests, and pre-G0.3 production deploys
-  override the default Vault loader.
+  resolving a `(target, operator)` pair to
+  `{"username": ..., "password": ...}`. The `operator` parameter
+  (threaded down the HTTP auth surface by G3.9-T1) carries the full
+  frozen `Operator` so the live loader (G3.9-T3) can read the
+  service-account secret under the operator's identity via
+  `vault_client_for_operator(operator)`. Injectable on connector
+  construction (`VmwareRestConnector(session_loader=…)`) so unit tests,
+  integration tests, and pre-G0.3 production deploys override the
+  default Vault loader.
 - **`load_session_credentials_from_vault`** (`session.py`) — default
-  loader, stubbed `NotImplementedError` until G0.3 lands the
-  operator-context Vault read path. Mirrors the
+  loader, stubbed `NotImplementedError` until G3.9-T3 lands the
+  operator-context Vault read path. Accepts `(target, operator)` but
+  ignores `operator` while stubbed. Mirrors the
   `load_kubeconfig_from_vault` pattern in `connectors/kubernetes/`.
 
 ## Control flow
@@ -98,11 +104,13 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 
 ### Per-target session
 
-1. First call to `auth_headers(target, raw_jwt)` against a target whose
+1. First call to `auth_headers(target, operator)` against a target whose
    name isn't in `self._session_tokens`:
    a. Acquires `self._session_lock` (asyncio.Lock).
-   b. Calls `self._session_loader(target)` for the service-account
-      credentials.
+   b. Calls `self._session_loader(target, operator)` for the
+      service-account credentials (the operator is threaded so the live
+      loader can read Vault under the operator's identity; the stub
+      ignores it).
    c. POSTs `/api/session` with HTTP basic auth (creds["username"],
       creds["password"]).
    d. Parses the response body: a JSON-quoted string (vSphere 7.0+

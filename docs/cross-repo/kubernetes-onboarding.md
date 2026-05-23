@@ -7,12 +7,46 @@ Copyright (c) 2026 evoila Group
 
 > Operator-facing recipe for the G3.2 `k8s-1.x` op surface — the
 > `meho k8s …` verb tree, the agent meta-tool path, and the migration
-> off the consumer's `kubectl-vcf.sh` wrapper. The op handlers live in
+> off the consumer's `kubectl-vcf.sh` wrapper. With the G3.10-T4
+> [#948](https://github.com/evoila/meho/issues/948) credential-broker
+> wiring landed, `meho operation call k8s.<op> target=…` reads the
+> kubeconfig out of Vault under the operator's identity and executes a
+> real read against the cluster — the rubric **State 2** wiring per
+> [`docs/codebase/connector-release-readiness.md`](../codebase/connector-release-readiness.md).
+> The op handlers live in
 > [`backend/src/meho_backplane/connectors/kubernetes/`](../../backend/src/meho_backplane/connectors/kubernetes/);
 > the engineering-facing companion is
-> [`docs/codebase/connectors-kubernetes.md`](../codebase/connectors-kubernetes.md).
+> [`docs/codebase/connectors-kubernetes.md`](../codebase/connectors-kubernetes.md);
+> the deploy prerequisite is the Vault-policy runbook
+> [`connector-vault-policy.md`](./connector-vault-policy.md).
 > This doc is the cookbook every RDC operator reads when retiring
 > `kubectl-vcf.sh` in favour of `meho k8s …`.
+
+## What "State 2" means here
+
+Per the
+[connector release-readiness rubric](../codebase/connector-release-readiness.md):
+
+- **State 1** (where this connector was before G3.10): dispatch +
+  catalog only — ops indexed and searchable, but the default
+  kubeconfig loader raised `NotImplementedError`, so a real
+  `operation call` against a Vault-backed target failed and only the
+  injected-loader test path worked.
+- **State 2** (what G3.10-T4 ships): the default loader performs the
+  live operator-context Vault read for the **`shared_service_account`**
+  auth model. `operation call k8s.<op> target=…` executes end to end
+  against a real cluster. The kubeconfig YAML lives in Vault at the
+  target's `secret_ref` under the field name `kubeconfig`; the loader
+  forwards the operator's validated Keycloak JWT to Vault's JWT/OIDC
+  auth method, reads the YAML, parses it via
+  [`parse_kubeconfig_yaml`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py),
+  and feeds the resulting dict to
+  `kubernetes_asyncio.config.new_client_from_config_dict`.
+- **State 3** (not yet): every advertised auth model wired; full catalog
+  in production rotation. `per_user` (operator-by-operator user
+  impersonation via the K8s `User-Impersonation` headers) and
+  `impersonation` are not yet wired and a target tagged with either
+  raises a clear boundary error.
 
 ## What this surface is
 
@@ -96,14 +130,64 @@ What this means for the kubeconfig in Vault:
 
 - The kubeconfig YAML lives in Vault at the path the target's
   `secret_ref` points to (e.g. `secret/data/<tenant>/k8s/<cluster>-kubeconfig`)
-  under field name `kubeconfig`.
+  under field name `kubeconfig`. The path is the **logical KV-v2 path
+  relative to the mount root** — no `secret/` mount prefix and no
+  `/data/` segment. It is exactly the string you store as the target's
+  `secret_ref` and the string the loader passes to hvac's
+  `read_secret_version(path=…, mount_point="secret")`, which inserts
+  the `/data/` itself
+  ([`connectors/kubernetes/kubeconfig.py`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)).
 - The backplane reads it lazily on first op invocation per target via
-  `load_kubeconfig_from_vault` (resolved through the operator's
-  federation chain); the resulting `kubernetes_asyncio.client.ApiClient`
-  is cached per `target.secret_ref` and reused across ops.
+  `load_kubeconfig_from_vault(target, operator)` (G3.10-T4 [#948](https://github.com/evoila/meho/issues/948));
+  the operator's validated Keycloak JWT is forwarded to Vault's
+  JWT/OIDC auth method via
+  [`vault_client_for_operator`](../../backend/src/meho_backplane/auth/vault.py)
+  so the read happens **under the operator's Vault Identity entity** —
+  per-operator RBAC + per-operator audit. The resulting
+  `kubernetes_asyncio.client.ApiClient` is cached per
+  `target.secret_ref` and reused across ops (an in-flight per-operator
+  cache key swap lands when `per_user` ships).
 - Rotation: re-write the kubeconfig in Vault, then restart the
   backplane (the cache lives in-process; future Initiative may add a
   cache-invalidation op). Until then, restart is the rotation path.
+
+### The deploy prerequisite (Vault policy + Keycloak → Vault identity)
+
+The `meho-mcp` Vault role's templated ACL policy must grant read on
+the target's `secret_ref`, and the operator's Keycloak JWT `sub` must
+match a Vault Identity entity alias on the corresponding identity
+provider so the operator's read is attributed to *their* entity rather
+than rejected. Without this in place the live read returns Vault 403
+(`VaultRoleDeniedError`). The cross-repo deploy runbook
+[`connector-vault-policy.md`](./connector-vault-policy.md) documents
+the exact policy + identity wiring; the same prerequisite gates the
+`vmware-rest-9.0` State 2 path.
+
+### No kubeconfig content leaves the backplane
+
+The State-2 wiring is built so the kubeconfig YAML is ephemeral
+in-memory state:
+
+- The loader
+  ([`connectors/kubernetes/kubeconfig.py`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py))
+  logs only the target name, host, `secret_ref` path, and the
+  requested *field name* (`kubeconfig`) — never any kubeconfig
+  content (no server URL, no client certificate, no bearer token).
+- The connector's `ApiClient`-build log event carries the target name
+  and host only — same discipline.
+- The parsed kubeconfig dict is consumed by
+  `kubernetes_asyncio.config.new_client_from_config_dict` to build the
+  `ApiClient` and then dropped; it never enters the
+  `OperationResult`, the audit row payload, or the broadcast event.
+
+This is asserted by the recorded-fixture E2E
+([`tests/test_connectors_k8s_credread.py`](../../backend/tests/test_connectors_k8s_credread.py)):
+canary server URL + bearer token + client-cert strings are seeded into
+the (faked) Vault read and asserted absent from the result, every
+captured log event, and the broadcast payload. The live k3d + Vault
+E2E ([`tests/integration/test_connectors_k8s_live_vault.py`](../../backend/tests/integration/test_connectors_k8s_live_vault.py))
+re-runs the same no-leak assertions against a real k3s + real Vault
+chain (env-gated via `MEHO_RUN_LIVE_K3D_VAULT=1`).
 
 ## Step-by-step onboarding
 
@@ -306,17 +390,16 @@ The wrapping is the **dispatcher's** job, not the handler's: the
 handler returns `{"rows": [...], "total": N}` verbatim and `dispatch`
 passes it through the configured `Reducer` before audit/broadcast.
 
-**v0.2 ships only `PassThroughReducer`, so the v0.2 default is
-pass-through** — every list op returns the full inline row list with
-no handle, regardless of row count. The threshold-aware reducer (and
-the `result_query` / `result_aggregate` / `result_describe` /
-`result_export` meta-tools that drill into a handle) ship in a follow-on
-Initiative; swapping it in touches one `set_default_reducer` call, not
-the K8s handlers. Operationally: in v0.2 expect the full row list
-inline; when the real reducer lands, large `meho k8s pod list` /
-`deployment list` / `event list` results return a handle and you drill
-in with the `meho operation` result verbs exactly as for any other
-connector's set-shaped op.
+The default reducer is the threshold-aware
+[`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) — a list
+op whose result exceeds ~50 rows / 4 KB returns a sample + `ResultHandle`
+rather than the full inline list; smaller results pass through unchanged.
+The `result_query` / `result_aggregate` / `result_describe` /
+`result_export` meta-tools that drill into a handle ship in a follow-on
+Initiative. Operationally: large `meho k8s pod list` / `deployment list` /
+`event list` results return a handle and you drill in with the `meho
+operation` result verbs exactly as for any other connector's set-shaped
+op; small results land inline as before.
 
 For now, operators reading a busy namespace can use the server-side
 `--limit` + `--continue-token` knobs on `pod list` / `deployment list`

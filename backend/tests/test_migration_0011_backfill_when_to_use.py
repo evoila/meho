@@ -428,20 +428,28 @@ def test_re_running_migration_is_idempotent(
         when_to_use=_stamped_template(group_key, product, impl_id),
     )
 
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0011")
     curated_text, first_updated_at = _read_when_to_use(sync_url, row_id)
     assert "bind9.about" in curated_text  # sanity: first pass landed
 
     # Second invocation -- stamp the DB back to 0010 (without
     # rolling the data change back; ``downgrade()`` is a documented
-    # no-op so the rewritten row stays curated) and re-run
-    # ``upgrade head``. Alembic now actually re-executes the
+    # no-op so the rewritten row stays curated) and re-run the
+    # 0011 upgrade. Alembic now actually re-executes the
     # migration's ``upgrade()`` because the revision is no longer
     # stamped, exercising the SQL on an already-curated row. A
     # filter-shaped predicate is a no-op on the second pass; a
     # stamp-shaped one would clobber ``updated_at`` or worse.
+    #
+    # Pinning the target to ``0011`` (not ``head``) keeps the replay
+    # scoped to the migration under test -- downstream schema
+    # migrations (e.g. 0012's ``CREATE TABLE graph_*_history`` and
+    # 0013's ``CREATE TABLE web_session``) are not idempotent by
+    # design (Alembic gates them on ``alembic_version`` in
+    # production) and would raise ``table already exists`` if the
+    # second ``upgrade`` walked past 0011.
     command.stamp(cfg, "0010")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0011")
 
     second_text, second_updated_at = _read_when_to_use(sync_url, row_id)
     assert second_text == curated_text, "second invocation must not rewrite already-curated rows"

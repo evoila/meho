@@ -65,6 +65,7 @@ from kubernetes_asyncio.client.models import (
     V1ServiceSpec,
 )
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import (
     KUBERNETES_OPS,
     KubernetesConnector,
@@ -165,10 +166,26 @@ def _stub_kubeconfig() -> dict[str, Any]:
 
 
 def _make_connector() -> KubernetesConnector:
-    async def _loader(_target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_target: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return _stub_kubeconfig()
 
     return KubernetesConnector(kubeconfig_loader=_loader)
+
+
+def _make_operator() -> Operator:
+    """Build a non-system operator carrying a non-empty ``raw_jwt``.
+
+    G3.10-T4 (#948) added ``operator`` to every typed handler's
+    signature; the injected loader here ignores it.
+    """
+    return Operator(
+        sub="op-net-config-test",
+        name="Net/Config Test Operator",
+        email=None,
+        raw_jwt="op.net.jwt",
+        tenant_id=__import__("uuid").UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -743,7 +760,9 @@ async def test_k8s_service_list_returns_rows_and_total() -> None:
         list_resp.items = services
         list_resp.metadata = V1ListMeta()
         core_v1_cls.return_value.list_namespaced_service = AsyncMock(return_value=list_resp)
-        result = await connector.k8s_service_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_service_list(
+            _make_operator(), _TARGET, {"namespace": "argocd"}
+        )
 
         core_v1_cls.return_value.list_namespaced_service.assert_awaited_once_with(
             namespace="argocd"
@@ -771,7 +790,7 @@ async def test_k8s_service_list_empty_namespace() -> None:
         list_resp = MagicMock()
         list_resp.items = []
         core_v1_cls.return_value.list_namespaced_service = AsyncMock(return_value=list_resp)
-        result = await connector.k8s_service_list(_TARGET, {"namespace": "empty"})
+        result = await connector.k8s_service_list(_make_operator(), _TARGET, {"namespace": "empty"})
     assert result == {"rows": [], "total": 0}
 
 
@@ -807,7 +826,9 @@ async def test_k8s_ingress_list_returns_hosts_and_tls() -> None:
         list_resp = MagicMock()
         list_resp.items = [ingress]
         networking_cls.return_value.list_namespaced_ingress = AsyncMock(return_value=list_resp)
-        result = await connector.k8s_ingress_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_ingress_list(
+            _make_operator(), _TARGET, {"namespace": "argocd"}
+        )
 
         networking_cls.return_value.list_namespaced_ingress.assert_awaited_once_with(
             namespace="argocd"
@@ -848,7 +869,9 @@ async def test_k8s_configmap_list_keys_only_data_absent() -> None:
         list_resp = MagicMock()
         list_resp.items = [cm]
         core_v1_cls.return_value.list_namespaced_config_map = AsyncMock(return_value=list_resp)
-        result = await connector.k8s_configmap_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_configmap_list(
+            _make_operator(), _TARGET, {"namespace": "argocd"}
+        )
 
     assert result["total"] == 1
     row = result["rows"][0]
@@ -885,7 +908,7 @@ async def test_k8s_configmap_info_returns_full_data_and_binary_data() -> None:
     ):
         core_v1_cls.return_value.read_namespaced_config_map = AsyncMock(return_value=cm)
         result = await connector.k8s_configmap_info(
-            _TARGET, {"name": "argocd-cm", "namespace": "argocd"}
+            _make_operator(), _TARGET, {"name": "argocd-cm", "namespace": "argocd"}
         )
 
         core_v1_cls.return_value.read_namespaced_config_map.assert_awaited_once_with(
@@ -925,6 +948,7 @@ async def test_k8s_event_list_field_selector_forwarded() -> None:
         list_resp.items = [warn]
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
         result = await connector.k8s_event_list(
+            _make_operator(),
             _TARGET,
             {"namespace": "argocd", "field_selector": "type=Warning"},
         )
@@ -977,7 +1001,7 @@ async def test_k8s_event_list_default_limit() -> None:
         list_resp = MagicMock()
         list_resp.items = api_events
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
-        result = await connector.k8s_event_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_event_list(_make_operator(), _TARGET, {"namespace": "argocd"})
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
         # Wire: always MAX_EVENT_LIMIT.
         assert kwargs["limit"] == MAX_EVENT_LIMIT
@@ -1035,7 +1059,9 @@ async def test_k8s_event_list_limit_respects_value_and_ordered_by_last_seen() ->
         list_resp = MagicMock()
         list_resp.items = api_events
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
-        result = await connector.k8s_event_list(_TARGET, {"namespace": "argocd", "limit": 10})
+        result = await connector.k8s_event_list(
+            _make_operator(), _TARGET, {"namespace": "argocd", "limit": 10}
+        )
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
         # The handler always pulls up to MAX_EVENT_LIMIT, never the
         # caller's smaller ``limit`` -- the recency sort needs the
@@ -1101,7 +1127,9 @@ async def test_k8s_event_list_fetches_max_then_sorts_client_side() -> None:
         list_resp = MagicMock()
         list_resp.items = api_events
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
-        result = await connector.k8s_event_list(_TARGET, {"namespace": "argocd", "limit": 5})
+        result = await connector.k8s_event_list(
+            _make_operator(), _TARGET, {"namespace": "argocd", "limit": 5}
+        )
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
         # Wire-side: ask for the superset, not the caller's limit.
         assert kwargs["limit"] == MAX_EVENT_LIMIT
@@ -1128,7 +1156,9 @@ async def test_k8s_event_list_limit_clamps_at_max() -> None:
         list_resp = MagicMock()
         list_resp.items = []
         core_v1_cls.return_value.list_namespaced_event = AsyncMock(return_value=list_resp)
-        await connector.k8s_event_list(_TARGET, {"namespace": "argocd", "limit": 99999})
+        await connector.k8s_event_list(
+            _make_operator(), _TARGET, {"namespace": "argocd", "limit": 99999}
+        )
         kwargs = core_v1_cls.return_value.list_namespaced_event.call_args.kwargs
         # The API request always asks for MAX_EVENT_LIMIT regardless
         # of how the caller's ``limit`` was clamped -- the clamp

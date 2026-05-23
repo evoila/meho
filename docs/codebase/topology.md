@@ -486,6 +486,283 @@ so the guard runs only where the column is JSONB.
    `op_class="write"`). Commit. Publish one broadcast event
    (fail-open).
 
+## Diff-on-write history hook (write half — G9.3-T2 #857)
+
+The append-only `graph_node_history` + `graph_edge_history` tables
+(shipped by G9.3-T1 #856) are populated by a **single shared writer**
+the refresh + annotate paths both call:
+`backend/src/meho_backplane/topology/history.py`. The hook emits one
+history row per applied live mutation inside the **same**
+`session.begin()` block as the mutation itself — atomicity is the
+load-bearing contract: the live graph and the history table can
+never disagree about which mutations committed.
+
+### Snapshot shape
+
+Every history row's `snapshot` JSONB is
+`{"before": <row-json>|None, "after": <row-json>|None}`:
+
+* `created` — `before=None`, `after=<post-insert row>`.
+* `updated` — `before=<pre-mutation row>`, `after=<post-mutation row>`.
+* `removed` — `before=<final row>`, `after=None`.
+
+The bidirectional projection is what makes `meho topology diff
+<ts1> <ts2>` (T4 #860) reconstructible without joining back against
+live tables — a tombstone row carries enough state to render the
+removed resource. Column selection is deliberately narrow (the
+`_NODE_SNAPSHOT_COLUMNS` / `_EDGE_SNAPSHOT_COLUMNS` constants in
+`history.py`) rather than `vars(row)` or `sqlalchemy.inspect`-based
+reflection: a future column that should *not* enter the snapshot
+(e.g. a derived counter) opts in via the projection list.
+
+### audit_id linkage
+
+Every history row carries the **causing operation's**
+`audit_log.id` (soft-FK column `audit_id`). The refresh / annotate
+service pre-allocates one `audit_id` at the top of the request via
+`uuid.uuid4()`, writes one audit row with that id, and threads the
+same id down to every history row the operation emits. Re-using one
+audit row per operation (rather than per history row) keeps
+`audit_log` at one row per operation — the contract `audit_log`
+consumers rely on — and lets `meho topology diff` / `history` /
+`timeline` (T3-T5) join history back to the principal / session /
+target via `audit_log.id`.
+
+### Refresh path
+
+`_reconcile_nodes` and `_reconcile_edges` (in `topology/refresh.py`)
+each take an `audit_id` parameter threaded from
+`_apply_reconcile` → `refresh_target_topology`. Per applied
+mutation:
+
+* **Insert branch** — capture nothing (no prior state); emit
+  `created` with `before=None`, `after=node_snapshot(new_row)`.
+* **Update branch** — capture `before = node_snapshot(row)` **before**
+  reassigning the row's columns (otherwise the snapshot aliases the
+  post-mutation state); reassign columns; emit `updated` with
+  `after=node_snapshot(row)`. The history row fires under the same
+  predicate the refresh `updated` counter uses (`last_seen IS NULL`
+  OR `target_id` changed OR properties differ) — a pure `last_seen`
+  heartbeat is not a recorded mutation.
+* **Soft-remove branch** — capture `before` before nulling
+  `last_seen`; emit `removed` with `after=None`.
+
+Edge reconciliation is identical, with one extra wrinkle: the
+*resurrected curated edge* case (`last_seen IS NULL → now`) emits an
+`updated` history row even though the only changed column is
+`last_seen` — the resurrection is operator-observable (the edge
+returned to traversal), so it warrants a row. A pure heartbeat on
+an already-live curated edge does not.
+
+### Annotate path
+
+`annotate_edge_in_txn` emits history rows for **every mutated edge**
+inside the same `session.begin()` block as the upsert:
+
+* The curated row itself — `created` (fresh insert) or `updated`
+  (idempotent re-annotate or auto→curated promotion). The `after`
+  snapshot is captured *after* both §6 conflict scans run so any
+  `conflicts_with` marker stamped on the curated row by
+  `_mark_incompatible_kinds_conflict` is visible in `snapshot.after`.
+* Each auto edge marked `superseded_by` (same-kind /
+  different-endpoint, §6 rule 1) — `updated`, with `before` captured
+  before the marker write so `snapshot.before` shows the row as the
+  operator last saw it on `list-edges`.
+* Each edge of a different kind over the same endpoint pair (§6
+  rule 2) — `updated` with the same before/after discipline.
+
+`_mark_same_kind_different_endpoint_superseded` and
+`_mark_incompatible_kinds_conflict` now return
+`list[tuple[GraphEdge, snapshot_before]]` instead of plain id lists;
+the audit payload's `superseded` / `conflicts` arrays are derived
+from `pair[0].id`.
+
+### Unannotate path
+
+`unannotate_edge` emits:
+
+* One `removed` history row for the curated edge. The history row
+  is staged in the session **before** `session.delete(edge)` so the
+  insert and the delete flush in a stable order — flushing the
+  delete first would let the FK `ON DELETE SET NULL` kick in and
+  the freshly-inserted history row would land with
+  `edge_id = NULL`, defeating the per-resource history walk in T3
+  (the walk filters on `edge_id`).
+* One `updated` row per referencing edge whose `superseded_by` /
+  `conflicts_with` marker the unannotate just cleared. `before` is
+  captured before `_clear_reciprocal_markers` runs so the cleared
+  marker is visible in `snapshot.before` and absent in
+  `snapshot.after` — the temporal-query verb can render the
+  inverse of the original annotate as a single point-in-time
+  mutation.
+
+### No own audit rows
+
+The hook never writes its own `audit_log` rows. Acceptance criterion
+#5 of #857 — re-emitting an audit row per history row would balloon
+the audit log on a topology refresh that touches dozens of resources,
+and would also break the "one operation, one audit row" invariant
+`audit_log` consumers rely on. The single audit row the refresh /
+annotate service writes is the canonical audit record; history rows
+reference it.
+
+### Bulk import composition
+
+`bulk_import_edges` (G9.2-T8 #600) calls `annotate_edge_in_txn` once
+per row inside a shared `session.begin()` block — every per-row
+history emission lands inside the same batch transaction and rolls
+back atomically with the batch. No additional wiring was needed for
+G9.3-T2: the hook is on the call path the bulk importer already
+uses.
+
+## Timeline query (read half — G9.3-T5 #861)
+
+`query_timeline` (in `backend/src/meho_backplane/topology/query.py`)
+is the tenant-wide chronological feed of graph changes — "what's
+been happening in the graph in the last hour?" without rooting at a
+specific resource. It UNIONs `graph_node_history` +
+`graph_edge_history` and walks both tables in `(valid_from DESC,
+history_id DESC)` order, paginated via opaque forward-only cursor.
+
+### Pagination
+
+OFFSET-based pagination is broken under the diff-on-write hook
+(T2 #857) — new history rows land continuously, and offset shifts
+every subsequent row. A keyset cursor over the `(valid_from,
+history_id, source)` lex order is correctness-preserving: page N+1
+starts at the row strictly after page N's last row, and a concurrent
+insert either lands below the cursor (appears on a later page) or
+above the cursor (stays outside the paged sweep). No row is
+duplicated or skipped by the act of paging.
+
+The cursor is opaque (base64-encoded JSON, see
+`topology/timeline_cursor.py`) so consumers treat it as a token
+rather than parsing it. `source` is the third component because the
+two history tables have independent `BIGSERIAL` counters — a node
+and an edge can share `(valid_from, history_id)`; alphabetical
+order (`"node" > "edge"` in DESC) is the deterministic tie-breaker.
+
+### Query shape
+
+Two parallel single-index scans (one per table) followed by a
+Python-side merge, rather than a SQL `UNION ALL`. Two reasons:
+
+1. Each table's `(tenant_id, valid_from DESC)` composite index is
+   the natural access path; the planner would otherwise materialise
+   the union before sorting, defeating the index.
+2. The `--target` filter joins `graph_node` (for the node side) and
+   `graph_edge` + endpoint `graph_node` (for the edge side).
+   Inlining those joins into a single UNION'd statement would mix
+   two access paths in one plan — fragile under data growth.
+
+The merge is a two-pointer pass: pop the larger head from either
+list, with the source-discriminator tie-breaker. Memory is
+O(per_side_fetch) = O(limit + 1) per side, bounded by `limit ≤ 1000`.
+
+### Filters
+
+- `target_id` — optional `targets.id`. Nodes filter on
+  `graph_node.target_id`; edges filter on the endpoint nodes'
+  `target_id` (either endpoint touching the target qualifies — an
+  edge crossing two targets is part of both timelines).
+- `since` / `until` — inclusive `valid_from` bounds. The CLI
+  resolves duration shorthand (`24h` / `7d`) client-side to an
+  absolute ISO-8601 before crossing the wire.
+- `limit` — page size, default 50 per the Task #861 acceptance
+  criterion; ceiling 1000.
+
+### Audit class
+
+The REST route binds `audit_op_id="topology.timeline"` /
+`audit_op_class="audit_query"` per [decision #3](../planning/v0.2-decisions.md)
+— temporal graph queries are inspections of system state, parallel
+to G8's audit-log query surface. The broadcast event carries only
+`{op_id, result_status, row_count}` so the request filter (which
+may name a sensitive target) and the row contents never leak onto
+the SSE / Slack feed.
+
+## History query (read half — G9.3-T3 #859)
+
+`query_history` (in `backend/src/meho_backplane/topology/query.py`)
+is the per-resource history walk — "what changed for THIS specific
+resource?" Companion to `query_timeline` (tenant-wide feed,
+truncated summary) but with two key differences:
+
+1. **Anchored on one node.** The first thing the substrate does is
+   call `resolve_node` to translate the operator-supplied name (and
+   optional `kind` disambiguator) into a `graph_node.id`. An unknown
+   name or a cross-tenant name surfaces as `NodeNotFoundError`; an
+   ambiguous bare name as `AmbiguousNodeError`. The REST + MCP
+   fronts map both to operator-actionable diagnostics (404 / 409
+   for HTTP, JSON-RPC -32602 for MCP).
+2. **Full snapshot per row.** Each `TopologyHistoryEntry` carries
+   the row's `snapshot.before` / `snapshot.after` JSONB intact —
+   the forensic payload the CLI's `--json` mode and the MCP facet
+   need to answer "what was the exact state before this change?".
+   The timeline's one-line summary truncation does not apply here.
+
+### Include-edges join
+
+By default `query_history` walks `graph_node_history` only for the
+anchor's `node_id`. Passing `include_edges=True` also walks
+`graph_edge_history` for every edge incident to the anchor — the
+inner subquery is `edge_id IN (SELECT id FROM graph_edge WHERE
+from_node_id = anchor OR to_node_id = anchor)`. Tenant scope is
+enforced on both the inner and the outer query so a cross-tenant
+edge id cannot leak in.
+
+Tombstones (edge-history rows whose `edge_id` was NULLed by `ON
+DELETE SET NULL` after the live edge was hard-deleted) drop out of
+the inner subquery's id list and therefore stay out of the
+per-resource walk — a tombstoned edge has no surviving live row to
+associate with the anchor. Operators wanting the full tombstone
+replay use `meho topology timeline` (G9.3-T5 #861).
+
+### Indexes
+
+The per-resource walk leans on two tenant-scoped composite indexes
+declared by migration 0012 (G9.3-T1 #856):
+
+- `graph_node_history` `(tenant_id, node_id, valid_from DESC)` —
+  per-(tenant, node, time) lookup is a single composite-index scan.
+- `graph_edge_history` `(tenant_id, edge_id, valid_from DESC)` —
+  mirror for the edge side.
+
+Both are sub-millisecond on the test fixture and indexed under
+realistic load.
+
+### Pagination
+
+Unlike `query_timeline` (cursor-paginated), `query_history` returns
+one page bounded by `_MAX_HISTORY_ROWS = 5000`. Per-resource
+history is bounded by the retention window (default 90 days) and
+the operator typically wants the complete chronology in one
+response. A caller that overflows the cap narrows `since` /
+`until`; there is no `next_cursor`.
+
+### Latent SQLite resolver bug fixed by this task
+
+`resolve_node`'s bare-name branch runs a `text()` SQL with a
+``tenant_id = :tenant_id`` filter. Before #859 the bind passed
+`str(uuid)` (dashed form). On the SQLite test driver the `Uuid()`
+column stores 32-char hex without dashes, and the dashed-string
+filter silently matched zero rows — `resolve_node` then raised a
+spurious `NodeNotFoundError`. Production PG accepts both forms,
+masking the bug. #859 pins `_ANCHOR_KINDS_SQL` to a SAUuid bind
+type so both dialects round-trip cleanly. The closure / path verbs
+were unaffected because they call `_assert_anchor_unambiguous`,
+which only raises when 2+ kinds match (a zero-row result is
+intentionally silent there — G9.1 contract).
+
+### Audit class
+
+The REST route binds `audit_op_id="topology.history"` /
+`audit_op_class="audit_query"` — same shape as `topology.timeline`.
+The broadcast event carries only `{op_id, result_status,
+row_count}` so the response rows (which may include the snapshot
+of a sensitive resource's pre/post payload) never leak onto the
+SSE / Slack feed.
+
 ## Manual node seed control flow (write half — G0.9.1-T6 #778)
 
 ### `create_or_get_node`
@@ -541,10 +818,10 @@ will adopt the node onto the target (`target_id` gets set, the
 node's properties pick up probe-derived shape) without losing the
 manual-seed audit trail.
 
-## REST API surface (T5, #453 + G9.2-T5 #597)
+## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861 + G9.3-T3 #859)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Nine routes total — eight on the topology
+the read + write halves. Eleven routes total — ten on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -557,6 +834,8 @@ router, one on the targets router:
 | `DELETE /api/v1/topology/edges/{edge_id}` | `unannotate_edge` (T3 #595) | `topology.unannotate` | **tenant_admin** |
 | `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
 | `POST /api/v1/topology/edges/bulk` | `bulk_import_edges` (T8 #600) | `topology.bulk_import` | **tenant_admin** |
+| `GET /api/v1/topology/timeline` | `query_timeline` (G9.3-T5 #861) | `topology.timeline` | operator |
+| `GET /api/v1/topology/history/{name}` | `query_history` (G9.3-T3 #859) | `topology.history` | operator |
 | `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
 
 Load-bearing details:
@@ -831,7 +1110,10 @@ tables, happy path, `--json`, cross-tenant seed 404).
   `tenant_id` against it.
 - `meho_backplane.broadcast` — `BroadcastEvent` / `publish_event`
   (fail-open, G6.1).
-- `meho_backplane.settings` — `topology_refresh_interval_seconds`.
+- `meho_backplane.settings` — `topology_refresh_interval_seconds`,
+  `topology_history_retention_days`,
+  `topology_history_prune_interval_seconds`,
+  `topology_history_prune_enabled` (the G9.3-T6 retention knobs).
 - `meho_backplane.metrics` — `TOPOLOGY_REFRESH_TOTAL` counter
   (`outcome` label: `ok` / `error` / `skipped_locked`).
 - SQLAlchemy 2.0 `text()` with `:named` binds — same raw-SQL pattern
@@ -839,6 +1121,79 @@ tables, happy path, `--json`, cross-tenant seed 404).
   OR ...` for optional filters, UUIDs passed as `str`). Every read
   statement is a module-level fully-literal `text("...")`; nothing is
   interpolated so the `avoid-sqlalchemy-text` SAST rule does not fire.
+
+## History retention prune (G9.3-T6 #858)
+
+The G9.3-T1 (#856) `graph_node_history` / `graph_edge_history` tables
+are append-only by contract — the diff-on-write hook (T2) is the only
+INSERT writer, and the application never issues UPDATE or DELETE
+statements against them under normal operation. Without bounded
+retention these tables grow indefinitely; a 1-h refresh cadence on a
+churning tenant adds tens of thousands of rows per week.
+
+`backend/src/meho_backplane/topology/history_retention.py` ships the
+physical cleanup: an `asyncio.create_task` loop registered in the
+FastAPI lifespan that ticks on `TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS`
+(default 604800s / weekly) and deletes rows where `valid_from <
+now() - TOPOLOGY_HISTORY_RETENTION_DAYS` (default 90 days). Both
+DELETEs ride the migration-0012-declared `(tenant_id, valid_from
+DESC)` index in reverse, so even multi-million-row history tables
+prune in seconds.
+
+**Same `asyncio.create_task` pattern as the G9.1-T3 topology refresh
+scheduler and the G5.2-T1 memory-expiry sweeper.** Issue #858
+references APScheduler in its task body as a name; the established
+chassis precedent is the in-lifespan `asyncio` loop — zero-dependency,
+matches "no new substrate" discipline, and gives one disposal pattern
+across every long-lived lifespan-owned task.
+
+**Knobs (`backend/src/meho_backplane/settings.py` + Helm
+`deploy/charts/meho/values.yaml` `topology.*`):**
+
+- `TOPOLOGY_HISTORY_RETENTION_DAYS` (default `90`, range `[0, 3650]`).
+  Rows older than `now() - days` are deleted per tick. **`0` is the
+  "keep forever" opt-out sentinel**: the prune loop still runs but
+  every tick is a logged heartbeat with no DELETE and no audit row —
+  operators picking `0` accept unbounded disk growth in exchange for
+  full historical retention. Quarterly-plus retention with bounded
+  growth is the export path: `meho topology timeline --json > out.jsonl`
+  to cold storage of choice.
+- `TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS` (default `604800` / 7d,
+  range `[60, 604800]`). Sleep between ticks. Below one minute
+  competes with normal write load; weekly cadence is the documented
+  ceiling — slower pruning is expressed by raising
+  `TOPOLOGY_HISTORY_RETENTION_DAYS`.
+- `TOPOLOGY_HISTORY_PRUNE_ENABLED` (default `true`). Skips starting
+  the loop entirely in the lifespan when `false` — distinct from
+  `RETENTION_DAYS=0`'s heartbeat-only shape. Use `false` only when an
+  external retention mechanism (k8s CronJob, archive-then-delete via
+  cold storage) reaps rows instead.
+
+**Audit-row shape (one row per non-no-op tick).** Channel `INTERNAL`,
+path `topology.history.prune`, operator_sub
+`system:topology-history-retention`, tenant_id the per-deploy sentinel
+`00000000-0000-0000-0000-0000000858a1` (system-wide ops, not
+attributable to a real tenant — `audit_log.tenant_id` is a soft-FK so
+the sentinel value writes without a matching `tenant` row). Payload:
+`{"dropped_node_rows": N, "dropped_edge_rows": M, "retention_days":
+D, "cutoff": <iso-ts>}`. The no-op case (`RETENTION_DAYS=0`) writes
+no audit row — weekly empty-payload rows would flood `audit_log` for
+no operator value. The G8.2 audit-query verb picks this up via
+`meho audit query --op topology.history.prune`.
+
+**Failure isolation.** Per-tick `try` / `except` so a transient DB
+blip logs `topology_history_retention_tick_failed` and the loop
+continues to the next cadence. Audit-write failures after the DELETE
+are caught locally and logged loud-but-non-fatal — the rows are
+already gone; surfacing the audit failure is the closest we get to
+two-phase commit consistency.
+
+**No per-pod leader election.** Initiative #374 defers leader
+election to v0.2.next. Two replicas racing on the same prune tick
+issue two identical bounded DELETEs in the same second; the second
+one hits zero rows. Below the noise floor of normal DB load — same
+calculus the memory-expiry sweeper documents for its own no-leader
+shape.
 
 ## Known issues / out of scope
 

@@ -41,6 +41,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import KubernetesConnector
 from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 from meho_backplane.connectors.kubernetes.ops_logs import (
@@ -86,10 +87,26 @@ def _stub_kubeconfig_dict() -> dict[str, Any]:
 
 
 def _make_connector() -> KubernetesConnector:
-    async def _loader(_target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_target: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return _stub_kubeconfig_dict()
 
     return KubernetesConnector(kubeconfig_loader=_loader)
+
+
+def _make_operator() -> Operator:
+    """Build a non-system operator carrying a non-empty ``raw_jwt``.
+
+    G3.10-T4 (#948) added ``operator`` to every typed handler's
+    signature; the injected loader here ignores it.
+    """
+    return Operator(
+        sub="op-logs-test",
+        name="Logs Test Operator",
+        email=None,
+        raw_jwt="op.logs.jwt",
+        tenant_id=__import__("uuid").UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 def _pod_obj(name: str, containers: list[str]) -> MagicMock:
@@ -226,7 +243,10 @@ async def test_k8s_logs_default_tail_100_returns_lines() -> None:
     config_patch, core_v1_patch, core_v1 = _patch_api(log_body=body)
     with config_patch, core_v1_patch:
         result = await k8s_logs(
-            connector, _TARGET, {"pod_name": "argocd-server", "namespace": "argocd"}
+            connector,
+            _TARGET,
+            _make_operator(),
+            {"pod_name": "argocd-server", "namespace": "argocd"},
         )
 
     assert result["pod"] == "argocd-server-7c4b8d-x7r2k"
@@ -251,6 +271,7 @@ async def test_k8s_logs_explicit_tail_flows_to_api() -> None:
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd", "tail": 500},
         )
     assert core_v1.read_namespaced_pod_log.call_args.kwargs["tail_lines"] == 500
@@ -265,6 +286,7 @@ async def test_k8s_logs_tail_clamps_at_max() -> None:
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd", "tail": 99999},
         )
     assert core_v1.read_namespaced_pod_log.call_args.kwargs["tail_lines"] == MAX_TAIL_LINES
@@ -278,6 +300,7 @@ async def test_k8s_logs_since_resolves_to_seconds() -> None:
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd", "since": "5m"},
         )
     assert core_v1.read_namespaced_pod_log.call_args.kwargs["since_seconds"] == 300
@@ -291,6 +314,7 @@ async def test_k8s_logs_previous_flows_to_api() -> None:
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd", "previous": True},
         )
     assert core_v1.read_namespaced_pod_log.call_args.kwargs["previous"] is True
@@ -310,6 +334,7 @@ async def test_k8s_logs_explicit_container_in_multi_container_pod() -> None:
         result = await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {
                 "pod_name": "istio-pilot-1",
                 "namespace": "istio",
@@ -329,6 +354,7 @@ async def test_k8s_logs_multi_container_without_container_param_errors() -> None
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "istio-pilot-1", "namespace": "istio"},
         )
     assert exc.value.containers == ["discovery", "istio-proxy"]
@@ -343,6 +369,7 @@ async def test_k8s_logs_unknown_container_in_multi_container_pod_errors() -> Non
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {
                 "pod_name": "istio-pilot-1",
                 "namespace": "istio",
@@ -371,6 +398,7 @@ async def test_k8s_logs_pod_prefix_resolves_to_exact_name() -> None:
         result = await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd"},
         )
     assert result["pod"] == "argocd-server-7c4b8d-x7r2k"
@@ -391,6 +419,7 @@ async def test_k8s_logs_pod_prefix_ambiguous_raises() -> None:
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "api", "namespace": "default"},
         )
     assert exc.value.candidates == ["api-1", "api-2"]
@@ -405,6 +434,7 @@ async def test_k8s_logs_pod_not_found_raises() -> None:
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "ghost", "namespace": "default"},
         )
     assert exc.value.candidates == []
@@ -425,6 +455,7 @@ async def test_k8s_logs_exact_match_wins_over_prefix_match() -> None:
         result = await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "api-1", "namespace": "default"},
         )
     assert result["pod"] == "api-1"
@@ -445,6 +476,7 @@ async def test_k8s_logs_body_under_cap_returns_untruncated() -> None:
         result = await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd"},
         )
     assert result["truncated"] is False
@@ -464,6 +496,7 @@ async def test_k8s_logs_body_over_cap_truncates_from_front() -> None:
         result = await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd"},
         )
 
@@ -499,6 +532,7 @@ async def test_k8s_logs_api_exception_propagates() -> None:
         await k8s_logs(
             connector,
             _TARGET,
+            _make_operator(),
             {"pod_name": "argocd-server", "namespace": "argocd"},
         )
 
@@ -514,5 +548,7 @@ async def test_kubernetes_connector_logs_method_delegates_to_handler() -> None:
     body = "delegated\n"
     config_patch, core_v1_patch, _core_v1 = _patch_api(log_body=body)
     with config_patch, core_v1_patch:
-        result = await connector.logs(_TARGET, {"pod_name": "argocd-server", "namespace": "argocd"})
+        result = await connector.logs(
+            _make_operator(), _TARGET, {"pod_name": "argocd-server", "namespace": "argocd"}
+        )
     assert result["lines"] == ["delegated"]

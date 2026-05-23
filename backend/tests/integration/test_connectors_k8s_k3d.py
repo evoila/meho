@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import (
     KubernetesConnector,
     KubernetesTargetLike,
@@ -127,6 +128,26 @@ def k3s_kubeconfig_and_target() -> Any:
         container.stop()
 
 
+def _make_k3d_operator() -> Operator:
+    """Build a non-system operator carrying a non-empty ``raw_jwt``.
+
+    G3.10-T4 (#948) added ``operator`` to every typed handler's
+    signature; the injected loader here ignores it (the test container's
+    kubeconfig is passed through verbatim), but the handler forwards it
+    to :meth:`KubernetesConnector._get_api_client`.
+    """
+    import uuid as _uuid
+
+    return Operator(
+        sub="op-k3d-test",
+        name="K3d Test Operator",
+        email=None,
+        raw_jwt="op.k3d.jwt",
+        tenant_id=_uuid.UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
 @pytest.fixture
 async def k3s_connector(
     k3s_kubeconfig_and_target: tuple[dict[str, Any], _K3sTarget],
@@ -134,7 +155,7 @@ async def k3s_connector(
     """Yield a connector whose loader returns the container's kubeconfig."""
     kubeconfig, target = k3s_kubeconfig_and_target
 
-    async def _loader(_target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_target: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return kubeconfig
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
@@ -190,7 +211,7 @@ async def test_probe_against_unreachable_host_returns_not_ok(
     """An invalid host yields an informative ``ok=False`` reason."""
     kubeconfig, _ = k3s_kubeconfig_and_target
 
-    async def _loader(_target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_target: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return kubeconfig
 
     bogus = _K3sTarget(
@@ -238,7 +259,7 @@ async def test_namespace_list_against_k3s_returns_default_set(
 ) -> None:
     """``k8s.namespace.list`` over k3s returns the bootstrap namespaces."""
     connector, target = k3s_connector
-    result = await connector.k8s_namespace_list(target, {})
+    result = await connector.k8s_namespace_list(_make_k3d_operator(), target, {})
     assert result["total"] >= 4  # default, kube-system, kube-public, kube-node-lease
     names = {row["name"] for row in result["rows"]}
     assert "default" in names
@@ -255,7 +276,7 @@ async def test_node_list_against_k3s_returns_at_least_one_node(
 ) -> None:
     """``k8s.node.list`` over k3s returns the single-node default cluster."""
     connector, target = k3s_connector
-    result = await connector.k8s_node_list(target, {})
+    result = await connector.k8s_node_list(_make_k3d_operator(), target, {})
     assert result["total"] >= 1
     node = result["rows"][0]
     # k3s nodes report Ready=True post-boot; the test waits implicitly via
@@ -276,7 +297,7 @@ async def test_ls_root_against_k3s_returns_namespaces_and_cluster_kinds(
 ) -> None:
     """``k8s.ls /`` over k3s returns the live namespace set + the fixed cluster kinds."""
     connector, target = k3s_connector
-    result = await connector.k8s_ls(target, {"path": "/"})
+    result = await connector.k8s_ls(_make_k3d_operator(), target, {"path": "/"})
     assert result["path"] == "/"
     assert "default" in result["namespaces"]
     assert "kube-system" in result["namespaces"]
@@ -290,7 +311,7 @@ async def test_ls_namespace_against_k3s_returns_kind_counts(
 ) -> None:
     """``k8s.ls /kube-system`` returns per-kind counts via remaining_item_count."""
     connector, target = k3s_connector
-    result = await connector.k8s_ls(target, {"path": "/kube-system"})
+    result = await connector.k8s_ls(_make_k3d_operator(), target, {"path": "/kube-system"})
     assert result["namespace"] == "kube-system"
     assert result["cluster_kinds_omitted"] is True
     kinds_by_label = {entry["kind"]: entry for entry in result["kinds"]}
@@ -320,7 +341,7 @@ async def test_ls_namespace_kind_against_k3s_forwards_to_unknown_op(
     by this module.
     """
     connector, target = k3s_connector
-    result = await connector.k8s_ls(target, {"path": "/default/pods"})
+    result = await connector.k8s_ls(_make_k3d_operator(), target, {"path": "/default/pods"})
     assert result["forwarded_to"] == "k8s.pod.list"
     inner = result["result"]
     assert inner["status"] == "error"
@@ -344,7 +365,9 @@ async def test_pod_list_against_k3s_returns_kube_system_pods(
     drift adds/removes shipped components.
     """
     connector, target = k3s_connector
-    result = await connector.k8s_pod_list(target, {"namespace": "kube-system"})
+    result = await connector.k8s_pod_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system"}
+    )
     assert result["total"] >= 1
     sample = result["rows"][0]
     for key in ("name", "namespace", "status", "ready", "restarts", "age_seconds", "node", "ip"):
@@ -358,7 +381,7 @@ async def test_pod_list_all_namespaces_against_k3s(
 ) -> None:
     """``k8s.pod.list --all-namespaces`` returns pods spanning multiple namespaces."""
     connector, target = k3s_connector
-    result = await connector.k8s_pod_list(target, {"all_namespaces": True})
+    result = await connector.k8s_pod_list(_make_k3d_operator(), target, {"all_namespaces": True})
     assert result["total"] >= 1
     namespaces = {row["namespace"] for row in result["rows"]}
     # k3s' bootstrap pods live in kube-system.
@@ -371,7 +394,9 @@ async def test_pod_list_server_side_limit_caps_rows(
 ) -> None:
     """``limit=1`` enforces a one-row page; further pages reachable via continue_token."""
     connector, target = k3s_connector
-    result = await connector.k8s_pod_list(target, {"namespace": "kube-system", "limit": 1})
+    result = await connector.k8s_pod_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system", "limit": 1}
+    )
     assert result["total"] == 1
     # next_continue presence depends on whether kube-system has >1 pod
     # (it normally does on k3s); single-pod namespaces omit the token.
@@ -379,6 +404,7 @@ async def test_pod_list_server_side_limit_caps_rows(
     # cleanly back through a second list call.
     if "next_continue" in result:
         page_2 = await connector.k8s_pod_list(
+            _make_k3d_operator(),
             target,
             {
                 "namespace": "kube-system",
@@ -395,7 +421,9 @@ async def test_pod_info_against_k3s_resolves_prefix(
 ) -> None:
     """``k8s.pod.info`` resolves a unique prefix and returns full container detail."""
     connector, target = k3s_connector
-    listing = await connector.k8s_pod_list(target, {"namespace": "kube-system"})
+    listing = await connector.k8s_pod_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system"}
+    )
     assert listing["total"] >= 1
     pod_name = listing["rows"][0]["name"]
     # k3s pod names follow ``<deployment>-<hash>-<id>``; the first
@@ -405,7 +433,7 @@ async def test_pod_info_against_k3s_resolves_prefix(
     prefix_matches = [r for r in listing["rows"] if r["name"].startswith(prefix)]
     target_name = prefix if len(prefix_matches) == 1 else pod_name
     info = await connector.k8s_pod_info(
-        target, {"pod_name": target_name, "namespace": "kube-system"}
+        _make_k3d_operator(), target, {"pod_name": target_name, "namespace": "kube-system"}
     )
     assert info["name"] == pod_name
     assert info["namespace"] == "kube-system"
@@ -423,6 +451,7 @@ async def test_pod_info_not_found_raises_against_k3s(
     connector, target = k3s_connector
     with pytest.raises(WorkloadNotFoundError):
         await connector.k8s_pod_info(
+            _make_k3d_operator(),
             target,
             {"pod_name": "definitely-not-a-real-pod-zzz", "namespace": "kube-system"},
         )
@@ -439,7 +468,9 @@ async def test_deployment_list_against_k3s_kube_system(
     existential (at least one) for k3s-minor drift tolerance.
     """
     connector, target = k3s_connector
-    result = await connector.k8s_deployment_list(target, {"namespace": "kube-system"})
+    result = await connector.k8s_deployment_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system"}
+    )
     assert result["total"] >= 1
     sample = result["rows"][0]
     for key in (
@@ -462,11 +493,13 @@ async def test_deployment_info_against_k3s_returns_full_detail(
 ) -> None:
     """``k8s.deployment.info`` returns the full template + status block."""
     connector, target = k3s_connector
-    listing = await connector.k8s_deployment_list(target, {"namespace": "kube-system"})
+    listing = await connector.k8s_deployment_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system"}
+    )
     assert listing["total"] >= 1
     dep_name = listing["rows"][0]["name"]
     info = await connector.k8s_deployment_info(
-        target, {"deployment_name": dep_name, "namespace": "kube-system"}
+        _make_k3d_operator(), target, {"deployment_name": dep_name, "namespace": "kube-system"}
     )
     assert info["name"] == dep_name
     assert info["namespace"] == "kube-system"
@@ -486,7 +519,9 @@ async def test_service_list_against_k3s_returns_kubernetes_service(
 ) -> None:
     """``k8s.service.list --namespace default`` returns the bootstrap ``kubernetes`` service."""
     connector, target = k3s_connector
-    result = await connector.k8s_service_list(target, {"namespace": "default"})
+    result = await connector.k8s_service_list(
+        _make_k3d_operator(), target, {"namespace": "default"}
+    )
     # Every k3s cluster ships with the ``kubernetes`` ClusterIP service
     # in the ``default`` namespace -- it's the API server's in-cluster
     # endpoint. Use it as the existence assertion; specific cluster_ip
@@ -511,7 +546,9 @@ async def test_ingress_list_against_k3s_returns_empty_or_default(
     failed against a real cluster would surface as an exception here.
     """
     connector, target = k3s_connector
-    result = await connector.k8s_ingress_list(target, {"namespace": "default"})
+    result = await connector.k8s_ingress_list(
+        _make_k3d_operator(), target, {"namespace": "default"}
+    )
     assert isinstance(result["rows"], list)
     assert result["total"] == len(result["rows"])
 
@@ -529,7 +566,9 @@ async def test_configmap_list_against_k3s_keys_only_data_absent(
     or ``binary_data``.
     """
     connector, target = k3s_connector
-    result = await connector.k8s_configmap_list(target, {"namespace": "kube-system"})
+    result = await connector.k8s_configmap_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system"}
+    )
     assert result["total"] >= 1, "k8s kube-system should ship at least one configmap"
     for row in result["rows"]:
         # Privacy contract: keys populated, values absent.
@@ -549,11 +588,13 @@ async def test_configmap_info_against_k3s_returns_full_data(
     happens to ship in this version.
     """
     connector, target = k3s_connector
-    list_result = await connector.k8s_configmap_list(target, {"namespace": "kube-system"})
+    list_result = await connector.k8s_configmap_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system"}
+    )
     assert list_result["rows"], "need at least one configmap to exercise info"
     first = list_result["rows"][0]
     info_result = await connector.k8s_configmap_info(
-        target, {"name": first["name"], "namespace": "kube-system"}
+        _make_k3d_operator(), target, {"name": first["name"], "namespace": "kube-system"}
     )
     assert info_result["name"] == first["name"]
     assert info_result["namespace"] == "kube-system"
@@ -571,7 +612,9 @@ async def test_event_list_against_k3s_returns_namespaced_events(
 ) -> None:
     """``k8s.event.list --namespace kube-system`` returns recent events sorted recent-first."""
     connector, target = k3s_connector
-    result = await connector.k8s_event_list(target, {"namespace": "kube-system", "limit": 50})
+    result = await connector.k8s_event_list(
+        _make_k3d_operator(), target, {"namespace": "kube-system", "limit": 50}
+    )
     # k3s emits events during boot (pod scheduling, image pulls, leader
     # election); the kube-system namespace always has some.
     assert isinstance(result["rows"], list)
@@ -594,6 +637,7 @@ async def test_event_list_against_k3s_field_selector_filters(
     """
     connector, target = k3s_connector
     result = await connector.k8s_event_list(
+        _make_k3d_operator(),
         target,
         {"namespace": "kube-system", "field_selector": "type=Warning"},
     )

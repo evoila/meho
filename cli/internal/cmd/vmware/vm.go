@@ -10,6 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -97,19 +99,19 @@ type vmListOpts struct {
 }
 
 func runVMList(cmd *cobra.Command, opts vmListOpts) error {
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 	params, perr := buildListParams(opts.FilterNames, opts.FilterPowerStates, opts.FilterRaw)
 	if perr != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(perr.Error()), opts.JSONOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/vcenter/vm", opts.TargetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/vcenter/vm", opts.TargetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)
 	}
-	return renderCallResult(cmd, "GET:/vcenter/vm", r, opts.JSONOut, printVMList)
+	return conn.Render(cmd, "GET:/vcenter/vm", r, opts.JSONOut, printVMList)
 }
 
 // printVMList renders a VM list as a table. vSphere's GET /vcenter/vm
@@ -157,7 +159,7 @@ func fallbackResultRender(w io.Writer, r *CallResult) {
 	if len(r.Result) == 0 || string(r.Result) == "null" {
 		return
 	}
-	pretty, err := prettyJSON(r.Result)
+	pretty, err := dispatch.PrettyJSON(r.Result)
 	if err == nil {
 		fmt.Fprintln(w, pretty)
 		return
@@ -279,9 +281,9 @@ func newVMInfoCmd() *cobra.Command {
 }
 
 func runVMInfo(cmd *cobra.Command, nameOrID, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	moid, err := resolveName(cmd.Context(), backplaneURL, targetName, "vm", nameOrID)
 	if err != nil {
@@ -299,11 +301,11 @@ func runVMInfo(cmd *cobra.Command, nameOrID, targetName string, jsonOut bool, ba
 	}
 	opID := "GET:/vcenter/vm/{vm}"
 	params := map[string]any{"vm": moid}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printVMInfo)
+	return conn.Render(cmd, opID, r, jsonOut, printVMInfo)
 }
 
 // printVMInfo renders a single-VM detail block. The result body's
@@ -396,21 +398,21 @@ func newVMCreateCmd() *cobra.Command {
 }
 
 func runVMCreate(cmd *cobra.Command, targetName, specFlag string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params, err := loadParamsFlag(specFlag)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 	}
 	opID := "vmware.composite.vm.create"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
 	// The composite's success shape is opaque to the CLI today
 	// (T6 ships the canonical envelope; CLI consumers read --json).
 	// Use the generic renderer until the shape stabilises.
-	return renderCallResult(cmd, opID, r, jsonOut, nil)
+	return conn.Render(cmd, opID, r, jsonOut, nil)
 }

@@ -359,6 +359,10 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         # * ``graph_edge.tenant_id`` — migration 0007 (G7 topology).
         # * ``broadcast_override.tenant_id`` — migration 0008 (G6.3
         #   PII opt-in/opt-out controls).
+        # * ``graph_node_history.tenant_id`` + FK to ``graph_node`` —
+        #   migration 0012 (G9.3-T1 topology history).
+        # * ``graph_edge_history.tenant_id`` + FK to ``graph_edge`` —
+        #   migration 0012 (G9.3-T1 topology history).
         #
         # ``audit_log`` has no FK to ``tenant`` (the soft column shape
         # from 0002) but stays in the list so the per-test reset is
@@ -366,11 +370,14 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         # FK (``targets``, ``endpoint_descriptor``, ``operation_group``)
         # don't need to be here. ``graph_edge`` also has a FK to
         # ``graph_node`` but listing both lets the statement stay
-        # non-cascading regardless of FK order.
+        # non-cascading regardless of FK order. The history tables
+        # likewise carry FKs to their live counterparts; PG requires
+        # them in the same TRUNCATE statement (or CASCADE).
         await conn.execute(
             text(
                 "TRUNCATE TABLE audit_log, documents, graph_edge, "
-                "graph_node, broadcast_override, tenant",
+                "graph_edge_history, graph_node, graph_node_history, "
+                "broadcast_override, tenant",
             ),
         )
         # Re-seed two pinned tenant rows so the integration suite
@@ -428,7 +435,8 @@ async def pg_engine_empty_tenant(
         await conn.execute(
             text(
                 "TRUNCATE TABLE audit_log, documents, graph_edge, "
-                "graph_node, broadcast_override, tenant",
+                "graph_edge_history, graph_node, graph_node_history, "
+                "broadcast_override, tenant",
             ),
         )
         await conn.commit()

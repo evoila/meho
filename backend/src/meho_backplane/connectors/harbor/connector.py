@@ -201,11 +201,13 @@ class HarborConnector(HttpConnector):
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target*, caches
-        them, and reuses the cached values on subsequent calls. ``operator``
-        is accepted for the shared HTTP auth surface (G3.9-T1) but unused —
-        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
-        Vault-sourced service account, not the operator's OIDC token.
-        Threading the operator into Harbor's credential loader is #G3.10.
+        them, and reuses the cached values on subsequent calls. The full
+        ``operator`` is forwarded to :meth:`_load_credentials` so the live
+        default loader (G3.10-T1 #945) reads the per-target Vault secret
+        under the operator's identity (``vault_client_for_operator(operator)``).
+        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` selects the Vault-sourced
+        service account once the loader has resolved it; the operator's
+        JWT only authenticates the read, not the Harbor request itself.
 
         The Basic auth username is sent verbatim from the Vault-loaded
         credentials — no ``sso_realm`` suffix is appended. Both admin
@@ -215,7 +217,6 @@ class HarborConnector(HttpConnector):
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del operator  # SHARED_SERVICE_ACCOUNT mode does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -223,10 +224,12 @@ class HarborConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        creds = await self._load_credentials(target)
+        creds = await self._load_credentials(target, operator)
         return {"Authorization": _basic_auth_header(creds["username"], creds["password"])}
 
-    async def _load_credentials(self, target: HarborTargetLike) -> dict[str, str]:
+    async def _load_credentials(
+        self, target: HarborTargetLike, operator: Operator
+    ) -> dict[str, str]:
         """Return the cached credentials for *target*, loading from Vault on first use.
 
         The lock serialises concurrent first-use callers for the same target;
@@ -234,12 +237,20 @@ class HarborConnector(HttpConnector):
         dict must contain ``"username"`` and ``"password"`` keys; missing
         keys raise a :exc:`RuntimeError` naming the target and the missing
         key so operators can identify a misconfigured Vault path.
+
+        ``operator`` is forwarded to the
+        :class:`HarborCredentialsLoader` so the default loader can read
+        the per-target Vault secret under the operator's identity
+        (G3.10-T1's live read). The default loader is the thin
+        harbor-specific entry point to the shared operator-context
+        Vault read; injected test loaders accept the same
+        ``(target, operator)`` pair.
         """
         async with self._creds_lock:
             cached = self._creds_cache.get(target.name)
             if cached is not None:
                 return cached
-            raw = await self._credentials_loader(target)
+            raw = await self._credentials_loader(target, operator)
             try:
                 _ = raw["username"]
                 _ = raw["password"]

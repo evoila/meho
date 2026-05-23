@@ -92,6 +92,7 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
     SessionLoginError,
@@ -238,20 +239,21 @@ class VcfLogsConnector(HttpConnector):
             product_label="vrli",
         )
 
-    async def auth_headers(self, target: VcfLogsTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: VcfLogsTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Bearer <session_id>"}`` for the request.
 
         Lazily establishes the session on first call against *target*;
-        subsequent calls reuse the cached token. ``raw_jwt`` is accepted
-        for ABC-signature compatibility but unused --
+        subsequent calls reuse the cached token. ``operator`` is accepted
+        for the shared HTTP auth surface (G3.9-T1) but unused --
         :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
         Vault-sourced service account, not the operator's OIDC token.
+        Threading the operator into vRLI's credential loader is #G3.10.
 
         Raises :exc:`NotImplementedError` (with ``target.name`` and the
         requested mode in the message) if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -331,7 +333,7 @@ class VcfLogsConnector(HttpConnector):
         target: VcfLogsTargetLike,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """GET *path* with single 401 -> re-login -> retry-once recovery.
@@ -349,13 +351,13 @@ class VcfLogsConnector(HttpConnector):
         the NSX precedent established.
         """
         try:
-            return await self._get_json(target, path, raw_jwt=raw_jwt, params=params)
+            return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 401:
                 raise
             await self._invalidate_session(target)
         try:
-            return await self._get_json(target, path, raw_jwt=raw_jwt, params=params)
+            return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 raise RuntimeError(

@@ -87,6 +87,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
@@ -195,14 +197,15 @@ class HarborConnector(HttpConnector):
         client.cookies.clear()
         return client
 
-    async def auth_headers(self, target: HarborTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: HarborTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target*, caches
-        them, and reuses the cached values on subsequent calls. ``raw_jwt``
-        is accepted for ABC-signature compatibility but unused —
+        them, and reuses the cached values on subsequent calls. ``operator``
+        is accepted for the shared HTTP auth surface (G3.9-T1) but unused —
         :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
         Vault-sourced service account, not the operator's OIDC token.
+        Threading the operator into Harbor's credential loader is #G3.10.
 
         The Basic auth username is sent verbatim from the Vault-loaded
         credentials — no ``sso_realm`` suffix is appended. Both admin
@@ -212,7 +215,7 @@ class HarborConnector(HttpConnector):
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT mode does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT mode does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -268,7 +271,9 @@ class HarborConnector(HttpConnector):
         """
         probed_at = datetime.now(UTC)
         try:
-            payload = await self._get_json(target, "/api/v2.0/systeminfo", raw_jwt="")
+            payload = await self._get_json(
+                target, "/api/v2.0/systeminfo", operator=synthesise_system_operator()
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",
@@ -310,7 +315,9 @@ class HarborConnector(HttpConnector):
         """
         probed_at = datetime.now(UTC)
         try:
-            payload = await self._get_json(target, "/api/v2.0/health", raw_jwt="")
+            payload = await self._get_json(
+                target, "/api/v2.0/health", operator=synthesise_system_operator()
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return ProbeResult(
                 ok=False,
@@ -431,7 +438,9 @@ class HarborConnector(HttpConnector):
             ],
         }
         path = "/api/v2.0/robots"
-        result = await self._post_json(target, path, raw_jwt="", json=body)
+        result = await self._post_json(
+            target, path, operator=synthesise_system_operator(), json=body
+        )
         return {
             "id": result["id"],
             "name": result["name"],
@@ -478,7 +487,7 @@ class HarborConnector(HttpConnector):
 
         path = f"/api/v2.0/robots/{robot_id}"
         client = await self._http_client(target)
-        headers = await self.auth_headers(target, raw_jwt="")
+        headers = await self.auth_headers(target, synthesise_system_operator())
         resp = await client.request("DELETE", path, headers=headers)
         resp.raise_for_status()
         return {"id": robot_id, "deleted": True}

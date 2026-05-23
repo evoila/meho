@@ -92,6 +92,7 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -191,7 +192,7 @@ class VcfAutomationConnector(HttpConnector):
     async def auth_headers(
         self,
         target: VcfAutomationTargetLike,
-        raw_jwt: str,
+        operator: Operator,
         *,
         path: str | None = None,
     ) -> dict[str, str]:
@@ -209,12 +210,13 @@ class VcfAutomationConnector(HttpConnector):
         callers don't forward ``path`` -- this connector overrides
         both transports to thread ``path`` through. A stray path-less
         call raises :exc:`VcfAutomationConfigurationError` rather than
-        silently picking a plane. ``raw_jwt`` is accepted for
-        ABC-signature compatibility but unused. Raises
+        silently picking a plane. ``operator`` is accepted for the
+        shared HTTP auth surface (G3.9-T1) but unused; threading it into
+        vRA's credential loader is #G3.10. Raises
         :exc:`NotImplementedError` for any ``target.auth_model`` other
         than ``shared_service_account`` / ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -304,7 +306,7 @@ class VcfAutomationConnector(HttpConnector):
         method: str,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -333,7 +335,7 @@ class VcfAutomationConnector(HttpConnector):
                 f"['GET', 'HEAD', 'OPTIONS']; got {method_upper!r}"
             )
         return await self._do_request_with_retry(
-            target, method_upper, path, raw_jwt=raw_jwt, params=params, json=json
+            target, method_upper, path, operator=operator, params=params, json=json
         )
 
     async def _post_json(
@@ -341,12 +343,12 @@ class VcfAutomationConnector(HttpConnector):
         target: VcfAutomationTargetLike,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         json: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Path-aware non-idempotent JSON POST with per-plane 401 retry-once."""
         return await self._do_request_with_retry(
-            target, "POST", path, raw_jwt=raw_jwt, params=None, json=json
+            target, "POST", path, operator=operator, params=None, json=json
         )
 
     async def _do_request_with_retry(
@@ -355,7 +357,7 @@ class VcfAutomationConnector(HttpConnector):
         method: str,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: Mapping[str, Any] | None,
         json: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
@@ -379,11 +381,11 @@ class VcfAutomationConnector(HttpConnector):
             )
 
         plane = plane_for_path(path)
-        headers = await self.auth_headers(target, raw_jwt, path=path)
+        headers = await self.auth_headers(target, operator, path=path)
         resp = await _fire(headers)
         if resp.status_code == 401:
             await self._invalidate_plane(target, plane)
-            headers = await self.auth_headers(target, raw_jwt, path=path)
+            headers = await self.auth_headers(target, operator, path=path)
             resp = await _fire(headers)
             if resp.status_code == 401:
                 raise RuntimeError(

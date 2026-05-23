@@ -28,6 +28,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/migrate"
 	"github.com/evoila/meho/cli/internal/cmd/nsx"
 	"github.com/evoila/meho/cli/internal/cmd/operation"
+	"github.com/evoila/meho/cli/internal/cmd/pfsense"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
@@ -302,6 +303,19 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())
+
+	// G3.7-T3 (#850) -- pfsense-ssh-2.7 operator alias verbs for
+	// Initiative #370. The verb tree pre-bakes connector_id=
+	// "pfsense-ssh-2.7" on top of the existing /api/v1/operations/call
+	// dispatcher route so operators don't type the connector ID on every
+	// invocation. Ships 8 read-only ops (about, version, firewall
+	// rules/state, nat rules, network interface/gateway, config show)
+	// registered by G3.7-T1..T2 (#844/#847). Replaces the consumer's
+	// `scripts/pfsense.sh` wrapper (see docs/cross-repo/pfsense-
+	// onboarding.md for the migration recipe). Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `pfsense` parent.
+	root.AddCommand(pfsense.NewRootCmd())
 
 	// G3.7-T6 (#851) -- gcloud-rest-1.0 operator alias verbs for
 	// Initiative #370. The verb tree pre-bakes connector_id=

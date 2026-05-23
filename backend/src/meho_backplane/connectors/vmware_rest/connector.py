@@ -260,11 +260,12 @@ class VmwareRestConnector(HttpConnector):
 
         Lazily establishes the session on first call against *target*;
         subsequent calls reuse the cached token. The full ``operator`` is
-        threaded to the :class:`VsphereSessionLoader` so the (future,
-        G3.9-T3) live loader can read the service-account credentials
-        from Vault under the operator's identity
-        (``vault_client_for_operator(operator)``). The default stub
-        loader ignores it and raises until that lands.
+        threaded to the :class:`VsphereSessionLoader` so the default
+        loader (G3.9-T3's :func:`load_session_credentials_from_vault`)
+        can read the service-account credentials from Vault under the
+        operator's identity (``vault_client_for_operator(operator)``). An
+        injected test loader receives the same ``(target, operator)``
+        pair.
 
         Raises :exc:`NotImplementedError` (with ``target.name`` and the
         requested mode in the message) if ``target.auth_model`` is
@@ -334,11 +335,12 @@ class VmwareRestConnector(HttpConnector):
         on the legacy path — those are auth/server failures, not "this
         deployment doesn't have the modern endpoint".
 
-        ``operator`` is forwarded to the injected
+        ``operator`` is forwarded to the
         :class:`VsphereSessionLoader` so the credential read runs under
-        the operator's identity (G3.9-T3's live read). The default stub
-        loader ignores it; injected test loaders accept the (target,
-        operator) pair.
+        the operator's identity (G3.9-T3's live read). The default loader
+        (:func:`load_session_credentials_from_vault`) performs that live
+        operator-context Vault read; injected test loaders accept the
+        same ``(target, operator)`` pair.
         """
         async with self._session_lock:
             cached = self._session_tokens.get(target.name)

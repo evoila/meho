@@ -51,6 +51,9 @@ from meho_backplane.connectors.vmware_rest import (
     VmwareRestConnector,
     VsphereTargetLike,
 )
+from meho_backplane.settings import get_settings
+
+from ._vault_fakes import install_fake_client
 
 
 def _make_operator(raw_jwt: str = "") -> Operator:
@@ -63,6 +66,29 @@ def _make_operator(raw_jwt: str = "") -> Operator:
         tenant_id=UUID(int=0),
         tenant_role=TenantRole.OPERATOR,
     )
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the chassis env vars ``Settings`` reads at construction time.
+
+    The live default loader's ``load_basic_credentials`` →
+    ``vault_client_for_operator`` calls ``get_settings()`` which eagerly
+    reads ``KEYCLOAK_*`` / ``VAULT_*``. The respx-only tests in this
+    module never reach Vault (they inject a stub loader), but the
+    live-read test below does, so pin the env for the whole module — the
+    same shape ``test_connectors_vault_creds.py`` uses.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -154,19 +180,60 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is VmwareRestConnector
 
 
-def test_default_session_loader_raises_deliberate_stub() -> None:
-    """The default Vault loader is a deliberate, clearly-labelled stub."""
-    import asyncio
+@pytest.mark.asyncio
+async def test_default_session_loader_does_live_vault_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default loader reads ``{username, password}`` from Vault, JWT-forwarded.
 
+    Replaces the former ``raises deliberate stub`` test: with G3.9-T2's
+    shared helper wired, the default loader performs the live KV-v2 read
+    under the operator's identity (rubric State 2). The in-process Vault
+    fake (``install_fake_client``) stands in for hvac so the unit lane
+    stays secret-free; the live Vault round-trip is the env-gated lab
+    smoke in ``tests/integration``.
+    """
     from meho_backplane.connectors.vmware_rest.session import (
         load_session_credentials_from_vault,
     )
 
-    async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"deliberate stub.*#214"):
-            await load_session_credentials_from_vault(_TARGET_A, _make_operator())
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"username": "svc-meho", "password": "vault-read-pw"},
+    )
 
-    asyncio.run(_check())
+    creds = await load_session_credentials_from_vault(_TARGET_A, _make_operator("op.jwt"))
+
+    assert creds == {"username": "svc-meho", "password": "vault-read-pw"}
+    # The operator's JWT was forwarded to Vault's JWT/OIDC login.
+    assert fake.auth.jwt.login_calls[-1]["jwt"] == "op.jwt"
+    # The read addressed the target's secret_ref under the default mount.
+    assert fake.secrets.kv.v2.read_calls[-1]["path"] == _TARGET_A.secret_ref
+
+
+@pytest.mark.asyncio
+async def test_default_session_loader_fails_closed_for_system_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A system-initiated call (empty raw_jwt) errors before touching Vault.
+
+    The shared helper's fail-closed carve-out: no operator JWT means no
+    operator-context read. Confirms the vmware default loader inherits
+    that contract rather than silently falling back.
+    """
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+    from meho_backplane.connectors.vmware_rest.session import (
+        load_session_credentials_from_vault,
+    )
+
+    fake = install_fake_client(monkeypatch)
+
+    with pytest.raises(VaultCredentialsReadError):
+        await load_session_credentials_from_vault(_TARGET_A, _make_operator(raw_jwt=""))
+
+    # Vault was never reached — no login, no read.
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
 
 
 # ---------------------------------------------------------------------------

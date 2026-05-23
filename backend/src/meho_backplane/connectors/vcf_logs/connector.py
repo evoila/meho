@@ -243,17 +243,19 @@ class VcfLogsConnector(HttpConnector):
         """Return ``{"Authorization": "Bearer <session_id>"}`` for the request.
 
         Lazily establishes the session on first call against *target*;
-        subsequent calls reuse the cached token. ``operator`` is accepted
-        for the shared HTTP auth surface (G3.9-T1) but unused --
-        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
-        Vault-sourced service account, not the operator's OIDC token.
-        Threading the operator into vRLI's credential loader is #G3.10.
+        subsequent calls reuse the cached token. The full ``operator`` is
+        threaded into :meth:`_session_token` so the live credentials
+        loader (the default
+        :func:`~meho_backplane.connectors._shared.vcf_auth.load_credentials_from_vault`)
+        reads the per-target KV-v2 secret under the operator's Vault
+        Identity entity via
+        :func:`~meho_backplane.auth.vault.vault_client_for_operator` --
+        the locked Option A decision.
 
         Raises :exc:`NotImplementedError` (with ``target.name`` and the
         requested mode in the message) if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del operator  # SHARED_SERVICE_ACCOUNT does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -261,10 +263,10 @@ class VcfLogsConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        token = await self._session_token(target)
+        token = await self._session_token(target, operator)
         return {"Authorization": f"Bearer {token}"}
 
-    async def _session_token(self, target: VcfLogsTargetLike) -> str:
+    async def _session_token(self, target: VcfLogsTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, establishing on first use.
 
         The lock serialises concurrent first-use callers for one target;
@@ -284,12 +286,18 @@ class VcfLogsConnector(HttpConnector):
         :exc:`RuntimeError` (``SessionLoginError`` is a
         ``RuntimeError`` subclass) for parity with the NSX precedent's
         error shape.
+
+        ``operator`` is forwarded to the shared
+        :class:`CredentialsCache` so the live default loader reads the
+        per-target Vault secret under the operator's Vault Identity
+        entity (G3.10-T2's live read). Injected test loaders accept the
+        same ``(target, operator)`` pair.
         """
         async with self._session_lock:
             cached = self._session_tokens.get(target.name)
             if cached is not None:
                 return cached
-            creds = await self._credentials.get(target)
+            creds = await self._credentials.get(target, operator)
             provider = getattr(target, "provider", None) or _DEFAULT_PROVIDER
             client = await self._http_client(target)
             token = await vcf_session_login(

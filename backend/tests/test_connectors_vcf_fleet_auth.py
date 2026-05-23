@@ -108,7 +108,7 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: VcfFleetTargetLike) -> dict[str, str]:
+async def _stub_loader(_target: VcfFleetTargetLike, _operator: Operator) -> dict[str, str]:
     """Return canned ``admin@local`` credentials regardless of the target."""
     return {"username": "admin@local", "password": "stub-password"}
 
@@ -151,19 +151,42 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is VcfFleetConnector
 
 
-def test_default_credentials_loader_raises_until_goal_214() -> None:
-    """The default Vault loader stays unimplemented until Goal #214."""
+def test_default_credentials_loader_fails_closed_without_operator_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default loader is the live shared operator-context Vault read (G3.10-T2).
+
+    Empty ``raw_jwt`` is fail-closed — system-initiated calls have no
+    operator JWT to forward to Vault's JWT/OIDC auth method, so the
+    helper raises :class:`VaultCredentialsReadError` rather than
+    silently falling back to a backplane identity. End-to-end coverage
+    of the wired read lives in ``test_connectors_vcf_fleet_credread.py``.
+    """
     import asyncio
 
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.vcf_fleet.session import (
         load_credentials_from_vault,
     )
+    from meho_backplane.settings import get_settings
+
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A)
+        with pytest.raises(VaultCredentialsReadError, match=r"vcf-fleet-a"):
+            await load_credentials_from_vault(_TARGET_A, _make_operator(raw_jwt=""))
 
-    asyncio.run(_check())
+    try:
+        asyncio.run(_check())
+    finally:
+        get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +220,7 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
     """Second auth_headers call against the same target does NOT re-invoke the loader."""
     call_count = 0
 
-    async def _counting_loader(_target: VcfFleetTargetLike) -> dict[str, str]:
+    async def _counting_loader(_target: VcfFleetTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
         return {"username": "admin@local", "password": "stub-password"}
@@ -221,7 +244,7 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
     """Two targets get two distinct credential cache entries; no cross-target leakage."""
     call_log: list[str] = []
 
-    async def _tracking_loader(target: VcfFleetTargetLike) -> dict[str, str]:
+    async def _tracking_loader(target: VcfFleetTargetLike, _operator: Operator) -> dict[str, str]:
         call_log.append(target.name)
         return {"username": f"svc-{target.name}", "password": "pass"}
 
@@ -246,7 +269,7 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
 async def test_loader_missing_password_key_raises_runtime_error_naming_target() -> None:
     """Loader returning a dict missing 'password' raises RuntimeError naming the target."""
 
-    async def _bad_loader(_target: VcfFleetTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: VcfFleetTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "admin@local"}  # type: ignore[return-value]
 
     connector = VcfFleetConnector(credentials_loader=_bad_loader)
@@ -261,7 +284,7 @@ async def test_loader_missing_password_key_raises_runtime_error_naming_target() 
 async def test_loader_missing_username_key_raises_runtime_error_naming_target() -> None:
     """Loader returning a dict missing 'username' raises RuntimeError naming the target."""
 
-    async def _bad_loader(_target: VcfFleetTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: VcfFleetTargetLike, _operator: Operator) -> dict[str, str]:
         return {"password": "stub-password"}  # type: ignore[return-value]
 
     connector = VcfFleetConnector(credentials_loader=_bad_loader)
@@ -515,7 +538,7 @@ async def test_aclose_clears_credential_cache() -> None:
     """aclose() empties the shared credential cache so a reuse re-fetches."""
     call_count = 0
 
-    async def _counting_loader(_target: VcfFleetTargetLike) -> dict[str, str]:
+    async def _counting_loader(_target: VcfFleetTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
         return {"username": "admin@local", "password": "stub-password"}

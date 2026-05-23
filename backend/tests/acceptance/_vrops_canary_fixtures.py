@@ -405,7 +405,9 @@ def _param_schema_for(path: str) -> dict[str, object]:
     }
 
 
-async def _vrops_credentials_loader(_target: VcfOperationsTargetLike) -> dict[str, str]:
+async def _vrops_credentials_loader(
+    _target: VcfOperationsTargetLike, _operator: Operator
+) -> dict[str, str]:
     """Stub credentials loader — bypasses the not-yet-wired Vault read.
 
     The respx routes accept any Basic-auth header, so the values are

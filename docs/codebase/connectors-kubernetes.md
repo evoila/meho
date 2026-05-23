@@ -72,9 +72,21 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `Target` model once G0.3 (#224) lands; the structural shape there
   satisfies the Protocol unchanged.
 - **`load_kubeconfig_from_vault`** (`kubeconfig.py`) -- the default
-  kubeconfig loader stub. Raises `NotImplementedError` until G0.3
-  lands; tests and the integration suite inject a callable returning
-  a pre-built kubeconfig dict.
+  kubeconfig loader. After G3.10-T4 (#948) it performs the live
+  operator-context KV-v2 read: opens
+  `vault_client_for_operator(operator)` (forwards the operator's
+  validated Keycloak JWT to Vault's JWT/OIDC auth method), reads
+  `target.secret_ref`, extracts the `kubeconfig` field, and parses the
+  YAML into the dict shape
+  `kubernetes_asyncio.config.new_client_from_config_dict` accepts. The
+  read happens **under the operator's Vault Identity entity** —
+  per-operator RBAC + per-operator audit. Tests still inject a custom
+  loader for unit-scope determinism; the `(target, operator)` signature
+  is shared by the default and every injected loader. Fail-closed
+  guards: empty `operator.raw_jwt` (the system-call carve-out) and
+  unset `target.secret_ref` both raise `VaultCredentialsReadError`
+  before Vault is touched. This is the rubric **State 2** wiring
+  (`shared_service_account` only). Decision: [`docs/architecture/connector-auth.md`](../architecture/connector-auth.md).
 
 ## Shipped op surface
 

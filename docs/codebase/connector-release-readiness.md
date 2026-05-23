@@ -55,7 +55,9 @@ rg "op_id=.<connector-name>\." backend/src/meho_backplane/connectors/<connector-
 rg "raise NotImplementedError" backend/src/meho_backplane/connectors/<connector-name>/
 ```
 
-**v0.3.0 examples at this state:** `k8s-1.x`. (`vmware-rest-9.0` was at
+**v0.3.0 examples at this state:** none after G3.10. (`k8s-1.x` was at
+this state through v0.3.0; G3.10-T4 [#948](https://github.com/evoila/meho/issues/948)
+wired its live loader and moved it to State 2. `vmware-rest-9.0` was at
 this state through v0.3.0; G3.9-T3 [#942](https://github.com/evoila/meho/issues/942)
 wired its live loader and moved it to State 2.)
 
@@ -101,6 +103,20 @@ now performs the live operator-context KV-v2 read via the shared
 [`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
 helper; `shared_service_account` executes against a real vCenter.
 Operator recipe: [`vmware-rest-onboarding.md`](../cross-repo/vmware-rest-onboarding.md).
+`k8s-1.x` joined this state via G3.10-T4
+[#948](https://github.com/evoila/meho/issues/948): its default loader
+[`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)
+performs the live operator-context KV-v2 read (kubeconfig YAML under
+the `kubeconfig` field) and parses the result into the dict shape
+`kubernetes_asyncio.config.new_client_from_config_dict` accepts;
+`shared_service_account` executes against a real cluster. The
+kubeconfig is structurally different from the `{username, password}`
+the REST connectors consume — it's a single YAML document — so the
+loader reuses the lower-level `vault_client_for_operator` primitive
+directly rather than the `load_basic_credentials` helper, while still
+applying the same fail-closed contract (empty `operator.raw_jwt` →
+`VaultCredentialsReadError`) and the same no-secret-in-logs discipline.
+Operator recipe: [`kubernetes-onboarding.md`](../cross-repo/kubernetes-onboarding.md).
 
 **Honest release-notes language:**
 
@@ -134,7 +150,7 @@ flow is the only auth_model; loader is live; consumer confirmed
 |---|---|---|---|
 | `vault-1.x` | 3 | JWT-federated, live | ✅ |
 | `bind9-ssh-9.x` | 2-3 | `shared_service_account` inline | ✅ |
-| `k8s-1.x` | 1 | [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py#L86) — `NotImplementedError` | ❌ (mock loader in test only) |
+| `k8s-1.x` | 2 | [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py) — live operator-context Vault read (G3.10-T4 [#948](https://github.com/evoila/meho/issues/948)) | ✅ (`shared_service_account`) |
 | `vmware-rest-9.0` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L116) — live operator-context Vault read (G3.9-T3 [#942](https://github.com/evoila/meho/issues/942)) | ✅ (`shared_service_account`) |
 | `vcf-automation-9.0` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vcf_automation/session.py) — live operator-context Vault read via the shared [`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py) helper; `operator` threaded through the bespoke dual-plane auth (G3.10-T3 [#947](https://github.com/evoila/meho/issues/947)) | ✅ (`shared_service_account`) |
 | `vcf-operations-9.0` (vROps) | 2 | Shared [`_shared/vcf_auth.load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/_shared/vcf_auth.py) — live operator-context Vault read (G3.10-T2 [#946](https://github.com/evoila/meho/issues/946)) | ✅ (`shared_service_account`) |
@@ -143,7 +159,7 @@ flow is the only auth_model; loader is live; consumer confirmed
 | `nsx-4.2` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/nsx/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
 | `sddc-manager-9.0` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/sddc_manager/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
 | `harbor-2.x` | 2 | [`load_credentials_from_vault`](../../backend/src/meho_backplane/connectors/harbor/session.py) — live operator-context Vault read (G3.10-T1 [#945](https://github.com/evoila/meho/issues/945)) | ✅ (`shared_service_account`) |
-| `kubernetes-asyncio-1.x` | 1 (shadow) | Same as `k8s-1.x` | ❌ |
+| `kubernetes-asyncio-1.x` | 2 (shadow) | Same as `k8s-1.x` | ✅ (`shared_service_account`) |
 
 State 0.5 = `register_connector_v2` called but no ops registered yet.
 Since [T5 #733](https://github.com/evoila/meho/issues/733), these

@@ -3,15 +3,18 @@
 
 # SonarCloud quality gate.
 #
-# Triggers via workflow_run after CI succeeds. Downloads Python coverage
-# from CI's artifacts (when CI starts producing them), then runs the
-# SonarCloud scan. The "Clean as You Code" model applies the gate to
-# new code only — existing issues don't block PRs.
+# Triggers via workflow_run after CI succeeds. Downloads the Python
+# coverage artifact CI produces, then runs the SonarCloud scan. The
+# "Clean as You Code" model is meant to gate new code only — existing
+# issues don't block PRs.
 #
-# After the orphan-commit reset, SonarCloud sees a fresh single-commit
-# history. The project (evoila_meho on org evoila) persists across the
-# reset — it's external state keyed by repo identifier — so the same
-# project picks up the new commits and resets the baseline naturally.
+# NEW-CODE BASELINE: the orphan-commit reset left SonarCloud with a
+# baseline that predates *all* commits, so the entire repo is scored as
+# "new code" (every new_* metric equals its all-time twin and the gate
+# fails on the whole codebase, not the diff). It does NOT reset itself.
+# Fix is a one-time project setting — New Code = "Reference branch: main"
+# — documented in docs/codebase/sonarcloud.md. continue-on-error below
+# keeps the (currently meaningless) gate advisory until that lands.
 #
 # Prerequisite: SONAR_TOKEN repo secret. Verified present pre-merge.
 #
@@ -51,9 +54,45 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: python-coverage
+          # Extract into backend/ so the file lands at backend/coverage.xml,
+          # matching sonar.python.coverage.reportPaths in
+          # sonar-project.properties. The artifact stores the bare
+          # `coverage.xml` basename (uploaded from backend/coverage.xml).
+          path: backend
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true  # coverage artifact may not exist yet (no tests)
+        continue-on-error: true  # missing artifact degrades to "no coverage", never blocks
+
+      - name: Point coverage report at the backend/ source root
+        # coverage.py (relative_files=true) writes an empty <source></source>
+        # and filenames like `src/meho_backplane/...` relative to backend/.
+        # SonarCloud resolves coverage paths from the repo root, so without
+        # the `backend/` prefix every file fails with "Cannot resolve the
+        # file path ... the file does not exist in all 'source'" and coverage
+        # imports as 0% (observed on the #920 merge run). Injecting the
+        # source root makes paths resolve to backend/src/meho_backplane/...
+        # Guarded on the file existing so a missing coverage artifact is a no-op.
+        if: hashFiles('backend/coverage.xml') != ''
+        run: |
+          set -euo pipefail
+          sed -i 's#<source></source>#<source>backend</source>#' backend/coverage.xml
+          grep -q '<source>backend</source>' backend/coverage.xml \
+            && echo "coverage source root set to backend/" \
+            || echo "::warning::coverage <source> not rewritten — sonar may report 0% coverage"
+
+      - name: Download Go coverage from CI workflow
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: go-coverage
+          # Extract into cli/ so the file lands at cli/coverage.out, matching
+          # sonar.go.coverage.reportPaths. The Go profile uses module import
+          # paths (github.com/evoila/meho/cli/...), which SonarCloud's Go
+          # sensor resolves via cli/go.mod — no path rewrite needed (unlike
+          # the Python report).
+          path: cli
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true  # missing artifact degrades to "no Go coverage", never blocks
 
       - name: Ensure dirmngr is available (for sonar-scanner GPG verify)
         run: |
@@ -65,5 +104,10 @@ jobs:
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995  # v8.1.0
+        with:
+          # Stamp each analysis with the analysed commit so SonarCloud's
+          # history is navigable (the project version was "not provided").
+          args: >-
+            -Dsonar.projectVersion=${{ github.event.workflow_run.head_sha }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

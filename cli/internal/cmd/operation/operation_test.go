@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 )
 
 // TestTruncateAsciiNoTrim — string within budget passes through.
@@ -261,7 +262,7 @@ func TestLoadParamsFlagMissingFileReportsError(t *testing.T) {
 // TestNormaliseURLStripsTrailingSlash — same contract as the
 // retrieval sibling; trailing-slash trimming is the v0.2 convention.
 func TestNormaliseURLStripsTrailingSlash(t *testing.T) {
-	got, err := normaliseURL("https://meho.test/")
+	got, err := backplane.NormaliseURL("https://meho.test/")
 	if err != nil {
 		t.Fatalf("normaliseURL: %v", err)
 	}
@@ -273,7 +274,7 @@ func TestNormaliseURLStripsTrailingSlash(t *testing.T) {
 // TestNormaliseURLRejectsEmpty — empty input returns the "empty"
 // error string callers depend on.
 func TestNormaliseURLRejectsEmpty(t *testing.T) {
-	_, err := normaliseURL("   ")
+	_, err := backplane.NormaliseURL("   ")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("expected 'empty' error; got %v", err)
 	}
@@ -283,13 +284,13 @@ func TestNormaliseURLRejectsEmpty(t *testing.T) {
 // any error wrapping it) maps to AuthExpired; everything else maps
 // to Unexpected. Same routing ladder as the retrieval sibling.
 func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
-	wrappedNotFound := &errNoBackplaneConfigured{inner: auth.ErrConfigNotFound}
-	se := classifyBackplaneError(wrappedNotFound)
+	wrappedNotFound := &backplane.NotConfiguredError{Inner: auth.ErrConfigNotFound}
+	se := backplane.ClassifyError(wrappedNotFound)
 	if se == nil || se.Code != "auth_expired" {
 		t.Fatalf("ErrConfigNotFound wrapper should classify as auth_expired; got %+v", se)
 	}
 	parseFailure := errors.New("invalid backplane URL")
-	se = classifyBackplaneError(parseFailure)
+	se = backplane.ClassifyError(parseFailure)
 	if se == nil || se.Code != "unexpected_response" {
 		t.Fatalf("parse failure should classify as unexpected; got %+v", se)
 	}

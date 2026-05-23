@@ -56,6 +56,14 @@ clear :exc:`NotImplementedError` naming the target + the requested
 mode. Per-user and impersonation modes are deferred to v0.2.next,
 same posture the vSphere precedent established.
 
+The operator's validated Keycloak JWT is forwarded through
+:meth:`auth_headers` -> :meth:`_session_token` -> the
+:class:`NsxSessionLoader` so the live default loader reads the
+per-target Vault secret under the operator's identity (G3.10-T1 #945,
+following the G3.9 vmware-rest precedent). The NSX session establish
+itself stays HTTP-form against the resolved service account -- the
+operator's JWT authenticates the Vault read, not the NSX login.
+
 Session lifecycle
 -----------------
 
@@ -90,6 +98,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx.session import (
     NsxSessionLoader,
@@ -181,14 +191,18 @@ class NsxConnector(HttpConnector):
             session_loader if session_loader is not None else load_session_credentials_from_vault
         )
 
-    async def auth_headers(self, target: NsxTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: NsxTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"X-XSRF-TOKEN": <token>}`` for the request.
 
         Lazily establishes the session on first call against *target*;
-        subsequent calls reuse the cached token. ``raw_jwt`` is accepted
-        for ABC-signature compatibility but unused --
-        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
-        Vault-sourced service account, not the operator's OIDC token.
+        subsequent calls reuse the cached token. The full ``operator`` is
+        forwarded to :meth:`_session_token` so the live default loader
+        (G3.10-T1 #945) can read the per-target secret under the
+        operator's identity (``vault_client_for_operator(operator)``).
+        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` selects the
+        Vault-sourced service account once the loader has resolved it;
+        the operator's JWT only authenticates the read, not the NSX
+        session itself.
 
         The JSESSIONID cookie that pairs with this XSRF token lives in
         the per-target client's cookie jar
@@ -199,7 +213,6 @@ class NsxConnector(HttpConnector):
         requested mode in the message) if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT does not forward operator JWT
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -207,10 +220,10 @@ class NsxConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        token = await self._session_token(target)
+        token = await self._session_token(target, operator)
         return {_XSRF_HEADER: token}
 
-    async def _session_token(self, target: NsxTargetLike) -> str:
+    async def _session_token(self, target: NsxTargetLike, operator: Operator) -> str:
         """Return the cached XSRF token for *target*, establishing one on first use.
 
         The lock serialises concurrent first-use for one target; the
@@ -224,12 +237,20 @@ class NsxConnector(HttpConnector):
         and ``Set-Cookie: JSESSIONID=...`` which the per-target httpx
         client jar captures automatically. The response body is not
         used.
+
+        ``operator`` is forwarded to the
+        :class:`NsxSessionLoader` so the default loader can read the
+        per-target Vault secret under the operator's identity
+        (G3.10-T1's live read). The default loader is the thin
+        nsx-specific entry point to the shared operator-context Vault
+        read; injected test loaders accept the same
+        ``(target, operator)`` pair.
         """
         async with self._session_lock:
             cached = self._session_tokens.get(target.name)
             if cached is not None:
                 return cached
-            creds = await self._session_loader(target)
+            creds = await self._session_loader(target, operator)
             try:
                 username = creds["username"]
                 password = creds["password"]
@@ -298,7 +319,7 @@ class NsxConnector(HttpConnector):
         target: NsxTargetLike,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """GET *path* with single 401 -> re-login -> retry-once recovery.
@@ -316,13 +337,13 @@ class NsxConnector(HttpConnector):
         retry loop.
         """
         try:
-            return await self._get_json(target, path, raw_jwt=raw_jwt, params=params)
+            return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 401:
                 raise
             await self._invalidate_session(target)
         try:
-            return await self._get_json(target, path, raw_jwt=raw_jwt, params=params)
+            return await self._get_json(target, path, operator=operator, params=params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 raise RuntimeError(
@@ -350,7 +371,9 @@ class NsxConnector(HttpConnector):
         """
         probed_at = datetime.now(UTC)
         try:
-            payload = await self._get_json_with_session_retry(target, "/api/v1/node", raw_jwt="")
+            payload = await self._get_json_with_session_retry(
+                target, "/api/v1/node", operator=synthesise_system_operator()
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",

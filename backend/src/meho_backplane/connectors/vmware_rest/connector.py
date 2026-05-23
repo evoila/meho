@@ -86,6 +86,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -253,21 +255,23 @@ class VmwareRestConnector(HttpConnector):
             session_loader if session_loader is not None else load_session_credentials_from_vault
         )
 
-    async def auth_headers(self, target: VsphereTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: VsphereTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"vmware-api-session-id": <token>}`` for the request.
 
         Lazily establishes the session on first call against *target*;
-        subsequent calls reuse the cached token. ``raw_jwt`` is accepted
-        for ABC-signature compatibility but unused — the
-        :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` mode authenticates with
-        a Vault-sourced service account, not the operator's OIDC token.
+        subsequent calls reuse the cached token. The full ``operator`` is
+        threaded to the :class:`VsphereSessionLoader` so the default
+        loader (G3.9-T3's :func:`load_session_credentials_from_vault`)
+        can read the service-account credentials from Vault under the
+        operator's identity (``vault_client_for_operator(operator)``). An
+        injected test loader receives the same ``(target, operator)``
+        pair.
 
         Raises :exc:`NotImplementedError` (with ``target.name`` and the
         requested mode in the message) if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         Per-user and impersonation modes are deferred to v0.2.next.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT mode doesn't forward the operator JWT
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -275,10 +279,10 @@ class VmwareRestConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        token = await self._session_token(target)
+        token = await self._session_token(target, operator)
         return {_SESSION_HEADER: token}
 
-    async def mount_op_path(self, target: VsphereTargetLike, path: str) -> str:
+    async def mount_op_path(self, target: VsphereTargetLike, path: str, operator: Operator) -> str:
         """Map a spec-relative ingested-op *path* onto *target*'s live mount.
 
         Overrides the identity :meth:`HttpConnector.mount_op_path` hook
@@ -294,6 +298,11 @@ class VmwareRestConnector(HttpConnector):
         and 404ing. The pure mapping — including the already-mounted
         pass-through — lives in :func:`._mount.mounted_path`.
 
+        ``operator`` is the dispatch op's operator; it is forwarded to
+        :meth:`_session_token` so a cold-cache session establish here
+        authenticates under the same identity the subsequent transport
+        call will.
+
         This is a dedicated dispatcher hook rather than a
         ``_request_json`` / ``_post_json`` override on purpose: those
         carry tenacity's ``@retry`` (and the ``.retry`` attribute that
@@ -302,11 +311,11 @@ class VmwareRestConnector(HttpConnector):
         — overriding the transport methods would both strip ``.retry``
         and force a spurious session establish on the pre-auth probe.
         """
-        await self._session_token(target)
+        await self._session_token(target, operator)
         session_path = self._session_paths.get(target.name, SESSION_PATH_MODERN)
         return mounted_path(session_path, path)
 
-    async def _session_token(self, target: VsphereTargetLike) -> str:
+    async def _session_token(self, target: VsphereTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, establishing one on first use.
 
         The lock serialises concurrent first-use for one target; the
@@ -325,12 +334,19 @@ class VmwareRestConnector(HttpConnector):
         endpoint. 401 / 403 / 5xx on the modern path are *not* retried
         on the legacy path — those are auth/server failures, not "this
         deployment doesn't have the modern endpoint".
+
+        ``operator`` is forwarded to the
+        :class:`VsphereSessionLoader` so the credential read runs under
+        the operator's identity (G3.9-T3's live read). The default loader
+        (:func:`load_session_credentials_from_vault`) performs that live
+        operator-context Vault read; injected test loaders accept the
+        same ``(target, operator)`` pair.
         """
         async with self._session_lock:
             cached = self._session_tokens.get(target.name)
             if cached is not None:
                 return cached
-            creds = await self._session_loader(target)
+            creds = await self._session_loader(target, operator)
             client = await self._http_client(target)
             try:
                 username = creds["username"]
@@ -394,8 +410,13 @@ class VmwareRestConnector(HttpConnector):
         structured response rather than a stack trace.
         """
         probed_at = datetime.now(UTC)
+        # The fingerprint probe is system-initiated — there is no real
+        # operator on this path. Synthesise a system operator (empty
+        # raw_jwt) for the auth surface; ``GET /api/about`` is reached
+        # pre-session via _get_json. See _shared.system_operator.
+        operator = synthesise_system_operator()
         try:
-            payload = await self._get_json(target, "/api/about", raw_jwt="")
+            payload = await self._get_json(target, "/api/about", operator=operator)
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             # RuntimeError catches the session-establish failures from
             # :meth:`_session_token` so an unauthenticatable target

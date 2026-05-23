@@ -147,10 +147,10 @@ Automation take.
 
 ```text
 caller wants to issue an authenticated GET:
-  ├─ _get_json_with_session_retry(target, path, raw_jwt)
-  │    ├─ _get_json(target, path)
+  ├─ _get_json_with_session_retry(target, path, operator)
+  │    ├─ _get_json(target, path, operator=operator)
   │    │    └─ HttpConnector._request_json (retry on 5xx / conn err)
-  │    │         ├─ auth_headers(target, raw_jwt)
+  │    │         ├─ auth_headers(target, operator)
   │    │         │    └─ _session_token(target)
   │    │         │         ├─ _credentials.get(target)
   │    │         │         │    └─ user-injected or Vault loader

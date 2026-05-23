@@ -78,6 +78,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.hetzner_robot.session import (
     HetznerRobotCredentialsLoader,
@@ -158,20 +160,23 @@ class HetznerRobotConnector(HttpConnector):
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
 
-    async def auth_headers(self, target: HetznerRobotTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(
+        self, target: HetznerRobotTargetLike, operator: Operator
+    ) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target*, caches
-        them, and reuses the cached values on subsequent calls.  ``raw_jwt``
-        is accepted for ABC-signature compatibility but unused —
+        them, and reuses the cached values on subsequent calls.  ``operator``
+        is accepted for the shared HTTP auth surface (G3.9-T1) but unused —
         :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
         Vault-sourced Webservice-user credential, not the operator's OIDC
-        token.
+        token.  Threading the operator into Hetzner Robot's credential loader
+        is #G3.10.
 
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is anything
         other than ``shared_service_account`` or ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT mode does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT mode does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -226,7 +231,7 @@ class HetznerRobotConnector(HttpConnector):
         the human-readable failure on top.
         """
         client = await self._http_client(target)
-        headers = await self.auth_headers(target, raw_jwt="")
+        headers = await self.auth_headers(target, synthesise_system_operator())
         resp = await client.request("GET", path, headers=headers)
         if resp.status_code == 401:
             raise RuntimeError(
@@ -259,7 +264,7 @@ class HetznerRobotConnector(HttpConnector):
         ships for v0.2.next write readiness per the task body.
         """
         client = await self._http_client(target)
-        headers = await self.auth_headers(target, raw_jwt="")
+        headers = await self.auth_headers(target, synthesise_system_operator())
         resp = await client.request("POST", path, data=data, headers=headers)
         if resp.status_code == 401:
             raise RuntimeError(

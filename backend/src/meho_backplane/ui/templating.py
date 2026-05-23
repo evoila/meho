@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from meho_backplane import __version__
@@ -56,6 +57,14 @@ from meho_backplane.ui.paths import templates_dir
 # type without ``cast``; lru_cache + Jinja2 + mypy has a known
 # False-positive on the cached return type at strict mode.
 _ENV: Environment | None = None
+
+#: Cached :class:`Jinja2Templates` wrapper bound to :data:`_ENV`. T5
+#: (#866) route handlers call ``TemplateResponse(request, name, context)``
+#: through this object so FastAPI's response wiring (URL reverse-lookup
+#: helper + ``request`` context injection) lights up. Constructed
+#: lazily alongside :func:`get_jinja_env` so the chassis-only Task #863
+#: stays free of FastAPI route plumbing.
+_TEMPLATES: Jinja2Templates | None = None
 
 _AUTOESCAPE_EXTS: Final[tuple[str, ...]] = ("html", "htm", "xml")
 
@@ -89,3 +98,42 @@ def get_jinja_env() -> Environment:
         )
         _ENV.globals["app_version"] = __version__
     return _ENV
+
+
+def get_templates() -> Jinja2Templates:
+    """Return the lazily-constructed :class:`Jinja2Templates` wrapper.
+
+    FastAPI 0.136's :class:`fastapi.templating.Jinja2Templates` accepts
+    a pre-built ``env=`` argument; we pass our chassis singleton so the
+    autoescape / ``StrictUndefined`` / ``app_version`` global plumbing
+    survives across the wrapper. The wrapper itself adds two things
+    on top of a bare :class:`~jinja2.Environment`:
+
+    * A :class:`fastapi.templating._TemplateResponse` factory invoked as
+      ``templates.TemplateResponse(request, "name.html", {...})`` -- the
+      ``request`` argument is the FastAPI-blessed shape (Starlette 1.0
+      deprecates the legacy ``(name, {request, ...})`` signature).
+    * A ``url_for`` Jinja global bound to the request's router so
+      surface templates can reverse route names instead of hard-coding
+      ``href=`` strings.
+
+    Module-level cache (rather than :func:`functools.lru_cache`) so the
+    type checker sees the concrete return type without ``cast``.
+    """
+    global _TEMPLATES
+    if _TEMPLATES is None:
+        _TEMPLATES = Jinja2Templates(env=get_jinja_env())
+    return _TEMPLATES
+
+
+def reset_templating_for_testing() -> None:
+    """Drop the cached env + templates wrapper. Test-only.
+
+    Production never mutates these caches under a running process. The
+    UI smoke test rebuilds the cache between cases (e.g. when verifying
+    the env loads against a tmp-path override) by calling this helper
+    inside its fixture teardown.
+    """
+    global _ENV, _TEMPLATES
+    _ENV = None
+    _TEMPLATES = None

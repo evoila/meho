@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -53,15 +54,15 @@ func newProjectListCmd() *cobra.Command {
 }
 
 func runProjectList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v2.0/projects", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2.0/projects", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v2.0/projects", r, jsonOut, printProjectList)
+	return conn.Render(cmd, "GET:/api/v2.0/projects", r, jsonOut, printProjectList)
 }
 
 func printProjectList(w io.Writer, r *CallResult) {
@@ -128,17 +129,17 @@ func newProjectInfoCmd() *cobra.Command {
 }
 
 func runProjectInfo(cmd *cobra.Command, projectName, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	opID := "GET:/api/v2.0/projects/{project_name}"
 	params := map[string]any{"project_name": projectName}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printProjectInfo)
+	return conn.Render(cmd, opID, r, jsonOut, printProjectInfo)
 }
 
 func printProjectInfo(w io.Writer, r *CallResult) {

@@ -27,6 +27,10 @@ dependencies = [
     "packaging>=24.0",
     "python-frontmatter>=1.2.0",
     "jinja2>=3.1.6",
+    "duckdb>=1.4.3",
+    "pyarrow>=21.0.0",
+    "msgspec>=0.20.0",
+    "tabulate>=0.9.0",
 ]
 
 [dependency-groups]
@@ -106,6 +110,28 @@ select = [
 # and then `operator.attrgetter(...)` — that pattern WOULD be confusing.
 "src/meho_backplane/auth/operator.py" = ["A005"]
 "src/meho_backplane/logging.py" = ["A005"]
+# Vendored JSONFlux tree (#752, from MEHO.X meho_app/jsonflux/ at fc82cf93).
+# Kept as a verbatim copy, so the lint carveouts mirror MEHO.X's own and
+# additionally cover the rules MEHO.X never tripped because its ruff config
+# differs from this repo's:
+#   - C901 cognitive complexity, PERF perf-sensitive loops, BLE001 broad
+#     excepts at the SQL/IO boundary, ERA001 commented-out documented
+#     examples, TCH import-time type-checking blocks, S608 SQL-literal
+#     construction on Arrow tables  (the carveouts MEHO.X declares directly).
+#   - A002 (`format` arg shadows a builtin) and N806 (Arrow/SQL-style
+#     CamelCase locals): this repo selects A + N; MEHO.X does not.
+#   - E501 line-too-long and RUF100 unused-noqa: this repo enforces both;
+#     MEHO.X ignores them globally. RUF100 fires here because the verbatim
+#     source carries `# noqa: S608/S311` for the bandit (S) ruleset, which
+#     this repo does not select — the noqa comments are retained for
+#     provenance and to keep the tree byte-identical to upstream.
+# Revisit on the next upstream sync.
+"src/meho_backplane/jsonflux/__init__.py" = ["C901", "PERF", "BLE001", "A002", "RUF100"]
+"src/meho_backplane/jsonflux/core/analyzer.py" = ["C901", "ERA001", "PERF", "TCH", "N806"]
+"src/meho_backplane/jsonflux/core/converter.py" = ["C901"]
+"src/meho_backplane/jsonflux/core/stats.py" = ["C901", "ERA001", "PERF", "E501"]
+"src/meho_backplane/jsonflux/query/engine.py" = ["C901", "PERF", "S608", "TCH", "BLE001", "A002", "E501", "RUF100"]
+"src/meho_backplane/jsonflux/utils/sampling.py" = ["TCH"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's standard dependency-injection pattern relies on calling
@@ -226,6 +252,32 @@ ignore_missing_imports = true
 module = ["frontmatter.*"]
 ignore_missing_imports = true
 
+# tabulate (used by the vendored JSONFlux query engine, #752) ships no
+# ``py.typed`` marker as of 0.9.x. It is imported lazily inside the
+# ``query_table`` / ``query_print`` rendering paths of
+# :mod:`meho_backplane.jsonflux.query.engine`. Whitelisting the module
+# avoids pulling ``types-tabulate`` into the dev image just for those
+# two call sites. Drop this override if upstream ships stubs.
+[[tool.mypy.overrides]]
+module = ["tabulate.*"]
+ignore_missing_imports = true
+
+# Vendored JSONFlux tree (#752, from MEHO.X meho_app/jsonflux/ at
+# fc82cf93). The tree is mypy-clean under MEHO.X's config, which does
+# not enable two of this repo's ``strict = true`` sub-flags:
+# ``disallow_any_generics`` (bare ``dict``/``list``/``frozenset``
+# annotations -> ``type-arg``) and ``no_implicit_reexport`` (re-exports
+# without ``__all__`` -> ``attr-defined`` on ``from .core.analyzer
+# import ALL_KINDS`` etc.). To keep the tree byte-identical to upstream
+# rather than re-annotate ~3.3k LOC, this override relaxes exactly those
+# two error codes for the vendored package only — the rest of strict
+# mode (untyped-def detection, return-any, etc.) stays in force here,
+# and the whole repo outside ``jsonflux`` is unaffected. Revisit /
+# tighten on the next upstream sync.
+[[tool.mypy.overrides]]
+module = ["meho_backplane.jsonflux.*"]
+disable_error_code = ["type-arg", "attr-defined"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -258,3 +310,12 @@ markers = [
 # warning is intentional — it's the only signal the test run carries
 # of the v0.2 ``joserfc`` migration backlog item, and silencing it
 # would risk obscuring future authlib deprecations.
+
+[tool.coverage.run]
+# Store file paths in coverage.xml *relative* to the project root rather
+# than as absolute runner paths. The unit-test + coverage step (CI's
+# `Pytest (unit + coverage)`) and the SonarCloud scan (quality-gate.yml)
+# run in separate jobs on separate runners, so absolute paths captured by
+# the first never resolve in the second. Relative paths make the report
+# portable so SonarCloud can map coverage onto the analysed sources.
+relative_files = true

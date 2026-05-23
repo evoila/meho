@@ -77,6 +77,6 @@ class VcfOperationsTargetLike(Protocol):
     name: str
     host: str
     port: int | None
-    secret_ref: str
+    secret_ref: str | None
     auth_model: str | None
     auth_source: str | None

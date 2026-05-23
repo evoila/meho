@@ -4,7 +4,7 @@
 
 The `hetzner-robot` connector is the hand-rolled `HttpConnector` subclass
 for the [Hetzner Robot Webservice API](https://robot.hetzner.com/doc/webservice/en.html).
-G3.7-T6 (#846) ships the skeleton — HTTP Basic auth, fingerprint, probe,
+G3.7-T7 (#846) ships the skeleton — HTTP Basic auth, fingerprint, probe,
 `_post_form` helper, and the G0.6 dispatch shim. G3.7-T8 (#849) ships the
 read-only v0.2 core: the Robot Webservice OpenAPI spec is ingested via G0.7
 into the `endpoint_descriptor` table, and the curated 10-op core is staged
@@ -85,8 +85,11 @@ Vault path as `{"username": ..., "password": ...}`.
 
 ### Auth flow
 
-1. `auth_headers(target, raw_jwt)` checks `target.auth_model` — must be
-   `shared_service_account` or `None`.
+1. `auth_headers(target, operator)` checks `target.auth_model` — must be
+   `shared_service_account` or `None`. The `operator` is accepted for the
+   shared HTTP auth surface (G3.9-T1) but unused — `shared_service_account`
+   mode authenticates with a Vault-sourced Webservice-user credential, not
+   the operator's OIDC token.
 2. `_load_credentials(target)` checks `_creds_cache`; on miss, calls the
    injectable loader.
 3. Loader returns `{"username": ..., "password": ...}`; connector computes
@@ -131,8 +134,9 @@ Vault path as `{"username": ..., "password": ...}`.
 ## References
 
 - Hetzner Robot Webservice docs: https://robot.hetzner.com/doc/webservice/en.html
-- G3.7-T6 skeleton issue: https://github.com/evoila/meho/issues/846
+- G3.7-T7 skeleton issue: https://github.com/evoila/meho/issues/846
 - G3.7-T8 core-ops issue: https://github.com/evoila/meho/issues/849
 - Canary runbook: [`docs/cross-repo/g37-hetzner-canary.md`](../cross-repo/g37-hetzner-canary.md)
 - Precedent: `connectors/harbor/core_ops.py` (apply_harbor_core_curation pattern)
+- Precedent: `connectors/harbor/connector.py` (HTTP Basic + loader + fingerprint/probe)
 - Precedent: `connectors/adapters/http.py` (`HttpConnector` + retry policy)

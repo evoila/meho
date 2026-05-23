@@ -390,17 +390,16 @@ The wrapping is the **dispatcher's** job, not the handler's: the
 handler returns `{"rows": [...], "total": N}` verbatim and `dispatch`
 passes it through the configured `Reducer` before audit/broadcast.
 
-**v0.2 ships only `PassThroughReducer`, so the v0.2 default is
-pass-through** — every list op returns the full inline row list with
-no handle, regardless of row count. The threshold-aware reducer (and
-the `result_query` / `result_aggregate` / `result_describe` /
-`result_export` meta-tools that drill into a handle) ship in a follow-on
-Initiative; swapping it in touches one `set_default_reducer` call, not
-the K8s handlers. Operationally: in v0.2 expect the full row list
-inline; when the real reducer lands, large `meho k8s pod list` /
-`deployment list` / `event list` results return a handle and you drill
-in with the `meho operation` result verbs exactly as for any other
-connector's set-shaped op.
+The default reducer is the threshold-aware
+[`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) — a list
+op whose result exceeds ~50 rows / 4 KB returns a sample + `ResultHandle`
+rather than the full inline list; smaller results pass through unchanged.
+The `result_query` / `result_aggregate` / `result_describe` /
+`result_export` meta-tools that drill into a handle ship in a follow-on
+Initiative. Operationally: large `meho k8s pod list` / `deployment list` /
+`event list` results return a handle and you drill in with the `meho
+operation` result verbs exactly as for any other connector's set-shaped
+op; small results land inline as before.
 
 For now, operators reading a busy namespace can use the server-side
 `--limit` + `--continue-token` knobs on `pod list` / `deployment list`

@@ -215,7 +215,7 @@ The eight phases (steps 2–9) map directly to function calls in the dispatcher 
 4. **Policy gate.** v0.2 default-allow; `requires_approval=True` → `denied`. The gate writes an audit row before returning (so denials are visible in `audit_log` even though the op never executed).
 5. **Resolve the connector class** via `resolve_connector(target)` and instantiate it (cached at module level via [`_handler_resolve.get_or_create_connector_instance`](../../backend/src/meho_backplane/operations/_handler_resolve.py)). Resolver miss → structured `no_connector` error.
 6. **Branch on `descriptor.source_kind`** — see [`operations/_branches.py`](../../backend/src/meho_backplane/operations/_branches.py).
-7. **JSONFlux-wrap the response via the `Reducer`.** v0.2 default is `PassThroughReducer`; the call is **wrapped in `try/except`** so reducer exceptions land as `connector_error` (with the audit row + broadcast event still firing).
+7. **JSONFlux-wrap the response via the `Reducer`.** The default is [`JsonFluxReducer`](jsonflux.md) (G0.6.1, #750), which materializes large set-shaped responses as a `ResultHandle` and passes small ones through; the call is **wrapped in `try/except`** so reducer exceptions land as `connector_error` (with the audit row + broadcast event still firing).
 8. **Write the audit row + publish a broadcast event** via [`_audit.audit_and_broadcast_safe`](../../backend/src/meho_backplane/operations/_audit.py). Audit failure → logged at error level; broadcast skipped (the event would reference a phantom row). Broadcast failure → logged, fail-open per `publish_event`'s contract.
 9. **Return the `OperationResult`.**
 
@@ -246,11 +246,11 @@ class OperationResult(BaseModel):
     result: dict[str, Any] | list[Any] | None = None
     error: str | None = None
     duration_ms: float
-    handle: ResultHandle | None = None       # Always None in v0.2 (PassThroughReducer)
+    handle: ResultHandle | None = None       # Set by JsonFluxReducer for large set-shaped payloads; None otherwise
     extras: Mapping[str, Any] = ...          # frozen via @model_validator(mode="after")
 ```
 
-Treat `result + handle` as a tagged union: `result` carries either the raw payload (no reduction) or the reduced summary (reduction happened); `handle is not None` signals the **full** payload is addressable via the reducer's backing store. v0.2's `PassThroughReducer` always leaves `handle=None`.
+Treat `result + handle` as a tagged union: `result` carries either the raw payload (no reduction) or the reduced summary (reduction happened); `handle is not None` signals the **full** payload is addressable via the reducer's backing store. The default `JsonFluxReducer` leaves `handle=None` for small / scalar payloads and sets it for set-shaped payloads over threshold.
 
 ### Path-parameter substitution for ingested ops
 
@@ -316,7 +316,7 @@ Per the asyncio contextvar contract, the value is per-task: two concurrent dispa
 
 ## JSONFlux integration
 
-[`operations/reducer.py`](../../backend/src/meho_backplane/operations/reducer.py) ships the `Reducer` Protocol + v0.2 `PassThroughReducer` default.
+[`operations/reducer.py`](../../backend/src/meho_backplane/operations/reducer.py) ships the `Reducer` Protocol; `PassThroughReducer` lives here as the test utility. The production default — the real set-shaped-response reducer vendored from MEHO.X — is [`JsonFluxReducer`](../../backend/src/meho_backplane/operations/jsonflux_reducer.py); see [`jsonflux.md`](jsonflux.md) for its provenance, license chain, and upstream-sync runbook.
 
 ### `Reducer` Protocol contract
 
@@ -331,11 +331,11 @@ class Reducer(Protocol):
     ) -> tuple[Any, ResultHandle | None]: ...
 ```
 
-The dispatcher always invokes `reduce()` after the handler returns and before the audit phase fires. Real reducers (post-G0.6) return a reduced payload + a `ResultHandle` for large set-shaped responses while leaving small/scalar payloads alone. v0.2 ships only `PassThroughReducer` — the no-op default that returns the raw payload verbatim with a `None` handle.
+The dispatcher always invokes `reduce()` after the handler returns and before the audit phase fires. A real reducer returns a reduced payload + a `ResultHandle` for large set-shaped responses while leaving small/scalar payloads alone. v0.2 ships [`JsonFluxReducer`](../../backend/src/meho_backplane/operations/jsonflux_reducer.py) as the default — installed at app startup via `set_default_reducer(JsonFluxReducer())` in [`main.py`](../../backend/src/meho_backplane/main.py); `PassThroughReducer` remains a test utility (the module-level fallback the running app overwrites). See [`jsonflux.md`](jsonflux.md) for the vendored reducer's provenance, license chain, and constructor defaults.
 
-The dispatcher's reducer call is wrapped in `try/except`: a reducer exception lands as `connector_error` with the audit + broadcast still firing. The PassThroughReducer can't raise, but [`set_default_reducer(...)`](../../backend/src/meho_backplane/operations/dispatcher.py) invites swappable real reducers (MinIO/S3 spill, schema validation) that will.
+The dispatcher's reducer call is wrapped in `try/except`: a reducer exception lands as `connector_error` with the audit + broadcast still firing. `PassThroughReducer` can't raise, but [`set_default_reducer(...)`](../../backend/src/meho_backplane/operations/dispatcher.py) is the seam through which the real `JsonFluxReducer` (in-memory DuckDB materialization) is swapped in.
 
-### v0.2 `PassThroughReducer` default
+### `PassThroughReducer` test utility
 
 ```python
 class PassThroughReducer:
@@ -343,7 +343,7 @@ class PassThroughReducer:
         return payload, None
 ```
 
-Stateless and pure — the dispatcher instantiates one module-level instance and reuses it across every dispatch call; concurrent dispatches share it safely.
+Stateless and pure — the dispatcher instantiates one module-level instance as the import-time fallback before `main.py` swaps in `JsonFluxReducer`; tests reuse it as the no-op shim. Concurrent dispatches share it safely.
 
 ### `ResultHandle` shape (future-facing)
 
@@ -362,7 +362,7 @@ Frozen Pydantic model with `MappingProxyType`-wrapped nested mappings (via `@mod
 
 `schema_` carries a trailing underscore to avoid collision with Pydantic's deprecated `BaseModel.schema()` API; it serialises as `schema_` on the wire.
 
-The real `result_query` / `result_aggregate` / `result_export` / `result_describe` meta-tools that read handles back from the backing store land alongside the real reducer in a follow-on Initiative.
+`JsonFluxReducer` now populates `handle` for large set-shaped responses (G0.6.1, #750). The `result_query` / `result_aggregate` / `result_export` / `result_describe` meta-tools that read handles back from the backing store are still a follow-on Initiative.
 
 ## The three operation meta-tools
 
@@ -421,7 +421,7 @@ A `call_operation(connector_id="vmware-rest-9.0", op_id="GET:/api/vcenter/cluste
 
 8. **Dispatcher step 6 — branch on `source_kind`.** `dispatch_ingested(...)`: splits params into the four buckets (`filter.names` → query), substitutes `{}` placeholders in `path` (none here), calls `connector._request_json(target, "GET", "/api/vcenter/cluster", raw_jwt=operator.raw_jwt, params={"filter.names": ["prod-cluster"]})`. The vSphere REST returns `[{"cluster": "domain-c1", "name": "prod-cluster", ...}]`.
 
-9. **Dispatcher step 7 — reduce.** `PassThroughReducer.reduce(raw, response_schema, context)` returns `(raw, None)`.
+9. **Dispatcher step 7 — reduce.** `JsonFluxReducer.reduce(raw, response_schema, context)` returns `(raw, None)` — the one-cluster list is under the row/byte threshold, so it passes through unreduced. A larger cluster list would return a `(summary, ResultHandle)` instead.
 
 10. **Dispatcher step 8 — audit + broadcast.** `audit_and_broadcast_safe(...)`:
     - INSERT into `audit_log`: `id=audit_uuid`, `operator_sub`, `tenant_id`, `target_id=target.id`, `parent_audit_id=None` (no parent — top-level dispatch), `method='DISPATCH'`, `path='GET:/api/vcenter/cluster'`, `status_code=200`, `duration_ms=42.3`, `payload={"op_id": …, "params_hash": "sha256:…", "source_kind": "ingested", "connector_product": "vmware", "connector_version": "9.0", "connector_impl_id": "vmware-rest", "result_status": "ok"}`.

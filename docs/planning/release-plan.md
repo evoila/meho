@@ -53,10 +53,12 @@ Neither is a connector-tier line item, which is exactly why they were invisible.
 Both gate *usability* across multiple releases.
 
 1. **JSONFlux reducer** — [#750](https://github.com/evoila/meho/issues/750)
-   (G0.6.1), open, 0/5, off the version map. [CLAUDE.md postulate
+   (G0.6.1), in progress, off the version map. [CLAUDE.md postulate
    6](../../CLAUDE.md) calls set-shaped reduction "non-negotiable"; the
-   dispatcher ships `PassThroughReducer` today, so a large vCenter list dumps
-   raw into the agent context — the precise failure MEHO exists to prevent.
+   dispatcher now defaults to the real
+   [`JsonFluxReducer`](../architecture/jsonflux.md) (T3 #753 merged), so a
+   large vCenter list returns a `ResultHandle` instead of dumping raw into
+   the agent context — the precise failure MEHO exists to prevent.
 2. **Credential execution** — [#939](https://github.com/evoila/meho/issues/939)
    + [#944](https://github.com/evoila/meho/issues/944). Decision:
    operator-context Vault read ([connector-auth.md](../architecture/connector-auth.md)).

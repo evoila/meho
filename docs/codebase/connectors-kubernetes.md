@@ -210,9 +210,11 @@ restarts on unchanged code stay cheap.
    `kubernetes_asyncio.client.CoreV1Api(api_client).<list_xxx>()` and
    projects each model into the wire dict via the pure mapping
    helpers.
-4. The dispatcher invokes `PassThroughReducer.reduce()` (v0.2's no-op
-   reducer), writes the audit row, fires the broadcast event, and
-   wraps the result in `OperationResult.status="ok"`.
+4. The dispatcher invokes the default
+   [`JsonFluxReducer.reduce()`](../architecture/jsonflux.md) (G0.6.1,
+   #750) — large row lists materialize into a `ResultHandle`, small
+   ones pass through — writes the audit row, fires the broadcast event,
+   and wraps the result in `OperationResult.status="ok"`.
 
 ### `k8s.ls` three-way dispatch
 
@@ -251,18 +253,19 @@ Issue #322's "Handle threshold tested: against k3d populated with 50+
 namespaces, sample of 20 + handle returned" acceptance criterion
 assumed the shared `HandleStore` from G3.1-T4 (#304) would be in place.
 #304 was **superseded** -- the Initiative-redraft note on the issue
-spells this out -- and the substrate currently in the tree ships
-`PassThroughReducer` as the only reducer. The reducer never populates
-`OperationResult.handle`.
+spells this out -- and the substrate's default reducer is now the
+threshold-aware [`JsonFluxReducer`](../architecture/jsonflux.md)
+(G0.6.1, #750), which materializes large row lists into a
+`ResultHandle` (in-memory DuckDB) and passes small ones through.
 
 The handlers in this connector emit **raw row lists** (`{"rows": [...],
-"total": N}`) -- the shape the future JSONFlux reducer will see when it
-ships. The reducer, not the connector, owns the threshold check, the
-row truncation, the spill to MinIO/S3/Valkey, and the `ResultHandle`
-construction. Centralising the spill logic in one reducer keeps every
-typed connector free of per-handler threshold code; per the substrate
-split documented on `meho_backplane.operations.reducer`, set-shaped
-reduction is the reducer's job, not the connector's.
+"total": N}`) -- the shape the JSONFlux reducer sees. The reducer, not
+the connector, owns the threshold check, the row truncation, the
+materialization, and the `ResultHandle` construction. Centralising that
+logic in one reducer keeps every typed connector free of per-handler
+threshold code; per the substrate split documented on
+`meho_backplane.operations.reducer`, set-shaped reduction is the
+reducer's job, not the connector's.
 
 The `total` key in the response envelope is the un-truncated row count
 the reducer will read to decide whether to spill; today the value is

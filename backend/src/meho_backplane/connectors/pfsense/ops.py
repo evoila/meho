@@ -7,13 +7,19 @@ G3.7-T1 (#844) skeleton ships ``pfsense.about`` -- the canary op that
 proves the ``register_typed_operation()`` -> dispatcher -> handler ->
 result-wrap pipeline end-to-end for the pfSense SSH-transport connector.
 G3.7-T2 (#847) layers the 7 read ops (``pfctl``/config.xml parsed)
-onto that surface.
+onto that surface via :func:`_pfsense_ops`.
 
 The dataclass + tuple shape mirrors the Bind9 connector
 (:mod:`~meho_backplane.connectors.bind9.ops`) so the registration
 walk reads identically to the bind9 sibling. The ``PfSenseOp``
 dataclass mirrors ``Bind9Op`` field for field, preserving the
 uniform registration-walk contract.
+
+The composition pattern (:func:`_pfsense_ops` importing per-module op
+tuples) mirrors :func:`meho_backplane.connectors.bind9.ops._bind9_ops`
+-- ``ops.py`` defines :class:`PfSenseOp` + ``_PFSENSE_ABOUT_OP``,
+then imports the T2 read ops from :mod:`ops_read`. Import order stays
+linear; the ``about`` canary stays co-located with the dataclass.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-__all__ = ["PFSENSE_OPS", "PfSenseOp"]
+__all__ = ["PFSENSE_OPS", "PfSenseOp", "_pfsense_ops"]
 
 
 @dataclass(frozen=True)
@@ -108,8 +114,38 @@ _PFSENSE_ABOUT_OP = PfSenseOp(
 )
 
 
+def _pfsense_ops() -> tuple[PfSenseOp, ...]:
+    """Return the merged registration tuple.
+
+    Composition: ``pfsense.about`` (T1 canary) + ``READ_OPS`` (T2 read
+    ops: ``pfsense.version``, ``pfsense.firewall.rules``,
+    ``pfsense.firewall.state``, ``pfsense.nat.rules``,
+    ``pfsense.interface.list``, ``pfsense.gateway.list``,
+    ``pfsense.config.show``). Eight ops total -- the full G3.7-T2
+    read surface.
+
+    Implemented as a function call rather than a literal-and-splat at
+    module level so the import order stays linear: ``ops.py`` defines
+    :class:`PfSenseOp` + ``_PFSENSE_ABOUT_OP``, then imports the T2
+    read ops from :mod:`meho_backplane.connectors.pfsense.ops_read`.
+    The arrangement keeps the canary op co-located with the dataclass
+    while the larger read surface lives in its own module next to its
+    parsers. Mirrors :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
+    """
+    from meho_backplane.connectors.pfsense.ops_read import READ_OPS
+
+    return (_PFSENSE_ABOUT_OP, *READ_OPS)
+
+
 #: The ops :class:`PfSenseConnector` registers at lifespan startup.
-#: T1 ships the single ``pfsense.about`` canary; T2 (#847) will extend
-#: via a ``_pfsense_ops()`` composition function mirroring the bind9
-#: ``_bind9_ops()`` pattern.
-PFSENSE_OPS: tuple[PfSenseOp, ...] = (_PFSENSE_ABOUT_OP,)
+#: T1 shipped ``pfsense.about``; T2 (#847) adds the 7 read ops
+#: (``pfsense.version``, ``pfsense.firewall.rules``,
+#: ``pfsense.firewall.state``, ``pfsense.nat.rules``,
+#: ``pfsense.interface.list``, ``pfsense.gateway.list``,
+#: ``pfsense.config.show``) -- 8 ops total. The shape of each
+#: follow-on PR is "import a new module-level tuple and splat it
+#: into :data:`PFSENSE_OPS` via :func:`_pfsense_ops`" -- the
+#: registration walk in
+#: :meth:`PfSenseConnector.register_operations` does not need to
+#: change.
+PFSENSE_OPS: tuple[PfSenseOp, ...] = _pfsense_ops()

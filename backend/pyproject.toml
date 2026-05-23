@@ -18,6 +18,7 @@ dependencies = [
     "asyncpg>=0.29",
     "alembic>=1.13",
     "jsonschema>=4.26.0",
+    "defusedxml>=0.7.1",
     "pgvector>=0.3,<1.0",
     "fastembed>=0.7,<1.0",
     "kubernetes-asyncio>=35.0.1,<36",
@@ -241,6 +242,15 @@ ignore_missing_imports = true
 # upstream ships stubs.
 [[tool.mypy.overrides]]
 module = ["asyncssh.*"]
+ignore_missing_imports = true
+
+# defusedxml (G3.7-T2 #847) ships no ``py.typed`` marker as of 0.7.1.
+# Used by :mod:`meho_backplane.connectors.pfsense.ops_read` to parse the
+# pfSense ``config.xml`` safely (XXE-hardened drop-in for the stdlib
+# ``xml.etree.ElementTree.fromstring``). Drop this override if upstream
+# ships stubs (or switch to ``types-defusedxml``).
+[[tool.mypy.overrides]]
+module = ["defusedxml.*"]
 ignore_missing_imports = true
 
 # python-frontmatter (G4.1-T1 #415) ships no ``py.typed`` marker as

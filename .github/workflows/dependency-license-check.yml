@@ -92,6 +92,14 @@ jobs:
         # Other/Proprietary. Remove either entry when upstream
         # license metadata is corrected. ``--ignore-packages`` accepts
         # ``nargs=*`` (space-separated), NOT a semicolon-joined string.
+        #
+        # ``EPL-2.0 OR GPL-2.0-or-later``: asyncssh (G0.2-T4, an existing
+        # accepted dependency) reports this PEP 639 dual-license expression
+        # under pip-licenses 5.5.5. The EPL-2.0 arm is weak (file-level)
+        # copyleft, which this workflow's policy explicitly permits inbound
+        # against the Apache-2.0 outbound (see header); we consume asyncssh
+        # unmodified as an SSH transport library. Allowing the exact emitted
+        # expression keeps the gate specific rather than broadening it.
         run: >
           pip-licenses --format=plain --ignore-packages py_rust_stemmers fastembed --allow-only="
           Apache Software License;
@@ -125,6 +133,7 @@ jobs:
           MIT AND PSF-2.0;
           MIT OR Apache-2.0;
           MPL-2.0 AND MIT;
+          EPL-2.0 OR GPL-2.0-or-later;
           "
 
   npm-licenses:

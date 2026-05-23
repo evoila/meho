@@ -346,8 +346,3 @@ func stringField(e map[string]any, key string) string {
 	}
 	return ""
 }
-
-// jsonUnmarshalStrict is a thin wrapper over json.Unmarshal.
-func jsonUnmarshalStrict(raw []byte, out any) error {
-	return json.Unmarshal(raw, out)
-}

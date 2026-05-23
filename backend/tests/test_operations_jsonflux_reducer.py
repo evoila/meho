@@ -29,6 +29,7 @@ the captured broadcast event).
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
@@ -141,6 +142,55 @@ async def test_materialize_handle_for_large_set() -> None:
     assert reduced["row_count"] == 60
     assert len(reduced["sample"]) <= 5
     assert "results" not in reduced
+
+
+async def test_materialize_handle_for_under_row_over_byte_threshold() -> None:
+    """A set ≤ row_threshold but > byte_threshold materializes via the byte branch.
+
+    Pins the *size*-triggered materialization path independently of the
+    row-count path: ``_over_threshold`` returns True when
+    ``len(_serialize(payload)) > byte_threshold`` even though
+    ``len(rows) <= row_threshold``. This is the branch the production
+    default exercises against vcsim's 50-VM seed (50 rows == the 50-row
+    threshold, so ``50 > 50`` is False, but the serialized payload is
+    ≈5 KB > the 4 KB ``byte_threshold``) — it had no dedicated unit
+    coverage and broke the agent-flow e2e in CI (#962 B1) before this
+    test was added.
+
+    The fixture builds a 5-row set whose values are padded so the
+    serialized JSON clears the default 4 KB ``byte_threshold`` while
+    staying well under the 50-row default ``row_threshold``.
+    """
+    reducer = JsonFluxReducer()  # production defaults: row=50, byte=4096
+
+    # Five rows, each carrying a ~1.2 KB blob → ~6 KB serialized: comfortably
+    # over the 4 KB byte_threshold, comfortably under the 50-row threshold.
+    rows = [{"id": f"seg-{i}", "blob": "x" * 1200} for i in range(5)]
+    payload = {"value": rows}
+
+    # Guard the test's own premise: row count is under the threshold, byte
+    # count is over it — so only the byte branch can trigger materialization.
+    assert len(rows) <= reducer._row_threshold
+    assert len(json.dumps(payload).encode()) > reducer._byte_threshold
+
+    reduced, handle = await reducer.reduce(payload, None)
+
+    assert handle is not None, (
+        "a 5-row set serializing over the 4 KB byte_threshold must "
+        "materialize a handle even though it is under the row threshold"
+    )
+    assert isinstance(handle, ResultHandle)
+    assert handle.total_rows == 5, (
+        f"total_rows must reflect the 5-row collection; got {handle.total_rows}"
+    )
+    assert handle.sample_rows is not None and handle.sample_rows, (
+        "the byte-triggered handle must still carry a bounded sample"
+    )
+
+    # The inlined summary is the reduced view, not the raw 5-row list.
+    assert isinstance(reduced, dict)
+    assert reduced["row_count"] == 5
+    assert "value" not in reduced
 
 
 # ---------------------------------------------------------------------------

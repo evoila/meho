@@ -60,8 +60,9 @@ References
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING, Any
+
+from defusedxml.ElementTree import ParseError, fromstring
 
 from meho_backplane.connectors.pfsense.ops import PfSenseOp
 
@@ -435,8 +436,8 @@ def parse_gateways_xml(xml_text: str) -> list[dict[str, Any]]:
     if not xml_text.strip():
         return []
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
+        root = fromstring(xml_text)
+    except ParseError:
         return []
     gw_root = root if root.tag == "gateways" else root.find(".//gateways")
     if gw_root is None:
@@ -456,8 +457,14 @@ def parse_gateways_xml(xml_text: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _xml_text(element: ET.Element, tag: str) -> str | None:
-    """Return the text of *tag* under *element*, or ``None``."""
+def _xml_text(element: Any, tag: str) -> str | None:
+    """Return the text of *tag* under *element*, or ``None``.
+
+    *element* is a ``defusedxml``-parsed ElementTree node; defusedxml ships
+    no type stubs, so it surfaces as ``Any`` (annotating it with the stdlib
+    ``Element`` type would re-introduce the ``xml.etree`` import that Semgrep
+    flags as an XXE vector).
+    """
     child = element.find(tag)
     return child.text if child is not None else None
 

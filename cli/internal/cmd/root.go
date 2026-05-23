@@ -20,6 +20,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
+	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
 	"github.com/evoila/meho/cli/internal/cmd/memory"
@@ -314,6 +315,20 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `pfsense` parent.
 	root.AddCommand(pfsense.NewRootCmd())
+
+	// G3.7-T9 (#852) -- hetzner-rest-2026.04 operator alias verbs for
+	// Initiative #370. The verb tree pre-bakes connector_id=
+	// "hetzner-rest-2026.04" on top of the existing /api/v1/operations/call
+	// dispatcher route. Hetzner Robot is a generic-ingested connector with
+	// HTTP Basic auth (Webservice user, distinct from Robot portal login).
+	// Ships 10 read-only verbs (about, server list/info, ip list, subnet
+	// list, vswitch list/info, failover list, rdns list, ssh-key list) plus
+	// operation search/call meta-tool wrappers. WARNING: Hetzner Robot blocks
+	// the source IP for 10 minutes after 3 consecutive 401 responses — the
+	// connector raises auth_failed on the FIRST 401 and never retries.
+	// Registered before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `hetzner-robot` parent.
+	root.AddCommand(hetznerrobot.NewRootCmd())
 
 	// G3.6-T12 (#840) -- vcfa-rest-9.0 operator alias verbs for
 	// Initiative #369. The verb tree pre-bakes connector_id=

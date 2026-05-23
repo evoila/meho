@@ -25,11 +25,13 @@ from __future__ import annotations
 import types
 from typing import Any
 from unittest.mock import patch
+from uuid import UUID
 
 import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.adapters.http import HttpConnector as _HttpConnectorDirect
 from meho_backplane.connectors.schemas import (
@@ -41,6 +43,18 @@ from meho_backplane.connectors.schemas import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_operator(raw_jwt: str = "") -> Operator:
+    """Return a minimal :class:`Operator` carrying *raw_jwt* for the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 def _make_target(
@@ -56,8 +70,8 @@ class _ConcreteHttpConnector(HttpConnector):
 
     product = "test-http"
 
-    async def auth_headers(self, target: Any, raw_jwt: str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {raw_jwt}"}
+    async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
+        return {"Authorization": f"Bearer {operator.raw_jwt}"}
 
     async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
         raise NotImplementedError
@@ -122,7 +136,7 @@ async def test_get_json_success() -> None:
 
     async with respx.mock(base_url="https://vcenter.example.com") as mock:
         mock.get("/api/items").respond(200, json={"items": [1, 2, 3]})
-        result = await conn._get_json(target, "/api/items", raw_jwt="tok-abc")
+        result = await conn._get_json(target, "/api/items", operator=_make_operator("tok-abc"))
 
     assert result == {"items": [1, 2, 3]}
     await conn.aclose()
@@ -136,7 +150,7 @@ async def test_auth_headers_forwarded() -> None:
 
     async with respx.mock(base_url="https://vcenter.example.com") as mock:
         route = mock.get("/api/me").respond(200, json={"sub": "u1"})
-        await conn._get_json(target, "/api/me", raw_jwt="my-jwt")
+        await conn._get_json(target, "/api/me", operator=_make_operator("my-jwt"))
 
     assert route.called
     sent_headers = route.calls[0].request.headers
@@ -170,7 +184,7 @@ async def test_5xx_on_get_retries_three_times_then_reraises() -> None:
             ),
             pytest.raises(httpx.HTTPStatusError) as exc_info,
         ):
-            await conn._request_json(target, "GET", "/api/vms", raw_jwt="tok")
+            await conn._request_json(target, "GET", "/api/vms", operator=_make_operator("tok"))
 
     assert exc_info.value.response.status_code == 503
     assert route.call_count == 4  # 1 initial + 3 retries
@@ -192,7 +206,7 @@ async def test_4xx_does_not_retry() -> None:
         route = mock.get("/api/missing").respond(404)
 
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            await conn._request_json(target, "GET", "/api/missing", raw_jwt="tok")
+            await conn._request_json(target, "GET", "/api/missing", operator=_make_operator("tok"))
 
     assert exc_info.value.response.status_code == 404
     assert route.call_count == 1
@@ -223,7 +237,7 @@ async def test_connect_error_retries_three_times() -> None:
             ),
             pytest.raises(httpx.ConnectError),
         ):
-            await conn._request_json(target, "GET", "/api/vms", raw_jwt="tok")
+            await conn._request_json(target, "GET", "/api/vms", operator=_make_operator("tok"))
 
     assert route.call_count == 4
     await conn.aclose()
@@ -241,7 +255,7 @@ async def test_non_idempotent_method_raises_value_error() -> None:
     target = _make_target()
 
     with pytest.raises(ValueError, match="idempotent"):
-        await conn._request_json(target, "POST", "/api/vms", raw_jwt="tok")
+        await conn._request_json(target, "POST", "/api/vms", operator=_make_operator("tok"))
 
     await conn.aclose()
 
@@ -253,7 +267,7 @@ async def test_non_idempotent_method_lowercase_also_raises() -> None:
     target = _make_target()
 
     with pytest.raises(ValueError):
-        await conn._request_json(target, "post", "/api/vms", raw_jwt="tok")
+        await conn._request_json(target, "post", "/api/vms", operator=_make_operator("tok"))
 
     await conn.aclose()
 

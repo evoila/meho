@@ -927,6 +927,7 @@ def _every_v2_connector_registered() -> Iterator[None]:
     """
     from meho_backplane.connectors.bind9.connector import Bind9Connector
     from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.nsx.connector import NsxConnector
     from meho_backplane.connectors.registry import (
@@ -943,6 +944,7 @@ def _every_v2_connector_registered() -> Iterator[None]:
     entries: tuple[tuple[str, str, str, type], ...] = (
         ("bind9", "9.x", "bind9-ssh", Bind9Connector),
         ("harbor", "2.x", "harbor-rest", HarborConnector),
+        ("hetzner-robot", "2026.04", "hetzner-rest", HetznerRobotConnector),
         ("k8s", "1.x", "k8s", KubernetesConnector),
         ("nsx", "4.2", "nsx-rest", NsxConnector),
         ("sddc-manager", "9.0", "sddc-rest", SddcManagerConnector),

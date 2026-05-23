@@ -76,6 +76,13 @@ from tests.acceptance._nsx_canary_fixtures import (
     ingested_nsx_canary,
     nsx_acceptance_operator,
 )
+from tests.acceptance._robot_canary_fixtures import (
+    ROBOT_CANARY_OPERATOR_TENANT,
+    IngestedRobotCanary,
+    ingested_robot_canary,
+    ingested_robot_canary_sandbox,
+    robot_acceptance_operator,
+)
 from tests.acceptance._sddc_canary_fixtures import (
     SDDC_CANARY_OPERATOR_TENANT,
     IngestedSddcCanary,
@@ -109,12 +116,14 @@ __all__ = [
     "DOCKER_AVAILABLE",
     "HARBOR_CANARY_OPERATOR_TENANT",
     "NSX_CANARY_OPERATOR_TENANT",
+    "ROBOT_CANARY_OPERATOR_TENANT",
     "SDDC_CANARY_OPERATOR_TENANT",
     "SKIP_REASON",
     "VROPS_CANARY_OPERATOR_TENANT",
     "IngestedCanaryVcsim",
     "IngestedHarborCanary",
     "IngestedNsxCanary",
+    "IngestedRobotCanary",
     "IngestedSddcCanary",
     "IngestedVropsCanary",
     "VcsimEndpoint",
@@ -125,12 +134,15 @@ __all__ = [
     "ingested_canary_vcsim",
     "ingested_harbor_canary",
     "ingested_nsx_canary",
+    "ingested_robot_canary",
+    "ingested_robot_canary_sandbox",
     "ingested_sddc_canary",
     "ingested_vrops_canary",
     "integration_env",
     "nsx_acceptance_operator",
     "pg_engine",
     "prewarmed_embeddings",
+    "robot_acceptance_operator",
     "sddc_acceptance_operator",
     "vcsim_endpoint",
     "vrops_acceptance_operator",
@@ -155,8 +167,20 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "broadcast_override",
     "documents",
     "endpoint_descriptor",
+    # ``graph_edge_history`` carries a real FK ``graph_edge(id) ON DELETE
+    # SET NULL`` per migration ``0012`` (#856 T1); the same applies to
+    # ``graph_node_history``. PG rejects a TRUNCATE on the parent table
+    # unless the referencing tables are truncated in the same statement
+    # (``cannot truncate a table referenced in a foreign key constraint``).
+    # Without these two entries the per-test TRUNCATE the acceptance
+    # fixture runs raises ``FeatureNotSupportedError`` and every
+    # PG-backed acceptance test errors at setup. The integration conftest's
+    # ``_TRUNCATE_TABLES`` already includes both; the acceptance side was
+    # missed when T1 landed and is repaired here together with T2's hook.
     "graph_edge",
+    "graph_edge_history",
     "graph_node",
+    "graph_node_history",
     "operation_group",
     "targets",
     "tenant",

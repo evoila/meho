@@ -46,6 +46,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import (
     all_connectors,
     all_connectors_v2,
@@ -150,7 +151,7 @@ def _stub_kubeconfig_dict() -> dict[str, Any]:
 
 
 def _make_connector() -> KubernetesConnector:
-    async def _loader(_target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_target: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return _stub_kubeconfig_dict()
 
     return KubernetesConnector(kubeconfig_loader=_loader)

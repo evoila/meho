@@ -28,6 +28,15 @@ from meho_backplane.operations.ingest.api_schemas import (
     IngestResponse,
     SpecSource,
 )
+from meho_backplane.operations.ingest.catalog import (
+    CatalogError,
+    CatalogListResponse,
+    ConnectorSpecCatalog,
+    ConnectorSpecEntry,
+    load_catalog,
+    parse_catalog,
+    validate_catalog_registry_coverage,
+)
 from meho_backplane.operations.ingest.connector_registration import (
     GenericRestConnector,
     check_version_covered_by_registered_class,
@@ -88,12 +97,16 @@ from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
+    "CatalogError",
+    "CatalogListResponse",
     "ConnectorListItem",
     "ConnectorListResponse",
     "ConnectorNotFoundError",
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
+    "ConnectorSpecCatalog",
+    "ConnectorSpecEntry",
     "ConnectorStatusFilter",
     "EditGroupBody",
     "EditOpBody",
@@ -129,9 +142,12 @@ __all__ = [
     "detect_spec_format",
     "ensure_connector_class_registered",
     "list_ingested_connectors",
+    "load_catalog",
+    "parse_catalog",
     "parse_connector_id",
     "parse_openapi",
     "read_spec_info_version",
     "register_ingested_operations",
     "run_llm_grouping",
+    "validate_catalog_registry_coverage",
 ]

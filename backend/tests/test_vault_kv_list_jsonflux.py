@@ -22,35 +22,28 @@ Two behaviours are pinned:
   as the inline ``{"keys": [...]}`` list with ``handle is None``. This
   is the v0.2 default the Initiative #366 work item 6 specifies
   ("v0.2 default is pass-through").
-* **Force-mode / over-threshold: handle.** With a threshold-aware
-  reducer swapped in via
+* **Over-threshold: handle.** With the **real**
+  :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+  (G0.6.1-T3 #753) installed via
   :func:`~meho_backplane.operations.dispatcher.set_default_reducer`
-  (the same seam G3.1-T8's
-  ``test_vmware_rest_jsonflux_force_handle.py`` exercises for the
-  ingested vCenter connector), a ``vault.kv.list`` against a path with
-  more than 50 keys returns ``{sample, ...}`` on
-  :attr:`OperationResult.result` plus a populated
+  (the same seam the ``*_jsonflux_force_handle.py`` acceptance tests
+  exercise for the ingested vendor connectors), a ``vault.kv.list``
+  against a path with more than 50 keys returns ``{row_count, total,
+  sample, ...}`` on :attr:`OperationResult.result` plus a populated
   :class:`~meho_backplane.connectors.schemas.ResultHandle` carrying the
-  full ``total_rows`` count and a bounded ``sample_rows`` slice. The
-  agent never sees the raw >50-key list.
+  full ``total_rows`` count, a JSON-Schema ``schema_``, and a bounded
+  ``sample_rows`` slice. The agent never sees the raw >50-key list.
 
 On ``result_query`` / ``result_describe``
 =========================================
 
-v0.2 ships only :class:`PassThroughReducer`; the real reducer plus the
-``result_query`` / ``result_aggregate`` / ``result_describe`` /
+The ``result_query`` / ``result_aggregate`` / ``result_describe`` /
 ``result_export`` meta-tools that read a handle back land in a
-follow-on Initiative (see the
-:class:`~meho_backplane.connectors.schemas.ResultHandle` docstring and
-the G3.1-T8 sibling test's "What the test does NOT cover" note). The
-DoD's ``result_describe(handle)`` / ``result_query(handle, ...)``
-drill-in is therefore verified at the **contract** level the way the
-established sibling test does it: the handle carries the exact
-``total_rows`` (what ``result_describe`` will report) and a
-non-empty ``sample_rows`` slice keyed off the same payload
-``result_query`` will page through. Asserting against not-yet-shipped
-meta-tools would test vapourware; asserting the handle envelope pins
-the contract those tools will consume.
+follow-on Initiative. The DoD's ``result_describe(handle)`` /
+``result_query(handle, ...)`` drill-in is therefore verified at the
+**contract** level: the handle carries the exact ``total_rows`` (what
+``result_describe`` will report) and a non-empty ``sample_rows`` slice
+keyed off the same payload ``result_query`` will page through.
 """
 
 from __future__ import annotations
@@ -74,70 +67,21 @@ from meho_backplane.connectors.vault import (
 )
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.reducer import PassThroughReducer
 from meho_backplane.settings import get_settings
 
 from ._vault_fakes import install_fake_client
 
 #: JSONFlux default set-shape threshold (v0.1-spec §4: ~50 rows). The
-#: real reducer keys its set-detection on this; the test-only reducer
-#: below mirrors the same bound so the regression pins the exact
-#: ">50 keys → handle, ≤50 keys → inline" boundary the spec names.
+#: real :class:`JsonFluxReducer` keys its set-detection on this exact
+#: bound; the constant pins the ">50 keys → handle, ≤50 keys → inline"
+#: boundary the spec names so a future default change is caught here.
 _THRESHOLD = 50
 
-#: Sample slice the handle carries for the agent's first look. Matches
-#: the bounded-sample discipline the G3.1-T8 sibling uses (first N rows).
+#: Sample slice the handle carries for the agent's first look —
+#: :class:`JsonFluxReducer`'s default ``sample_size``.
 _SAMPLE_SIZE = 5
-
-
-class _ThresholdHandleReducer:
-    """Test-only reducer mirroring the production threshold contract.
-
-    The v0.2 production default
-    (:class:`~meho_backplane.operations.reducer.PassThroughReducer`)
-    never produces a handle; the real reducer (post-G0.6 follow-on
-    Initiative) wraps set-shaped payloads above the JSONFlux threshold.
-    This stand-in implements exactly that boundary for the
-    ``vault.kv.list`` payload shape (``{"keys": [...]}``) so the
-    regression exercises the dispatcher → reducer → ``OperationResult``
-    seam without depending on the unshipped real reducer.
-
-    Boundary:
-
-    * ``{"keys": [...]}`` with ``len(keys) > _THRESHOLD`` → returns a
-      ``{"sample": [...], "total": N}`` summary plus a
-      :class:`ResultHandle` carrying the full ``total_rows`` and a
-      bounded ``sample_rows`` slice. The agent-visible
-      :attr:`OperationResult.result` is the summary, never the raw
-      >50-key list.
-    * Anything else (small key set, scalar, ``None``) → pass-through:
-      ``(payload, None)`` — identical to the production v0.2 default,
-      so the test can install this single reducer and still assert the
-      ≤threshold pass-through path behaves like production.
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        del schema, context  # threshold decision is payload-shape only
-        if isinstance(payload, dict) and isinstance(payload.get("keys"), list):
-            keys = payload["keys"]
-            if len(keys) > _THRESHOLD:
-                sample = keys[:_SAMPLE_SIZE]
-                handle = ResultHandle(
-                    handle_id=uuid.uuid4(),
-                    summary_md=f"vault.kv.list — {len(keys)} keys (sample of {len(sample)})",
-                    schema_={"type": "array", "items": {"type": "string"}},
-                    total_rows=len(keys),
-                    sample_rows=tuple({"key": k} for k in sample),
-                    ttl_seconds=3600,
-                )
-                summary = {"sample": sample, "total": len(keys)}
-                return summary, handle
-        return payload, None
 
 
 @pytest.fixture(autouse=True)
@@ -200,15 +144,18 @@ async def _registered_vault_typed_ops(
 
 @pytest.fixture
 def threshold_reducer() -> Iterator[None]:
-    """Swap :class:`_ThresholdHandleReducer` in as the dispatcher default.
+    """Swap the real :class:`JsonFluxReducer` in as the dispatcher default.
 
+    Constructed with its production defaults (``row_threshold=50``,
+    ``sample_size=5``) so the regression pins the exact ">50 keys →
+    handle, ≤50 keys → inline" boundary against the shipped reducer.
     The reducer is module-level state on
     :mod:`meho_backplane.operations.dispatcher`; teardown restores the
     v0.2 production :class:`PassThroughReducer` so a follow-on test in
-    the same session sees the shipped default, and drops the
-    dispatcher caches so connector-instance state does not leak.
+    the same session sees the shipped default, and drops the dispatcher
+    caches so connector-instance state does not leak.
     """
-    set_default_reducer(_ThresholdHandleReducer())
+    set_default_reducer(JsonFluxReducer())
     try:
         yield
     finally:
@@ -371,16 +318,30 @@ async def test_kv_list_over_threshold_returns_sample_and_handle(
     )
     # ResultHandle._freeze_nested wraps schema_ in a MappingProxyType
     # (the model's frozen-after-construction guarantee), so it is a
-    # Mapping, not a plain dict — assert the structural contract.
+    # Mapping, not a plain dict — assert the real array-of-objects shape
+    # the reducer inferred from the DuckDB-materialized table. The Vault
+    # key list is a list of scalars; the reducer normalizes each key into
+    # a one-column ``{"value": <key>}`` row, so the inferred schema has a
+    # single ``value`` column.
     assert isinstance(handle.schema_, Mapping) and handle.schema_, (
         f"handle.schema_ must be a non-empty mapping; got {handle.schema_!r}"
     )
+    assert handle.schema_["type"] == "array"
+    assert "value" in handle.schema_["items"]["properties"], (
+        f"expected the normalized 'value' column in the inferred schema; "
+        f"got {handle.schema_['items']['properties']!r}"
+    )
     # sample_rows is the slice a future result_query(handle, ...) pages
-    # from — bounded, non-empty, and strictly smaller than the full set.
+    # from — bounded, non-empty, strictly smaller than the full set, and
+    # carrying the normalized ``{"value": <key>}`` rows.
     assert handle.sample_rows is not None
     assert 0 < len(handle.sample_rows) <= _SAMPLE_SIZE < len(big_keys), (
         f"sample_rows must be a bounded non-empty slice smaller than the "
         f"full set; got {len(handle.sample_rows)} rows"
+    )
+    assert [row["value"] for row in handle.sample_rows] == big_keys[:_SAMPLE_SIZE], (
+        f"sample_rows must carry the first {_SAMPLE_SIZE} real keys; "
+        f"got {[dict(row) for row in handle.sample_rows]!r}"
     )
 
     # The agent-visible inlined result is the reducer's summary, NOT the
@@ -389,7 +350,8 @@ async def test_kv_list_over_threshold_returns_sample_and_handle(
     # agent.
     assert isinstance(result.result, dict)
     assert result.result.get("total") == len(big_keys)
-    assert result.result.get("sample") == big_keys[:_SAMPLE_SIZE]
+    assert result.result.get("row_count") == len(big_keys)
+    assert [row["value"] for row in result.result.get("sample", [])] == big_keys[:_SAMPLE_SIZE]
     assert "keys" not in result.result, (
         "the raw inline key list must not survive on the result envelope once a handle is produced"
     )

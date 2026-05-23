@@ -1,0 +1,142 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Curated connector-spec catalog (Goal #214 raw-REST ingest on-ramp; Task #743).
+#
+# This is the machine-readable map of (product, version) -> recommended
+# OpenAPI spec source(s) + the registered connector class that covers the
+# version label. It turns the implicit, commit-message-and-tribal-knowledge
+# ingest workflow into a discoverable artifact: an operator (or the
+# `meho connector catalog list` / `ingest --catalog` CLI verbs in #915)
+# resolves an entry here instead of hand-typing the triple + spec URLs.
+#
+# WHERE THIS FILE LIVES. The Task body asked for `docs/connector-specs/
+# catalog.yaml`, but the backend image build context is `backend/` (see
+# every docker `context: backend` in .github/workflows/*.yml) and the
+# wheel only packages `src/meho_backplane`, so a repo-root `docs/` file is
+# NOT present at runtime. To keep the catalog loadable at startup and over
+# `GET /api/v1/connectors/catalog` in a deployed container, it ships as
+# package data colocated with its loader (catalog.py), resolved via
+# `importlib.resources` -- the same pattern as alembic.ini/alembic
+# (find_alembic_ini in db/migrations.py). docs/cross-repo/connector-catalog.md
+# is the operator-facing pointer.
+#
+# FIELD CONTRACT (validated by catalog.py / ConnectorSpecEntry):
+#   product / version / impl_id  -- the connector triple; (product, version)
+#       is the `--catalog <product>/<version>` lookup key and is unique.
+#   requires_connector_class     -- the registered connector class __name__
+#       that covers this version label. A regression test asserts every
+#       value here exists in all_connectors_v2() (Task #743 criterion b).
+#   upstream                     -- public URL(s) where the vendor hosts the
+#       spec; operators/CLI fetch directly (MEHO does not redistribute).
+#       null == typed connector (no ingestable spec).
+#   spec_info_version            -- the spec.info.version observed when MEHO
+#       smoke-tested the spec; PEP 440 when present. null until a connector's
+#       spec has actually been ingest-verified through MEHO (these are
+#       empirical values, not guesses -- populate on first verified ingest).
+#   sha256                       -- advisory content hash MEHO smoke-tested
+#       against; optional, not enforced. null until smoke-tested.
+#   notes                        -- operator context: sharp edges, version
+#       quirks, appliance-served vs portal-hosted, curation status.
+
+entries:
+  # --- Generic-ingested connectors (Layer 2: ingest the vendor OpenAPI) ---
+
+  - product: vmware
+    version: "9.0"
+    impl_id: vmware-rest
+    requires_connector_class: VmwareRestConnector
+    upstream:
+      - "https://developer.broadcom.com/xapis/vsphere-automation-api/latest/"
+      - "https://developer.broadcom.com/xapis/virtual-infrastructure-json-api/latest/"
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Generic-ingested. vSphere publishes two specs that merge under one
+      connector triple: vcenter.yaml (modern REST automation API, ~961 paths)
+      and vi-json.yaml (Performance Manager, snapshots, host ops, ~2,195
+      paths). Both are served by the appliance at https://<vcenter-fqdn>/ and
+      mirrored on the Broadcom Developer Portal (links above). spec_info_version
+      pending the first MEHO-verified ingest. See #743 / connector-ingestion.md.
+
+  - product: sddc-manager
+    version: "9.0"
+    impl_id: sddc-rest
+    requires_connector_class: SddcManagerConnector
+    upstream:
+      - "https://developer.broadcom.com/xapis/sddc-manager-api/latest/"
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Generic-ingested. The SDDC Manager API is served by the appliance at
+      https://<sddc-manager-fqdn>/v1/ and documented on the Broadcom Developer
+      Portal (link above). spec_info_version pending first verified ingest.
+      See #743.
+
+  - product: harbor
+    version: "2.x"
+    impl_id: harbor-rest
+    requires_connector_class: HarborConnector
+    upstream:
+      - "https://raw.githubusercontent.com/goharbor/harbor/v2.11.0/api/v2.0/swagger.yaml"
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Generic-ingested. goharbor publishes the API spec at
+      api/v2.0/swagger.yaml (info.version observed: 2.0). SHARP EDGE: that
+      file is Swagger 2.0, while the G0.7 ingest parser targets OpenAPI
+      3.0/3.1 -- convert before ingest. spec_info_version left null pending an
+      OpenAPI-3-converted, MEHO-verified ingest. See #743 / harbor-onboarding.md.
+
+  - product: nsx
+    version: "4.2"
+    impl_id: nsx-rest
+    requires_connector_class: NsxConnector
+    upstream:
+      - "https://<nsx-mgr-fqdn>/api/v1/spec/openapi/nsx_api.yaml"
+      - "https://developer.broadcom.com/xapis/nsx-t-data-center-rest-api/latest/"
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Generic-ingested. NSX Manager serves the OpenAPI spec at
+      /api/v1/spec/openapi/nsx_api.yaml (appliance-served, fqdn-templated);
+      the Broadcom Developer Portal mirrors the reference. spec_info_version
+      pending first verified ingest. See #743.
+
+  # --- Typed connectors (Layer 1: hand-coded; no spec ingestion) ---
+
+  - product: vault
+    version: "1.x"
+    impl_id: vault
+    requires_connector_class: VaultConnector
+    upstream: null
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Typed connector (hand-coded; KV-v2 + sys + auth read/list ops). Vault
+      publishes an OpenAPI surface, but MEHO ships VaultConnector typed by
+      design -- no spec ingestion. See #743.
+
+  - product: k8s
+    version: "1.x"
+    impl_id: k8s
+    requires_connector_class: KubernetesConnector
+    upstream: null
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Typed connector (kubernetes_asyncio; 13+ typed read ops; kubeconfig
+      from Vault). Per-Kubernetes-minor OpenAPI ingestion is a future Goal
+      #214 investigation; no spec ingestion today. See #743.
+
+  - product: bind9
+    version: "9.x"
+    impl_id: bind9-ssh
+    requires_connector_class: Bind9Connector
+    upstream: null
+    spec_info_version: null
+    sha256: null
+    notes: >-
+      Typed-SSH connector. BIND 9 exposes no REST/OpenAPI surface (named
+      driven over SSH with atomic-apply discipline), so spec ingestion is not
+      possible. See #743 / bind9-onboarding.md.

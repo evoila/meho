@@ -83,6 +83,7 @@ rejected at the schema layer before the handler runs.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any, Final
 
 from sqlalchemy import select
@@ -108,8 +109,12 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_diff,
+    query_history,
+    query_timeline,
 )
 from meho_backplane.topology.resolvers import NodeNotFoundError
+from meho_backplane.topology.timeline_cursor import InvalidTimelineCursorError
 
 __all__: list[str] = []
 
@@ -138,6 +143,23 @@ _MAX_HOPS_MAX: Final[int] = 32
 _EDGES_LIMIT_DEFAULT: Final[int] = 200
 _EDGES_LIMIT_MAX: Final[int] = 1000
 
+#: ``timeline`` facet defaults / ceilings. Mirror the T5 substrate
+#: bounds (``query._DEFAULT_TIMELINE_LIMIT`` = 50,
+#: ``query._MAX_TIMELINE_LIMIT`` = 1000). Default 50 per the Task
+#: #861 acceptance criterion ("default ``--limit 50``").
+_TIMELINE_LIMIT_DEFAULT: Final[int] = 50
+_TIMELINE_LIMIT_MAX: Final[int] = 1000
+
+#: ``history`` facet ceiling. Mirrors the T3 substrate cap
+#: (``query._MAX_HISTORY_ROWS`` = 5000) and the REST route cap
+#: (``api/v1/topology._HISTORY_LIMIT_MAX``) so the four fronts (REST /
+#: CLI / MCP / substrate) clamp the per-resource walk identically.
+#: Per-resource history is bounded by retention, so the default IS the
+#: ceiling -- a tighter MCP default would silently truncate the walk
+#: and operators would think they see the full history when they
+#: don't (same reasoning T3 used for the REST and CLI defaults).
+_HISTORY_LIMIT_MAX: Final[int] = 5000
+
 #: Canonical ``GraphEdgeKind`` values, materialised once at module load
 #: so the inputSchema enum + the kind_filter description stay in lock-step
 #: with :class:`~meho_backplane.db.models.GraphEdgeKind` without
@@ -151,7 +173,15 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "kind": {
             "type": "string",
-            "enum": ["dependents", "dependencies", "path", "edges"],
+            "enum": [
+                "dependents",
+                "dependencies",
+                "path",
+                "edges",
+                "timeline",
+                "diff",
+                "history",
+            ],
             "description": (
                 "Which read shape to run. `dependents` = reverse closure "
                 "(what depends on `target`); `dependencies` = forward "
@@ -159,7 +189,22 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "unweighted route between `from_name` and `to_name`; "
                 "`edges` = flat tenant-scoped listing of `graph_edge` "
                 "rows (the inventory-survey shape, replaces a "
-                "standalone `list_edges` meta-tool)."
+                "standalone `list_edges` meta-tool); `timeline` = "
+                "tenant-wide chronological feed of graph changes from "
+                "the G9.3 `graph_node_history` + `graph_edge_history` "
+                "tables, cursor-paginated -- 'what's been happening in "
+                "the graph in the last hour?' without rooting at a "
+                "specific resource; `diff` = net per-resource delta "
+                "between two timestamps (`ts1` exclusive, `ts2` "
+                "inclusive) -- 'what changed between 9am and 11am?'. "
+                "Output is hard-capped at 1000 entries with a "
+                "truncation marker + 'narrow the time window' hint; "
+                "`history` = per-resource history "
+                "walk for one named node (and optionally its incident "
+                "edges via `include_edges=true`) -- 'when did THIS "
+                "resource start depending on X, and what changed?' -- "
+                "carries the full `snapshot.before` / `snapshot.after` "
+                "JSONB per row."
             ),
         },
         "target": {
@@ -235,13 +280,29 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
         "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": _EDGES_LIMIT_MAX,
-            "default": _EDGES_LIMIT_DEFAULT,
+            # Permissive base ceiling matches the loosest substrate cap
+            # (``query_history`` accepts 1..``_HISTORY_LIMIT_MAX``); the
+            # per-facet ``allOf`` clauses below tighten this to the
+            # ``edges`` (1000) and ``timeline`` (1000) substrate caps so
+            # MCP callers can't smuggle an over-cap value past the
+            # schema and trip the substrate's ``ValueError`` at runtime.
+            "maximum": _HISTORY_LIMIT_MAX,
+            # No schema-level ``default`` -- the effective default
+            # varies by ``kind`` (``edges`` -> ``_EDGES_LIMIT_DEFAULT``,
+            # ``timeline`` -> ``_TIMELINE_LIMIT_DEFAULT``,
+            # ``history`` -> ``_HISTORY_LIMIT_MAX``). A single default
+            # in the schema would mislead schema-driven MCP clients
+            # into pre-populating the edges default on every call,
+            # over-requesting timeline / history pages.
             "description": (
-                f"Page size for `kind=edges` (default "
-                f"{_EDGES_LIMIT_DEFAULT}; ceiling {_EDGES_LIMIT_MAX}, "
-                "matching the substrate `list_edges` cap). Ignored for "
-                "the closure kinds and `path`."
+                f"Page size for paginated facets. `kind=edges` defaults "
+                f"to {_EDGES_LIMIT_DEFAULT} (ceiling {_EDGES_LIMIT_MAX}); "
+                f"`kind=timeline` defaults to {_TIMELINE_LIMIT_DEFAULT} "
+                f"(ceiling {_TIMELINE_LIMIT_MAX}); `kind=history` "
+                f"defaults to {_HISTORY_LIMIT_MAX} (also the ceiling -- "
+                "per-resource history is bounded by retention so the "
+                "default IS the cap). Ignored for the closure kinds and "
+                "`path`."
             ),
         },
         "offset": {
@@ -297,6 +358,80 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Ignored for the closure kinds."
             ),
         },
+        "since": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 absolute lower bound on `valid_from` for "
+                "`kind=timeline`. Inclusive. Pair with `until` to "
+                "scope the timeline to one window. Ignored for the "
+                "closure / path / edges kinds."
+            ),
+            "format": "date-time",
+        },
+        "until": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 absolute upper bound on `valid_from` for "
+                "`kind=timeline`. Inclusive. Ignored for the closure "
+                "/ path / edges kinds."
+            ),
+            "format": "date-time",
+        },
+        "cursor": {
+            "type": ["string", "null"],
+            "description": (
+                "Opaque forward-pagination token from a prior "
+                "`kind=timeline` page's `next_cursor`. Encodes "
+                "`(valid_from, history_id, source)`; stable under "
+                "concurrent inserts from the G9.3 diff-on-write hook. "
+                "Ignored for non-timeline kinds."
+            ),
+            "maxLength": 1024,
+        },
+        "ts1": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 EXCLUSIVE lower bound for `kind=diff` -- "
+                "rows with `valid_from > ts1` enter the fold. Required "
+                "for `kind=diff`; ignored for the other kinds. Must "
+                "be strictly less than `ts2`; an inverted window "
+                "returns -32602."
+            ),
+            "format": "date-time",
+        },
+        "ts2": {
+            "type": ["string", "null"],
+            "description": (
+                "ISO-8601 INCLUSIVE upper bound for `kind=diff` -- "
+                "rows with `valid_from <= ts2` enter the fold. Required "
+                "for `kind=diff`."
+            ),
+            "format": "date-time",
+        },
+        "changed_only": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When `true` with `kind=diff`, suppress `updated` "
+                "entries whose every in-window history row was a "
+                "`last_seen`-only refresh heartbeat (the refresh "
+                "service's 'I observed this row again at T+15m' "
+                "emission). `created` / `removed` entries always "
+                "surface. Ignored for the other kinds."
+            ),
+        },
+        "include_edges": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "For `kind=history` only: when `true`, also walk every "
+                "history row for edges incident to the anchor node "
+                "(joined via `edge_id IN (SELECT id FROM graph_edge "
+                "WHERE from_node_id = anchor OR to_node_id = "
+                "anchor)`). Default `false` -- the node-side history "
+                "is the common case. Ignored for the other kinds."
+            ),
+        },
     },
     "required": ["kind"],
     "additionalProperties": False,
@@ -317,6 +452,31 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
         {
             "if": {"properties": {"kind": {"const": "path"}}},
             "then": {"required": ["from_name", "to_name"]},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "diff"}}},
+            "then": {"required": ["ts1", "ts2"]},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "history"}}},
+            "then": {"required": ["target"]},
+        },
+        # Per-facet ``limit`` ceilings. The base ``limit.maximum`` above
+        # is the loosest cap (5000 for ``history``); the ``edges`` and
+        # ``timeline`` substrates cap tighter (1000 each), so we
+        # intersect a stricter ``maximum`` for those kinds. JSON Schema
+        # 2020-12 ``allOf`` semantics: every applicable subschema must
+        # validate, so the effective ceiling for a given ``kind`` is
+        # ``min(base.maximum, then.maximum)``. Without this, an
+        # ``edges`` caller passing ``limit=1500`` would pass the schema
+        # but trip ``list_edges``'s ``ValueError`` at runtime.
+        {
+            "if": {"properties": {"kind": {"const": "edges"}}},
+            "then": {"properties": {"limit": {"maximum": _EDGES_LIMIT_MAX}}},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "timeline"}}},
+            "then": {"properties": {"limit": {"maximum": _TIMELINE_LIMIT_MAX}}},
         },
     ],
 }
@@ -355,7 +515,44 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     'tenant\'); `{kind: "path", path: TopologyPath|null}` for `path` '
     "(null = unreachable within `max_hops`, a valid answer, not an "
     'error); `{kind: "edges", edges: [TopologyEdge, ...]}` for `edges` '
-    "(flat list, ordered by `last_seen DESC NULLS LAST, id`)."
+    "(flat list, ordered by `last_seen DESC NULLS LAST, id`).\n\n"
+    "For `kind=timeline`: tenant-wide chronological feed of graph "
+    "changes -- 'what changed in the graph since 9am?' → "
+    "`query_topology {kind: timeline, since: 2026-05-22T09:00:00Z}`. "
+    "Use `since` / `until` to bound the window. Cursor-paginated "
+    "(default `limit: 50`); a non-null `next_cursor` in the response "
+    "means more rows exist -- pass it back as `cursor` on the next "
+    "call to walk forward. Returns "
+    '`{kind: "timeline", rows: [TopologyTimelineEntry, ...], '
+    "next_cursor: <token|null>}`.\n\n"
+    "For `kind=diff`: graph-level net delta between two timestamps -- "
+    "'what changed between 9am and 11am?' → `query_topology {kind: "
+    "diff, ts1: 2026-05-22T09:00:00Z, ts2: 2026-05-22T11:00:00Z}`. "
+    "Each entry is one resource's NET change in `(ts1, ts2]` "
+    "(`created` / `updated` / `removed`); a resource created and "
+    "removed in the same window nets to `removed`. Use "
+    "`changed_only: true` to suppress refresh-heartbeat updates "
+    "(rows whose only mutation was a `last_seen` bump). Output is "
+    "hard-capped at 1000 entries -- when the cap fires, "
+    "`truncated: true` and `truncation_hint` carries the canonical "
+    "'narrow the time window' message; the operator narrows `ts1` / "
+    "`ts2` or filters by `kind_filter` and retries. Returns "
+    '`{kind: "diff", entries: [TopologyDiffEntry, ...], '
+    "truncated: bool, truncation_hint: <str|null>}`.\n\n"
+    "For `kind=history`: per-resource history walk for one named "
+    "node -- 'when did service-X start depending on database-Y, and "
+    "what changed each time?' → `query_topology {kind: history, "
+    "target: service-X, include_edges: true}`. Required: `target` "
+    "(the node name); optional: `node_kind` to disambiguate, `since` "
+    "/ `until` to bound the window, `include_edges=true` to also "
+    "walk every history row for edges incident to the anchor. "
+    "Carries the full `snapshot.before` / `snapshot.after` JSONB "
+    "per row (unlike `timeline`, which truncates to a one-line "
+    "summary) -- use for forensic 'what was the exact state before "
+    "this change?' questions. Unknown / cross-tenant target returns "
+    '-32602 `node_not_found`. Returns `{kind: "history", rows: '
+    "[TopologyHistoryEntry, ...], anchor_node_id: <uuid>, "
+    "include_edges: <bool>}`."
 )
 
 
@@ -400,6 +597,12 @@ async def _query_topology_handler(
         if kind == "edges":
             edges = await _list_edges_facet(operator, arguments)
             return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
+        if kind == "timeline":
+            return await _timeline_facet(operator, arguments)
+        if kind == "diff":
+            return await _diff_facet(operator, arguments)
+        if kind == "history":
+            return await _history_facet(operator, arguments)
         # kind == "path" — the enum + schema guarantee no other value.
         result = await find_path(
             operator,
@@ -411,9 +614,229 @@ async def _query_topology_handler(
         )
     except AmbiguousNodeError as exc:
         raise McpInvalidParamsError(str(exc)) from exc
+    except NodeNotFoundError as exc:
+        # ``kind=history`` resolves the anchor and surfaces a missing
+        # or cross-tenant name as :class:`NodeNotFoundError`; the
+        # closure / path verbs treat a missing name as an empty
+        # result (G9.1 contract) so they never raise this. The catch
+        # is keyed by the substrate, not by the dispatch branch.
+        raise McpInvalidParamsError(str(exc)) from exc
     return {
         "kind": kind,
         "path": None if result is None else result.model_dump(mode="json"),
+    }
+
+
+async def _timeline_facet(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch the ``kind="timeline"`` facet to G9.3-T5's substrate.
+
+    Parses ISO-8601 strings from ``since`` / ``until`` (the MCP layer
+    accepts absolute ISO-8601 only; the CLI layer adds the
+    ``"24h"`` / ``"7d"`` duration-shorthand convenience and resolves
+    it to an absolute timestamp before crossing the wire). Forwards
+    the optional cursor verbatim.
+
+    :class:`InvalidTimelineCursorError` from the substrate surfaces
+    as JSON-RPC ``-32602`` -- the cursor came from a prior
+    ``next_cursor`` of this same tool, so a tampered / hand-crafted
+    token is an operator-actionable input problem.
+
+    ``target`` is intentionally **not** wired in here: the MCP
+    surface for ``kind=timeline`` does not accept a per-target
+    narrowing because the closure / path kinds already use ``target``
+    for a different concept (the anchor node name). Operators
+    wanting the per-target slice use the CLI ``meho topology
+    timeline --target ...`` which resolves the name to a target id
+    before calling the substrate. A future MCP widening can add a
+    ``target_id`` argument without conflicting with the closure
+    semantics.
+    """
+    since_str = arguments.get("since")
+    until_str = arguments.get("until")
+    cursor = arguments.get("cursor")
+    since_dt: datetime | None = None
+    until_dt: datetime | None = None
+    if isinstance(since_str, str):
+        try:
+            since_dt = datetime.fromisoformat(since_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=timeline): 'since' is not ISO-8601: {since_str!r}",
+            ) from exc
+    if isinstance(until_str, str):
+        try:
+            until_dt = datetime.fromisoformat(until_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=timeline): 'until' is not ISO-8601: {until_str!r}",
+            ) from exc
+
+    try:
+        result = await query_timeline(
+            operator,
+            target_id=None,
+            since=since_dt,
+            until=until_dt,
+            limit=int(arguments.get("limit", _TIMELINE_LIMIT_DEFAULT)),
+            cursor=cursor if isinstance(cursor, str) else None,
+        )
+    except InvalidTimelineCursorError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+
+    return {
+        "kind": "timeline",
+        "rows": [r.model_dump(mode="json") for r in result.rows],
+        "next_cursor": result.next_cursor,
+    }
+
+
+async def _diff_facet(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch the ``kind="diff"`` facet to G9.3-T4's substrate.
+
+    Parses ISO-8601 strings from ``ts1`` / ``ts2`` (the MCP wire only
+    carries strings -- the CLI adds duration-shorthand convenience and
+    resolves to absolute timestamps before crossing the wire, mirroring
+    the timeline facet's split). The substrate raises
+    :class:`ValueError` on an inverted window (``ts1 >= ts2``); that is
+    an operator-actionable input problem and surfaces as JSON-RPC
+    ``-32602`` so the agent sees the diagnostic inline.
+
+    The 1000-row cap is enforced inside :func:`query_diff`; this facet
+    is a thin parameter shim that does not re-implement the cap.
+    """
+    ts1_str = arguments.get("ts1")
+    ts2_str = arguments.get("ts2")
+    # ``ts1`` / ``ts2`` are required by the inputSchema's allOf clause
+    # for ``kind=diff``, but a non-string sentinel (None / numeric)
+    # would slip past the jsonschema ``type: string`` check on a
+    # client that bypasses the validator. The isinstance guards
+    # therefore stay -- they parse the happy path and reject the
+    # never-validated path consistently.
+    if not isinstance(ts1_str, str):
+        raise McpInvalidParamsError(
+            "query_topology(kind=diff): 'ts1' must be an ISO-8601 string",
+        )
+    if not isinstance(ts2_str, str):
+        raise McpInvalidParamsError(
+            "query_topology(kind=diff): 'ts2' must be an ISO-8601 string",
+        )
+    try:
+        ts1_dt = datetime.fromisoformat(ts1_str)
+    except ValueError as exc:
+        raise McpInvalidParamsError(
+            f"query_topology(kind=diff): 'ts1' is not ISO-8601: {ts1_str!r}",
+        ) from exc
+    try:
+        ts2_dt = datetime.fromisoformat(ts2_str)
+    except ValueError as exc:
+        raise McpInvalidParamsError(
+            f"query_topology(kind=diff): 'ts2' is not ISO-8601: {ts2_str!r}",
+        ) from exc
+
+    # Reject non-boolean ``changed_only`` rather than coercing with
+    # ``bool(...)``: ``bool("false")`` is ``True``, so a malformed client
+    # sending the string ``"false"`` would silently flip the
+    # heartbeat-suppression flag and surface the opposite of what was
+    # asked for. Same input-validation discipline as the ts1 / ts2
+    # ISO-8601 parse above.
+    changed_only_raw = arguments.get("changed_only", False)
+    if not isinstance(changed_only_raw, bool):
+        raise McpInvalidParamsError(
+            f"query_topology(kind=diff): 'changed_only' must be a boolean; "
+            f"got {type(changed_only_raw).__name__}",
+        )
+
+    try:
+        result = await query_diff(
+            operator,
+            ts1=ts1_dt,
+            ts2=ts2_dt,
+            changed_only=changed_only_raw,
+            kind_filter=arguments.get("kind_filter"),
+        )
+    except ValueError as exc:
+        # Empty / inverted window -- the substrate raises ValueError
+        # with both timestamps named in the message. Surface as -32602
+        # so the agent sees the diagnostic inline rather than as a
+        # -32603 Internal Error.
+        raise McpInvalidParamsError(str(exc)) from exc
+
+    return {
+        "kind": "diff",
+        "entries": [e.model_dump(mode="json") for e in result.entries],
+        "truncated": result.truncated,
+        "truncation_hint": result.truncation_hint,
+    }
+
+
+async def _history_facet(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch the ``kind="history"`` facet to G9.3-T3's substrate.
+
+    Calls :func:`query_history` with the anchor name from ``target``
+    (reused for the agent-facing concept of "the resource I am
+    asking about") and the optional ``node_kind`` / ``since`` /
+    ``until`` / ``include_edges`` filters. Returns the full
+    :class:`TopologyHistoryResult` including the ``snapshot``
+    payload per row so the agent can reason about pre/post state --
+    this is the differentiator from ``kind=timeline``, which carries
+    only the one-line summary.
+
+    Failure-mode translation:
+
+    * :class:`NodeNotFoundError` (unknown / cross-tenant target) and
+      :class:`AmbiguousNodeError` (bare name resolves to multiple
+      kinds) bubble up to the outer ``try/except`` block which maps
+      both to JSON-RPC ``-32602`` -- the operator-actionable
+      input-problem shape the closure verbs use.
+
+    ``since`` / ``until`` are parsed as ISO-8601 absolute timestamps
+    (the same shape :func:`_timeline_facet` uses). The CLI front
+    resolves duration shorthand (``"24h"`` / ``"7d"``) to an
+    absolute string before crossing the wire.
+    """
+    target_name = arguments["target"]
+    since_str = arguments.get("since")
+    until_str = arguments.get("until")
+    since_dt: datetime | None = None
+    until_dt: datetime | None = None
+    if isinstance(since_str, str):
+        try:
+            since_dt = datetime.fromisoformat(since_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=history): 'since' is not ISO-8601: {since_str!r}",
+            ) from exc
+    if isinstance(until_str, str):
+        try:
+            until_dt = datetime.fromisoformat(until_str)
+        except ValueError as exc:
+            raise McpInvalidParamsError(
+                f"query_topology(kind=history): 'until' is not ISO-8601: {until_str!r}",
+            ) from exc
+
+    result = await query_history(
+        operator,
+        target_name,
+        kind=arguments.get("node_kind"),
+        since=since_dt,
+        until=until_dt,
+        include_edges=bool(arguments.get("include_edges", False)),
+        limit=int(arguments.get("limit", _HISTORY_LIMIT_MAX)),
+    )
+    return {
+        "kind": "history",
+        "anchor_node_id": str(result.anchor_node_id),
+        "include_edges": result.include_edges,
+        "rows": [r.model_dump(mode="json") for r in result.rows],
     }
 
 
@@ -461,7 +884,15 @@ register_mcp_tool(
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["dependents", "dependencies", "path", "edges"],
+                    "enum": [
+                        "dependents",
+                        "dependencies",
+                        "path",
+                        "edges",
+                        "timeline",
+                        "diff",
+                        "history",
+                    ],
                 },
                 "nodes": {
                     "type": "array",
@@ -486,6 +917,68 @@ register_mcp_tool(
                         "Present for `kind=edges`. TopologyEdge rows "
                         "ordered (last_seen DESC NULLS LAST, id). See "
                         "`meho_backplane.topology.schemas.TopologyEdge`."
+                    ),
+                },
+                "rows": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Present for `kind=timeline` (TopologyTimelineEntry "
+                        "rows, summary only) and `kind=history` "
+                        "(TopologyHistoryEntry rows, full snapshot.before/"
+                        "after payload). Both ordered (valid_from DESC, "
+                        "history_id DESC). See "
+                        "`meho_backplane.topology.schemas`."
+                    ),
+                },
+                "next_cursor": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Present for `kind=timeline`. Opaque next-page "
+                        "token, or null when the page is the end of the "
+                        "matching set."
+                    ),
+                },
+                "entries": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Present for `kind=diff`. TopologyDiffEntry rows "
+                        "in substrate insertion order (node side first, "
+                        "then edge side; first-seen `resource_id` order "
+                        "within each side). See `meho_backplane.topology."
+                        "schemas.TopologyDiffEntry`."
+                    ),
+                },
+                "truncated": {
+                    "type": "boolean",
+                    "description": (
+                        "Present for `kind=diff`. `true` when the 1000-"
+                        "row hard cap fired; pair with `truncation_hint` "
+                        "for the operator-facing remediation."
+                    ),
+                },
+                "truncation_hint": {
+                    "type": ["string", "null"],
+                    "description": (
+                        "Present for `kind=diff`. Operator-facing "
+                        "'narrow the time window' message when "
+                        "`truncated=true`; null otherwise."
+                    ),
+                },
+                "anchor_node_id": {
+                    "type": "string",
+                    "description": (
+                        "Present for `kind=history`. The resolved "
+                        "`graph_node.id` of the anchor (UUID string)."
+                    ),
+                },
+                "include_edges": {
+                    "type": "boolean",
+                    "description": (
+                        "Present for `kind=history`. Echoes the call-"
+                        "site flag so a consumer can branch on whether "
+                        "edge rows are expected to appear in `rows`."
                     ),
                 },
             },

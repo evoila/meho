@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -58,15 +59,15 @@ func newHostListCmd() *cobra.Command {
 }
 
 func runHostList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/vcenter/host", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/vcenter/host", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/vcenter/host", r, jsonOut, printHostList)
+	return conn.Render(cmd, "GET:/vcenter/host", r, jsonOut, printHostList)
 }
 
 func printHostList(w io.Writer, r *CallResult) {
@@ -134,9 +135,9 @@ func newHostEvacuateCmd() *cobra.Command {
 }
 
 func runHostEvacuate(cmd *cobra.Command, nameOrID, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	moid, err := resolveName(cmd.Context(), backplaneURL, targetName, "host", nameOrID)
 	if err != nil {
@@ -146,9 +147,9 @@ func runHostEvacuate(cmd *cobra.Command, nameOrID, targetName string, jsonOut bo
 	}
 	opID := "vmware.composite.host.evacuate"
 	params := map[string]any{"host": moid}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, nil)
+	return conn.Render(cmd, opID, r, jsonOut, nil)
 }

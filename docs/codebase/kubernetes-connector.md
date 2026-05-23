@@ -104,12 +104,13 @@ copy this pattern in G3.x).
    `importlib.import_module` + chained `getattr`), binds the unbound
    method against the registered `KubernetesConnector` instance, and
    awaits it as `handler(target=target, params=params)`.
-5. Handler returns `dict[str, Any]`. The dispatcher's
-   `PassThroughReducer` lands that dict verbatim into
-   `OperationResult.result`. The audit subsystem writes one
-   `audit_log` row with `params_hash` derived from the input params
-   only -- log contents (or any other returned payload) are never
-   written to the audit row.
+5. Handler returns `dict[str, Any]`. The dispatcher's default
+   [`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750)
+   lands a small dict verbatim into `OperationResult.result`, or
+   materializes a large set-shaped one into a `ResultHandle`. The
+   audit subsystem writes one `audit_log` row with `params_hash`
+   derived from the input params only -- log contents (or any other
+   returned payload) are never written to the audit row.
 
 ### `k8s.logs` -- per-call flow
 

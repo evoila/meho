@@ -93,6 +93,7 @@ read-shaped trace.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -122,15 +123,22 @@ from meho_backplane.topology.query import (
     find_dependents,
     find_path,
     list_edges,
+    query_diff,
+    query_history,
+    query_timeline,
 )
 from meho_backplane.topology.refresh import RefreshResult, refresh_target_topology
 from meho_backplane.topology.resolvers import NodeNotFoundError
 from meho_backplane.topology.schemas import (
+    TopologyDiffResult,
     TopologyEdge,
     TopologyEdgeEndpoint,
+    TopologyHistoryResult,
     TopologyNode,
     TopologyPath,
+    TopologyTimelineResult,
 )
+from meho_backplane.topology.timeline_cursor import InvalidTimelineCursorError
 
 __all__ = ["router"]
 
@@ -161,6 +169,9 @@ _OP_ANNOTATE = "topology.annotate"
 _OP_UNANNOTATE = "topology.unannotate"
 _OP_LIST_EDGES = "topology.list_edges"
 _OP_BULK_IMPORT = "topology.bulk_import"
+_OP_TIMELINE = "topology.timeline"
+_OP_DIFF = "topology.diff"
+_OP_HISTORY = "topology.history"
 
 #: HTTP-boundary ceiling on the number of edges accepted in one
 #: ``POST /edges/bulk`` body. The consumer's INVENTORY.md
@@ -178,6 +189,25 @@ _BULK_IMPORT_MAX_EDGES = 1000
 #: widen the HTTP boundary.
 _LIST_EDGES_LIMIT_DEFAULT = 200
 _LIST_EDGES_LIMIT_MAX = 1000
+
+#: ``GET /topology/timeline`` ``limit`` ceiling at the HTTP boundary.
+#: Default 50 per Task #861 acceptance criterion ("default
+#: ``--limit 50``"); the substrate ceiling is 1000. Tighter HTTP cap
+#: than the substrate is the same pattern :data:`_LIST_EDGES_LIMIT_MAX`
+#: uses -- the boundary layer can clamp without re-issuing the
+#: substrate primitive's own ceiling.
+_TIMELINE_LIMIT_DEFAULT = 50
+_TIMELINE_LIMIT_MAX = 1000
+
+#: ``GET /topology/history/{name}`` ``limit`` ceiling at the HTTP
+#: boundary. Mirrors the substrate ceiling
+#: :data:`meho_backplane.topology.query._MAX_HISTORY_ROWS`. Per-resource
+#: history is bounded by retention (default 90 days) and the operator
+#: typically wants the complete walk in one response; the route default
+#: is the same ceiling because a tighter cap on the HTTP boundary
+#: would silently truncate the walk and the operator would think they
+#: see the full history when they don't.
+_HISTORY_LIMIT_MAX = 5000
 
 #: Bounds mirror the service-layer defaults (``query._DEFAULT_DEPTH`` /
 #: ``query._DEFAULT_MAX_HOPS``); the ceilings cap a pathological
@@ -900,3 +930,360 @@ async def _edge_to_response(edge: object, session: AsyncSession) -> TopologyEdge
         properties=dict(edge.properties or {}),
         last_seen=edge.last_seen,
     )
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T5 (#861) — tenant-wide timeline of graph changes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/timeline", response_model=TopologyTimelineResult)
+async def timeline_route(
+    target: str | None = Query(default=None, max_length=256),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    limit: int = Query(
+        default=_TIMELINE_LIMIT_DEFAULT,
+        ge=1,
+        le=_TIMELINE_LIMIT_MAX,
+    ),
+    cursor: str | None = Query(default=None, max_length=1024),
+    operator: Operator = _require_operator,
+    session: AsyncSession = Depends(get_raw_session),
+) -> TopologyTimelineResult:
+    """Tenant-wide chronological feed of graph changes.
+
+    Wraps :func:`~meho_backplane.topology.query.query_timeline` (G9.3-T5
+    #861). Walks ``graph_node_history`` + ``graph_edge_history`` in
+    ``(valid_from DESC, history_id DESC)`` order, paginated via opaque
+    forward-only cursor encoding ``(valid_from, history_id, source)``.
+    Tenant scope is ``operator.tenant_id`` -- no surface accepts a
+    tenant id on this route.
+
+    Query parameters:
+
+    * ``target`` -- optional target name or alias. Resolved tenant-
+      scoped via :func:`~meho_backplane.targets.resolver.resolve_target`
+      (alias-aware, 404 with near-misses when nothing matches). The
+      resolved target id narrows the timeline to history rows for
+      resources belonging to that target -- nodes whose ``target_id``
+      matches, and edges whose either endpoint belongs to the target.
+    * ``since`` / ``until`` -- ISO-8601 absolute datetimes; either
+      bound is optional. Duration shorthand (``"24h"`` / ``"7d"``) is
+      a CLI convenience that the CLI front parses; the REST API
+      accepts absolute timestamps only, mirroring the audit-query
+      router's split (G8.1-T2 #466).
+    * ``limit`` -- page size (default ``50`` per the issue body;
+      ceiling ``1000``).
+    * ``cursor`` -- opaque next-page token from a prior response.
+
+    Errors:
+
+    * **404 ``no_target``** -- ``target`` did not resolve to a row in
+      the tenant. Near-miss matches surface in ``detail.matches`` for
+      operator self-correction (same shape as the ``refresh`` route).
+    * **400 ``invalid_cursor``** -- ``cursor`` is not a valid opaque
+      token (tampered or hand-crafted). The substrate's
+      :class:`InvalidTimelineCursorError` message is echoed.
+
+    The route binds ``audit_op_id="topology.timeline"`` /
+    ``audit_op_class="audit_query"`` per [decision #3](docs/planning/v0.2-decisions.md)
+    -- temporal graph queries are inspections of system state, parallel
+    to G8's audit-log query surface; the broadcast event carries only
+    ``{op_id, result_status, row_count}`` so the request filter (which
+    may name a sensitive target) and the rows themselves never leak
+    onto the SSE / Slack feed.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_TIMELINE,
+        audit_op_class="audit_query",
+    )
+    target_id: uuid.UUID | None = None
+    if target is not None:
+        # Re-use the existing tenant-scoped resolver so a missing
+        # target lands as the canonical 404 envelope (with near-miss
+        # suggestions) the CLI already renders for refresh / show.
+        resolved = await resolve_target(session, operator.tenant_id, target)
+        target_id = resolved.id
+
+    try:
+        result = await query_timeline(
+            operator,
+            target_id=target_id,
+            since=since,
+            until=until,
+            limit=limit,
+            cursor=cursor,
+        )
+    except InvalidTimelineCursorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Broadcast aggregate signal: row count only, never per-row payload.
+    structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T3 (#859) — per-resource history walk
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/history/{name}",
+    response_model=TopologyHistoryResult,
+    responses={
+        # 404 ``node_not_found`` / 409 ``ambiguous_node`` -- declared
+        # explicitly so FastAPI's autogen OpenAPI surfaces both runtime
+        # error shapes to SDK clients. The route handler below raises
+        # via ``_node_not_found_http`` / ``_ambiguous_node_http`` which
+        # produce ``HTTPException(404, detail={"error": "node_not_found",
+        # ...})`` and ``HTTPException(409, detail={"error":
+        # "ambiguous_node", ...})`` respectively. Without these
+        # declarations the spec only listed 200 + 422 and clients had no
+        # schema-driven signal for the recoverable per-anchor errors
+        # (the operator's first-line diagnostics).
+        404: {
+            "description": ("Anchor node not found by ``name`` (and ``kind`` when supplied)."),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "error": {
+                                        "type": "string",
+                                        "enum": ["node_not_found"],
+                                    },
+                                    "name": {"type": "string"},
+                                    "kind": {"type": "string"},
+                                },
+                                "required": ["error", "name"],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+        409: {
+            "description": (
+                "Bare ``name`` resolves to multiple ``kind`` candidates; "
+                "client should re-issue with an explicit ``kind``."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "error": {
+                                        "type": "string",
+                                        "enum": ["ambiguous_node"],
+                                    },
+                                    "name": {"type": "string"},
+                                    "kinds": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": ["error", "name", "kinds"],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
+)
+async def history_route(
+    name: str,
+    kind: str | None = Query(default=None, max_length=64),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    include_edges: bool = Query(default=False),
+    limit: int = Query(default=_HISTORY_LIMIT_MAX, ge=1, le=_HISTORY_LIMIT_MAX),
+    operator: Operator = _require_operator,
+) -> TopologyHistoryResult:
+    """Chronological history walk anchored at one ``graph_node``.
+
+    Wraps :func:`~meho_backplane.topology.query.query_history` (G9.3-T3
+    #859). Companion to ``GET /topology/timeline`` (G9.3-T5): timeline
+    is "what changed in the graph at all in this window"; history is
+    "what changed for THIS specific resource". Resolved via the G9.1
+    resolver :func:`~meho_backplane.topology.resolvers.resolve_node` so
+    name + optional kind disambiguation use the same surface every
+    G9.1 + G9.2 verb does.
+
+    Query parameters:
+
+    * ``kind`` -- optional ``graph_node.kind`` pin to disambiguate
+      when a bare *name* resolves to multiple kinds in the tenant.
+    * ``since`` / ``until`` -- ISO-8601 absolute datetime bounds on
+      ``valid_from`` (inclusive at both ends). The CLI front resolves
+      duration shorthand (``"24h"`` / ``"7d"``) to an absolute
+      timestamp before crossing the wire, mirroring the timeline
+      route's split.
+    * ``include_edges`` -- when ``true``, also walk every history row
+      for edges incident to the resolved node (joined via the inner
+      subquery ``edge_id IN (SELECT id FROM graph_edge WHERE
+      from_node_id = anchor OR to_node_id = anchor)``). The merged
+      result still orders newest-first.
+    * ``limit`` -- hard cap on returned rows (1..``_HISTORY_LIMIT_MAX``).
+      Defaults to the ceiling because per-resource history is bounded
+      by retention; tighter caps would silently truncate the walk.
+
+    Errors:
+
+    * **404 ``node_not_found``** -- *name* (and *kind*, when supplied)
+      does not resolve to any node in the tenant. Cross-tenant names
+      surface identically -- the tenant boundary is opaque to the
+      caller.
+    * **409 ``ambiguous_node``** -- bare *name* resolves to multiple
+      kinds; pass ``kind`` to disambiguate.
+
+    The route binds ``audit_op_id="topology.history"`` /
+    ``audit_op_class="audit_query"`` per [decision #3](docs/planning/v0.2-decisions.md)
+    -- temporal graph queries are inspections of system state,
+    parallel to G8's audit-log query surface; the broadcast event
+    carries only ``{op_id, result_status, row_count}`` so the
+    response rows (which may carry the snapshot of a sensitive
+    resource's pre/post payload) never leak onto the SSE / Slack
+    feed. Same shape T5's timeline route uses.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_HISTORY,
+        audit_op_class="audit_query",
+    )
+    try:
+        result = await query_history(
+            operator,
+            name,
+            kind=kind,
+            since=since,
+            until=until,
+            include_edges=include_edges,
+            limit=limit,
+        )
+    except AmbiguousNodeError as exc:
+        raise _ambiguous_node_http(exc) from exc
+    except NodeNotFoundError as exc:
+        raise _node_not_found_http(exc) from exc
+
+    structlog.contextvars.bind_contextvars(audit_row_count=len(result.rows))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T4 (#860) — graph-level diff between two timestamps
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/diff",
+    response_model=TopologyDiffResult,
+    responses={
+        # 400 ``invalid_window`` -- ``ts1 >= ts2``. Declared explicitly so
+        # FastAPI's autogen OpenAPI surfaces the 400 to SDK clients; the
+        # route handler below raises ``HTTPException(400, detail={"error":
+        # "invalid_window", "message": ...})``. Without this declaration
+        # the spec only listed 200 + 422 and clients had no schema-driven
+        # signal that 400 is a documented response.
+        400: {
+            "description": "Invalid window (``ts1 >= ts2``).",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "error": {
+                                        "type": "string",
+                                        "enum": ["invalid_window"],
+                                    },
+                                    "message": {"type": "string"},
+                                },
+                                "required": ["error", "message"],
+                            },
+                        },
+                        "required": ["detail"],
+                    },
+                },
+            },
+        },
+    },
+)
+async def diff_route(
+    ts1: datetime = Query(..., description="exclusive lower bound on valid_from"),
+    ts2: datetime = Query(..., description="inclusive upper bound on valid_from"),
+    changed_only: bool = Query(default=False),
+    kind: str | None = Query(default=None, max_length=64),
+    operator: Operator = _require_operator,
+) -> TopologyDiffResult:
+    """Tenant-scoped graph-level diff between ``ts1`` and ``ts2``.
+
+    Wraps :func:`~meho_backplane.topology.query.query_diff` (G9.3-T4
+    #860). Returns one entry per resource that mutated in
+    ``(ts1, ts2]``, folded into a net ``created`` / ``updated`` /
+    ``removed`` change_kind. Output is capped at 1000 entries with a
+    truncation marker + remediation hint -- the diff is the heavy
+    temporal query and the cap protects the API from a hostile / wide
+    time window.
+
+    Query parameters:
+
+    * ``ts1`` -- exclusive lower bound on ``valid_from``.
+    * ``ts2`` -- inclusive upper bound on ``valid_from``.
+    * ``changed_only`` -- when ``true``, suppress ``updated`` entries
+      whose only mutation in the window was a ``last_seen``-bump
+      (refresh-service heartbeats). ``created`` / ``removed`` entries
+      always surface.
+    * ``kind`` -- optional resource-kind filter (node ``kind`` like
+      ``vm`` or edge ``kind`` like ``runs-on``); applied after the
+      fold so the cap fires on the post-filter cohort.
+
+    Errors:
+
+    * **400 ``invalid_window``** -- ``ts1 >= ts2``. The substrate
+      raises :class:`ValueError`; the route surfaces it as a 400 with
+      the canonical message so the CLI / MCP fronts render a
+      consistent diagnostic.
+
+    The route binds ``audit_op_id="topology.diff"`` /
+    ``audit_op_class="audit_query"`` per the G9 audit-query convention
+    (decision #3) -- temporal graph queries are inspections of system
+    state, parallel to G8's audit-log query surface, so the broadcast
+    event carries only ``{op_id, result_status, row_count}`` and the
+    per-row payload never leaks onto the SSE / Slack feed. One
+    ``audit_log`` row per call from the chassis middleware.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_DIFF,
+        audit_op_class="audit_query",
+    )
+    try:
+        result = await query_diff(
+            operator,
+            ts1=ts1,
+            ts2=ts2,
+            changed_only=changed_only,
+            kind_filter=kind,
+        )
+    except ValueError as exc:
+        # ``ts1 >= ts2`` -- empty / inverted window. The substrate's
+        # message names both values; surface as 400 so the operator
+        # gets the diagnostic without a 500 round trip.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_window", "message": str(exc)},
+        ) from exc
+
+    # Broadcast aggregate signal: entry count only, never per-row payload.
+    structlog.contextvars.bind_contextvars(audit_row_count=len(result.entries))
+    return result

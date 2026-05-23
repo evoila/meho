@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -254,11 +255,11 @@ type retireOptions struct {
 // the request, render the response. Each error class is mapped to its
 // structured-error category so main() picks the right exit code.
 func runRetireChecklist(cmd *cobra.Command, opts retireOptions) error {
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			classifyBackplaneError(err),
+			backplane.ClassifyError(err),
 			opts.JSONOut,
 		)
 	}

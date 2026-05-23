@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -140,10 +141,10 @@ func runRecall(cmd *cobra.Command, opts recallOptions) error {
 			opts.JSONOut,
 		)
 	}
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
-			classifyBackplaneError(err), opts.JSONOut)
+			backplane.ClassifyError(err), opts.JSONOut)
 	}
 	if hasArg {
 		return runRecallByKey(cmd, backplaneURL, opts)

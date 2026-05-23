@@ -17,7 +17,9 @@ Covers all four acceptance criteria from Issue #837:
     ``method='DISPATCH'``, a non-null ``target_id``, and a
     ``payload["params_hash"]`` key.
 (d) JSONFlux handle path: ``GET:/suite-api/api/resources`` dispatched
-    with a ``ForceHandleReducer`` returns a populated
+    with the real
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    in force mode (``row_threshold=0``) returns a populated
     ``OperationResult.handle`` with at least one ``sample_rows`` entry.
 
 Database: SQLite via the autouse ``_default_database_url`` conftest
@@ -56,7 +58,6 @@ from sqlalchemy import select
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.connectors.vcf_operations import (
     VROPS_CONNECTOR_ID,
     VROPS_CORE_OPS,
@@ -69,6 +70,7 @@ from meho_backplane.db.models import AuditLog, Target
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vrops_canary_fixtures import (
@@ -153,69 +155,6 @@ def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
     monkeypatch.setattr(audit_module, "publish_event", _capture)
     return events
-
-
-# ---------------------------------------------------------------------------
-# ForceHandleReducer (acceptance criterion d)
-# ---------------------------------------------------------------------------
-
-
-class _ForceHandleReducer:
-    """Test-only reducer that wraps a vROps list payload in a ResultHandle.
-
-    vROps' suite-api wraps list payloads under noun-specific keys
-    (``resourceList``, ``alerts``, ``alertDefinitions``, ``symptoms``,
-    ``recommendations``, ``superMetrics``) rather than the generic
-    ``results`` / ``elements`` / ``value`` shapes NSX, SDDC Manager,
-    and vSphere use. Recognise both families so the same reducer
-    works against any list op the JSONFlux force-handle case might
-    target in the future.
-    """
-
-    _LIST_KEYS: tuple[str, ...] = (
-        "elements",
-        "results",
-        "value",
-        "resourceList",
-        "alerts",
-        "alertDefinitions",
-        "symptoms",
-        "recommendations",
-        "superMetrics",
-    )
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        del schema, context
-        if isinstance(payload, list):
-            total = len(payload)
-            sample: tuple[Any, ...] = tuple(payload[:5]) if payload else ()
-        elif isinstance(payload, dict):
-            for key in self._LIST_KEYS:
-                rows = payload.get(key)
-                if isinstance(rows, list):
-                    total = len(rows)
-                    sample = tuple(rows[:5]) if rows else ()
-                    break
-            else:
-                total = 1
-                sample = ()
-        else:
-            total = 1
-            sample = ()
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample or None,
-            ttl_seconds=3600,
-        )
-        return {"row_count": total, "sample": list(sample)}, handle
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +419,7 @@ async def test_vcf_operations_e2e_dispatch_writes_audit_row(
 async def test_vcf_operations_e2e_jsonflux_handle_populated_for_resource_list(
     vcf_operations_e2e_canary: _VropsE2EBundle,
 ) -> None:
-    """Resource list dispatched with ForceHandleReducer returns a populated handle.
+    """Resource list dispatched with the real JsonFluxReducer returns a populated handle.
 
     Acceptance criterion (d). Resource list is the largest list
     surface in a real vROps deployment (hundreds to thousands of
@@ -499,7 +438,7 @@ async def test_vcf_operations_e2e_jsonflux_handle_populated_for_resource_list(
     assert isinstance(resource_list, list)
     expected_rows = len(resource_list)
 
-    set_default_reducer(_ForceHandleReducer())
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         result_envelope = await call_operation(
             _OPERATOR,
@@ -519,7 +458,7 @@ async def test_vcf_operations_e2e_jsonflux_handle_populated_for_resource_list(
 
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        "Expected OperationResult.handle to be populated by _ForceHandleReducer; "
+        "Expected OperationResult.handle to be populated by JsonFluxReducer; "
         f"got handle=None on envelope={result_envelope!r}"
     )
 

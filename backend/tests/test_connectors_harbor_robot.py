@@ -10,10 +10,11 @@ Covers:
 * ``redact_payload("credential_mint", ...)`` — aggregate-only, no secret.
 * No regression to ``credential_read`` classification for existing vault ops.
 
-Auth: HTTP Basic (shared service account) — handlers pass ``raw_jwt=""``
-to :meth:`HarborConnector.auth_headers`. Per-target credentials are
-injected via the ``credentials_loader`` seam so the Vault stub is never
-reached.
+Auth: HTTP Basic (shared service account) — handlers pass a synthesised
+system :class:`Operator` to :meth:`HarborConnector.auth_headers` (the
+SHARED_SERVICE_ACCOUNT mode ignores the operator identity). Per-target
+credentials are injected via the ``credentials_loader`` seam so the Vault
+stub is never reached.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors.harbor import HarborConnector, HarborTargetLike
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -72,7 +74,8 @@ _TARGET = _StubTarget(
 )
 
 
-async def _stub_loader(_target: HarborTargetLike) -> dict[str, str]:
+async def _stub_loader(_target: HarborTargetLike, _operator: Operator) -> dict[str, str]:
+    """Stub loader matching the 2-arg signature G3.10-T1 #945 introduced."""
     return {"username": "admin", "password": "test-password"}
 
 

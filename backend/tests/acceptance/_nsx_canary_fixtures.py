@@ -331,13 +331,15 @@ def _param_schema_for(path: str) -> dict[str, object]:
     }
 
 
-async def _nsx_session_loader(_target: object) -> dict[str, str]:
-    """Stub session loader — bypasses the not-yet-wired Vault read.
+async def _nsx_session_loader(_target: object, _operator: Operator) -> dict[str, str]:
+    """Stub session loader — bypasses the live operator-context Vault read.
 
     The respx ``POST /api/session/create`` route accepts any pair, so
     the values are illustrative. Mirrors the same pattern
     :func:`tests.acceptance._canary_fixtures._vcenter_rest_session_loader`
-    uses for vSphere.
+    uses for vSphere; the ``_operator`` argument matches the 2-arg
+    :class:`~meho_backplane.connectors.nsx.session.NsxSessionLoader`
+    signature G3.10-T1 (#945) introduced.
     """
     return {"username": "nsx-canary-svc", "password": "nsx-canary-pw"}
 

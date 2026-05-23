@@ -90,6 +90,135 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`k8s-1.x` typed connector — `shared_service_account` auth model live
+  (G3.10-T4 [#948](https://github.com/evoila/meho/issues/948)).** The
+  default
+  [`load_kubeconfig_from_vault`](./backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)
+  now performs the live operator-context KV-v2 read (forwarding the
+  operator's Keycloak JWT to Vault's JWT/OIDC auth method, reading the
+  `kubeconfig` field at `target.secret_ref`, parsing the YAML into the
+  dict shape `kubernetes_asyncio.config.new_client_from_config_dict`
+  accepts). `operation call k8s.<op> target=…` executes end to end
+  against a real cluster — the rubric **State 2** wiring per
+  [`docs/codebase/connector-release-readiness.md`](./docs/codebase/connector-release-readiness.md).
+  Fail-closed on empty `operator.raw_jwt` (the system-call carve-out)
+  and unset `secret_ref`. Operator recipe:
+  [`kubernetes-onboarding.md`](./docs/cross-repo/kubernetes-onboarding.md).
+  `per_user` / `impersonation` remain out of scope.
+
+## [0.5.1] - 2026-05-22
+
+**Connector raw-REST ingest on-ramp + topology change-history + UI
+chassis groundwork.** This patch lands the Goal #214 connector-spec
+catalog (the curated entry point that turns "ingest the vendor's full
+REST surface" from tribal knowledge into a discoverable command, on both
+the API and CLI), the G9.3 topology change-history substrate (history
+tables, diff-on-write capture, a `timeline` query, and retention), and
+the first G10 operator-UI chassis pieces (the `ui/` module + BFF session
+storage). It also fixes the MCP `tools/list` combinator rejection that
+broke Claude Code sessions, and tightens CI (a unit-job time budget,
+SonarCloud signature verification + coverage wiring, and a CLI
+OpenAPI-snapshot freshness gate). No breaking changes.
+
+### Added
+
+- **Connector-spec catalog — the raw-REST ingest on-ramp (Goal
+  [#214](https://github.com/evoila/meho/issues/214)).** A curated,
+  server-side catalog mapping `(product, version)` → recommended OpenAPI
+  spec source(s) + the registered connector class that covers the version
+  label. It ships as package data, is loaded + schema-validated at
+  backplane startup (a malformed catalog fails the app-boot smoke), and
+  is served read-only at `GET /api/v1/connectors/catalog`
+  ([#743](https://github.com/evoila/meho/issues/743) / #917). The
+  matching `meho connector catalog list` and `meho connector ingest
+  --catalog <product>/<version>` CLI verbs resolve an entry and ingest
+  its recommended triple + upstream spec URLs, refusing typed-only and
+  fqdn-templated entries with an actionable hint
+  ([#915](https://github.com/evoila/meho/issues/915) / #926). This is the
+  operator on-ramp for the generic-ingestion (raw-REST) half of the
+  two-layer connector model — the answer to the v0.3.0 dogfood's "only 13
+  vmware ops?".
+- **Topology change history (G9.3).** New `graph_node_history` +
+  `graph_edge_history` tables (Alembic migration 0012) capture every
+  node/edge mutation ([#900](https://github.com/evoila/meho/issues/900)),
+  populated by a diff-on-write hook that also stamps `audit_id` on
+  refresh / annotate ([#904](https://github.com/evoila/meho/issues/904)).
+  A new `meho topology timeline` verb + `GET /api/v1/topology/timeline` +
+  `query_topology(kind=timeline)` expose the history
+  ([#909](https://github.com/evoila/meho/issues/909)); a
+  `meho topology diff <ts1> <ts2>` verb + `GET /api/v1/topology/diff` +
+  `query_topology(kind="diff", ts1=..., ts2=...)` returns the net change
+  set between two timestamps folded to `created` / `updated` / `removed`
+  (with `--changed-only` to suppress `last_seen`-bump heartbeats and a
+  1000-entry hard cap + truncation marker)
+  ([#860](https://github.com/evoila/meho/issues/860)). A weekly
+  retention prune (`TOPOLOGY_HISTORY_RETENTION_DAYS`, `0` = keep forever)
+  bounds growth ([#902](https://github.com/evoila/meho/issues/902)).
+- **Operator web UI chassis (G10.0, groundwork — no operator surface
+  enabled yet).** A new `ui/` module with a FastAPI BFF mount point,
+  Jinja2 base templates, and a Tailwind 4 build pipeline
+  ([#897](https://github.com/evoila/meho/issues/897)), plus BFF session
+  storage — a `web_session` table with encrypted token custody and RFC
+  9700 refresh-token rotation
+  ([#903](https://github.com/evoila/meho/issues/903)).
+
+### Fixed
+
+- MCP `tools/list` no longer publishes a top-level `oneOf` / `allOf` /
+  `anyOf` in any tool's `inputSchema`. The Anthropic Messages API
+  rejects a top-level JSON-Schema combinator in a tool's `input_schema`
+  (`400 ... input_schema does not support oneOf, allOf, or anyOf at the
+  top level`), and because it validates the whole `tools` array a single
+  offender 400'd *every* call in a Claude Code session with the MEHO MCP
+  server connected. `query_topology` (top-level `allOf` for its per-`kind`
+  conditional requireds) and `meho.topology.unannotate` (top-level
+  `oneOf` for its XOR selector) both tripped it. `ToolDefinition.to_wire`
+  now strips top-level combinators from the published copy while the full
+  schema stays on `inputSchema`, so server-side jsonschema validation
+  (the `-32602` rejections for bad argument shapes) is unchanged. Found
+  dogfooding from `claude-rdc-hetzner-dc` after its static `.mcp.json`
+  wire-up. (#905 / #910)
+
+### Documentation
+
+- Add [`docs/RELEASING.md`](docs/RELEASING.md) — a step-ordered release
+  runbook that is the source of truth for cutting a `v*` tag (CHANGELOG
+  roll → tag → artefact verification → deploy + smoke)
+  ([#914](https://github.com/evoila/meho/issues/914)).
+
+### Internal (CI / build / quality — no operator-facing change)
+
+- Enforce a 10-minute unit-job budget as an early-warning gate against
+  CI-perf creep ([#899](https://github.com/evoila/meho/issues/899)).
+- Add a CLI OpenAPI-snapshot freshness gate: regenerate the drifted
+  `cli/api/openapi.json` snapshot + generated client and fail CI when a
+  backend route change leaves them stale
+  ([#928](https://github.com/evoila/meho/issues/928) / #929).
+- Install `dirmngr` + enable SonarCloud GPG signature verification in the
+  quality gate ([#770](https://github.com/evoila/meho/issues/770)); scope
+  Sonar to tests + wire coverage with a documented new-code baseline
+  ([#920](https://github.com/evoila/meho/issues/920)); resolve coverage
+  paths via the `backend/` source root so import coverage isn't reported
+  as 0% ([#927](https://github.com/evoila/meho/issues/927)).
+
+## [0.5.0] - 2026-05-22
+
+**VMware Cloud Foundation connector wave + second-cycle dogfood
+hardening.** This minor release lands the G3.6 VCF connector fleet
+(VCF Operations / vROps, VCF Logs / vRLI, VCF Fleet, VCF Automation,
+plus a shared `vcf_auth` substrate), the G5.2 memory-promotion verbs,
+harbor operator CLI verbs, and the G0.9.1 hardening of every surface
+the 2026-05-21/22 RDC second-cycle dogfood drove against the v0.3.1
+deploy — the catalog↔dispatch regression, the `when_to_use`
+backfill-on-upgrade gap, memory / ingest / topology polish, and the
+full CLI + MCP first-login auth onramp (`auth-config`, the deployer
+recipe, the `bootstrap-clients` verb, claim-specific token errors, and
+the macOS keyring + device-flow login fixes). CI test-suite performance
+was hardened in parallel to keep the unit job under budget as the op
+count grew.
+
 ### Breaking changes
 
 - **MCP `add_to_memory` argument renamed `content` → `body`**
@@ -229,6 +358,59 @@ connector-related release-notes line.
   is also the canonical path for curated inner-graph nodes the probes
   cannot derive (vault-role, keycloak-realm, externally-managed
   principals) ([#778](https://github.com/evoila/meho/issues/778)).
+- **VCF Fleet spec-ingest + 8-op read core** (G3.6-T8
+  [#890](https://github.com/evoila/meho/issues/890)) — enables the
+  `VcfFleetConnector` (#886) for agent dispatch by ingesting the Fleet
+  spec via the G0.7 pipeline and curating an 8-op read core that
+  `search_operations` / `call_operation` surface. **Dispatch + catalog**
+  state; production execution against per-target Vault credentials is
+  tracked under [#214](https://github.com/evoila/meho/issues/214). Write
+  ops stay `is_enabled=False` per Initiative #369.
+- **VCF Automation dual-plane spec ingestion + 11-op read core**
+  (G3.6-T11 [#892](https://github.com/evoila/meho/issues/892)) — enables
+  the `VcfAutomationConnector` (#885) for agent dispatch across both VCFA
+  planes; 11 read ops curated and surfaced by `search_operations` /
+  `call_operation`. **Dispatch + catalog** state; loader wiring tracked
+  under [#214](https://github.com/evoila/meho/issues/214).
+- **Three more VCF connector skeletons registered** — `HttpConnector`
+  subclasses with `fingerprint()` + `probe()` but **no dispatchable ops
+  until their curation Tasks land** (registered-not-ingested state):
+  - **VcfLogsConnector** `vrli-rest-9.0` — session-token auth +
+    401-retry-once (G3.6-T4,
+    [#887](https://github.com/evoila/meho/issues/887)); ops via the vRLI
+    read core (#834).
+  - **VcfFleetConnector** — HTTP Basic (`admin@local`, no SSO) +
+    wrapper-verified probe (G3.6-T7,
+    [#886](https://github.com/evoila/meho/issues/886)); ops via #890.
+  - **VcfAutomationConnector** — dual-plane auth + vhost routing
+    (G3.6-T10, [#885](https://github.com/evoila/meho/issues/885)); ops
+    via #892.
+- **Shared `connectors/_shared/vcf_auth.py` substrate + recorded-fixture
+  refresh tool** (G3.6-T13 [#841](https://github.com/evoila/meho/issues/841)
+  / #884) — common Basic / session auth scaffolding, auth-model
+  predicate, credentials cache, and Vault loader stub shared across the
+  VCF connector skeletons, plus the tool that refreshes the recorded
+  HTTP fixtures the connector E2E suites replay.
+- **Operator CLI alias verbs for three more connectors** — pure
+  Cobra-over-HTTP wrappers that pre-bake the `connector_id` and POST to
+  `/api/v1/operations/call` (the same dispatcher route the agent uses;
+  vendor logic stays out of the CLI per CLAUDE.md postulate 5), each
+  with a recorded-fixture E2E and an onboarding doc:
+  - **`meho vrli`** over the vRLI read core (G3.6-T6,
+    [#896](https://github.com/evoila/meho/issues/896)).
+  - **`meho fleet`** over the Fleet read core (G3.6-T9,
+    [#894](https://github.com/evoila/meho/issues/894)).
+  - **`meho vcf-automation`** over the VCFA dual-plane core, with
+    `--fqdn` plane selection (G3.6-T12,
+    [#895](https://github.com/evoila/meho/issues/895)).
+- **`meho harbor` operator CLI alias verbs** over the `harbor-rest-2.x`
+  op surface, with container E2E + onboarding doc (G3.5-T10
+  [#622](https://github.com/evoila/meho/issues/622) / #768).
+- **Memory promotion** — `POST /api/v1/memory/{scope}/{slug}/promote`
+  (idempotent) + the `meho.memory.promote` admin meta-tool (G5.2-T4
+  [#626](https://github.com/evoila/meho/issues/626) / #764), and the
+  `meho promote` CLI verb with exit-code mapping + E2E smoke (G5.2-T5
+  [#627](https://github.com/evoila/meho/issues/627) / #784).
 
 ### Changed
 
@@ -297,6 +479,42 @@ connector-related release-notes line.
   G0.9.1-T9 under [#772](https://github.com/evoila/meho/issues/772)).
   Auto-provisioning the public client at install time is tracked under
   [#791](https://github.com/evoila/meho/issues/791) (T11).
+- Backfill curated per-group `when_to_use` text onto existing
+  `operation_group` rows on upgrade (Alembic `0011`), closing the
+  Signal #5 gap where #731/#732's curation never replaced the
+  v0.3.0-era auto-derived templates already written to the DB. The
+  migration rewrites only rows still holding the template prefix —
+  operator edits via `meho.connector.edit_group` and tenant-scoped rows
+  are preserved — and is idempotent; Harbor's placeholder group text is
+  curated in the same pass. Signal #5 (refined: backfill-on-upgrade,
+  not curate-existing) ([#774](https://github.com/evoila/meho/issues/774)
+  / #783).
+- MCP `add_to_memory` now injects the default user-scope TTL when `ttl`
+  is omitted, matching the REST path — a shared resolver distinguishes
+  "omitted" (apply `MEMORY_USER_DEFAULT_TTL_DAYS`) from explicit
+  `ttl: null` (the `--persist` opt-out, persist forever). The v0.3.1 MCP
+  path silently bypassed the default and stored `expires_at = null`.
+  Signal #10 ([#775](https://github.com/evoila/meho/issues/775) / #781).
+- The token validator returns a specific code at the decode stage —
+  `invalid_audience` / `invalid_issuer` / `missing_sub` /
+  `token_expired` / `signature_verification_failed` / … — instead of a
+  bare `invalid_token`, so a deployer sees which claim failed. Per
+  RFC 6750 the response body stays terse and the full
+  expected-vs-received diagnostic goes to the structured log. Addendum II
+  Ask #1 (Walls #2/#3) ([#797](https://github.com/evoila/meho/issues/797)
+  / #842).
+- `meho login`'s device-code poll no longer dies with `context deadline
+  exceeded` under wrapped / non-interactive invocation (CI, an agent's
+  shell tool): the device-flow wait is detached from the ambient parent
+  context and bounded by its own deadline matching Keycloak's device-code
+  TTL. Addendum II Wall #4
+  ([#798](https://github.com/evoila/meho/issues/798) / #821).
+- `meho login` on macOS now falls back to the `0600` credentials file
+  store when the system keyring rejects the token bundle with a size
+  error (`go-keyring` hitting the legacy `kSecValueData` ~4 KB limit),
+  instead of failing the whole login; `MEHO_KEYRING_DISABLE` is now
+  surfaced in `--help` to force the file store. Addendum II Wall #5
+  ([#876](https://github.com/evoila/meho/issues/876)).
 
 ### Documentation
 
@@ -353,6 +571,21 @@ connector-related release-notes line.
   [#797](https://github.com/evoila/meho/issues/797) (T12); the
   `meho login` device-flow deadline fix is
   [#798](https://github.com/evoila/meho/issues/798) (T13).
+
+### Performance (internal — CI / test-suite, no operator-facing change)
+
+- Unit-job CI time brought back under budget as the G3.6 op count grew:
+  skip the per-test typed-descriptor re-embed in the unit suite
+  ([#771](https://github.com/evoila/meho/issues/771) / #799),
+  session-scope the fastembed model cache dir to kill per-test model
+  re-fetch (#786), amortize per-test DB schema via a per-worker template
+  (#898), run `python-lint-test` on `meho-runners-ci-heavy` at `-n 6`
+  ([#761](https://github.com/evoila/meho/issues/761) / #765), and restore
+  `--cov` on PRs while lowering the job timeout 50→20 min (#814). An
+  opt-in real-embedding guard + CI-perf timing instrumentation (#827)
+  backs the measurement.
+- Test correctness: the G8.1 audit acceptance test asserts `422` for a
+  body-level `tenant_id` (the `extra="forbid"` contract) (#767).
 
 ## [0.3.1] - 2026-05-21
 

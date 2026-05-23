@@ -98,10 +98,14 @@ f-string with the join columns swapped.
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from collections.abc import Sequence
+from datetime import datetime
+from typing import Any, Final, Literal
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import DateTime, bindparam, text
+from sqlalchemy import Uuid as SAUuid
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,10 +118,21 @@ from meho_backplane.topology.resolvers import (
     resolve_node,
 )
 from meho_backplane.topology.schemas import (
+    TopologyDiffEntry,
+    TopologyDiffResult,
     TopologyEdge,
     TopologyEdgeEndpoint,
+    TopologyHistoryEntry,
+    TopologyHistoryResult,
     TopologyNode,
     TopologyPath,
+    TopologyTimelineEntry,
+    TopologyTimelineResult,
+)
+from meho_backplane.topology.timeline_cursor import (
+    TimelineCursorPosition,
+    decode_timeline_cursor,
+    encode_timeline_cursor,
 )
 
 # ``AmbiguousNodeError`` was historically defined in this module and is
@@ -130,10 +145,15 @@ from meho_backplane.topology.schemas import (
 # site without churn.
 __all__ = [
     "AmbiguousNodeError",
+    "TopologyNodeListEntry",
     "find_dependencies",
     "find_dependents",
     "find_path",
     "list_edges",
+    "list_nodes",
+    "query_diff",
+    "query_history",
+    "query_timeline",
 ]
 
 
@@ -851,3 +871,1513 @@ async def list_edges(
         },
     )
     return [_row_to_edge(row) for row in result.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# G10.5-T1 (#880) — tenant-scoped node listing for the UI tabular surface
+# ---------------------------------------------------------------------------
+#
+# Tabular ``/ui/topology?view=table`` (Initiative #342 work-item #1)
+# needs a paginated, sortable, filterable list of nodes plus an inbound
+# edge count per row so the operator can scan the tenant inventory at
+# a glance. The traversal verbs above answer "what depends on X" — they
+# do not produce a per-tenant survey.
+#
+# Shape decisions:
+#
+#   * One frozen dataclass (:class:`TopologyNodeListEntry`) per row,
+#     carrying the columns the UI table renders: ``id``, ``kind``,
+#     ``name``, ``last_seen``, ``children_count``, ``parents``. The
+#     ``parents`` list projects the immediate ``runs-on`` /
+#     ``part-of`` / curated edges out of the node (the v0.2 "parent"
+#     semantic surface; deeper ancestry stays in the graph view).
+#   * ORM ``select`` against :class:`GraphNode` rather than a raw
+#     ``text("...")`` so the helper is dialect-portable: the unit-test
+#     suite runs on SQLite (no ``jsonb_typeof`` / ``jsonb_array_length``),
+#     while PG production gets the same query. The ``children_count``
+#     correlated subquery counts inbound edges
+#     (``graph_edge.to_node_id = graph_node.id``) — the same shape
+#     :func:`find_dependents` walks.
+#   * Sort + filter are tightly enumerated: ``sort`` is one of a
+#     fixed set so a hostile caller cannot inject an arbitrary
+#     ``ORDER BY``; ``kind`` / ``name_contains`` filters compose
+#     additively. ``name_contains`` uses SQLAlchemy's ``ilike`` so
+#     the substring match is case-insensitive on both dialects.
+#   * Tenant scoping is unconditional: every statement starts with
+#     ``WHERE graph_node.tenant_id = :tenant_id``. No filter
+#     combination can leak a row from another tenant.
+
+#: Default page size for :func:`list_nodes`. The UI table renders the
+#: full page in one HTMX swap; 200 is large enough for the typical
+#: ~30-150-node tenant the v0.2 onboarding targets while bounding a
+#: pathological discovery. The route layer caps tighter at the HTTP
+#: boundary.
+_DEFAULT_NODE_LIMIT = 200
+
+#: Hard ceiling on the per-call node-listing page size. Mirrors
+#: :data:`_MAX_EDGE_LIMIT` so the two inventory verbs share the same
+#: operator ergonomics.
+_MAX_NODE_LIMIT = 1000
+
+#: Closed enum of sort columns the UI table exposes. The route layer
+#: surfaces this as an enum query param so an out-of-range value 422s
+#: at the boundary rather than reaching the SQL layer. Pinned as a
+#: tuple so a typo at a call site is a static type error rather than a
+#: silent SQL injection vector.
+_NODE_SORT_COLUMNS: tuple[str, ...] = ("name", "kind", "last_seen", "first_seen")
+
+
+class TopologyNodeListEntry:
+    """One row of the per-tenant node inventory the UI table renders.
+
+    Lightweight frozen dataclass-like shape; not a Pydantic model
+    because this helper is a UI-internal projection (consumed only by
+    the ``/ui/topology`` routes), not part of the public REST surface
+    every external client validates against. The HTTP-visible Pydantic
+    shapes stay in :mod:`meho_backplane.topology.schemas`.
+
+    Fields:
+
+    * ``id`` — ``graph_node.id`` UUID.
+    * ``kind`` — ``graph_node.kind``.
+    * ``name`` — ``graph_node.name``.
+    * ``target_id`` — ``graph_node.target_id`` (NULL for inner
+      graph nodes; populated for nodes that are themselves a
+      registered target). Drives the "recent ops" filter on the
+      detail drawer — only target-backed nodes carry audit rows.
+    * ``first_seen`` / ``last_seen`` — observation timestamps.
+      ``last_seen`` is NULL after a refresh soft-delete; the helper
+      excludes such rows by default.
+    * ``discovered_by`` — the connector slug or ``curated`` marker.
+    * ``children_count`` — number of inbound non-soft-deleted edges
+      (``graph_edge.to_node_id = node.id AND last_seen IS NOT NULL``).
+      The same count :func:`find_dependents` walks. ``0`` for a leaf.
+    """
+
+    __slots__ = (
+        "children_count",
+        "discovered_by",
+        "first_seen",
+        "id",
+        "kind",
+        "last_seen",
+        "name",
+        "target_id",
+    )
+
+    def __init__(
+        self,
+        *,
+        id: UUID,  # noqa: A002 — column name; the attribute mirrors ``graph_node.id``
+        kind: str,
+        name: str,
+        target_id: UUID | None,
+        first_seen: datetime,
+        last_seen: datetime | None,
+        discovered_by: str,
+        children_count: int,
+    ) -> None:
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.target_id = target_id
+        self.first_seen = first_seen
+        self.last_seen = last_seen
+        self.discovered_by = discovered_by
+        self.children_count = children_count
+
+
+async def list_nodes(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    kind: str | None = None,
+    name_contains: str | None = None,
+    sort: str = "name",
+    direction: str = "asc",
+    include_soft_deleted: bool = False,
+    limit: int = _DEFAULT_NODE_LIMIT,
+    offset: int = 0,
+) -> list[TopologyNodeListEntry]:
+    """Tenant-scoped paginated listing of ``graph_node`` rows.
+
+    Task #880 (G10.5-T1). The substrate primitive the UI tabular surface
+    (``GET /ui/topology?view=table``) calls; the helper is intentionally
+    UI-leaning (richer per-row projection than the traversal verbs'
+    :class:`TopologyNode`) but stays in the substrate module so the CLI
+    and MCP layers can reuse it later without duplicating the SQL.
+
+    Args:
+        session: An open :class:`AsyncSession`. Caller owns the
+            transaction. The helper performs only read statements.
+        tenant_id: The tenant scope. Mandatory; no "list every node
+            across tenants" mode by construction. The first SQL WHERE
+            clause is always ``graph_node.tenant_id = :tenant_id``;
+            no filter combination overrides it.
+        kind: Optional exact-match ``graph_node.kind`` filter (one of
+            :data:`meho_backplane.db.models._GRAPH_NODE_KINDS`). The
+            CHECK constraint already restricts the column; this
+            narrows the listing.
+        name_contains: Optional case-insensitive substring filter on
+            ``graph_node.name``. Uses SQLAlchemy ``ilike`` with the
+            user-controllable input wrapped in ``%`` on both sides;
+            the binding parameter pattern means the substring is
+            treated literally (no glob), and ``%`` / ``_`` chars in
+            the operator's input match themselves.
+        sort: Column to sort by. Must be one of
+            :data:`_NODE_SORT_COLUMNS`; any other value raises
+            :class:`ValueError`. The closed enum is the
+            SQL-injection guard — the route layer validates the
+            same set at the HTTP boundary, but the substrate refuses
+            defensively because a non-route caller (CLI/MCP/REPL)
+            may not have the same validation.
+        direction: ``"asc"`` or ``"desc"``. Any other value raises
+            :class:`ValueError`.
+        include_soft_deleted: When ``False`` (the default), exclude
+            rows with ``last_seen IS NULL`` — the soft-delete signal
+            refresh writes on a node that disappeared from probe
+            output. Set ``True`` for the audit / history surface
+            (G9.3) that needs to see deleted rows; the UI table
+            never sets it.
+        limit: Maximum rows per call (1..``_MAX_NODE_LIMIT``).
+        offset: Rows to skip; combined with the stable
+            ``(<sort>, id)`` total order, paging is deterministic.
+
+    Returns:
+        A list of :class:`TopologyNodeListEntry` rows in the requested
+        ``(sort, direction)`` order plus a stable ``id`` tie-breaker.
+        Empty when no node matches.
+
+    Raises:
+        ValueError: ``sort`` is not in :data:`_NODE_SORT_COLUMNS`,
+            ``direction`` is not in ``{"asc", "desc"}``, ``limit``
+            is out of range, or ``offset`` is negative.
+    """
+    if sort not in _NODE_SORT_COLUMNS:
+        raise ValueError(
+            f"sort must be one of {_NODE_SORT_COLUMNS}; got {sort!r}",
+        )
+    if direction not in ("asc", "desc"):
+        raise ValueError(f"direction must be 'asc' or 'desc'; got {direction!r}")
+    if limit < 1 or limit > _MAX_NODE_LIMIT:
+        raise ValueError(f"limit must be in 1..{_MAX_NODE_LIMIT}; got {limit}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0; got {offset}")
+
+    # Local import: keeping the heavy ORM imports under the helper
+    # rather than at module top avoids a circular-import risk with the
+    # broader topology package and matches the existing per-helper
+    # localisation pattern in this module.
+    from sqlalchemy import asc, desc, func, select
+
+    from meho_backplane.db.models import GraphEdge, GraphNode
+
+    sort_column = {
+        "name": GraphNode.name,
+        "kind": GraphNode.kind,
+        "last_seen": GraphNode.last_seen,
+        "first_seen": GraphNode.first_seen,
+    }[sort]
+    order_clause = asc(sort_column) if direction == "asc" else desc(sort_column)
+
+    children_count_subq = (
+        select(func.count(GraphEdge.id))
+        .where(
+            GraphEdge.tenant_id == tenant_id,
+            GraphEdge.to_node_id == GraphNode.id,
+            GraphEdge.last_seen.is_not(None),
+        )
+        .correlate(GraphNode)
+        .scalar_subquery()
+    )
+
+    stmt = select(
+        GraphNode.id,
+        GraphNode.kind,
+        GraphNode.name,
+        GraphNode.target_id,
+        GraphNode.first_seen,
+        GraphNode.last_seen,
+        GraphNode.discovered_by,
+        children_count_subq.label("children_count"),
+    ).where(GraphNode.tenant_id == tenant_id)
+
+    if not include_soft_deleted:
+        stmt = stmt.where(GraphNode.last_seen.is_not(None))
+    if kind is not None:
+        stmt = stmt.where(GraphNode.kind == kind)
+    if name_contains is not None and name_contains:
+        # ``ilike`` is case-insensitive on PG; on SQLite the codec
+        # collapses to ``LIKE`` with a case-sensitive match unless
+        # the connection is configured with ``case_sensitive_like=0``.
+        # The unit-test fixture uses the default (insensitive
+        # ASCII), so the substring match behaves identically on both
+        # dialects for ASCII inputs.
+        stmt = stmt.where(GraphNode.name.ilike(f"%{name_contains}%"))
+
+    # Compose a stable secondary sort by ``id`` so paging is
+    # deterministic even when the primary sort column has duplicate
+    # values (e.g. two nodes share a ``last_seen`` timestamp).
+    stmt = stmt.order_by(order_clause, asc(GraphNode.id)).limit(limit).offset(offset)
+
+    result = await session.execute(stmt)
+    return [
+        TopologyNodeListEntry(
+            id=row.id,
+            kind=row.kind,
+            name=row.name,
+            target_id=row.target_id,
+            first_seen=row.first_seen,
+            last_seen=row.last_seen,
+            discovered_by=row.discovered_by,
+            children_count=row.children_count,
+        )
+        for row in result.all()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T5 (#861) — tenant-wide timeline of graph changes
+# ---------------------------------------------------------------------------
+#
+# The timeline UNIONs ``graph_node_history`` + ``graph_edge_history``
+# and walks them in ``(valid_from DESC, history_id DESC)`` order. The
+# ``source`` discriminator is the third sort key because the two
+# tables have independent ``BIGSERIAL`` counters -- a node and an
+# edge can share ``(valid_from, history_id)``.
+#
+# Indexes the timeline walks (declared by migration 0012):
+#
+#   * ``graph_node_history_tenant_valid_from_idx`` (composite b-tree
+#     on ``(tenant_id, valid_from DESC)``)
+#   * ``graph_edge_history_tenant_valid_from_idx`` (mirror for edges)
+#
+# Both are tenant-scoped composite indexes so the per-tenant slice is
+# sub-millisecond on the test fixture and indexed under realistic
+# load.
+#
+# Cursor stability under concurrent inserts: every history row from
+# a single transaction shares the same ``valid_from`` (the diff-on-
+# write hook in :mod:`.history` enforces this). The keyset compare
+# ``(valid_from, history_id, source) < cursor`` is therefore
+# correctness-preserving against any T2 hook write that lands
+# between page N and page N+1 -- a new row either appears on a later
+# page (if it lands below the cursor) or never (if above), and no
+# row is duplicated or skipped.
+
+#: Default timeline page size per the Task #861 acceptance criterion
+#: ("default ``--limit 50``"). The substrate clamps to 1..1000 to
+#: cap a hostile / misconfigured caller; the route / CLI layers cap
+#: tighter where appropriate.
+_DEFAULT_TIMELINE_LIMIT = 50
+
+#: Hard ceiling on the per-call timeline page size. Mirrors the
+#: G8.1 audit-query limit ceiling so an operator paging through
+#: history at maximum width gets the same one-page-per-call ergonomics
+#: across both surfaces.
+_MAX_TIMELINE_LIMIT = 1000
+
+
+def _format_node_summary(change_kind: str, snapshot: dict[str, Any] | None) -> str:
+    """Render a one-line node-mutation summary from a snapshot.
+
+    Picks the post-state for ``created`` / ``updated`` (the row as it
+    exists after the mutation; more useful for "what's new" surveys)
+    and the pre-state for ``removed`` (the row that just went away).
+    Falls back to ``"<change_kind> node"`` when the snapshot is
+    missing or malformed -- a tombstone whose ``ON DELETE SET NULL``
+    cleared its ``node_id`` may still have a snapshot, but a legacy
+    row from a pre-hook era might not.
+    """
+    if snapshot is None:
+        return f"{change_kind} node"
+    side = snapshot.get("before") if change_kind == "removed" else snapshot.get("after")
+    if not isinstance(side, dict):
+        return f"{change_kind} node"
+    kind = side.get("kind") or "node"
+    name = side.get("name") or "<unknown>"
+    return f"{change_kind} {kind} {name}"
+
+
+def _format_edge_summary(change_kind: str, snapshot: dict[str, Any] | None) -> str:
+    """Render a one-line edge-mutation summary from a snapshot.
+
+    Mirror of :func:`_format_node_summary` for the edge side.
+    Endpoint names are not in the edge snapshot directly (the edge
+    rows carry FK ids, not names) -- the renderer falls back to the
+    ``kind`` field plus the change kind. Operators wanting the full
+    endpoint detail use ``--json`` and look up the FKs themselves;
+    the table view is a "what's new in the graph" survey, not a full
+    reconstruction.
+    """
+    if snapshot is None:
+        return f"{change_kind} edge"
+    side = snapshot.get("before") if change_kind == "removed" else snapshot.get("after")
+    if not isinstance(side, dict):
+        return f"{change_kind} edge"
+    edge_kind = side.get("kind") or "edge"
+    return f"{change_kind} {edge_kind}"
+
+
+# Two literal SQL statements -- one per history table -- joined by a
+# Python-side merge rather than a SQL ``UNION ALL``. Two reasons:
+#
+#   1. Each statement is a single-index scan over its respective
+#      ``graph_*_history_tenant_valid_from_idx``. A ``UNION ALL``
+#      with an outer ``ORDER BY`` works but most PG planners
+#      materialise the union before sorting, defeating the
+#      tenant-scoped index. Two parallel single-index scans then a
+#      Python merge is O(limit) memory and one round trip per table.
+#
+#   2. The ``--target`` filter joins ``graph_node`` (for the node
+#      side) and ``graph_edge`` + endpoint ``graph_node`` (for the
+#      edge side). Inlining those joins into a UNION'd statement
+#      would make the planner choose between two different access
+#      paths, which is precisely the kind of decision that flips
+#      under data growth. Two statements keep each plan obvious.
+# Cursor compare nuances across the two tables
+# --------------------------------------------
+#
+# The DESC global ordering is ``(valid_from, history_id, source)``
+# with ``"node"`` placed before ``"edge"`` (we pick ``"node" > "edge"``
+# in DESC; i.e. ``"edge"`` < ``"node"`` ASC). When the cursor names a
+# node row, the next-page boundary is "strictly after this node row
+# in the DESC order" -- which means:
+#
+#   * Node-table candidates with the same ``(valid_from,
+#     history_id)`` as the cursor are excluded (history_id is unique
+#     within the node table, so the only same-key candidate IS the
+#     cursor row).
+#   * Edge-table candidates with the same ``(valid_from,
+#     history_id)`` as the cursor are included (edge sorts after
+#     node in DESC, so they fall *after* the cursor).
+#
+# When the cursor names an edge row, the next-page boundary is
+# "strictly after this edge row":
+#
+#   * Both tables exclude rows at exactly ``(valid_from,
+#     history_id)`` because edge already comes after node at the
+#     same key; nothing after an edge row at the same key.
+#
+# The per-side SQL therefore receives ``cursor_src`` and applies the
+# inclusive-vs-exclusive choice at the same-key boundary. Below the
+# boundary (``(valid_from, history_id) <`` cursor), every row is
+# included unconditionally.
+_TIMELINE_NODE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.node_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.audit_id      AS audit_id,
+        h.valid_from    AS valid_from
+    FROM graph_node_history h
+    WHERE h.tenant_id = :tenant_id
+      AND (CAST(:since_marker AS text) IS NULL OR h.valid_from >= :since)
+      AND (CAST(:until_marker AS text) IS NULL OR h.valid_from <= :until)
+      AND (
+          :target_id IS NULL
+          OR h.node_id IN (
+              SELECT n.id FROM graph_node n
+              WHERE n.tenant_id = :tenant_id
+                AND n.target_id = :target_id
+          )
+      )
+      AND (
+          CAST(:cursor_marker AS text) IS NULL
+          OR h.valid_from < :cursor_ts
+          OR (h.valid_from = :cursor_ts AND h.history_id < :cursor_id)
+      )
+    ORDER BY h.valid_from DESC, h.history_id DESC
+    LIMIT :limit
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("target_id", type_=SAUuid()),
+    bindparam("since", type_=DateTime(timezone=True)),
+    bindparam("until", type_=DateTime(timezone=True)),
+    bindparam("cursor_ts", type_=DateTime(timezone=True)),
+)
+
+_TIMELINE_EDGE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.edge_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.audit_id      AS audit_id,
+        h.valid_from    AS valid_from
+    FROM graph_edge_history h
+    WHERE h.tenant_id = :tenant_id
+      AND (CAST(:since_marker AS text) IS NULL OR h.valid_from >= :since)
+      AND (CAST(:until_marker AS text) IS NULL OR h.valid_from <= :until)
+      AND (
+          :target_id IS NULL
+          OR h.edge_id IN (
+              SELECT e.id FROM graph_edge e
+              JOIN graph_node n_from ON n_from.id = e.from_node_id
+              JOIN graph_node n_to   ON n_to.id   = e.to_node_id
+              WHERE e.tenant_id = :tenant_id
+                AND (
+                    n_from.target_id = :target_id
+                    OR n_to.target_id = :target_id
+                )
+          )
+      )
+      AND (
+          CAST(:cursor_marker AS text) IS NULL
+          OR h.valid_from < :cursor_ts
+          OR (
+              h.valid_from = :cursor_ts
+              AND (
+                  h.history_id < :cursor_id
+                  OR (h.history_id = :cursor_id AND :cursor_src = 'node')
+              )
+          )
+      )
+    ORDER BY h.valid_from DESC, h.history_id DESC
+    LIMIT :limit
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("target_id", type_=SAUuid()),
+    bindparam("since", type_=DateTime(timezone=True)),
+    bindparam("until", type_=DateTime(timezone=True)),
+    bindparam("cursor_ts", type_=DateTime(timezone=True)),
+)
+
+
+def _row_to_timeline_entry(row: Row[Any], source: str) -> TopologyTimelineEntry:
+    """Map one node-or-edge history row to a :class:`TopologyTimelineEntry`.
+
+    ``source`` is supplied by the caller because the row itself does
+    not know which history table it came from -- the two SQL
+    statements share a column shape so the same materialiser handles
+    both, with the discriminator threaded through as a literal.
+
+    ``snapshot`` arrives as a ``dict`` on PG (asyncpg's JSONB codec)
+    and may arrive as a JSON-encoded string on SQLite (where the
+    ``text()`` statement bypasses the ORM column-type round-trip).
+    Both shapes are deserialised here so the summary renderer always
+    sees a dict-or-None.
+    """
+    m = row._mapping
+    snapshot_raw = m["snapshot"]
+    snapshot: dict[str, Any] | None
+    if isinstance(snapshot_raw, dict):
+        snapshot = snapshot_raw
+    elif isinstance(snapshot_raw, str):
+        try:
+            parsed = json.loads(snapshot_raw)
+            snapshot = parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            snapshot = None
+    else:
+        snapshot = None
+    change_kind = m["change_kind"]
+    if source == "node":
+        summary = _format_node_summary(change_kind, snapshot)
+    else:
+        summary = _format_edge_summary(change_kind, snapshot)
+    return TopologyTimelineEntry(
+        valid_from=m["valid_from"],
+        history_id=m["history_id"],
+        source=source,
+        change_kind=change_kind,
+        resource_id=m["resource_id"],
+        summary=summary,
+        audit_id=m["audit_id"],
+    )
+
+
+def _merge_timeline_pages(
+    node_rows: list[TopologyTimelineEntry],
+    edge_rows: list[TopologyTimelineEntry],
+    limit: int,
+) -> list[TopologyTimelineEntry]:
+    """Merge two pre-sorted ``DESC`` lists into one, capped at ``limit``.
+
+    Each input is already ordered by ``(valid_from DESC, history_id
+    DESC)`` from its own SQL statement. The merge is a single
+    two-pointer pass: pop the larger head from either list at each
+    step, with the source discriminator (``"edge"`` < ``"node"``
+    alphabetically) as the tie-breaker when both heads share
+    ``(valid_from, history_id)`` -- which can happen only across the
+    two tables, never within one.
+    """
+    merged: list[TopologyTimelineEntry] = []
+    i = j = 0
+    while len(merged) < limit and (i < len(node_rows) or j < len(edge_rows)):
+        if i >= len(node_rows):
+            merged.append(edge_rows[j])
+            j += 1
+            continue
+        if j >= len(edge_rows):
+            merged.append(node_rows[i])
+            i += 1
+            continue
+        n = node_rows[i]
+        e = edge_rows[j]
+        # Lex compare: newer valid_from wins; same ts → higher
+        # history_id wins; same (ts, id) → 'edge' before 'node'
+        # alphabetically (deterministic + matches the cursor sort).
+        if (n.valid_from, n.history_id) > (e.valid_from, e.history_id):
+            merged.append(n)
+            i += 1
+        elif (n.valid_from, n.history_id) < (e.valid_from, e.history_id):
+            merged.append(e)
+            j += 1
+        else:
+            # Same (valid_from, history_id) across the two tables.
+            # 'edge' sorts before 'node' alphabetically; in DESC
+            # order across the keyset, 'node' (lex-greater) lands
+            # first. Pick node first to mirror the cursor compare
+            # in the SQL.
+            merged.append(n)
+            i += 1
+    return merged
+
+
+def _build_timeline_bind_params(
+    operator: Operator,
+    *,
+    target_id: UUID | None,
+    since: datetime | None,
+    until: datetime | None,
+    cursor_pos: TimelineCursorPosition | None,
+    per_side_fetch: int,
+) -> dict[str, Any]:
+    """Assemble the bind-parameter dict for the two timeline SQL statements.
+
+    ``tenant_id`` / ``target_id`` ride through SQLAlchemy's
+    :class:`Uuid` bind type (declared on the ``text()`` via
+    ``.bindparams`` on the two statements above) so the asyncpg /
+    aiosqlite drivers serialise the UUID natively -- ``str(uuid)``
+    would deliver the dashed-canonical form, which mismatches the
+    hex storage SQLite uses for ``Uuid()`` columns and produces a
+    silent zero-row result on the dev-test DB.
+
+    ``*_marker`` parameters are text-typed sentinels parallel to the
+    native-typed ones; the SQL uses ``CAST(:*_marker AS text) IS
+    NULL`` to detect the optional-clause "off" state portably across
+    PostgreSQL (where ``CAST(NULL AS text)`` is NULL with a known
+    type) and SQLite. Mirrors the ``CAST(:x AS text) IS NULL OR
+    ...`` idiom the traversal SQL in this module uses.
+    """
+    return {
+        "tenant_id": operator.tenant_id,
+        "since": since,
+        "since_marker": "x" if since is not None else None,
+        "until": until,
+        "until_marker": "x" if until is not None else None,
+        "target_id": target_id,
+        "cursor_ts": cursor_pos.ts if cursor_pos is not None else None,
+        "cursor_id": cursor_pos.history_id if cursor_pos is not None else 0,
+        "cursor_src": cursor_pos.source if cursor_pos is not None else "node",
+        "cursor_marker": "x" if cursor_pos is not None else None,
+        "limit": per_side_fetch,
+    }
+
+
+def _compute_next_cursor(
+    node_rows: list[TopologyTimelineEntry],
+    edge_rows: list[TopologyTimelineEntry],
+    merged: list[TopologyTimelineEntry],
+    limit: int,
+) -> str | None:
+    """Encode the next-page cursor when there are unvisited rows past the page.
+
+    Returns ``None`` when the merge consumed every fetched row -- the
+    page is the end of the matching set. Otherwise encodes
+    ``(valid_from, history_id, source)`` of the page's last row so
+    the next call paginates strictly past it.
+
+    ``has_more`` is true when *either* per-side fetch overflowed its
+    per-side budget *or* the merge left rows un-emitted on either
+    side after capping at ``limit``. Both signals matter: a per-side
+    overflow alone doesn't necessarily mean the merged page is full
+    (the overflowing side may have all-older rows), but a merge that
+    capped at ``limit`` with leftovers on either side definitively
+    indicates more rows exist.
+    """
+    if not merged or len(merged) < limit:
+        return None
+    has_more = (
+        len(node_rows) > limit
+        or len(edge_rows) > limit
+        or _merge_has_leftovers(node_rows, edge_rows, merged)
+    )
+    if not has_more:
+        return None
+    last = merged[-1]
+    return encode_timeline_cursor(
+        TimelineCursorPosition(
+            ts=last.valid_from,
+            history_id=last.history_id,
+            source=last.source,
+        )
+    )
+
+
+async def query_timeline(
+    operator: Operator,
+    *,
+    target_id: UUID | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = _DEFAULT_TIMELINE_LIMIT,
+    cursor: str | None = None,
+) -> TopologyTimelineResult:
+    """Tenant-wide chronological feed of graph changes.
+
+    Initiative #365 (G9.3), Task #861 (T5). Walks
+    :class:`GraphNodeHistory` + :class:`GraphEdgeHistory` in
+    ``(valid_from DESC, history_id DESC, source DESC)`` order
+    tenant-scoped on ``operator.tenant_id`` so a cross-tenant probe is
+    structurally impossible -- the first WHERE clause of both literal
+    SQL statements is ``tenant_id = :tenant_id``.
+
+    Args:
+        operator: The calling operator. ``tenant_id`` lifted from the
+            JWT; never sourced from caller-controllable args.
+        target_id: Optional ``targets.id`` filter -- restrict the
+            timeline to history rows for resources belonging to one
+            target. Nodes filter on ``graph_node.target_id``; edges
+            filter on the endpoint nodes' ``target_id`` (either
+            endpoint touching the target qualifies the edge, since
+            an edge crossing two targets is part of both timelines).
+        since: Optional lower bound on ``valid_from``. Inclusive.
+        until: Optional upper bound on ``valid_from``. Inclusive.
+        limit: Page size (default 50; ceiling 1000). Per the Task
+            #861 acceptance criterion default.
+        cursor: Opaque forward-pagination cursor from a prior page's
+            ``next_cursor``. Decoded into ``(valid_from, history_id,
+            source)`` and applied as a strict keyset compare against
+            the row immediately after the cursor's row.
+
+    Returns:
+        :class:`TopologyTimelineResult` -- a page of rows ordered by
+        ``(valid_from DESC, history_id DESC)``. ``next_cursor`` is
+        ``None`` when the page is the end of the matching set; a
+        non-None cursor encodes the last-row keyset position for the
+        next call.
+
+    Raises:
+        ValueError: ``limit`` is out of range (``< 1`` or ``>
+        _MAX_TIMELINE_LIMIT``).
+        :class:`InvalidTimelineCursorError`: ``cursor`` is not a
+        valid opaque token (the caller's previous next_cursor was
+        not echoed verbatim, the token was tampered with, or the
+        client typed a string by hand).
+    """
+    if limit < 1 or limit > _MAX_TIMELINE_LIMIT:
+        raise ValueError(f"limit must be in 1..{_MAX_TIMELINE_LIMIT}; got {limit}")
+
+    cursor_pos: TimelineCursorPosition | None = (
+        decode_timeline_cursor(cursor) if cursor is not None else None
+    )
+    # Fetch ``limit + 1`` from each table; the +1 over the per-side
+    # limit is the "has_more" detection trick that
+    # :func:`_compute_next_cursor` reads.
+    per_side_fetch = limit + 1
+    bind_params = _build_timeline_bind_params(
+        operator,
+        target_id=target_id,
+        since=since,
+        until=until,
+        cursor_pos=cursor_pos,
+        per_side_fetch=per_side_fetch,
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        node_result = await session.execute(_TIMELINE_NODE_SQL, bind_params)
+        node_rows = [_row_to_timeline_entry(row, "node") for row in node_result.fetchall()]
+        edge_result = await session.execute(_TIMELINE_EDGE_SQL, bind_params)
+        edge_rows = [_row_to_timeline_entry(row, "edge") for row in edge_result.fetchall()]
+
+    merged = _merge_timeline_pages(node_rows, edge_rows, limit)
+    next_cursor = _compute_next_cursor(node_rows, edge_rows, merged, limit)
+    return TopologyTimelineResult(rows=tuple(merged), next_cursor=next_cursor)
+
+
+def _merge_has_leftovers(
+    node_rows: list[TopologyTimelineEntry],
+    edge_rows: list[TopologyTimelineEntry],
+    merged: list[TopologyTimelineEntry],
+) -> bool:
+    """Detect "more rows exist past this page" after the merge cap.
+
+    A merge that consumed exactly ``len(node_rows)`` from one side
+    and only some of the other side -- without overflowing the
+    per-side fetch -- still has leftovers iff the un-consumed side
+    contributed fewer than its fetch size. We need to know whether
+    the merge stopped on the cap *and* there are un-consumed rows
+    on either side.
+    """
+    consumed_nodes = sum(1 for r in merged if r.source == "node")
+    consumed_edges = len(merged) - consumed_nodes
+    return consumed_nodes < len(node_rows) or consumed_edges < len(edge_rows)
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T3 (#859) — per-resource history walk
+# ---------------------------------------------------------------------------
+#
+# Unlike :func:`query_timeline` (tenant-wide chronological feed),
+# :func:`query_history` anchors on **one** :class:`GraphNode` and
+# returns every history row that mentions it -- the node-side rows
+# directly, and (when ``include_edges=True``) every edge-side row whose
+# ``edge_id`` resolves to an edge with the anchor at either endpoint.
+# The shape is the operator surface "show me what changed for THIS
+# resource" parallel to the timeline's "what changed in the graph at
+# all".
+#
+# Indexes the per-resource walk leans on (declared by migration 0012
+# for G9.3-T1 #856):
+#
+#   * ``graph_node_history`` ``(tenant_id, node_id, valid_from DESC)``
+#     -- per-(tenant, node, time) lookup is a single composite-index
+#     scan.
+#   * ``graph_edge_history`` ``(tenant_id, edge_id, valid_from DESC)``
+#     -- mirror for the edge side.
+#
+# Both indexes are tenant-scoped composites so the per-resource slice
+# is sub-millisecond on the test fixture and indexed under realistic
+# load.
+
+#: Hard ceiling on rows returned in one :func:`query_history` call.
+#: Picked to fit the typical retention window (90 days x a few
+#: writes/day per resource) into a single response without paginating;
+#: the route layer caps tighter at the HTTP boundary. Bumping requires
+#: a coordinated review with the retention-cadence ``Settings``
+#: defaults.
+_MAX_HISTORY_ROWS = 5000
+
+
+# Node-side history walk for one anchor node. ``anchor_node_id`` is
+# the resolved :class:`GraphNode.id`; the FK is direct so this is a
+# single indexed scan over the composite
+# ``(tenant_id, node_id, valid_from DESC)`` index. ``since`` /
+# ``until`` ride the established ``CAST(:marker AS text) IS NULL OR
+# ...`` optional-filter idiom so one literal statement serves the
+# bounded and unbounded cases.
+_HISTORY_NODE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.node_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.audit_id      AS audit_id,
+        h.valid_from    AS valid_from
+    FROM graph_node_history h
+    WHERE h.tenant_id = :tenant_id
+      AND h.node_id = :anchor_node_id
+      AND (CAST(:since_marker AS text) IS NULL OR h.valid_from >= :since)
+      AND (CAST(:until_marker AS text) IS NULL OR h.valid_from <= :until)
+    ORDER BY h.valid_from DESC, h.history_id DESC
+    LIMIT :limit
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("anchor_node_id", type_=SAUuid()),
+    bindparam("since", type_=DateTime(timezone=True)),
+    bindparam("until", type_=DateTime(timezone=True)),
+)
+
+# Edge-side history walk for every edge incident to the anchor. The
+# inner subquery resolves the edge ids whose ``from_node_id`` or
+# ``to_node_id`` matches the anchor; the outer query pulls every
+# history row for those ids. Tenant scope is enforced on both the
+# inner (``graph_edge.tenant_id``) and outer
+# (``graph_edge_history.tenant_id``) so a cross-tenant edge id cannot
+# leak in. Tombstones (rows whose ``edge_id`` was NULLed by
+# ``ON DELETE SET NULL``) drop out of the inner subquery's id list
+# and therefore stay out of the per-resource walk -- a tombstoned
+# edge has no surviving live row to associate with the anchor.
+# Operators wanting the full tombstone replay use
+# ``meho topology timeline`` (G9.3-T5 #861) which surfaces every
+# history row including tombstones.
+_HISTORY_EDGE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.edge_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.audit_id      AS audit_id,
+        h.valid_from    AS valid_from
+    FROM graph_edge_history h
+    WHERE h.tenant_id = :tenant_id
+      AND h.edge_id IN (
+          SELECT e.id FROM graph_edge e
+          WHERE e.tenant_id = :tenant_id
+            AND (e.from_node_id = :anchor_node_id
+                 OR e.to_node_id = :anchor_node_id)
+      )
+      AND (CAST(:since_marker AS text) IS NULL OR h.valid_from >= :since)
+      AND (CAST(:until_marker AS text) IS NULL OR h.valid_from <= :until)
+    ORDER BY h.valid_from DESC, h.history_id DESC
+    LIMIT :limit
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("anchor_node_id", type_=SAUuid()),
+    bindparam("since", type_=DateTime(timezone=True)),
+    bindparam("until", type_=DateTime(timezone=True)),
+)
+
+
+def _row_to_history_entry(row: Row[Any], source: str) -> TopologyHistoryEntry:
+    """Map one history row to :class:`TopologyHistoryEntry`.
+
+    ``source`` is threaded through by the caller because the SELECT
+    column shape is identical for the two history tables; the same
+    materialiser handles both with the discriminator passed as a
+    literal. ``snapshot`` arrives as a ``dict`` on PG (asyncpg JSONB
+    codec) and as a JSON-encoded string on SQLite -- both are
+    normalised to ``dict-or-None`` here so the front layers always
+    see a structured payload.
+
+    Unlike :class:`TopologyTimelineEntry`, the history entry preserves
+    the full snapshot rather than rendering it down to a one-line
+    summary. The summary collapse is timeline's space-saving trick
+    appropriate for a tenant-wide feed; per-resource history is the
+    forensic surface where the snapshot is the load-bearing payload.
+    """
+    m = row._mapping
+    snapshot_raw = m["snapshot"]
+    snapshot: dict[str, Any] | None
+    if isinstance(snapshot_raw, dict):
+        snapshot = snapshot_raw
+    elif isinstance(snapshot_raw, str):
+        try:
+            parsed = json.loads(snapshot_raw)
+            snapshot = parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            snapshot = None
+    else:
+        snapshot = None
+    return TopologyHistoryEntry(
+        valid_from=m["valid_from"],
+        history_id=m["history_id"],
+        source=source,
+        change_kind=m["change_kind"],
+        resource_id=m["resource_id"],
+        snapshot=snapshot,
+        audit_id=m["audit_id"],
+    )
+
+
+def _merge_history_pages(
+    node_rows: list[TopologyHistoryEntry],
+    edge_rows: list[TopologyHistoryEntry],
+    limit: int,
+) -> list[TopologyHistoryEntry]:
+    """Merge two pre-sorted ``DESC`` lists into one, capped at ``limit``.
+
+    Mirror of :func:`_merge_timeline_pages` for the history shape.
+    Each input is already ordered by ``(valid_from DESC, history_id
+    DESC)`` from its own SQL statement. Two-pointer pass; when both
+    heads share the same ``(valid_from, history_id)`` (only possible
+    across the two tables), the node side lands first to mirror the
+    timeline merge convention.
+    """
+    merged: list[TopologyHistoryEntry] = []
+    i = j = 0
+    while len(merged) < limit and (i < len(node_rows) or j < len(edge_rows)):
+        if i >= len(node_rows):
+            merged.append(edge_rows[j])
+            j += 1
+            continue
+        if j >= len(edge_rows):
+            merged.append(node_rows[i])
+            i += 1
+            continue
+        n = node_rows[i]
+        e = edge_rows[j]
+        if (n.valid_from, n.history_id) > (e.valid_from, e.history_id):
+            merged.append(n)
+            i += 1
+        elif (n.valid_from, n.history_id) < (e.valid_from, e.history_id):
+            merged.append(e)
+            j += 1
+        else:
+            merged.append(n)
+            i += 1
+    return merged
+
+
+async def query_history(
+    operator: Operator,
+    name_or_alias: str,
+    *,
+    kind: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    include_edges: bool = False,
+    limit: int = _MAX_HISTORY_ROWS,
+) -> TopologyHistoryResult:
+    """Per-resource history walk anchored at one ``graph_node``.
+
+    Initiative #365 (G9.3), Task #859 (T3). The companion to
+    :func:`query_timeline`: timeline is "what changed in the graph at
+    all"; history is "what changed for THIS specific resource".
+    Resolves the anchor tenant-scoped via :func:`resolve_node` so an
+    unknown name (or a name that exists only in another tenant)
+    surfaces as :class:`NodeNotFoundError`, the contract the route
+    layer maps to 404. A bare name that resolves to multiple kinds
+    raises :class:`AmbiguousNodeError`, mapped to 409 by the route
+    layer.
+
+    Args:
+        operator: The calling operator. ``tenant_id`` lifted from the
+            JWT; never sourced from caller-controllable args.
+        name_or_alias: The anchor node's :attr:`GraphNode.name`. The
+            G9.1 resolver only matches on ``name`` -- formal alias
+            resolution is deferred (see
+            ``docs/codebase/topology.md`` "Known issues") -- so an
+            aliased name will currently surface as
+            :class:`NodeNotFoundError` here just as it does for the
+            traversal verbs. The argument is named
+            ``name_or_alias`` for forward-compat with the planned
+            G10 alias substrate.
+        kind: Optional :attr:`GraphNode.kind` pin to disambiguate
+            when the bare name resolves to multiple kinds in the
+            tenant.
+        since: Optional lower bound on ``valid_from``. Inclusive.
+        until: Optional upper bound on ``valid_from``. Inclusive.
+        include_edges: When ``True``, also walk every history row for
+            edges incident to the anchor (joined via the inner
+            subquery on ``graph_edge.from_node_id`` /
+            ``graph_edge.to_node_id``). The merged result still
+            orders newest-first.
+        limit: Hard cap on returned rows (1..``_MAX_HISTORY_ROWS``).
+            Defaults to the ceiling because per-resource history is
+            bounded by retention; tighter caps would silently
+            truncate the walk.
+
+    Returns:
+        :class:`TopologyHistoryResult` carrying the resolved
+        ``anchor_node_id``, the echoed ``include_edges`` flag, and a
+        tuple of :class:`TopologyHistoryEntry` rows in
+        ``(valid_from DESC, history_id DESC)`` order.
+
+    Raises:
+        NodeNotFoundError: ``name_or_alias`` (and ``kind``, when
+            supplied) does not resolve in this tenant.
+        AmbiguousNodeError: Bare-name lookup hit multiple kinds; pass
+            ``kind=`` to disambiguate.
+        ValueError: ``limit`` is out of range (``< 1`` or
+            ``> _MAX_HISTORY_ROWS``).
+    """
+    if limit < 1 or limit > _MAX_HISTORY_ROWS:
+        raise ValueError(f"limit must be in 1..{_MAX_HISTORY_ROWS}; got {limit}")
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        # Resolve the anchor up front so a missing / cross-tenant /
+        # ambiguous name surfaces with the canonical exception types
+        # the route + MCP layers already map; never let the SQL
+        # statements run with a NULL anchor (a quirk of the
+        # ``CAST(:x AS text) IS NULL OR ...`` idiom is that a NULL
+        # anchor would broaden the filter, not narrow it).
+        anchor = await resolve_node(session, operator.tenant_id, name_or_alias, kind=kind)
+        bind_params: dict[str, Any] = {
+            "tenant_id": operator.tenant_id,
+            "anchor_node_id": anchor.id,
+            "since": since,
+            "since_marker": "x" if since is not None else None,
+            "until": until,
+            "until_marker": "x" if until is not None else None,
+            "limit": limit,
+        }
+        node_result = await session.execute(_HISTORY_NODE_SQL, bind_params)
+        node_rows = [_row_to_history_entry(row, "node") for row in node_result.fetchall()]
+        edge_rows: list[TopologyHistoryEntry] = []
+        if include_edges:
+            edge_result = await session.execute(_HISTORY_EDGE_SQL, bind_params)
+            edge_rows = [_row_to_history_entry(row, "edge") for row in edge_result.fetchall()]
+
+    if not include_edges:
+        merged = node_rows[:limit]
+    else:
+        merged = _merge_history_pages(node_rows, edge_rows, limit)
+
+    return TopologyHistoryResult(
+        anchor_node_id=anchor.id,
+        include_edges=include_edges,
+        rows=tuple(merged),
+    )
+
+
+# ---------------------------------------------------------------------------
+# G9.3-T4 (#860) — graph-level diff between two timestamps
+# ---------------------------------------------------------------------------
+#
+# ``query_diff`` is the heavy temporal query: per resource, fold every
+# in-window history row into a single net delta (created / updated /
+# removed) for ``(ts1, ts2]``. The fold rule:
+#
+#   * created -- first in-window row is ``created`` AND last is not
+#     ``removed``.
+#   * removed -- last in-window row is ``removed``. (Includes the
+#     "created and removed in the same window" case: the post-window
+#     state is "gone".)
+#   * updated -- otherwise (the resource existed before ``ts1`` and has
+#     at least one in-window mutation that isn't a net delete).
+#
+# ``--changed-only`` suppresses ``updated`` entries whose only mutation
+# in the window was a ``last_seen``-bump (the refresh service's "I
+# observed this row again at T+15m" emission). The substrate folds these
+# by comparing the snapshot's ``before`` and ``after`` projections: if
+# the only differing field is ``last_seen``, the row is a refresh
+# heartbeat and gets dropped under the flag.
+#
+# The 1000-row cap is enforced at the substrate -- the CLI / REST / MCP
+# fronts mirror it but the substrate is authoritative. Truncation
+# returns a partial result with ``truncated=True`` plus the canonical
+# "narrow the time window" hint; consumers render the hint verbatim.
+
+#: Hard ceiling on diff entries returned in one call. v0.2 contract per
+#: the Task #860 acceptance criterion ("output exceeding 1000 rows
+#: returns a truncation marker + remediation hint"). The cap is at the
+#: substrate so a non-route caller (REPL, MCP front, CLI) cannot
+#: accidentally request an unbounded fold.
+_DIFF_HARD_CAP: Final[int] = 1000
+
+#: Canonical operator-facing remediation surfaced verbatim on every
+#: front when the cap fires. Pinned as a module constant so the CLI /
+#: REST / MCP wording stays in lock-step without duplicating the string
+#: across three layers.
+_DIFF_TRUNCATION_HINT: Final[str] = (
+    "diff output truncated at the 1000-row hard cap; narrow the "
+    "time window (ts1..ts2) or filter by --kind to reduce churn."
+)
+
+
+# Two literal SQL statements -- one per history table -- pulling every
+# in-window row tenant-scoped. The fold is Python-side because the
+# per-resource "first vs last in-window row" rule is awkward in pure
+# SQL and the projection-shape diff for ``--changed-only`` needs access
+# to the deserialised snapshot. Indexes the queries lean on (migration
+# 0012): ``graph_*_history_tenant_valid_from_idx`` -- composite
+# ``(tenant_id, valid_from DESC)`` so the per-tenant slice is sub-ms
+# under realistic load.
+#
+# ``valid_from`` is ``>`` ``ts1`` (exclusive lower) and ``<=`` ``ts2``
+# (inclusive upper) per the Task #860 contract.
+#
+# Ordering: ``valid_from ASC, history_id ASC`` so the fold sees the
+# in-window rows in chronological order. The "first vs last" rule then
+# falls out of a single left-to-right pass per resource.
+_DIFF_NODE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.node_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.valid_from    AS valid_from
+    FROM graph_node_history h
+    WHERE h.tenant_id = :tenant_id
+      AND h.valid_from > :ts1
+      AND h.valid_from <= :ts2
+    ORDER BY h.valid_from ASC, h.history_id ASC
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("ts1", type_=DateTime(timezone=True)),
+    bindparam("ts2", type_=DateTime(timezone=True)),
+)
+
+_DIFF_EDGE_SQL = text(
+    """
+    SELECT
+        h.history_id    AS history_id,
+        h.edge_id       AS resource_id,
+        h.change_kind   AS change_kind,
+        h.snapshot      AS snapshot,
+        h.valid_from    AS valid_from
+    FROM graph_edge_history h
+    WHERE h.tenant_id = :tenant_id
+      AND h.valid_from > :ts1
+      AND h.valid_from <= :ts2
+    ORDER BY h.valid_from ASC, h.history_id ASC
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("ts1", type_=DateTime(timezone=True)),
+    bindparam("ts2", type_=DateTime(timezone=True)),
+)
+
+
+def _deserialise_snapshot(snapshot_raw: Any) -> dict[str, Any] | None:
+    """Coerce a snapshot column value into a dict-or-None.
+
+    Asyncpg's JSONB codec returns ``dict``; SQLite (the test DB) returns
+    a JSON-encoded string because the ``text()`` literal bypasses the
+    ORM column-type round-trip. Mirrors :func:`_row_to_timeline_entry`'s
+    snapshot coercion so the same deserialisation rule applies to every
+    history-table read path.
+    """
+    if isinstance(snapshot_raw, dict):
+        return snapshot_raw
+    if isinstance(snapshot_raw, str):
+        try:
+            parsed = json.loads(snapshot_raw)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+    return None
+
+
+def _snapshot_side(snapshot: dict[str, Any] | None, key: str) -> dict[str, Any] | None:
+    """Pick the ``before`` or ``after`` side of a snapshot, or None.
+
+    Returns the side as a plain dict; ``None`` when the side is absent
+    or non-dict (e.g. ``created`` rows have ``before=None``).
+    """
+    if snapshot is None:
+        return None
+    side = snapshot.get(key)
+    if isinstance(side, dict):
+        return side
+    return None
+
+
+def _is_last_seen_only_change(snapshot: dict[str, Any] | None) -> bool:
+    """Detect an ``updated`` row whose only diff is ``last_seen``.
+
+    The refresh service emits an ``updated`` history row whenever a
+    probed live row's column changes -- including ``last_seen``-only
+    bumps from the periodic refresh ("I observed this row again at
+    T+15m"). The ``--changed-only`` flag exists precisely to suppress
+    these refresh heartbeats from a diff so the operator sees only
+    substantive change.
+
+    Returns ``True`` only when both snapshot sides are dicts that share
+    every key with identical values *except* ``last_seen``. A snapshot
+    missing either side (a ``created`` or ``removed`` row, where the
+    flag is irrelevant in the first place) returns ``False`` so the
+    caller never accidentally drops a non-``updated`` row.
+    """
+    before = _snapshot_side(snapshot, "before")
+    after = _snapshot_side(snapshot, "after")
+    if before is None or after is None:
+        return False
+    # Same key set -- if a key was added or removed that itself is a
+    # substantive change worth surfacing.
+    if set(before.keys()) != set(after.keys()):
+        return False
+    for key, before_value in before.items():
+        if key == "last_seen":
+            continue
+        if before_value != after.get(key):
+            return False
+    return True
+
+
+def _pick_kind_for_entry(rows: list[Row[Any]], net_kind: str) -> str:
+    """Pick a renderable ``kind`` from a resource's in-window history rows.
+
+    For a ``removed`` resource the operator wants to see what was
+    removed -- pull the ``kind`` from the pre-state of the last row.
+    For ``created`` / ``updated`` the post-state of the last row
+    carries the current kind. Falls back to ``"unknown"`` only when
+    both snapshot sides are missing (a legacy row from a pre-hook
+    era), preserving the entry rather than dropping it.
+    """
+    last = rows[-1]
+    snapshot = _deserialise_snapshot(last._mapping["snapshot"])
+    if net_kind == "removed":
+        side = _snapshot_side(snapshot, "before")
+        if side is not None and "kind" in side:
+            return str(side["kind"])
+    side = _snapshot_side(snapshot, "after")
+    if side is not None and "kind" in side:
+        return str(side["kind"])
+    side = _snapshot_side(snapshot, "before")
+    if side is not None and "kind" in side:
+        return str(side["kind"])
+    return "unknown"
+
+
+def _pick_name_for_node_entry(rows: list[Row[Any]], net_kind: str) -> str | None:
+    """Pick a renderable ``name`` for a node entry from its history rows.
+
+    Mirror of :func:`_pick_kind_for_entry` for the ``name`` column.
+    Edges return ``None`` (the edge snapshot does not carry a name --
+    only endpoint FKs).
+    """
+    last = rows[-1]
+    snapshot = _deserialise_snapshot(last._mapping["snapshot"])
+    if net_kind == "removed":
+        side = _snapshot_side(snapshot, "before")
+        if side is not None and "name" in side:
+            return str(side["name"])
+    side = _snapshot_side(snapshot, "after")
+    if side is not None and "name" in side:
+        return str(side["name"])
+    side = _snapshot_side(snapshot, "before")
+    if side is not None and "name" in side:
+        return str(side["name"])
+    return None
+
+
+def _fold_to_net_kind(rows: list[Row[Any]]) -> Literal["created", "updated", "removed"]:
+    """Fold a resource's in-window history rows into one net ``change_kind``.
+
+    The fold rule per resource over the window ``(ts1, ts2]``:
+
+    * First in-window row is ``created`` AND last is not ``removed``
+      -> ``created``.
+    * Last in-window row is ``removed`` -> ``removed`` (includes the
+      created-and-removed-in-same-window case; the post-window state
+      is "gone").
+    * Otherwise -> ``updated`` (the resource existed before ``ts1`` and
+      mutated in window).
+    """
+    first_kind = rows[0]._mapping["change_kind"]
+    last_kind = rows[-1]._mapping["change_kind"]
+    if last_kind == "removed":
+        return "removed"
+    if first_kind == "created":
+        return "created"
+    return "updated"
+
+
+def _all_window_rows_are_last_seen_only(rows: list[Row[Any]]) -> bool:
+    """True when every in-window ``updated`` row is a ``last_seen``-only bump.
+
+    For ``--changed-only`` we suppress an entry whose net kind is
+    ``updated`` AND every constituent in-window row is a ``last_seen``-only
+    refresh heartbeat. If any in-window row is a substantive change
+    (kind changed, properties changed, target_id moved, etc.) the entry
+    survives because the operator does want to see the substantive
+    column flip even if the cohort also includes refresh bumps. A
+    ``created`` or ``removed`` entry is never a refresh heartbeat by
+    construction, so this check is only relevant for the
+    ``updated`` net-kind branch.
+    """
+    for row in rows:
+        if row._mapping["change_kind"] != "updated":
+            return False
+        snapshot = _deserialise_snapshot(row._mapping["snapshot"])
+        if not _is_last_seen_only_change(snapshot):
+            return False
+    return True
+
+
+def _build_diff_entry(
+    rows: list[Row[Any]],
+    *,
+    source: Literal["node", "edge"],
+    resource_id: UUID | None,
+    changed_only: bool,
+) -> TopologyDiffEntry | None:
+    """Fold one resource's history rows into a single :class:`TopologyDiffEntry`.
+
+    Returns ``None`` when the entry should be suppressed under
+    ``changed_only`` (an ``updated`` net-kind whose every in-window row
+    is a ``last_seen``-only refresh heartbeat).
+
+    Summary format mirrors :func:`_format_node_summary` /
+    :func:`_format_edge_summary` so the diff and timeline surfaces read
+    consistently: ``"<change_kind> <source> <kind>[ <name>]"``.
+    """
+    net_kind = _fold_to_net_kind(rows)
+    if changed_only and net_kind == "updated" and _all_window_rows_are_last_seen_only(rows):
+        return None
+    domain_kind = _pick_kind_for_entry(rows, net_kind)
+    name = _pick_name_for_node_entry(rows, net_kind) if source == "node" else None
+    if name is None:
+        summary = f"{net_kind} {source} {domain_kind}"
+    else:
+        summary = f"{net_kind} {source} {domain_kind} {name}"
+    return TopologyDiffEntry(
+        change_kind=net_kind,
+        source=source,
+        resource_id=resource_id,
+        kind=domain_kind,
+        name=name,
+        summary=summary,
+    )
+
+
+def _recover_resource_id(row: Row[Any]) -> UUID | None:
+    """Recover a tombstone row's resource id from its snapshot payload.
+
+    A hard-deleted resource's history row carries ``resource_id``
+    (``node_id`` / ``edge_id``) NULL because the FK is ``ON DELETE SET
+    NULL`` (migration 0012) -- the cascade fires when the live row is
+    deleted in the same flush. The deleted resource's own id survives in
+    the snapshot (``before.id`` for the ``removed`` row; the
+    ``_*_SNAPSHOT_COLUMNS`` include ``id`` for exactly this reason -- see
+    :mod:`meho_backplane.topology.annotate`). Returns the UUID, or
+    ``None`` when the snapshot is missing/malformed (e.g. a legacy
+    pre-hook tombstone).
+    """
+    snapshot = _deserialise_snapshot(row._mapping["snapshot"])
+    for key in ("before", "after"):
+        side = _snapshot_side(snapshot, key)
+        if side is not None:
+            raw = side.get("id")
+            if raw is not None:
+                try:
+                    return UUID(str(raw))
+                except (ValueError, AttributeError):
+                    return None
+    return None
+
+
+def _group_rows_by_resource(
+    rows: Sequence[Row[Any]],
+) -> list[tuple[UUID | None, list[Row[Any]]]]:
+    """Group history rows by resource preserving first-occurrence order.
+
+    The SQL returns rows in ``(valid_from ASC, history_id ASC)`` order;
+    grouping per resource while keeping the first-seen order gives the
+    substrate a deterministic per-resource ordering for the cap.
+
+    Tombstone rows (``resource_id IS NULL`` after an ``ON DELETE SET
+    NULL`` hard-delete) must NOT all collapse under a single ``None``
+    key -- that would merge two distinct deletions into one diff entry,
+    undercount the truncation cap, and drop the deleted resources'
+    identities. Instead the resource id is recovered from the snapshot
+    (:func:`_recover_resource_id`); a create-then-delete within the same
+    window re-joins its pre-delete rows because the recovered id equals
+    the original ``resource_id``. When the id is unrecoverable, the row
+    is keyed on its unique ``history_id`` so each such tombstone still
+    becomes its own entry rather than merging.
+
+    Returns a list of ``(resource_id, rows)`` tuples in first-occurrence
+    order, so a caller iterating it sees the same order in every call
+    (important for the cap-stable truncation behaviour). ``resource_id``
+    is the recovered UUID where known, else ``None``.
+    """
+    by_key: dict[tuple[str, object], list[Row[Any]]] = {}
+    resource_id_for_key: dict[tuple[str, object], UUID | None] = {}
+    order: list[tuple[str, object]] = []
+    for row in rows:
+        rid = row._mapping["resource_id"]
+        if rid is not None:
+            key: tuple[str, object] = ("id", rid)
+            resource_id: UUID | None = rid
+        else:
+            recovered = _recover_resource_id(row)
+            if recovered is not None:
+                key = ("id", recovered)
+                resource_id = recovered
+            else:
+                key = ("history", row._mapping["history_id"])
+                resource_id = None
+        if key not in by_key:
+            by_key[key] = []
+            resource_id_for_key[key] = resource_id
+            order.append(key)
+        by_key[key].append(row)
+    return [(resource_id_for_key[key], by_key[key]) for key in order]
+
+
+async def query_diff(
+    operator: Operator,
+    *,
+    ts1: datetime,
+    ts2: datetime,
+    changed_only: bool = False,
+    kind_filter: str | None = None,
+) -> TopologyDiffResult:
+    """Graph-level diff between ``ts1`` (exclusive) and ``ts2`` (inclusive).
+
+    Initiative #365 (G9.3), Task #860 (T4). Walks
+    :class:`GraphNodeHistory` + :class:`GraphEdgeHistory` tenant-scoped
+    on ``operator.tenant_id`` and folds every in-window row per
+    resource into one net ``created`` / ``updated`` / ``removed``
+    entry. Returns at most :data:`_DIFF_HARD_CAP` entries; on overflow,
+    ``truncated=True`` and ``truncation_hint`` carries the canonical
+    "narrow the time window" remediation.
+
+    Args:
+        operator: The calling operator. ``tenant_id`` lifted from the
+            JWT; never sourced from caller-controllable args.
+        ts1: Exclusive lower bound on ``valid_from``.
+        ts2: Inclusive upper bound on ``valid_from``.
+        changed_only: When ``True``, suppress ``updated`` entries
+            whose every in-window history row is a ``last_seen``-only
+            refresh heartbeat. ``created`` / ``removed`` entries are
+            never affected (by construction they are not heartbeats).
+        kind_filter: Optional resource-kind filter -- restrict the
+            result to entries whose domain ``kind`` matches (node
+            ``kind`` like ``vm``, or edge ``kind`` like ``runs-on``).
+            Filter is applied **after** the fold so the cap fires on
+            the post-filter cohort.
+
+    Returns:
+        :class:`TopologyDiffResult`. ``entries`` is ordered by
+        first-seen ``resource_id`` from the underlying SQL scan;
+        consumers wanting a presentation order sort client-side.
+
+    Raises:
+        ValueError: ``ts1 >= ts2`` -- the window must be non-empty;
+            an empty / inverted window is an operator-actionable input
+            problem and surfaced before any DB call.
+    """
+    if not ts1 < ts2:
+        raise ValueError(f"query_diff requires ts1 < ts2; got ts1={ts1!r}, ts2={ts2!r}")
+
+    bind_params: dict[str, Any] = {
+        "tenant_id": operator.tenant_id,
+        "ts1": ts1,
+        "ts2": ts2,
+    }
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        node_result = await session.execute(_DIFF_NODE_SQL, bind_params)
+        node_rows = node_result.fetchall()
+        edge_result = await session.execute(_DIFF_EDGE_SQL, bind_params)
+        edge_rows = edge_result.fetchall()
+
+    entries: list[TopologyDiffEntry] = []
+    truncated = False
+
+    # Fold node side first, then edge side. Within a side the SQL's
+    # ``ORDER BY valid_from ASC, history_id ASC`` ordering is preserved
+    # by :func:`_group_rows_by_resource`, so the per-side iteration is
+    # deterministic. Across sides, nodes come before edges -- a stable
+    # presentation order that mirrors the timeline tie-breaker (node
+    # before edge at the same key).
+    sides: tuple[tuple[Literal["node", "edge"], Sequence[Row[Any]]], ...] = (
+        ("node", node_rows),
+        ("edge", edge_rows),
+    )
+    for source_label, raw_rows in sides:
+        groups = _group_rows_by_resource(raw_rows)
+        for resource_id, group_rows in groups:
+            entry = _build_diff_entry(
+                group_rows,
+                source=source_label,
+                resource_id=resource_id,
+                changed_only=changed_only,
+            )
+            if entry is None:
+                continue
+            if kind_filter is not None and entry.kind != kind_filter:
+                continue
+            if len(entries) >= _DIFF_HARD_CAP:
+                truncated = True
+                break
+            entries.append(entry)
+        if truncated:
+            break
+
+    return TopologyDiffResult(
+        entries=tuple(entries),
+        truncated=truncated,
+        truncation_hint=_DIFF_TRUNCATION_HINT if truncated else None,
+    )

@@ -32,14 +32,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -129,57 +128,13 @@ func printErrorTrailer(w io.Writer, r *CallResult) {
 	}
 	if len(r.Extras) > 0 && string(r.Extras) != "null" {
 		fmt.Fprintln(w, "extras:")
-		pretty, err := prettyJSON(r.Extras)
+		pretty, err := dispatch.PrettyJSON(r.Extras)
 		if err == nil {
 			fmt.Fprintln(w, pretty)
 		} else {
 			fmt.Fprintln(w, string(r.Extras))
 		}
 	}
-}
-
-type errNoBackplaneConfigured struct{ inner error }
-
-func (e *errNoBackplaneConfigured) Error() string {
-	return "no backplane URL configured; run `meho login <url>` first or pass --backplane <url>"
-}
-func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
-
-func resolveBackplane(override string) (string, error) {
-	if override != "" {
-		return normaliseURL(override)
-	}
-	cfg, err := auth.LoadConfig()
-	if err != nil {
-		if errors.Is(err, auth.ErrConfigNotFound) {
-			return "", &errNoBackplaneConfigured{inner: err}
-		}
-		return "", err
-	}
-	return normaliseURL(cfg.BackplaneURL)
-}
-
-func classifyBackplaneError(err error) *output.StructuredError {
-	if errors.Is(err, auth.ErrConfigNotFound) {
-		return output.AuthExpired(err.Error())
-	}
-	return output.Unexpected(err.Error())
-}
-
-func normaliseURL(s string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(s), "/")
-	if trimmed == "" {
-		return "", errors.New("backplane URL is empty")
-	}
-	u, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("backplane URL %q has no host", s)
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
 }
 
 func renderRequestError(

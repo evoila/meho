@@ -19,10 +19,12 @@ import asyncio
 import base64
 from collections.abc import Iterator
 from dataclasses import dataclass
+from uuid import UUID
 
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
@@ -34,6 +36,18 @@ from meho_backplane.connectors.vcf_operations import (
     VcfOperationsConnector,
     VcfOperationsTargetLike,
 )
+
+
+def _make_operator(raw_jwt: str = "") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -154,7 +168,7 @@ def test_default_credentials_loader_raises_until_g03_lands() -> None:
 async def test_auth_headers_sends_basic_auth() -> None:
     """auth_headers() produces Authorization: Basic with stub credentials."""
     connector = _make_connector()
-    headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "Authorization" in headers
     assert headers["Authorization"].startswith("Basic ")
@@ -180,8 +194,8 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
         return {"username": "admin", "password": "stub-password"}
 
     connector = VcfOperationsConnector(credentials_loader=_counting_loader)
-    h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
-    h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+    h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert h1 == h2
     assert call_count == 1
@@ -203,8 +217,8 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
         return {"username": f"svc-{target.name}", "password": "pass"}
 
     connector = VcfOperationsConnector(credentials_loader=_tracking_loader)
-    h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
-    h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+    h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
 
     username_a, _ = _decode_basic_auth(h_a["Authorization"])
     username_b, _ = _decode_basic_auth(h_b["Authorization"])
@@ -226,7 +240,7 @@ async def test_loader_missing_password_key_raises_runtime_error_naming_target() 
 
     connector = VcfOperationsConnector(credentials_loader=_bad_loader)
     with pytest.raises(RuntimeError, match=r"password") as exc_info:
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "vrops-a" in str(exc_info.value)
     await connector.aclose()
@@ -239,7 +253,7 @@ async def test_loader_missing_username_key_raises_runtime_error_naming_target() 
 
     connector = VcfOperationsConnector(credentials_loader=_bad_loader)
     with pytest.raises(RuntimeError, match=r"username") as exc_info:
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "vrops-a" in str(exc_info.value)
     await connector.aclose()
@@ -269,7 +283,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(
     connector = _make_connector()
 
     with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, raw_jwt="")
+        await connector.auth_headers(target, operator=_make_operator())
 
     assert "vrops-per-user" in str(exc_info.value)
     assert auth_model in str(exc_info.value)
@@ -287,7 +301,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         auth_model=None,
     )
     connector = _make_connector()
-    headers = await connector.auth_headers(target, raw_jwt="")
+    headers = await connector.auth_headers(target, operator=_make_operator())
     assert headers["Authorization"].startswith("Basic ")
     await connector.aclose()
 
@@ -303,7 +317,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()
-    headers = await connector.auth_headers(target, raw_jwt="")
+    headers = await connector.auth_headers(target, operator=_make_operator())
     assert headers["Authorization"].startswith("Basic ")
     await connector.aclose()
 
@@ -493,7 +507,7 @@ async def test_probe_returns_ok_false_with_reason_on_transport_error() -> None:
 async def test_aclose_clears_credential_cache_and_pool() -> None:
     """aclose() clears the in-memory credential cache and tears down the httpx pool."""
     connector = _make_connector()
-    await connector.auth_headers(_TARGET_A, raw_jwt="")
+    await connector.auth_headers(_TARGET_A, operator=_make_operator())
     assert "vrops-a" in connector._creds.cached_targets
     await connector.aclose()
     assert connector._creds.cached_targets == frozenset()

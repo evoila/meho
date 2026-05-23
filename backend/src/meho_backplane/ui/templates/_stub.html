@@ -1,0 +1,42 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Surface-stub template (Initiative #337, Task #866). Rendered by the
+  five "coming soon" routes (broadcast / knowledge / topology /
+  connectors / memory) the chassis lands before the surface
+  Initiatives G10.1-G10.5 replace them.
+
+  Inherits base.html so the chrome (sidebar, navbar, footer) matches
+  every other surface. Carries the same hx-headers CSRF wiring as
+  the dashboard so any future placeholder form has the double-submit
+  chain set up.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ surface_title }} &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="mx-auto max-w-2xl space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header>
+    <h1 class="text-2xl font-semibold">{{ surface_title }}</h1>
+    <p class="text-sm opacity-70">Operator surface placeholder.</p>
+  </header>
+
+  <article class="card bg-base-100 border-base-300 border shadow-sm">
+    <div class="card-body">
+      <h2 class="card-title">Coming soon</h2>
+      <p>{{ summary }}</p>
+      <p class="text-sm opacity-70">
+        This surface ships with Initiative <code>#{{ initiative_number }}</code>.
+        The chassis (G10.0) routes this URL to a placeholder so the
+        sidebar navigation renders end-to-end; the surface Initiative
+        replaces the route handler with the real view.
+      </p>
+    </div>
+  </article>
+</section>
+{% endblock %}

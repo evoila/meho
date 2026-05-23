@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.base import Connector
 
 # Forward declaration — replaced with `from meho_backplane.targets import Target`
@@ -79,7 +80,7 @@ class HttpConnector(Connector):
                 )
             return self._clients[target.name]
 
-    async def mount_op_path(self, target: Target, path: str) -> str:
+    async def mount_op_path(self, target: Target, path: str, operator: Operator) -> str:
         """Map an ingested-descriptor *path* onto the wire path for *target*.
 
         Dispatcher hook for ``source_kind='ingested'`` ops: the G0.7
@@ -91,8 +92,13 @@ class HttpConnector(Connector):
         (see ``VmwareRestConnector``) override this; the override is a
         separate seam from ``_request_json`` / ``_post_json`` so their
         tenacity ``@retry`` wrapper stays intact.
+
+        ``operator`` is threaded so an override that has to establish a
+        session to learn the live mount (vCenter's modern→legacy
+        fallback) authenticates under the same operator identity the
+        transport call will use, rather than a credential-less stand-in.
         """
-        del target
+        del target, operator
         return path
 
     def _base_url(self, target: Target) -> str:
@@ -100,10 +106,17 @@ class HttpConnector(Connector):
         port = f":{target.port}" if target.port and target.port != 443 else ""
         return f"{scheme}://{target.host}{port}"
 
-    async def auth_headers(self, target: Target, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: Target, operator: Operator) -> dict[str, str]:
         """Return auth headers for the request.
 
-        Vendor connectors MUST override per ``target.auth_model``.
+        Vendor connectors MUST override per ``target.auth_model``. The
+        full :class:`~meho_backplane.auth.operator.Operator` is threaded
+        here (not just ``operator.raw_jwt``) so a connector's credential
+        loader can perform an operator-context Vault read via
+        ``vault_client_for_operator(operator)`` — the locked decision in
+        [docs/architecture/connector-auth.md](docs/architecture/connector-auth.md).
+        ``Operator`` is frozen, so passing it down carries no
+        confused-deputy risk.
         """
         raise NotImplementedError(
             f"{type(self).__name__} must override auth_headers() — "
@@ -122,7 +135,7 @@ class HttpConnector(Connector):
         method: str,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -131,7 +144,9 @@ class HttpConnector(Connector):
         Raises :exc:`ValueError` for non-idempotent verbs so a caller that
         accidentally passes ``POST``/``PATCH`` never gets silent retry of a
         side-effecting operation. Non-idempotent callers must use
-        ``_post_json`` or call the httpx client directly.
+        ``_post_json`` or call the httpx client directly. ``operator`` is
+        forwarded to :meth:`auth_headers` so the connector can resolve
+        credentials under the operator's identity.
         """
         method = method.upper()
         if method not in _IDEMPOTENT_METHODS:
@@ -140,7 +155,7 @@ class HttpConnector(Connector):
                 f"{sorted(_IDEMPOTENT_METHODS)}; got {method!r}"
             )
         client = await self._http_client(target)
-        headers = await self.auth_headers(target, raw_jwt)
+        headers = await self.auth_headers(target, operator)
         resp = await client.request(method, path, params=params, json=json, headers=headers)
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
@@ -150,18 +165,18 @@ class HttpConnector(Connector):
         target: Target,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Retried GET returning parsed JSON."""
-        return await self._request_json(target, "GET", path, raw_jwt=raw_jwt, params=params)
+        return await self._request_json(target, "GET", path, operator=operator, params=params)
 
     async def _post_json(
         self,
         target: Target,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Non-retried POST returning parsed JSON.
@@ -169,7 +184,7 @@ class HttpConnector(Connector):
         Retry on non-idempotent verbs is the caller's responsibility.
         """
         client = await self._http_client(target)
-        headers = await self.auth_headers(target, raw_jwt)
+        headers = await self.auth_headers(target, operator)
         resp = await client.request("POST", path, json=json, headers=headers)
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]

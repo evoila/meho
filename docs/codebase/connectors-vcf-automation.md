@@ -136,7 +136,7 @@ to the dispatcher.
 
 ### Plane selection by path prefix
 
-`VcfAutomationConnector.auth_headers(target, raw_jwt, *, path=...)` is
+`VcfAutomationConnector.auth_headers(target, operator, *, path=...)` is
 keyword-only on `path` and **requires** the path argument — a `None`
 default raises `VcfAutomationConfigurationError` because this connector has
 no plane-agnostic header set. The base `HttpConnector._request_json` /

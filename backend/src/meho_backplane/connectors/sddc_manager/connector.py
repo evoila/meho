@@ -74,6 +74,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -150,14 +152,16 @@ class SddcManagerConnector(HttpConnector):
             credentials_loader if credentials_loader is not None else load_credentials_from_vault
         )
 
-    async def auth_headers(self, target: SddcTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: SddcTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target*, caches
-        them, and reuses the cached values on subsequent calls. ``raw_jwt``
-        is accepted for ABC-signature compatibility but unused —
+        them, and reuses the cached values on subsequent calls. ``operator``
+        is accepted for the shared HTTP auth surface (G3.9-T1) but unused —
         :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
         Vault-sourced service account, not the operator's OIDC token.
+        Threading the operator into SDDC Manager's credential loader is
+        #G3.10.
 
         The Basic auth username is ``{creds['username']}@{target.sso_realm}``
         where ``sso_realm`` defaults to ``"vsphere.local"`` when unset or
@@ -166,7 +170,7 @@ class SddcManagerConnector(HttpConnector):
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT mode does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT mode does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -220,7 +224,9 @@ class SddcManagerConnector(HttpConnector):
         """
         probed_at = datetime.now(UTC)
         try:
-            payload = await self._get_json(target, "/v1/sddc-managers", raw_jwt="")
+            payload = await self._get_json(
+                target, "/v1/sddc-managers", operator=synthesise_system_operator()
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",

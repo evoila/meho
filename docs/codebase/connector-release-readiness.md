@@ -55,7 +55,9 @@ rg "op_id=.<connector-name>\." backend/src/meho_backplane/connectors/<connector-
 rg "raise NotImplementedError" backend/src/meho_backplane/connectors/<connector-name>/
 ```
 
-**v0.3.0 examples at this state:** `k8s-1.x`, `vmware-rest-9.0`.
+**v0.3.0 examples at this state:** `k8s-1.x`. (`vmware-rest-9.0` was at
+this state through v0.3.0; G3.9-T3 [#942](https://github.com/evoila/meho/issues/942)
+wired its live loader and moved it to State 2.)
 
 **Honest release-notes language:**
 
@@ -88,10 +90,17 @@ What's NOT shipped:
 - Other auth_models (`per_user`, `impersonation`) still raise a clear
   boundary error.
 
-**v0.3.0 examples at this state:** `bind9-ssh-9.x` (the SSH transport
+**Examples at this state:** `bind9-ssh-9.x` (the SSH transport
 loads credentials inline in the connector — no separate `session.py`
 stub; the credential read for `shared_service_account` is live). The
 consumer correctly noted this as the "closest to parity" connector.
+`vmware-rest-9.0` joined this state via G3.9-T3
+[#942](https://github.com/evoila/meho/issues/942): its default loader
+[`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L116)
+now performs the live operator-context KV-v2 read via the shared
+[`load_basic_credentials`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py)
+helper; `shared_service_account` executes against a real vCenter.
+Operator recipe: [`vmware-rest-onboarding.md`](../cross-repo/vmware-rest-onboarding.md).
 
 **Honest release-notes language:**
 
@@ -126,7 +135,7 @@ flow is the only auth_model; loader is live; consumer confirmed
 | `vault-1.x` | 3 | JWT-federated, live | ✅ |
 | `bind9-ssh-9.x` | 2-3 | `shared_service_account` inline | ✅ |
 | `k8s-1.x` | 1 | [`load_kubeconfig_from_vault`](../../backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py#L86) — `NotImplementedError` | ❌ (mock loader in test only) |
-| `vmware-rest-9.0` (composites) | 1 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L107) — `NotImplementedError` | ❌ (mock loader in test only) |
+| `vmware-rest-9.0` | 2 | [`load_session_credentials_from_vault`](../../backend/src/meho_backplane/connectors/vmware_rest/session.py#L116) — live operator-context Vault read (G3.9-T3 [#942](https://github.com/evoila/meho/issues/942)) | ✅ (`shared_service_account`) |
 | `sddc-manager-9.0` | 0.5 | Class-side registered, no ops yet, loader stubbed | ❌ |
 | `harbor-2.x` | 0.5 | Class-side registered, no ops yet, loader stubbed | ❌ |
 | `kubernetes-asyncio-1.x` | 1 (shadow) | Same as `k8s-1.x` | ❌ |

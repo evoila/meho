@@ -527,7 +527,7 @@ async def test_vrli_e2e_401_recovery_via_connector_method(
     result = await bundle.connector_instance._get_json_with_session_retry(
         bundle.db_target,
         "/api/v2/version",
-        raw_jwt="",
+        operator=_OPERATOR,
     )
 
     assert result.get("version") == "9.0.0", (
@@ -573,7 +573,7 @@ async def test_vrli_e2e_second_401_fails_with_runtime_error(
         await bundle.connector_instance._get_json_with_session_retry(
             bundle.db_target,
             "/api/v2/version",
-            raw_jwt="",
+            operator=_OPERATOR,
         )
 
     msg = str(exc_info.value)

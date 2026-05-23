@@ -114,6 +114,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
     basic_auth_header,
@@ -197,15 +199,16 @@ class VcfFleetConnector(HttpConnector):
         )
         self._creds: CredentialsCache = CredentialsCache(loader, product_label="vcf-fleet")
 
-    async def auth_headers(self, target: VcfFleetTargetLike, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: VcfFleetTargetLike, operator: Operator) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target* via
         the shared :class:`CredentialsCache` and reuses the cached
-        values on subsequent calls. ``raw_jwt`` is accepted for
-        ABC-signature compatibility but unused —
+        values on subsequent calls. ``operator`` is accepted for the
+        shared HTTP auth surface (G3.9-T1) but unused —
         :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` authenticates with a
         Vault-sourced service account, not the operator's OIDC token.
+        Threading the operator into Fleet's credential loader is #G3.10.
 
         The Basic auth username is sent verbatim from the Vault-loaded
         credentials — no SSO-realm suffix is appended. The typical
@@ -217,7 +220,7 @@ class VcfFleetConnector(HttpConnector):
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is
         anything other than ``shared_service_account`` or ``None``.
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT does not forward operator JWT
+        del operator  # SHARED_SERVICE_ACCOUNT does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -256,7 +259,7 @@ class VcfFleetConnector(HttpConnector):
         probed_at = datetime.now(UTC)
         try:
             client = await self._http_client(target)
-            headers = await self.auth_headers(target, raw_jwt="")
+            headers = await self.auth_headers(target, synthesise_system_operator())
             resp = await client.get(
                 _FLEET_PROBE_PATH,
                 headers={"Accept": "application/json", **headers},

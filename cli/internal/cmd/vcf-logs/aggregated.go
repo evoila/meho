@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -65,20 +66,20 @@ func runAggregated(
 	jsonOut bool,
 	backplaneOverride string,
 ) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"constraints": constraints}
 	if timeRange != "" {
 		params["timestamp_window"] = timeRange
 	}
 	const opID = "GET:/api/v2/aggregated-events/{constraints}"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printAggregated)
+	return conn.Render(cmd, opID, r, jsonOut, printAggregated)
 }
 
 func printAggregated(w io.Writer, r *CallResult) {

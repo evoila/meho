@@ -1697,6 +1697,63 @@ type TopologyEdgeEndpoint struct {
 	Name string             `json:"name"`
 }
 
+// TopologyHistoryEntry One row of the per-resource history walk (G9.3-T3).
+//
+// Task #859 ships the operator surface “meho topology history
+// <node>“ -- "what changed for THIS resource?" The differentiator
+// from :class:`TopologyTimelineEntry` (G9.3-T5) is that history
+// carries the full “snapshot“ JSONB (“{before, after}“) per row
+// rather than a one-line summary -- the forensic shape for “--json“
+// reconstruction. Field-to-column mapping otherwise matches
+// timeline:
+//
+//   - “valid_from“ -- “*_history.valid_from“.
+//   - “history_id“ -- “*_history.history_id“.
+//   - “source“ -- “"node"“ for :class:`GraphNodeHistory`, “"edge"“
+//     for :class:`GraphEdgeHistory` (only “"edge"“ rows ever appear
+//     when the caller passed “include_edges=True“).
+//   - “change_kind“ -- one of “"created"“ / “"updated"“ /
+//     “"removed"“ per :class:`GraphHistoryChangeKind`.
+//   - “resource_id“ -- “node_id“ for node-side rows, “edge_id“
+//     for edge-side rows. “None“ only after the referenced live row
+//     has been hard-deleted (“ON DELETE SET NULL“).
+//   - “snapshot“ -- the full “{before, after}“ JSONB. “None“
+//     only for legacy / mid-rollout rows that pre-date the
+//     diff-on-write hook; every hook-emitted row populates it.
+//   - “audit_id“ -- soft-FK to the “audit_log.id“ of the
+//     operation that caused the mutation.
+type TopologyHistoryEntry struct {
+	AuditId    *openapi_types.UUID     `json:"audit_id"`
+	ChangeKind string                  `json:"change_kind"`
+	HistoryId  int                     `json:"history_id"`
+	ResourceId *openapi_types.UUID     `json:"resource_id"`
+	Snapshot   *map[string]interface{} `json:"snapshot"`
+	Source     string                  `json:"source"`
+	ValidFrom  time.Time               `json:"valid_from"`
+}
+
+// TopologyHistoryResult The full per-resource history walk plus the resolved anchor.
+//
+// Unlike :class:`TopologyTimelineResult` (which is cursor-paginated),
+// the per-resource walk returns one page bounded by the substrate's
+// “_MAX_HISTORY_ROWS“ cap -- per-resource history is bounded by
+// the retention window (default 90 days) and the operator typically
+// wants the complete chronology in one response. No “next_cursor“;
+// a caller that overflows the cap narrows “since“ / “until“.
+//
+// “anchor_node_id“ is the resolved :class:`GraphNode.id` of the
+// anchor. Echoing it lets the CLI / MCP fronts surface "I resolved
+// your name X to node Y" in the human-readable header without a
+// second resolver round trip.
+//
+// “include_edges“ echoes the call-site flag so a consumer can
+// branch on whether edge rows are expected to appear in “rows“.
+type TopologyHistoryResult struct {
+	AnchorNodeId openapi_types.UUID     `json:"anchor_node_id"`
+	IncludeEdges bool                   `json:"include_edges"`
+	Rows         []TopologyHistoryEntry `json:"rows"`
+}
+
 // TopologyNode One “graph_node“ row reached during a traversal.
 //
 // “depth“ is the distance from the query root: the root itself is
@@ -2390,6 +2447,16 @@ type UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// HistoryRouteApiV1TopologyHistoryNameGetParams defines parameters for HistoryRouteApiV1TopologyHistoryNameGet.
+type HistoryRouteApiV1TopologyHistoryNameGetParams struct {
+	Kind          *string    `form:"kind,omitempty" json:"kind,omitempty"`
+	Since         *time.Time `form:"since,omitempty" json:"since,omitempty"`
+	Until         *time.Time `form:"until,omitempty" json:"until,omitempty"`
+	IncludeEdges  *bool      `form:"include_edges,omitempty" json:"include_edges,omitempty"`
+	Limit         *int       `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string    `json:"authorization,omitempty"`
+}
+
 // PathApiV1TopologyPathGetParams defines parameters for PathApiV1TopologyPathGet.
 type PathApiV1TopologyPathGetParams struct {
 	From          string  `form:"from" json:"from"`
@@ -2418,6 +2485,19 @@ type TimelineRouteApiV1TopologyTimelineGetParams struct {
 // McpDispatchMcpPostParams defines parameters for McpDispatchMcpPost.
 type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UiAuthCallbackUiAuthCallbackGetParams defines parameters for UiAuthCallbackUiAuthCallbackGet.
+type UiAuthCallbackUiAuthCallbackGetParams struct {
+	Code             *string `form:"code,omitempty" json:"code,omitempty"`
+	State            *string `form:"state,omitempty" json:"state,omitempty"`
+	Error            *string `form:"error,omitempty" json:"error,omitempty"`
+	ErrorDescription *string `form:"error_description,omitempty" json:"error_description,omitempty"`
+}
+
+// UiAuthLoginUiAuthLoginGetParams defines parameters for UiAuthLoginUiAuthLoginGet.
+type UiAuthLoginUiAuthLoginGetParams struct {
+	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
 }
 
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
@@ -2793,6 +2873,9 @@ type ClientInterface interface {
 	// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete request
 	UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// HistoryRouteApiV1TopologyHistoryNameGet request
+	HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PathApiV1TopologyPathGet request
 	PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2813,6 +2896,33 @@ type ClientInterface interface {
 
 	// ReadyReadyGet request
 	ReadyReadyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiDashboardUiGet request
+	UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthCallbackUiAuthCallbackGet request
+	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthLoginUiAuthLoginGet request
+	UiAuthLoginUiAuthLoginGet(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiAuthLogoutUiAuthLogoutGet request
+	UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubBroadcastUiBroadcastGet request
+	UiStubBroadcastUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubConnectorsUiConnectorsGet request
+	UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubKnowledgeUiKnowledgeGet request
+	UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubMemoryUiMemoryGet request
+	UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiStubTopologyUiTopologyGet request
+	UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// VersionVersionGet request
 	VersionVersionGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3634,6 +3744,18 @@ func (c *Client) UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx context.C
 	return c.Client.Do(req)
 }
 
+func (c *Client) HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewHistoryRouteApiV1TopologyHistoryNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPathApiV1TopologyPathGetRequest(c.Server, params)
 	if err != nil {
@@ -3708,6 +3830,114 @@ func (c *Client) MetricsMetricsGet(ctx context.Context, reqEditors ...RequestEdi
 
 func (c *Client) ReadyReadyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewReadyReadyGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiDashboardUiGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthCallbackUiAuthCallbackGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthLoginUiAuthLoginGet(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthLoginUiAuthLoginGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthLogoutUiAuthLogoutGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubBroadcastUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubBroadcastUiBroadcastGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubConnectorsUiConnectorsGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubKnowledgeUiKnowledgeGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubKnowledgeUiKnowledgeGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubMemoryUiMemoryGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiStubTopologyUiTopologyGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -7129,6 +7359,141 @@ func NewUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteRequest(server string, 
 	return req, nil
 }
 
+// NewHistoryRouteApiV1TopologyHistoryNameGetRequest generates requests for HistoryRouteApiV1TopologyHistoryNameGet
+func NewHistoryRouteApiV1TopologyHistoryNameGetRequest(server string, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/history/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Until != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "until", runtime.ParamLocationQuery, *params.Until); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeEdges != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_edges", runtime.ParamLocationQuery, *params.IncludeEdges); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPathApiV1TopologyPathGetRequest generates requests for PathApiV1TopologyPathGet
 func NewPathApiV1TopologyPathGetRequest(server string, params *PathApiV1TopologyPathGetParams) (*http.Request, error) {
 	var err error
@@ -7549,6 +7914,341 @@ func NewReadyReadyGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiDashboardUiGetRequest generates requests for UiDashboardUiGet
+func NewUiDashboardUiGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthCallbackUiAuthCallbackGetRequest generates requests for UiAuthCallbackUiAuthCallbackGet
+func NewUiAuthCallbackUiAuthCallbackGetRequest(server string, params *UiAuthCallbackUiAuthCallbackGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/callback")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Code != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "code", runtime.ParamLocationQuery, *params.Code); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Error != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error", runtime.ParamLocationQuery, *params.Error); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ErrorDescription != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error_description", runtime.ParamLocationQuery, *params.ErrorDescription); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthLoginUiAuthLoginGetRequest generates requests for UiAuthLoginUiAuthLoginGet
+func NewUiAuthLoginUiAuthLoginGetRequest(server string, params *UiAuthLoginUiAuthLoginGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/login")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReturnTo != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiAuthLogoutUiAuthLogoutGetRequest generates requests for UiAuthLogoutUiAuthLogoutGet
+func NewUiAuthLogoutUiAuthLogoutGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/auth/logout")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubBroadcastUiBroadcastGetRequest generates requests for UiStubBroadcastUiBroadcastGet
+func NewUiStubBroadcastUiBroadcastGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubConnectorsUiConnectorsGetRequest generates requests for UiStubConnectorsUiConnectorsGet
+func NewUiStubConnectorsUiConnectorsGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/connectors")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubKnowledgeUiKnowledgeGetRequest generates requests for UiStubKnowledgeUiKnowledgeGet
+func NewUiStubKnowledgeUiKnowledgeGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/knowledge")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubMemoryUiMemoryGetRequest generates requests for UiStubMemoryUiMemoryGet
+func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/memory")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiStubTopologyUiTopologyGetRequest generates requests for UiStubTopologyUiTopologyGet
+func NewUiStubTopologyUiTopologyGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/topology")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewVersionVersionGetRequest generates requests for VersionVersionGet
 func NewVersionVersionGetRequest(server string) (*http.Request, error) {
 	var err error
@@ -7806,6 +8506,9 @@ type ClientWithResponsesInterface interface {
 	// UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse request
 	UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteWithResponse(ctx context.Context, edgeId openapi_types.UUID, params *UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteParams, reqEditors ...RequestEditorFn) (*UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse, error)
 
+	// HistoryRouteApiV1TopologyHistoryNameGetWithResponse request
+	HistoryRouteApiV1TopologyHistoryNameGetWithResponse(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error)
+
 	// PathApiV1TopologyPathGetWithResponse request
 	PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error)
 
@@ -7826,6 +8529,33 @@ type ClientWithResponsesInterface interface {
 
 	// ReadyReadyGetWithResponse request
 	ReadyReadyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ReadyReadyGetResponse, error)
+
+	// UiDashboardUiGetWithResponse request
+	UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error)
+
+	// UiAuthCallbackUiAuthCallbackGetWithResponse request
+	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
+
+	// UiAuthLoginUiAuthLoginGetWithResponse request
+	UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error)
+
+	// UiAuthLogoutUiAuthLogoutGetWithResponse request
+	UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error)
+
+	// UiStubBroadcastUiBroadcastGetWithResponse request
+	UiStubBroadcastUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubBroadcastUiBroadcastGetResponse, error)
+
+	// UiStubConnectorsUiConnectorsGetWithResponse request
+	UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error)
+
+	// UiStubKnowledgeUiKnowledgeGetWithResponse request
+	UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error)
+
+	// UiStubMemoryUiMemoryGetWithResponse request
+	UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error)
+
+	// UiStubTopologyUiTopologyGetWithResponse request
+	UiStubTopologyUiTopologyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubTopologyUiTopologyGetResponse, error)
 
 	// VersionVersionGetWithResponse request
 	VersionVersionGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*VersionVersionGetResponse, error)
@@ -9000,6 +9730,45 @@ func (r UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse) StatusCode() 
 	return 0
 }
 
+type HistoryRouteApiV1TopologyHistoryNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *TopologyHistoryResult
+	JSON404      *struct {
+		Detail struct {
+			Error HistoryRouteApiV1TopologyHistoryNameGet404DetailError `json:"error"`
+			Kind  *string                                               `json:"kind,omitempty"`
+			Name  string                                                `json:"name"`
+		} `json:"detail"`
+	}
+	JSON409 *struct {
+		Detail struct {
+			Error HistoryRouteApiV1TopologyHistoryNameGet409DetailError `json:"error"`
+			Kinds []string                                              `json:"kinds"`
+			Name  string                                                `json:"name"`
+		} `json:"detail"`
+	}
+	JSON422 *HTTPValidationError
+}
+type HistoryRouteApiV1TopologyHistoryNameGet404DetailError string
+type HistoryRouteApiV1TopologyHistoryNameGet409DetailError string
+
+// Status returns HTTPResponse.Status
+func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PathApiV1TopologyPathGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -9152,6 +9921,197 @@ func (r ReadyReadyGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r ReadyReadyGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiDashboardUiGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiDashboardUiGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiDashboardUiGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthCallbackUiAuthCallbackGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthCallbackUiAuthCallbackGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthCallbackUiAuthCallbackGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthLoginUiAuthLoginGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthLoginUiAuthLoginGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthLoginUiAuthLoginGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiAuthLogoutUiAuthLogoutGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiAuthLogoutUiAuthLogoutGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiAuthLogoutUiAuthLogoutGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubBroadcastUiBroadcastGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubBroadcastUiBroadcastGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubBroadcastUiBroadcastGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubConnectorsUiConnectorsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubConnectorsUiConnectorsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubConnectorsUiConnectorsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubKnowledgeUiKnowledgeGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubKnowledgeUiKnowledgeGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubKnowledgeUiKnowledgeGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubMemoryUiMemoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubMemoryUiMemoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubMemoryUiMemoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiStubTopologyUiTopologyGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiStubTopologyUiTopologyGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiStubTopologyUiTopologyGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -9775,6 +10735,15 @@ func (c *ClientWithResponses) UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteW
 	return ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp)
 }
 
+// HistoryRouteApiV1TopologyHistoryNameGetWithResponse request returning *HistoryRouteApiV1TopologyHistoryNameGetResponse
+func (c *ClientWithResponses) HistoryRouteApiV1TopologyHistoryNameGetWithResponse(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error) {
+	rsp, err := c.HistoryRouteApiV1TopologyHistoryNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp)
+}
+
 // PathApiV1TopologyPathGetWithResponse request returning *PathApiV1TopologyPathGetResponse
 func (c *ClientWithResponses) PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error) {
 	rsp, err := c.PathApiV1TopologyPathGet(ctx, params, reqEditors...)
@@ -9836,6 +10805,87 @@ func (c *ClientWithResponses) ReadyReadyGetWithResponse(ctx context.Context, req
 		return nil, err
 	}
 	return ParseReadyReadyGetResponse(rsp)
+}
+
+// UiDashboardUiGetWithResponse request returning *UiDashboardUiGetResponse
+func (c *ClientWithResponses) UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error) {
+	rsp, err := c.UiDashboardUiGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiDashboardUiGetResponse(rsp)
+}
+
+// UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
+func (c *ClientWithResponses) UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error) {
+	rsp, err := c.UiAuthCallbackUiAuthCallbackGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthCallbackUiAuthCallbackGetResponse(rsp)
+}
+
+// UiAuthLoginUiAuthLoginGetWithResponse request returning *UiAuthLoginUiAuthLoginGetResponse
+func (c *ClientWithResponses) UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error) {
+	rsp, err := c.UiAuthLoginUiAuthLoginGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthLoginUiAuthLoginGetResponse(rsp)
+}
+
+// UiAuthLogoutUiAuthLogoutGetWithResponse request returning *UiAuthLogoutUiAuthLogoutGetResponse
+func (c *ClientWithResponses) UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error) {
+	rsp, err := c.UiAuthLogoutUiAuthLogoutGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp)
+}
+
+// UiStubBroadcastUiBroadcastGetWithResponse request returning *UiStubBroadcastUiBroadcastGetResponse
+func (c *ClientWithResponses) UiStubBroadcastUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubBroadcastUiBroadcastGetResponse, error) {
+	rsp, err := c.UiStubBroadcastUiBroadcastGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubBroadcastUiBroadcastGetResponse(rsp)
+}
+
+// UiStubConnectorsUiConnectorsGetWithResponse request returning *UiStubConnectorsUiConnectorsGetResponse
+func (c *ClientWithResponses) UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error) {
+	rsp, err := c.UiStubConnectorsUiConnectorsGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubConnectorsUiConnectorsGetResponse(rsp)
+}
+
+// UiStubKnowledgeUiKnowledgeGetWithResponse request returning *UiStubKnowledgeUiKnowledgeGetResponse
+func (c *ClientWithResponses) UiStubKnowledgeUiKnowledgeGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
+	rsp, err := c.UiStubKnowledgeUiKnowledgeGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp)
+}
+
+// UiStubMemoryUiMemoryGetWithResponse request returning *UiStubMemoryUiMemoryGetResponse
+func (c *ClientWithResponses) UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error) {
+	rsp, err := c.UiStubMemoryUiMemoryGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubMemoryUiMemoryGetResponse(rsp)
+}
+
+// UiStubTopologyUiTopologyGetWithResponse request returning *UiStubTopologyUiTopologyGetResponse
+func (c *ClientWithResponses) UiStubTopologyUiTopologyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubTopologyUiTopologyGetResponse, error) {
+	rsp, err := c.UiStubTopologyUiTopologyGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiStubTopologyUiTopologyGetResponse(rsp)
 }
 
 // VersionVersionGetWithResponse request returning *VersionVersionGetResponse
@@ -11465,6 +12515,65 @@ func ParseUnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDeleteResponse(rsp *http.Re
 	return response, nil
 }
 
+// ParseHistoryRouteApiV1TopologyHistoryNameGetResponse parses an HTTP response from a HistoryRouteApiV1TopologyHistoryNameGetWithResponse call
+func ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp *http.Response) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &HistoryRouteApiV1TopologyHistoryNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest TopologyHistoryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest struct {
+			Detail struct {
+				Error HistoryRouteApiV1TopologyHistoryNameGet404DetailError `json:"error"`
+				Kind  *string                                               `json:"kind,omitempty"`
+				Name  string                                                `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest struct {
+			Detail struct {
+				Error HistoryRouteApiV1TopologyHistoryNameGet409DetailError `json:"error"`
+				Kinds []string                                              `json:"kinds"`
+				Name  string                                                `json:"name"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePathApiV1TopologyPathGetResponse parses an HTTP response from a PathApiV1TopologyPathGetWithResponse call
 func ParsePathApiV1TopologyPathGetResponse(rsp *http.Response) (*PathApiV1TopologyPathGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -11670,6 +12779,170 @@ func ParseReadyReadyGetResponse(rsp *http.Response) (*ReadyReadyGetResponse, err
 		}
 		response.JSON200 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiDashboardUiGetResponse parses an HTTP response from a UiDashboardUiGetWithResponse call
+func ParseUiDashboardUiGetResponse(rsp *http.Response) (*UiDashboardUiGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiDashboardUiGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthCallbackUiAuthCallbackGetResponse parses an HTTP response from a UiAuthCallbackUiAuthCallbackGetWithResponse call
+func ParseUiAuthCallbackUiAuthCallbackGetResponse(rsp *http.Response) (*UiAuthCallbackUiAuthCallbackGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthCallbackUiAuthCallbackGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthLoginUiAuthLoginGetResponse parses an HTTP response from a UiAuthLoginUiAuthLoginGetWithResponse call
+func ParseUiAuthLoginUiAuthLoginGetResponse(rsp *http.Response) (*UiAuthLoginUiAuthLoginGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthLoginUiAuthLoginGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiAuthLogoutUiAuthLogoutGetResponse parses an HTTP response from a UiAuthLogoutUiAuthLogoutGetWithResponse call
+func ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp *http.Response) (*UiAuthLogoutUiAuthLogoutGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiAuthLogoutUiAuthLogoutGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubBroadcastUiBroadcastGetResponse parses an HTTP response from a UiStubBroadcastUiBroadcastGetWithResponse call
+func ParseUiStubBroadcastUiBroadcastGetResponse(rsp *http.Response) (*UiStubBroadcastUiBroadcastGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubBroadcastUiBroadcastGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubConnectorsUiConnectorsGetResponse parses an HTTP response from a UiStubConnectorsUiConnectorsGetWithResponse call
+func ParseUiStubConnectorsUiConnectorsGetResponse(rsp *http.Response) (*UiStubConnectorsUiConnectorsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubConnectorsUiConnectorsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubKnowledgeUiKnowledgeGetResponse parses an HTTP response from a UiStubKnowledgeUiKnowledgeGetWithResponse call
+func ParseUiStubKnowledgeUiKnowledgeGetResponse(rsp *http.Response) (*UiStubKnowledgeUiKnowledgeGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubKnowledgeUiKnowledgeGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubMemoryUiMemoryGetResponse parses an HTTP response from a UiStubMemoryUiMemoryGetWithResponse call
+func ParseUiStubMemoryUiMemoryGetResponse(rsp *http.Response) (*UiStubMemoryUiMemoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubMemoryUiMemoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiStubTopologyUiTopologyGetResponse parses an HTTP response from a UiStubTopologyUiTopologyGetWithResponse call
+func ParseUiStubTopologyUiTopologyGetResponse(rsp *http.Response) (*UiStubTopologyUiTopologyGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiStubTopologyUiTopologyGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

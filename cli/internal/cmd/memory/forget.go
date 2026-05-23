@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -145,10 +146,10 @@ func runForget(cmd *cobra.Command, opts forgetOptions) error {
 			return nil
 		}
 	}
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
-			classifyBackplaneError(err), opts.JSONOut)
+			backplane.ClassifyError(err), opts.JSONOut)
 	}
 	if err := callForget(cmd.Context(), backplaneURL, scope, slug, opts.TargetArg); err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)

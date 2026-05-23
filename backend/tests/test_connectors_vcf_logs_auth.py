@@ -33,11 +33,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from uuid import UUID
 
 import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.vcf_auth import VcfTargetLike
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
@@ -49,6 +51,18 @@ from meho_backplane.connectors.vcf_logs import (
     VcfLogsConnector,
     VcfLogsTargetLike,
 )
+
+
+def _make_operator(raw_jwt: str = "") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -174,7 +188,7 @@ async def test_auth_headers_establishes_session_with_json_body_and_default_provi
         session_route = mock.post("/api/v2/sessions").respond(
             200, json={"sessionId": session_id, "ttl": 1800}
         )
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert session_route.called and session_route.call_count == 1
     assert headers == {"Authorization": f"Bearer {session_id}"}
@@ -212,7 +226,7 @@ async def test_auth_headers_uses_target_provider_when_set() -> None:
         session_route = mock.post("/api/v2/sessions").respond(
             200, json={"sessionId": "ad-token", "ttl": 1800}
         )
-        await connector.auth_headers(target, raw_jwt="")
+        await connector.auth_headers(target, operator=_make_operator())
 
     request = session_route.calls[0].request
     import json
@@ -233,8 +247,8 @@ async def test_auth_headers_reuses_cached_session_across_calls() -> None:
         session_route = mock.post("/api/v2/sessions").respond(
             200, json={"sessionId": session_id, "ttl": 1800}
         )
-        h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert h1 == h2 == {"Authorization": f"Bearer {session_id}"}
     # The load-bearing assertion -- exactly one POST /api/v2/sessions
@@ -256,8 +270,8 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
             200, json={"sessionId": "token-b", "ttl": 1800}
         )
 
-        h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+        h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
 
     assert route_a.called and route_b.called
     assert h_a == {"Authorization": "Bearer token-a"}
@@ -284,7 +298,7 @@ async def test_session_create_401_surfaces_session_login_error_naming_target() -
     async with respx.mock(base_url="https://vrli-a.test.invalid") as mock:
         mock.post("/api/v2/sessions").respond(401, json={"errorMessage": "invalid_credentials"})
         with pytest.raises(SessionLoginError, match=r"vrli-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "401" in str(exc_info.value)
     await connector.aclose()
@@ -307,7 +321,7 @@ async def test_session_create_missing_session_id_in_body_raises() -> None:
         # Body without sessionId -- failure case.
         mock.post("/api/v2/sessions").respond(200, json={"ttl": 1800})
         with pytest.raises(SessionLoginError, match=r"vrli-a"):
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     await connector.aclose()
 
@@ -322,7 +336,7 @@ async def test_session_create_empty_session_id_raises() -> None:
     async with respx.mock(base_url="https://vrli-a.test.invalid") as mock:
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "", "ttl": 1800})
         with pytest.raises(SessionLoginError, match=r"vrli-a"):
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     await connector.aclose()
 
@@ -343,7 +357,7 @@ async def test_loader_missing_password_key_raises_clear_error_naming_target() ->
 
     async with respx.mock(base_url="https://vrli-a.test.invalid"):
         with pytest.raises(RuntimeError, match=r"vrli-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert "password" in str(exc_info.value)
     await connector.aclose()
@@ -371,7 +385,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
     connector = _make_connector()
 
     with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, raw_jwt="")
+        await connector.auth_headers(target, operator=_make_operator())
 
     assert "vrli-per-user" in str(exc_info.value)
     assert auth_model in str(exc_info.value)
@@ -392,7 +406,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
 
     async with respx.mock(base_url="https://vrli.test.invalid") as mock:
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "pre-g03-token", "ttl": 1800})
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, operator=_make_operator())
 
     assert headers == {"Authorization": "Bearer pre-g03-token"}
     await connector.aclose()
@@ -412,7 +426,7 @@ async def test_auth_headers_accepts_enum_value_for_auth_model() -> None:
 
     async with respx.mock(base_url="https://vrli.test.invalid") as mock:
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "enum-token", "ttl": 1800})
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, operator=_make_operator())
 
     assert headers == {"Authorization": "Bearer enum-token"}
     await connector.aclose()
@@ -447,7 +461,7 @@ async def test_downstream_401_triggers_relogin_and_retry_once() -> None:
         ]
 
         result = await connector._get_json_with_session_retry(
-            _TARGET_A, "/api/v2/events", raw_jwt=""
+            _TARGET_A, "/api/v2/events", operator=_make_operator()
         )
 
     assert result == {"events": [{"id": "ev-1"}]}
@@ -482,7 +496,9 @@ async def test_downstream_401_then_still_401_after_relogin_raises_runtime_error(
         events_route = mock.get("/api/v2/events").respond(401)
 
         with pytest.raises(RuntimeError, match=r"vrli-a") as exc_info:
-            await connector._get_json_with_session_retry(_TARGET_A, "/api/v2/events", raw_jwt="")
+            await connector._get_json_with_session_retry(
+                _TARGET_A, "/api/v2/events", operator=_make_operator()
+            )
 
     assert "401" in str(exc_info.value)
     assert "after refresh" in str(exc_info.value)
@@ -512,7 +528,9 @@ async def test_downstream_non_401_status_error_propagates_untouched() -> None:
         mock.get("/api/v2/events").respond(502)
 
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            await connector._get_json_with_session_retry(_TARGET_A, "/api/v2/events", raw_jwt="")
+            await connector._get_json_with_session_retry(
+                _TARGET_A, "/api/v2/events", operator=_make_operator()
+            )
 
     assert exc_info.value.response.status_code == 502
     # One session-create call (initial); no re-login fired.
@@ -634,7 +652,7 @@ async def test_aclose_clears_session_token_cache_and_credentials_and_pool() -> N
 
     async with respx.mock(base_url="https://vrli-a.test.invalid") as mock:
         mock.post("/api/v2/sessions").respond(200, json={"sessionId": "token", "ttl": 1800})
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
     assert connector._session_tokens == {"vrli-a": "token"}
     # Credentials cache should also be populated after the first call.

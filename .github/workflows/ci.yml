@@ -496,8 +496,10 @@ jobs:
       - name: Go test (race + coverage)
         # -race catches data races the CLI may hit when the
         # async-token-refresh code (internal/auth) is exercised from
-        # parallel tests. -cover keeps the per-package summary in the
-        # workflow log; we don't enforce a threshold v0.1.
+        # parallel tests. -coverprofile writes a merged profile consumed
+        # by the downstream SonarCloud scan (sonar.go.coverage.reportPaths)
+        # so the Clean-as-You-Code new-code-coverage gate sees Go coverage,
+        # not 0%. -covermode=atomic is required under -race.
         #
         # CGO_ENABLED=1 is required: `go test -race` is implemented in
         # the cgo-based race runtime and refuses to run otherwise
@@ -510,7 +512,21 @@ jobs:
         working-directory: cli
         env:
           CGO_ENABLED: '1'
-        run: go test -race -cover ./...
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Upload Go coverage artifact
+        # Consumed by quality-gate.yml (`workflow_run` -> SonarCloud).
+        # Lossy like the Python sibling: a missing upload degrades the
+        # SonarCloud signal to "no Go coverage for this run" but never
+        # invalidates the test outcome. continue-on-error is appropriate
+        # ONLY for this step.
+        if: always() && hashFiles('cli/coverage.out') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: go-coverage
+          path: cli/coverage.out
+          retention-days: 7
 
   cli-api-snapshot-freshness:
     name: CLI API snapshot freshness

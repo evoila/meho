@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -54,16 +55,16 @@ func newTier1ListCmd() *cobra.Command {
 }
 
 func runTier1List(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	const opID = "GET:/policy/api/v1/infra/tier-1s"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printTier1List)
+	return conn.Render(cmd, opID, r, jsonOut, printTier1List)
 }
 
 func printTier1List(w io.Writer, r *CallResult) {

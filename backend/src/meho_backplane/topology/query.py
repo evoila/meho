@@ -145,10 +145,12 @@ from meho_backplane.topology.timeline_cursor import (
 # site without churn.
 __all__ = [
     "AmbiguousNodeError",
+    "TopologyNodeListEntry",
     "find_dependencies",
     "find_dependents",
     "find_path",
     "list_edges",
+    "list_nodes",
     "query_diff",
     "query_history",
     "query_timeline",
@@ -869,6 +871,269 @@ async def list_edges(
         },
     )
     return [_row_to_edge(row) for row in result.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# G10.5-T1 (#880) — tenant-scoped node listing for the UI tabular surface
+# ---------------------------------------------------------------------------
+#
+# Tabular ``/ui/topology?view=table`` (Initiative #342 work-item #1)
+# needs a paginated, sortable, filterable list of nodes plus an inbound
+# edge count per row so the operator can scan the tenant inventory at
+# a glance. The traversal verbs above answer "what depends on X" — they
+# do not produce a per-tenant survey.
+#
+# Shape decisions:
+#
+#   * One frozen dataclass (:class:`TopologyNodeListEntry`) per row,
+#     carrying the columns the UI table renders: ``id``, ``kind``,
+#     ``name``, ``last_seen``, ``children_count``, ``parents``. The
+#     ``parents`` list projects the immediate ``runs-on`` /
+#     ``part-of`` / curated edges out of the node (the v0.2 "parent"
+#     semantic surface; deeper ancestry stays in the graph view).
+#   * ORM ``select`` against :class:`GraphNode` rather than a raw
+#     ``text("...")`` so the helper is dialect-portable: the unit-test
+#     suite runs on SQLite (no ``jsonb_typeof`` / ``jsonb_array_length``),
+#     while PG production gets the same query. The ``children_count``
+#     correlated subquery counts inbound edges
+#     (``graph_edge.to_node_id = graph_node.id``) — the same shape
+#     :func:`find_dependents` walks.
+#   * Sort + filter are tightly enumerated: ``sort`` is one of a
+#     fixed set so a hostile caller cannot inject an arbitrary
+#     ``ORDER BY``; ``kind`` / ``name_contains`` filters compose
+#     additively. ``name_contains`` uses SQLAlchemy's ``ilike`` so
+#     the substring match is case-insensitive on both dialects.
+#   * Tenant scoping is unconditional: every statement starts with
+#     ``WHERE graph_node.tenant_id = :tenant_id``. No filter
+#     combination can leak a row from another tenant.
+
+#: Default page size for :func:`list_nodes`. The UI table renders the
+#: full page in one HTMX swap; 200 is large enough for the typical
+#: ~30-150-node tenant the v0.2 onboarding targets while bounding a
+#: pathological discovery. The route layer caps tighter at the HTTP
+#: boundary.
+_DEFAULT_NODE_LIMIT = 200
+
+#: Hard ceiling on the per-call node-listing page size. Mirrors
+#: :data:`_MAX_EDGE_LIMIT` so the two inventory verbs share the same
+#: operator ergonomics.
+_MAX_NODE_LIMIT = 1000
+
+#: Closed enum of sort columns the UI table exposes. The route layer
+#: surfaces this as an enum query param so an out-of-range value 422s
+#: at the boundary rather than reaching the SQL layer. Pinned as a
+#: tuple so a typo at a call site is a static type error rather than a
+#: silent SQL injection vector.
+_NODE_SORT_COLUMNS: tuple[str, ...] = ("name", "kind", "last_seen", "first_seen")
+
+
+class TopologyNodeListEntry:
+    """One row of the per-tenant node inventory the UI table renders.
+
+    Lightweight frozen dataclass-like shape; not a Pydantic model
+    because this helper is a UI-internal projection (consumed only by
+    the ``/ui/topology`` routes), not part of the public REST surface
+    every external client validates against. The HTTP-visible Pydantic
+    shapes stay in :mod:`meho_backplane.topology.schemas`.
+
+    Fields:
+
+    * ``id`` — ``graph_node.id`` UUID.
+    * ``kind`` — ``graph_node.kind``.
+    * ``name`` — ``graph_node.name``.
+    * ``target_id`` — ``graph_node.target_id`` (NULL for inner
+      graph nodes; populated for nodes that are themselves a
+      registered target). Drives the "recent ops" filter on the
+      detail drawer — only target-backed nodes carry audit rows.
+    * ``first_seen`` / ``last_seen`` — observation timestamps.
+      ``last_seen`` is NULL after a refresh soft-delete; the helper
+      excludes such rows by default.
+    * ``discovered_by`` — the connector slug or ``curated`` marker.
+    * ``children_count`` — number of inbound non-soft-deleted edges
+      (``graph_edge.to_node_id = node.id AND last_seen IS NOT NULL``).
+      The same count :func:`find_dependents` walks. ``0`` for a leaf.
+    """
+
+    __slots__ = (
+        "children_count",
+        "discovered_by",
+        "first_seen",
+        "id",
+        "kind",
+        "last_seen",
+        "name",
+        "target_id",
+    )
+
+    def __init__(
+        self,
+        *,
+        id: UUID,  # noqa: A002 — column name; the attribute mirrors ``graph_node.id``
+        kind: str,
+        name: str,
+        target_id: UUID | None,
+        first_seen: datetime,
+        last_seen: datetime | None,
+        discovered_by: str,
+        children_count: int,
+    ) -> None:
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.target_id = target_id
+        self.first_seen = first_seen
+        self.last_seen = last_seen
+        self.discovered_by = discovered_by
+        self.children_count = children_count
+
+
+async def list_nodes(
+    session: AsyncSession,
+    tenant_id: UUID,
+    *,
+    kind: str | None = None,
+    name_contains: str | None = None,
+    sort: str = "name",
+    direction: str = "asc",
+    include_soft_deleted: bool = False,
+    limit: int = _DEFAULT_NODE_LIMIT,
+    offset: int = 0,
+) -> list[TopologyNodeListEntry]:
+    """Tenant-scoped paginated listing of ``graph_node`` rows.
+
+    Task #880 (G10.5-T1). The substrate primitive the UI tabular surface
+    (``GET /ui/topology?view=table``) calls; the helper is intentionally
+    UI-leaning (richer per-row projection than the traversal verbs'
+    :class:`TopologyNode`) but stays in the substrate module so the CLI
+    and MCP layers can reuse it later without duplicating the SQL.
+
+    Args:
+        session: An open :class:`AsyncSession`. Caller owns the
+            transaction. The helper performs only read statements.
+        tenant_id: The tenant scope. Mandatory; no "list every node
+            across tenants" mode by construction. The first SQL WHERE
+            clause is always ``graph_node.tenant_id = :tenant_id``;
+            no filter combination overrides it.
+        kind: Optional exact-match ``graph_node.kind`` filter (one of
+            :data:`meho_backplane.db.models._GRAPH_NODE_KINDS`). The
+            CHECK constraint already restricts the column; this
+            narrows the listing.
+        name_contains: Optional case-insensitive substring filter on
+            ``graph_node.name``. Uses SQLAlchemy ``ilike`` with the
+            user-controllable input wrapped in ``%`` on both sides;
+            the binding parameter pattern means the substring is
+            treated literally (no glob), and ``%`` / ``_`` chars in
+            the operator's input match themselves.
+        sort: Column to sort by. Must be one of
+            :data:`_NODE_SORT_COLUMNS`; any other value raises
+            :class:`ValueError`. The closed enum is the
+            SQL-injection guard — the route layer validates the
+            same set at the HTTP boundary, but the substrate refuses
+            defensively because a non-route caller (CLI/MCP/REPL)
+            may not have the same validation.
+        direction: ``"asc"`` or ``"desc"``. Any other value raises
+            :class:`ValueError`.
+        include_soft_deleted: When ``False`` (the default), exclude
+            rows with ``last_seen IS NULL`` — the soft-delete signal
+            refresh writes on a node that disappeared from probe
+            output. Set ``True`` for the audit / history surface
+            (G9.3) that needs to see deleted rows; the UI table
+            never sets it.
+        limit: Maximum rows per call (1..``_MAX_NODE_LIMIT``).
+        offset: Rows to skip; combined with the stable
+            ``(<sort>, id)`` total order, paging is deterministic.
+
+    Returns:
+        A list of :class:`TopologyNodeListEntry` rows in the requested
+        ``(sort, direction)`` order plus a stable ``id`` tie-breaker.
+        Empty when no node matches.
+
+    Raises:
+        ValueError: ``sort`` is not in :data:`_NODE_SORT_COLUMNS`,
+            ``direction`` is not in ``{"asc", "desc"}``, ``limit``
+            is out of range, or ``offset`` is negative.
+    """
+    if sort not in _NODE_SORT_COLUMNS:
+        raise ValueError(
+            f"sort must be one of {_NODE_SORT_COLUMNS}; got {sort!r}",
+        )
+    if direction not in ("asc", "desc"):
+        raise ValueError(f"direction must be 'asc' or 'desc'; got {direction!r}")
+    if limit < 1 or limit > _MAX_NODE_LIMIT:
+        raise ValueError(f"limit must be in 1..{_MAX_NODE_LIMIT}; got {limit}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0; got {offset}")
+
+    # Local import: keeping the heavy ORM imports under the helper
+    # rather than at module top avoids a circular-import risk with the
+    # broader topology package and matches the existing per-helper
+    # localisation pattern in this module.
+    from sqlalchemy import asc, desc, func, select
+
+    from meho_backplane.db.models import GraphEdge, GraphNode
+
+    sort_column = {
+        "name": GraphNode.name,
+        "kind": GraphNode.kind,
+        "last_seen": GraphNode.last_seen,
+        "first_seen": GraphNode.first_seen,
+    }[sort]
+    order_clause = asc(sort_column) if direction == "asc" else desc(sort_column)
+
+    children_count_subq = (
+        select(func.count(GraphEdge.id))
+        .where(
+            GraphEdge.tenant_id == tenant_id,
+            GraphEdge.to_node_id == GraphNode.id,
+            GraphEdge.last_seen.is_not(None),
+        )
+        .correlate(GraphNode)
+        .scalar_subquery()
+    )
+
+    stmt = select(
+        GraphNode.id,
+        GraphNode.kind,
+        GraphNode.name,
+        GraphNode.target_id,
+        GraphNode.first_seen,
+        GraphNode.last_seen,
+        GraphNode.discovered_by,
+        children_count_subq.label("children_count"),
+    ).where(GraphNode.tenant_id == tenant_id)
+
+    if not include_soft_deleted:
+        stmt = stmt.where(GraphNode.last_seen.is_not(None))
+    if kind is not None:
+        stmt = stmt.where(GraphNode.kind == kind)
+    if name_contains is not None and name_contains:
+        # ``ilike`` is case-insensitive on PG; on SQLite the codec
+        # collapses to ``LIKE`` with a case-sensitive match unless
+        # the connection is configured with ``case_sensitive_like=0``.
+        # The unit-test fixture uses the default (insensitive
+        # ASCII), so the substring match behaves identically on both
+        # dialects for ASCII inputs.
+        stmt = stmt.where(GraphNode.name.ilike(f"%{name_contains}%"))
+
+    # Compose a stable secondary sort by ``id`` so paging is
+    # deterministic even when the primary sort column has duplicate
+    # values (e.g. two nodes share a ``last_seen`` timestamp).
+    stmt = stmt.order_by(order_clause, asc(GraphNode.id)).limit(limit).offset(offset)
+
+    result = await session.execute(stmt)
+    return [
+        TopologyNodeListEntry(
+            id=row.id,
+            kind=row.kind,
+            name=row.name,
+            target_id=row.target_id,
+            first_seen=row.first_seen,
+            last_seen=row.last_seen,
+            discovered_by=row.discovered_by,
+            children_count=row.children_count,
+        )
+        for row in result.all()
+    ]
 
 
 # ---------------------------------------------------------------------------

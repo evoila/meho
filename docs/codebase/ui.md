@@ -354,6 +354,98 @@ content, CSRF rejection on missing/mismatched/forged tokens,
 positive control on matched token, and middleware-order sanity
 (/api/* passes through untouched).
 
+## Topology surface (Task #880)
+
+Initiative [#342](https://github.com/evoila/meho/issues/342) (G10.5
+Topology UI), Task [#880](https://github.com/evoila/meho/issues/880)
+(G10.5-T1) replaces the chassis stub at `/ui/topology` with the real
+**tabular view** + **per-node detail drawer**.
+
+### Routes
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET` | `/ui/topology` | Full-page tabular surface. Accepts `?sort=`, `?direction=`, `?kind=`, `?q=` (name substring), and `?view=` (reserved for G10.5-T2's graph mode). Returns the full page on a normal browser navigation and the `_table_rows.html` fragment when the request carries `HX-Request: true` (HTMX sort / filter swap). |
+| `GET` | `/ui/topology/node/{node_id}` | Per-node detail drawer fragment. Returns `_drawer.html` on a happy path; `_drawer_not_found.html` with HTTP 404 when the node id is unknown or belongs to another tenant. |
+
+### Module layout
+
+| Module | Purpose |
+| ------ | ------- |
+| `meho_backplane.ui.routes.topology` | Aggregate router. `build_router()` includes the table and detail sub-routers; mounted **before** the chassis stubs in `meho_backplane.ui.routes.build_router` so the real route wins FastAPI's first-match-wins path lookup. |
+| `meho_backplane.ui.routes.topology.table` | `GET /ui/topology` handler. Pulls the tenant inventory via `meho_backplane.topology.query.list_nodes` and branches on `HX-Request` to render either `topology/table.html` (full page) or `topology/_table_rows.html` (fragment). Sort + filter inputs are echoed back into the template context so the rendered HTML preserves operator selection. |
+| `meho_backplane.ui.routes.topology.detail` | `GET /ui/topology/node/{node_id}` handler. Resolves the node tenant-scoped, then pulls incoming + outgoing edges via a SQLite-portable ORM query (the substrate `list_edges` uses PG-only `jsonb_typeof` for its conflict filter; the drawer doesn't need conflict info, so the local helper is the right factoring) and the recent `audit_log` rows for the node's `target_id`. |
+
+### Substrate primitive
+
+`meho_backplane.topology.query.list_nodes` was added by T1 as the
+tenant-scoped paginated node listing every UI / CLI / MCP layer can
+share. ORM-based (not raw `text()`) so the helper runs on SQLite (the
+unit-test fixture) as well as Postgres (production). Closed sort-column
+enum (`name | kind | first_seen | last_seen`) is the SQL-injection
+guard -- the route layer validates the same set at the HTTP boundary,
+but the substrate refuses defensively because a non-route caller (CLI /
+MCP / REPL) may not have the same validation. Tenant scoping is
+unconditional: every statement starts with
+`WHERE graph_node.tenant_id = :tenant_id`; no filter combination
+overrides it. Cross-tenant isolation is enforced at the SQL layer, not
+the template.
+
+### Templates
+
+| Template | Purpose |
+| -------- | ------- |
+| `topology/table.html` | Full-page surface. Extends `base.html`; renders the filter bar + sortable column headers + the multi-row checkbox `<tbody>` + the `#node-drawer` slot. Alpine.js holds the selection state (`x-data="{ selected: new Set() }"`) so a future bulk-action button reads selection without a template rewrite. |
+| `topology/_table_rows.html` | `<tbody>` fragment swapped in by HTMX on a sort / filter change. Idempotent shape — re-rendered standalone on an HTMX request or included from the full page on a browser nav. |
+| `topology/_drawer.html` | Drawer fragment with node properties (id, kind, name, target_id, first_seen, last_seen, discovered_by, raw JSON), outgoing + incoming edges, recent operations on the node's target (empty for inner graph nodes with no `target_id`), and the "Show dependents" link handing off to T2/T3's graph view. |
+| `topology/_drawer_not_found.html` | 404 drawer fragment for an unknown / cross-tenant node id. Same outer `aside#node-drawer` shape so the HTMX `outerHTML` swap remains semantically consistent. |
+
+### HTMX wiring
+
+* **Sort + filter on `/ui/topology`** — the filter form uses
+  `hx-get="/ui/topology"` + `hx-target="#topology-table-body"` +
+  `hx-trigger="input changed delay:300ms from:find input, change from:find select"`
+  so a typed search character or a dropdown change triggers a single
+  debounced fetch returning only the `<tbody>` partial.
+  `hx-push-url="true"` updates the browser URL so a copy/paste
+  reproduces the filtered view. Column headers use the same shape:
+  the `href` is the next sort URL the `next_direction_for` Jinja
+  closure computes.
+* **Row "view" buttons on each row** — `hx-get="/ui/topology/node/{id}"`
+  + `hx-target="#node-drawer"` + `hx-swap="outerHTML"` swaps the
+  drawer fragment in place without a full-page reload.
+* **HX-Request header branch** — the table handler reads
+  `request.headers["hx-request"]` to decide between the full page
+  and the fragment template. Per the
+  [HTMX 2 reference](https://htmx.org/reference/#request_headers),
+  HTMX sets `HX-Request: true` on every fetch its directives drive.
+
+### Cross-tenant isolation
+
+Every UI route reads `tenant_id` from the session-bound
+`UISessionContext`; no query parameter or path segment ever carries a
+tenant id. The substrate `list_nodes` and the local detail-route helpers
+all start with `WHERE graph_node.tenant_id = :tenant_id` or its edge /
+audit-log counterpart. A cross-tenant node id surfaces as 404, never as
+a render of the other tenant's data — the tenant boundary is opaque to
+the caller. The
+[chassis smoke suite](../../backend/tests/test_ui_chassis_smoke.py) and
+the [topology suite](../../backend/tests/test_ui_topology_table.py)
+pin both invariants.
+
+### Known limits
+
+* **Parents column is a placeholder** — T1 ships the column header +
+  empty cell so the table reserves the space; the immediate-parent
+  projection wires when the substrate helper grows a `parents`
+  projection or T3's dependents overlay lands.
+* **Multi-row select is client-side only** — Alpine.js holds the
+  selection set. T1 doesn't ship a bulk-action endpoint; the selection
+  state is exposed for a future button to consume.
+* **No graph view yet** — `view=table` is the only mode T1 honours.
+  T2 (#881) adds `view=graph` and switches routing on the query
+  parameter.
+
 ## Known issues / open items
 
 - **`static/dist/tailwind.css` is missing on first uvicorn start in

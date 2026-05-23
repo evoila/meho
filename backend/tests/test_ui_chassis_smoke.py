@@ -99,12 +99,20 @@ _AUTHORIZATION_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/auth"
 _TOKEN_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/token"
 _END_SESSION_ENDPOINT = f"{DEFAULT_ISSUER}/protocol/openid-connect/logout"
 
-#: Five surface routes the chassis sidebar links to and the stubs
-#: register. The Initiative #337 work-item #5 enumerates these exact
-#: URLs; the chassis smoke test pins them so a future surface
-#: Initiative renaming the path triggers an explicit test break (not
-#: a silent sidebar-vs-route divergence).
+#: Five surface routes the chassis sidebar links to. Initiative #337
+#: work-item #5 enumerates these exact URLs; the chassis smoke test
+#: pins them so a future surface Initiative renaming the path triggers
+#: an explicit test break (not a silent sidebar-vs-route divergence).
 _SURFACE_ROUTES = ("/ui/broadcast", "/ui/knowledge", "/ui/topology", "/ui/connectors", "/ui/memory")
+
+#: Subset of :data:`_SURFACE_ROUTES` that still render the chassis
+#: "Coming soon" stub. ``/ui/topology`` is omitted because Initiative
+#: #342 Task #880 (G10.5-T1) replaced the stub with the real table
+#: view; G10.1-G10.4 will trim this tuple further as their surface
+#: Initiatives land. The chassis smoke test still pins the sidebar
+#: links via :data:`_SURFACE_ROUTES` so a sidebar-vs-route divergence
+#: surfaces explicitly.
+_STUB_SURFACE_ROUTES = ("/ui/broadcast", "/ui/knowledge", "/ui/connectors", "/ui/memory")
 
 
 @pytest.fixture(autouse=True)
@@ -390,9 +398,16 @@ def test_dashboard_authenticated_renders_console_html() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("route", _SURFACE_ROUTES)
+@pytest.mark.parametrize("route", _STUB_SURFACE_ROUTES)
 def test_surface_stub_returns_placeholder(route: str) -> None:
-    """Each of the five surface stubs renders the ``Coming soon`` placeholder."""
+    """Each remaining surface stub renders the ``Coming soon`` placeholder.
+
+    ``/ui/topology`` is excluded -- the chassis stub is replaced by
+    Initiative #342 Task #880 (G10.5-T1), so the route now returns
+    the real tabular surface. Tests for that surface live in
+    :mod:`backend.tests.test_ui_topology_table`. The remaining four
+    surfaces stay stubs until their own G10.x Initiatives land.
+    """
     session_id = _seed_session_sync()
     with respx.mock(assert_all_called=False):
         client = TestClient(_build_app(), follow_redirects=False)

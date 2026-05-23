@@ -2312,6 +2312,19 @@ type McpDispatchMcpPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// UiAuthCallbackUiAuthCallbackGetParams defines parameters for UiAuthCallbackUiAuthCallbackGet.
+type UiAuthCallbackUiAuthCallbackGetParams struct {
+	Code             *string `form:"code,omitempty" json:"code,omitempty"`
+	State            *string `form:"state,omitempty" json:"state,omitempty"`
+	Error            *string `form:"error,omitempty" json:"error,omitempty"`
+	ErrorDescription *string `form:"error_description,omitempty" json:"error_description,omitempty"`
+}
+
+// UiAuthLoginUiAuthLoginGetParams defines parameters for UiAuthLoginUiAuthLoginGet.
+type UiAuthLoginUiAuthLoginGetParams struct {
+	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
+}
+
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
@@ -2707,10 +2720,10 @@ type ClientInterface interface {
 	UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthCallbackUiAuthCallbackGet request
-	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthLoginUiAuthLoginGet request
-	UiAuthLoginUiAuthLoginGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiAuthLoginUiAuthLoginGet(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiAuthLogoutUiAuthLogoutGet request
 	UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3634,8 +3647,8 @@ func (c *Client) UiDashboardUiGet(ctx context.Context, reqEditors ...RequestEdit
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAuthCallbackUiAuthCallbackGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAuthCallbackUiAuthCallbackGetRequest(c.Server)
+func (c *Client) UiAuthCallbackUiAuthCallbackGet(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthCallbackUiAuthCallbackGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -3646,8 +3659,8 @@ func (c *Client) UiAuthCallbackUiAuthCallbackGet(ctx context.Context, reqEditors
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiAuthLoginUiAuthLoginGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiAuthLoginUiAuthLoginGetRequest(c.Server)
+func (c *Client) UiAuthLoginUiAuthLoginGet(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiAuthLoginUiAuthLoginGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -7485,7 +7498,7 @@ func NewUiDashboardUiGetRequest(server string) (*http.Request, error) {
 }
 
 // NewUiAuthCallbackUiAuthCallbackGetRequest generates requests for UiAuthCallbackUiAuthCallbackGet
-func NewUiAuthCallbackUiAuthCallbackGetRequest(server string) (*http.Request, error) {
+func NewUiAuthCallbackUiAuthCallbackGetRequest(server string, params *UiAuthCallbackUiAuthCallbackGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -7503,6 +7516,76 @@ func NewUiAuthCallbackUiAuthCallbackGetRequest(server string) (*http.Request, er
 		return nil, err
 	}
 
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Code != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "code", runtime.ParamLocationQuery, *params.Code); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Error != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error", runtime.ParamLocationQuery, *params.Error); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ErrorDescription != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "error_description", runtime.ParamLocationQuery, *params.ErrorDescription); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
@@ -7512,7 +7595,7 @@ func NewUiAuthCallbackUiAuthCallbackGetRequest(server string) (*http.Request, er
 }
 
 // NewUiAuthLoginUiAuthLoginGetRequest generates requests for UiAuthLoginUiAuthLoginGet
-func NewUiAuthLoginUiAuthLoginGetRequest(server string) (*http.Request, error) {
+func NewUiAuthLoginUiAuthLoginGetRequest(server string, params *UiAuthLoginUiAuthLoginGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -7528,6 +7611,28 @@ func NewUiAuthLoginUiAuthLoginGetRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.ReturnTo != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "return_to", runtime.ParamLocationQuery, *params.ReturnTo); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -7979,10 +8084,10 @@ type ClientWithResponsesInterface interface {
 	UiDashboardUiGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiDashboardUiGetResponse, error)
 
 	// UiAuthCallbackUiAuthCallbackGetWithResponse request
-	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
+	UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error)
 
 	// UiAuthLoginUiAuthLoginGetWithResponse request
-	UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error)
+	UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error)
 
 	// UiAuthLogoutUiAuthLogoutGetWithResponse request
 	UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error)
@@ -9327,7 +9432,7 @@ func (r UiDashboardUiGetResponse) StatusCode() int {
 type UiAuthCallbackUiAuthCallbackGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *interface{}
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -9349,7 +9454,7 @@ func (r UiAuthCallbackUiAuthCallbackGetResponse) StatusCode() int {
 type UiAuthLoginUiAuthLoginGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *interface{}
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -9371,7 +9476,6 @@ func (r UiAuthLoginUiAuthLoginGetResponse) StatusCode() int {
 type UiAuthLogoutUiAuthLogoutGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *interface{}
 }
 
 // Status returns HTTPResponse.Status
@@ -10176,8 +10280,8 @@ func (c *ClientWithResponses) UiDashboardUiGetWithResponse(ctx context.Context, 
 }
 
 // UiAuthCallbackUiAuthCallbackGetWithResponse request returning *UiAuthCallbackUiAuthCallbackGetResponse
-func (c *ClientWithResponses) UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error) {
-	rsp, err := c.UiAuthCallbackUiAuthCallbackGet(ctx, reqEditors...)
+func (c *ClientWithResponses) UiAuthCallbackUiAuthCallbackGetWithResponse(ctx context.Context, params *UiAuthCallbackUiAuthCallbackGetParams, reqEditors ...RequestEditorFn) (*UiAuthCallbackUiAuthCallbackGetResponse, error) {
+	rsp, err := c.UiAuthCallbackUiAuthCallbackGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -10185,8 +10289,8 @@ func (c *ClientWithResponses) UiAuthCallbackUiAuthCallbackGetWithResponse(ctx co
 }
 
 // UiAuthLoginUiAuthLoginGetWithResponse request returning *UiAuthLoginUiAuthLoginGetResponse
-func (c *ClientWithResponses) UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error) {
-	rsp, err := c.UiAuthLoginUiAuthLoginGet(ctx, reqEditors...)
+func (c *ClientWithResponses) UiAuthLoginUiAuthLoginGetWithResponse(ctx context.Context, params *UiAuthLoginUiAuthLoginGetParams, reqEditors ...RequestEditorFn) (*UiAuthLoginUiAuthLoginGetResponse, error) {
+	rsp, err := c.UiAuthLoginUiAuthLoginGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -12069,12 +12173,12 @@ func ParseUiAuthCallbackUiAuthCallbackGetResponse(rsp *http.Response) (*UiAuthCa
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest interface{}
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON422 = &dest
 
 	}
 
@@ -12095,12 +12199,12 @@ func ParseUiAuthLoginUiAuthLoginGetResponse(rsp *http.Response) (*UiAuthLoginUiA
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest interface{}
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON422 = &dest
 
 	}
 
@@ -12118,16 +12222,6 @@ func ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp *http.Response) (*UiAuthLogout
 	response := &UiAuthLogoutUiAuthLogoutGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest interface{}
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
 	}
 
 	return response, nil

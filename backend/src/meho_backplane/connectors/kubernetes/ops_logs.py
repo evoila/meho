@@ -75,11 +75,13 @@ __all__ = [
 #: log line length.
 MAX_TAIL_LINES = 5000
 
-#: 1 MiB serialised body cap. The dispatcher's ``PassThroughReducer``
-#: lands the returned dict verbatim into
-#: :attr:`OperationResult.result`; large log payloads inflate the
-#: JSONFlux reducer's reduction overhead linearly and blow past the
-#: audit row's display size. 1 MiB matches the operator's typical
+#: 1 MiB serialised body cap. The dispatcher's default
+#: :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+#: materializes the returned ``lines`` collection into a
+#: :class:`~meho_backplane.connectors.schemas.ResultHandle` once it
+#: crosses the threshold; capping the body keeps reduction overhead
+#: bounded and the payload below the audit row's display size. 1 MiB
+#: matches the operator's typical
 #: terminal scrollback and the MCP envelope's practical payload
 #: ceiling (no hard limit, but >1 MB choices stall clients).
 MAX_BODY_BYTES = 1024 * 1024
@@ -154,7 +156,8 @@ K8S_LOGS_PARAMETER_SCHEMA: dict[str, Any] = {
 
 
 #: Informational response schema for the meta-tools. The dispatcher's
-#: pass-through reducer does not validate outbound payloads in v0.2.
+#: default reducer does not validate outbound payloads against this
+#: schema; it is descriptive metadata for ``describe_operation``.
 K8S_LOGS_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {

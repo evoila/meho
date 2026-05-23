@@ -892,9 +892,13 @@ async def bind9_config_backup(
     Returns ``{backup_id, path, rows, total, op_class, state_after}``;
     ``rows`` is the listing (one row per existing ``.tar.gz`` file
     with ``{id, path, size, modified}``); ``total`` is the un-truncated
-    count. A future JSONFlux reducer reads ``rows`` + ``total`` and
-    swaps the row list for a result handle when ``total > 20`` -- the
-    K8s precedent (``ops_core.py``) is what this op extends.
+    count. The dispatcher's default reducer
+    (:class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
+    installed in ``main.py`` via ``set_default_reducer``) reads the
+    ``rows`` collection and swaps it for a result handle once it crosses
+    the materialization threshold -- the K8s precedent
+    (``ops_core.py``) is what this op extends. See
+    ``docs/architecture/jsonflux.md``.
 
     ``op_class="write"`` because the op creates an artifact, but the
     artifact lives outside ``/etc/bind/`` so the audit row carries
@@ -1100,8 +1104,8 @@ BIND9_CONFIG_BACKUP_LLM_INSTRUCTIONS: dict[str, Any] = {
         "{'backup_id': <timestamp[-tag]>, 'path': <abs tar.gz path>, "
         "'rows': [{id, path, size, modified}, ...] newest-first, "
         "'total': <int>, 'op_class': 'write', 'state_after': "
-        "<backup_id>}. The future JSONFlux reducer swaps ``rows`` for "
-        "a result handle when ``total > 20``."
+        "<backup_id>}. The dispatcher's default JsonFluxReducer swaps "
+        "``rows`` for a result handle once it crosses the threshold."
     ),
 }
 

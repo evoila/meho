@@ -36,12 +36,14 @@ Wire shape conventions
 The list handlers emit ``{"rows": [...], "total": N}`` plus an optional
 ``next_continue`` key when the server signals more pages via
 ``V1ListMeta._continue``. T2's module docstring spells out the
-rationale: connector handlers stay reducer-agnostic (raw rows + total),
-and the v0.2 substrate's :class:`PassThroughReducer` lands the dict
-verbatim into :attr:`OperationResult.result`. A future JSONFlux reducer
-owns set-shaped truncation + handle creation; the ``next_continue``
-token is the same server-side cursor the operator can pass back as
-``continue_token`` for the next page.
+rationale: connector handlers stay reducer-agnostic (raw rows + total).
+The dispatcher's default
+:class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(installed in ``main.py`` via ``set_default_reducer``) owns set-shaped
+truncation + handle creation; small payloads pass through verbatim into
+:attr:`OperationResult.result`. The ``next_continue`` token is the same
+server-side cursor the operator can pass back as ``continue_token`` for
+the next page. See ``docs/architecture/jsonflux.md``.
 
 The ``info`` handlers emit a flat dict structured around the API
 object's spec + status. Pod info includes container statuses (with

@@ -27,6 +27,7 @@ dependencies = [
     "packaging>=24.0",
     "python-frontmatter>=1.2.0",
     "jinja2>=3.1.6",
+    "google-auth>=2.38",
     "duckdb>=1.4.3",
     "pyarrow>=21.0.0",
     "msgspec>=0.20.0",
@@ -250,6 +251,17 @@ ignore_missing_imports = true
 # walker module. Drop if upstream adds stubs.
 [[tool.mypy.overrides]]
 module = ["frontmatter.*"]
+ignore_missing_imports = true
+
+# google-auth (G3.7-T4 #845) ships partial type stubs (``google-auth``
+# bundles ``google.auth._credentials_base`` etc. with ``py.typed``
+# present in some sub-packages), but ``google.auth.impersonated_credentials``
+# and the transport layer remain untyped at the method level. The
+# ``GcloudConnector._fetch_token_sync`` method localises all
+# ``google.auth.*`` calls to one place. Whitelisting the full tree keeps
+# strict mode biting on every other dependency.
+[[tool.mypy.overrides]]
+module = ["google.auth.*"]
 ignore_missing_imports = true
 
 # tabulate (used by the vendored JSONFlux query engine, #752) ships no

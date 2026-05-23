@@ -1,0 +1,173 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Per-node detail drawer fragment (Initiative #342 Task #880 work
+  item #3). Rendered by ``GET /ui/topology/node/{node_id}`` and
+  swapped into ``#node-drawer`` via HTMX ``hx-target`` + ``hx-swap``
+  outerHTML on a row's "View" button click.
+
+  Sections:
+    1. Header -- node identity (kind badge + name) + a close button
+       that empties the drawer client-side (no extra round trip).
+    2. Properties -- key fields rendered as a description list, plus
+       the raw JSON properties bag in a <pre> for forensic shape.
+    3. Outgoing + incoming edges -- per-direction list with edge
+       kind + neighbour name + source (auto/curated).
+    4. Recent operations -- the last few audit_log rows on this
+       node's target (empty when target_id is null).
+    5. "Show dependents" link -- hands off to the future T3 graph
+       view; URL contract surfaces today so the link works as soon
+       as T3 lands.
+-#}
+<aside
+  id="node-drawer"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-label="Node detail drawer"
+>
+  <div class="card-body space-y-3">
+    <header class="flex items-start justify-between gap-2">
+      <div>
+        <h2 class="card-title text-base">
+          <span class="badge badge-ghost badge-sm">{{ node.kind }}</span>
+          <span class="font-mono">{{ node.name }}</span>
+        </h2>
+        <p class="text-xs opacity-70">Node detail</p>
+      </div>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        aria-label="Close node detail drawer"
+        hx-get="/ui/topology/node-drawer-empty"
+        hx-swap="outerHTML"
+        hx-target="#node-drawer"
+        onclick="
+          const el = document.getElementById('node-drawer');
+          if (el) {
+            el.outerHTML = '<aside id=\'node-drawer\' class=\'card bg-base-100 border-base-300 border shadow-sm\' aria-live=\'polite\' aria-label=\'Node detail drawer\'><div class=\'card-body text-sm opacity-70\'>Select a row to inspect a node.</div></aside>';
+          }
+          return false;
+        "
+      >
+        Close
+      </button>
+    </header>
+
+    {# ---------- Properties ---------- #}
+    <section aria-label="Node properties">
+      <h3 class="text-sm font-semibold uppercase opacity-60">Properties</h3>
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+        <dt class="opacity-60">id</dt>
+        <dd class="font-mono">{{ node.id }}</dd>
+        <dt class="opacity-60">kind</dt>
+        <dd>{{ node.kind }}</dd>
+        <dt class="opacity-60">name</dt>
+        <dd class="font-mono">{{ node.name }}</dd>
+        <dt class="opacity-60">discovered_by</dt>
+        <dd>{{ node.discovered_by }}</dd>
+        {% if node.target_id %}
+          <dt class="opacity-60">target_id</dt>
+          <dd class="font-mono">{{ node.target_id }}</dd>
+        {% endif %}
+        <dt class="opacity-60">first_seen</dt>
+        <dd>{{ node.first_seen.isoformat() }}</dd>
+        <dt class="opacity-60">last_seen</dt>
+        <dd>
+          {% if node.last_seen %}{{ node.last_seen.isoformat() }}{% else %}<span class="opacity-50">—</span>{% endif %}
+        </dd>
+      </dl>
+      {% if node.properties %}
+        <details class="mt-2">
+          <summary class="cursor-pointer text-xs opacity-70">Raw properties JSON</summary>
+          <pre class="mt-2 max-h-48 overflow-auto rounded bg-base-200 p-2 text-xs">{{ node.properties | tojson(indent=2) }}</pre>
+        </details>
+      {% endif %}
+    </section>
+
+    {# ---------- Outgoing edges ---------- #}
+    <section aria-label="Outgoing edges">
+      <h3 class="text-sm font-semibold uppercase opacity-60">
+        Outgoing edges ({{ outgoing_edges | length }})
+      </h3>
+      {% if outgoing_edges %}
+        <ul class="space-y-1 text-sm">
+          {% for edge in outgoing_edges %}
+            <li class="flex items-center gap-2">
+              <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
+              <span class="opacity-60">&rarr;</span>
+              <span class="font-mono">{{ edge.to_endpoint.name }}</span>
+              <span class="badge badge-ghost badge-xs">{{ edge.to_endpoint.kind }}</span>
+              <span class="text-xs opacity-50">({{ edge.source }})</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-sm opacity-60">No outgoing edges.</p>
+      {% endif %}
+    </section>
+
+    {# ---------- Incoming edges ---------- #}
+    <section aria-label="Incoming edges">
+      <h3 class="text-sm font-semibold uppercase opacity-60">
+        Incoming edges ({{ incoming_edges | length }})
+      </h3>
+      {% if incoming_edges %}
+        <ul class="space-y-1 text-sm">
+          {% for edge in incoming_edges %}
+            <li class="flex items-center gap-2">
+              <span class="font-mono">{{ edge.from_endpoint.name }}</span>
+              <span class="badge badge-ghost badge-xs">{{ edge.from_endpoint.kind }}</span>
+              <span class="opacity-60">&rarr;</span>
+              <span class="badge badge-outline badge-xs">{{ edge.kind }}</span>
+              <span class="text-xs opacity-50">({{ edge.source }})</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-sm opacity-60">No incoming edges.</p>
+      {% endif %}
+    </section>
+
+    {# ---------- Recent operations ---------- #}
+    <section aria-label="Recent operations">
+      <h3 class="text-sm font-semibold uppercase opacity-60">
+        Recent operations ({{ recent_ops | length }})
+      </h3>
+      {% if recent_ops %}
+        <ul class="space-y-1 text-sm">
+          {% for op in recent_ops %}
+            <li class="flex items-center gap-2">
+              <time class="text-xs opacity-70" datetime="{{ op.occurred_at.isoformat() }}">
+                {{ op.occurred_at.isoformat() }}
+              </time>
+              <span class="badge badge-outline badge-xs">{{ op.method }}</span>
+              <span class="font-mono text-xs">{{ op.path }}</span>
+              <span class="text-xs opacity-50">{{ op.status_code }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% elif node.target_id %}
+        <p class="text-sm opacity-60">No operations recorded yet.</p>
+      {% else %}
+        <p class="text-sm opacity-60">
+          Inner graph node (no <code>target_id</code>); operations are tracked at the
+          target level only.
+        </p>
+      {% endif %}
+    </section>
+
+    {# ---------- Show dependents ----------
+       Hands off to the T3 graph view; the URL contract is fixed
+       here so the link works as soon as T3 (#882) lands.
+    #}
+    <footer class="mt-2 flex justify-end">
+      <a
+        href="{{ dependents_href }}"
+        class="btn btn-primary btn-xs"
+        aria-label="Show graph view rooted at {{ node.name }}"
+      >
+        Show dependents &rarr;
+      </a>
+    </footer>
+  </div>
+</aside>

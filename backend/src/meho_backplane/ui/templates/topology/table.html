@@ -1,0 +1,180 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Topology tabular surface (Initiative #342
+  Task #880). Extends ``base.html`` so the chrome (navbar, sidebar,
+  footer) matches the rest of the console.
+
+  Layout (top-down):
+    * Filter bar -- kind <select> + free-text name search, each
+      HTMX-bound to ``/ui/topology`` with ``hx-target`` swapping the
+      <tbody> (id="topology-table-body") so re-renders skip the
+      surrounding chrome.
+    * Sortable column headers -- each header is an <a> whose href
+      flips the sort direction (asc->desc or vice versa) via the
+      ``next_direction_for`` Jinja closure the route handler binds
+      into the context.
+    * Multi-row checkbox <tbody> -- one checkbox per row plus a
+      "select all on page" master checkbox in the header. Selection
+      is purely client-side via Alpine.js for T1 (the bulk-action
+      endpoints land with T2/T3); the Alpine model is exposed so a
+      future bulk-action button reads selection state without a
+      template rewrite.
+    * Empty ``#node-drawer`` slot -- drawer fragments swap into it
+      when a row's "view" button is clicked.
+
+  HTMX wiring:
+    * Filter <select>/<input>: ``hx-get`` to ``/ui/topology`` with
+      ``hx-include`` so every filter+sort value rides along on each
+      change, ``hx-target="#topology-table-body"`` to swap only the
+      table body, ``hx-trigger`` debounced 300ms on input changes so
+      keystrokes don't fire a request per character. ``hx-push-url``
+      so the browser URL reflects the active filter and a copy/paste
+      reproduces it.
+    * Row "view" buttons: ``hx-get`` to
+      ``/ui/topology/node/{node_id}`` with ``hx-target="#node-drawer"``.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+  x-data="{ selected: new Set() }"
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Topology</h1>
+      <p class="text-sm opacity-70">
+        Tenant inventory of nodes (targets, VMs, hosts, clusters, networks, datastores, ...).
+      </p>
+    </div>
+    <div class="text-sm opacity-70">
+      <span x-text="'Selected: ' + selected.size" aria-live="polite"></span>
+    </div>
+  </header>
+
+  {# ---------- Filter bar ---------- #}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-get="/ui/topology"
+    hx-target="#topology-table-body"
+    hx-swap="outerHTML"
+    hx-trigger="input changed delay:300ms from:find input, change from:find select"
+    hx-include="closest form"
+    hx-push-url="true"
+    role="search"
+    aria-label="Filter topology nodes"
+    onsubmit="return false;"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-4">
+      <label class="form-control md:col-span-2">
+        <span class="label-text">Search by name</span>
+        <input
+          type="search"
+          name="q"
+          value="{{ name_filter }}"
+          placeholder="Substring match (case-insensitive)"
+          class="input input-bordered input-sm"
+          aria-label="Filter nodes by name"
+        />
+      </label>
+      <label class="form-control">
+        <span class="label-text">Kind</span>
+        <select
+          name="kind"
+          class="select select-bordered select-sm"
+          aria-label="Filter nodes by kind"
+        >
+          <option value="">All kinds</option>
+          {% for option in node_kind_options %}
+            <option value="{{ option }}" {% if option == kind_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      {# Hidden inputs carry the current sort + direction so the next
+         HTMX swap preserves them on top of the filter change. #}
+      <input type="hidden" name="sort" value="{{ sort.value }}" />
+      <input type="hidden" name="direction" value="{{ direction.value }}" />
+    </div>
+  </form>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          <th class="w-8">
+            <input
+              type="checkbox"
+              class="checkbox checkbox-sm"
+              aria-label="Select all visible nodes"
+              x-on:change="
+                const rows = $el.closest('table').querySelectorAll('tbody input[type=checkbox][data-node-id]');
+                if ($el.checked) {
+                  rows.forEach(r => { r.checked = true; selected.add(r.dataset.nodeId); });
+                } else {
+                  rows.forEach(r => { r.checked = false; selected.delete(r.dataset.nodeId); });
+                }
+                selected = new Set(selected);
+              "
+            />
+          </th>
+          {%- set columns = [
+            ("name", "Name"),
+            ("kind", "Kind"),
+            ("last_seen", "Last seen"),
+            ("first_seen", "First seen"),
+          ] -%}
+          {% for col_value, col_label in columns %}
+            {%- set next_dir = next_direction_for(col_value) -%}
+            <th>
+              <a
+                href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter }}{% endif %}{% if name_filter %}&q={{ name_filter }}{% endif %}"
+                hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter }}{% endif %}{% if name_filter %}&q={{ name_filter }}{% endif %}"
+                hx-target="#topology-table-body"
+                hx-swap="outerHTML"
+                hx-push-url="true"
+                class="link link-hover"
+                aria-label="Sort by {{ col_label }} {{ next_dir }}ending"
+              >
+                {{ col_label }}
+                {% if sort.value == col_value %}
+                  <span aria-hidden="true">{% if direction.value == "asc" %}&uarr;{% else %}&darr;{% endif %}</span>
+                {% endif %}
+              </a>
+            </th>
+          {% endfor %}
+          <th>Product</th>
+          <th>Parents</th>
+          <th class="text-right">Children</th>
+          <th class="w-12"></th>
+        </tr>
+      </thead>
+      {% include "topology/_table_rows.html" %}
+    </table>
+  </div>
+
+  {# ---------- Drawer slot ----------
+     T1 lands the slot; row "view" buttons swap the drawer fragment
+     into it. The drawer renders to the right of the table on
+     ``lg:`` viewports via Tailwind grid + col-span; on smaller
+     viewports it stacks below.
+  -#}
+  <aside
+    id="node-drawer"
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    aria-live="polite"
+    aria-label="Node detail drawer"
+  >
+    <div class="card-body text-sm opacity-70">
+      Select a row's <em>view</em> button to inspect a node.
+    </div>
+  </aside>
+</section>
+{% endblock %}

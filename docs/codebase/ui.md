@@ -178,10 +178,10 @@ Round-trip shape:
 3. **Keycloak authenticates the operator.** Browser arrives at
    `/ui/auth/callback?code=...&state=...`.
 4. **`/ui/auth/callback`.** `exchange_code_for_tokens` pops the
-   verifier from the store (single-use), POSTs `code + code_verifier
-   + client_secret` to Keycloak's token endpoint, and returns the
-   access + refresh tokens. The callback then validates the access
-   token through the chassis JWT chain
+   verifier from the store (single-use), POSTs
+   `code+code_verifier+client_secret` to Keycloak's token endpoint,
+   and returns the access + refresh tokens. The callback then
+   validates the access token through the chassis JWT chain
    (`verify_jwt_for_audience`) so the BFF inherits issuer / audience
    / sub / tenant_id / tenant_role defences; on success it calls
    `create_session` to write the encrypted row and sets the

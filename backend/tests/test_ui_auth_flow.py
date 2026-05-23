@@ -368,6 +368,13 @@ def test_callback_creates_session_and_sets_cookie() -> None:
     assert "code_verifier=" in posted_body
     assert "grant_type=authorization_code" in posted_body
     assert "resource=https%3A%2F%2Fmeho.test%2Fapi" in posted_body
+    # Keycloak enforces exact-match on ``redirect_uri`` at the token
+    # endpoint (RFC 6749 §4.1.3); a regression that drops the field
+    # from the body breaks the exchange but the existing substring
+    # asserts above wouldn't notice. ``parse_qs`` returns
+    # percent-decoded values, so we compare against the bare URI.
+    posted_params = parse_qs(posted_body)
+    assert posted_params["redirect_uri"] == [_REDIRECT_URI]
     # ``Authorization: Basic <base64(client_id:client_secret)>`` --
     # the header is present (length > 'Basic '), but we deliberately
     # do not unpack the value because the secret-leak sweep in
@@ -568,6 +575,14 @@ def test_logout_without_cookie_still_redirects_and_clears() -> None:
     # the operator may have under a different tab also gets a
     # clean termination.
     assert response.headers["location"].startswith(_END_SESSION_ENDPOINT)
+    # The "and clears" part of the test name -- a stale browser
+    # cookie under the same name MUST be emitted with an expiry
+    # in the past so the next request lands without a cookie. A
+    # regression where ``_handle_logout`` skips the clear on the
+    # no-cookie path would leave a phantom cookie alive.
+    set_cookie = response.headers.get("set-cookie", "").lower()
+    assert f"{SESSION_COOKIE_NAME.lower()}=" in set_cookie
+    assert "max-age=0" in set_cookie or "expires=" in set_cookie
 
 
 # ---------------------------------------------------------------------------

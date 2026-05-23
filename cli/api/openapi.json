@@ -3723,6 +3723,153 @@
         }
       }
     },
+    "/ui/topology": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Ui Topology Table",
+        "description": "``GET /ui/topology[?view=table&sort=...&direction=...&kind=...&q=...]``.\n\n``view`` is accepted but unused in T1 (the only mode is the\ntable); T2 (#881) will branch on ``view`` to render the\nCytoscape graph instead. Documenting the param in the\nsignature now keeps the URL contract forward-compatible.",
+        "operationId": "ui_topology_table_ui_topology_get",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_SortColumn",
+              "default": "name"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_SortDirection",
+              "default": "asc"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 16,
+              "nullable": true,
+              "title": "View"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/node/{node_id}": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Ui Topology Node Detail",
+        "description": "``GET /ui/topology/node/{node_id}``.\n\nResolves the node tenant-scoped, then pulls the incoming +\noutgoing edges via :func:`list_edges` and the recent\noperations directly from ``audit_log``. Renders the\n``topology/_drawer.html`` fragment with the full context.",
+        "operationId": "ui_topology_node_detail_ui_topology_node__node_id__get",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Node id does not exist in this tenant (or exists only for another tenant). Returns the not-found drawer fragment.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/broadcast": {
       "get": {
         "tags": [
@@ -3751,27 +3898,6 @@
         ],
         "summary": "Ui Stub Knowledge",
         "operationId": "ui_stub_knowledge_ui_knowledge_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/topology": {
-      "get": {
-        "tags": [
-          "ui-stubs"
-        ],
-        "summary": "Ui Stub Topology",
-        "operationId": "ui_stub_topology_ui_topology_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -7096,6 +7222,26 @@
         ],
         "title": "_EdgeEndpoint",
         "description": "Inbound JSON shape for one annotation endpoint.\n\nMirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:\n``name`` is required, ``kind`` is the optional disambiguator for a\nbare name that resolves to multiple :class:`GraphNode` rows in the\ntenant. Frozen so the route handler cannot accidentally rebind the\nfield; ``extra=\"forbid\"`` rejects typo'd keys at the boundary\n(``{from: {nme: ...}}`` is a 422, not a silently-ignored body)."
+      },
+      "_SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "kind",
+          "last_seen",
+          "first_seen"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
+      },
+      "_SortDirection": {
+        "type": "string",
+        "enum": [
+          "asc",
+          "desc"
+        ],
+        "title": "_SortDirection",
+        "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
       }
     }
   }

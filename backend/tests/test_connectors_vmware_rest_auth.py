@@ -34,11 +34,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from uuid import UUID
 
 import httpx
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -49,6 +51,44 @@ from meho_backplane.connectors.vmware_rest import (
     VmwareRestConnector,
     VsphereTargetLike,
 )
+from meho_backplane.settings import get_settings
+
+from ._vault_fakes import install_fake_client
+
+
+def _make_operator(raw_jwt: str = "") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface."""
+    return Operator(
+        sub="test-operator",
+        name=None,
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=UUID(int=0),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the chassis env vars ``Settings`` reads at construction time.
+
+    The live default loader's ``load_basic_credentials`` →
+    ``vault_client_for_operator`` calls ``get_settings()`` which eagerly
+    reads ``KEYCLOAK_*`` / ``VAULT_*``. The respx-only tests in this
+    module never reach Vault (they inject a stub loader), but the
+    live-read test below does, so pin the env for the whole module — the
+    same shape ``test_connectors_vault_creds.py`` uses.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -103,8 +143,8 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: VsphereTargetLike) -> dict[str, str]:
-    """Return canned credentials regardless of the target."""
+async def _stub_loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+    """Return canned credentials regardless of the target/operator."""
     return {"username": "svc-meho", "password": "stub-password"}
 
 
@@ -140,19 +180,60 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is VmwareRestConnector
 
 
-def test_default_session_loader_raises_deliberate_stub() -> None:
-    """The default Vault loader is a deliberate, clearly-labelled stub."""
-    import asyncio
+@pytest.mark.asyncio
+async def test_default_session_loader_does_live_vault_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default loader reads ``{username, password}`` from Vault, JWT-forwarded.
 
+    Replaces the former ``raises deliberate stub`` test: with G3.9-T2's
+    shared helper wired, the default loader performs the live KV-v2 read
+    under the operator's identity (rubric State 2). The in-process Vault
+    fake (``install_fake_client``) stands in for hvac so the unit lane
+    stays secret-free; the live Vault round-trip is the env-gated lab
+    smoke in ``tests/integration``.
+    """
     from meho_backplane.connectors.vmware_rest.session import (
         load_session_credentials_from_vault,
     )
 
-    async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"deliberate stub.*#214"):
-            await load_session_credentials_from_vault(_TARGET_A)
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"username": "svc-meho", "password": "vault-read-pw"},
+    )
 
-    asyncio.run(_check())
+    creds = await load_session_credentials_from_vault(_TARGET_A, _make_operator("op.jwt"))
+
+    assert creds == {"username": "svc-meho", "password": "vault-read-pw"}
+    # The operator's JWT was forwarded to Vault's JWT/OIDC login.
+    assert fake.auth.jwt.login_calls[-1]["jwt"] == "op.jwt"
+    # The read addressed the target's secret_ref under the default mount.
+    assert fake.secrets.kv.v2.read_calls[-1]["path"] == _TARGET_A.secret_ref
+
+
+@pytest.mark.asyncio
+async def test_default_session_loader_fails_closed_for_system_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A system-initiated call (empty raw_jwt) errors before touching Vault.
+
+    The shared helper's fail-closed carve-out: no operator JWT means no
+    operator-context read. Confirms the vmware default loader inherits
+    that contract rather than silently falling back.
+    """
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+    from meho_backplane.connectors.vmware_rest.session import (
+        load_session_credentials_from_vault,
+    )
+
+    fake = install_fake_client(monkeypatch)
+
+    with pytest.raises(VaultCredentialsReadError):
+        await load_session_credentials_from_vault(_TARGET_A, _make_operator(raw_jwt=""))
+
+    # Vault was never reached — no login, no read.
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +269,7 @@ async def test_auth_headers_establishes_session_and_returns_header() -> None:
 
     async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
         session_route = mock.post("/api/session").respond(200, json=token)
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        headers = await connector.auth_headers(_TARGET_A, _make_operator())
 
     assert session_route.called
     assert session_route.call_count == 1
@@ -209,8 +290,8 @@ async def test_auth_headers_reuses_cached_session_across_calls() -> None:
 
     async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
         session_route = mock.post("/api/session").respond(200, json=token)
-        h1 = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h2 = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        h1 = await connector.auth_headers(_TARGET_A, _make_operator())
+        h2 = await connector.auth_headers(_TARGET_A, _make_operator())
 
     assert h1 == h2 == {"vmware-api-session-id": token}
     # The load-bearing assertion — exactly one POST /api/session for two
@@ -233,8 +314,8 @@ async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
             200, json="token-for-b"
         )
 
-        h_a = await connector.auth_headers(_TARGET_A, raw_jwt="")
-        h_b = await connector.auth_headers(_TARGET_B, raw_jwt="")
+        h_a = await connector.auth_headers(_TARGET_A, _make_operator())
+        h_b = await connector.auth_headers(_TARGET_B, _make_operator())
 
     assert route_a.called and route_b.called
     assert h_a == {"vmware-api-session-id": "token-for-a"}
@@ -261,7 +342,7 @@ async def test_session_create_401_surfaces_runtime_error_with_target_name() -> N
     async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
         mock.post("/api/session").respond(401, json={"error": "invalid_credentials"})
         with pytest.raises(RuntimeError, match=r"vcenter-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, _make_operator())
 
     # The wrapped HTTPStatusError carries the 401 details.
     assert "401" in str(exc_info.value)
@@ -279,7 +360,7 @@ async def test_session_response_unexpected_shape_raises() -> None:
         # an empty object is the most common vcsim misbehaviour shape.
         mock.post("/api/session").respond(200, json={"unrelated": "field"})
         with pytest.raises(RuntimeError, match=r"vcenter-a"):
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, _make_operator())
 
     await connector.aclose()
 
@@ -297,7 +378,7 @@ async def test_session_legacy_object_shape_is_accepted_defensively() -> None:
 
     async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
         mock.post("/api/session").respond(200, json={"value": "legacy-shape-token"})
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        headers = await connector.auth_headers(_TARGET_A, _make_operator())
 
     assert headers == {"vmware-api-session-id": "legacy-shape-token"}
     await connector.aclose()
@@ -335,7 +416,7 @@ async def test_modern_session_endpoint_is_tried_first_no_fallback_on_200() -> No
 
     async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
         modern = mock.post("/api/session").respond(200, json="modern-path-token")
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        headers = await connector.auth_headers(_TARGET_A, _make_operator())
 
     assert headers == {"vmware-api-session-id": "modern-path-token"}
     assert modern.called and modern.call_count == 1
@@ -360,7 +441,7 @@ async def test_session_falls_back_to_legacy_path_on_modern_404() -> None:
         legacy = mock.post("/rest/com/vmware/cis/session").respond(
             200, json={"value": "legacy-path-token"}
         )
-        headers = await connector.auth_headers(_TARGET_A, raw_jwt="")
+        headers = await connector.auth_headers(_TARGET_A, _make_operator())
 
     assert modern.called and modern.call_count == 1
     assert legacy.called and legacy.call_count == 1
@@ -389,7 +470,7 @@ async def test_session_does_not_fall_back_on_401_from_modern_endpoint() -> None:
     async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
         modern = mock.post("/api/session").respond(401, json={"error": "invalid_credentials"})
         with pytest.raises(RuntimeError, match=r"vcenter-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, _make_operator())
 
     assert modern.called and modern.call_count == 1
     # The error message names the modern endpoint (the one that actually
@@ -409,7 +490,7 @@ async def test_session_legacy_path_404_surfaces_runtime_error_naming_legacy_path
         mock.post("/api/session").respond(404)
         mock.post("/rest/com/vmware/cis/session").respond(404)
         with pytest.raises(RuntimeError, match=r"vcenter-a") as exc_info:
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, _make_operator())
 
     # The last endpoint attempted is the one named — operators can see
     # in one log line that both paths failed.
@@ -450,8 +531,8 @@ async def test_aclose_revokes_against_legacy_path_when_fallback_was_used() -> No
             "https://vcenter-b.test.invalid/rest/com/vmware/cis/session"
         ).respond(204)
 
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
-        await connector.auth_headers(_TARGET_B, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, _make_operator())
+        await connector.auth_headers(_TARGET_B, _make_operator())
         await connector.aclose()
 
     # The load-bearing pair of assertions: each target was revoked at
@@ -469,7 +550,7 @@ async def test_aclose_revokes_against_legacy_path_when_fallback_was_used() -> No
 async def test_loader_missing_password_key_raises_clear_error() -> None:
     """A loader that returns a dict without 'password' surfaces a clear message."""
 
-    async def _bad_loader(_target: VsphereTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
         # Intentionally missing 'password'; a real production loader bug.
         return {"username": "svc-meho"}  # type: ignore[return-value]
 
@@ -478,7 +559,7 @@ async def test_loader_missing_password_key_raises_clear_error() -> None:
 
     async with respx.mock(base_url="https://vcenter-a.test.invalid"):
         with pytest.raises(RuntimeError, match=r"password"):
-            await connector.auth_headers(_TARGET_A, raw_jwt="")
+            await connector.auth_headers(_TARGET_A, _make_operator())
     await connector.aclose()
 
 
@@ -505,7 +586,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
     _patch_no_revoke_aclose(connector)
 
     with pytest.raises(NotImplementedError) as exc_info:
-        await connector.auth_headers(target, raw_jwt="")
+        await connector.auth_headers(target, _make_operator())
 
     assert "vcenter-per-user" in str(exc_info.value)
     assert auth_model in str(exc_info.value)
@@ -527,7 +608,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
 
     async with respx.mock(base_url="https://vc.test.invalid") as mock:
         mock.post("/api/session").respond(200, json="pre-g03-token")
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, _make_operator())
 
     assert headers == {"vmware-api-session-id": "pre-g03-token"}
     await connector.aclose()
@@ -549,7 +630,7 @@ async def test_auth_headers_accepts_enum_value_for_auth_model() -> None:
 
     async with respx.mock(base_url="https://vc.test.invalid") as mock:
         mock.post("/api/session").respond(200, json="enum-token")
-        headers = await connector.auth_headers(target, raw_jwt="")
+        headers = await connector.auth_headers(target, _make_operator())
 
     assert headers == {"vmware-api-session-id": "enum-token"}
     await connector.aclose()
@@ -571,8 +652,8 @@ async def test_aclose_revokes_every_cached_session() -> None:
         delete_a = mock.delete("https://vcenter-a.test.invalid/api/session").respond(204)
         delete_b = mock.delete("https://vcenter-b.test.invalid/api/session").respond(204)
 
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
-        await connector.auth_headers(_TARGET_B, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, _make_operator())
+        await connector.auth_headers(_TARGET_B, _make_operator())
         await connector.aclose()
 
     assert delete_a.called and delete_b.called
@@ -596,7 +677,7 @@ async def test_aclose_continues_on_revoke_failure() -> None:
         # The revoke leg fails with a transport error — connector swallows
         # and proceeds (lifespan shutdown must not block).
         mock.delete("/api/session").mock(side_effect=httpx.ConnectError("revoke failed"))
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, _make_operator())
         # The load-bearing invariant: aclose() returns cleanly.
         await connector.aclose()
 
@@ -613,7 +694,7 @@ async def test_aclose_continues_on_revoke_4xx() -> None:
         # vCenter's DELETE /api/session may 401 if the session expired
         # between the last call and shutdown; tear-down still proceeds.
         mock.delete("/api/session").respond(401)
-        await connector.auth_headers(_TARGET_A, raw_jwt="")
+        await connector.auth_headers(_TARGET_A, _make_operator())
         await connector.aclose()
 
     assert connector._clients == {}

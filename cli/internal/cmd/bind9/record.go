@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -71,19 +72,19 @@ func newRecordGetCmd() *cobra.Command {
 }
 
 func runRecordGet(cmd *cobra.Command, fqdn, recordType, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"fqdn": fqdn}
 	if recordType != "" {
 		params["type"] = recordType
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.record.get", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.record.get", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.record.get", r, jsonOut, printRecordGet)
+	return conn.Render(cmd, "bind9.record.get", r, jsonOut, printRecordGet)
 }
 
 // printRecordGet renders the record get result. Same row shape as
@@ -185,9 +186,9 @@ func newRecordAddCmd() *cobra.Command {
 }
 
 func runRecordAdd(cmd *cobra.Command, fqdn, ip, zone, recordType, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{
 		"fqdn": fqdn,
@@ -199,11 +200,11 @@ func runRecordAdd(cmd *cobra.Command, fqdn, ip, zone, recordType, targetName str
 	if recordType != "" {
 		params["type"] = recordType
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.record.add", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.record.add", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.record.add", r, jsonOut, printWriteResult)
+	return conn.Render(cmd, "bind9.record.add", r, jsonOut, printWriteResult)
 }
 
 // newRecordRemoveCmd returns `meho bind9 record remove <fqdn>`.
@@ -246,19 +247,19 @@ func newRecordRemoveCmd() *cobra.Command {
 }
 
 func runRecordRemove(cmd *cobra.Command, fqdn, zone, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"fqdn": fqdn}
 	if zone != "" {
 		params["zone"] = zone
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "bind9.record.remove", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "bind9.record.remove", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "bind9.record.remove", r, jsonOut, printWriteResult)
+	return conn.Render(cmd, "bind9.record.remove", r, jsonOut, printWriteResult)
 }
 
 // printWriteResult renders the canonical write-op result envelope

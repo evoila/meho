@@ -36,12 +36,14 @@ Wire shape conventions
 The list handlers emit ``{"rows": [...], "total": N}`` plus an optional
 ``next_continue`` key when the server signals more pages via
 ``V1ListMeta._continue``. T2's module docstring spells out the
-rationale: connector handlers stay reducer-agnostic (raw rows + total),
-and the v0.2 substrate's :class:`PassThroughReducer` lands the dict
-verbatim into :attr:`OperationResult.result`. A future JSONFlux reducer
-owns set-shaped truncation + handle creation; the ``next_continue``
-token is the same server-side cursor the operator can pass back as
-``continue_token`` for the next page.
+rationale: connector handlers stay reducer-agnostic (raw rows + total).
+The dispatcher's default
+:class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(installed in ``main.py`` via ``set_default_reducer``) owns set-shaped
+truncation + handle creation; small payloads pass through verbatim into
+:attr:`OperationResult.result`. The ``next_continue`` token is the same
+server-side cursor the operator can pass back as ``continue_token`` for
+the next page. See ``docs/architecture/jsonflux.md``.
 
 The ``info`` handlers emit a flat dict structured around the API
 object's spec + status. Pod info includes container statuses (with
@@ -101,6 +103,7 @@ if TYPE_CHECKING:
         V1Pod,
     )
 
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
@@ -658,6 +661,7 @@ def _next_continue_token(resp: Any) -> str | None:
 async def k8s_pod_list(
     connector: KubernetesConnector,
     target: KubernetesTargetLike,
+    operator: Operator,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """Handler for ``k8s.pod.list``.
@@ -667,10 +671,14 @@ async def k8s_pod_list(
     ``{rows, total, next_continue?}``; the ``next_continue`` key is
     only present when the server signalled more pages exist. Schema
     validation runs in the dispatcher before this handler is called.
+
+    ``operator`` is forwarded to
+    :meth:`KubernetesConnector._get_api_client` so a cold-cache
+    kubeconfig load runs under the operator's identity.
     """
     namespace: str | None = params.get("namespace")
     all_namespaces = bool(params.get("all_namespaces", False))
-    api_client = await connector._get_api_client(target)
+    api_client = await connector._get_api_client(target, operator)
     v1 = client.CoreV1Api(api_client)
     kwargs = _list_kwargs(params)
     if all_namespaces:
@@ -691,6 +699,7 @@ async def k8s_pod_list(
 async def k8s_pod_info(
     connector: KubernetesConnector,
     target: KubernetesTargetLike,
+    operator: Operator,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """Handler for ``k8s.pod.info``.
@@ -701,10 +710,14 @@ async def k8s_pod_info(
     differs from the input -- the prefix-resolution list response
     already contains the full :class:`V1Pod`, so the extra round-trip
     is skipped for the exact-name path.
+
+    ``operator`` is forwarded to
+    :meth:`KubernetesConnector._get_api_client` so a cold-cache
+    kubeconfig load runs under the operator's identity.
     """
     pod_name: str = params["pod_name"]
     namespace: str = params["namespace"]
-    api_client = await connector._get_api_client(target)
+    api_client = await connector._get_api_client(target, operator)
     v1 = client.CoreV1Api(api_client)
     pod = await resolve_pod_name(v1, namespace, pod_name)
     # The list-derived V1Pod carries the full spec + status by default,
@@ -717,6 +730,7 @@ async def k8s_pod_info(
 async def k8s_deployment_list(
     connector: KubernetesConnector,
     target: KubernetesTargetLike,
+    operator: Operator,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """Handler for ``k8s.deployment.list``.
@@ -725,10 +739,14 @@ async def k8s_deployment_list(
     ``field_selector`` knob is less commonly used against deployments
     (no ``status.phase`` filter equivalent), but the API accepts it so
     we forward it for parity with the pod path.
+
+    ``operator`` is forwarded to
+    :meth:`KubernetesConnector._get_api_client` so a cold-cache
+    kubeconfig load runs under the operator's identity.
     """
     namespace: str | None = params.get("namespace")
     all_namespaces = bool(params.get("all_namespaces", False))
-    api_client = await connector._get_api_client(target)
+    api_client = await connector._get_api_client(target, operator)
     apps_v1 = client.AppsV1Api(api_client)
     kwargs = _list_kwargs(params)
     if all_namespaces:
@@ -746,12 +764,18 @@ async def k8s_deployment_list(
 async def k8s_deployment_info(
     connector: KubernetesConnector,
     target: KubernetesTargetLike,
+    operator: Operator,
     params: dict[str, Any],
 ) -> dict[str, Any]:
-    """Handler for ``k8s.deployment.info``. Mirrors :func:`k8s_pod_info`."""
+    """Handler for ``k8s.deployment.info``. Mirrors :func:`k8s_pod_info`.
+
+    ``operator`` is forwarded to
+    :meth:`KubernetesConnector._get_api_client` so a cold-cache
+    kubeconfig load runs under the operator's identity.
+    """
     deployment_name: str = params["deployment_name"]
     namespace: str = params["namespace"]
-    api_client = await connector._get_api_client(target)
+    api_client = await connector._get_api_client(target, operator)
     apps_v1 = client.AppsV1Api(api_client)
     deployment = await resolve_deployment_name(apps_v1, namespace, deployment_name)
     return deployment_info(deployment)
@@ -1002,8 +1026,8 @@ K8S_DEPLOYMENT_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# Response schemas -- informational; the dispatcher's pass-through reducer
-# does not validate outbound payloads in v0.2.
+# Response schemas -- informational; the dispatcher's default reducer
+# (JsonFluxReducer) does not validate outbound payloads against them.
 # ---------------------------------------------------------------------------
 
 

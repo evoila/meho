@@ -22,6 +22,11 @@ The connector reuses the shared scaffolding in
   for the ``Authorization: Basic`` header value.
 * :func:`~meho_backplane.connectors._shared.vcf_auth.is_acceptable_auth_model`
   for the ``shared_service_account`` / ``None`` gate.
+* :func:`~meho_backplane.connectors._shared.vcf_auth.load_credentials_from_vault`
+  — the live operator-context KV-v2 read. Single source of truth across
+  vROps, vRLI, and Fleet (G3.10-T2 #946). Re-exported here so Fleet's
+  public API reads cohesively without forcing consumers to reach into
+  the shared module.
 
 The :class:`VcfFleetTargetLike` Protocol captures the minimum target
 shape the connector reads: ``name`` (per-target credential cache key),
@@ -32,18 +37,16 @@ header carries ``username:password`` directly with no realm suffix
 (verified against ``scripts/vcf-fleet.sh`` — the wrapper passes
 ``-u "${FLEET_USERNAME}:${FLEET_PASSWORD}"`` with no additional
 realm/domain decoration).
-
-The default loader, :func:`load_credentials_from_vault`, raises
-:exc:`NotImplementedError` until the operator-context Vault read lands.
-Production deploys and tests override the loader on construction (same
-posture as the Harbor / NSX / SDDC Manager / VCF Automation precedents
-— all four currently raise the same shape under open Goal #214).
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
+
+from meho_backplane.connectors._shared.vcf_auth import (
+    VcfCredentialsLoader,
+    load_credentials_from_vault,
+)
 
 __all__ = [
     "SessionCredentials",
@@ -54,7 +57,7 @@ __all__ = [
 
 
 class SessionCredentials(Protocol):
-    """The dict shape :class:`VcfFleetCredentialsLoader` returns.
+    """The dict shape :data:`VcfFleetCredentialsLoader` returns.
 
     Captured as a Protocol so the type checker can flag a loader that
     forgets a key. The two values map to the Basic-auth components the
@@ -78,9 +81,14 @@ class VcfFleetTargetLike(Protocol):
     rather than silently authenticating as the shared service account.
 
     ``secret_ref`` is the Vault path the loader resolves to a
-    :class:`SessionCredentials`-shaped dict. ``port`` is optional —
-    Fleet defaults to 443 and :meth:`HttpConnector._base_url` already
-    handles the ``port is None or 443`` case correctly.
+    :class:`SessionCredentials`-shaped dict. ``str | None`` matches the
+    concrete ``Target.secret_ref`` column (nullable) and the shared
+    :class:`~meho_backplane.connectors._shared.vault_creds.BasicCredentialsTargetLike`
+    the loader forwards to; an unset ``secret_ref`` is rejected with a
+    clear error inside the loader, never a bare ``KeyError``. ``port``
+    is optional — Fleet defaults to 443 and
+    :meth:`HttpConnector._base_url` already handles the
+    ``port is None or 443`` case correctly.
 
     No ``sso_realm`` field — Fleet's local user store accepts
     ``admin@local`` as the literal Basic-auth username; no realm suffix
@@ -90,12 +98,18 @@ class VcfFleetTargetLike(Protocol):
     name: str
     host: str
     port: int | None
-    secret_ref: str
+    secret_ref: str | None
     auth_model: str | None
 
 
-VcfFleetCredentialsLoader = Callable[[VcfFleetTargetLike], Awaitable[dict[str, str]]]
-"""Async callable resolving a target to ``{"username": ..., "password": ...}``.
+VcfFleetCredentialsLoader = VcfCredentialsLoader
+"""Async callable resolving a ``(target, operator)`` pair to credentials.
+
+Type alias for :data:`~meho_backplane.connectors._shared.vcf_auth.VcfCredentialsLoader`.
+Re-exported under a connector-flavoured name so the public API of the
+:mod:`meho_backplane.connectors.vcf_fleet` package reads cohesively
+(``VcfFleetConnector(credentials_loader=...)``) without exposing the
+shared module name at the boundary.
 
 The connector's
 :class:`~meho_backplane.connectors._shared.vcf_auth.CredentialsCache`
@@ -106,32 +120,3 @@ the resulting dict under ``target.name``. The return type is the looser
 matching class — production code returns a plain dict and the connector
 reads ``creds["username"]`` / ``creds["password"]`` by key.
 """
-
-
-async def load_credentials_from_vault(
-    target: VcfFleetTargetLike,
-) -> dict[str, str]:
-    """Default credential loader — Vault read by ``target.secret_ref``.
-
-    Deliberate stub: the operator-context per-target Vault credential
-    read is not yet wired for the VCF Fleet connector. Raising
-    :exc:`NotImplementedError` here keeps the wiring shape stable — a
-    production caller without an override receives a clear error rather
-    than a silent fallback or a hallucinated credential pair. The
-    supported workaround is to inject a custom ``credentials_loader``
-    on ``VcfFleetConnector`` at construction time. The live read is
-    tracked under the open Goal #214 (Connector parity).
-
-    Once the read lands, this function becomes the live implementation
-    that reads the ``vcf-fleet/<target.name>`` Vault path (or
-    ``target.secret_ref`` directly when set) and returns the parsed
-    ``{"username": ..., "password": ...}`` dict.
-    """
-    raise NotImplementedError(
-        "load_credentials_from_vault is a deliberate stub: the operator-context "
-        "per-target Vault credential read is not yet wired for the VCF Fleet "
-        f"connector; target={target.name!r} secret_ref={target.secret_ref!r}. "
-        "Workaround: inject a custom credentials_loader on VcfFleetConnector. "
-        "Tracked under open Goal #214 (Connector parity): "
-        "https://github.com/evoila/meho/issues/214"
-    )

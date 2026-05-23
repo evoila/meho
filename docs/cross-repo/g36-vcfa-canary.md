@@ -73,9 +73,8 @@ against the **two-spec dual-plane VCFA corpus**:
    tenant-plane list op through `call_operation` to prove both
    auth planes work end-to-end. The deployment-list op is the
    largest tenant payload; the dispatcher's JSONFlux seam wraps
-   oversized responses in a `ResultHandle` (v0.2 ships
-   `PassThroughReducer`; the seam is exercised through
-   `ForceHandleReducer` acceptance tests).
+   oversized responses in a `ResultHandle` via the default
+   [`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750).
 
 ## Prerequisites
 

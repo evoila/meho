@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -57,15 +58,15 @@ func newTransportZoneListCmd() *cobra.Command {
 }
 
 func runTransportZoneList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, tzOpID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, tzOpID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, tzOpID, r, jsonOut, printTransportZoneList)
+	return conn.Render(cmd, tzOpID, r, jsonOut, printTransportZoneList)
 }
 
 func printTransportZoneList(w io.Writer, r *CallResult) {

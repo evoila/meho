@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.vcf_automation._routing import (
     PROVIDER_CLOUDAPI_ACCEPT,
     PROVIDER_SESSION_PATH,
@@ -43,9 +44,10 @@ _log = structlog.get_logger(__name__)
 async def load_credentials_with_override(
     loader: VcfAutomationCredentialsLoader,
     target: VcfAutomationTargetLike,
+    operator: Operator,
     secret_ref: str | None,
 ) -> dict[str, str]:
-    """Invoke *loader* against *target* (optionally with override *secret_ref*).
+    """Invoke *loader* against ``(target, operator)`` (optionally with override *secret_ref*).
 
     When *secret_ref* matches ``target.secret_ref`` (or is ``None``)
     the target passes through unchanged. When it differs, the loader
@@ -53,10 +55,12 @@ async def load_credentials_with_override(
     attributes with ``secret_ref`` rewritten to the override -- this
     lets the provider plane resolve a distinct Vault path
     (``provider_secret_ref``) when the provider-plane password differs
-    from the SSO/tenant secret.
+    from the SSO/tenant secret. ``operator`` is forwarded verbatim so
+    the live default loader can perform the operator-context Vault
+    read under the operator's identity.
     """
     if secret_ref is None or secret_ref == target.secret_ref:
-        return await loader(target)
+        return await loader(target, operator)
     proxy = SimpleNamespace(
         name=target.name,
         host=target.host,
@@ -68,7 +72,7 @@ async def load_credentials_with_override(
         provider_username=getattr(target, "provider_username", None),
         provider_secret_ref=getattr(target, "provider_secret_ref", None),
     )
-    return await loader(proxy)
+    return await loader(proxy, operator)
 
 
 def _require_username_password(

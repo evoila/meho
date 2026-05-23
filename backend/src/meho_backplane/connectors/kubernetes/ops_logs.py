@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 from kubernetes_asyncio import client
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
@@ -74,11 +75,13 @@ __all__ = [
 #: log line length.
 MAX_TAIL_LINES = 5000
 
-#: 1 MiB serialised body cap. The dispatcher's ``PassThroughReducer``
-#: lands the returned dict verbatim into
-#: :attr:`OperationResult.result`; large log payloads inflate the
-#: JSONFlux reducer's reduction overhead linearly and blow past the
-#: audit row's display size. 1 MiB matches the operator's typical
+#: 1 MiB serialised body cap. The dispatcher's default
+#: :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+#: materializes the returned ``lines`` collection into a
+#: :class:`~meho_backplane.connectors.schemas.ResultHandle` once it
+#: crosses the threshold; capping the body keeps reduction overhead
+#: bounded and the payload below the audit row's display size. 1 MiB
+#: matches the operator's typical
 #: terminal scrollback and the MCP envelope's practical payload
 #: ceiling (no hard limit, but >1 MB choices stall clients).
 MAX_BODY_BYTES = 1024 * 1024
@@ -153,7 +156,8 @@ K8S_LOGS_PARAMETER_SCHEMA: dict[str, Any] = {
 
 
 #: Informational response schema for the meta-tools. The dispatcher's
-#: pass-through reducer does not validate outbound payloads in v0.2.
+#: default reducer does not validate outbound payloads against this
+#: schema; it is descriptive metadata for ``describe_operation``.
 K8S_LOGS_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -397,6 +401,7 @@ def truncate_lines_to_byte_cap(lines: list[str], cap_bytes: int) -> tuple[list[s
 async def k8s_logs(
     connector: KubernetesConnector,
     target: KubernetesTargetLike,
+    operator: Operator,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """Handler for ``k8s.logs``.
@@ -407,6 +412,10 @@ async def k8s_logs(
     validation runs in the dispatcher, so ``params`` arrives
     pre-checked against :data:`K8S_LOGS_PARAMETER_SCHEMA` -- the
     handler only re-reads validated values.
+
+    ``operator`` is forwarded to
+    :meth:`KubernetesConnector._get_api_client` so a cold-cache
+    kubeconfig load runs under the operator's identity.
 
     Raises propagate to the dispatcher's ``connector_error`` branch:
 
@@ -432,7 +441,7 @@ async def k8s_logs(
     since_seconds = parse_duration(params.get("since"))
     previous = bool(params.get("previous", False))
 
-    api_client = await connector._get_api_client(target)
+    api_client = await connector._get_api_client(target, operator)
     v1 = client.CoreV1Api(api_client)
 
     exact_name, container_name = await resolve_pod_and_container(

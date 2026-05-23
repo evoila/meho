@@ -152,23 +152,21 @@ back as a sample + `ResultHandle`, not the raw list.
 
 The wrapping is the **dispatcher's** job, not the handler's: the
 handler returns `{"keys": [...]}` verbatim and `dispatch` passes it
-through the configured `Reducer` before audit/broadcast. v0.2 ships
-only `PassThroughReducer`, so the **v0.2 default is pass-through** —
-`vault.kv.list` returns the full inline key list with
-`OperationResult.handle is None`, regardless of key count. The real
-threshold-aware reducer (and the `result_query` / `result_aggregate` /
-`result_describe` / `result_export` meta-tools that read a handle
-back) ships in a follow-on Initiative; swapping it in touches one
-`set_default_reducer` call, not the Vault handler.
+through the configured `Reducer` before audit/broadcast. The default
+reducer is the threshold-aware
+[`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) —
+`vault.kv.list` with ≤50 keys (≤4 KB) passes through inline with
+`OperationResult.handle is None`; a larger list returns a sample +
+`ResultHandle`. The `result_query` / `result_aggregate` /
+`result_describe` / `result_export` meta-tools that read a handle back
+ship in a follow-on Initiative.
 
 `tests/test_vault_kv_list_jsonflux.py` (G3.3-T4) pins both halves of
-the contract: ≤50 keys stays inline with no handle (the shipped v0.2
-default), and — with a threshold-aware reducer installed via the
-`set_default_reducer` seam — >50 keys produces `{sample, ...}` on
-`result` plus a `ResultHandle` whose `total_rows` / `sample_rows`
-carry exactly what a future `result_describe` / `result_query` will
-read. The agent never sees the raw >50-key list once a handle is
-produced.
+the contract: ≤50 keys stays inline with no handle, and >50 keys
+produces `{sample, ...}` on `result` plus a `ResultHandle` whose
+`total_rows` / `sample_rows` carry exactly what a future
+`result_describe` / `result_query` will read. The agent never sees the
+raw >50-key list once a handle is produced.
 
 ## Control flow
 

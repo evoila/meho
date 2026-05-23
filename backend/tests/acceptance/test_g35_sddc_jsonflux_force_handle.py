@@ -3,18 +3,19 @@
 
 """G3.5-T5 JSONFlux force-mode acceptance for the SDDC Manager connector.
 
-v0.2 ships only :class:`~meho_backplane.operations.reducer.PassThroughReducer`
-— the production reducer never produces a :class:`ResultHandle`. This test
-mirrors :mod:`tests.acceptance.test_g35_nsx_jsonflux_force_handle` verbatim,
-swapping in SDDC Manager as the dispatched connector: it installs a test-only
-:class:`ForceHandleReducer` that wraps every payload in a synthetic handle,
-dispatches ``GET:/v1/hosts`` against the seeded SDDC Manager core, and asserts
-the :class:`~meho_backplane.connectors.schemas.OperationResult`'s ``handle``
-field carries a populated :class:`ResultHandle`.
+Mirrors :mod:`tests.acceptance.test_g35_nsx_jsonflux_force_handle`,
+swapping in SDDC Manager as the dispatched connector and driving the
+**real** :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(G0.6.1-T3 #753) in force mode (``row_threshold=0`` — the seeded SDDC
+core returns only 12 hosts, below the default 50-row threshold). It
+dispatches ``GET:/v1/hosts`` against the seeded SDDC Manager core and
+asserts the :class:`~meho_backplane.connectors.schemas.OperationResult`'s
+``handle`` field carries a populated :class:`ResultHandle` with the real
+materialized shape.
 
-The SDDC Manager API returns paginated results under an ``elements[]`` key
-(vs NSX's ``results[]``). The :class:`ForceHandleReducer` handles both shapes
-so the dispatcher-seam test doesn't depend on a specific list-key name.
+The SDDC Manager API returns paginated results under an ``elements[]``
+key (vs NSX's ``results[]``); the reducer's envelope detection
+recognises ``elements`` so the list materializes to one row per host.
 """
 
 from __future__ import annotations
@@ -24,9 +25,9 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._sddc_canary_fixtures import (
@@ -36,59 +37,16 @@ from tests.acceptance._sddc_canary_fixtures import (
 )
 
 
-class ForceHandleReducer:
-    """Test-only reducer that always produces a :class:`ResultHandle`.
-
-    Recognises three pagination shapes the SDDC Manager and NSX APIs use:
-
-    * ``dict`` with ``"elements"`` key (SDDC Manager paginated envelope).
-    * ``dict`` with ``"results"`` key (NSX policy/manager API list shape).
-    * ``dict`` with ``"value"`` key (vCenter REST list shape).
-    * ``list`` → total = ``len(payload)``.
-    * Anything else → total = 1, sample = ().
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        """Always return ``(summary_dict, ResultHandle)``."""
-        del schema, context
-        if isinstance(payload, dict):
-            for key in ("elements", "results", "value"):
-                rows = payload.get(key)
-                if isinstance(rows, list):
-                    total = len(rows)
-                    sample = tuple(rows[:5]) if rows else ()
-                    break
-            else:
-                total = 1
-                sample = ()
-        elif isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        else:
-            total = 1
-            sample = ()
-
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample if sample else None,
-            ttl_seconds=3600,
-        )
-        summary = {"row_count": total, "sample": list(sample)}
-        return summary, handle
-
-
 @pytest.fixture
 def force_handle_reducer() -> Any:
-    """Install :class:`ForceHandleReducer` as the dispatcher's default."""
-    set_default_reducer(ForceHandleReducer())
+    """Install :class:`JsonFluxReducer` in force mode as the dispatcher default.
+
+    ``row_threshold=0`` forces every non-empty set to materialize, so
+    the seeded 12-host SDDC list (below the default 50-row threshold)
+    produces a handle. Teardown restores :class:`PassThroughReducer` and
+    drops the dispatcher caches.
+    """
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         yield
     finally:
@@ -134,7 +92,7 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_sddc(
 
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        f"expected OperationResult.handle to be populated by ForceHandleReducer; "
+        f"expected OperationResult.handle to be populated by JsonFluxReducer; "
         f"got handle=None on envelope={result_envelope!r}"
     )
     uuid.UUID(handle["handle_id"])
@@ -146,12 +104,23 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_sddc(
     assert str(expected_rows) in handle["summary_md"], (
         f"expected summary_md to mention the row count; got {handle['summary_md']!r}"
     )
+    # schema_ is the real JSON Schema the reducer inferred from the
+    # DuckDB-materialized table: an array-of-objects with typed columns.
     assert isinstance(handle["schema_"], dict) and handle["schema_"], (
         f"handle.schema_ must be a non-empty mapping; got {handle['schema_']!r}"
+    )
+    assert handle["schema_"]["type"] == "array"
+    schema_props = handle["schema_"]["items"]["properties"]
+    assert "id" in schema_props and "fqdn" in schema_props, (
+        f"expected SDDC host columns in the inferred schema; got {schema_props!r}"
     )
     sample_rows = handle.get("sample_rows")
     assert sample_rows, (
         f"expected ≥1 sample row from the seeded SDDC host list; got sample_rows={sample_rows!r}"
+    )
+    # Sample rows are real host records carrying the seeded id pattern.
+    assert sample_rows[0]["id"].startswith("host-"), (
+        f"expected a real seeded host in sample_rows; got {sample_rows[0]!r}"
     )
 
     payload = result_envelope.get("result")

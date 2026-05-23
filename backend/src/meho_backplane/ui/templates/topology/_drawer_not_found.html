@@ -1,0 +1,32 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Drawer fragment rendered when the requested node id does not
+  resolve in the operator's tenant. Returned with HTTP 404 by
+  ``GET /ui/topology/node/{node_id}``.
+
+  The fragment swaps into ``#node-drawer`` exactly like the happy
+  path so the operator sees the not-found message without a
+  full-page reload. The outer ``aside#node-drawer`` shape mirrors
+  ``_drawer.html`` so the HTMX outerHTML swap remains semantically
+  consistent.
+-#}
+<aside
+  id="node-drawer"
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  aria-live="polite"
+  aria-label="Node detail drawer"
+>
+  <div class="card-body space-y-2">
+    <h2 class="card-title text-base">Node not found</h2>
+    <p class="text-sm opacity-70">
+      No node with id <code class="font-mono">{{ node_id }}</code> exists in this tenant.
+    </p>
+    <p class="text-xs opacity-60">
+      A node may have been hard-deleted, the id may belong to another tenant
+      (the boundary is opaque), or the table view may be stale -- refresh the
+      page to re-query the inventory.
+    </p>
+  </div>
+</aside>

@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 )
 
 // seedXDGAndToken seeds a per-test config dir + token store that
@@ -98,7 +99,7 @@ func TestNewRootCmdRegistersAllFiveVerbs(t *testing.T) {
 // targets / operation helpers; the trailing slash invariant is
 // load-bearing for the request paths assembled on top.
 func TestNormaliseURLStripsTrailingSlash(t *testing.T) {
-	got, err := normaliseURL("https://meho.example/")
+	got, err := backplane.NormaliseURL("https://meho.example/")
 	if err != nil {
 		t.Fatalf("normaliseURL: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestNormaliseURLStripsTrailingSlash(t *testing.T) {
 // TestNormaliseURLRejectsHostlessInput — bare paths fail fast rather
 // than producing a request against the local filesystem.
 func TestNormaliseURLRejectsHostlessInput(t *testing.T) {
-	if _, err := normaliseURL("/just/a/path"); err == nil {
+	if _, err := backplane.NormaliseURL("/just/a/path"); err == nil {
 		t.Errorf("expected error for hostless URL")
 	}
 }
@@ -118,7 +119,7 @@ func TestNormaliseURLRejectsHostlessInput(t *testing.T) {
 // TestNormaliseURLRejectsGarbage — a fundamentally unparseable URL
 // surfaces the parse error rather than the silently-empty resolver.
 func TestNormaliseURLRejectsGarbage(t *testing.T) {
-	if _, err := normaliseURL("h ttp://broken"); err == nil {
+	if _, err := backplane.NormaliseURL("h ttp://broken"); err == nil {
 		t.Errorf("expected error for malformed URL")
 	}
 }
@@ -126,7 +127,7 @@ func TestNormaliseURLRejectsGarbage(t *testing.T) {
 // TestNormaliseURLRejectsEmpty — empty config slot must reach the
 // caller as an error rather than producing a zero-host request.
 func TestNormaliseURLRejectsEmpty(t *testing.T) {
-	if _, err := normaliseURL("   "); err == nil {
+	if _, err := backplane.NormaliseURL("   "); err == nil {
 		t.Errorf("expected error for empty URL")
 	}
 }

@@ -47,8 +47,11 @@ References
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
+from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -95,7 +98,47 @@ def create_engine_for_url(url: str, *, pool_size: int, pool_timeout: float) -> A
     if not url.startswith("sqlite"):
         pool_kwargs["pool_size"] = pool_size
         pool_kwargs["pool_timeout"] = pool_timeout
-    return create_async_engine(url, future=True, **pool_kwargs)
+    engine = create_async_engine(url, future=True, **pool_kwargs)
+
+    if url.startswith("sqlite") and os.environ.get("MEHO_SQLITE_FOREIGN_KEYS") == "1":
+        # SQLite enforces foreign-key constraints only when ``PRAGMA
+        # foreign_keys = ON`` is issued on every connection (the default
+        # is OFF, even on aiosqlite). Production runs on PG where FKs
+        # are always enforced; the dev/test driver is SQLite, where the
+        # default-off behaviour means a test suite cannot catch PG-vs-
+        # SQLite divergences like the G9.3-T2 ``graph_edge_history.
+        # edge_id`` ``ON DELETE SET NULL`` cascade, which silently
+        # nulled the column on PG and left it untouched on SQLite.
+        #
+        # The PRAGMA is gated on an **opt-in env var** rather than
+        # being on by default for SQLite. A blanket enable surfaces a
+        # large pre-existing tape of test fixtures that insert
+        # FK-referencing rows without seeding the parent (the
+        # SQLite-doesn't-enforce-FKs default has masked them since the
+        # chassis adopted the per-test SQLite template at #793).
+        # Tearing that out is a chassis-wide refactor; the diff-on-
+        # write hook does not need it. Tests that *do* exercise the
+        # cascade semantics (currently :mod:`tests.test_topology_history_hook`)
+        # opt in via the ``_enforce_sqlite_foreign_keys`` autouse
+        # fixture, which sets the env var, resets the engine cache,
+        # and tears down on yield.
+        #
+        # Registering on the underlying sync engine fires once per new
+        # connection in the async pool. ``sync_engine`` is the
+        # documented async-side event-attachment surface (SQLAlchemy
+        # 2.x async docs § "Synopsis - Core").
+        @event.listens_for(engine.sync_engine, "connect")
+        def _sqlite_enable_foreign_keys(
+            dbapi_connection: Any,
+            _connection_record: Any,
+        ) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 def get_engine() -> AsyncEngine:

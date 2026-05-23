@@ -33,6 +33,11 @@ The workflow walks the [five-step pipeline](../architecture/spec-ingestion.md#th
 
 ### Step 1 — find the spec
 
+> For the shipped connectors, the curated
+> [connector-spec catalog](connector-catalog.md) already records the
+> recommended spec source(s) + required connector class per
+> `(product, version)`. Start there before hunting for a URL.
+
 Vendor specs live in one of three places, in priority order:
 
 1. **The consumer's checked-in docs corpus** (e.g. `claude-rdc-hetzner-dc/docs/<product>-<version>/`). The maintainer's local clone is the conventional source. Use the `docs:<product>-<version>/<spec>.yaml` shorthand when this applies.

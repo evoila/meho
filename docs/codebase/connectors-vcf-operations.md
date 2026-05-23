@@ -78,7 +78,7 @@ session cookie or token is established. The flow:
    the shared `CredentialsCache`. Missing-key (`"username"` /
    `"password"`) returns from the loader surface as `RuntimeError` naming
    both the target and the missing key.
-2. `auth_headers(target, raw_jwt)` checks `target.auth_model` via the
+2. `auth_headers(target, operator)` checks `target.auth_model` via the
    shared `is_acceptable_auth_model` predicate. Anything other than
    `shared_service_account` / the enum member / `None` (the pre-G0.3
    sentinel) raises `NotImplementedError` naming both the target and the
@@ -86,8 +86,10 @@ session cookie or token is established. The flow:
 3. Returns `{"Authorization": "Basic <b64>"}` computed from the cached
    credentials.
 
-`raw_jwt` is accepted for ABC-signature compatibility but unused —
-`SHARED_SERVICE_ACCOUNT` mode authenticates with a Vault-sourced service
+The full `operator` is threaded through `auth_headers(target, operator)`
+(G3.9-T1) so a future operator-context Vault read can run under the
+operator's identity. In `SHARED_SERVICE_ACCOUNT` mode the `operator` is
+accepted but unused — authentication uses the Vault-sourced service
 account, not the operator's OIDC token.
 
 ### Optional `auth-source` query parameter

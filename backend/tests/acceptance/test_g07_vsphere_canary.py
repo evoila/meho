@@ -1987,7 +1987,7 @@ async def test_g07_canary_vcsim_dispatch(
         f"{_CANARY_IMPL_ID}); registry snapshot keys = {sorted(registry_snapshot)}"
     )
 
-    async def _no_auth(_self: Any, _target: Any, _raw_jwt: str) -> dict[str, str]:
+    async def _no_auth(_self: Any, _target: Any, _operator: Any) -> dict[str, str]:
         return dict(_VCSIM_NO_AUTH_HEADERS)
 
     monkeypatch.setattr(shim_cls, "auth_headers", _no_auth)

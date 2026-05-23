@@ -42,10 +42,12 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Final
 
 import structlog
 from fastapi import FastAPI, Response
+from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
@@ -94,13 +96,22 @@ from meho_backplane.memory import (
 )
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
-from meho_backplane.operations import run_typed_op_registrars
+from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
+from meho_backplane.operations.ingest import load_catalog
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
+    start_topology_history_retention_sweeper,
     start_topology_refresh_scheduler,
+    stop_topology_history_retention_sweeper,
     stop_topology_refresh_scheduler,
 )
+from meho_backplane.ui.auth import UISessionMiddleware
+from meho_backplane.ui.auth import build_router as build_ui_auth_router
+from meho_backplane.ui.csrf import CSRFMiddleware
+from meho_backplane.ui.paths import ensure_static_dist_dir, static_root_dir
+from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.version import router as version_router
 
 _APP_NAME: Final[str] = "meho-backplane"
@@ -181,49 +192,27 @@ async def _run_lifespan_shutdown() -> None:
         log.exception("dispose_broadcast_client_failed")
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan hook.
+async def _run_lifespan_startup() -> None:
+    """Eager init phase of the lifespan: probes, pools, registrars, model.
 
-    Configures structlog at startup so every log line emitted from
-    this point onwards (including the very first request) is JSON-
-    formatted, and registers the Keycloak + Vault + DB-migration-state
-    readiness probes with the registry so ``/ready`` reflects whether
-    each dependency is reachable. Probes are registered even though
-    no request-path consumer of the dependency may have landed yet -
-    readiness is a deployment-shape concern, not a request-path
-    concern.
+    Extracted from :func:`lifespan` so the lifespan body stays under
+    the chassis code-quality limit on function size. Each helper /
+    constructor here owns its own success-or-warn shape; this function
+    only sequences them. The order is load-bearing:
 
-    The SQLAlchemy async engine is **eagerly** instantiated here
-    (via :func:`get_engine`) so that the pool is built and the
-    ``DATABASE_URL`` is validated at startup, not on the first
-    request. The fastembed model (G0.4-T2 #259) and the async Valkey
-    client backing G6's activity broadcast (#228) are similarly
-    eagerly initialised — each owns a helper above for its
-    success-or-warn shape.
-
-    G0.6 (#388) added the typed-op registration step: after
-    :func:`_eager_import_connectors` runs every connector
-    subpackage's import-time ``register_connector_v2`` call,
-    :func:`run_typed_op_registrars` walks the registrar list each
-    subpackage appended to and runs each registrar against the DB so
-    the ``endpoint_descriptor`` rows the dispatcher reads are
-    populated before the first request arrives. Failure here is a
-    deploy bug, not a runtime condition — the exception propagates
-    and the lifespan crashes so the operator sees CrashLoopBackOff
-    instead of a quietly-broken dispatch.
-
-    The G5.2-T1 memory-expiry sweeper (#623) starts last among
-    background tasks and stops first on shutdown so its session-borrow
-    can never outlive the engine pool teardown. The sweeper is
-    enabled by ``MEMORY_EXPIRY_ENABLED`` (default ``True``); operators
-    using an external cleanup mechanism (k8s CronJob, etc.) flip the
-    env var off and the task handle stays ``None``, which the
-    ``finally`` branch tolerates.
-
-    On shutdown :func:`_run_lifespan_shutdown` releases the
-    SQLAlchemy + Valkey pools with per-disposer try/except so a
-    single failure can't leak a sibling pool.
+    1. Logging configured first so every subsequent ``structlog`` call
+       lands in the JSON output the rest of the chassis assumes.
+    2. Readiness probes registered before any eager resource so
+       ``/ready`` accurately reports state even if a later step crashes.
+    3. Eager engine + broadcast-client construction so URL-parse / pool-
+       build failures surface at startup rather than first request.
+    4. Connector + MCP module auto-discovery so import-time
+       ``register_*`` calls run before the first request arrives.
+    5. Typed-op registrars run **after** connector discovery (the
+       registrars are appended during the import pass).
+    6. MCP audience guard last — the eager-init failures above raise
+       before this, so the guard's CrashLoopBackOff carries the
+       MCP-audience message, not a stale earlier failure.
     """
     configure_logging()
     register_probe("keycloak", keycloak_readiness_probe)
@@ -241,11 +230,29 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # `register_connector_v2` calls in each product's `__init__.py`
     # run before the first request arrives.
     _eager_import_connectors()
+    # Connector-spec catalog parse + schema validation (#743). Loads the
+    # packaged catalog.yaml once; a malformed catalog (bad YAML, unknown
+    # field, non-PEP-440 spec_info_version, duplicate (product, version))
+    # raises here and crashes the lifespan, so CI's app-boot smoke fails
+    # instead of the bad catalog surfacing as a 500 on first
+    # GET /api/v1/connectors/catalog. Registry-coverage of each entry's
+    # requires_connector_class is a CI regression test, not a startup
+    # guard (the registry's populated-ness is import-order-dependent
+    # under pytest-xdist; see catalog.py).
+    load_catalog()
     # Typed-op registration (G0.6-T-Refactor-Vault #390). See the
     # docstring for the contract; runs registrars connectors appended
     # to during the import pass above so descriptor rows are populated
     # before the first dispatch.
     await run_typed_op_registrars()
+    # Real JSONFlux reducer install (G0.6.1-T3 #753). Swaps the
+    # dispatcher's module-level :class:`PassThroughReducer` default for
+    # the production :class:`JsonFluxReducer`, so every connector's
+    # set-shaped response over the v0.1-spec §4 threshold (50 rows / 4 KB)
+    # comes back as a markdown summary + :class:`ResultHandle` instead of
+    # the raw list. Production-only: tests construct their own reducers
+    # via :func:`set_default_reducer`.
+    set_default_reducer(JsonFluxReducer())
     # MCP tool / resource auto-discovery (G0.5-T3, #248). Same shape
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.
@@ -256,30 +263,105 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # 401s with no signal. Crash loudly here with the remediation
     # instead of serving a dark, silent surface.
     _assert_mcp_resource_uri_configured()
+    # G10.0-T5 (#866) — ensure ``ui/static/dist/`` exists so the
+    # StaticFiles mount does not crash on a fresh clone where
+    # ``tailwindcss --watch`` has not yet materialised the compiled
+    # stylesheet. Idempotent; mkdir(exist_ok=True). The mount serves
+    # a 404 on ``/ui/static/dist/tailwind.css`` until the operator
+    # runs the Tailwind build -- the operator-facing remediation is
+    # documented in ``docs/codebase/ui.md``.
+    ensure_static_dist_dir()
     # Embedding model preload (G0.4-T2 #259); loud-but-non-fatal.
     await _preload_embedding_model()
-    # Scheduled topology refresh (G9.1-T3 #450). Started after connector
-    # auto-discovery (it resolves connectors per target) so the first
-    # sweep can dispatch ``discover_topology``. The task handle is kept
-    # so shutdown can cancel + await its unwind before the DB/redis
-    # pools are disposed (a sweep mid-flight must not race pool teardown).
-    topology_scheduler_task = start_topology_refresh_scheduler()
-    # Scheduled memory-expiry sweeper (G5.2-T1 #623). Gated on
-    # ``MEMORY_EXPIRY_ENABLED`` so operators relying on an external
-    # cleanup mechanism (k8s CronJob, etc.) can disable the in-process
-    # loop without forking the chassis. ``None`` when disabled; the
-    # finally branch tolerates that shape so disable-and-shutdown does
-    # not raise.
-    memory_expiry_task: asyncio.Task[None] | None = None
-    if get_settings().memory_expiry_enabled:
-        memory_expiry_task = start_memory_expiry_sweeper()
+
+
+@dataclass
+class _BackgroundTasks:
+    """Lifespan-owned background ``asyncio`` task handles.
+
+    Returned from :func:`_start_background_tasks`; consumed by
+    :func:`_stop_background_tasks` on shutdown. The shape (one optional
+    per gated task, one required per always-on task) is what lets the
+    ``finally`` branch tolerate the disabled-by-settings shape without
+    a per-task ``if``-ladder inside the lifespan body itself.
+    """
+
+    topology_scheduler: asyncio.Task[None]
+    memory_expiry: asyncio.Task[None] | None
+    topology_history: asyncio.Task[None] | None
+
+
+def _start_background_tasks() -> _BackgroundTasks:
+    """Start every lifespan-owned background loop, return their handles.
+
+    Started after :func:`_run_lifespan_startup` returns -- they depend
+    on the engine pool, the typed-op registrars, and the connector
+    table the eager-init phase populates. Each handle is kept on the
+    returned dataclass so :func:`_stop_background_tasks` can cancel +
+    await unwind before the DB/redis pools are disposed (an in-flight
+    sweep must not race pool teardown).
+    """
+    settings = get_settings()
+    # G9.1-T3 #450 — always on; the cadence + advisory-lock guard live
+    # in the scheduler module itself.
+    topology_scheduler = start_topology_refresh_scheduler()
+    # G5.2-T1 #623 — gated on MEMORY_EXPIRY_ENABLED so operators using
+    # an external cleanup mechanism don't double-sweep.
+    memory_expiry: asyncio.Task[None] | None = None
+    if settings.memory_expiry_enabled:
+        memory_expiry = start_memory_expiry_sweeper()
+    # G9.3-T6 #858 — gated on TOPOLOGY_HISTORY_PRUNE_ENABLED.
+    # ``RETENTION_DAYS=0`` keeps the loop running but every tick is a
+    # no-op (heartbeat-only); ``PRUNE_ENABLED=false`` skips starting
+    # the loop entirely.
+    topology_history: asyncio.Task[None] | None = None
+    if settings.topology_history_prune_enabled:
+        topology_history = start_topology_history_retention_sweeper()
+    return _BackgroundTasks(
+        topology_scheduler=topology_scheduler,
+        memory_expiry=memory_expiry,
+        topology_history=topology_history,
+    )
+
+
+async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
+    """Cancel + await every background task, then dispose pooled resources.
+
+    Stop order is the reverse of start order so each task's session
+    borrow can never outlive the engine pool teardown. The opted-out
+    branches (``None`` task handles) are tolerated cleanly so a
+    disable-and-shutdown sequence does not raise.
+    """
+    if tasks.topology_history is not None:
+        await stop_topology_history_retention_sweeper(tasks.topology_history)
+    if tasks.memory_expiry is not None:
+        await stop_memory_expiry_sweeper(tasks.memory_expiry)
+    await stop_topology_refresh_scheduler(tasks.topology_scheduler)
+    await _run_lifespan_shutdown()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Application lifespan hook.
+
+    Sequences three phases: :func:`_run_lifespan_startup` (probes,
+    eager pools, registrars, audience guard, embedding preload),
+    :func:`_start_background_tasks` (lifespan-owned ``asyncio`` loops),
+    yield (request-handling window), and :func:`_stop_background_tasks`
+    (reverse-order shutdown so background tasks don't outlive the
+    pools they borrow from).
+
+    Each phase helper carries the load-bearing detail in its own
+    docstring; the lifespan body stays thin so the chassis function-
+    size budget is not the first thing a future contributor has to
+    refactor when adding a fourth background loop.
+    """
+    await _run_lifespan_startup()
+    tasks = _start_background_tasks()
     try:
         yield
     finally:
-        if memory_expiry_task is not None:
-            await stop_memory_expiry_sweeper(memory_expiry_task)
-        await stop_topology_refresh_scheduler(topology_scheduler_task)
-        await _run_lifespan_shutdown()
+        await _stop_background_tasks(tasks)
 
 
 app: FastAPI = FastAPI(
@@ -294,10 +376,33 @@ app: FastAPI = FastAPI(
 # outermost layer (its ``__call__`` runs first on the request side and
 # last on the response side). The required runtime order for v0.2 is:
 #
-#   client → RequestContextMiddleware → BroadcastDetailMiddleware
+#   client → UISessionMiddleware → CSRFMiddleware
+#          → RequestContextMiddleware → BroadcastDetailMiddleware
 #          → AuditMiddleware → router → handler
 #
-# - ``RequestContextMiddleware`` outermost so ``request_id`` is bound
+# - ``UISessionMiddleware`` (G10.0-T4 #865, mounted by T5 #866)
+#   outermost so unauthenticated ``/ui/*`` requests 302 to
+#   ``/ui/auth/login`` BEFORE any inner middleware does
+#   request-context / audit work. Out-of-prefix paths
+#   (``/api/*`` / ``/mcp/*`` / ``/healthz`` / etc.) pass straight
+#   through to the inner chain -- the middleware is ``/ui/``-scoped
+#   by construction. Registering it *before* (i.e. outside) the
+#   JWT dependency chain is what the Initiative #337 acceptance
+#   criterion 4 means by "session middleware before JWT
+#   middleware": JWT verification is enforced as a route
+#   dependency on ``/api/*`` routes, and the session middleware
+#   short-circuits ``/ui/*`` requests so the JWT dependency never
+#   runs on them. The /api/* surface continues to flow through the
+#   inner chain unchanged.
+# - ``CSRFMiddleware`` (G10.0-T5 #866) runs second. It guards
+#   state-changing ``/ui/*`` requests (POST/PATCH/PUT/DELETE) with
+#   the OWASP double-submit cookie pattern. Out-of-prefix paths
+#   and read-only methods pass through. The middleware is
+#   intentionally registered *outside* the audit chain so a CSRF
+#   rejection produces a 403 without writing an unauthenticated
+#   audit row (the audit middleware skips when ``operator_sub`` is
+#   not bound, which is true on a CSRF rejection).
+# - ``RequestContextMiddleware`` next so ``request_id`` is bound
 #   before any inner middleware reads it; the
 #   :func:`~meho_backplane.middleware.verify_jwt_and_bind` dependency
 #   binds ``operator_sub`` deeper still, inside the handler invocation.
@@ -313,14 +418,17 @@ app: FastAPI = FastAPI(
 #
 # To achieve that with ``add_middleware``'s last-added-is-outermost
 # rule, ``AuditMiddleware`` is registered *first* (becomes innermost),
-# then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``
-# (becomes outermost). Middleware is registered before routers so
-# every endpoint (including the Task #19 health/version/ready
-# surfaces and the Task #20 ``/metrics`` route) inherits the
-# request-id binding and the http_requests_total counter.
+# then ``BroadcastDetailMiddleware``, then ``RequestContextMiddleware``,
+# then ``CSRFMiddleware``, then ``UISessionMiddleware`` (becomes
+# outermost). Middleware is registered before routers so every
+# endpoint (including the Task #19 health/version/ready surfaces
+# and the Task #20 ``/metrics`` route) inherits the request-id
+# binding and the http_requests_total counter.
 app.add_middleware(AuditMiddleware)
 app.add_middleware(BroadcastDetailMiddleware)
 app.add_middleware(RequestContextMiddleware)
+app.add_middleware(CSRFMiddleware)
+app.add_middleware(UISessionMiddleware)
 
 app.include_router(health_router)
 app.include_router(version_router)
@@ -460,6 +568,33 @@ app.include_router(api_v1_broadcast_overrides_router)
 #   semantics on top.
 app.include_router(well_known_router)
 app.include_router(mcp_router)
+
+# G10.0-T5 (#866) -- Operator console surface. Three pieces ship
+# together: the static-asset mount for vendored JS + compiled
+# Tailwind, the BFF auth router (login/callback/logout), and the
+# umbrella UI router (dashboard + 5 surface stubs).
+#
+# Mount order:
+# * ``/ui/static`` -- StaticFiles wrapping the ``ui/static/``
+#   subtree. Covers both ``static/src/vendor/*.js`` (vendored HTMX /
+#   Alpine / Cytoscape) and ``static/dist/tailwind.css`` (compiled
+#   stylesheet, materialised by ``ensure_static_dist_dir`` at
+#   startup). The ``UISessionMiddleware`` short-circuits on the
+#   ``/ui/static/`` prefix so unauthenticated browsers can load
+#   the styled login page assets.
+# * UI auth router -- ``/ui/auth/{login,callback,logout}`` GET
+#   routes; reachable unauthenticated (the middleware exempts
+#   ``/ui/auth/``).
+# * UI router -- ``GET /ui/`` dashboard + the five
+#   ``GET /ui/{slug}`` surface stubs. All routes require a session;
+#   ``UISessionMiddleware`` redirects to login on miss.
+app.mount(
+    "/ui/static",
+    StaticFiles(directory=str(static_root_dir()), check_dir=False),
+    name="ui_static",
+)
+app.include_router(build_ui_auth_router())
+app.include_router(build_ui_router())
 
 # Opt-in stub routes for end-to-end verification of
 # :func:`~meho_backplane.auth.rbac.require_role`. Disabled by default

@@ -397,8 +397,15 @@ class _ForceHandleReducer:
 # ---------------------------------------------------------------------------
 
 
-async def _vcfa_credentials_loader(_target: object) -> dict[str, str]:
-    """Stub credentials loader -- bypasses the not-yet-wired Vault read."""
+async def _vcfa_credentials_loader(_target: object, _operator: Operator) -> dict[str, str]:
+    """Stub credentials loader -- bypasses the live Vault read for the E2E dispatch tests.
+
+    The dual-plane dispatch acceptance criteria in #840 don't exercise
+    the operator-context Vault read (that's the responsibility of the
+    cred-read recorded-fixture E2E in
+    ``test_connectors_vcf_automation_credread.py``). Keeping the stub
+    here avoids forcing every dispatch test to wire the Vault fake.
+    """
     return {"username": "svc-meho", "password": "vcfa-e2e-password"}
 
 

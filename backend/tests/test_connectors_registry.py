@@ -321,16 +321,26 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
             patch("meho_backplane.main.get_embedding_service"),
-            # G5.2-T1 (#623) added a settings read + sweeper start to the
-            # lifespan body. Patch both so this test (which patches every
-            # other heavy dep but does not pin env vars) does not regress
-            # on the env-var lookup ``get_settings`` would otherwise hit.
+            # G5.2-T1 (#623) added a memory-expiry sweeper start to the
+            # lifespan body; G9.3-T6 (#858) added a topology-history
+            # retention sweeper. Both read ``get_settings`` to decide
+            # whether to start; patch both flags off so this test
+            # (which doesn't pin env vars) does not regress on the
+            # env-var lookup ``get_settings`` would otherwise hit.
             patch(
                 "meho_backplane.main.get_settings",
-                return_value=MagicMock(memory_expiry_enabled=False),
+                return_value=MagicMock(
+                    memory_expiry_enabled=False,
+                    topology_history_prune_enabled=False,
+                ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
             patch("meho_backplane.main.stop_memory_expiry_sweeper", new=AsyncMock()),
+            patch("meho_backplane.main.start_topology_history_retention_sweeper"),
+            patch(
+                "meho_backplane.main.stop_topology_history_retention_sweeper",
+                new=AsyncMock(),
+            ),
         ):
             # Manually step through the lifespan async generator.
             gen = lifespan(None)  # type: ignore[arg-type]
@@ -374,13 +384,24 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             patch("meho_backplane.main.eager_import_mcp_modules"),
             patch("meho_backplane.main._assert_mcp_resource_uri_configured"),
             patch("meho_backplane.main.get_embedding_service"),
-            # G5.2-T1 (#623) — same patches as the sibling lifespan test.
+            # G5.2-T1 (#623) + G9.3-T6 (#858) — same lifespan-task
+            # patches as the sibling test. Both background-task flags
+            # are pinned off so this dispose-error test exercises only
+            # the disposer ordering, not the start-task race.
             patch(
                 "meho_backplane.main.get_settings",
-                return_value=MagicMock(memory_expiry_enabled=False),
+                return_value=MagicMock(
+                    memory_expiry_enabled=False,
+                    topology_history_prune_enabled=False,
+                ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
             patch("meho_backplane.main.stop_memory_expiry_sweeper", new=AsyncMock()),
+            patch("meho_backplane.main.start_topology_history_retention_sweeper"),
+            patch(
+                "meho_backplane.main.stop_topology_history_retention_sweeper",
+                new=AsyncMock(),
+            ),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]
             await gen.__aenter__()

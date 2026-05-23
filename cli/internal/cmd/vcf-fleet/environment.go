@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
+	"github.com/evoila/meho/cli/internal/dispatch"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -60,15 +62,15 @@ func newEnvironmentListCmd() *cobra.Command {
 }
 
 func runEnvironmentList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, environmentListOpID, targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, environmentListOpID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, environmentListOpID, r, jsonOut, printEnvironmentList)
+	return conn.Render(cmd, environmentListOpID, r, jsonOut, printEnvironmentList)
 }
 
 func printEnvironmentList(w io.Writer, r *CallResult) {
@@ -79,7 +81,7 @@ func printEnvironmentList(w io.Writer, r *CallResult) {
 	}
 	entries, err := decodeListResult(r.Result)
 	if err != nil {
-		printGenericResult(w, environmentListOpID, r)
+		conn.PrintGeneric(w, environmentListOpID, r)
 		return
 	}
 	if len(entries) == 0 {
@@ -126,16 +128,16 @@ func newEnvironmentInfoCmd() *cobra.Command {
 }
 
 func runEnvironmentInfo(cmd *cobra.Command, environmentID, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"environmentId": environmentID}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, environmentGetOpID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, environmentGetOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, environmentGetOpID, r, jsonOut, printEnvironmentInfo)
+	return conn.Render(cmd, environmentGetOpID, r, jsonOut, printEnvironmentInfo)
 }
 
 func printEnvironmentInfo(w io.Writer, r *CallResult) {
@@ -166,7 +168,7 @@ func printEnvironmentInfo(w io.Writer, r *CallResult) {
 		} `json:"products"`
 	}
 	if err := jsonUnmarshalStrict(r.Result, &env); err != nil || env.EnvironmentID == "" {
-		if pretty, perr := prettyJSON(r.Result); perr == nil {
+		if pretty, perr := dispatch.PrettyJSON(r.Result); perr == nil {
 			fmt.Fprintln(w, pretty)
 		} else {
 			fmt.Fprintln(w, string(r.Result))

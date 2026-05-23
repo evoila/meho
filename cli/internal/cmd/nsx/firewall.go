@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -76,20 +77,20 @@ func newFirewallPolicyListCmd() *cobra.Command {
 }
 
 func runFirewallPolicyList(cmd *cobra.Command, scope, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	if scope == "" {
 		scope = "default"
 	}
 	const opID = "GET:/policy/api/v1/infra/domains/{domain-id}/security-policies"
 	params := map[string]any{"domain-id": scope}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printFirewallPolicyList)
+	return conn.Render(cmd, opID, r, jsonOut, printFirewallPolicyList)
 }
 
 func printFirewallPolicyList(w io.Writer, r *CallResult) {
@@ -170,9 +171,9 @@ func newFirewallRuleListCmd() *cobra.Command {
 }
 
 func runFirewallRuleList(cmd *cobra.Command, policyID, scope, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	if scope == "" {
 		scope = "default"
@@ -182,11 +183,11 @@ func runFirewallRuleList(cmd *cobra.Command, policyID, scope, targetName string,
 		"domain-id":          scope,
 		"security-policy-id": policyID,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printFirewallRuleList)
+	return conn.Render(cmd, opID, r, jsonOut, printFirewallRuleList)
 }
 
 func printFirewallRuleList(w io.Writer, r *CallResult) {

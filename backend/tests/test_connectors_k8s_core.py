@@ -62,6 +62,7 @@ from kubernetes_asyncio.client.models import (
     V1Taint,
 )
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import (
     KUBERNETES_OPS,
     KubernetesConnector,
@@ -150,10 +151,26 @@ def _stub_kubeconfig() -> dict[str, Any]:
 
 
 def _make_connector() -> KubernetesConnector:
-    async def _loader(_target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_target: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return _stub_kubeconfig()
 
     return KubernetesConnector(kubeconfig_loader=_loader)
+
+
+def _make_operator() -> Operator:
+    """Build a non-system operator carrying a non-empty ``raw_jwt``.
+
+    G3.10-T4 (#948) added ``operator`` to every typed handler's
+    signature; the injected loader here ignores it.
+    """
+    return Operator(
+        sub="op-core-test",
+        name="Core Test Operator",
+        email=None,
+        raw_jwt="op.core.jwt",
+        tenant_id=__import__("uuid").UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +455,7 @@ async def test_k8s_namespace_list_returns_rows_and_total() -> None:
         core_v1_cls.return_value.list_namespace = AsyncMock(
             return_value=V1NamespaceList(items=namespaces, metadata=V1ListMeta())
         )
-        result = await connector.k8s_namespace_list(_TARGET, {})
+        result = await connector.k8s_namespace_list(_make_operator(), _TARGET, {})
 
     assert result["total"] == 2
     assert len(result["rows"]) == 2
@@ -463,7 +480,7 @@ async def test_k8s_namespace_list_empty_cluster() -> None:
         core_v1_cls.return_value.list_namespace = AsyncMock(
             return_value=V1NamespaceList(items=[], metadata=V1ListMeta())
         )
-        result = await connector.k8s_namespace_list(_TARGET, {})
+        result = await connector.k8s_namespace_list(_make_operator(), _TARGET, {})
     assert result == {"rows": [], "total": 0}
 
 
@@ -491,7 +508,7 @@ async def test_k8s_node_list_returns_rows_and_total() -> None:
         core_v1_cls.return_value.list_node = AsyncMock(
             return_value=V1NodeList(items=nodes, metadata=V1ListMeta())
         )
-        result = await connector.k8s_node_list(_TARGET, {})
+        result = await connector.k8s_node_list(_make_operator(), _TARGET, {})
 
     assert result["total"] == 2
     names = [row["name"] for row in result["rows"]]
@@ -525,7 +542,7 @@ async def test_k8s_ls_root_returns_namespaces_and_cluster_kinds() -> None:
         core_v1_cls.return_value.list_namespace = AsyncMock(
             return_value=V1NamespaceList(items=namespaces, metadata=V1ListMeta())
         )
-        result = await connector.k8s_ls(_TARGET, {"path": "/"})
+        result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/"})
 
     assert result["path"] == "/"
     assert result["namespaces"] == ["argocd", "kube-system", "zebra"]
@@ -548,7 +565,7 @@ async def test_k8s_ls_default_path_is_root() -> None:
         core_v1_cls.return_value.list_namespace = AsyncMock(
             return_value=V1NamespaceList(items=namespaces, metadata=V1ListMeta())
         )
-        result = await connector.k8s_ls(_TARGET, {})  # no path
+        result = await connector.k8s_ls(_make_operator(), _TARGET, {})  # no path
     assert result["path"] == "/"
     assert result["namespaces"] == ["default"]
 
@@ -603,7 +620,7 @@ async def test_k8s_ls_namespace_counts_via_remaining_item_count() -> None:
             return_value=core_v1_instance,
         ),
     ):
-        result = await connector.k8s_ls(_TARGET, {"path": "/argocd"})
+        result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd"})
 
     assert result["path"] == "/argocd"
     assert result["namespace"] == "argocd"
@@ -642,7 +659,7 @@ async def test_k8s_ls_namespace_kind_with_rbac_403_records_error() -> None:
             return_value=core_v1_instance,
         ),
     ):
-        result = await connector.k8s_ls(_TARGET, {"path": "/argocd"})
+        result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd"})
 
     kinds_by_label = {entry["kind"]: entry for entry in result["kinds"]}
     assert kinds_by_label["events"]["count"] is None
@@ -677,7 +694,7 @@ async def test_k8s_ls_namespace_kind_forwards_to_unknown_op_envelope() -> None:
     ):
         await KubernetesConnector.register_operations()
 
-    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/statefulsets"})
+    result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/statefulsets"})
 
     assert result["path"] == "/argocd/statefulsets"
     assert result["forwarded_to"] == "k8s.statefulset.list"
@@ -705,7 +722,9 @@ async def test_k8s_ls_path_with_extra_segments_collapses_to_two_arg_forward() ->
     ):
         await KubernetesConnector.register_operations()
 
-    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/services/extra/segments"})
+    result = await connector.k8s_ls(
+        _make_operator(), _TARGET, {"path": "/argocd/services/extra/segments"}
+    )
     assert result["forwarded_to"] == "k8s.service.list"
     # The path retained is the canonical 2-segment shape.
     assert result["path"] == "/argocd/services"
@@ -785,7 +804,7 @@ async def test_k8s_ls_forwards_singular_ingress_path_without_mangling() -> None:
     ):
         await KubernetesConnector.register_operations()
 
-    result = await connector.k8s_ls(_TARGET, {"path": "/argocd/ingress"})
+    result = await connector.k8s_ls(_make_operator(), _TARGET, {"path": "/argocd/ingress"})
 
     assert result["path"] == "/argocd/ingress"
     assert result["forwarded_to"] == "k8s.ingress.list"

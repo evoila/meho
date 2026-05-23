@@ -6,6 +6,7 @@ package vault
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -89,15 +90,15 @@ func bindAuthAddrFlags(cmd *cobra.Command) *authAddrFlags {
 // dispatchAuth runs the resolve → dispatch → render pipeline shared by
 // every auth verb. params is nil for the list verbs.
 func dispatchAuth(cmd *cobra.Command, f *authAddrFlags, opID string, params map[string]any) error {
-	backplaneURL, err := resolveBackplane(f.backplaneOverride)
+	backplaneURL, err := backplane.Resolve(f.backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), f.jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), f.jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, f.targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, f.targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, f.jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, f.jsonOut, nil)
+	return conn.Render(cmd, opID, r, f.jsonOut, nil)
 }
 
 // newAuthListVerbCmd builds one no-arg, no-param list verb (userpass-

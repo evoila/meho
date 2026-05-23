@@ -109,6 +109,8 @@ from typing import Any
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vcf_auth import (
     CredentialsCache,
     basic_auth_header,
@@ -169,16 +171,20 @@ class VcfOperationsConnector(HttpConnector):
     async def auth_headers(
         self,
         target: VcfOperationsTargetLike,
-        raw_jwt: str,
+        operator: Operator,
     ) -> dict[str, str]:
         """Return ``{"Authorization": "Basic ..."}`` for the request.
 
         Loads credentials from Vault on first call against *target*, caches
         them (via the shared :class:`CredentialsCache`), and reuses the cached
-        values on subsequent calls. ``raw_jwt`` is accepted for ABC-signature
-        compatibility but unused — :attr:`AuthModel.SHARED_SERVICE_ACCOUNT`
-        authenticates with a Vault-sourced service account, not the operator's
-        OIDC token.
+        values on subsequent calls. The full ``operator`` is threaded into
+        the loader so the live default
+        (:func:`~meho_backplane.connectors._shared.vcf_auth.load_credentials_from_vault`)
+        reads the per-target KV-v2 secret under the operator's Vault
+        Identity entity via
+        :func:`~meho_backplane.auth.vault.vault_client_for_operator` —
+        the locked Option A decision. An injected test loader receives
+        the same ``(target, operator)`` pair.
 
         Raises :exc:`NotImplementedError` if ``target.auth_model`` is anything
         other than ``shared_service_account`` or ``None``. Same predicate as
@@ -191,7 +197,6 @@ class VcfOperationsConnector(HttpConnector):
         separate seams matches httpx's own API surface
         (``client.request(..., headers=..., params=...)``).
         """
-        del raw_jwt  # SHARED_SERVICE_ACCOUNT mode does not forward operator JWT
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -199,7 +204,7 @@ class VcfOperationsConnector(HttpConnector):
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        creds = await self._creds.get(target)
+        creds = await self._creds.get(target, operator)
         return {"Authorization": basic_auth_header(creds["username"], creds["password"])}
 
     def _auth_query_params(self, target: VcfOperationsTargetLike) -> dict[str, str]:
@@ -222,7 +227,7 @@ class VcfOperationsConnector(HttpConnector):
         method: str,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -235,7 +240,8 @@ class VcfOperationsConnector(HttpConnector):
         via :meth:`_get_json`). Caller-supplied params win on key conflict —
         an operation handler that explicitly sets ``auth-source`` overrides
         the per-target default; nothing today exercises that path, but the
-        ordering documents the intended precedence.
+        ordering documents the intended precedence. ``operator`` is forwarded
+        to the base method (and thence :meth:`auth_headers`) unchanged.
         """
         merged_params = dict(self._auth_query_params(target))
         if params:
@@ -248,7 +254,7 @@ class VcfOperationsConnector(HttpConnector):
             target,
             method,
             path,
-            raw_jwt=raw_jwt,
+            operator=operator,
             params=final_params,
             json=json,
         )
@@ -267,7 +273,9 @@ class VcfOperationsConnector(HttpConnector):
         """
         probed_at = datetime.now(UTC)
         try:
-            payload = await self._get_json(target, "/suite-api/api/versions/current", raw_jwt="")
+            payload = await self._get_json(
+                target, "/suite-api/api/versions/current", operator=synthesise_system_operator()
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="vmware",

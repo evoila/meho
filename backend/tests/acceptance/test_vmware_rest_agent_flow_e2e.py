@@ -42,23 +42,55 @@ search-quality contract lives in the canary.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from meho_backplane.operations import reset_dispatcher_caches
+from meho_backplane.operations.dispatcher import set_default_reducer
 from meho_backplane.operations.ingest import list_ingested_connectors
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import (
     UnknownConnectorError,
     call_operation,
     list_operation_groups,
     search_operations,
 )
+from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._canary_fixtures import (
     CANARY_CONNECTOR_ID,
     IngestedCanaryVcsim,
 )
 
 
+@pytest.fixture
+def production_default_reducer() -> Any:
+    """Install the production-default :class:`JsonFluxReducer` as the dispatcher default.
+
+    The FastAPI lifespan installs ``JsonFluxReducer()`` (default
+    ``row_threshold=50`` / ``byte_threshold=4096``) as the module-level
+    dispatcher default (``main.py``'s ``set_default_reducer`` call). This
+    fixture pins that same production default for the agent-flow chain so
+    the test asserts the shape the deployed backplane actually returns —
+    independent of whichever reducer a prior test in the same pytest
+    worker left installed (the module-level default is process-global and
+    the lifespan does not restore it on shutdown).
+
+    Teardown restores :class:`PassThroughReducer` (the dispatcher's
+    import-time default) and drops the dispatcher caches so no
+    connector-instance state leaks into a follow-on test.
+    """
+    set_default_reducer(JsonFluxReducer())
+    try:
+        yield
+    finally:
+        set_default_reducer(PassThroughReducer())
+        reset_dispatcher_caches()
+
+
 async def test_agent_flow_end_to_end_against_vcsim(
     prewarmed_embeddings: None,
+    production_default_reducer: None,
     ingested_canary_vcsim: IngestedCanaryVcsim,
 ) -> None:
     """The four-step agent chain produces real vcsim data on call_operation.
@@ -80,9 +112,16 @@ async def test_agent_flow_end_to_end_against_vcsim(
        "list virtual machines" query (the canary's full-corpus search-
        quality assertion lives in ``test_g07_vsphere_canary.py``).
     4. ``call_operation(op_id="GET:/vcenter/vm", target=<vcsim>)`` must
-       return ``status='ok'`` carrying real data from vcsim (the
-       seeded topology has 50 VMs, so the inlined ``result['value']``
-       list has 50 entries).
+       return ``status='ok'``. With the production-default
+       :class:`JsonFluxReducer` installed (G0.6.1-T3 #753), the 50-VM
+       seed materializes into a JSONFlux handle: the row count is *at*
+       the 50-row threshold (``50 > 50`` is False) but the serialized
+       payload exceeds the 4 KB ``byte_threshold``, so the byte branch
+       fires. The chain therefore returns the reduced summary on
+       ``result`` plus a populated :class:`ResultHandle` (the agent
+       drills into the full set via ``result_query`` / ``result_export``
+       — CLAUDE.md postulate 6 / v0.1-spec §4) rather than a raw
+       50-element list inline.
     """
     operator = ingested_canary_vcsim.operator
 
@@ -133,20 +172,35 @@ async def test_agent_flow_end_to_end_against_vcsim(
         },
     )
     assert result_envelope["status"] == "ok", f"dispatch did not succeed: {result_envelope!r}"
-    payload = result_envelope.get("result")
-    assert payload is not None, f"expected non-null OperationResult.result; got {result_envelope!r}"
-    # vCenter REST returns set-shaped responses as ``{"value": [...]}``
-    # on the legacy ``/rest`` mount and as a bare list on the modern
-    # ``/api`` mount. vcsim serves both shapes depending on which
-    # endpoint the connector hits; assert on the union.
-    vms = payload["value"] if isinstance(payload, dict) and "value" in payload else payload
-    assert isinstance(vms, list), (
-        f"expected a list of VMs from vcsim's 50-VM seed topology; "
-        f"got payload type {type(payload).__name__} body={payload!r}"
+
+    # With the production-default JsonFluxReducer installed, the 50-VM
+    # seed (≈5 KB serialized, over the 4 KB byte_threshold) materializes
+    # into a handle. The agent never sees the raw 50-element list inline:
+    # ``result`` carries the reduced summary, ``handle`` carries the
+    # ResultHandle the agent drills into.
+    handle = result_envelope.get("handle")
+    assert handle is not None, (
+        f"expected OperationResult.handle to be populated by the "
+        f"production-default JsonFluxReducer; got handle=None on "
+        f"envelope={result_envelope!r}"
     )
-    assert len(vms) == 50, (
-        f"expected 50 VMs from vcsim's seed topology; got {len(vms)} "
-        f"(payload shape={type(payload).__name__})"
+    assert handle["total_rows"] == 50, (
+        f"expected 50 VMs from vcsim's seed topology; got handle.total_rows={handle['total_rows']}"
+    )
+    # The bounded sample lets the agent preview the set without
+    # materializing all 50 rows; it must be non-empty and capped below
+    # the full row count.
+    sample_rows = handle.get("sample_rows")
+    assert sample_rows, f"expected a bounded sample on the handle; got sample_rows={sample_rows!r}"
+    assert 0 < len(sample_rows) < handle["total_rows"], (
+        f"sample must be a bounded slice of the 50-VM set; got {len(sample_rows)} rows"
+    )
+
+    # The inlined result is the reducer's summary, not the raw 50-VM set.
+    payload = result_envelope.get("result")
+    assert payload is not None and payload.get("row_count") == 50, (
+        f"expected the reducer's reduced summary on result with "
+        f"row_count==50; got result={payload!r}"
     )
 
 

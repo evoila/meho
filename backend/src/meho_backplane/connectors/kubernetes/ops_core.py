@@ -40,21 +40,22 @@ The Issue body's "Handle threshold tested: against k3d populated with
 50+ namespaces, sample of 20 + handle returned" criterion assumed the
 shared :class:`HandleStore` from G3.1-T4 (#304) would be in place. #304
 was **superseded** (closed without a HandleStore landing -- the
-Initiative-redraft note on the issue spells this out), and the
-substrate currently in the tree ships
-:class:`~meho_backplane.operations.reducer.PassThroughReducer` as the
-only reducer -- it never populates :attr:`OperationResult.handle`.
+Initiative-redraft note on the issue spells this out). The substrate
+now in the tree ships
+:class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(G0.6.1 #750), installed as the dispatcher default in ``main.py`` via
+``set_default_reducer`` -- it materializes set-shaped responses into a
+:class:`~meho_backplane.connectors.schemas.ResultHandle`.
 
 The handlers in this module emit **raw row lists** in the response
-dict, exactly the shape the future JSONFlux reducer will see when it
-ships. That reducer -- not the connector -- owns the threshold check,
-the row truncation, the spill to MinIO/S3/Valkey, and the
-``ResultHandle`` construction. Putting threshold logic per-handler
-would couple every connector to the eventual reducer's calibration
-choice and double-implement the spill path; per the substrate split
-documented on
+dict, exactly the shape the default JsonFluxReducer reduces. That
+reducer -- not the connector -- owns the threshold check, the row
+truncation, the spill to MinIO/S3/Valkey, and the ``ResultHandle``
+construction. Putting threshold logic per-handler would couple every
+connector to the reducer's calibration choice and double-implement
+the spill path; per the substrate split documented on
 :mod:`meho_backplane.operations.reducer`, set-shaped reduction is the
-reducer's job, not the connector's.
+reducer's job, not the connector's. See ``docs/architecture/jsonflux.md``.
 
 A small forward-compat marker stays in the response envelope so future
 agent prompts (which inline ``llm_instructions.output_shape``) know
@@ -411,8 +412,9 @@ _K8S_NAMESPACE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "integer",
             "description": (
                 "Row count emitted in ``rows``. Useful as the "
-                "pre-reduction count -- a future JSONFlux reducer "
-                "tracks both the inlined sample size and this total."
+                "pre-reduction count -- the dispatcher's default "
+                "JsonFluxReducer tracks both the inlined sample size "
+                "and this total."
             ),
         },
     },

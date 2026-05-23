@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.gcloud import GcloudConnector
 from meho_backplane.connectors.gcloud.ops import GCLOUD_OPS, GcloudOp
 from meho_backplane.connectors.gcloud.session import GcloudTargetLike
@@ -64,7 +65,7 @@ _TARGET = _StubTarget(
 # ---------------------------------------------------------------------------
 
 
-async def _empty_loader(_target: GcloudTargetLike) -> dict[str, Any]:
+async def _empty_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
     return {}
 
 

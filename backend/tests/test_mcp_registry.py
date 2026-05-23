@@ -43,6 +43,7 @@ from meho_backplane.mcp import (
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.registry import (
     _match_uri_template,
+    _wire_safe_input_schema,
     all_resource_templates_for,
     all_tools_for,
     clear_registries,
@@ -155,6 +156,70 @@ def test_register_mcp_tool_makes_it_callable_via_get_tool() -> None:
     stored_defn, stored_handler = entry
     assert stored_defn.name == "test.tool"
     assert stored_handler is _stub
+
+
+def test_to_wire_strips_top_level_combinators_but_keeps_them_on_input_schema() -> None:
+    """``to_wire`` drops top-level oneOf/allOf/anyOf; the stored schema retains them.
+
+    The Anthropic Messages API rejects a top-level JSON-Schema combinator
+    in a tool's ``input_schema`` and 400s the whole session (#905). MEHO
+    keeps the combinator on ``inputSchema`` — server-side jsonschema
+    validation in :mod:`~meho_backplane.mcp.handlers` needs it — and strips
+    it only from the published wire copy. A NESTED combinator (inside
+    ``properties``) is untouched: the restriction is top-level only.
+    """
+    nested_combinator = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    schema = {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string"},
+            "opt": nested_combinator,
+        },
+        "required": ["kind"],
+        "additionalProperties": False,
+        "allOf": [
+            {
+                "if": {"properties": {"kind": {"const": "x"}}},
+                "then": {"required": ["opt"]},
+            },
+        ],
+        "oneOf": [{"required": ["kind"]}],
+        "anyOf": [{"required": ["kind"]}],
+    }
+    defn = ToolDefinition(
+        name="test.combinator",
+        description="A tool whose schema carries top-level combinators",
+        inputSchema=schema,
+    )
+
+    wire = defn.to_wire()["inputSchema"]
+    # Top-level combinators gone from the wire shape ...
+    assert "allOf" not in wire
+    assert "oneOf" not in wire
+    assert "anyOf" not in wire
+    # ... the non-combinator keys survive untouched ...
+    assert wire["type"] == "object"
+    assert wire["required"] == ["kind"]
+    assert wire["additionalProperties"] is False
+    # ... and a nested combinator (inside properties) is preserved.
+    assert wire["properties"]["opt"] == nested_combinator
+
+    # The stored schema is unchanged — server-side validation still sees
+    # the combinators by value.
+    assert defn.inputSchema["allOf"] == schema["allOf"]
+    assert defn.inputSchema["oneOf"] == schema["oneOf"]
+    assert defn.inputSchema["anyOf"] == schema["anyOf"]
+
+
+def test_wire_safe_input_schema_returns_same_object_when_nothing_to_strip() -> None:
+    """A combinator-free schema passes through unchanged (no-copy fast path).
+
+    The common case (~15 of MEHO's tools) has no top-level combinator;
+    :func:`_wire_safe_input_schema` returns the same object identity rather
+    than building a needless copy.
+    """
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    assert _wire_safe_input_schema(schema) is schema
 
 
 def test_register_mcp_tool_rejects_duplicate() -> None:

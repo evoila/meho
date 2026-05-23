@@ -41,7 +41,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import Connector
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.kubernetes import (
     KubernetesConnector,
     KubernetesTargetLike,
@@ -53,6 +56,8 @@ from meho_backplane.connectors.kubernetes.kubeconfig import load_kubeconfig_from
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.settings import get_settings
 
+from ._vault_fakes import install_fake_client
+
 
 @pytest.fixture(autouse=True)
 def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -62,11 +67,18 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     via the DB engine, so the lookup path needs ``Settings`` to
     construct -- which requires the three Keycloak/Vault env vars.
     Fingerprint / probe tests don't touch the DB but the fixture is
-    autouse so all tests in the module see a consistent env.
+    autouse so all tests in the module see a consistent env. The Vault
+    JWT/OIDC vars are needed too because G3.10-T4 (#948) wired the
+    default kubeconfig loader against ``vault_client_for_operator``,
+    which reads these on every call.
     """
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("VAULT_OIDC_ROLE", "meho-mcp")
+    monkeypatch.setenv("VAULT_OIDC_MOUNT_PATH", "jwt")
+    monkeypatch.setenv("VAULT_TIMEOUT_SECONDS", "5.0")
+    monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -130,10 +142,35 @@ def _stub_version() -> MagicMock:
     return v
 
 
-def _make_connector_with_stub_kubeconfig() -> KubernetesConnector:
-    """Build a connector whose loader returns the stub kubeconfig dict."""
+def _make_operator(*, raw_jwt: str = "op.test.jwt") -> Operator:
+    """Build a non-system operator with a non-empty ``raw_jwt``.
 
-    async def _loader(target: KubernetesTargetLike) -> dict[str, Any]:
+    The empty-``raw_jwt`` case is the fail-closed system-call carve-out;
+    tests that exercise it pass ``raw_jwt=""`` (or call
+    :func:`synthesise_system_operator`).
+    """
+    return Operator(
+        sub="op-test",
+        name="Test Operator",
+        email=None,
+        raw_jwt=raw_jwt,
+        tenant_id=__import__("uuid").UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+
+def _make_connector_with_stub_kubeconfig() -> KubernetesConnector:
+    """Build a connector whose loader returns the stub kubeconfig dict.
+
+    The injected loader accepts the same ``(target, operator)`` pair the
+    production default
+    :func:`~meho_backplane.connectors.kubernetes.kubeconfig.load_kubeconfig_from_vault`
+    accepts (the G3.10-T4 #948 contract) so the wiring is exercised
+    end-to-end through the test seam as well.
+    """
+
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del operator  # accepted by signature; stub doesn't need it
         return _stub_kubeconfig_dict()
 
     return KubernetesConnector(kubeconfig_loader=_loader)
@@ -157,12 +194,123 @@ def test_kubernetes_connector_subclasses_connector_abc() -> None:
     assert KubernetesConnector.impl_id == "k8s"
 
 
-def test_default_loader_raises_deliberate_stub() -> None:
-    """The default Vault-shaped loader is a deliberate, clearly-labelled stub."""
+def test_default_loader_fails_closed_on_empty_operator_jwt() -> None:
+    """The default loader fails closed on the system-call carve-out (no JWT).
+
+    Replaces the pre-G3.10-T4 (#948) ``deliberate stub`` test: the loader
+    is now live (reads Vault under the operator's identity) but still
+    fails closed when ``operator.raw_jwt`` is empty — the same fail-closed
+    boundary :func:`load_basic_credentials` enforces. The Vault leaf is
+    never reached on this path; the guard runs before
+    :func:`vault_client_for_operator` is touched.
+    """
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"deliberate stub.*#214"):
-            await load_kubeconfig_from_vault(_TARGET_A)
+        with pytest.raises(VaultCredentialsReadError, match="no operator JWT"):
+            await load_kubeconfig_from_vault(_TARGET_A, synthesise_system_operator())
+
+    asyncio.run(_check())
+
+
+def test_default_loader_fails_closed_on_unset_secret_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``target.secret_ref`` raises before Vault is touched."""
+    unconfigured = _StubTarget(name="unconfigured", host="x.test.invalid", port=6443, secret_ref="")
+
+    async def _check() -> None:
+        with pytest.raises(VaultCredentialsReadError, match="no secret_ref configured"):
+            await load_kubeconfig_from_vault(unconfigured, _make_operator())
+
+    asyncio.run(_check())
+
+
+def test_default_loader_returns_parsed_kubeconfig_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live loader reads the ``kubeconfig`` KV-v2 field + returns the parsed dict.
+
+    Uses the shared in-process Vault fake (``install_fake_client``)
+    seeded with a kubeconfig YAML; the loader's real
+    :func:`vault_client_for_operator` + ``read_secret_version`` code
+    path runs against the fake.
+    """
+    kubeconfig_yaml = (
+        "apiVersion: v1\n"
+        "kind: Config\n"
+        "current-context: default\n"
+        "contexts:\n"
+        "- name: default\n"
+        "  context: {cluster: c1, user: u1}\n"
+        "clusters:\n"
+        "- name: c1\n"
+        "  cluster: {server: 'https://k8s.test:6443'}\n"
+        "users:\n"
+        "- name: u1\n"
+        "  user: {token: stub-token}\n"
+    )
+    fake = install_fake_client(monkeypatch, secret={"kubeconfig": kubeconfig_yaml})
+
+    async def _check() -> None:
+        operator = _make_operator(raw_jwt="op.live.jwt")
+        result = await load_kubeconfig_from_vault(_TARGET_A, operator)
+        assert result["apiVersion"] == "v1"
+        assert result["clusters"][0]["cluster"]["server"] == "https://k8s.test:6443"
+        assert result["current-context"] == "default"
+        # The KV-v2 read happened under the operator's JWT (operator-context
+        # Vault read — the locked Option A decision).
+        assert fake.auth.jwt.login_calls[-1]["jwt"] == "op.live.jwt"
+        assert fake.secrets.kv.v2.read_calls[-1]["path"] == _TARGET_A.secret_ref
+
+    asyncio.run(_check())
+
+
+def test_default_loader_raises_on_missing_kubeconfig_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KV-v2 secret missing the ``kubeconfig`` field surfaces a clear error."""
+    install_fake_client(monkeypatch, secret={"username": "wrong-shape"})
+
+    async def _check() -> None:
+        with pytest.raises(VaultCredentialsReadError, match="missing required field 'kubeconfig'"):
+            await load_kubeconfig_from_vault(_TARGET_A, _make_operator())
+
+    asyncio.run(_check())
+
+
+def test_default_loader_raises_on_non_string_kubeconfig_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``kubeconfig`` field that isn't a string surfaces a clear error.
+
+    Defence against a misconfigured secret that stored the kubeconfig as
+    a nested dict (e.g. someone wrote a parsed dict instead of the YAML
+    text) — the loader rejects it cleanly rather than passing a non-string
+    to :func:`parse_kubeconfig_yaml`.
+    """
+    install_fake_client(monkeypatch, secret={"kubeconfig": {"oops": "dict"}})
+
+    async def _check() -> None:
+        with pytest.raises(VaultCredentialsReadError, match="expected a YAML string"):
+            await load_kubeconfig_from_vault(_TARGET_A, _make_operator())
+
+    asyncio.run(_check())
+
+
+def test_default_loader_propagates_yaml_parse_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed kubeconfig YAML surfaces a :class:`ValueError` (not a bare YAMLError).
+
+    The loader's contract is one failure path for malformed YAML — the
+    :func:`parse_kubeconfig_yaml` normalisation. Callers don't need to
+    import ``yaml`` just to catch parse failures.
+    """
+    install_fake_client(monkeypatch, secret={"kubeconfig": "key: 'unterminated"})
+
+    async def _check() -> None:
+        with pytest.raises(ValueError, match="failed to parse"):
+            await load_kubeconfig_from_vault(_TARGET_A, _make_operator())
 
     asyncio.run(_check())
 
@@ -406,18 +554,20 @@ async def test_execute_returns_unknown_op_for_every_op_id() -> None:
 async def test_api_client_reused_for_same_target() -> None:
     loader_calls: list[str] = []
 
-    async def _loader(target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del operator
         loader_calls.append(target.name)
         return _stub_kubeconfig_dict()
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
+    op = _make_operator()
     with patch(
         "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         return_value=MagicMock(close=AsyncMock()),
     ) as factory:
-        c1 = await connector._get_api_client(_TARGET_A)
-        c2 = await connector._get_api_client(_TARGET_A)
+        c1 = await connector._get_api_client(_TARGET_A, op)
+        c2 = await connector._get_api_client(_TARGET_A, op)
 
     assert c1 is c2
     assert factory.call_count == 1
@@ -426,18 +576,20 @@ async def test_api_client_reused_for_same_target() -> None:
 
 @pytest.mark.asyncio
 async def test_api_clients_per_target_are_distinct() -> None:
-    async def _loader(target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del operator
         return _stub_kubeconfig_dict()
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
+    op = _make_operator()
 
     with patch(
         "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=lambda _d: MagicMock(close=AsyncMock()),
     ):
-        c_a = await connector._get_api_client(_TARGET_A)
-        c_b = await connector._get_api_client(_TARGET_B)
+        c_a = await connector._get_api_client(_TARGET_A, op)
+        c_b = await connector._get_api_client(_TARGET_B, op)
 
     assert c_a is not c_b
 
@@ -458,17 +610,19 @@ async def test_api_client_cache_key_is_secret_ref_not_name() -> None:
         name="rke2-meho", host="t-b.test", port=6443, secret_ref="kv/data/tenant-b/k8s"
     )
 
-    async def _loader(target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del operator
         return _stub_kubeconfig_dict()
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
+    op = _make_operator()
     with patch(
         "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=lambda _d: MagicMock(close=AsyncMock()),
     ) as factory:
-        c_a = await connector._get_api_client(tenant_a)
-        c_b = await connector._get_api_client(tenant_b)
+        c_a = await connector._get_api_client(tenant_a, op)
+        c_b = await connector._get_api_client(tenant_b, op)
 
     assert c_a is not c_b
     assert factory.call_count == 2
@@ -479,21 +633,49 @@ async def test_api_client_cache_key_is_secret_ref_not_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_loader_receives_operator_and_target() -> None:
+    """The injected loader receives the same ``(target, operator)`` pair the default does.
+
+    Locks in the G3.10-T4 (#948) contract: ``KubeconfigLoader`` carries
+    ``operator`` so the dispatch path threads the operator's identity to
+    the kubeconfig read. An injected test loader receives the same pair.
+    """
+    captured: list[tuple[str, str]] = []
+
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        captured.append((target.name, operator.sub))
+        return _stub_kubeconfig_dict()
+
+    connector = KubernetesConnector(kubeconfig_loader=_loader)
+    op = _make_operator()
+    with patch(
+        "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
+        new_callable=AsyncMock,
+        return_value=MagicMock(close=AsyncMock()),
+    ):
+        await connector._get_api_client(_TARGET_A, op)
+
+    assert captured == [(_TARGET_A.name, "op-test")]
+
+
+@pytest.mark.asyncio
 async def test_aclose_closes_every_cached_client_and_clears_cache() -> None:
-    async def _loader(target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
+        del operator
         return _stub_kubeconfig_dict()
 
     connector = KubernetesConnector(kubeconfig_loader=_loader)
     client_a = MagicMock(close=AsyncMock())
     client_b = MagicMock(close=AsyncMock())
+    op = _make_operator()
 
     with patch(
         "meho_backplane.connectors.kubernetes.connector.config.new_client_from_config_dict",
         new_callable=AsyncMock,
         side_effect=[client_a, client_b],
     ):
-        await connector._get_api_client(_TARGET_A)
-        await connector._get_api_client(_TARGET_B)
+        await connector._get_api_client(_TARGET_A, op)
+        await connector._get_api_client(_TARGET_B, op)
 
     await connector.aclose()
 

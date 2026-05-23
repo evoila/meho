@@ -11,14 +11,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -161,11 +160,11 @@ type evalOptions struct {
 // flag-parsing boilerplate stays in newEvalCmd and the request-
 // response logic stays testable in isolation.
 func runEval(cmd *cobra.Command, opts evalOptions) error {
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
-			classifyBackplaneError(err),
+			backplane.ClassifyError(err),
 			opts.JSONOut,
 		)
 	}
@@ -288,77 +287,6 @@ func postEvalWithBearer(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	return client.Do(req)
-}
-
-// errNoBackplaneConfigured wraps auth.ErrConfigNotFound so callers
-// can distinguish "operator never logged in" (→ auth_expired exit
-// code 2 — the right fix is `meho login`) from URL-parse failures
-// (→ unexpected exit code 4 — the right fix is correcting argv).
-// Wrapped via %w so errors.Is(err, auth.ErrConfigNotFound) still
-// matches; the user-facing message points at the actionable fix.
-type errNoBackplaneConfigured struct{ inner error }
-
-func (e *errNoBackplaneConfigured) Error() string {
-	return "no backplane URL configured; run `meho login <url>` first or pass --backplane <url>"
-}
-func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
-
-// resolveBackplane re-implements the host-trimming + parsing rules
-// the cmd package's resolveBackplaneURL applies. We can't import
-// cmd from a subpackage without an import cycle (cmd/root.go grafts
-// this package onto the tree), so the resolution shape is mirrored
-// here.
-func resolveBackplane(override string) (string, error) {
-	if override != "" {
-		return normaliseURL(override)
-	}
-	cfg, err := auth.LoadConfig()
-	if err != nil {
-		if errors.Is(err, auth.ErrConfigNotFound) {
-			return "", &errNoBackplaneConfigured{inner: err}
-		}
-		return "", err
-	}
-	return normaliseURL(cfg.BackplaneURL)
-}
-
-// classifyBackplaneError maps a resolveBackplane error to the right
-// output.StructuredError category. The documented exit codes (see
-// runEval header) name 2 = auth_expired vs 3 = unreachable vs 4 =
-// unexpected; collapsing every error to auth_expired (the previous
-// shape) sends operators down the `meho login` path when the actual
-// cause was a typo in --backplane or a stale config file. Classify:
-//
-//   - ErrConfigNotFound (or our wrapper) → auth_expired: operator
-//     hasn't run `meho login` yet, that's exactly the fix.
-//   - everything else (parse errors, file-system errors from
-//     LoadConfig) → unexpected: the cause is operator argv or a
-//     corrupt config, not an expired token.
-func classifyBackplaneError(err error) *output.StructuredError {
-	if errors.Is(err, auth.ErrConfigNotFound) {
-		return output.AuthExpired(err.Error())
-	}
-	return output.Unexpected(err.Error())
-}
-
-// normaliseURL strips trailing slashes + parses the URL to fail
-// fast on garbage input. Mirrors normalizeBackplaneURL in
-// cmd/status.go (kept independent because of the import-cycle
-// concern noted on resolveBackplane).
-func normaliseURL(s string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(s), "/")
-	if trimmed == "" {
-		return "", errors.New("backplane URL is empty")
-	}
-	u, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("backplane URL %q has no host", s)
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
 }
 
 // renderRequestError translates an error from postEval into the

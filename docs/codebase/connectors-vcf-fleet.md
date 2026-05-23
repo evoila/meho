@@ -77,7 +77,7 @@ does not — its dual-plane auth shape is bespoke.
 
 ### Auth
 
-1. The chassis dispatcher calls `auth_headers(target, raw_jwt="")`
+1. The chassis dispatcher calls `auth_headers(target, operator)`
    before issuing the request.
 2. `auth_headers` rejects any `target.auth_model` other than
    `shared_service_account` / `None` via the shared

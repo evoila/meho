@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -121,9 +122,9 @@ func runDelete(cmd *cobra.Command, opts deleteOptions) error {
 			return nil
 		}
 	}
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 	if err := callDelete(cmd.Context(), backplaneURL, opts.Slug); err != nil {
 		return renderRequestError(cmd, backplaneURL, err, opts.JSONOut)

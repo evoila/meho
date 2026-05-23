@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -56,15 +57,15 @@ func newRobotListCmd() *cobra.Command {
 }
 
 func runRobotList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/api/v2.0/robots", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v2.0/robots", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/api/v2.0/robots", r, jsonOut, printRobotList)
+	return conn.Render(cmd, "GET:/api/v2.0/robots", r, jsonOut, printRobotList)
 }
 
 func printRobotList(w io.Writer, r *CallResult) {
@@ -147,20 +148,20 @@ func newRobotCreateCmd() *cobra.Command {
 }
 
 func runRobotCreate(cmd *cobra.Command, robotName, projectName string, duration int, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{
 		"name":     robotName,
 		"project":  projectName,
 		"duration": duration,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "harbor.robot.create", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.robot.create", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "harbor.robot.create", r, jsonOut, printRobotCreate)
+	return conn.Render(cmd, "harbor.robot.create", r, jsonOut, printRobotCreate)
 }
 
 func printRobotCreate(w io.Writer, r *CallResult) {
@@ -225,19 +226,19 @@ func newRobotDeleteCmd() *cobra.Command {
 }
 
 func runRobotDelete(cmd *cobra.Command, projectName string, robotID int, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{
 		"project": projectName,
 		"id":      robotID,
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "harbor.robot.delete", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "harbor.robot.delete", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "harbor.robot.delete", r, jsonOut, printRobotDelete)
+	return conn.Render(cmd, "harbor.robot.delete", r, jsonOut, printRobotDelete)
 }
 
 func printRobotDelete(w io.Writer, r *CallResult) {

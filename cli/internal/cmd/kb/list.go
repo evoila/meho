@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -104,9 +105,9 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 			opts.JSONOut,
 		)
 	}
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), opts.JSONOut)
 	}
 	resp, err := getList(cmd.Context(), backplaneURL, opts)
 	if err != nil {

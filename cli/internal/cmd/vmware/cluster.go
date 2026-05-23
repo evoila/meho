@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -58,15 +59,15 @@ func newClusterListCmd() *cobra.Command {
 }
 
 func runClusterList(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, "GET:/vcenter/cluster", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/vcenter/cluster", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, "GET:/vcenter/cluster", r, jsonOut, printClusterList)
+	return conn.Render(cmd, "GET:/vcenter/cluster", r, jsonOut, printClusterList)
 }
 
 func printClusterList(w io.Writer, r *CallResult) {
@@ -137,9 +138,9 @@ func newClusterPatchCmd() *cobra.Command {
 }
 
 func runClusterPatch(cmd *cobra.Command, nameOrID, targetName, specFlag string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	moid, err := resolveName(cmd.Context(), backplaneURL, targetName, "cluster", nameOrID)
 	if err != nil {
@@ -156,9 +157,9 @@ func runClusterPatch(cmd *cobra.Command, nameOrID, targetName, specFlag string, 
 	}
 	params["cluster"] = moid
 	opID := "vmware.composite.cluster.patch"
-	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, nil)
+	return conn.Render(cmd, opID, r, jsonOut, nil)
 }

@@ -624,7 +624,7 @@ class _FakeHttpConnector(HttpConnector):
         method: str,
         path: str,
         *,
-        raw_jwt: str,
+        operator: Operator,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -633,7 +633,7 @@ class _FakeHttpConnector(HttpConnector):
                 "target": target,
                 "method": method,
                 "path": path,
-                "raw_jwt": raw_jwt,
+                "operator": operator,
                 "params": params,
                 "json": json,
             }
@@ -715,7 +715,7 @@ async def test_dispatch_ingested_builds_request_via_request_json(
     assert call["method"] == "GET"
     assert call["path"] == "/api/test/abc-123"
     assert call["params"] == {"filter": "name=foo"}
-    assert call["raw_jwt"] == operator.raw_jwt
+    assert call["operator"] is operator
 
     assert result.status == "ok", result.error
     assert isinstance(result.result, dict)

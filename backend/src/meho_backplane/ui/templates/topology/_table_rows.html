@@ -1,0 +1,82 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Table body fragment for the Topology tabular surface (Initiative
+  #342 Task #880). Rendered standalone on an HTMX sort / filter
+  swap; included inside ``table.html`` on a full-page render.
+
+  Outermost element is ``<tbody id="topology-table-body">`` so the
+  HTMX ``hx-target="#topology-table-body"`` + ``hx-swap="outerHTML"``
+  pair replaces the body cleanly with the new contents.
+-#}
+<tbody id="topology-table-body">
+  {% if nodes %}
+    {% for node in nodes %}
+      <tr data-node-id="{{ node.id }}" data-node-kind="{{ node.kind }}">
+        <td>
+          <input
+            type="checkbox"
+            class="checkbox checkbox-sm"
+            data-node-id="{{ node.id }}"
+            aria-label="Select node {{ node.name }}"
+            x-on:change="
+              if ($el.checked) selected.add($el.dataset.nodeId);
+              else selected.delete($el.dataset.nodeId);
+              selected = new Set(selected);
+            "
+          />
+        </td>
+        <td>
+          <span class="font-mono text-sm">{{ node.name }}</span>
+        </td>
+        <td>
+          <span class="badge badge-ghost badge-sm">{{ node.kind }}</span>
+        </td>
+        <td>
+          {% if node.last_seen %}
+            <time datetime="{{ node.last_seen.isoformat() }}">{{ node.last_seen.isoformat() }}</time>
+          {% else %}
+            <span class="opacity-50">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <time datetime="{{ node.first_seen.isoformat() }}">{{ node.first_seen.isoformat() }}</time>
+        </td>
+        <td>
+          {# ``discovered_by`` doubles as the product / connector slug --
+             the same column the table column header labels "Product". #}
+          <span class="text-xs opacity-80">{{ node.discovered_by }}</span>
+        </td>
+        <td>
+          {# Parent badges -- T1 emits the immediate parent inferred
+             from the node's own ``parents`` projection on the listing
+             helper. For T1 ``parents`` is not yet projected (the
+             traversal is deferred to T3); render the placeholder so the
+             column reserves space and a future projection can fill it
+             without a template rewrite. #}
+          <span class="text-xs opacity-50">—</span>
+        </td>
+        <td class="text-right tabular-nums">{{ node.children_count }}</td>
+        <td>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs"
+            hx-get="/ui/topology/node/{{ node.id }}"
+            hx-target="#node-drawer"
+            hx-swap="outerHTML"
+            aria-label="View detail for {{ node.name }}"
+          >
+            View
+          </button>
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="9" class="text-center text-sm opacity-70">
+        No nodes match the current filter.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

@@ -108,7 +108,7 @@ func resolveName(
 	params := map[string]any{
 		"filter.names": name,
 	}
-	r, err := dispatchOp(ctx, backplaneURL, opID, targetSlug, params)
+	r, err := conn.Call(ctx, backplaneURL, opID, targetSlug, params)
 	if err != nil {
 		return "", err
 	}

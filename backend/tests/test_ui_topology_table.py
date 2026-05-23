@@ -724,3 +724,34 @@ def test_real_topology_route_wins_over_stub() -> None:
     # H1 marker is the cheapest discriminator.
     assert "vm-route-pinner" in response.text
     assert "Coming soon" not in response.text
+
+
+def test_topology_route_not_shadowed_in_openapi_schema() -> None:
+    """Regression: the real /ui/topology route must own the OpenAPI schema.
+
+    Runtime first-match-wins serves the real table route (pinned by
+    :func:`test_real_topology_route_wins_over_stub`), but FastAPI's
+    ``get_openapi()`` lets a later-registered route at the same path
+    *overwrite* an earlier one in the schema. The chassis ``topology``
+    stub used to register ``GET /ui/topology`` and shadowed the real
+    route in the generated ``cli/api/openapi.json`` (the CLI front-end
+    of the feature). The stub entry was removed; this asserts the
+    generated schema documents the real table route's query params and
+    that the node-detail route declares its 404.
+    """
+    app = _build_app()
+    schema = app.openapi()
+
+    topology_op = schema["paths"]["/ui/topology"]["get"]
+    param_names = {p["name"] for p in topology_op.get("parameters", [])}
+    assert {"sort", "direction", "kind", "q", "limit", "view"} <= param_names, (
+        f"GET /ui/topology OpenAPI op is missing the real table query params; "
+        f"got {sorted(param_names)!r} — the chassis stub is shadowing the real "
+        "route in the schema again."
+    )
+
+    node_op = schema["paths"]["/ui/topology/node/{node_id}"]["get"]
+    assert "404" in node_op["responses"], (
+        "GET /ui/topology/node/{node_id} must declare a 404 response in the "
+        "OpenAPI schema (the handler returns 404 for missing/cross-tenant ids)."
+    )

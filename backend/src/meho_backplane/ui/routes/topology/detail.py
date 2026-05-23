@@ -162,12 +162,13 @@ async def _fetch_edges(
 
     The query joins both endpoint nodes explicitly via aliases so the
     result carries the human-readable ``(kind, name)`` for each
-    endpoint without an N+1 lookup; the tenant boundary is enforced
-    on the edge itself (``GraphEdge.tenant_id == tenant_id``) and
-    implicitly on both endpoints by the unique-index invariant
-    ``(tenant_id, kind, name)`` on ``graph_node`` -- a cross-tenant
-    edge would have to involve cross-tenant endpoints, which the
-    refresh service forbids by construction.
+    endpoint without an N+1 lookup. The tenant boundary is enforced
+    explicitly on the edge (``GraphEdge.tenant_id == tenant_id``) AND
+    on both joined endpoints (``from_alias.tenant_id`` /
+    ``to_alias.tenant_id == tenant_id``) -- defense in depth, so a
+    stray cross-tenant endpoint row could never surface here even if
+    the refresh service's ``(tenant_id, kind, name)`` invariant were
+    ever violated.
     """
     if direction not in ("in", "out"):
         raise ValueError(f"direction must be 'in' or 'out'; got {direction!r}")
@@ -194,6 +195,8 @@ async def _fetch_edges(
         .join(to_alias, to_alias.id == GraphEdge.to_node_id)
         .where(
             GraphEdge.tenant_id == tenant_id,
+            from_alias.tenant_id == tenant_id,
+            to_alias.tenant_id == tenant_id,
             GraphEdge.last_seen.is_not(None),
         )
         .order_by(GraphEdge.last_seen.desc(), GraphEdge.id)
@@ -365,5 +368,14 @@ def build_detail_router() -> APIRouter:
         methods=["GET"],
         name="ui_topology_node_detail",
         response_class=HTMLResponse,
+        responses={
+            404: {
+                "description": (
+                    "Node id does not exist in this tenant (or exists only "
+                    "for another tenant). Returns the not-found drawer fragment."
+                ),
+                "content": {"text/html": {}},
+            },
+        },
     )
     return router

@@ -2421,6 +2421,16 @@ type UiAuthLoginUiAuthLoginGetParams struct {
 	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
 }
 
+// UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
+type UiTopologyTableUiTopologyGetParams struct {
+	Sort      *UnderscoreSortColumn    `form:"sort,omitempty" json:"sort,omitempty"`
+	Direction *UnderscoreSortDirection `form:"direction,omitempty" json:"direction,omitempty"`
+	Kind      *string                  `form:"kind,omitempty" json:"kind,omitempty"`
+	Q         *string                  `form:"q,omitempty" json:"q,omitempty"`
+	Limit     *int                     `form:"limit,omitempty" json:"limit,omitempty"`
+	View      *string                  `form:"view,omitempty" json:"view,omitempty"`
+}
+
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
@@ -2839,8 +2849,8 @@ type ClientInterface interface {
 	// UiStubMemoryUiMemoryGet request
 	UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubTopologyUiTopologyGet request
-	UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiTopologyTableUiTopologyGet request
+	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyNodeDetailUiTopologyNodeNodeIdGet request
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGet(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3845,8 +3855,8 @@ func (c *Client) UiStubMemoryUiMemoryGet(ctx context.Context, reqEditors ...Requ
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubTopologyUiTopologyGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubTopologyUiTopologyGetRequest(c.Server)
+func (c *Client) UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiTopologyTableUiTopologyGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -8039,8 +8049,8 @@ func NewUiStubMemoryUiMemoryGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
-// NewUiStubTopologyUiTopologyGetRequest generates requests for UiStubTopologyUiTopologyGet
-func NewUiStubTopologyUiTopologyGetRequest(server string) (*http.Request, error) {
+// NewUiTopologyTableUiTopologyGetRequest generates requests for UiTopologyTableUiTopologyGet
+func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTableUiTopologyGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -8056,6 +8066,108 @@ func NewUiStubTopologyUiTopologyGetRequest(server string) (*http.Request, error)
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Sort != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "sort", runtime.ParamLocationQuery, *params.Sort); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Direction != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "direction", runtime.ParamLocationQuery, *params.Direction); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Q != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "q", runtime.ParamLocationQuery, *params.Q); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.View != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "view", runtime.ParamLocationQuery, *params.View); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -8402,8 +8514,8 @@ type ClientWithResponsesInterface interface {
 	// UiStubMemoryUiMemoryGetWithResponse request
 	UiStubMemoryUiMemoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubMemoryUiMemoryGetResponse, error)
 
-	// UiStubTopologyUiTopologyGetWithResponse request
-	UiStubTopologyUiTopologyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubTopologyUiTopologyGetResponse, error)
+	// UiTopologyTableUiTopologyGetWithResponse request
+	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
 
 	// UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request
 	UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse(ctx context.Context, nodeId openapi_types.UUID, reqEditors ...RequestEditorFn) (*UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse, error)
@@ -9918,13 +10030,14 @@ func (r UiStubMemoryUiMemoryGetResponse) StatusCode() int {
 	return 0
 }
 
-type UiStubTopologyUiTopologyGetResponse struct {
+type UiTopologyTableUiTopologyGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubTopologyUiTopologyGetResponse) Status() string {
+func (r UiTopologyTableUiTopologyGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -9932,7 +10045,7 @@ func (r UiStubTopologyUiTopologyGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubTopologyUiTopologyGetResponse) StatusCode() int {
+func (r UiTopologyTableUiTopologyGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -10713,13 +10826,13 @@ func (c *ClientWithResponses) UiStubMemoryUiMemoryGetWithResponse(ctx context.Co
 	return ParseUiStubMemoryUiMemoryGetResponse(rsp)
 }
 
-// UiStubTopologyUiTopologyGetWithResponse request returning *UiStubTopologyUiTopologyGetResponse
-func (c *ClientWithResponses) UiStubTopologyUiTopologyGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubTopologyUiTopologyGetResponse, error) {
-	rsp, err := c.UiStubTopologyUiTopologyGet(ctx, reqEditors...)
+// UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
+func (c *ClientWithResponses) UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error) {
+	rsp, err := c.UiTopologyTableUiTopologyGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubTopologyUiTopologyGetResponse(rsp)
+	return ParseUiTopologyTableUiTopologyGetResponse(rsp)
 }
 
 // UiTopologyNodeDetailUiTopologyNodeNodeIdGetWithResponse request returning *UiTopologyNodeDetailUiTopologyNodeNodeIdGetResponse
@@ -12730,17 +12843,27 @@ func ParseUiStubMemoryUiMemoryGetResponse(rsp *http.Response) (*UiStubMemoryUiMe
 	return response, nil
 }
 
-// ParseUiStubTopologyUiTopologyGetResponse parses an HTTP response from a UiStubTopologyUiTopologyGetWithResponse call
-func ParseUiStubTopologyUiTopologyGetResponse(rsp *http.Response) (*UiStubTopologyUiTopologyGetResponse, error) {
+// ParseUiTopologyTableUiTopologyGetResponse parses an HTTP response from a UiTopologyTableUiTopologyGetWithResponse call
+func ParseUiTopologyTableUiTopologyGetResponse(rsp *http.Response) (*UiTopologyTableUiTopologyGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubTopologyUiTopologyGetResponse{
+	response := &UiTopologyTableUiTopologyGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

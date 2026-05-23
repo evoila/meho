@@ -118,8 +118,8 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: VcfAutomationTargetLike) -> dict[str, str]:
-    """Return canned credentials regardless of the target."""
+async def _stub_loader(_target: VcfAutomationTargetLike, _operator: Operator) -> dict[str, str]:
+    """Return canned credentials regardless of the target / operator."""
     return {"username": "svc-meho", "password": "stub-password"}
 
 
@@ -161,17 +161,29 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is VcfAutomationConnector
 
 
-def test_default_credentials_loader_raises_until_goal_214() -> None:
-    """The default Vault loader stays unimplemented until Goal #214."""
+def test_default_loader_fails_closed_for_system_initiated_call() -> None:
+    """The default loader rejects an empty operator JWT (system-initiated call).
+
+    The vmware-rest precedent (#942) wired
+    :func:`load_credentials_from_vault` to delegate to the shared
+    :func:`load_basic_credentials` helper, which fails closed when
+    ``operator.raw_jwt`` is empty -- the locked decision's
+    system-initiated carve-out. The same contract holds here: a system
+    operator (synthesised with ``raw_jwt=""``) cannot resolve target
+    credentials through the operator-context read path. The error is a
+    :class:`VaultCredentialsReadError` naming the target, not a bare
+    ``KeyError`` or a fallback to a backplane identity.
+    """
     import asyncio
 
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.vcf_automation.session import (
         load_credentials_from_vault,
     )
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A)
+        with pytest.raises(VaultCredentialsReadError, match=r"vcfa-a"):
+            await load_credentials_from_vault(_TARGET_A, _make_operator(raw_jwt=""))
 
     asyncio.run(_check())
 
@@ -511,7 +523,9 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
 
     seen_secret_refs: list[str] = []
 
-    async def _ref_tracking_loader(t: VcfAutomationTargetLike) -> dict[str, str]:
+    async def _ref_tracking_loader(
+        t: VcfAutomationTargetLike, _operator: Operator
+    ) -> dict[str, str]:
         seen_secret_refs.append(t.secret_ref)
         if t.secret_ref == "kv/data/vcfa/provider":
             return {"username": "admin", "password": "provider-secret"}
@@ -604,7 +618,7 @@ async def test_tenant_login_empty_token_field_raises() -> None:
 async def test_loader_missing_password_raises_clear_error() -> None:
     """A loader returning a dict without ``password`` raises naming the target."""
 
-    async def _bad_loader(_t: VcfAutomationTargetLike) -> dict[str, str]:
+    async def _bad_loader(_t: VcfAutomationTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "svc-meho"}  # type: ignore[return-value]
 
     connector = VcfAutomationConnector(credentials_loader=_bad_loader)

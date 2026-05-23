@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors.harbor import HarborConnector, HarborTargetLike
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
@@ -73,7 +74,8 @@ _TARGET = _StubTarget(
 )
 
 
-async def _stub_loader(_target: HarborTargetLike) -> dict[str, str]:
+async def _stub_loader(_target: HarborTargetLike, _operator: Operator) -> dict[str, str]:
+    """Stub loader matching the 2-arg signature G3.10-T1 #945 introduced."""
     return {"username": "admin", "password": "test-password"}
 
 

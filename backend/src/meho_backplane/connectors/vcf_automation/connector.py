@@ -210,13 +210,15 @@ class VcfAutomationConnector(HttpConnector):
         callers don't forward ``path`` -- this connector overrides
         both transports to thread ``path`` through. A stray path-less
         call raises :exc:`VcfAutomationConfigurationError` rather than
-        silently picking a plane. ``operator`` is accepted for the
-        shared HTTP auth surface (G3.9-T1) but unused; threading it into
-        vRA's credential loader is #G3.10. Raises
-        :exc:`NotImplementedError` for any ``target.auth_model`` other
-        than ``shared_service_account`` / ``None``.
+        silently picking a plane. ``operator`` is forwarded to the
+        :class:`VcfAutomationCredentialsLoader` on first session-establish
+        so the default loader (:func:`.session.load_credentials_from_vault`)
+        can perform the operator-context Vault read under the operator's
+        identity; cached tokens are reused on warm-path calls without
+        re-reading Vault. Raises :exc:`NotImplementedError` for any
+        ``target.auth_model`` other than ``shared_service_account`` /
+        ``None``.
         """
-        del operator  # SHARED_SERVICE_ACCOUNT does not forward operator identity
         auth_model = getattr(target, "auth_model", None)
         if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -233,12 +235,12 @@ class VcfAutomationConnector(HttpConnector):
             )
         plane = plane_for_path(path)
         if plane == "provider":
-            token = await self._provider_session_token(target)
+            token = await self._provider_session_token(target, operator)
             return {
                 "Authorization": f"Bearer {token}",
                 "Accept": provider_accept_for_path(path),
             }
-        token = await self._tenant_session_token(target)
+        token = await self._tenant_session_token(target, operator)
         return {
             "Authorization": f"Bearer {token}",
             "Accept": TENANT_ACCEPT,
@@ -248,12 +250,18 @@ class VcfAutomationConnector(HttpConnector):
     # Per-plane session establishment
     # ------------------------------------------------------------------
 
-    async def _provider_session_token(self, target: VcfAutomationTargetLike) -> str:
+    async def _provider_session_token(
+        self, target: VcfAutomationTargetLike, operator: Operator
+    ) -> str:
         """Return the cached provider-plane JWT, establishing on first use.
 
-        When ``target.provider_secret_ref`` is set, the loader is
-        called with the override path so the provider account can
-        differ from the SSO/tenant account (the ``admin@System`` vs
+        ``operator`` is forwarded to the
+        :class:`VcfAutomationCredentialsLoader` so the credential read
+        runs under the operator's identity (the live default loader's
+        operator-context Vault KV-v2 read). When
+        ``target.provider_secret_ref`` is set, the loader is called
+        with the override path so the provider account can differ
+        from the SSO/tenant account (the ``admin@System`` vs
         ``svc-meho`` split documented in the consumer wrapper).
         Otherwise the default ``target.secret_ref`` pair is used for
         both planes. See :func:`._auth.vcfa_provider_login` for the
@@ -265,25 +273,32 @@ class VcfAutomationConnector(HttpConnector):
                 return cached
             override_ref = getattr(target, "provider_secret_ref", None)
             creds = await load_credentials_with_override(
-                self._credentials_loader, target, override_ref
+                self._credentials_loader, target, operator, override_ref
             )
             client = await self._http_client(target)
             jwt = await vcfa_provider_login(client, creds, target)
             self._provider_tokens[target.name] = jwt
             return jwt
 
-    async def _tenant_session_token(self, target: VcfAutomationTargetLike) -> str:
+    async def _tenant_session_token(
+        self, target: VcfAutomationTargetLike, operator: Operator
+    ) -> str:
         """Return the cached tenant-plane token, establishing on first use.
 
-        The tenant plane does NOT honour ``provider_secret_ref`` --
-        it's strictly an SSO-ish account flow against ``target.secret_ref``.
-        See :func:`._auth.tenant_login` for the wire-level POST.
+        ``operator`` is forwarded to the
+        :class:`VcfAutomationCredentialsLoader` so the credential read
+        runs under the operator's identity. The tenant plane does
+        NOT honour ``provider_secret_ref`` -- it's strictly an SSO-ish
+        account flow against ``target.secret_ref``. See
+        :func:`._auth.tenant_login` for the wire-level POST.
         """
         async with self._tenant_lock:
             cached = self._tenant_tokens.get(target.name)
             if cached is not None:
                 return cached
-            creds = await load_credentials_with_override(self._credentials_loader, target, None)
+            creds = await load_credentials_with_override(
+                self._credentials_loader, target, operator, None
+            )
             client = await self._http_client(target)
             token = await tenant_login(client, creds, target)
             self._tenant_tokens[target.name] = token

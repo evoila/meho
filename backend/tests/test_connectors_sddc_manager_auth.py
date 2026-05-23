@@ -99,8 +99,8 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: SddcTargetLike) -> dict[str, str]:
-    """Return canned credentials regardless of the target."""
+async def _stub_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
+    """Return canned credentials regardless of the target or operator."""
     return {"username": "svc-meho", "password": "stub-password"}
 
 
@@ -142,15 +142,24 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is SddcManagerConnector
 
 
-def test_default_credentials_loader_raises_until_g03_lands() -> None:
-    """The default Vault loader stays unimplemented until G0.3."""
+def test_default_credentials_loader_delegates_to_shared_basic_loader() -> None:
+    """The default loader is the thin wrapper around ``load_basic_credentials``.
+
+    G3.10-T1 (#945) wired the live read; the loader now delegates to
+    :func:`load_basic_credentials` rather than raising
+    :exc:`NotImplementedError`. The fail-closed precondition (empty
+    ``operator.raw_jwt``) is asserted via a :class:`VaultCredentialsReadError`
+    on a system-initiated synthetic operator (no Vault is touched).
+    """
     import asyncio
 
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.sddc_manager.session import load_credentials_from_vault
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"Goal #214"):
-            await load_credentials_from_vault(_TARGET_A)
+        system_operator = _make_operator(raw_jwt="")
+        with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
+            await load_credentials_from_vault(_TARGET_A, system_operator)
 
     asyncio.run(_check())
 
@@ -204,7 +213,7 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
     """Second auth_headers call against the same target does NOT re-invoke the loader."""
     call_count = 0
 
-    async def _counting_loader(_target: SddcTargetLike) -> dict[str, str]:
+    async def _counting_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
         return {"username": "svc-meho", "password": "stub-password"}
@@ -223,7 +232,7 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
     """Two targets get two distinct credential cache entries; no cross-target leakage."""
     call_log: list[str] = []
 
-    async def _tracking_loader(target: SddcTargetLike) -> dict[str, str]:
+    async def _tracking_loader(target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         call_log.append(target.name)
         return {"username": f"svc-{target.name}", "password": "pass"}
 
@@ -249,7 +258,7 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
 async def test_loader_missing_password_key_raises_runtime_error_naming_target() -> None:
     """A loader returning a dict without 'password' surfaces a clear RuntimeError."""
 
-    async def _bad_loader(_target: SddcTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "svc-meho"}  # type: ignore[return-value]
 
     connector = SddcManagerConnector(credentials_loader=_bad_loader)
@@ -264,7 +273,7 @@ async def test_loader_missing_password_key_raises_runtime_error_naming_target() 
 async def test_loader_missing_username_key_raises_runtime_error_naming_target() -> None:
     """A loader returning a dict without 'username' surfaces a clear RuntimeError."""
 
-    async def _bad_loader(_target: SddcTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
         return {"password": "stub-password"}  # type: ignore[return-value]
 
     connector = SddcManagerConnector(credentials_loader=_bad_loader)

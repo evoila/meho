@@ -99,8 +99,8 @@ _TARGET_B = _StubTarget(
 )
 
 
-async def _stub_loader(_target: NsxTargetLike) -> dict[str, str]:
-    """Return canned credentials regardless of the target."""
+async def _stub_loader(_target: NsxTargetLike, _operator: Operator) -> dict[str, str]:
+    """Return canned credentials regardless of the target or operator."""
     return {"username": "svc-meho", "password": "stub-password"}
 
 
@@ -135,17 +135,24 @@ def test_importing_package_registers_against_v2_registry() -> None:
     assert registry[key] is NsxConnector
 
 
-def test_default_session_loader_raises_until_g03_lands() -> None:
-    """The default Vault loader stays unimplemented until G0.3."""
+def test_default_session_loader_delegates_to_shared_basic_loader() -> None:
+    """The default loader is the thin wrapper around ``load_basic_credentials``.
+
+    G3.10-T1 (#945) wired the live read; the loader now delegates to
+    :func:`load_basic_credentials` rather than raising
+    :exc:`NotImplementedError`. The fail-closed precondition (empty
+    ``operator.raw_jwt``) is asserted via a :class:`VaultCredentialsReadError`
+    on a system-initiated synthetic operator (no Vault is touched).
+    """
     import asyncio
 
-    from meho_backplane.connectors.nsx.session import (
-        load_session_credentials_from_vault,
-    )
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+    from meho_backplane.connectors.nsx.session import load_session_credentials_from_vault
 
     async def _check() -> None:
-        with pytest.raises(NotImplementedError, match=r"G0\.3"):
-            await load_session_credentials_from_vault(_TARGET_A)
+        system_operator = _make_operator(raw_jwt="")
+        with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
+            await load_session_credentials_from_vault(_TARGET_A, system_operator)
 
     asyncio.run(_check())
 
@@ -292,7 +299,7 @@ async def test_session_create_missing_xsrf_header_raises() -> None:
 async def test_loader_missing_password_key_raises_clear_error() -> None:
     """A loader returning a dict without 'password' surfaces a clear message."""
 
-    async def _bad_loader(_target: NsxTargetLike) -> dict[str, str]:
+    async def _bad_loader(_target: NsxTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "svc-meho"}  # type: ignore[return-value]
 
     connector = NsxConnector(session_loader=_bad_loader)

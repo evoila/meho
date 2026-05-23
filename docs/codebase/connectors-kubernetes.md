@@ -72,9 +72,21 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `Target` model once G0.3 (#224) lands; the structural shape there
   satisfies the Protocol unchanged.
 - **`load_kubeconfig_from_vault`** (`kubeconfig.py`) -- the default
-  kubeconfig loader stub. Raises `NotImplementedError` until G0.3
-  lands; tests and the integration suite inject a callable returning
-  a pre-built kubeconfig dict.
+  kubeconfig loader. After G3.10-T4 (#948) it performs the live
+  operator-context KV-v2 read: opens
+  `vault_client_for_operator(operator)` (forwards the operator's
+  validated Keycloak JWT to Vault's JWT/OIDC auth method), reads
+  `target.secret_ref`, extracts the `kubeconfig` field, and parses the
+  YAML into the dict shape
+  `kubernetes_asyncio.config.new_client_from_config_dict` accepts. The
+  read happens **under the operator's Vault Identity entity** —
+  per-operator RBAC + per-operator audit. Tests still inject a custom
+  loader for unit-scope determinism; the `(target, operator)` signature
+  is shared by the default and every injected loader. Fail-closed
+  guards: empty `operator.raw_jwt` (the system-call carve-out) and
+  unset `target.secret_ref` both raise `VaultCredentialsReadError`
+  before Vault is touched. This is the rubric **State 2** wiring
+  (`shared_service_account` only). Decision: [`docs/architecture/connector-auth.md`](../architecture/connector-auth.md).
 
 ## Shipped op surface
 
@@ -198,9 +210,11 @@ restarts on unchanged code stay cheap.
    `kubernetes_asyncio.client.CoreV1Api(api_client).<list_xxx>()` and
    projects each model into the wire dict via the pure mapping
    helpers.
-4. The dispatcher invokes `PassThroughReducer.reduce()` (v0.2's no-op
-   reducer), writes the audit row, fires the broadcast event, and
-   wraps the result in `OperationResult.status="ok"`.
+4. The dispatcher invokes the default
+   [`JsonFluxReducer.reduce()`](../architecture/jsonflux.md) (G0.6.1,
+   #750) — large row lists materialize into a `ResultHandle`, small
+   ones pass through — writes the audit row, fires the broadcast event,
+   and wraps the result in `OperationResult.status="ok"`.
 
 ### `k8s.ls` three-way dispatch
 
@@ -239,18 +253,19 @@ Issue #322's "Handle threshold tested: against k3d populated with 50+
 namespaces, sample of 20 + handle returned" acceptance criterion
 assumed the shared `HandleStore` from G3.1-T4 (#304) would be in place.
 #304 was **superseded** -- the Initiative-redraft note on the issue
-spells this out -- and the substrate currently in the tree ships
-`PassThroughReducer` as the only reducer. The reducer never populates
-`OperationResult.handle`.
+spells this out -- and the substrate's default reducer is now the
+threshold-aware [`JsonFluxReducer`](../architecture/jsonflux.md)
+(G0.6.1, #750), which materializes large row lists into a
+`ResultHandle` (in-memory DuckDB) and passes small ones through.
 
 The handlers in this connector emit **raw row lists** (`{"rows": [...],
-"total": N}`) -- the shape the future JSONFlux reducer will see when it
-ships. The reducer, not the connector, owns the threshold check, the
-row truncation, the spill to MinIO/S3/Valkey, and the `ResultHandle`
-construction. Centralising the spill logic in one reducer keeps every
-typed connector free of per-handler threshold code; per the substrate
-split documented on `meho_backplane.operations.reducer`, set-shaped
-reduction is the reducer's job, not the connector's.
+"total": N}`) -- the shape the JSONFlux reducer sees. The reducer, not
+the connector, owns the threshold check, the row truncation, the
+materialization, and the `ResultHandle` construction. Centralising that
+logic in one reducer keeps every typed connector free of per-handler
+threshold code; per the substrate split documented on
+`meho_backplane.operations.reducer`, set-shaped reduction is the
+reducer's job, not the connector's.
 
 The `total` key in the response envelope is the un-truncated row count
 the reducer will read to decide whether to spill; today the value is

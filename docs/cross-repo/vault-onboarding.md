@@ -231,20 +231,18 @@ The wrapping is the **dispatcher's** job, not the handler's: the
 handler returns `{"keys": [...]}` verbatim and `dispatch` passes it
 through the configured `Reducer` before audit/broadcast.
 
-**v0.2 ships only `PassThroughReducer`, so the v0.2 default is
-pass-through** — `vault.kv.list` returns the full inline key list with
-no handle, regardless of key count. The threshold-aware reducer (and
-the `result_query` / `result_aggregate` / `result_describe` /
-`result_export` meta-tools that drill into a handle) ship in a
-follow-on Initiative; swapping it in touches one `set_default_reducer`
-call, not the Vault handler. `tests/test_vault_kv_list_jsonflux.py`
+The default reducer is the threshold-aware
+[`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) — a
+`vault.kv.list` whose key count exceeds ~50 rows / 4 KB returns a sample
++ `ResultHandle`; a smaller list passes through inline with
+`handle is None`. The `result_query` / `result_aggregate` /
+`result_describe` / `result_export` meta-tools that drill into a handle
+ship in a follow-on Initiative. `tests/test_vault_kv_list_jsonflux.py`
 (G3.3-T4 #548/#566) pins both halves of the contract: ≤50 keys stays
-inline with no handle (shipped default), and — with a threshold-aware
-reducer installed via the test seam — >50 keys produces a `sample` +
-`ResultHandle`. Operationally: in v0.2 expect the full key list inline;
-when the real reducer lands, large `meho vault kv list` results return
-a handle and you drill in with the `meho operation` result verbs
-exactly as for any other connector's set-shaped op.
+inline with no handle, and >50 keys produces a `sample` + `ResultHandle`.
+Operationally: large `meho vault kv list` results return a handle and you
+drill in with the `meho operation` result verbs exactly as for any other
+connector's set-shaped op; small lists land inline as before.
 
 ## The `credential_read` PII guarantee
 

@@ -74,6 +74,7 @@ from tests.mcp_test_fixtures import (
 # the symbol into ``mcp.tools.topology``'s module dict, so the local
 # name is the patchable reference.
 _LIST_EDGES_PATCH = "meho_backplane.mcp.tools.topology.list_edges"
+_QUERY_HISTORY_PATCH = "meho_backplane.mcp.tools.topology.query_history"
 _PUBLISH_PATCH = "meho_backplane.topology.annotate.publish_event"
 
 
@@ -239,12 +240,14 @@ def test_no_separate_list_edges_tool_registered() -> None:
 
 
 def test_query_topology_input_schema_includes_edges_facet() -> None:
-    """The kind enum widened to include 'edges' / 'timeline' / 'diff'.
+    """The kind enum widened to include 'edges' / 'timeline' / 'diff' / 'history'.
 
-    G9.2-T7 (#598) added ``edges``; G9.3-T5 (#861) added ``timeline``;
-    G9.3-T4 (#860) added ``diff``. ``edges`` / ``timeline`` have no
-    conditional required clause -- every filter on either facet is
-    optional. ``diff`` requires both timestamps (``ts1``, ``ts2``).
+    G9.2-T7 (#598) added ``edges``; G9.3-T5 (#861) added ``timeline``
+    (no required field); G9.3-T4 (#860) added ``diff`` (requires both
+    timestamps ``ts1`` + ``ts2``); G9.3-T3 (#859) added ``history``
+    (requires ``target`` -- the anchor node name). ``edges`` and
+    ``timeline`` have no conditional required clause; every filter on
+    those two facets is optional.
     """
     entry = get_tool("query_topology")
     assert entry is not None
@@ -257,17 +260,28 @@ def test_query_topology_input_schema_includes_edges_facet() -> None:
         "edges",
         "timeline",
         "diff",
+        "history",
     ]
-    # `edges` / `timeline` have no required field; `diff` requires
-    # `ts1` + `ts2`. The other three branches stay as-is.
+    # `diff` requires `ts1` + `ts2`; `history` requires `target`;
+    # `edges` and `timeline` have no required field. The other three
+    # branches stay as-is. The schema also carries per-kind
+    # ``limit.maximum`` tightening clauses for `edges` and `timeline`
+    # (intersecting the base permissive ceiling so MCP callers can't
+    # smuggle an over-cap value past the schema and trip the
+    # substrate's ``ValueError``); those clauses don't carry a
+    # ``required`` key, so the ``required``-only dict below skips them
+    # via ``.get`` rather than throwing on missing keys.
     by_kind = {
-        c["if"]["properties"]["kind"]["const"]: c["then"]["required"] for c in schema["allOf"]
+        c["if"]["properties"]["kind"]["const"]: c["then"]["required"]
+        for c in schema["allOf"]
+        if "required" in c["then"]
     }
     assert "edges" not in by_kind
     assert "timeline" not in by_kind
     assert sorted(by_kind["diff"]) == ["ts1", "ts2"]
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
+    assert by_kind["history"] == ["target"]
     # The new filter knobs surface as optional properties on the schema.
     for prop in ("source", "conflicts", "limit", "offset"):
         assert prop in schema["properties"]
@@ -850,6 +864,137 @@ def test_edges_facet_read_role_unchanged(
     with patch(_LIST_EDGES_PATCH, new=mock_list):
         response = _query_topology_call(client, 73, {"kind": "edges"})
     assert response.json()["result"]["isError"] is False
+
+
+# ---------------------------------------------------------------------------
+# query_topology(kind=history) facet — limit forwarding (B3 on PR #936)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_history_facet_forwards_limit_to_query_history(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """``kind=history`` + caller-supplied ``limit`` flows through to ``query_history``.
+
+    Regression for PR #936 iter-1 finding B3: the dispatcher was
+    extracting every other knob (``node_kind`` / ``since`` / ``until`` /
+    ``include_edges``) from the arguments dict but silently dropped
+    ``limit``, so MCP callers always got the substrate's default
+    ceiling (5000) regardless of what they asked for.
+    """
+    from meho_backplane.topology.schemas import TopologyHistoryResult
+
+    client, _op = client_with_operator
+    mock_history = AsyncMock(
+        return_value=TopologyHistoryResult(
+            anchor_node_id=uuid.uuid4(),
+            include_edges=False,
+            rows=(),
+        )
+    )
+    with patch(_QUERY_HISTORY_PATCH, new=mock_history):
+        response = _query_topology_call(
+            client,
+            80,
+            {"kind": "history", "target": "vm-a", "limit": 250},
+        )
+    assert response.json()["result"]["isError"] is False
+    # ``limit`` rides the kwargs the dispatcher passes -- the substrate
+    # validates the 1..5000 range itself, so the MCP layer only forwards.
+    kwargs = mock_history.await_args.kwargs
+    assert kwargs["limit"] == 250
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_history_facet_defaults_limit_to_history_ceiling(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """``kind=history`` with no ``limit`` falls back to the per-facet ceiling.
+
+    Per-resource history is bounded by retention; the default IS the
+    ceiling. A tighter default would silently truncate the walk and
+    the operator would think they see the full history when they
+    don't (same reasoning the REST and CLI fronts use).
+    """
+    from meho_backplane.mcp.tools.topology import _HISTORY_LIMIT_MAX
+    from meho_backplane.topology.schemas import TopologyHistoryResult
+
+    client, _op = client_with_operator
+    mock_history = AsyncMock(
+        return_value=TopologyHistoryResult(
+            anchor_node_id=uuid.uuid4(),
+            include_edges=False,
+            rows=(),
+        )
+    )
+    with patch(_QUERY_HISTORY_PATCH, new=mock_history):
+        _query_topology_call(client, 81, {"kind": "history", "target": "vm-a"})
+    kwargs = mock_history.await_args.kwargs
+    assert kwargs["limit"] == _HISTORY_LIMIT_MAX
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_history_facet_schema_admits_limit_up_to_history_ceiling(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The MCP schema admits ``limit`` in [1, 5000] for ``kind=history``.
+
+    Regression for PR #936 iter-1 finding M1: the shared ``limit``
+    property used to cap at ``_EDGES_LIMIT_MAX`` (1000), schema-rejecting
+    valid history calls. The base ceiling now matches
+    ``_HISTORY_LIMIT_MAX``; per-facet ``allOf`` clauses tighten ``edges``
+    / ``timeline`` back down to 1000 so they can't accidentally widen.
+    """
+    from meho_backplane.topology.schemas import TopologyHistoryResult
+
+    client, _op = client_with_operator
+    mock_history = AsyncMock(
+        return_value=TopologyHistoryResult(
+            anchor_node_id=uuid.uuid4(),
+            include_edges=False,
+            rows=(),
+        )
+    )
+    with patch(_QUERY_HISTORY_PATCH, new=mock_history):
+        response = _query_topology_call(
+            client,
+            82,
+            {"kind": "history", "target": "vm-a", "limit": 4000},
+        )
+    # No schema rejection -- the call reached the handler and the
+    # mocked substrate returned an empty result.
+    assert response.json()["result"]["isError"] is False
+    assert mock_history.await_args.kwargs["limit"] == 4000
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_edges_facet_schema_rejects_limit_above_edges_ceiling(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The per-facet ``allOf`` clause holds ``edges`` to ``_EDGES_LIMIT_MAX``.
+
+    Companion to the history test above: the base ``limit.maximum`` was
+    widened to ``_HISTORY_LIMIT_MAX`` (5000) so history isn't
+    schema-rejected, but ``edges`` still substrate-caps at 1000. The
+    ``allOf if/then`` clause intersects a stricter ceiling for the
+    ``edges`` branch so an MCP caller can't smuggle ``limit=1500`` past
+    the schema and trip ``list_edges``'s ``ValueError`` at runtime.
+    """
+    client, _op = client_with_operator
+    mock_list = AsyncMock(return_value=[])
+    with patch(_LIST_EDGES_PATCH, new=mock_list):
+        response = _query_topology_call(
+            client,
+            83,
+            {"kind": "edges", "limit": 1500},
+        )
+    body = response.json()
+    # ``INVALID_PARAMS`` already imported at module level (line 64).
+    assert body["error"]["code"] == INVALID_PARAMS
+    # The mocked substrate was never reached -- rejection happened at
+    # the schema layer.
+    mock_list.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 )
 
 // ---------- helper tests ----------
@@ -40,25 +41,25 @@ func TestTruncatePassthroughAndCut(t *testing.T) {
 }
 
 func TestNormaliseURLBasic(t *testing.T) {
-	got, err := normaliseURL("https://meho.test/")
+	got, err := backplane.NormaliseURL("https://meho.test/")
 	if err != nil {
 		t.Fatalf("normaliseURL: %v", err)
 	}
 	if got != "https://meho.test" {
 		t.Fatalf("expected trailing slash stripped; got %q", got)
 	}
-	if _, err := normaliseURL("   "); err == nil || !strings.Contains(err.Error(), "empty") {
+	if _, err := backplane.NormaliseURL("   "); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("empty should reject; got %v", err)
 	}
 }
 
 func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
-	wrapped := &errNoBackplaneConfigured{inner: auth.ErrConfigNotFound}
-	se := classifyBackplaneError(wrapped)
+	wrapped := &backplane.NotConfiguredError{Inner: auth.ErrConfigNotFound}
+	se := backplane.ClassifyError(wrapped)
 	if se == nil || se.Code != "auth_expired" {
 		t.Fatalf("wrapped ErrConfigNotFound should classify as auth_expired; got %+v", se)
 	}
-	se = classifyBackplaneError(errors.New("parse failure"))
+	se = backplane.ClassifyError(errors.New("parse failure"))
 	if se == nil || se.Code != "unexpected_response" {
 		t.Fatalf("parse failure should classify as unexpected_response; got %+v", se)
 	}
@@ -373,7 +374,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, "GET:/api/v1/node", "rdc-nsx", nil)
+	r, err := conn.Call(context.Background(), srv.URL, "GET:/api/v1/node", "rdc-nsx", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -401,7 +402,7 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "GET:/api/v1/node", "", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "GET:/api/v1/node", "", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -429,7 +430,7 @@ func TestDispatchFirewallPolicySendsScope(t *testing.T) {
 
 	const opID = "GET:/policy/api/v1/infra/domains/{domain-id}/security-policies"
 	params := map[string]any{"domain-id": "my-domain"}
-	if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-nsx", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, opID, "rdc-nsx", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }
@@ -464,7 +465,7 @@ func TestDispatchFirewallRuleListSendsPolicyAndScope(t *testing.T) {
 		"domain-id":          "default",
 		"security-policy-id": "policy-app-tier",
 	}
-	if _, err := dispatchOp(context.Background(), srv.URL, opID, "rdc-nsx", params); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, opID, "rdc-nsx", params); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

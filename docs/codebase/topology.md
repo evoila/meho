@@ -681,6 +681,88 @@ to G8's audit-log query surface. The broadcast event carries only
 may name a sensitive target) and the row contents never leak onto
 the SSE / Slack feed.
 
+## History query (read half — G9.3-T3 #859)
+
+`query_history` (in `backend/src/meho_backplane/topology/query.py`)
+is the per-resource history walk — "what changed for THIS specific
+resource?" Companion to `query_timeline` (tenant-wide feed,
+truncated summary) but with two key differences:
+
+1. **Anchored on one node.** The first thing the substrate does is
+   call `resolve_node` to translate the operator-supplied name (and
+   optional `kind` disambiguator) into a `graph_node.id`. An unknown
+   name or a cross-tenant name surfaces as `NodeNotFoundError`; an
+   ambiguous bare name as `AmbiguousNodeError`. The REST + MCP
+   fronts map both to operator-actionable diagnostics (404 / 409
+   for HTTP, JSON-RPC -32602 for MCP).
+2. **Full snapshot per row.** Each `TopologyHistoryEntry` carries
+   the row's `snapshot.before` / `snapshot.after` JSONB intact —
+   the forensic payload the CLI's `--json` mode and the MCP facet
+   need to answer "what was the exact state before this change?".
+   The timeline's one-line summary truncation does not apply here.
+
+### Include-edges join
+
+By default `query_history` walks `graph_node_history` only for the
+anchor's `node_id`. Passing `include_edges=True` also walks
+`graph_edge_history` for every edge incident to the anchor — the
+inner subquery is `edge_id IN (SELECT id FROM graph_edge WHERE
+from_node_id = anchor OR to_node_id = anchor)`. Tenant scope is
+enforced on both the inner and the outer query so a cross-tenant
+edge id cannot leak in.
+
+Tombstones (edge-history rows whose `edge_id` was NULLed by `ON
+DELETE SET NULL` after the live edge was hard-deleted) drop out of
+the inner subquery's id list and therefore stay out of the
+per-resource walk — a tombstoned edge has no surviving live row to
+associate with the anchor. Operators wanting the full tombstone
+replay use `meho topology timeline` (G9.3-T5 #861).
+
+### Indexes
+
+The per-resource walk leans on two tenant-scoped composite indexes
+declared by migration 0012 (G9.3-T1 #856):
+
+- `graph_node_history` `(tenant_id, node_id, valid_from DESC)` —
+  per-(tenant, node, time) lookup is a single composite-index scan.
+- `graph_edge_history` `(tenant_id, edge_id, valid_from DESC)` —
+  mirror for the edge side.
+
+Both are sub-millisecond on the test fixture and indexed under
+realistic load.
+
+### Pagination
+
+Unlike `query_timeline` (cursor-paginated), `query_history` returns
+one page bounded by `_MAX_HISTORY_ROWS = 5000`. Per-resource
+history is bounded by the retention window (default 90 days) and
+the operator typically wants the complete chronology in one
+response. A caller that overflows the cap narrows `since` /
+`until`; there is no `next_cursor`.
+
+### Latent SQLite resolver bug fixed by this task
+
+`resolve_node`'s bare-name branch runs a `text()` SQL with a
+``tenant_id = :tenant_id`` filter. Before #859 the bind passed
+`str(uuid)` (dashed form). On the SQLite test driver the `Uuid()`
+column stores 32-char hex without dashes, and the dashed-string
+filter silently matched zero rows — `resolve_node` then raised a
+spurious `NodeNotFoundError`. Production PG accepts both forms,
+masking the bug. #859 pins `_ANCHOR_KINDS_SQL` to a SAUuid bind
+type so both dialects round-trip cleanly. The closure / path verbs
+were unaffected because they call `_assert_anchor_unambiguous`,
+which only raises when 2+ kinds match (a zero-row result is
+intentionally silent there — G9.1 contract).
+
+### Audit class
+
+The REST route binds `audit_op_id="topology.history"` /
+`audit_op_class="audit_query"` — same shape as `topology.timeline`.
+The broadcast event carries only `{op_id, result_status,
+row_count}` so the response rows (which may include the snapshot
+of a sensitive resource's pre/post payload) never leak onto the
+SSE / Slack feed.
+
 ## Manual node seed control flow (write half — G0.9.1-T6 #778)
 
 ### `create_or_get_node`
@@ -779,10 +861,10 @@ Surfaces:
 * `query_topology(kind="diff", ts1=..., ts2=...)` -- the MCP facet on
   the parametric `query_topology` meta-tool.
 
-## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861 + G9.3-T4 #860)
+## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861 + G9.3-T4 #860 + G9.3-T3 #859)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Eleven routes total — ten on the topology
+the read + write halves. Twelve routes total — eleven on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -797,6 +879,7 @@ router, one on the targets router:
 | `POST /api/v1/topology/edges/bulk` | `bulk_import_edges` (T8 #600) | `topology.bulk_import` | **tenant_admin** |
 | `GET /api/v1/topology/timeline` | `query_timeline` (G9.3-T5 #861) | `topology.timeline` | operator |
 | `GET /api/v1/topology/diff` | `query_diff` (G9.3-T4 #860) | `topology.diff` | operator |
+| `GET /api/v1/topology/history/{name}` | `query_history` (G9.3-T3 #859) | `topology.history` | operator |
 | `GET /api/v1/targets/discover?product=X` | `Connector.list_candidates` | `targets.discover` | operator |
 
 Load-bearing details:

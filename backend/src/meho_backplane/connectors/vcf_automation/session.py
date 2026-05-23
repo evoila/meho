@@ -21,17 +21,24 @@ The credential fetch (Vault path -> ``{"username": ..., "password": ...}``
 dict) is split out behind a narrow :class:`VcfAutomationCredentialsLoader`
 callable so:
 
-* Production deploys override the default loader at construction time
-  once the operator-context per-target Vault credential read is wired
-  for this connector (tracked under the open
-  `Goal #214 (Connector parity) <https://github.com/evoila/meho/issues/214>`_).
+* Production deploys use the default loader,
+  :func:`load_credentials_from_vault`, which performs the **live**
+  operator-context KV-v2 read via the shared
+  :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
+  helper (G3.9-T2 #941). This is the rubric **State 2** wiring
+  (``shared_service_account`` only) per
+  `Goal #214 (Connector parity) <https://github.com/evoila/meho/issues/214>`_.
 * Unit tests inject their own (mock) loader returning a pre-built dict.
 * Integration tests against a recorded fixture or live VCFA appliance
   pass a loader that yields the appropriate service-account credentials.
 
-The default loader, :func:`load_credentials_from_vault`, raises
-:exc:`NotImplementedError` until the live read lands -- same posture as
-the NSX / SDDC Manager / vSphere precedents.
+The loader's signature carries the request-scoped
+:class:`~meho_backplane.auth.operator.Operator` so the default
+implementation can forward ``operator.raw_jwt`` to Vault's JWT/OIDC
+auth method (the locked Option A decision in
+:doc:`docs/architecture/connector-auth.md`). Injected test loaders
+receive the same ``(target, operator)`` pair and are free to ignore
+``operator`` when the test does not need per-operator attribution.
 
 The :class:`VcfAutomationTargetLike` Protocol captures the minimum
 target shape the connector reads: ``name`` (per-target token cache key),
@@ -54,6 +61,9 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
+
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 
 __all__ = [
     "SessionCredentials",
@@ -115,7 +125,7 @@ class VcfAutomationTargetLike(Protocol):
     name: str
     host: str
     port: int | None
-    secret_ref: str
+    secret_ref: str | None
     auth_model: str | None
     fqdn: str | None
     domain: str | None
@@ -123,47 +133,70 @@ class VcfAutomationTargetLike(Protocol):
     provider_secret_ref: str | None
 
 
-VcfAutomationCredentialsLoader = Callable[[VcfAutomationTargetLike], Awaitable[dict[str, str]]]
-"""Async callable resolving a target to ``{"username": ..., "password": ...}``.
+VcfAutomationCredentialsLoader = Callable[
+    [VcfAutomationTargetLike, Operator], Awaitable[dict[str, str]]
+]
+"""Async callable resolving a ``(target, operator)`` pair to credentials.
 
-The connector's
-:meth:`VcfAutomationConnector._load_credentials` invokes the loader on
-first session-establish per ``(target.name, secret_ref)`` and caches the
-result for the connector instance lifetime. The same loader is invoked
-a second time with ``target.provider_secret_ref`` when that override is
-set, so production deploys can resolve both via a single Vault read
-path. The return type is the looser ``dict[str, str]`` (not
-:class:`SessionCredentials`) because Python :class:`Protocol` instances
-aren't runtime-constructible without a matching class -- production
-code returns a plain dict and the connector reads ``creds["username"]``
-/ ``creds["password"]`` by key.
+Returns ``{"username": ..., "password": ...}``. The connector's
+:meth:`VcfAutomationConnector._provider_session_token` /
+:meth:`VcfAutomationConnector._tenant_session_token` invoke the loader
+on first session-establish per ``(target.name, secret_ref)``; the
+provider plane invokes it a second time with the override
+:attr:`VcfAutomationTargetLike.provider_secret_ref` when set, so a
+production deploy can resolve both via a single read path. The return
+type is the looser ``dict[str, str]`` (not :class:`SessionCredentials`)
+because Python :class:`Protocol` instances aren't runtime-constructible
+without a matching class -- production code returns a plain dict and
+the connector reads ``creds["username"]`` / ``creds["password"]`` by
+key.
+
+The ``operator`` parameter carries the full
+:class:`~meho_backplane.auth.operator.Operator` (frozen) so the live
+loader (:func:`load_credentials_from_vault`) can read the per-target
+secret under the operator's identity via
+``vault_client_for_operator(operator)`` -- the locked decision in
+:doc:`docs/architecture/connector-auth.md`.
 """
 
 
 async def load_credentials_from_vault(
     target: VcfAutomationTargetLike,
+    operator: Operator,
 ) -> dict[str, str]:
-    """Default credential loader -- Vault read by ``target.secret_ref``.
+    """Default credential loader -- live operator-context Vault KV-v2 read.
 
-    Deliberate stub: the operator-context per-target Vault credential
-    read is not yet wired for the VCF Automation connector. Raising
-    :exc:`NotImplementedError` here keeps the wiring shape stable -- a
-    production caller without an override receives a clear error rather
-    than a silent fallback or a hallucinated credential pair. The
-    supported workaround is to inject a custom ``credentials_loader``
-    on ``VcfAutomationConnector`` at construction time. The live read
-    is tracked under the open Goal #214 (Connector parity).
+    Reads ``target.secret_ref`` as a KV-v2 secret **under the operator's
+    identity** (``operator.raw_jwt`` is forwarded to Vault's JWT/OIDC
+    auth method) and returns the ``{"username": ..., "password": ...}``
+    pair the connector feeds into both planes' login flows. Delegates
+    to the shared
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
+    helper (G3.9-T2 #941) so the read, the no-secret-in-logs discipline,
+    and the two-phase error contract are defined once for every REST
+    connector -- this loader is the thin vcf-automation entry point.
 
-    Once the read lands, this function becomes the live implementation
-    that reads the ``vcf-automation/<target.name>`` Vault path (or
-    ``target.secret_ref`` directly when set) and returns the parsed
-    ``{"username": ..., "password": ...}`` dict.
+    The error contract is the helper's:
+
+    * :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
+      -- read-phase failure (empty ``operator.raw_jwt`` for a
+      system-initiated call, unset ``target.secret_ref``, a malformed
+      KV-v2 payload, or a missing ``username``/``password`` field).
+      Never a bare ``KeyError``.
+    * :class:`~meho_backplane.auth.vault.VaultClientError` (and its
+      subclasses) -- login-phase failure (Vault unreachable, role
+      denied). Propagated verbatim so callers can distinguish login
+      from read.
+
+    The connector invokes this loader once per plane on first
+    session-establish; the provider plane re-invokes it with the
+    override ``target.provider_secret_ref`` when that field is set so
+    distinct provider-plane credentials (``admin@System`` vs the
+    SSO/tenant account) resolve from a different Vault path.
+
+    A custom :class:`VcfAutomationCredentialsLoader` can still be
+    injected via ``credentials_loader`` on ``VcfAutomationConnector``
+    (tests do exactly that); this default is what production targets
+    at rubric State 2 (``shared_service_account``) use.
     """
-    raise NotImplementedError(
-        "load_credentials_from_vault is a deliberate stub: the operator-context "
-        "per-target Vault credential read is not yet wired for the VCF Automation "
-        f"connector; target={target.name!r} secret_ref={target.secret_ref!r}. "
-        "Workaround: inject a custom credentials_loader on VcfAutomationConnector. "
-        "Tracked under open Goal #214 (Connector parity): "
-        "https://github.com/evoila/meho/issues/214"
-    )
+    return await load_basic_credentials(target, operator)

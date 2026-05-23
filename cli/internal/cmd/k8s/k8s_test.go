@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 )
 
 // ---------- pure-function helpers ----------
@@ -43,14 +44,14 @@ func TestTruncatePassthroughAndCut(t *testing.T) {
 
 // TestNormaliseURLBasic — trailing-slash trimming + reject-empty.
 func TestNormaliseURLBasic(t *testing.T) {
-	got, err := normaliseURL("https://meho.test/")
+	got, err := backplane.NormaliseURL("https://meho.test/")
 	if err != nil {
 		t.Fatalf("normaliseURL: %v", err)
 	}
 	if got != "https://meho.test" {
 		t.Fatalf("expected trailing slash stripped; got %q", got)
 	}
-	if _, err := normaliseURL("   "); err == nil || !strings.Contains(err.Error(), "empty") {
+	if _, err := backplane.NormaliseURL("   "); err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("empty should reject; got %v", err)
 	}
 }
@@ -58,12 +59,12 @@ func TestNormaliseURLBasic(t *testing.T) {
 // TestClassifyBackplaneErrorRoutesByCause — ErrConfigNotFound (or any
 // wrapping error) maps to AuthExpired; everything else to Unexpected.
 func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
-	wrapped := &errNoBackplaneConfigured{inner: auth.ErrConfigNotFound}
-	se := classifyBackplaneError(wrapped)
+	wrapped := &backplane.NotConfiguredError{Inner: auth.ErrConfigNotFound}
+	se := backplane.ClassifyError(wrapped)
 	if se == nil || se.Code != "auth_expired" {
 		t.Fatalf("wrapped ErrConfigNotFound should classify as auth_expired; got %+v", se)
 	}
-	se = classifyBackplaneError(errors.New("parse failure"))
+	se = backplane.ClassifyError(errors.New("parse failure"))
 	if se == nil || se.Code != "unexpected_response" {
 		t.Fatalf("parse failure should classify as unexpected_response; got %+v", se)
 	}
@@ -203,7 +204,7 @@ func TestDispatchOpBakesConnectorID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	r, err := dispatchOp(context.Background(), srv.URL, opAbout, "rke2-meho", nil)
+	r, err := conn.Call(context.Background(), srv.URL, opAbout, "rke2-meho", nil)
 	if err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestDispatchOpTargetSlugWrappedAsName(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	if _, err := dispatchOp(context.Background(), srv.URL, "x", "rke2-meho", nil); err != nil {
+	if _, err := conn.Call(context.Background(), srv.URL, "x", "rke2-meho", nil); err != nil {
 		t.Fatalf("dispatchOp: %v", err)
 	}
 }

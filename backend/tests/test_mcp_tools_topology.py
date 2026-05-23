@@ -162,9 +162,10 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     # standalone list_edges meta-tool); G9.3-T5 (#861) added the
     # `timeline` facet (tenant-wide chronological feed of graph
     # changes from the *_history tables); G9.3-T4 (#860) added the
-    # `diff` facet (net per-resource delta between two timestamps).
-    # The closure / path branches and their conditional requireds stay
-    # unchanged.
+    # `diff` facet (net per-resource delta between two timestamps);
+    # G9.3-T3 (#859) added the `history` facet (per-resource history
+    # walk with full snapshot payload). The closure / path branches and
+    # their conditional requireds stay unchanged.
     assert wire_schema["properties"]["kind"]["enum"] == [
         "dependents",
         "dependencies",
@@ -172,6 +173,7 @@ def test_query_topology_input_schema_is_conditional_on_kind(
         "edges",
         "timeline",
         "diff",
+        "history",
     ]
     # The wire shape carries NO top-level combinator — Anthropic 400s on
     # it (#905); the conditional logic moved to the stored schema below.
@@ -188,14 +190,23 @@ def test_query_topology_input_schema_is_conditional_on_kind(
     assert entry is not None
     stored_schema = entry[0].inputSchema
     conditionals = stored_schema["allOf"]
-    by_kind = {c["if"]["properties"]["kind"]["const"]: c["then"]["required"] for c in conditionals}
+    # Skip per-kind ``limit.maximum`` tightening clauses (no ``required``
+    # key) — those intersect a stricter ``limit`` ceiling for ``edges``
+    # / ``timeline`` and aren't part of the required-field contract.
+    by_kind = {
+        c["if"]["properties"]["kind"]["const"]: c["then"]["required"]
+        for c in conditionals
+        if "required" in c["then"]
+    }
     assert by_kind["dependents"] == ["target"]
     assert by_kind["dependencies"] == ["target"]
     assert sorted(by_kind["path"]) == ["from_name", "to_name"]
     # `diff` requires both timestamps.
     assert sorted(by_kind["diff"]) == ["ts1", "ts2"]
-    # `edges` and `timeline` have no required field — every filter is
-    # optional on both facets.
+    # `history` requires `target` (the anchor node name); `edges` and
+    # `timeline` have no required field — every filter is optional on
+    # both facets.
+    assert by_kind["history"] == ["target"]
     assert "edges" not in by_kind
     assert "timeline" not in by_kind
 

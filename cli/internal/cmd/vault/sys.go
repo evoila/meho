@@ -6,6 +6,7 @@ package vault
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -82,15 +83,15 @@ func newSysVerbCmd(use, opID, short, long, example string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			backplaneURL, err := resolveBackplane(backplaneOverride)
+			backplaneURL, err := backplane.Resolve(backplaneOverride)
 			if err != nil {
-				return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+				return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 			}
-			r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, nil)
+			r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 			if err != nil {
 				return renderRequestError(cmd, backplaneURL, err, jsonOut)
 			}
-			return renderCallResult(cmd, opID, r, jsonOut, nil)
+			return conn.Render(cmd, opID, r, jsonOut, nil)
 		},
 	}
 	cmd.Flags().StringVar(&targetName, "target", "",

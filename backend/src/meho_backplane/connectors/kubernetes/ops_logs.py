@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Any
 from kubernetes_asyncio import client
 
 if TYPE_CHECKING:
+    from meho_backplane.auth.operator import Operator
     from meho_backplane.connectors.kubernetes.connector import KubernetesConnector
     from meho_backplane.connectors.kubernetes.kubeconfig import KubernetesTargetLike
 
@@ -397,6 +398,7 @@ def truncate_lines_to_byte_cap(lines: list[str], cap_bytes: int) -> tuple[list[s
 async def k8s_logs(
     connector: KubernetesConnector,
     target: KubernetesTargetLike,
+    operator: Operator,
     params: dict[str, Any],
 ) -> dict[str, Any]:
     """Handler for ``k8s.logs``.
@@ -407,6 +409,10 @@ async def k8s_logs(
     validation runs in the dispatcher, so ``params`` arrives
     pre-checked against :data:`K8S_LOGS_PARAMETER_SCHEMA` -- the
     handler only re-reads validated values.
+
+    ``operator`` is forwarded to
+    :meth:`KubernetesConnector._get_api_client` so a cold-cache
+    kubeconfig load runs under the operator's identity.
 
     Raises propagate to the dispatcher's ``connector_error`` branch:
 
@@ -432,7 +438,7 @@ async def k8s_logs(
     since_seconds = parse_duration(params.get("since"))
     previous = bool(params.get("previous", False))
 
-    api_client = await connector._get_api_client(target)
+    api_client = await connector._get_api_client(target, operator)
     v1 = client.CoreV1Api(api_client)
 
     exact_name, container_name = await resolve_pod_and_container(

@@ -344,6 +344,38 @@ class Settings(BaseModel):
         :func:`~meho_backplane.memory._internal.is_expired` until the
         external job reaps them. Read once at lifespan startup; toggling
         post-start requires a pod restart to take effect.
+    ui_keycloak_client_id:
+        OAuth ``client_id`` of the **confidential** Keycloak client the
+        operator-console BFF login flow authenticates against. Initiative
+        #337 (G10.0 Frontend chassis), Task #865. Distinct from
+        :attr:`keycloak_cli_client_id` (the public device-code client
+        ``meho login`` uses) and from :attr:`keycloak_audience` (the
+        resource-server identifier the backplane validates JWT ``aud``
+        claims against): the BFF needs a *confidential* client with a
+        secret because the authorization-code flow runs server-side at
+        ``/ui/auth/callback`` and the token-endpoint exchange carries
+        ``client_id`` + ``client_secret`` in the request body. Suggested
+        name ``meho-web``. Configured per the recipe in
+        ``docs/cross-repo/keycloak-web-client.md``. Default ``""``
+        (unset) keeps the chassis-only deploys booting; any ``/ui/auth/*``
+        request with the default surfaces an actionable error rather than
+        silently misusing one of the other client ids.
+    ui_keycloak_client_secret:
+        Client secret of the confidential ``meho-web`` Keycloak client.
+        Initiative #337, Task #865. Sourced from Vault in production
+        (same render-into-env chain that lands ``DATABASE_URL`` /
+        ``UI_SESSION_ENCRYPTION_KEY``): the deploy renders the value
+        into the pod's ``UI_KEYCLOAK_CLIENT_SECRET`` env var; this field
+        reads it once at startup via :func:`get_settings`. The value
+        leaves the pod environment only as the body of the POST to
+        Keycloak's token endpoint in :mod:`meho_backplane.ui.auth.flow`
+        — never logged, never surfaced in error bodies, never copied
+        into structlog context. Default ``""`` (unset) is fail-fast: the
+        BFF login flow rejects token-exchange attempts without an
+        explicit secret rather than silently falling back to an empty
+        body (which Keycloak would reject as ``invalid_client``, but the
+        explicit precheck names the missing knob so operator remediation
+        is unambiguous).
     ui_session_encryption_key:
         URL-safe base64-encoded 32-byte key used by
         :mod:`meho_backplane.ui.auth.session_store` to Fernet-encrypt
@@ -457,6 +489,8 @@ class Settings(BaseModel):
     memory_user_default_ttl_days: int = Field(default=7, ge=1, le=365)
     memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
     memory_expiry_enabled: bool = True
+    ui_keycloak_client_id: str = ""
+    ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
     # G9.3-T6 #858 — topology history retention prune knobs. ``days=0`` is
     # the opt-out sentinel ("keep forever"); ``enabled=False`` skips the
@@ -600,7 +634,9 @@ def get_settings() -> Settings:
         memory_expiry_enabled=parse_bool_env(
             os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
         ),
-        ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", ""),
+        ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
+        ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
+        ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
         topology_history_retention_days=int(
             os.environ.get("TOPOLOGY_HISTORY_RETENTION_DAYS", "90"),
         ),

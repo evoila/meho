@@ -389,7 +389,11 @@ async def harbor_e2e(
 
 
 def _make_credentials_loader(username: str, password: str):  # type: ignore[no-untyped-def]
-    async def _loader(_target: HarborTargetLike) -> dict[str, str]:
+    # Inner loader uses 2-arg signature (target, operator) per
+    # G3.10-T1 #945's HarborCredentialsLoader contract; the operator
+    # is unused here because the container test injects credentials
+    # directly without touching Vault.
+    async def _loader(_target: HarborTargetLike, _operator: object) -> dict[str, str]:
         return {"username": username, "password": password}
 
     return _loader

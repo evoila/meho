@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -62,9 +63,9 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 	if se := requirePlane(plane); se != nil {
 		return output.RenderError(cmd.ErrOrStderr(), se, jsonOut)
 	}
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	opID := aboutOpForPlane(plane)
 	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, readFqdn(cmd), nil)
@@ -72,7 +73,7 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
 	printer := func(w io.Writer, res *CallResult) { printAbout(w, plane, res) }
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }
 
 // aboutOpForPlane returns the op_id the `about` verb dispatches for

@@ -57,6 +57,7 @@ import structlog
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import register_connector_v2
@@ -125,7 +126,7 @@ class GenericRestConnector(HttpConnector):
             return self._base_url_override
         return super()._base_url(target)
 
-    async def auth_headers(self, target: Any, raw_jwt: str) -> dict[str, str]:
+    async def auth_headers(self, target: Any, operator: Operator) -> dict[str, str]:
         """Raise :class:`NotImplementedError` with operator-readable guidance.
 
         The auto-shim doesn't know how to authenticate against the

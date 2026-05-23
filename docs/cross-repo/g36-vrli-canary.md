@@ -291,12 +291,13 @@ meho operation call vrli-rest-9.0 \
   --json
 ```
 
-When the production reducer is wired (v0.5.next), large event
-result sets will return as a `ResultHandle`; the agent reads
-them via `result_describe` + `result_query`. v0.5 ships only the
-`PassThroughReducer`, so handles are exercised non-interactively
-via the per-op `llm_instructions` advertising the shape (assert
-covered by
+The production reducer
+[`JsonFluxReducer`](../architecture/jsonflux.md) (G0.6.1, #750) is now
+the default, so large event result sets return as a `ResultHandle`; the
+agent will read them via `result_describe` + `result_query` once those
+meta-tools land (a follow-on Initiative). Until then, handles are
+exercised non-interactively via the per-op `llm_instructions` advertising
+the shape (assert covered by
 [`test_vrli_core_groups_event_query_op_is_jsonflux_handle_shaped`](../../backend/tests/test_connectors_vcf_logs_core_ops.py)).
 
 ## Rollback

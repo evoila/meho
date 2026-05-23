@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`k8s-1.x` typed connector — `shared_service_account` auth model live
+  (G3.10-T4 [#948](https://github.com/evoila/meho/issues/948)).** The
+  default
+  [`load_kubeconfig_from_vault`](./backend/src/meho_backplane/connectors/kubernetes/kubeconfig.py)
+  now performs the live operator-context KV-v2 read (forwarding the
+  operator's Keycloak JWT to Vault's JWT/OIDC auth method, reading the
+  `kubeconfig` field at `target.secret_ref`, parsing the YAML into the
+  dict shape `kubernetes_asyncio.config.new_client_from_config_dict`
+  accepts). `operation call k8s.<op> target=…` executes end to end
+  against a real cluster — the rubric **State 2** wiring per
+  [`docs/codebase/connector-release-readiness.md`](./docs/codebase/connector-release-readiness.md).
+  Fail-closed on empty `operator.raw_jwt` (the system-call carve-out)
+  and unset `secret_ref`. Operator recipe:
+  [`kubernetes-onboarding.md`](./docs/cross-repo/kubernetes-onboarding.md).
+  `per_user` / `impersonation` remain out of scope.
+
 ## [0.5.1] - 2026-05-22
 
 **Connector raw-REST ingest on-ramp + topology change-history + UI

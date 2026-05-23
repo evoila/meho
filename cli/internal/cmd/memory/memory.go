@@ -55,7 +55,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -264,21 +263,6 @@ type retrieveRequest struct {
 	Limit  int    `json:"limit,omitempty"`
 }
 
-// errNoBackplaneConfigured wraps auth.ErrConfigNotFound so callers
-// can distinguish "operator never logged in" (→ auth_expired exit
-// code 2 — fix is `meho login`) from URL-parse failures (→
-// unexpected exit code 4 — fix is correcting argv). Same shape as
-// the audit / kb / targets / connector siblings; duplicated here
-// because importing those packages would create cycles via
-// cmd/root.go (this package is registered onto the root the same
-// way they are).
-type errNoBackplaneConfigured struct{ inner error }
-
-func (e *errNoBackplaneConfigured) Error() string {
-	return "no backplane URL configured; run `meho login <url>` first or pass --backplane <url>"
-}
-func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
-
 // errMissingAccessToken is the sentinel doAuthedRequest returns
 // when the stored token row exists but its access_token field is
 // empty. Routed to auth_expired (exit 2) with a `meho login` hint
@@ -302,52 +286,6 @@ const responseBodyCap int64 = 1 << 20
 // bodies are expected to be hand-written notes, not megabyte
 // blobs.
 const loadBodyStdinCap int64 = 1 << 20
-
-// resolveBackplane mirrors the kb / audit / targets sibling helper.
-// Returns the backplane URL from the --backplane override or the
-// `meho login` config; wraps auth.ErrConfigNotFound so an absent
-// config maps to auth_expired (exit 2), not unexpected (exit 4).
-func resolveBackplane(override string) (string, error) {
-	if override != "" {
-		return normaliseURL(override)
-	}
-	cfg, err := auth.LoadConfig()
-	if err != nil {
-		if errors.Is(err, auth.ErrConfigNotFound) {
-			return "", &errNoBackplaneConfigured{inner: err}
-		}
-		return "", err
-	}
-	return normaliseURL(cfg.BackplaneURL)
-}
-
-// classifyBackplaneError maps a resolveBackplane error to the right
-// output.StructuredError category. Identical contract to the kb /
-// audit / targets siblings.
-func classifyBackplaneError(err error) *output.StructuredError {
-	if errors.Is(err, auth.ErrConfigNotFound) {
-		return output.AuthExpired(err.Error())
-	}
-	return output.Unexpected(err.Error())
-}
-
-// normaliseURL strips trailing slashes and parses the URL to fail
-// fast on garbage input. Mirrors the sibling-package helpers.
-func normaliseURL(s string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(s), "/")
-	if trimmed == "" {
-		return "", errors.New("backplane URL is empty")
-	}
-	u, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("backplane URL %q has no host", s)
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
-}
 
 // httpError carries a non-2xx response so per-verb runners can
 // render the right category. Same shape as the kb sibling.

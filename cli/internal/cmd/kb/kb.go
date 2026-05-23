@@ -59,7 +59,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -168,20 +167,6 @@ type RetrieveResponse struct {
 	QueryDurationMS float64        `json:"query_duration_ms"`
 }
 
-// errNoBackplaneConfigured wraps auth.ErrConfigNotFound so callers
-// can distinguish "operator never logged in" (→ auth_expired exit
-// code 2 — the right fix is `meho login`) from URL-parse failures
-// (→ unexpected exit code 4 — the right fix is correcting argv).
-// Same shape as the helper in cli/internal/cmd/audit/audit.go;
-// kept independent because importing those packages would create
-// cycles via cmd/root.go.
-type errNoBackplaneConfigured struct{ inner error }
-
-func (e *errNoBackplaneConfigured) Error() string {
-	return "no backplane URL configured; run `meho login <url>` first or pass --backplane <url>"
-}
-func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
-
 // errMissingAccessToken is the sentinel doAuthedRequest returns
 // when the stored token row exists but its `access_token` field is
 // empty. It's a credential-state failure rather than a transport
@@ -191,54 +176,6 @@ func (e *errNoBackplaneConfigured) Unwrap() error { return e.inner }
 // here that falls through to unreachable; the local fix here is
 // scoped to the kb package (m3 in the review punch list).
 var errMissingAccessToken = errors.New("meho: stored token has no access_token")
-
-// resolveBackplane resolves the backplane URL from either the
-// `--backplane` override or the `meho login` config file. Same shape
-// as the audit / targets / operation package helpers — duplicated
-// to avoid the import cycle the cmd → cmd/kb → cmd path would
-// create.
-func resolveBackplane(override string) (string, error) {
-	if override != "" {
-		return normaliseURL(override)
-	}
-	cfg, err := auth.LoadConfig()
-	if err != nil {
-		if errors.Is(err, auth.ErrConfigNotFound) {
-			return "", &errNoBackplaneConfigured{inner: err}
-		}
-		return "", err
-	}
-	return normaliseURL(cfg.BackplaneURL)
-}
-
-// classifyBackplaneError maps a resolveBackplane error to the right
-// output.StructuredError category. Identical contract to the
-// audit / targets sibling.
-func classifyBackplaneError(err error) *output.StructuredError {
-	if errors.Is(err, auth.ErrConfigNotFound) {
-		return output.AuthExpired(err.Error())
-	}
-	return output.Unexpected(err.Error())
-}
-
-// normaliseURL strips trailing slashes and parses the URL to fail
-// fast on garbage input. Mirrors normaliseURL in audit/audit.go and
-// targets/targets.go.
-func normaliseURL(s string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(s), "/")
-	if trimmed == "" {
-		return "", errors.New("backplane URL is empty")
-	}
-	u, err := url.ParseRequestURI(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("invalid backplane URL %q: %w", s, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("backplane URL %q has no host", s)
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
-}
 
 // renderRequestError translates an error from one of the per-verb
 // request helpers into the right output.StructuredError category.

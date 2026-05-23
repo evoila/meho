@@ -16,7 +16,9 @@ Covers all four acceptance criteria from Issue #615:
     ``method='DISPATCH'``, a non-null ``target_id``, and a
     ``payload["params_hash"]`` key.
 (d) JSONFlux handle path: ``GET:/policy/api/v1/infra/segments``
-    dispatched with a ``ForceHandleReducer`` returns a populated
+    dispatched with the real
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    in force mode (``row_threshold=0``) returns a populated
     ``OperationResult.handle`` with at least one ``sample_rows``
     entry.
 
@@ -49,12 +51,12 @@ from meho_backplane.connectors.nsx import (
     NsxConnector,
 )
 from meho_backplane.connectors.registry import all_connectors_v2
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, Target
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._nsx_canary_fixtures import (
@@ -138,46 +140,6 @@ def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
     monkeypatch.setattr(audit_module, "publish_event", _capture)
     return events
-
-
-# ---------------------------------------------------------------------------
-# ForceHandleReducer (acceptance criterion d)
-# ---------------------------------------------------------------------------
-
-
-class _ForceHandleReducer:
-    """Test-only reducer that always wraps an NSX list payload in a ResultHandle.
-
-    Installed for the JSONFlux handle-path test only; all other tests
-    use the v0.2 default :class:`PassThroughReducer`.
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        del schema, context
-        if isinstance(payload, dict) and "results" in payload:
-            rows = payload["results"]
-            total = len(rows) if isinstance(rows, list) else 1
-            sample: tuple[Any, ...] = tuple(rows[:5]) if isinstance(rows, list) and rows else ()
-        elif isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        else:
-            total = 1
-            sample = ()
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample or None,
-            ttl_seconds=3600,
-        )
-        return {"row_count": total, "sample": list(sample)}, handle
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +411,7 @@ async def test_nsx_e2e_401_retry_via_connector_method(
     result = await bundle.connector_instance._get_json_with_session_retry(
         bundle.db_target,
         "/api/v1/node",
-        raw_jwt="",
+        operator=_OPERATOR,
     )
 
     assert result.get("node_version") == NSX_VERSION, (
@@ -542,7 +504,7 @@ async def test_nsx_e2e_dispatch_writes_audit_row(
 async def test_nsx_e2e_jsonflux_handle_populated_for_segment_list(
     nsx_e2e_canary: _NsxE2EBundle,
 ) -> None:
-    """Segment list dispatched with ForceHandleReducer returns a populated handle.
+    """Segment list dispatched with the real JsonFluxReducer returns a populated handle.
 
     Exercises acceptance criterion (d): the JSONFlux dispatcher seam
     threads the reducer's :class:`ResultHandle` onto
@@ -559,7 +521,7 @@ async def test_nsx_e2e_jsonflux_handle_populated_for_segment_list(
     """
     expected_rows = len(NSX_CANARY_SEGMENTS["results"])  # type: ignore[arg-type]
 
-    set_default_reducer(_ForceHandleReducer())
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         result_envelope = await call_operation(
             _OPERATOR,
@@ -579,7 +541,7 @@ async def test_nsx_e2e_jsonflux_handle_populated_for_segment_list(
 
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        "Expected OperationResult.handle to be populated by _ForceHandleReducer; "
+        "Expected OperationResult.handle to be populated by JsonFluxReducer; "
         f"got handle=None on envelope={result_envelope!r}"
     )
 

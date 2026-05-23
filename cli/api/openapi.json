@@ -338,6 +338,71 @@
         }
       }
     },
+    "/api/v1/retrieve/retire-checklist": {
+      "post": {
+        "tags": [
+          "retrieval"
+        ],
+        "summary": "Retire Checklist Endpoint",
+        "description": "Return the five-criterion retire-decision checklist per surface.\n\nTenant scoping mirrors the sibling usage route:\n``operator`` / ``read_only`` callers are scoped to\n``operator.tenant_id``; passing a non-null ``tenant_filter`` query\nparameter returns 403. Only ``tenant_admin`` may cross tenants.\nThe request body's ``surface=all`` (default) walks every supported\nsurface in the order :data:`SURFACE_VERDICT_ORDER` pins.\n\nAudit overrides + enrichment contextvars are bound **before** the\ntenant-filter 403 path so the denied request still produces an\naudit row with the canonical ``op_id`` /\n``op_class`` / ``tenant_scope`` payload (the \"audit row per call\"\ncontract from the issue body holds on every status code). The\nsame overrides also protect the happy-path handler-exception case:\na partial payload is itself a useful incident-postmortem signal.\n``audit_row_count`` is bound after the service returns so the\nbroadcast event's ``row_count`` field reflects the number of\nsurfaces evaluated, not the underlying audit_log scan size.",
+        "operationId": "retire_checklist_endpoint_api_v1_retrieve_retire_checklist_post",
+        "parameters": [
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetireChecklistRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetireChecklistReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -453,6 +518,69 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/discover": {
+      "get": {
+        "tags": [
+          "targets"
+        ],
+        "summary": "Discover Targets",
+        "description": "Discover potentially-reachable targets for a *product*.\n\nIterates every connector implementation registered for *product*\nand calls\n:meth:`~meho_backplane.connectors.base.Connector.list_candidates`\non each, merging the results. ``seed_target`` (optional) scopes the\ndiscovery to one already-registered target's reach (e.g. peer\nKubernetes clusters in the same kubeconfig context tree); it is\nresolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` so a\nprincipal can only seed from a target in their own tenant\n(cross-tenant seeding is impossible). 404 with near-misses when the\nseed name does not resolve.\n\nThe verb is **read-only** \u2014 it returns candidates, never creates\n``targets`` rows (Initiative #363: auto-registration is v0.2.next;\nthe operator runs ``meho targets create`` after review). One\nconnector raising does not fail the sweep: it is recorded in\n``skipped`` with the exception summary and the rest still run.\n\nRegistered **before** ``GET /{name}`` on the same router so the\nliteral ``/discover`` segment is matched as this route rather than\ncaptured as a target name by the parametrised describe route\n(FastAPI resolves routes in declaration order).",
+        "operationId": "discover_targets_api_v1_targets_discover_get",
+        "parameters": [
+          {
+            "name": "product",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Product"
+            }
+          },
+          {
+            "name": "seed_target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Seed Target"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetsDiscoverResult"
                 }
               }
             }
@@ -637,6 +765,892 @@
         }
       }
     },
+    "/api/v1/topology/dependents/{name}": {
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Dependents",
+        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 so a caller can distinguish \"node\nexists but has no dependents\" (one-element list) from \"node does\nnot exist in this tenant\" (empty list).\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.",
+        "operationId": "dependents_api_v1_topology_dependents__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 64,
+              "minimum": 1,
+              "default": 16,
+              "title": "Depth"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "kind_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Kind Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TopologyNode"
+                  },
+                  "title": "Response Dependents Api V1 Topology Dependents  Name  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/dependencies/{name}": {
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Dependencies",
+        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping \u2014 walking edges out of the current node rather than\ninto it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`.",
+        "operationId": "dependencies_api_v1_topology_dependencies__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 64,
+              "minimum": 1,
+              "default": 16,
+              "title": "Depth"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "kind_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Kind Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TopologyNode"
+                  },
+                  "title": "Response Dependencies Api V1 Topology Dependencies  Name  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/path": {
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Path",
+        "description": "Shortest unweighted path from ``from`` to ``to``, or ``null``.\n\nWraps :func:`~meho_backplane.topology.query.find_path`. The query\nparams are ``from`` / ``to`` (matching the Initiative #363 route\nspec ``?from=A&to=B``); the handler binds them via ``alias`` since\n``from`` is a Python keyword. Walks edges in both directions so the\npath follows the graph's connectivity rather than only its edge\norientation. Returns ``null`` (HTTP 200) when *to* is unreachable\nfrom *from* within ``max_hops`` or either endpoint does not exist\nin this tenant \u2014 unreachability is a valid answer, not an error.\n\n``from_kind`` / ``to_kind`` pin each endpoint independently; an\nunpinned name resolving to multiple kinds returns 409\n(``ambiguous_node``).",
+        "operationId": "path_api_v1_topology_path_get",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "To"
+            }
+          },
+          {
+            "name": "from_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "From Kind"
+            }
+          },
+          {
+            "name": "to_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "To Kind"
+            }
+          },
+          {
+            "name": "max_hops",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 32,
+              "minimum": 1,
+              "default": 8,
+              "title": "Max Hops"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologyPath",
+                  "nullable": true,
+                  "title": "Response Path Api V1 Topology Path Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/refresh/{target_name}": {
+      "post": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Refresh",
+        "description": "Rediscover *target_name*'s topology and reconcile it into the graph.\n\nWraps :func:`~meho_backplane.topology.refresh.refresh_target_topology`.\n*target_name* is resolved tenant-scoped via\n:func:`~meho_backplane.targets.resolver.resolve_target` (alias-\naware, 404 with near-misses when nothing matches) \u2014 so a principal\ncan only ever refresh a target in their own tenant and the\nreconcile writes every row under ``operator.tenant_id``.\nCross-tenant refresh is impossible: there is no path by which a\ntarget id from another tenant reaches the service.\n\nThe refresh service writes its own domain-level ``audit_log`` row\n(``op_id=\"topology.refresh\"``, ``op_class=\"read\"``, the per-target\nnode/edge counts in ``payload``) and publishes one fail-open\nbroadcast event inside its own transaction; this route binds the\nsame op identity for the chassis HTTP-level audit row so both rows\nclassify consistently.",
+        "operationId": "refresh_api_v1_topology_refresh__target_name__post",
+        "parameters": [
+          {
+            "name": "target_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/edges": {
+      "post": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Annotate Edge Route",
+        "description": "Create or upsert a curated edge.\n\nWraps :func:`~meho_backplane.topology.annotate.annotate_edge`\n(G9.2-T3 #595). Resolves both endpoints tenant-scoped, idempotently\nupserts the ``(tenant_id, from, to, kind)`` row, runs \u00a76 conflict\ndetection on neighbouring auto edges, and writes one ``audit_log``\nrow + one broadcast event under ``op_id=\"topology.annotate\"`` /\n``op_class=\"write\"``.\n\nReturns the resulting :class:`TopologyEdge` (after the in-service\ncommit). 201 on first insert; 201 on a repeat call too \u2014 the\nidempotent upsert path is indistinguishable from a fresh insert at\nthe HTTP boundary, mirroring how :func:`annotate_edge` treats the\nre-annotate case as \"operator asserts the edge exists\".\n\nError mapping:\n\n* **Pydantic 422** on an unknown ``kind`` (the\n  :class:`GraphEdgeKind` enum field rejects the value before the\n  service runs).\n* **404** when either endpoint does not exist in the tenant\n  (``NodeNotFoundError``) \u2014 same wire shape every topology route\n  uses for a missing graph node.\n* **409 ambiguous_node** when a bare ``name`` endpoint resolves\n  to multiple kinds in the tenant \u2014 pass ``kind`` on the\n  endpoint to disambiguate.",
+        "operationId": "annotate_edge_route_api_v1_topology_edges_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_AnnotateEdgeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologyEdge"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "List Edges Route",
+        "description": "Flat filterable listing of edges in the caller's tenant.\n\nWraps :func:`~meho_backplane.topology.query.list_edges` (G9.2-T4\n#596). The query params are forwarded straight through (``from`` /\n``to`` are bound via :class:`Query` ``alias`` because ``from`` is a\nPython keyword); the tenant boundary comes from ``operator.tenant_id``\nand is non-overrideable by query string or body.\n\n``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind\nis rejected at the HTTP boundary (422) before the helper runs;\n``source`` is constrained to the two ``graph_edge.source`` values\nby a regex pattern; ``conflicts=true`` forwards\n``conflicts_only=True`` to surface the recoverability listing for\na wrong annotation (\u00a76 of Initiative #364).\n\nA bare ``from`` / ``to`` name that resolves to multiple kinds in\nthe tenant surfaces as **409 ambiguous_node** (same shape as the\ntraversal verbs) so the caller can re-issue with a kind-qualified\nendpoint. A name that does not resolve at all yields an empty\nlist, not a 404 \u2014 consistent with the helper's \"missing anchor \u2192\nempty result\" shape.\n\nThe route binds ``audit_op_id=\"topology.list_edges\"`` /\n``audit_op_class=\"read\"`` so the audit row + broadcast event carry\nthe canonical identity. ``.list_edges`` is not in the broadcast\nclassifier's read/write suffix tables, so the explicit override is\nload-bearing (same rationale as the traversal verbs' ``.dependents``\n/ ``.dependencies`` / ``.path`` bindings).",
+        "operationId": "list_edges_route_api_v1_topology_edges_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/GraphEdgeKind",
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(auto|curated)$",
+              "nullable": true,
+              "title": "Source"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "To"
+            }
+          },
+          {
+            "name": "conflicts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Conflicts"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TopologyEdge"
+                  },
+                  "title": "Response List Edges Route Api V1 Topology Edges Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/edges/{edge_id}": {
+      "delete": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Unannotate Edge Route",
+        "description": "Hard-delete a curated edge by id and clear its reciprocal markers.\n\nWraps :func:`~meho_backplane.topology.annotate.unannotate_edge`\n(G9.2-T3 #595). Returns 204 on success.\n\nError mapping (the \u00a73 auto-edge rule of Initiative #364):\n\n* **409 auto_edge_deletion** when the targeted row has\n  ``source='auto'``. Auto edges resurrect on the next refresh, so\n  manual deletion is meaningless; the service refuses with\n  :class:`AutoEdgeDeletionError` and this route surfaces the typed\n  diagnostic over HTTP so the CLI / MCP layers (T6, T7) can prompt\n  the operator to annotate-over-auto instead.\n* **404** when no edge with that id exists in the caller's tenant\n  (the service treats cross-tenant ids and missing ids identically\n  \u2014 the tenant boundary is opaque to the caller).",
+        "operationId": "unannotate_edge_route_api_v1_topology_edges__edge_id__delete",
+        "parameters": [
+          {
+            "name": "edge_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Edge Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/edges/bulk": {
+      "post": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Bulk Import Edges Route",
+        "description": "Batch-annotate edges from a single body in one transaction.\n\nWraps\n:func:`~meho_backplane.topology.bulk_import.bulk_import_edges`\n(G9.2-T8 #600). Validation runs first against every row; a single\ninvalid row rejects the entire batch (no partial apply). The\napply pass writes every row inside one transaction so the\n\"all-or-nothing per the issue body\" criterion holds.\n\nPer-row audit + broadcast events fire one per applied row,\nmirroring the single-edge :func:`annotate_edge` flow; the\nchassis HTTP-level audit row at this route binds\n``op_id=\"topology.bulk_import\"`` / ``op_class=\"write\"`` so the\nbatch lives alongside the per-row audit trail under a recognisable\nparent identity.\n\nError mapping:\n\n* **Pydantic 422** on body shape (unknown ``kind``, typo'd field,\n  empty ``edges``, more than 1000 rows) \u2014 fails at the boundary\n  before the service runs.\n* **422 invalid_bulk** with a per-row error list on\n  :class:`BulkImportValidationError` \u2014 every row's failure is\n  surfaced together so the operator fixes the file in one pass.\n* **200** on a successful apply or a successful dry-run.\n\nUses HTTP 200 (not 201) for both apply and dry-run paths: the\nrequest is fundamentally a list mutation (create + update mix)\nwhere 201 is misleading for the update / dry-run path.",
+        "operationId": "bulk_import_edges_route_api_v1_topology_edges_bulk_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_BulkImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/_BulkImportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/timeline": {
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Timeline Route",
+        "description": "Tenant-wide chronological feed of graph changes.\n\nWraps :func:`~meho_backplane.topology.query.query_timeline` (G9.3-T5\n#861). Walks ``graph_node_history`` + ``graph_edge_history`` in\n``(valid_from DESC, history_id DESC)`` order, paginated via opaque\nforward-only cursor encoding ``(valid_from, history_id, source)``.\nTenant scope is ``operator.tenant_id`` -- no surface accepts a\ntenant id on this route.\n\nQuery parameters:\n\n* ``target`` -- optional target name or alias. Resolved tenant-\n  scoped via :func:`~meho_backplane.targets.resolver.resolve_target`\n  (alias-aware, 404 with near-misses when nothing matches). The\n  resolved target id narrows the timeline to history rows for\n  resources belonging to that target -- nodes whose ``target_id``\n  matches, and edges whose either endpoint belongs to the target.\n* ``since`` / ``until`` -- ISO-8601 absolute datetimes; either\n  bound is optional. Duration shorthand (``\"24h\"`` / ``\"7d\"``) is\n  a CLI convenience that the CLI front parses; the REST API\n  accepts absolute timestamps only, mirroring the audit-query\n  router's split (G8.1-T2 #466).\n* ``limit`` -- page size (default ``50`` per the issue body;\n  ceiling ``1000``).\n* ``cursor`` -- opaque next-page token from a prior response.\n\nErrors:\n\n* **404 ``no_target``** -- ``target`` did not resolve to a row in\n  the tenant. Near-miss matches surface in ``detail.matches`` for\n  operator self-correction (same shape as the ``refresh`` route).\n* **400 ``invalid_cursor``** -- ``cursor`` is not a valid opaque\n  token (tampered or hand-crafted). The substrate's\n  :class:`InvalidTimelineCursorError` message is echoed.\n\nThe route binds ``audit_op_id=\"topology.timeline\"`` /\n``audit_op_class=\"audit_query\"`` per [decision #3](docs/planning/v0.2-decisions.md)\n-- temporal graph queries are inspections of system state, parallel\nto G8's audit-log query surface; the broadcast event carries only\n``{op_id, result_status, row_count}`` so the request filter (which\nmay name a sensitive target) and the rows themselves never leak\nonto the SSE / Slack feed.",
+        "operationId": "timeline_route_api_v1_topology_timeline_get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Target"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 1024,
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologyTimelineResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/history/{name}": {
+      "get": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "History Route",
+        "description": "Chronological history walk anchored at one ``graph_node``.\n\nWraps :func:`~meho_backplane.topology.query.query_history` (G9.3-T3\n#859). Companion to ``GET /topology/timeline`` (G9.3-T5): timeline\nis \"what changed in the graph at all in this window\"; history is\n\"what changed for THIS specific resource\". Resolved via the G9.1\nresolver :func:`~meho_backplane.topology.resolvers.resolve_node` so\nname + optional kind disambiguation use the same surface every\nG9.1 + G9.2 verb does.\n\nQuery parameters:\n\n* ``kind`` -- optional ``graph_node.kind`` pin to disambiguate\n  when a bare *name* resolves to multiple kinds in the tenant.\n* ``since`` / ``until`` -- ISO-8601 absolute datetime bounds on\n  ``valid_from`` (inclusive at both ends). The CLI front resolves\n  duration shorthand (``\"24h\"`` / ``\"7d\"``) to an absolute\n  timestamp before crossing the wire, mirroring the timeline\n  route's split.\n* ``include_edges`` -- when ``true``, also walk every history row\n  for edges incident to the resolved node (joined via the inner\n  subquery ``edge_id IN (SELECT id FROM graph_edge WHERE\n  from_node_id = anchor OR to_node_id = anchor)``). The merged\n  result still orders newest-first.\n* ``limit`` -- hard cap on returned rows (1..``_HISTORY_LIMIT_MAX``).\n  Defaults to the ceiling because per-resource history is bounded\n  by retention; tighter caps would silently truncate the walk.\n\nErrors:\n\n* **404 ``node_not_found``** -- *name* (and *kind*, when supplied)\n  does not resolve to any node in the tenant. Cross-tenant names\n  surface identically -- the tenant boundary is opaque to the\n  caller.\n* **409 ``ambiguous_node``** -- bare *name* resolves to multiple\n  kinds; pass ``kind`` to disambiguate.\n\nThe route binds ``audit_op_id=\"topology.history\"`` /\n``audit_op_class=\"audit_query\"`` per [decision #3](docs/planning/v0.2-decisions.md)\n-- temporal graph queries are inspections of system state,\nparallel to G8's audit-log query surface; the broadcast event\ncarries only ``{op_id, result_status, row_count}`` so the\nresponse rows (which may carry the snapshot of a sensitive\nresource's pre/post payload) never leak onto the SSE / Slack\nfeed. Same shape T5's timeline route uses.",
+        "operationId": "history_route_api_v1_topology_history__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Since"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "Until"
+            }
+          },
+          {
+            "name": "include_edges",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Edges"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 5000,
+              "minimum": 1,
+              "default": 5000,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopologyHistoryResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Anchor node not found by ``name`` (and ``kind`` when supplied).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "node_not_found"
+                          ]
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "name"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Bare ``name`` resolves to multiple ``kind`` candidates; client should re-issue with an explicit ``kind``.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "ambiguous_node"
+                          ]
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "kinds": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "name",
+                        "kinds"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/feed": {
       "get": {
         "tags": [
@@ -733,7 +1747,7 @@
           "operations"
         ],
         "summary": "Get Groups",
-        "description": "List enabled operation groups for *connector_id*.\n\nDelegates to :func:`list_operation_groups`. Unknown connector_id\nreturns ``{\"groups\": []}`` (empty is meaningful \u2014 the connector\nexists but has no enabled groups yet).",
+        "description": "List enabled operation groups for *connector_id*.\n\nDelegates to :func:`list_operation_groups`. An *unknown*\n``connector_id`` (no operations registered for the parsed triple)\nis a ``404`` \u2014 not an empty ``200``: the empty-catalog trap was\nthat a mis-shaped id looked identical to an empty connector. A\n*known* connector with zero enabled groups still returns\n``{\"groups\": []}`` (that empty is operationally meaningful).",
         "operationId": "get_groups_api_v1_operations_groups_get",
         "parameters": [
           {
@@ -743,7 +1757,23 @@
             "schema": {
               "type": "string",
               "minLength": 1,
+              "description": "Connector implementation id in `<impl_id>-<version>` form \u2014 e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.",
               "title": "Connector Id"
+            },
+            "description": "Connector implementation id in `<impl_id>-<version>` form \u2014 e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.",
+            "examples": {
+              "vmware_rest": {
+                "summary": "vCenter REST (generic, ingested)",
+                "value": "vmware-rest-9.0"
+              },
+              "vault": {
+                "summary": "HashiCorp Vault (typed)",
+                "value": "vault-1.x"
+              },
+              "k8s": {
+                "summary": "Kubernetes (typed)",
+                "value": "k8s-1.x"
+              }
             }
           },
           {
@@ -789,7 +1819,7 @@
           "operations"
         ],
         "summary": "Get Search",
-        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping.",
+        "description": "Hybrid BM25 + cosine RRF over ``endpoint_descriptor`` rows.\n\nDelegates to :func:`search_operations`. See its docstring for the\nfull algorithm and tenant scoping. Unknown ``connector_id`` \u2192 ``404``\n(same unknown-vs-known-empty contract as ``/groups``); a known\nconnector with no matching ops returns ``200`` with an empty list.",
         "operationId": "get_search_api_v1_operations_search_get",
         "parameters": [
           {
@@ -799,7 +1829,23 @@
             "schema": {
               "type": "string",
               "minLength": 1,
+              "description": "Connector implementation id in `<impl_id>-<version>` form \u2014 e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.",
               "title": "Connector Id"
+            },
+            "description": "Connector implementation id in `<impl_id>-<version>` form \u2014 e.g. `vmware-rest-9.0`, `vault-1.x`, `k8s-1.x`. NOT the bare product name (`vault`, `vmware`): a bare product slug names no connector and returns 404. Discover valid ids via `GET /api/v1/connectors`.",
+            "examples": {
+              "vmware_rest": {
+                "summary": "vCenter REST (generic, ingested)",
+                "value": "vmware-rest-9.0"
+              },
+              "vault": {
+                "summary": "HashiCorp Vault (typed)",
+                "value": "vault-1.x"
+              },
+              "k8s": {
+                "summary": "Kubernetes (typed)",
+                "value": "k8s-1.x"
+              }
             }
           },
           {
@@ -1041,7 +2087,7 @@
           "connectors"
         ],
         "summary": "List Endpoint",
-        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nThe response is wrapped in ``{\"connectors\": [...]}`` so future\npaging / cursor fields can land non-breakingly. The route\nserialises through :meth:`ConnectorListResponse.model_dump`\nrather than annotating ``response_model=ConnectorListResponse``\nbecause the per-item ``tenant_id`` UUID needs to render as a\nstring in the JSON (the default Pydantic-v2 serialiser\nhandles this).",
+        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nThe response is wrapped in ``{\"connectors\": [...]}`` so future\npaging / cursor fields can land non-breakingly. The route builds\nthe payload by calling :meth:`ConnectorListItem.model_dump`\n(with ``mode=\"json\"``) on each item returned by\n:func:`list_ingested_connectors` rather than annotating\n``response_model=ConnectorListResponse`` \u2014 per-item ``tenant_id``\nUUIDs need to render as strings in JSON, and the per-item\n``mode=\"json\"`` dump is the simplest way to get that without\nintroducing a custom serializer.",
         "operationId": "list_endpoint_api_v1_connectors_get",
         "parameters": [
           {
@@ -1086,6 +2132,50 @@
                     }
                   },
                   "title": "Response List Endpoint Api V1 Connectors Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/catalog": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Catalog Endpoint",
+        "description": "Return the curated connector-spec catalog (Goal #214 on-ramp; #743).\n\nThe catalog maps ``(product, version)`` to the recommended OpenAPI\nspec source(s) + the registered connector class that covers the\nversion label. It is global, built-in reference data (not tenant-\nscoped), so operator role is the only gate; the read carries no\ntenant filter. The ``meho connector catalog list`` / ``ingest\n--catalog`` verbs (#915) consume this route \u2014 the CLI ships as a\nseparate binary and cannot read the server's packaged catalog file.\n\nDeclared before the ``/{connector_id}/...`` routes so the literal\n``/catalog`` segment is matched ahead of the path-parameter\npatterns. Wrapped in ``{\"catalog\": [...]}`` for non-breaking paging\nroom, mirroring the ``GET /`` list shape. Typed via\n``response_model=CatalogListResponse`` so the OpenAPI contract for\nthis public route declares the envelope + entry fields explicitly;\nunlike the ``GET /`` list route it has no per-row UUID-serialisation\nreason to stay an untyped object map.",
+        "operationId": "catalog_endpoint_api_v1_connectors_catalog_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogListResponse"
                 }
               }
             }
@@ -1378,6 +2468,1054 @@
         }
       }
     },
+    "/api/v1/kb": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "List Kb",
+        "description": "List kb entries for the operator's tenant, slug-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler;\n``operator`` and ``tenant_admin`` both pass.\n\n``filter`` is forwarded to :meth:`KbService.list_entries` as a SQL\n``LIKE`` pattern; the operator is the trust boundary for pattern\nshape. ``limit`` is capped at 500 (the substrate's\n:data:`DEFAULT_LIST_LIMIT` is 100; the API surface allows higher\nexplicit values so a one-shot dump of a 200-entry corpus\ncompletes in one round trip).\n\nBinds ``audit_op_id=\"kb.list\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call so a handler exception still produces an\naudit row classified under the canonical op id.",
+        "operationId": "list_kb_api_v1_kb_get",
+        "parameters": [
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Filter"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Create Kb",
+        "description": "Create / re-index one kb entry under the operator's tenant.\n\n``tenant_admin`` only -- ``operator`` role gets 403 via\n:func:`require_role`. Invalid slug shape (regex miss) surfaces as\n422 ``invalid_slug``; same status code Pydantic uses for shape\nfailures so callers can branch on 4xx uniformly. The substrate's\nbody-hash short-circuit means re-creating an entry with an\nunchanged body pays only an ``updated_at`` bump.\n\nBinds ``audit_op_id=\"kb.create\"`` + ``audit_op_class=\"write\"``\nbefore the substrate call. ``audit_slug`` is bound so the audit\nlog payload (and the broadcast ``params``) carries the slug\nthat was created. The body content is NOT bound -- the audit\nrow is for the operation, not the document content (which lives\nin the ``documents`` table and is recoverable via ``kb.show``).",
+        "operationId": "create_kb_api_v1_kb_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KbEntryCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/kb/{slug}": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Show Kb",
+        "description": "Return the full body of one kb entry by slug.\n\nCross-tenant slug probes surface as 404 ``slug_not_found`` (not\n403) -- the conflation prevents an operator from enumerating\nother tenants via status-code differential. Same shape the\nconnectors review route uses.\n\nBinds ``audit_op_id=\"kb.show\"`` + ``audit_op_class=\"read\"`` before\nthe substrate call; ``kb.show`` does not match any suffix in\n:data:`_READ_SUFFIXES`, so the explicit override is load-bearing\nto keep the broadcast classifier from defaulting to\n``op_class=\"other\"`` (which would emit the full request payload\ninstead of read-shaped detail).",
+        "operationId": "show_kb_api_v1_kb__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Delete Kb",
+        "description": "Delete one kb entry by slug. Idempotent.\n\n``tenant_admin`` only. Returns 204 whether the row existed or\nnot -- the acceptance criteria pin idempotent semantics (\"delete\nalready-missing returns 204\"). A non-idempotent surface that\nreturns 404 on missing-on-delete would let an operator probe\nfor the presence of a slug they cannot read; the idempotent\nshape preserves the tenant boundary's confidentiality\nproperties.\n\nBinds ``audit_op_id=\"kb.delete\"`` + ``audit_op_class=\"write\"``\n+ ``audit_slug=<slug>`` **before** the substrate call so an\nexception on the substrate's ``delete_entry`` still produces an\naudit row classified under ``kb.delete``. The ``audit_existed``\nboolean (real deletion vs no-op) is bound *after* the substrate\nreturns -- on the exception path it stays unbound, which is the\ntruthful signal (we don't know whether the row existed because\nthe query failed). The audit row is written either way; every\nauthenticated request gets one row, per the audit middleware\ncontract.\n\nBind ordering matters: if the bind landed *after* the substrate\ncall, an exception during ``delete_entry`` would skip the bind\nentirely. The audit middleware would then fall back to its\npre-handler default ``op_id`` (``http.delete:/api/v1/kb/<slug>``)\nand :func:`~meho_backplane.broadcast.events.classify_op` would\nbucket the row as ``op_class=\"other\"`` -- defeating the\nbroadcast-redaction contract from decision #3.",
+        "operationId": "delete_kb_api_v1_kb__slug__delete",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/kb/ingest": {
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Ingest Kb",
+        "description": "Server-side bulk ingest from a directory on the backplane host.\n\n``tenant_admin`` only -- bulk ingest is a privileged operation.\nThe request shape accepts both ``directory`` and ``tarball_url``\nfields (the task body's contract), but only the ``directory``\nbranch is implemented in v0.2; a ``tarball_url`` request returns\n**501 Not Implemented**, mirroring\n:mod:`meho_backplane.api.v1.retrieve_eval`'s posture toward its\nunimplemented baseline field.\n\nWalks the supplied directory via\n:meth:`KbService.ingest_directory` and returns the four-bucket\n:class:`KbIngestionResult`. The directory path is **not**\nsanitised against an allowlist -- the route is gated on\n``tenant_admin``, the path is interpreted relative to the\nbackplane host's filesystem, and the substrate is responsible\nfor failing closed if the path does not exist or is not a\ndirectory. An operator with tenant_admin can already drive the\nsame ingest via the CLI verb (T4 #418), so the route does not\nintroduce a new privilege surface.\n\nBinds ``audit_op_id=\"kb.ingest\"`` + ``audit_op_class=\"write\"``\nplus the four ``KbIngestionResult`` counters in the audit\npayload (NOT the file contents -- the task body's audit\ncontract). ``audit_dry_run`` flags dry-run calls so an operator\ncan grep their audit log for trial vs real ingests.",
+        "operationId": "ingest_kb_api_v1_kb_ingest_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestKbRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbIngestionResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Remember",
+        "description": "Create one memory under the operator's tenant.\n\nService-layer\n:class:`~meho_backplane.memory.rbac.MemoryRbacResolver` enforces\nthe per-scope role matrix:\n\n* ``user`` / ``user-tenant`` / ``user-target`` -- any\n  authenticated operator (``read_only`` excluded).\n* ``tenant`` -- ``tenant_admin`` only.\n* ``target`` -- any operator in the tenant.\n\nA matrix mismatch raises\n:class:`~meho_backplane.memory.rbac.PermissionDeniedError` which\nthis route maps to 403. ``target_name`` missing for a target-\nscoped write raises :class:`ValueError` from the service, mapped\nto 422 (same status pydantic returns for shape failures so\ncallers can branch on 4xx uniformly).\n\nBinds ``audit_op_id=\"memory.remember\"`` + ``audit_op_class=\n\"write\"`` + ``audit_scope=<scope>`` before the service call so a\nhandler exception still produces an audit row classified under\nthe canonical op id. ``audit_slug`` is rebound *after* the\nservice call because the slug is auto-generated when the body\nomits it -- binding before would leave ``audit_slug=None`` in\nthat path; the post-call rebind carries the actually-persisted\nslug.\n\nDefault-TTL injection (G5.2-T2 #624)\n------------------------------------\n\nWhen ``body.scope`` is :attr:`MemoryScope.USER` *and* the request\nomitted ``expires_at`` entirely, the handler injects\n``expires_at = now(UTC) + Settings.memory_user_default_ttl_days``\nso session-scoped hints expire by default (consumer-needs.md \u00a7G5:\n\"session-scoped hints expire after 7 days unless re-pinned\").\nThe G5.2-T1 expiry sweeper (#623) reaps these rows once\n``expires_at`` passes.\n\nTwo opt-outs are deliberately distinguished from \"field omitted\":\n\n* Explicit ``\"expires_at\": null`` in the JSON body \u2192 no default;\n  the row persists forever. The CLI's ``--persist`` flag emits\n  this shape.\n* Explicit ``\"expires_at\": \"<ISO-8601>\"`` \u2192 that value is honoured\n  verbatim (no override).\n\nThe discrimination uses :attr:`BaseModel.model_fields_set`\n(pydantic v2) rather than ``body.expires_at is None``: the former\ndistinguishes \"field absent from JSON\" from \"field present with\nvalue null\", which is the load-bearing semantics for the CLI's\n``--persist`` opt-out. The default is applied *only* to the\nuser-only :attr:`MemoryScope.USER` kind (the one consumer-needs\ntargets); ``user-tenant`` / ``user-target`` are not in scope per\nthe issue (\"``kind == 'memory-user'``\").",
+        "operationId": "remember_api_v1_memory_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RememberBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "List Memories",
+        "description": "List memories visible to the operator in this tenant.\n\nTenant-scoped via ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``read_only`` operators get 403\nvia :func:`require_role` before reaching this handler.\n\nFilters (``scope`` / ``slug_pattern`` / ``tag``) are forwarded\nverbatim to :meth:`MemoryService.list_memories`; the service is\nthe contract owner for filter semantics (slug ``in`` substring\nmatch, tag membership in metadata, etc.). ``include_expired``\ndefaults to ``False`` so expired entries are filtered out on\nthe read side until G5.2 #374's daily cleanup task physically\nremoves them.\n\nBinds ``audit_op_id=\"memory.list\"`` + ``audit_op_class=\"read\"``\nbefore the service call so a handler exception still produces\nan audit row classified under the canonical op id.",
+        "operationId": "list_memories_api_v1_memory_get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope",
+              "nullable": true,
+              "title": "Scope"
+            }
+          },
+          {
+            "name": "slug_pattern",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Slug Pattern"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Tag"
+            }
+          },
+          {
+            "name": "include_expired",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Expired"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/{scope}/{slug}": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Recall",
+        "description": "Fetch one memory by natural key. 404 on not-found OR RBAC deny.\n\nThe 404-vs-403 collapse on read is the load-bearing info-leak\navoidance from the issue AC: a caller must not be able to\ndistinguish \"no such memory\" from \"you don't have access\" by the\nresponse shape. The service's\n:meth:`~meho_backplane.memory.service.MemoryService.recall` returns\n``None`` for both cases; the route translates that to 404 across\nthe board.\n\n``target_name`` is a query param (not a path segment) because\nonly ``user-target`` and ``target`` scopes need it; pushing it\ninto the path would force every recall URL to carry an empty\nplaceholder. A target-scoped recall without ``target_name``\nshort-circuits to ``None`` at the service layer (same return\nvalue as not-found), maintaining the info-leak avoidance.\n\nSlug length is bounded at the path-parameter parse stage so a\npathological slug substring in the URL can't pessimize the\nsubstrate's regex pass.\n\nBinds ``audit_op_id=\"memory.recall\"`` + ``audit_op_class=\"read\"``\n+ ``audit_scope`` + ``audit_slug`` before the service call.",
+        "operationId": "recall_api_v1_memory__scope___slug__get",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "target_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Target Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Forget",
+        "description": "Delete one memory by natural key. Idempotent (204 even when absent).\n\nMirrors :mod:`meho_backplane.api.v1.kb`'s idempotent-delete\ncontract: returns 204 whether the row existed or not. A non-\nidempotent surface that returned 404 on missing-on-delete would\nlet an operator probe for the presence of a slug they cannot\nread; the idempotent shape preserves the tenant boundary's\nconfidentiality properties (and the info-leak avoidance the\nrecall route holds).\n\nService-layer RBAC raises\n:class:`~meho_backplane.memory.rbac.PermissionDeniedError` on a\nmatrix mismatch (e.g. ``operator`` role trying to forget a\n``tenant``-scoped memory). The route maps that to 403; the\noperator *has* identified themselves and the matrix mismatch is\nhonest feedback (the alternative would be silent no-op, which\naudits worse than a loud 403). ``target_name`` missing for a\ntarget-scoped forget raises :class:`ValueError`, mapped to 422.\n\nBinds ``audit_op_id=\"memory.forget\"`` + ``audit_op_class=\n\"write\"`` + ``audit_scope`` + ``audit_slug`` **before** the\nservice call so an exception still produces a correctly-\nclassified audit row. ``audit_existed`` is bound *after* the\nservice returns -- on the exception path it stays unbound,\nwhich is the truthful signal (we don't know whether the row\nexisted because the call failed).\n\nSlug length is bounded at the path-parameter parse stage\n(mirrors the recall route) so a pathological slug substring in\nthe URL can't be bound onto audit/broadcast contextvars before\nthe service's regex pass would have rejected it. 404 (not 422)\npreserves the idempotent-delete contract: a probing caller\ncan't distinguish \"slug shape rejected at the edge\" from\n\"slug not found\".",
+        "operationId": "forget_api_v1_memory__scope___slug__delete",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "target_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Target Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/{scope}/{slug}/promote": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Promote",
+        "description": "Promote one memory to a strictly broader scope. Idempotent.\n\nG5.2-T4 (#626). Delegates ladder + authority checks to T3's\n:func:`~meho_backplane.memory.rbac.assert_can_promote`. The route\nis the HTTP error-mapping layer plus the audit contextvar\n(``audit_promotion_target_scope``) that distinguishes promote\nrows from regular ``memory.remember`` writes for G8 forensic\nqueries.\n\nStatus mapping: **200** new target row OR idempotent re-run\n(existing row); **400** :class:`InvalidPromotionStepError`;\n**403** :class:`PermissionDeniedError` with detail\n``insufficient_promotion_authority``; **404** source absent or\nnot visible (tenant-boundary info-leak avoidance); **409**\ntarget slug owned by a different ``promoted_from`` marker;\n**501** :class:`NotImplementedError` for the unshipped per-\ntarget ACL branch.\n\nBinds five audit contextvars before the service call so a mid-\nservice exception still produces a correctly-classified audit\nrow. The contextvar pattern mirrors G0.4-T5's ``audit_query_hash``\non ``/api/v1/retrieve``.",
+        "operationId": "promote_api_v1_memory__scope___slug__promote_post",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/MemoryScope"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromoteBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/query": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Query",
+        "description": "Run a tenant-scoped audit query with arbitrary filter combinations.\n\nBody fields mirror :class:`AuditQueryFilters` except ``since`` /\n``until`` are duration strings (``\"24h\"`` / ``\"7d\"`` / ISO-8601)\nparsed at the router layer. Client-supplied ``tenant_id`` (or any\nother unknown field) in the body is rejected at 422\n``extra_forbidden`` per :class:`AuditQueryRequest`'s\n``extra=\"forbid\"`` config; the route always passes\n``operator.tenant_id`` to the substrate.",
+        "operationId": "query_api_v1_audit_query_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuditQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditQueryResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/who-touched/{target}": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Who Touched",
+        "description": "Audit rows that touched *target* within the *since* window.\n\nPre-canned shortcut over :func:`query_audit` with the ``target``\nfilter bound to the path param. The substrate matches *target*\nagainst the ``targets`` table scoped to the operator's tenant; a\nnon-matching name returns an empty result, never an error.",
+        "operationId": "who_touched_api_v1_audit_who_touched__target__get",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "24h",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditQueryResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/my-recent": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "My Recent",
+        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.",
+        "operationId": "my_recent_api_v1_audit_my_recent_get",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "default": "24h",
+              "title": "Since"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditQueryResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/show/{audit_id}": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Show",
+        "description": "Fetch a single audit row by id, scoped to the operator's tenant.\n\nCross-tenant probe semantics: the substrate's first WHERE clause\nis always ``tenant_id = operator.tenant_id``, so a request for an\n``audit_id`` that exists but belongs to another tenant returns\nzero rows. The route then surfaces 404 \u2014 never 403 \u2014 so a probing\noperator cannot distinguish \"row doesn't exist\" from \"row belongs\nto another tenant\".",
+        "operationId": "show_api_v1_audit_show__audit_id__get",
+        "parameters": [
+          {
+            "name": "audit_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Audit Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/broadcast/overrides": {
+      "get": {
+        "tags": [
+          "broadcast"
+        ],
+        "summary": "List Overrides",
+        "description": "List override rules owned by the operator's tenant.",
+        "operationId": "list_overrides_api_v1_broadcast_overrides_get",
+        "parameters": [
+          {
+            "name": "op_id_pattern",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "nullable": true,
+              "description": "Exact-match filter on op_id_pattern (not a glob match).",
+              "title": "Op Id Pattern"
+            },
+            "description": "Exact-match filter on op_id_pattern (not a glob match)."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BroadcastOverrideRead"
+                  },
+                  "title": "Response List Overrides Api V1 Broadcast Overrides Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "broadcast"
+        ],
+        "summary": "Create Override",
+        "description": "Create an override rule; broadcasts as ``op_class=write``.",
+        "operationId": "create_override_api_v1_broadcast_overrides_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastOverrideCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastOverrideRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/broadcast/overrides/{override_id}": {
+      "delete": {
+        "tags": [
+          "broadcast"
+        ],
+        "summary": "Delete Override",
+        "description": "Delete an override rule owned by the operator's tenant.",
+        "operationId": "delete_override_api_v1_broadcast_overrides__override_id__delete",
+        "parameters": [
+          {
+            "name": "override_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Override Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/.well-known/oauth-protected-resource": {
       "get": {
         "tags": [
@@ -1444,6 +3582,378 @@
         }
       }
     },
+    "/ui/auth/login": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Login",
+        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.",
+        "operationId": "ui_auth_login_ui_auth_login_get",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Return To"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/auth/callback": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Callback",
+        "description": "Finish the OAuth round-trip, create the session, set the cookie.\n\n``code``, ``state``, ``error``, and ``error_description`` are all\ndeclared as typed FastAPI ``Query`` parameters so the OpenAPI\ndocument reflects the real callback-URL contract. They are\noptional because the IdP only ever populates one of the\n``code``/``state`` pair or the ``error``/``error_description``\npair; absent values in the wrong combination collapse to a 400\nvia :func:`_exchange_or_translate`. The full callback URL (which\nauthlib re-parses for token exchange) still comes from\n``request`` -- typed extraction is for OpenAPI fidelity, not a\nbehaviour change.",
+        "operationId": "ui_auth_callback_ui_auth_callback_get",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Code"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "State"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Error"
+            }
+          },
+          {
+            "name": "error_description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Error Description"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/auth/logout": {
+      "get": {
+        "tags": [
+          "ui-auth"
+        ],
+        "summary": "Ui Auth Logout",
+        "description": "Revoke the session row, clear the cookie, 302 to the end-session URL.",
+        "operationId": "ui_auth_logout_ui_auth_logout_get",
+        "responses": {
+          "302": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/ui/": {
+      "get": {
+        "tags": [
+          "ui"
+        ],
+        "summary": "Ui Dashboard",
+        "description": "Render ``GET /ui/`` for the authenticated operator.\n\nPer acceptance criterion 1 on #866: returns 200 with\n``<title>MEHO Operator Console`` plus the 3x2 grid + sidebar\nlinks to all five surfaces (the sidebar is inherited from\n``base.html``).\n\nThe handler also mints + sets the CSRF cookie so any subsequent\nHTMX ``hx-post`` / ``hx-delete`` from this page passes the\ndouble-submit check.",
+        "operationId": "ui_dashboard_ui__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Ui Topology Table",
+        "description": "``GET /ui/topology[?view=table&sort=...&direction=...&kind=...&q=...]``.\n\n``view`` is accepted but unused in T1 (the only mode is the\ntable); T2 (#881) will branch on ``view`` to render the\nCytoscape graph instead. Documenting the param in the\nsignature now keeps the URL contract forward-compatible.",
+        "operationId": "ui_topology_table_ui_topology_get",
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_SortColumn",
+              "default": "name"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/_SortDirection",
+              "default": "asc"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Kind"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 16,
+              "nullable": true,
+              "title": "View"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/topology/node/{node_id}": {
+      "get": {
+        "tags": [
+          "ui-topology"
+        ],
+        "summary": "Ui Topology Node Detail",
+        "description": "``GET /ui/topology/node/{node_id}``.\n\nResolves the node tenant-scoped, then pulls the incoming +\noutgoing edges via :func:`list_edges` and the recent\noperations directly from ``audit_log``. Renders the\n``topology/_drawer.html`` fragment with the full context.",
+        "operationId": "ui_topology_node_detail_ui_topology_node__node_id__get",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Node id does not exist in this tenant (or exists only for another tenant). Returns the not-found drawer fragment.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/broadcast": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Broadcast",
+        "operationId": "ui_stub_broadcast_ui_broadcast_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/knowledge": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Knowledge",
+        "operationId": "ui_stub_knowledge_ui_knowledge_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/connectors": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Connectors",
+        "operationId": "ui_stub_connectors_ui_connectors_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/memory": {
+      "get": {
+        "tags": [
+          "ui-stubs"
+        ],
+        "summary": "Ui Stub Memory",
+        "operationId": "ui_stub_memory_ui_memory_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Root",
@@ -1487,6 +3997,233 @@
   },
   "components": {
     "schemas": {
+      "AuditEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Name"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "status_code": {
+            "type": "integer",
+            "title": "Status Code"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          },
+          "duration_ms": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "nullable": true,
+            "title": "Duration Ms"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "title": "Result Status"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "broadcast_event_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Broadcast Event Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "tenant_id",
+          "principal_sub",
+          "principal_name",
+          "target_id",
+          "target_name",
+          "method",
+          "path",
+          "status_code",
+          "request_id",
+          "duration_ms",
+          "payload",
+          "op_id",
+          "op_class",
+          "result_status",
+          "parent_audit_id",
+          "agent_session_id",
+          "broadcast_event_id"
+        ],
+        "title": "AuditEntry",
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``principal_name`` / ``parent_audit_id`` / ``agent_session_id`` /\n  ``broadcast_event_id`` \u2014 v0.2 placeholders, always None"
+      },
+      "AuditQueryRequest": {
+        "properties": {
+          "target": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target"
+          },
+          "principal": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Principal"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "maxLength": 16,
+            "nullable": true,
+            "title": "Result Status"
+          },
+          "since": {
+            "type": "string",
+            "maxLength": 32,
+            "nullable": true,
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "maxLength": 32,
+            "nullable": true,
+            "title": "Until"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "limit": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "default": 100
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 512,
+            "nullable": true,
+            "title": "Cursor"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AuditQueryRequest",
+        "description": "POST body for ``/api/v1/audit/query``.\n\nMirrors :class:`~meho_backplane.audit_query.AuditQueryFilters`\nexcept ``since`` / ``until`` are strings parsed by\n:func:`~meho_backplane.audit_query.parse_duration` at the router\nlayer. All other fields pass through to the substrate filter\nobject unchanged. The empty body shape ``{}`` is the no-filter\ncase \u2014 every field defaults to None or the substrate-side default.\n\n``extra=\"forbid\"`` rejects unknown fields with 422\n``extra_forbidden`` so a typo or a client passing ``tenant_id``\nin the body fails loud at the framework boundary \u2014 the route\nalways uses ``operator.tenant_id`` from the JWT, never the body."
+      },
+      "AuditQueryResult": {
+        "properties": {
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rows",
+          "next_cursor"
+        ],
+        "title": "AuditQueryResult",
+        "description": "Page of audit rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows were\navailable (the query reached the end of the matching set). Consumers\niterate by re-issuing the same filter with ``cursor = next_cursor``\nuntil ``next_cursor`` is None."
+      },
       "AuthConfigResponse": {
         "properties": {
           "keycloak_issuer": {
@@ -1521,6 +4258,145 @@
         "title": "AuthModel",
         "description": "Per-target identity model per v0.1-spec L447-454."
       },
+      "BaselineMetricsOverride": {
+        "properties": {
+          "precision_at_5": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Precision At 5"
+          },
+          "mrr": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Mrr"
+          },
+          "coverage": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Coverage"
+          },
+          "kind": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Kind",
+            "default": "grep"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "precision_at_5",
+          "mrr",
+          "coverage"
+        ],
+        "title": "BaselineMetricsOverride",
+        "description": "Per-surface baseline metrics supplied by the caller.\n\nCriterion 4 (MEHO \u2265 baseline) needs side-by-side numbers from a\nbaseline retrieval (``grep -r kb/`` for kb; ``grep paths.txt +\nyq`` for operations). The v0.2 backplane has no checked-in\ncorpus snapshot to evaluate the baseline against (see\n:mod:`meho_backplane.api.v1.retrieve_eval` \u2014 explicit\n``baseline=grep`` on that route is rejected with 501); the CLI\nruns the baseline locally against the operator's kb/ checkout and\ncan pass the resulting numbers here so the retire-checklist\nverdict honestly reflects criterion 4 instead of always reporting\nyellow (\"baseline did not run\") on the API path.\n\nWithout an override, criterion 4 stays yellow for v0.2 production\ncallers \u2014 the documented \"READY TO RETIRE\" path is unreachable\nvia the bare API alone, which is the honest v0.2 posture. T7\n(#446) / v0.2.next is expected to wire a server-side corpus\nsnapshot and remove the need for this override."
+      },
+      "BroadcastOverrideCreate": {
+        "properties": {
+          "op_id_pattern": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Op Id Pattern"
+          },
+          "scope_field": {
+            "type": "string",
+            "enum": [
+              "namespace",
+              "target_name"
+            ],
+            "nullable": true,
+            "title": "Scope Field"
+          },
+          "scope_value": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Scope Value"
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "full",
+              "aggregate"
+            ],
+            "title": "Detail"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op_id_pattern",
+          "detail"
+        ],
+        "title": "BroadcastOverrideCreate",
+        "description": "Incoming POST body. Pydantic v2 strict.\n\n``extra=\"forbid\"`` rejects unknown fields with 422 -- catches a\nclient typo (``\"scope-field\": \"namespace\"`` with the wrong kebab\ncase) before it silently lands as a no-op.\n\n``model_validator(mode=\"after\")`` enforces the scope-pair\nconsistency invariant: ``scope_field`` and ``scope_value`` must\nboth be NULL (op-wide rule) or both be set (scoped rule). A half-\nset pair is a client bug.\n\n``op_id_pattern`` is validated against the regex-character\nblacklist by a second model_validator."
+      },
+      "BroadcastOverrideRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "op_id_pattern": {
+            "type": "string",
+            "title": "Op Id Pattern"
+          },
+          "scope_field": {
+            "type": "string",
+            "nullable": true,
+            "title": "Scope Field"
+          },
+          "scope_value": {
+            "type": "string",
+            "nullable": true,
+            "title": "Scope Value"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "op_id_pattern",
+          "scope_field",
+          "scope_value",
+          "detail",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "BroadcastOverrideRead",
+        "description": "Outgoing row representation.\n\n``model_config = ConfigDict(from_attributes=True)`` lets the\nhandler return the SQLAlchemy ORM object directly; FastAPI\nserialises via this model rather than the ORM's ``__dict__``."
+      },
       "CallOperationBody": {
         "properties": {
           "connector_id": {
@@ -1545,13 +4421,71 @@
             "title": "Params"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "connector_id",
           "op_id"
         ],
         "title": "CallOperationBody",
-        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution)."
+        "description": "Request body for the ``POST /api/v1/operations/call`` route.\n\nMirrors the :func:`call_operation` ``arguments`` shape so the route\nand the MCP handler share validation. ``target`` is a partial\ndescriptor (``{\"name\": \"rdc-vcenter\"}``) the handler resolves via\n:func:`~meho_backplane.targets.resolver.resolve_target`; ``None``\nmeans the operation does not need a target (typed handlers that\ndon't read it; composite handlers that do their own resolution).\n\nRecognised keys on the ``target`` dict:\n\n* ``name`` (required when ``target`` is supplied) -- the slug or\n  alias the resolver looks up in the targets registry.\n* ``fqdn`` (optional) -- per-call override for the resolved\n  target's ``fqdn`` column. Honoured by connectors that read\n  ``target.fqdn`` for vhost routing (G3.6 VCF Automation:\n  the appliance enforces strict ``Host:`` matching and returns\n  404 with empty body when reached by IP without the correct\n  vhost set). The override mutates the resolved Target in\n  memory only; the database row is not modified. Any other key\n  in the dict is silently ignored, mirroring the documented\n  forward-compatibility posture in the MCP tool schema.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` -- a v0.2.1 client still sending ``target:\nstr`` (the pre-rename single-name shape) or a typo in\n``connector_id`` now fails loud at the framework boundary instead\nof silently dispatching with the defaults. ``params`` itself is a\nfree-form ``dict`` because per-op parameter shape is enforced by\nthe descriptor's ``parameter_schema`` further down the dispatch\npath; only the meta-tool body's own fields are constrained here."
+      },
+      "CandidateHint": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Port"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evidence"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "title": "Confidence"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "host",
+          "evidence",
+          "confidence"
+        ],
+        "title": "CandidateHint",
+        "description": "One candidate target a connector's :meth:`Connector.list_candidates` returns.\n\nCandidates are potentially-reachable targets the connector inferred\nfrom an existing seed (e.g. a vCenter exposing its managed ESXi\nhosts; a kubeconfig listing peer cluster contexts). The\nG9.1-T6 ``meho targets discover`` CLI verb surfaces these to the\noperator; auto-registration is intentionally out of scope per\nInitiative #363 (operator runs ``meho targets create`` after review).\n\n``evidence`` is the debugging payload \u2014 whatever made the connector\nthink this candidate exists (e.g. ``{\"source\": \"kubeconfig\",\n\"context_name\": \"cluster-2\"}``); ``confidence`` is the connector's\nself-assessment of probe-vs-curation reliability."
+      },
+      "CatalogListResponse": {
+        "properties": {
+          "catalog": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorSpecEntry"
+            },
+            "type": "array",
+            "title": "Catalog"
+          }
+        },
+        "type": "object",
+        "required": [
+          "catalog"
+        ],
+        "title": "CatalogListResponse",
+        "description": "Wire envelope for ``GET /api/v1/connectors/catalog``.\n\nWrapped in ``catalog`` (not a bare list) so future paging fields can\nland non-breakingly, mirroring the ``GET /`` list shape. Used as the\nroute's ``response_model`` so the OpenAPI contract explicitly types\nthe envelope + entry fields (rather than a free-form object map)."
       },
       "ConnectorReviewGroup": {
         "properties": {
@@ -1699,6 +4633,120 @@
         "title": "ConnectorReviewPayload",
         "description": "Top-level review payload returned by :meth:`ReviewService.get_review_payload`.\n\n``connector_id`` is the operator-facing string the request\ntargeted (echoed back verbatim for round-trip clarity).\n``product`` / ``version`` / ``impl_id`` are the parsed triple\nderived via\n:func:`~meho_backplane.operations.ingest.parser.parse_connector_id`;\nthe CLI / API layers surface them in operator output so the\nconvention is self-documenting. ``tenant_id`` is the scope the\npayload was queried under (``None`` for built-in)."
       },
+      "ConnectorSpecEntry": {
+        "properties": {
+          "product": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Version"
+          },
+          "impl_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Impl Id"
+          },
+          "requires_connector_class": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Requires Connector Class"
+          },
+          "upstream": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "nullable": true,
+            "title": "Upstream"
+          },
+          "spec_info_version": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Spec Info Version"
+          },
+          "sha256": {
+            "type": "string",
+            "maxLength": 64,
+            "nullable": true,
+            "title": "Sha256"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 2048,
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "product",
+          "version",
+          "impl_id",
+          "requires_connector_class"
+        ],
+        "title": "ConnectorSpecEntry",
+        "description": "One curated ``(product, version)`` -> spec-source mapping.\n\n``upstream is None`` marks a typed connector with no ingestable spec;\nthe CLI's ``ingest --catalog`` path (#915) refuses such an entry rather\nthan POSTing an empty ``specs`` list."
+      },
+      "CriterionResult": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "daily_use_duration",
+              "operator_breadth",
+              "eval_precision",
+              "meho_vs_baseline",
+              "open_blockers"
+            ],
+            "title": "Name"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "green",
+              "yellow",
+              "red"
+            ],
+            "title": "Verdict"
+          },
+          "observed_value": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Observed Value"
+          },
+          "threshold_summary": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Threshold Summary"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Notes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "verdict",
+          "observed_value",
+          "threshold_summary"
+        ],
+        "title": "CriterionResult",
+        "description": "One row of the per-surface checklist.\n\nFrozen + ``extra=\"forbid\"`` so the structured output is stable for\nthe CLI table renderer and any future dashboard consumer. The\n``observed_value`` + ``threshold_summary`` pair is what the\nhuman-readable table prints verbatim \u2014 keep both short (\u2264 32\nchars each) so the table stays scannable in an 80-column terminal."
+      },
       "DailyUsageBucket": {
         "properties": {
           "date": {
@@ -1771,9 +4819,10 @@
             "title": "Name"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "EditGroupBody",
-        "description": "PATCH body for ``/api/v1/connectors/{id}/groups/{key}``.\n\nBoth fields optional but at least one must be set; the route\nlayer translates \"neither set\" into a 400. ``when_to_use`` is\nthe load-bearing operator-authored prose the LLM proposed at\ngrouping time; ``name`` is the Title Case display name.\n\nPydantic-side ``max_length`` caps line up with the underlying\n:class:`OperationGroup.when_to_use` /\n:class:`OperationGroup.name` columns. Empty strings are\nrejected \u2014 operators that want to \"clear\" the field should\nre-run grouping rather than blank it."
+        "description": "PATCH body for ``/api/v1/connectors/{id}/groups/{key}``.\n\nBoth fields optional but at least one must be set; the route\nlayer translates \"neither set\" into a 400. ``when_to_use`` is\nthe load-bearing operator-authored prose the LLM proposed at\ngrouping time; ``name`` is the Title Case display name.\n\nPydantic-side ``max_length`` caps line up with the underlying\n:class:`OperationGroup.when_to_use` /\n:class:`OperationGroup.name` columns. Empty strings are\nrejected \u2014 operators that want to \"clear\" the field should\nre-run grouping rather than blank it.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) means an unknown field \u2014\ne.g. a client mis-spelling ``when_to_use`` as ``whentouse`` \u2014\nfails 422 instead of being silently dropped (which would\nsurface as a confusing 400 \"at least one field must be set\"\nfrom the route layer)."
       },
       "EditOpBody": {
         "properties": {
@@ -1805,9 +4854,10 @@
             "title": "Is Enabled"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "EditOpBody",
-        "description": "PATCH body for ``/api/v1/connectors/{id}/operations/{op_id}``.\n\nPer-op operator overrides. At least one field must be set.\n\n``safety_level`` is the bounded enum from\n:class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`\n(``safe`` / ``caution`` / ``dangerous``); a value outside the set\nis rejected by Pydantic before the service layer sees it.\n\n``is_enabled`` is the per-op override that wins over the group\ncascade (see :meth:`ReviewService.edit_op` for the full\nsemantics). ``requires_approval`` flips the per-op flag that\nforces the dispatcher to write an audit row in\n``status='pending'`` and wait for an operator decision before\nexecuting.\n\n``custom_description`` is the operator's free-form override\nthat the agent surfaces in place of the upstream spec's\n``description`` field; capped at 4096 chars to keep audit-log\npayloads bounded."
+        "description": "PATCH body for ``/api/v1/connectors/{id}/operations/{op_id}``.\n\nPer-op operator overrides. At least one field must be set.\n\n``safety_level`` is the bounded enum from\n:class:`~meho_backplane.db.models.EndpointDescriptor.safety_level`\n(``safe`` / ``caution`` / ``dangerous``); a value outside the set\nis rejected by Pydantic before the service layer sees it.\n\n``is_enabled`` is the per-op override that wins over the group\ncascade (see :meth:`ReviewService.edit_op` for the full\nsemantics). ``requires_approval`` flips the per-op flag that\nforces the dispatcher to write an audit row in\n``status='pending'`` and wait for an operator decision before\nexecuting.\n\n``custom_description`` is the operator's free-form override\nthat the agent surfaces in place of the upstream spec's\n``description`` field; capped at 4096 chars to keep audit-log\npayloads bounded.\n\n``extra=\"forbid\"`` (G0.9-T2 / #729) rejects unknown fields with\n422 ``extra_forbidden`` \u2014 same fail-loud posture as every other\npublic v1 request schema."
       },
       "EvalRequest": {
         "properties": {
@@ -1925,6 +4975,23 @@
         "title": "FingerprintResult",
         "description": "Connector fingerprint per consumer-needs L95."
       },
+      "GraphEdgeKind": {
+        "type": "string",
+        "enum": [
+          "runs-on",
+          "mounts",
+          "routes-through",
+          "belongs-to",
+          "authenticates-via",
+          "depends-on",
+          "replicates-to",
+          "backed-up-by",
+          "routes-via",
+          "policy-binds"
+        ],
+        "title": "GraphEdgeKind",
+        "description": "Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.\n\nInitiative #364 (G9.2) locks the edge-kind vocabulary at ten members:\nthe four auto-discoverable kinds G9.1 (#363) shipped, plus six\noperator-curated cross-system kinds that auto-discovery cannot infer\n(decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary\nis closed -- widening it is a coordinated DB + model change (new\nmigration, new enum member, new decision row) so the v0.2.next\npolicy-engine grammar parsing ``kind`` stays portable across tenants.\n\nThe four auto-discoverable kinds (refresh service writes these on\nevery probe-derived edge):\n\n* :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``\n  ``node``: the physical / scheduling host of a workload.\n* :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``\n  ``volume``: storage attachment.\n* :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,\n  ``service`` ``routes-through`` ``pod``: network routing path.\n* :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``\n  ``belongs-to`` ``host`` (logical group membership).\n\nThe six curated-only kinds (operator-asserted via\n``meho topology annotate``; cannot be derived from probes):\n\n* :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node\n  (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical\n  cross-system example.\n* :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.\n  ``service-X`` -> ``database-Y`` where neither side knows about the\n  other in its own probe output).\n* :attr:`REPLICATES_TO` -- operator-asserted replication relationship\n  between two storage / database nodes.\n* :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.\n* :attr:`ROUTES_VIA` -- operator-asserted network path through an\n  intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the\n  probes only see point-to-point reachability).\n* :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses\n  connector boundaries (e.g., ``kubernetes-namespace-prod`` ->\n  ``vault-policy-prod-read``).\n\nMirrors the closed-enum pattern :class:`AuthModel`\n(:mod:`meho_backplane.connectors.schemas`) sets: a Python\n:class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,\nboth moved in lock-step by one Alembic migration so the enum and the\nconstraint cannot drift."
+      },
       "GroupingResultModel": {
         "properties": {
           "connector_id": {
@@ -1998,6 +5065,29 @@
         "title": "HealthResponse",
         "description": "``GET /api/v1/health`` response body."
       },
+      "IngestKbRequest": {
+        "properties": {
+          "directory": {
+            "type": "string",
+            "nullable": true,
+            "title": "Directory"
+          },
+          "tarball_url": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tarball Url"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "IngestKbRequest",
+        "description": "POST body for ``/api/v1/kb/ingest`` -- server-side bulk ingest.\n\nExactly one of ``directory`` / ``tarball_url`` must be set; the\nconstraint is validated by a model-level\n:func:`~pydantic.model_validator`. ``dry_run`` short-circuits the\nwrite path (matches :meth:`KbService.ingest_directory`'s contract).\n\n``tarball_url`` is accepted by the schema for forward-compat with\nthe task body's stated contract but :class:`KbService` (T1)\nonly exposes ``ingest_directory``; a request with ``tarball_url``\nset returns **501 Not Implemented** from the route handler."
+      },
       "IngestRequest": {
         "properties": {
           "product": {
@@ -2039,6 +5129,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "product",
@@ -2047,7 +5138,7 @@
           "specs"
         ],
         "title": "IngestRequest",
-        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL)."
+        "description": "POST body for ``/api/v1/connectors/ingest``.\n\nDrives a full pipeline run: parse every spec in *specs*, call\n:func:`register_ingested_operations` once per spec under the same\n``(product, version, impl_id)`` connector triple, then run\n:func:`run_llm_grouping` once for the whole connector. Multi-spec\ningestion (vCenter's ``vcenter.yaml`` + ``vi-json.yaml``) lands as\nmultiple ``SpecSource`` entries in one request.\n\n``dry_run=True`` skips both the DB writes and the grouping pass:\nonly :func:`parse_openapi` runs, and the response carries\n:class:`IngestionResultModel` counts derived from the parse output\nplus ``grouping=None``. Operators use the dry-run path to validate\na spec before committing.\n\n``base_url`` is the optional default base URL for the auto-\nregistered :class:`GenericRestConnector` shim; ``None`` leaves\nthe shim unconfigured (the connector's eventual hand-coded\nsubclass at G3.x will set its own base URL).\n\n``extra=\"forbid\"`` rejects unknown body fields with 422\n``extra_forbidden`` (G0.9-T2 / #729) \u2014 silent-drop on a typo\nwould otherwise mean the pipeline runs with the wrong impl_id\nand the operator only finds out at review-time."
       },
       "IngestResponse": {
         "properties": {
@@ -2104,6 +5195,278 @@
         ],
         "title": "IngestionResultModel",
         "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.\n\nThe dataclass lives in :mod:`register_ingested` so the helper\ncan stay framework-agnostic; this model is the wire-format twin\nthe routes return. Fields mirror the dataclass one-for-one with\nan extra ``connector_id`` echo for round-trip clarity."
+      },
+      "KbEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "slug",
+          "body",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "KbEntry",
+        "description": "One kb entry -- mirrors a row in the ``documents`` table.\n\nReturned by :meth:`KbService.get_entry`, :meth:`KbService.create_entry`,\nand (in list form) :meth:`KbService.list_entries`. ``slug`` is the\noperator-facing identifier (``documents.source_id`` on the SQL\nside); the underlying ``Document.id`` UUID is also surfaced for\ncross-correlation with audit-log rows and future MCP resource\nURIs."
+      },
+      "KbEntryCreate": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Slug",
+            "description": "Operator-facing identifier in kebab-case. Must start with a lowercase letter, end with a lowercase letter or digit, and contain only lowercase letters, digits, hyphens, or dots. The leading-letter rule (G0.9.1-T8, Signal #15) is the most common surprise: '657-recovery' is rejected; rewrite as 'ticket-657-recovery'.",
+            "examples": [
+              "vcenter-9.0-snapshot-revert"
+            ]
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Body"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "slug",
+          "body"
+        ],
+        "title": "KbEntryCreate",
+        "description": "POST body for ``/api/v1/kb`` -- create / re-index one entry.\n\n``slug`` is validated by :func:`validate_slug` inside the route\nhandler (the substrate's contract) rather than as a pydantic\nconstraint here -- the regex lives on the substrate side so the\nerror message is identical across REST / MCP / CLI consumers.\n``frozen=True`` mirrors the rest of the kb / retrieve schemas\n(a handler accidentally mutating a parsed request body surfaces\nas a pydantic error instead of a confused-deputy bug).\n``extra=\"forbid\"`` rejects unknown fields at 422 so a typo\n(\"body_text\") doesn't silently become a no-op."
+      },
+      "KbEntryPreview": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "preview": {
+            "type": "string",
+            "title": "Preview"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "slug",
+          "preview",
+          "metadata",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "KbEntryPreview",
+        "description": "Lightweight projection of :class:`KbEntry` for list responses.\n\nDrops the full body and emits a 200-char preview instead --\nconsumers that need the full body issue a follow-up ``GET\n/{slug}``. Mirrors the kb-search-hit snippet shape (T1's\n:class:`KbEntrySearchHit`) so an operator can do\n``list \u2192 identify slug \u2192 fetch full body`` without learning a\ndifferent field name on each surface."
+      },
+      "KbIngestionResult": {
+        "properties": {
+          "inserted_count": {
+            "type": "integer",
+            "title": "Inserted Count"
+          },
+          "updated_count": {
+            "type": "integer",
+            "title": "Updated Count"
+          },
+          "skipped_count": {
+            "type": "integer",
+            "title": "Skipped Count"
+          },
+          "error_count": {
+            "type": "integer",
+            "title": "Error Count"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "inserted_count",
+          "updated_count",
+          "skipped_count",
+          "error_count",
+          "errors"
+        ],
+        "title": "KbIngestionResult",
+        "description": "Summary of one :meth:`KbService.ingest_directory` run.\n\nThe four counters partition every discovered ``.md`` file into\nexactly one of four buckets:\n\n* ``inserted_count`` -- file's slug had no prior row in the tenant;\n  a new document row was created and embedded.\n* ``updated_count`` -- file's slug had a prior row whose\n  ``body_hash`` differed from the current body; the row was\n  re-embedded and updated.\n* ``skipped_count`` -- file's slug had a prior row whose\n  ``body_hash`` matched (dominant case on the second run against\n  an unchanged corpus -- the body-hash short-circuit from\n  G0.4-T3 means no embedding compute happened).\n* ``error_count`` -- the file could not be read or parsed\n  (binary masquerading as ``.md``, invalid slug, malformed\n  front-matter). The matching error message is appended to\n  :attr:`errors`; the ingestion run continues with the remaining\n  files.\n\nSum invariant: ``inserted_count + updated_count + skipped_count\n+ error_count == <total discovered .md files>``.\n\nThe ``errors`` list is bounded in practice by the corpus size --\nno per-file error string exceeds ~200 chars (the file path plus a\nshort reason), so even a worst-case all-error run on a 1000-file\ncorpus stays under ~200 KB of allocated memory. Truncation /\nsampling can land in v0.2.next if real corpora drive that."
+      },
+      "KbListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/KbEntryPreview"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "KbListResponse",
+        "description": "Response envelope for ``GET /api/v1/kb``.\n\nWrapped in ``{\"entries\": [...]}`` so a future paging / cursor\nfield can land non-breakingly -- same shape\n:mod:`meho_backplane.api.v1.connectors_ingest` adopted for its\nlist response. Per-entry shape matches :class:`KbEntryPreview`;\nthe body is truncated to a 200-char preview so a casual\n``meho kb list`` does not stream every entry's full body."
+      },
+      "MemoryEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "user_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "User Sub"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "scope",
+          "slug",
+          "body",
+          "metadata",
+          "expires_at",
+          "user_sub",
+          "target_name",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "MemoryEntry",
+        "description": "Read shape -- one memory row as the service returns it.\n\nFrozen so callers can stash the entry in audit / log records\nwithout mutation surprises. ``expires_at`` is lifted out of\n``doc_metadata`` for filter convenience -- the read-side filter in\n:meth:`~meho_backplane.memory.service.MemoryService.list_memories`\nand :meth:`~meho_backplane.memory.service.MemoryService.recall`\ncompares it without re-parsing the dict. The raw ``metadata`` is\nstill carried so callers (audit middleware, MCP resource handlers)\nsee the original payload."
+      },
+      "MemoryListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "MemoryListResponse",
+        "description": "Response envelope for ``GET /api/v1/memory``.\n\nWrapped in ``{\"entries\": [...]}`` so a future cursor field can\nland non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`\nadopted for its list response. Per-entry shape is the full\n:class:`MemoryEntry` (no preview truncation); memory bodies are\nexpected to be short hand-written notes rather than the multi-KB\nblobs the kb surface carries, so streaming the full body is the\nright default. A future preview / pagination contract lives in\nG5.2 #374's promote / expire verbs."
+      },
+      "MemoryScope": {
+        "type": "string",
+        "enum": [
+          "user",
+          "user-tenant",
+          "user-target",
+          "tenant",
+          "target"
+        ],
+        "title": "MemoryScope",
+        "description": "One of the five memory scopes from consumer-needs.md \u00a7G5 L137-141.\n\nThe string value is the wire-level identifier (route path segment,\nCLI flag value, MCP tool arg). Each value maps to a single\n``documents.kind`` row prefixed with ``memory-`` --\n:func:`kind_for_scope` is the canonical translation. The mapping is\none-to-one and bijective with :func:`scope_for_kind`, so callers\nnever round-trip through ad-hoc string-prefixing.\n\n``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``\nsemantics for free: ``f\"scope={MemoryScope.USER}\"`` renders as\n``\"scope=user\"`` rather than ``\"scope=MemoryScope.USER\"``, matching\nthe :class:`~meho_backplane.auth.operator.TenantRole` convention."
       },
       "OperationDescriptor": {
         "properties": {
@@ -2276,6 +5639,31 @@
         "title": "OperatorIdentity",
         "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
       },
+      "PromoteBody": {
+        "properties": {
+          "to": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "move": {
+            "type": "boolean",
+            "title": "Move",
+            "default": false
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "to"
+        ],
+        "title": "PromoteBody",
+        "description": "POST body for ``/api/v1/memory/{scope}/{slug}/promote``.\n\nG5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a\ntarget-scope name for the ``user -> user-target`` / ``user-target ->\ntarget`` ladder steps; ``frozen=True`` + ``extra=\"forbid\"`` mirror\n:class:`RememberBody`.\n\n* ``to`` -- the target scope. The route delegates ladder validation\n  to :func:`~meho_backplane.memory.rbac.assert_can_promote`, which\n  raises :class:`InvalidPromotionStepError` on non-ladder pairs (the\n  route maps that to 400).\n* ``move`` -- when ``True``, delete the source row in the same\n  transaction as the target insert (broadens-and-leaves vs.\n  broadens-and-rewires). Default ``False`` per the issue body.\n* ``target_name`` -- required when ``to`` is target-flavoured AND\n  the source scope is not (``user -> user-target``). For\n  ``user-target -> target`` the service inherits ``target_name``\n  from the source row, so the caller may omit it; we still accept\n  it for forward-compat with the CLI verb (T5 #627). Omitted\n  values land as ``None``."
+      },
       "QueryResult": {
         "properties": {
           "query": {
@@ -2344,6 +5732,215 @@
         "title": "QueryResult",
         "description": "Per-query eval row \u2014 what the runner produces for each corpus entry.\n\n``meho_hits`` is the surface-formatted top-``k`` slug list from\nMEHO retrieval; ``baseline_hits`` mirrors it for the baseline\nwhen configured. The per-query metrics (precision_at_5 / mrr /\ncoverage) are computed against ``meho_hits`` + the corpus's\nexpected ground truth; ``baseline_*`` mirrors are populated when\nthe baseline ran. Frozen so the runner can't accidentally mutate\na row while folding the surface aggregate."
       },
+      "RefreshResult": {
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Target Id"
+          },
+          "added_nodes": {
+            "type": "integer",
+            "title": "Added Nodes"
+          },
+          "added_edges": {
+            "type": "integer",
+            "title": "Added Edges"
+          },
+          "updated_nodes": {
+            "type": "integer",
+            "title": "Updated Nodes"
+          },
+          "updated_edges": {
+            "type": "integer",
+            "title": "Updated Edges"
+          },
+          "removed_nodes": {
+            "type": "integer",
+            "title": "Removed Nodes"
+          },
+          "removed_edges": {
+            "type": "integer",
+            "title": "Removed Edges"
+          },
+          "duration_ms": {
+            "type": "number",
+            "title": "Duration Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_id",
+          "added_nodes",
+          "added_edges",
+          "updated_nodes",
+          "updated_edges",
+          "removed_nodes",
+          "removed_edges",
+          "duration_ms"
+        ],
+        "title": "RefreshResult",
+        "description": "Per-target reconcile outcome returned by :func:`refresh_target_topology`.\n\nCounts are disjoint per object class: a node is counted in exactly\none of added / updated / removed (or none, when unchanged). The same\nholds for edges. ``duration_ms`` is wall-clock for the whole\nresolve + discover + reconcile + commit cycle."
+      },
+      "RememberBody": {
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScope"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Body"
+          },
+          "slug": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+            "nullable": true,
+            "title": "Slug"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Metadata"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Expires At"
+          },
+          "target_name": {
+            "type": "string",
+            "maxLength": 256,
+            "nullable": true,
+            "title": "Target Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "scope",
+          "body"
+        ],
+        "title": "RememberBody",
+        "description": "POST body for ``/api/v1/memory`` -- create one memory.\n\n``slug`` is constrained to :data:`SLUG_PATTERN` at the model\nboundary; the service-layer\n:func:`~meho_backplane.memory.schemas.validate_slug` is the\nparallel gate for non-Pydantic callers. ``frozen=True`` matches\nthe rest of the memory + kb schemas (a handler accidentally\nmutating a parsed request body surfaces as a pydantic error\ninstead of a confused-deputy bug). ``extra=\"forbid\"`` rejects\nunknown fields at 422 so a typo (``\"bodytext\"``) doesn't\nsilently become a no-op.\n\n``target_name`` is required when ``scope`` is ``user-target`` or\n``target``; the service-level\n:meth:`MemoryService._require_target_name` raises ``ValueError``\nwhen missing, which this route maps to 422 (parity with\npydantic's own missing-field shape)."
+      },
+      "RetireChecklistReport": {
+        "properties": {
+          "ran_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ran At"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Since"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Until"
+          },
+          "surfaces": {
+            "items": {
+              "$ref": "#/components/schemas/SurfaceChecklist"
+            },
+            "type": "array",
+            "title": "Surfaces"
+          },
+          "overall_verdict": {
+            "type": "string",
+            "enum": [
+              "READY TO RETIRE",
+              "REVIEW MANUALLY",
+              "NOT YET"
+            ],
+            "title": "Overall Verdict"
+          },
+          "counted_surfaces": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Counted Surfaces"
+          },
+          "rest_excluded": {
+            "type": "boolean",
+            "title": "Rest Excluded",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "ran_at",
+          "tenant_id",
+          "since",
+          "until",
+          "surfaces",
+          "overall_verdict"
+        ],
+        "title": "RetireChecklistReport",
+        "description": "Top-level shape returned by :func:`compute_retire_checklist`.\n\nFrozen + ``extra=\"forbid\"`` so the CLI's ``--json`` consumers can\npin the shape; ``ran_at`` lets two saved reports be compared\nchronologically without external metadata."
+      },
+      "RetireChecklistRequest": {
+        "properties": {
+          "surface": {
+            "type": "string",
+            "enum": [
+              "kb",
+              "memory",
+              "operations",
+              "all"
+            ],
+            "title": "Surface",
+            "default": "all"
+          },
+          "blocker_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "enum": [
+                "kb",
+                "memory",
+                "operations"
+              ]
+            },
+            "type": "object",
+            "nullable": true,
+            "title": "Blocker Counts"
+          },
+          "baseline_overrides": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BaselineMetricsOverride"
+            },
+            "propertyNames": {
+              "enum": [
+                "kb",
+                "memory",
+                "operations"
+              ]
+            },
+            "type": "object",
+            "nullable": true,
+            "title": "Baseline Overrides"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RetireChecklistRequest",
+        "description": "POST body for ``/api/v1/retrieve/retire-checklist``.\n\nFrozen + ``extra=\"forbid\"`` so a typo (``surfaces`` instead of\n``surface``, or ``blocker_count`` instead of ``blocker_counts``)\nfails 422 at the framework boundary rather than silently running\nthe default and giving the caller a confusing report.\n\n``blocker_counts`` is the surface\u2192count mapping the CLI fills in\nfrom a local ``gh issue list`` lookup. ``None`` (the default) is\nvalid \u2014 the service reports criterion 5 as yellow (unknown). Every\nkey must be one of the three supported surfaces; the\n``dict[Literal, int]`` shape pins that at the Pydantic boundary.\n\n``baseline_overrides`` is the surface\u2192baseline-metrics mapping the\nCLI can fill in from a local ``meho retrieval eval --baseline grep``\nrun. Without it, criterion 4 stays yellow for v0.2 production\ncallers because the backplane has no server-side corpus snapshot."
+      },
       "RetrievalHit": {
         "properties": {
           "document_id": {
@@ -2376,6 +5973,16 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Doc Metadata"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
           },
           "fused_score": {
             "type": "number",
@@ -2411,6 +6018,8 @@
           "kind",
           "body",
           "doc_metadata",
+          "created_at",
+          "updated_at",
           "fused_score",
           "bm25_score",
           "cosine_score",
@@ -2418,7 +6027,7 @@
           "cosine_rank"
         ],
         "title": "RetrievalHit",
-        "description": "One document in a ranked retrieval response.\n\nFrozen pydantic v2 model: the retrieve helper builds these once\nand the API surface (T5) returns them unchanged. The per-signal\nscores + ranks are carried for observability -- callers tuning\nembedding model choice want to see whether the top hit had\ncontributions from both signals or just one.\n\n``fused_score`` is the RRF score the documents are sorted by;\n``bm25_score`` and ``cosine_score`` are the raw per-signal\nscores (None if the document didn't appear in that signal's\ntop-:data:`CANDIDATE_LIMIT`). Likewise ``bm25_rank`` /\n``cosine_rank`` are the 1-based ranks (1 = best) the document\nheld in each signal's list, None when absent."
+        "description": "One document in a ranked retrieval response.\n\nFrozen pydantic v2 model: the retrieve helper builds these once\nand the API surface (T5) returns them unchanged. The per-signal\nscores + ranks are carried for observability -- callers tuning\nembedding model choice want to see whether the top hit had\ncontributions from both signals or just one.\n\n``fused_score`` is the RRF score the documents are sorted by;\n``bm25_score`` and ``cosine_score`` are the raw per-signal\nscores (None if the document didn't appear in that signal's\ntop-:data:`CANDIDATE_LIMIT`). Likewise ``bm25_rank`` /\n``cosine_rank`` are the 1-based ranks (1 = best) the document\nheld in each signal's list, None when absent.\n\n``created_at`` / ``updated_at`` mirror the persisted\n:class:`~meho_backplane.db.models.Document` columns so downstream\nconsumers (memory ``search_memory``, kb search projections) can\nsurface real write-time / mtime values instead of substituting a\nplaceholder. The retriever already issues a full ``SELECT * FROM\ndocuments WHERE id IN (...)`` for each top-fused row, so carrying\nthe columns through is a free pass-through, not an extra query."
       },
       "RetrieveRequest": {
         "properties": {
@@ -2448,12 +6057,13 @@
             "default": 10
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "query"
         ],
         "title": "RetrieveRequest",
-        "description": "POST body for ``/api/v1/retrieve``.\n\nField validation is the load-bearing first gate: empty queries\nshort-circuit at the framework (422 Unprocessable Entity) so the\nembedding pipeline never sees a zero-token input, and oversized\nqueries are rejected before they hit the model. The\n``max_length=2000`` cap is a generous upper bound on realistic\nfree-form operator queries; operators with longer payloads\nshould use the embedding pipeline directly via G4 / G5 ingestion\npaths."
+        "description": "POST body for ``/api/v1/retrieve``.\n\nField validation is the load-bearing first gate: empty queries\nshort-circuit at the framework (422 Unprocessable Entity) so the\nembedding pipeline never sees a zero-token input, and oversized\nqueries are rejected before they hit the model. The\n``max_length=2000`` cap is a generous upper bound on realistic\nfree-form operator queries; operators with longer payloads\nshould use the embedding pipeline directly via G4 / G5 ingestion\npaths.\n\n``extra=\"forbid\"`` rejects unknown fields at 422 with\n``extra_forbidden`` detail so a v0.2.1 client still sending the\npre-rename ``q`` / ``top_k`` keys fails loud instead of silently\nrunning with the defaults (Signal #2 from the 2026-05-20 RDC\ndogfood). Same posture as every public v1 request schema."
       },
       "RetrieveResponse": {
         "properties": {
@@ -2477,6 +6087,25 @@
         "title": "RetrieveResponse",
         "description": "Successful response shape for ``/api/v1/retrieve``.\n\n``query_duration_ms`` is the wall-clock time from request entry\nto response build (covers both the embedding compute and the two\nSQL round-trips); operators tuning embedding-model choice or\ndebugging retrieval latency consume this value. Frozen so a\nhandler accidentally mutating it post-construction surfaces as a\npydantic error rather than a silently-modified response."
       },
+      "SkippedConnector": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "reason"
+        ],
+        "title": "SkippedConnector",
+        "description": "One connector that did not contribute candidates for a product.\n\n``name`` is the connector implementation key (the ``impl_id`` from\nthe v2 registry, or the class name for a v1-only registration).\n``reason`` is a short human string \u2014 ``\"no candidates\"`` when the\nconnector ran cleanly but inferred nothing, or the exception class\n+ message when ``list_candidates`` raised (one bad connector must\nnot fail the whole discover sweep)."
+      },
       "SpecSource": {
         "properties": {
           "uri": {
@@ -2486,12 +6115,51 @@
             "title": "Uri"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "uri"
         ],
         "title": "SpecSource",
-        "description": "One spec to ingest under a connector triple.\n\n``uri`` carries the operator's spec identifier. Three forms are\naccepted by the underlying :func:`parse_openapi` resolver:\n\n* Absolute local path \u2014 ``/abs/path/to/spec.yaml``.\n* HTTP(S) URL \u2014 ``https://api.example.com/openapi.yaml``.\n* ``docs:<connector-id>/<file>`` shorthand \u2014 resolves against the\n  consumer's checked-in docs/ directory; CLI / API layers expand\n  this before calling the parser.\n\nWrapped in its own model so future per-spec knobs (auth headers,\ndialect pinning, content-type override) can land without\nreshaping :class:`IngestRequest`."
+        "description": "One spec to ingest under a connector triple.\n\n``uri`` carries the operator's spec identifier. Three forms are\naccepted by the underlying :func:`parse_openapi` resolver:\n\n* Absolute local path \u2014 ``/abs/path/to/spec.yaml``.\n* HTTP(S) URL \u2014 ``https://api.example.com/openapi.yaml``.\n* ``docs:<connector-id>/<file>`` shorthand \u2014 resolves against the\n  consumer's checked-in docs/ directory; CLI / API layers expand\n  this before calling the parser.\n\nWrapped in its own model so future per-spec knobs (auth headers,\ndialect pinning, content-type override) can land without\nreshaping :class:`IngestRequest`. ``extra=\"forbid\"`` rejects\nunknown fields (per the request-schema-strictness rule) so a\ntypo in a nested ``specs[*]`` entry fails 422 at the body parse\ninstead of being silently dropped."
+      },
+      "SurfaceChecklist": {
+        "properties": {
+          "surface": {
+            "type": "string",
+            "enum": [
+              "kb",
+              "memory",
+              "operations"
+            ],
+            "title": "Surface"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "READY TO RETIRE",
+              "REVIEW MANUALLY",
+              "NOT YET"
+            ],
+            "title": "Verdict"
+          },
+          "criteria": {
+            "items": {
+              "$ref": "#/components/schemas/CriterionResult"
+            },
+            "type": "array",
+            "title": "Criteria"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "surface",
+          "verdict",
+          "criteria"
+        ],
+        "title": "SurfaceChecklist",
+        "description": "Per-surface checklist: the five criteria + the surface verdict."
       },
       "SurfaceResult": {
         "properties": {
@@ -2871,6 +6539,31 @@
         "title": "TargetUpdate",
         "description": "PATCH /api/v1/targets/{name} body.\n\nAll fields are optional. The route handler applies only the fields\nthat are not ``None``; callers must send an explicit ``null`` JSON\nvalue to clear a nullable column (``fqdn``, ``secret_ref``,\n``notes``). ``name`` and ``product`` are absent \u2014 rename = delete\n+ create.\n\n``fingerprint`` is **not** accepted via PATCH \u2014 it is server-managed\nand rewritten by every successful probe. Sending ``fingerprint``\nraises 422 via ``extra='forbid'`` for the same reason\n:class:`TargetCreate` rejects it. ``preferred_impl_id`` is patchable."
       },
+      "TargetsDiscoverResult": {
+        "properties": {
+          "discovered": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateHint"
+            },
+            "type": "array",
+            "title": "Discovered"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/SkippedConnector"
+            },
+            "type": "array",
+            "title": "Skipped"
+          }
+        },
+        "type": "object",
+        "required": [
+          "discovered",
+          "skipped"
+        ],
+        "title": "TargetsDiscoverResult",
+        "description": "Aggregated discover output across every connector for a product.\n\n``discovered`` is the merged candidate list from every connector\nregistered for the requested product; ``skipped`` records the\nconnectors that contributed nothing (clean-but-empty or errored).\nThe verb never auto-creates ``targets`` rows \u2014 the operator reviews\n``discovered`` and runs ``meho targets create`` (Initiative #363:\nauto-registration is v0.2.next)."
+      },
       "Thresholds": {
         "properties": {
           "precision_at_5": {
@@ -2898,6 +6591,292 @@
         "type": "object",
         "title": "Thresholds",
         "description": "Per-metric green-band thresholds for a verdict computation.\n\nFrozen so the threshold object passed into :func:`verdict` cannot\nbe mutated mid-run (a stale or rewritten threshold mid-eval would\ninvalidate every subsequent verdict and silently shift the CI\ngate). The yellow floor is derived from :data:`YELLOW_FLOOR_RATIO`,\nnot stored \u2014 keeping it derived means the contract \"yellow is 70%\nof green\" can't drift between green-threshold customisation and\nthe yellow boundary.\n\nDefaults match the Initiative #373 / Task #441 contract; tests and\nfuture re-tunings construct ``Thresholds(...)`` with explicit\nvalues."
+      },
+      "TopologyEdge": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "from": {
+            "$ref": "#/components/schemas/TopologyEdgeEndpoint"
+          },
+          "to": {
+            "$ref": "#/components/schemas/TopologyEdgeEndpoint"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Properties"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "from",
+          "to",
+          "kind",
+          "source",
+          "last_seen"
+        ],
+        "title": "TopologyEdge",
+        "description": "One ``graph_edge`` row returned by :func:`list_edges`.\n\nFlat edge summary (no traversal context \u2014 there is no ``depth`` or\n``via_edge_kind``; those concepts only mean something during a\nwalk). The frozen Pydantic shape mirrors the immutability discipline\nof :class:`TopologyNode`: ``properties`` is deep-frozen so the\nconflict-marker arrays (``conflicts_with``) and the supersede UUID\n(``superseded_by``) \u2014 both written by G9.2-T3 (#595) and read by\nthis helper's ``conflicts_only=True`` filter \u2014 cannot be mutated by\na caller and leak back into shared result state.\n\n``last_seen`` is the refresh service's \"I observed this edge at\"\ntimestamp (NULL after a soft-delete; soft-deleted edges are\nexcluded from :func:`list_edges` by default). It doubles as the\nstable total-order key the helper paginates against:\n``ORDER BY last_seen DESC NULLS LAST, id`` is total because ``id``\nis a UUID primary key, and ``DESC`` puts the most-recently-observed\nedges first \u2014 the order an operator scanning a fresh inventory\nexpects."
+      },
+      "TopologyEdgeEndpoint": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "name"
+        ],
+        "title": "TopologyEdgeEndpoint",
+        "description": "One endpoint of a :class:`TopologyEdge` \u2014 the ``from`` or ``to`` node.\n\nCompact node identity for the flat edge-listing helper. Carries the\nthree fields a human-readable edge summary needs: the node ``id``\n(caller may follow it back to the full :class:`TopologyNode`), the\n``kind`` (the closed enum from migration ``0007``), and the\n``name`` (unique within ``(tenant_id, kind)``). The full node\n``properties`` bag is intentionally **not** included \u2014 an edge\nlisting is a survey of relationships, not a node dump; callers that\nneed the bag look the node up separately via\n:func:`meho_backplane.topology.resolvers.resolve_node`."
+      },
+      "TopologyHistoryEntry": {
+        "properties": {
+          "valid_from": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Valid From"
+          },
+          "history_id": {
+            "type": "integer",
+            "title": "History Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "change_kind": {
+            "type": "string",
+            "title": "Change Kind"
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Resource Id"
+          },
+          "snapshot": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Snapshot"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "valid_from",
+          "history_id",
+          "source",
+          "change_kind",
+          "resource_id",
+          "snapshot",
+          "audit_id"
+        ],
+        "title": "TopologyHistoryEntry",
+        "description": "One row of the per-resource history walk (G9.3-T3).\n\nTask #859 ships the operator surface ``meho topology history\n<node>`` -- \"what changed for THIS resource?\" The differentiator\nfrom :class:`TopologyTimelineEntry` (G9.3-T5) is that history\ncarries the full ``snapshot`` JSONB (``{before, after}``) per row\nrather than a one-line summary -- the forensic shape for ``--json``\nreconstruction. Field-to-column mapping otherwise matches\ntimeline:\n\n* ``valid_from`` -- ``*_history.valid_from``.\n* ``history_id`` -- ``*_history.history_id``.\n* ``source`` -- ``\"node\"`` for :class:`GraphNodeHistory`, ``\"edge\"``\n  for :class:`GraphEdgeHistory` (only ``\"edge\"`` rows ever appear\n  when the caller passed ``include_edges=True``).\n* ``change_kind`` -- one of ``\"created\"`` / ``\"updated\"`` /\n  ``\"removed\"`` per :class:`GraphHistoryChangeKind`.\n* ``resource_id`` -- ``node_id`` for node-side rows, ``edge_id``\n  for edge-side rows. ``None`` only after the referenced live row\n  has been hard-deleted (``ON DELETE SET NULL``).\n* ``snapshot`` -- the full ``{before, after}`` JSONB. ``None``\n  only for legacy / mid-rollout rows that pre-date the\n  diff-on-write hook; every hook-emitted row populates it.\n* ``audit_id`` -- soft-FK to the ``audit_log.id`` of the\n  operation that caused the mutation."
+      },
+      "TopologyHistoryResult": {
+        "properties": {
+          "anchor_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Anchor Node Id"
+          },
+          "include_edges": {
+            "type": "boolean",
+            "title": "Include Edges"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyHistoryEntry"
+            },
+            "type": "array",
+            "title": "Rows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "anchor_node_id",
+          "include_edges",
+          "rows"
+        ],
+        "title": "TopologyHistoryResult",
+        "description": "The full per-resource history walk plus the resolved anchor.\n\nUnlike :class:`TopologyTimelineResult` (which is cursor-paginated),\nthe per-resource walk returns one page bounded by the substrate's\n``_MAX_HISTORY_ROWS`` cap -- per-resource history is bounded by\nthe retention window (default 90 days) and the operator typically\nwants the complete chronology in one response. No ``next_cursor``;\na caller that overflows the cap narrows ``since`` / ``until``.\n\n``anchor_node_id`` is the resolved :class:`GraphNode.id` of the\nanchor. Echoing it lets the CLI / MCP fronts surface \"I resolved\nyour name X to node Y\" in the human-readable header without a\nsecond resolver round trip.\n\n``include_edges`` echoes the call-site flag so a consumer can\nbranch on whether edge rows are expected to appear in ``rows``."
+      },
+      "TopologyNode": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Properties"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "via_edge_kind": {
+            "type": "string",
+            "nullable": true,
+            "title": "Via Edge Kind"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "depth",
+          "via_edge_kind"
+        ],
+        "title": "TopologyNode",
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge)."
+      },
+      "TopologyPath": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyNode"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Nodes"
+          },
+          "total_hops": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total Hops"
+          }
+        },
+        "type": "object",
+        "required": [
+          "nodes",
+          "total_hops"
+        ],
+        "title": "TopologyPath",
+        "description": "An ordered shortest path between two nodes.\n\n``nodes`` runs from the ``from`` node (``depth == 0``) to the\n``to`` node (``depth == total_hops``) inclusive. ``total_hops`` is\nthe number of edges traversed, i.e. ``len(nodes) - 1``. v0.2 is\nunweighted: every edge costs one hop."
+      },
+      "TopologyTimelineEntry": {
+        "properties": {
+          "valid_from": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Valid From"
+          },
+          "history_id": {
+            "type": "integer",
+            "title": "History Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "change_kind": {
+            "type": "string",
+            "title": "Change Kind"
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Resource Id"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "valid_from",
+          "history_id",
+          "source",
+          "change_kind",
+          "resource_id",
+          "summary",
+          "audit_id"
+        ],
+        "title": "TopologyTimelineEntry",
+        "description": "One row of the topology timeline (G9.3-T5).\n\nTask #861 ships the tenant-wide chronological feed of graph\nchanges -- \"what's been happening in the graph in the last hour\"\nwithout rooting at a specific resource. Each row projects one\n``graph_node_history`` or ``graph_edge_history`` mutation into a\ncompact summary the CLI / REST / MCP fronts can render or page\nthrough.\n\nField-to-column mapping:\n\n* ``valid_from`` -- ``*_history.valid_from``; every history row\n  from one operation carries the same timestamp (the diff-on-write\n  hook is the single source per :mod:`.history`).\n* ``history_id`` -- ``*_history.history_id``. Required because the\n  cursor's tie-breaker discriminator is ``(valid_from, history_id,\n  source)`` -- ``valid_from`` alone is not unique within a refresh.\n* ``source`` -- ``\"node\"`` for :class:`GraphNodeHistory`, ``\"edge\"``\n  for :class:`GraphEdgeHistory`. The discriminator the UNION\n  preserves.\n* ``change_kind`` -- one of ``\"created\"`` / ``\"updated\"`` /\n  ``\"removed\"`` per :class:`GraphHistoryChangeKind`.\n* ``resource_id`` -- ``node_id`` or ``edge_id`` of the mutated row.\n  ``None`` only after the referenced live row has been\n  hard-deleted (``ON DELETE SET NULL``) -- a rare survivability\n  shape; most timeline rows carry the FK intact.\n* ``summary`` -- one-line human-readable description derived from\n  ``snapshot.before`` / ``snapshot.after``. Format:\n  ``\"<change_kind> <kind> <name>\"`` for nodes (e.g. ``\"created vm\n  vm-prod\"``); ``\"<change_kind> <edge_kind> <from> -> <to>\"`` for\n  edges (e.g. ``\"removed runs-on vm-prod -> host-a\"``). Falls back\n  to ``\"<change_kind> <source>\"`` when the live row is gone and\n  the snapshot did not preserve enough context.\n* ``audit_id`` -- the soft-FK to the ``audit_log.id`` of the\n  operation that caused the mutation. ``None`` only for legacy\n  / mid-rollout rows; the diff-on-write hook always populates it."
+      },
+      "TopologyTimelineResult": {
+        "properties": {
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/TopologyTimelineEntry"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rows",
+          "next_cursor"
+        ],
+        "title": "TopologyTimelineResult",
+        "description": "Page of timeline rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows\nwere available (the query reached the end of the matching set).\nConsumers iterate by re-issuing the same filter with\n``cursor = next_cursor`` until ``next_cursor`` is None.\n\nThe cursor is opaque (base64-encoded JSON over ``(valid_from,\nhistory_id, source)``) -- consumers treat it as a token. Stability\nunder concurrent inserts: a new history row landing in the window\nbetween page N and page N+1 is naturally placed by the keyset\ncompare (``(valid_from, history_id) < (cursor.ts, cursor.id)``)\nand either appears on a later page (if it falls below the cursor)\nor never (if it lands above the cursor). No row is duplicated or\nskipped by the act of paging."
       },
       "UsageReport": {
         "properties": {
@@ -2934,6 +6913,18 @@
           "total_searches": {
             "type": "integer",
             "title": "Total Searches"
+          },
+          "counted_surfaces": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Counted Surfaces"
+          },
+          "rest_excluded": {
+            "type": "boolean",
+            "title": "Rest Excluded",
+            "default": true
           }
         },
         "type": "object",
@@ -3011,6 +7002,246 @@
         ],
         "title": "VaultStatus",
         "description": "Vault federation-chain status.\n\n``reachable`` is true when the OIDC login succeeded (TCP + TLS +\nJWT forward all worked). ``read_ok`` is true when the test secret\nread succeeded against the resulting Vault token. ``detail`` carries\na short structured string for the CLI to render on failure paths \u2014\nnever an unbounded exception message."
+      },
+      "_AnnotateEdgeRequest": {
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/_EdgeEndpoint"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/GraphEdgeKind"
+          },
+          "to": {
+            "$ref": "#/components/schemas/_EdgeEndpoint"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "nullable": true,
+            "title": "Note"
+          },
+          "evidence_url": {
+            "type": "string",
+            "maxLength": 2000,
+            "nullable": true,
+            "title": "Evidence Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "from",
+          "kind",
+          "to"
+        ],
+        "title": "_AnnotateEdgeRequest",
+        "description": "Inbound body for ``POST /api/v1/topology/edges``.\n\n``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind\nfails Pydantic validation (HTTP 422) **before** the service runs \u2014\nthe service still raises :class:`InvalidEdgeKindError` for\nnon-route callers, but at the HTTP boundary the operator gets the\nstandard FastAPI validation error shape (with the candidate list in\nthe error context) rather than a 500-shaped diagnostic.\n\nThe keyword ``from`` is reserved in Python so the attribute name is\n``from_endpoint``; ``alias=\"from\"`` keeps the wire shape the issue\nbody specifies (``{from, kind, to, note?, evidence_url?}``).\n``populate_by_name`` lets the alias **and** the attribute name both\nwork \u2014 handy for hand-written test fixtures that use the Python\nattribute names."
+      },
+      "_BulkImportEdge": {
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/_EdgeEndpoint"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/GraphEdgeKind"
+          },
+          "to": {
+            "$ref": "#/components/schemas/_EdgeEndpoint"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "nullable": true,
+            "title": "Note"
+          },
+          "evidence_url": {
+            "type": "string",
+            "maxLength": 2000,
+            "nullable": true,
+            "title": "Evidence Url"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "from",
+          "kind",
+          "to"
+        ],
+        "title": "_BulkImportEdge",
+        "description": "One edge in the ``POST /api/v1/topology/edges/bulk`` body.\n\nSame wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,\nnote?, evidence_url?}``) \u2014 ``from`` is bound via ``alias`` because\nit is a Python keyword. ``kind`` is typed against\n:class:`GraphEdgeKind` so an unknown kind fails at the boundary\n(HTTP 422) before any service call runs, and the per-row error\nsurfaces inside the standard FastAPI validation envelope with the\nrow index in ``loc``. ``extra=\"forbid\"`` rejects typo'd keys so a\nmisspelled ``evidnce_url`` is caught at the boundary rather than\nsilently dropped."
+      },
+      "_BulkImportRequest": {
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/_BulkImportEdge"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Edges"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "edges"
+        ],
+        "title": "_BulkImportRequest",
+        "description": "Inbound body for ``POST /api/v1/topology/edges/bulk``.\n\n``edges`` is a non-empty list bounded at the HTTP boundary by\n:data:`_BULK_IMPORT_MAX_EDGES`. Zero rows are rejected at 422\nrather than silently no-op'ing \u2014 an empty body is almost always a\nmistake in the operator's YAML / JSON file, and 422 surfaces it\nimmediately. ``dry_run`` defaults to ``False`` per the issue\nbody's \"the CLI calls --dry-run explicitly\" convention."
+      },
+      "_BulkImportResponse": {
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run"
+          },
+          "created": {
+            "type": "integer",
+            "title": "Created"
+          },
+          "updated": {
+            "type": "integer",
+            "title": "Updated"
+          },
+          "conflicts": {
+            "type": "integer",
+            "title": "Conflicts"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/_BulkImportRowResponse"
+            },
+            "type": "array",
+            "title": "Rows"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dry_run",
+          "created",
+          "updated",
+          "conflicts",
+          "rows"
+        ],
+        "title": "_BulkImportResponse",
+        "description": "Response body for ``POST /api/v1/topology/edges/bulk``.\n\n``dry_run`` echoes the call-site flag so a CLI rendering the JSON\nresponse can branch on it; ``created`` / ``updated`` / ``conflicts``\nare the aggregate counts the service computed; ``rows`` carries the\nper-row outcome in source order."
+      },
+      "_BulkImportRowResponse": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "title": "Index"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "edge_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Edge Id"
+          },
+          "from_name": {
+            "type": "string",
+            "title": "From Name"
+          },
+          "from_kind": {
+            "type": "string",
+            "title": "From Kind"
+          },
+          "to_name": {
+            "type": "string",
+            "title": "To Name"
+          },
+          "to_kind": {
+            "type": "string",
+            "title": "To Kind"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "superseded": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Superseded"
+          },
+          "conflicts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Conflicts"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index",
+          "action",
+          "edge_id",
+          "from_name",
+          "from_kind",
+          "to_name",
+          "to_kind",
+          "kind",
+          "superseded",
+          "conflicts"
+        ],
+        "title": "_BulkImportRowResponse",
+        "description": "One row's outcome in the ``POST /edges/bulk`` response.\n\nMirrors :class:`~meho_backplane.topology.bulk_import.BulkEdgeResult`\non the wire. ``edge_id`` is null in dry-run mode (no row exists)\nand on the apply-pass ``create`` rows where the service hasn't\nbeen called yet at validation time \u2014 the apply path always\npopulates it."
+      },
+      "_EdgeEndpoint": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true,
+            "title": "Kind"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "_EdgeEndpoint",
+        "description": "Inbound JSON shape for one annotation endpoint.\n\nMirrors :class:`meho_backplane.topology.annotate.NodeRef` on the wire:\n``name`` is required, ``kind`` is the optional disambiguator for a\nbare name that resolves to multiple :class:`GraphNode` rows in the\ntenant. Frozen so the route handler cannot accidentally rebind the\nfield; ``extra=\"forbid\"`` rejects typo'd keys at the boundary\n(``{from: {nme: ...}}`` is a 422, not a silently-ignored body)."
+      },
+      "_SortColumn": {
+        "type": "string",
+        "enum": [
+          "name",
+          "kind",
+          "last_seen",
+          "first_seen"
+        ],
+        "title": "_SortColumn",
+        "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
+      },
+      "_SortDirection": {
+        "type": "string",
+        "enum": [
+          "asc",
+          "desc"
+        ],
+        "title": "_SortDirection",
+        "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
       }
     }
   }

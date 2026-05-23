@@ -3,27 +3,23 @@
 
 """G3.6-T2 JSONFlux force-mode acceptance for the vROps connector.
 
-v0.2 ships only :class:`~meho_backplane.operations.reducer.PassThroughReducer`
-— the production reducer never produces a :class:`ResultHandle`. The
-real reducer (set-shaped payload reduction, MinIO/S3 spill,
-``result_query`` / ``result_aggregate`` meta-tools) is **explicitly
-out of scope** at the Goal #214 level.
-
-This test mirrors :mod:`tests.acceptance.test_g35_nsx_jsonflux_force_handle`
-verbatim, swapping in vROps as the dispatched connector: it installs
-a test-only :class:`ForceHandleReducer` that wraps every payload in a
-synthetic handle, dispatches ``GET:/suite-api/api/resources`` against
-the seeded vROps core, and asserts the
+Drives the **real**
+:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(G0.6.1-T3 #753) in force mode (``row_threshold=0``) as the dispatcher
+default. Mirrors :mod:`tests.acceptance.test_g35_nsx_jsonflux_force_handle`,
+swapping in vROps as the dispatched connector: it dispatches
+``GET:/suite-api/api/resources`` against the seeded vROps core and
+asserts the
 :class:`~meho_backplane.connectors.schemas.OperationResult`'s
-``handle`` field carries a populated :class:`ResultHandle`.
+``handle`` field carries a populated :class:`ResultHandle` with the
+real materialized shape.
 
 vROps' suite-api wraps list payloads under noun-specific keys
 (``resourceList``, ``alerts``, ``symptoms``, etc.) rather than the
-generic ``results`` / ``value`` keys NSX and vSphere use. The
-:class:`ForceHandleReducer` below adds the noun-specific keys to its
-discovery loop so the dispatcher-seam test still observes the
-expected row count without leaking vendor-specific shape into the
-production reducer ABC.
+generic ``results`` / ``value`` keys NSX and vSphere use. The reducer's
+collection detection falls back to the largest top-level list value
+when no known envelope key matches, so it locates ``resourceList``
+without the test leaking vendor-specific shape into the reducer.
 """
 
 from __future__ import annotations
@@ -33,9 +29,9 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vrops_canary_fixtures import (
@@ -45,73 +41,16 @@ from tests.acceptance._vrops_canary_fixtures import (
 )
 
 
-class ForceHandleReducer:
-    """Test-only reducer that always produces a :class:`ResultHandle`.
-
-    Recognises both the cross-connector list shapes (``elements``,
-    ``results``, ``value``) and the vROps-specific wrapper keys
-    (``resourceList``, ``alerts``, ``alertDefinitions``, ``symptoms``,
-    ``recommendations``, ``superMetrics``).
-
-    * ``list`` → total = ``len(payload)``.
-    * ``dict`` with one of the recognised list-wrapper keys → rows = the
-      wrapped list.
-    * Anything else → total = 1, sample = ().
-    """
-
-    _LIST_KEYS: tuple[str, ...] = (
-        "elements",
-        "results",
-        "value",
-        "resourceList",
-        "alerts",
-        "alertDefinitions",
-        "symptoms",
-        "recommendations",
-        "superMetrics",
-    )
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        """Always return ``(summary_dict, ResultHandle)``."""
-        del schema, context
-        if isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        elif isinstance(payload, dict):
-            for key in self._LIST_KEYS:
-                rows = payload.get(key)
-                if isinstance(rows, list):
-                    total = len(rows)
-                    sample = tuple(rows[:5]) if rows else ()
-                    break
-            else:
-                total = 1
-                sample = ()
-        else:
-            total = 1
-            sample = ()
-
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample if sample else None,
-            ttl_seconds=3600,
-        )
-        summary = {"row_count": total, "sample": list(sample)}
-        return summary, handle
-
-
 @pytest.fixture
 def force_handle_reducer() -> Any:
-    """Install :class:`ForceHandleReducer` as the dispatcher's default."""
-    set_default_reducer(ForceHandleReducer())
+    """Install :class:`JsonFluxReducer` in force mode as the dispatcher default.
+
+    ``row_threshold=0`` forces every non-empty set to materialize, so
+    the seeded resource list (below the default 50-row threshold)
+    produces a handle. Teardown restores :class:`PassThroughReducer` so
+    a follow-on test in the same session sees the v0.2 default.
+    """
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         yield
     finally:
@@ -163,7 +102,7 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_vrops(
     handle = result_envelope.get("handle")
     assert handle is not None, (
         f"expected OperationResult.handle to be populated by "
-        f"ForceHandleReducer; got handle=None on envelope={result_envelope!r}"
+        f"JsonFluxReducer; got handle=None on envelope={result_envelope!r}"
     )
     uuid.UUID(handle["handle_id"])
     assert handle["total_rows"] == expected_rows, (

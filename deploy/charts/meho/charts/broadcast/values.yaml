@@ -55,9 +55,14 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+    # -- Node-pressure guard for the ephemeral streams data emptyDir +
+    # logs (kubernetes:S6870). Subchart default; the parent chart's
+    # `broadcast.resources` mirrors it.
+    ephemeral-storage: 512Mi
   requests:
     cpu: 50m
     memory: 128Mi
+    ephemeral-storage: 128Mi
 
 service:
   # -- Service type. ClusterIP is the only sensible choice for v0.1 — the

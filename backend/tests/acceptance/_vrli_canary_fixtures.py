@@ -284,7 +284,9 @@ def _param_schema_for(path: str) -> dict[str, object]:
     }
 
 
-async def _vrli_credentials_loader(_target: VcfLogsTargetLike) -> dict[str, str]:
+async def _vrli_credentials_loader(
+    _target: VcfLogsTargetLike, _operator: Operator
+) -> dict[str, str]:
     """Stub credentials loader — bypasses the not-yet-wired Vault read.
 
     The respx ``POST /api/v2/sessions`` route accepts any pair, so the

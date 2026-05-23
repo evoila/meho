@@ -6,8 +6,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -112,6 +114,7 @@ func newIngestCmd() *cobra.Command {
 		versionFlag       string
 		implID            string
 		specs             []string
+		catalog           string
 		dryRun            bool
 		jsonOut           bool
 		backplaneOverride string
@@ -119,20 +122,26 @@ func newIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ingest",
 		Short: "Ingest one or more vendor specs into a new connector (staged state)",
-		Long: "ingest parses each --spec URI, registers the operations into the\n" +
+		Long: "ingest parses each spec, registers the operations into the\n" +
 			"endpoint_descriptor table under one connector_id, and runs the\n" +
 			"LLM-summarised grouping pass. The newly-ingested connector lands\n" +
 			"in review_status=staged — operations are NOT dispatchable until\n" +
 			"an operator runs `meho connector review <id>` + `meho connector\n" +
 			"enable <id>`.\n\n" +
-			"--spec accepts three URI shapes:\n" +
-			"  - file:///abs/path/to/spec.yaml          (local file)\n" +
-			"  - https://example.com/spec.yaml           (HTTP fetch)\n" +
-			"  - docs:<product-version>/<spec.yaml>      (resolves against\n" +
-			"    $CLAUDE_RDC_DOCS when set; otherwise passed through for\n" +
-			"    backplane-side resolution against its own checked-in docs)\n\n" +
-			"Repeat --spec to merge multiple specs under one connector_id\n" +
-			"(vSphere is the canonical case: vcenter.yaml + vi-json.yaml).\n\n" +
+			"Two mutually-exclusive modes:\n\n" +
+			"  Catalog mode: --catalog <product>/<version> resolves the curated\n" +
+			"  catalog entry (see `meho connector catalog list`) and ingests its\n" +
+			"  recommended triple + upstream spec URL(s). Typed-connector and\n" +
+			"  fqdn-templated entries are refused with a hint.\n\n" +
+			"  Manual mode: --product + --version + --impl + one-or-more --spec.\n" +
+			"  --spec accepts three URI shapes:\n" +
+			"    - file:///abs/path/to/spec.yaml          (local file)\n" +
+			"    - https://example.com/spec.yaml           (HTTP fetch)\n" +
+			"    - docs:<product-version>/<spec.yaml>      (resolves against\n" +
+			"      $CLAUDE_RDC_DOCS when set; otherwise passed through for\n" +
+			"      backplane-side resolution against its own checked-in docs)\n" +
+			"  Repeat --spec to merge multiple specs under one connector_id\n" +
+			"  (vSphere is the canonical case: vcenter.yaml + vi-json.yaml).\n\n" +
 			"--dry-run parses + plans without writing to the DB; useful for\n" +
 			"validating a spec before committing. Role: tenant_admin.",
 		Args:          cobra.NoArgs,
@@ -144,6 +153,7 @@ func newIngestCmd() *cobra.Command {
 				Version:           versionFlag,
 				ImplID:            implID,
 				Specs:             specs,
+				Catalog:           catalog,
 				DryRun:            dryRun,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
@@ -151,23 +161,22 @@ func newIngestCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&product, "product", "",
-		"product name (e.g. vmware, kubernetes); required")
+		"product name (e.g. vmware, kubernetes); manual mode (required with --version/--impl/--spec)")
 	cmd.Flags().StringVar(&versionFlag, "version", "",
-		"product version (e.g. 9.0, 1.x); required")
+		"product version (e.g. 9.0, 1.x); manual mode")
 	cmd.Flags().StringVar(&implID, "impl", "",
-		"impl identifier (e.g. vmware-rest, k8s-go); required")
+		"impl identifier (e.g. vmware-rest, k8s-go); manual mode")
 	cmd.Flags().StringArrayVar(&specs, "spec", nil,
-		"spec URI; repeat for multi-spec merge under one connector_id (required, at least one)")
+		"spec URI; repeat for multi-spec merge under one connector_id; manual mode")
+	cmd.Flags().StringVar(&catalog, "catalog", "",
+		"catalog mode: ingest the curated entry for <product>/<version> (e.g. vmware/9.0); "+
+			"mutually exclusive with --product/--version/--impl/--spec")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"parse and plan without writing to the DB; the response carries an IngestionResult with counts but no GroupingResult")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human summary")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
-	_ = cmd.MarkFlagRequired("product")
-	_ = cmd.MarkFlagRequired("version")
-	_ = cmd.MarkFlagRequired("impl")
-	_ = cmd.MarkFlagRequired("spec")
 	return cmd
 }
 
@@ -176,41 +185,57 @@ type ingestOptions struct {
 	Version           string
 	ImplID            string
 	Specs             []string
+	Catalog           string
 	DryRun            bool
 	JSONOut           bool
 	BackplaneOverride string
 }
 
 func runIngest(cmd *cobra.Command, opts ingestOptions) error {
-	// Validate + resolve the spec URIs locally so the operator gets a
-	// fast hint on a typo'd scheme rather than a backplane 422.
-	if len(opts.Specs) == 0 {
-		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected("at least one --spec is required"),
-			opts.JSONOut,
-		)
-	}
-	resolved := make([]SpecSource, 0, len(opts.Specs))
-	for _, raw := range opts.Specs {
-		uri, err := resolveSpecURI(raw)
-		if err != nil {
-			return output.RenderError(cmd.ErrOrStderr(),
-				output.Unexpected(err.Error()),
-				opts.JSONOut,
-			)
-		}
-		resolved = append(resolved, SpecSource{URI: uri})
+	if err := validateIngestMode(opts); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
 
 	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), opts.JSONOut)
 	}
+
+	var specs []SpecSource
+	if opts.Catalog != "" {
+		entry, rerr := resolveCatalogEntry(cmd.Context(), backplaneURL, opts.Catalog)
+		if rerr != nil {
+			// Local resolution failures (bad ref, no entry, typed
+			// connector, templated upstream) carry errCatalogResolve and
+			// render as `unexpected`; transport/auth errors from the GET
+			// route through renderRequestError.
+			if errors.Is(rerr, errCatalogResolve) {
+				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(rerr.Error()), opts.JSONOut)
+			}
+			return renderRequestError(cmd, backplaneURL, rerr, opts.JSONOut)
+		}
+		// Adopt the catalog's recommended triple so the summary + the
+		// posted body carry it (the catalog flag supplies no triple).
+		opts.Product, opts.Version, opts.ImplID = entry.Product, entry.Version, entry.ImplID
+		specs = upstreamSpecs(entry.Upstream)
+	} else {
+		// Manual mode: resolve each --spec URI locally so the operator
+		// gets a fast hint on a typo'd scheme rather than a backplane 422.
+		specs = make([]SpecSource, 0, len(opts.Specs))
+		for _, raw := range opts.Specs {
+			uri, uerr := resolveSpecURI(raw)
+			if uerr != nil {
+				return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(uerr.Error()), opts.JSONOut)
+			}
+			specs = append(specs, SpecSource{URI: uri})
+		}
+	}
+
 	result, err := postIngest(cmd.Context(), backplaneURL, IngestRequest{
 		Product: opts.Product,
 		Version: opts.Version,
 		ImplID:  opts.ImplID,
-		Specs:   resolved,
+		Specs:   specs,
 		DryRun:  opts.DryRun,
 	})
 	if err != nil {
@@ -220,6 +245,45 @@ func runIngest(cmd *cobra.Command, opts ingestOptions) error {
 		return output.PrintJSON(cmd.OutOrStdout(), result)
 	}
 	printIngestSummary(cmd.OutOrStdout(), opts, result)
+	return nil
+}
+
+// validateIngestMode enforces the catalog/manual split: exactly one
+// mode, and manual mode needs the full triple + at least one --spec.
+// Replaces the per-flag MarkFlagRequired wiring (which can't express
+// "required unless --catalog").
+func validateIngestMode(opts ingestOptions) error {
+	manualSet := opts.Product != "" || opts.Version != "" || opts.ImplID != "" || len(opts.Specs) > 0
+	if opts.Catalog != "" {
+		if manualSet {
+			return errors.New(
+				"--catalog cannot be combined with --product/--version/--impl/--spec; " +
+					"use catalog mode OR manual mode, not both")
+		}
+		return nil
+	}
+	if !manualSet {
+		return errors.New(
+			"specify a connector to ingest: --catalog <product>/<version>, " +
+				"or manual mode (--product --version --impl --spec)")
+	}
+	var missing []string
+	if opts.Product == "" {
+		missing = append(missing, "--product")
+	}
+	if opts.Version == "" {
+		missing = append(missing, "--version")
+	}
+	if opts.ImplID == "" {
+		missing = append(missing, "--impl")
+	}
+	if len(opts.Specs) == 0 {
+		missing = append(missing, "--spec")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("manual ingest requires %s (or use --catalog <product>/<version>)",
+			strings.Join(missing, ", "))
+	}
 	return nil
 }
 

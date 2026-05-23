@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -88,15 +89,15 @@ func runTenantListVerb(
 	if se := validatePlane(readPlane(cmd), PlaneTenant); se != nil {
 		return output.RenderError(cmd.ErrOrStderr(), se, jsonOut)
 	}
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, readFqdn(cmd), nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }
 
 // runTenantGetVerb dispatches a tenant-plane read-by-id op_id with the
@@ -111,14 +112,14 @@ func runTenantGetVerb(
 	if se := validatePlane(readPlane(cmd), PlaneTenant); se != nil {
 		return output.RenderError(cmd.ErrOrStderr(), se, jsonOut)
 	}
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{paramName: paramValue}
 	r, err := dispatchOp(cmd.Context(), backplaneURL, opID, targetName, readFqdn(cmd), params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, opID, r, jsonOut, printer)
+	return conn.Render(cmd, opID, r, jsonOut, printer)
 }

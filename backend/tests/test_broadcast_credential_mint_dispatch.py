@@ -94,8 +94,15 @@ _FORBIDDEN_SUBSTRINGS: tuple[str, ...] = (_SENTINEL_SECRET,)
 # ---------------------------------------------------------------------------
 
 
-async def _stub_credentials_loader(_target: HarborTargetLike) -> dict[str, str]:
-    """Return hard-coded admin credentials — no Vault call."""
+async def _stub_credentials_loader(
+    _target: HarborTargetLike, _operator: Operator
+) -> dict[str, str]:
+    """Return hard-coded admin credentials — no Vault call.
+
+    The 2-arg signature matches the
+    :class:`~meho_backplane.connectors.harbor.session.HarborCredentialsLoader`
+    G3.10-T1 (#945) introduced.
+    """
     return {"username": "admin", "password": "test-password"}
 
 

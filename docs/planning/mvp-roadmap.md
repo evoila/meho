@@ -1,6 +1,6 @@
 # MEHO MVP roadmap — versioned deploys
 
-Maps the seven MVPs to release versions, names what ships in each, and links the
+Maps the MVP sequence to release versions, names what ships in each, and links the
 GitHub Initiatives that close each MVP.
 
 **Relationship to [v0.2-decisions.md](v0.2-decisions.md):** v0.2-decisions remains
@@ -20,8 +20,42 @@ v0.2" framing on the board.
 | **v0.4** | **MVP3** | NSX + SDDC + Harbor + agent memory | partially filed |
 | **v0.5** | **MVP4** | VCF mgmt plane + broadcast *complete* (live SSE + historical query) | partially filed |
 | **v0.6** | **MVP5** | pfSense + gcloud + Hetzner Robot + tenant conventions | partially filed |
-| **v0.7** | **MVP6** | Holodeck + operator web UI (broadcast / KB / connectors / memory / topology) | unfiled |
-| **v0.8** | **MVP7** | Audit replay (forensic session traversal) | unfiled |
+| **v0.7** | **MVP6** | **Agent runtime — floor** (G11.1 runtime + G11.2 identity/RBAC/approval + G11.3 scheduler) | filed (17 tasks); unstaffed |
+| **v0.8** | **MVP7** | **Agent runtime — hardening** (G11.4 sanitization + G11.5 providers/budgets + G11.6 reference patterns) | initiatives filed; child tasks unfiled |
+| **v0.9** | **MVP8** | Operator web UI (broadcast / KB / connectors / memory / topology) + topology time-travel | filed |
+| **v0.10** | **MVP9** | Audit replay (forensic session traversal) | initiative filed; tasks unfiled |
+| **v0.11** | **MVP10** | Holodeck connector — closes the G3 wrapper-retirement story (deferred; unblocked, ready now) | filed (3 tasks) |
+
+---
+
+## Capability-first overlay (added 2026-05-22)
+
+**Read [release-plan.md](release-plan.md) alongside this table.** A full-board +
+code audit on 2026-05-22 found that the version status above measures
+*initiative closure*, not *usable capability*: v0.2–v0.5 read as shipped while
+**no REST connector can execute against a real target** and **set-shaped
+responses are not reduced**. Two cross-cutting gates — invisible because they
+are not connector-tier line items — block usability across those versions:
+
+| Gate | Initiative | Status | Blocks |
+|---|---|---|---|
+| **JSONFlux reducer** (real reduction, not pass-through; [postulate 6](../../CLAUDE.md)) | [G0.6.1 #750](https://github.com/evoila/meho/issues/750) | open, 0/5, **was off-map** | safe output for *every* connector at scale |
+| **Connector credential broker** (operator-context Vault read) — vmware vertical slice | [G3.9 #939](https://github.com/evoila/meho/issues/939) | open, 0/4, **new** | v0.2 vSphere actually executing |
+| **Credential-loader fan-out** (nsx/sddc/harbor, VCF, k8s) | [G3.10 #944](https://github.com/evoila/meho/issues/944) | open, 0/4, **new** | v0.3/v0.4/v0.5 connectors executing |
+
+**Connector versions ship at [State 1–3](../codebase/connector-release-readiness.md), not binary "done":**
+
+- **v0.2** vSphere, **v0.3** k8s, **v0.4** nsx/sddc/harbor, **v0.5** VCF — all
+  shipped/planned at **State 1 (cataloged)**. They reach **State 2 (executes)**
+  only when #750 + #939 (v0.2) and #944 (v0.3–v0.5) land. Slot #939 into
+  **v0.2.1**; #944 spans **v0.3/v0.4/v0.5**; #750 into **v0.2.1**.
+- Release notes cite the connector's state + live auth models, never "shipped"
+  for a cataloged-only connector (the convention from
+  [connector-release-readiness.md](../codebase/connector-release-readiness.md)).
+
+The capability-first sequencing (R1 gates → R2 fan-out → R3 UI/replay → R4
+runtime) lives in [release-plan.md](release-plan.md); it re-orders *delivery*
+without renumbering the versions here.
 
 ---
 
@@ -162,10 +196,18 @@ so G0.8 corrects it before v0.3 work proceeds.
 | Initiative | # |
 |---|---|
 | [G0.8 v0.2 dogfood hardening](https://github.com/evoila/meho/issues/634) | #634 |
+| [G0.6.1 Real JSONFlux reducer (execution gate)](https://github.com/evoila/meho/issues/750) | #750 |
+| [G3.9 Connector credential broker + vmware vertical slice (execution gate)](https://github.com/evoila/meho/issues/939) | #939 |
 
 Parent goal G0 [#221](https://github.com/evoila/meho/issues/221). All 8
-child Tasks (#628 #583 #629 #633 #630 #632 #631 #668) closed; the three
+G0.8 child Tasks (#628 #583 #629 #633 #630 #632 #631 #668) closed; the three
 hard blockers (#628 / #583 / #629) cleared, lifting the v0.3/v0.4 freeze.
+
+**Execution gates added 2026-05-22 (see [release-plan.md](release-plan.md)).**
+v0.2 shipped vSphere at **State 1 (cataloged)**. It reaches **State 2
+(executes against a real target)** only when #750 (safe reduction) and #939
+(operator-context credential read) land — both folded into v0.2.1 because the
+hardening theme is "make the shipped v0.2 actually usable."
 
 > **`/meho-status` `VERSION_MAP` drift (surfaced, not silently
 > reconciled):** the `meho-status` skill's hardcoded `VERSION_MAP` does
@@ -199,11 +241,18 @@ hard blockers (#628 / #583 / #629) cleared, lifting the v0.3/v0.4 freeze.
 | [G3.4 bind9-9.x typed-SSH](https://github.com/evoila/meho/issues/367) | #367 |
 | [G9.1 Graph schema + auto-discovery + verbs](https://github.com/evoila/meho/issues/363) | #363 |
 | [G9.2 Curated cross-system edges](https://github.com/evoila/meho/issues/364) | #364 |
+| [G3.10 Credential-loader fan-out (execution gate; spans v0.3–v0.5 connectors)](https://github.com/evoila/meho/issues/944) | #944 |
 
-**Open scoping question:** [G9.3 Discovery history](https://github.com/evoila/meho/issues/365)
-(topology time-travel queries) is filed under G9 but unstaffed. This roadmap
-pushes it to **v0.7** where the Topology UI gives time-travel real reach.
-Decision needed before locking v0.3.
+**Execution gate:** [G3.10 #944](https://github.com/evoila/meho/issues/944) is
+one initiative that takes the v0.3 (k8s), v0.4 (nsx/sddc/harbor) and v0.5 (VCF)
+connectors from **State 1 → State 2**. It is mapped here at v0.3 as its earliest
+gated version; depends on [#939](https://github.com/evoila/meho/issues/939). See
+[release-plan.md](release-plan.md) R2.
+
+**Resolved:** [G9.3 Discovery history](https://github.com/evoila/meho/issues/365)
+(topology time-travel queries) ships in **v0.9** alongside the operator web UI,
+where the Topology UI gives time-travel real reach. (Originally floated for
+v0.7; moved with the UI in the 2026-05-22 replan — see Cross-cutting.)
 
 ---
 
@@ -300,12 +349,88 @@ subscriber externally; the backplane doesn't ship one.
 
 ---
 
-## v0.7 — MVP6 — Holodeck + operator web UI
+## v0.7 — MVP6 — Agent runtime — floor (G11 wave 1)
+
+**Reprioritised 2026-05-22:** agent runtime (Goal G11) moves ahead of the
+operator web UI and Holodeck. MEHO becomes a first-class **agent host** —
+long-running LLM agents that observe, reason, and (under governance) act,
+running *inside* MEHO's process boundary on the same identity + RBAC + audit +
+dispatch machinery as human operators. G11 is UI-independent by design (its own
+scope note: "agent surfaces in G10's UI are a later G10.x slice"), so it can
+lead while the UI waits. See [Goal #800](https://github.com/evoila/meho/issues/800).
 
 ### What ships
 
-- **Holodeck** (typed-SSH; PowerShell-over-SSH) — closes the
-  wrapper-retirement story
+The **runtime floor** — the three primitives that make MEHO an agent host:
+
+- **P1 — Agent runtime (G11.1)** — in-process Pydantic AI tool-use loop behind
+  an `AgentRun` seam; sync + async (handle/SSE) invocation; agent-invokes-agent.
+  Every tool call routes through the normal dispatch + RBAC + audit path.
+- **P3 — Agent identity + RBAC + approval (G11.2)** — agents as Keycloak
+  principals; RFC 8693 delegation (`sub`=user, `act`=agent); the v0.2
+  `requires_approval` hard-deny becomes the durable per-(principal, op, target)
+  approval queue (auto-execute | needs-approval | deny) it always foresaw.
+- **P2 — Scheduler (G11.3)** — durable cron + one-off + event(outbox) triggers
+  firing agent runs; the floor of 24/7 operation. Roll-our-own vs DBOS settled
+  by a spike task.
+
+Builds only on shipped substrate (G0 identity/audit/dispatch, G4 knowledge,
+G5 memory). Surfaced via CLI + MCP per v0.1 — no web-UI dependency.
+
+### Initiatives
+
+| Initiative | # | Tasks |
+|---|---|---|
+| [G11.1 Agent runtime (P1)](https://github.com/evoila/meho/issues/802) | #802 | #808–#813 (6) |
+| [G11.2 Agent identity + RBAC + approval (P3)](https://github.com/evoila/meho/issues/803) | #803 | #815–#820 (6) |
+| [G11.3 Scheduler (P2)](https://github.com/evoila/meho/issues/804) | #804 | #822–#826 (5) |
+
+---
+
+## v0.8 — MVP7 — Agent runtime — hardening (G11 waves 2–4)
+
+### What ships
+
+Completes the agent-runtime capability. The floor (v0.7) is not
+production-safe until sanitization lands, so these ship as the immediate
+follow-on, ahead of the UI:
+
+- **C1+C2 — Safety (G11.4)** — sanitization middleware (declarative regex hot
+  path + Presidio for free-text) on *every* connector response, "store raw in
+  audit, show redacted to caller"; plus the agent audit/replay extension
+  (`agent_session_id` lineage, raw+redacted side-by-side, redaction manifest).
+  This is what satisfies the consumer's "zero raw credentials in any LLM
+  prompt" bar.
+- **C4+C3 — Portability + cost (G11.5)** — LLM-provider abstraction (Anthropic
+  + Bedrock + OpenAI + on-prem vLLM/Ollama + **VCF Private AI Foundation**) so
+  the same agents ship to SaaS-OK and air-gapped tenants; plus per-identity
+  token budgets (the cost kill switch).
+- **R1–R4 — Reference patterns (G11.6)** — runnable sample agents + docs in
+  `examples/` (tiered triage, operator-approval gate, kb write-back,
+  local-Claude-as-triage). Not MEHO surface — composition examples on the
+  primitives.
+
+### Initiatives
+
+| Initiative | # |
+|---|---|
+| [G11.4 Safety — sanitization + audit/replay](https://github.com/evoila/meho/issues/805) | #805 |
+| [G11.5 Portability + cost — providers + budgets](https://github.com/evoila/meho/issues/806) | #806 |
+| [G11.6 Reference patterns (R1–R4)](https://github.com/evoila/meho/issues/807) | #807 |
+
+*Child tasks for #805 / #806 / #807 are outlined in each Initiative body but
+not yet filed as issues — file them before this version locks.*
+
+---
+
+## v0.9 — MVP8 — operator web UI + topology time-travel
+
+**Pushed back from v0.7** by the 2026-05-22 agent-runtime reprioritisation.
+Content is unchanged — the operator console, plus G9.3 topology time-travel
+which travels with it (its value is gated by the Topology UI).
+
+### What ships
+
 - **Operator console** at `/ui/*` — HTMX 2 + Jinja2 + Tailwind 4 + DaisyUI 5
   + Alpine.js + Cytoscape.js island
   - Frontend chassis (G10.0)
@@ -314,6 +439,8 @@ subscriber externally; the backplane doesn't ship one.
   - Connectors + Targets UI (G10.3) — table + per-target detail + ops matrix
   - Memory UI (G10.4) — 5-scope filtered list + scope-promotion + expiry viz
   - Topology UI (G10.5) — tabular + Cytoscape.js graph + dependents/dependencies/path
+  - **Agent surfaces** (run / inspect / approve) land here as a G10.x slice now
+    that the agent runtime (G11) ships first
 - **Discovery history (G9.3)** — pulled from v0.3 so the Topology UI can show
   time-travel topology meaningfully
 
@@ -321,25 +448,28 @@ subscriber externally; the backplane doesn't ship one.
 
 | Initiative | # |
 |---|---|
-| [G3.8 Holodeck typed-SSH](https://github.com/evoila/meho/issues/371) | #371 |
-| [G9.3 Discovery history](https://github.com/evoila/meho/issues/365) | #365 *(moved from v0.3)* |
 | [G10.0 Frontend chassis](https://github.com/evoila/meho/issues/337) | #337 |
 | [G10.1 Broadcast UI](https://github.com/evoila/meho/issues/338) | #338 |
 | [G10.2 KB UI](https://github.com/evoila/meho/issues/339) | #339 |
 | [G10.3 Connectors + Targets UI](https://github.com/evoila/meho/issues/340) | #340 |
 | [G10.4 Memory UI](https://github.com/evoila/meho/issues/341) | #341 |
 | [G10.5 Topology UI](https://github.com/evoila/meho/issues/342) | #342 |
+| [G9.3 Discovery history](https://github.com/evoila/meho/issues/365) | #365 *(moved from v0.3)* |
 
 ---
 
-## v0.8 — MVP7 — audit replay (post-MVP forensics)
+## v0.10 — MVP9 — audit replay (post-MVP forensics)
+
+**Pushed back from v0.8** by the agent-runtime reprioritisation; content
+unchanged.
 
 ### What ships
 
 - **Audit replay** — `meho audit replay <session-id>` reconstructs the full
   forensic trace of one agent session as a chronologically-ordered,
   parent/child tree of every operation. Recursive-CTE traversal over
-  `audit_log.parent_audit_id`. Closes the third leg of G8.
+  `audit_log.parent_audit_id`. Closes the third leg of G8. (Now also traverses
+  the `agent_session_id` lineage added in v0.8 / G11.4.)
 
 ### Initiatives
 
@@ -349,6 +479,31 @@ subscriber externally; the backplane doesn't ship one.
 
 *Audit query core (G8.1) shipped in v0.5. Only the replay/graph-traversal
 half remains.*
+
+---
+
+## v0.11 — MVP10 — Holodeck connector (G3 closer)
+
+**Deferred from v0.7** in the 2026-05-22 replan — lowest scheduled priority,
+but **unblocked and ready now**: it inherits the shipped `SshConnector`, and
+its tasks (#853–#855) are filed and ready for
+`/auto-implement-initiative #371`. It blocks nothing and nothing blocks it, so
+any contributor can pull it forward opportunistically; it sits at the tail only
+because agent runtime + UI + audit replay outrank it.
+
+### What ships
+
+- **Holodeck** (typed-SSH; PowerShell-over-SSH) — ~8 read-only inspection ops
+  against the VMware Holodeck nested-VCF-lab appliance (HoloRouter has no REST
+  API). Closes the G3 wrapper-retirement story — every consumer `scripts/*.sh`
+  wrapper now has a MEHO parallel. Pod-clone provisioning stays a future Runbook
+  under G11. See [#371](https://github.com/evoila/meho/issues/371).
+
+### Initiatives
+
+| Initiative | # |
+|---|---|
+| [G3.8 Holodeck typed-SSH](https://github.com/evoila/meho/issues/371) | #371 |
 
 ---
 
@@ -371,7 +526,7 @@ Tier is fixed by operator value, not architectural dependency:
 | 3 | pfSense | typed-SSH | v0.6 |
 | 3 | gcloud | transport TBD | v0.6 |
 | 3 | Hetzner Robot | generic-ingested | v0.6 |
-| — | Holodeck | typed-SSH | v0.7 |
+| — | Holodeck | typed-SSH | v0.11 *(deferred 2026-05-22; ready now)* |
 
 ### Items dropped from scope
 
@@ -379,14 +534,31 @@ Tier is fixed by operator value, not architectural dependency:
 
 ### Items pulled forward
 
+- **Agent runtime (Goal G11) — off-roadmap → v0.7 + v0.8.** Pulled in and
+  prioritised ahead of the operator UI in the 2026-05-22 replan: MEHO-as-agent-
+  host (P1 runtime + P2 scheduler + P3 identity/RBAC/approval in v0.7; then
+  C1–C4 + reference patterns in v0.8). Builds on already-shipped substrate and
+  is UI-independent by design. This **redefines MVP6/MVP7** (previously
+  Holodeck + UI / audit replay) — see TL;DR and the per-version sections.
 - **G8.1 Audit query core** — moved v0.8 → v0.5. Reason: it's what gives
   agents "what happened in the past X days," which is half of the broadcast
   contract.
 
 ### Items pushed back
 
-- **G9.3 Discovery history (topology time-travel)** — moved v0.3 → v0.7.
-  Reason: value is gated by the Topology UI.
+*All four below are consequences of the 2026-05-22 agent-runtime
+reprioritisation; none changed in content, only in sequence.*
+
+- **Operator web UI (G10.0–G10.5)** — moved v0.7 → **v0.9**. Reason: agent
+  runtime (G11) reprioritised ahead of it. Ships one release later, unchanged.
+- **Audit replay (G8.2)** — moved v0.8 → **v0.10**, displaced by the two
+  agent-runtime releases. Content unchanged.
+- **Holodeck (G3.8)** — moved v0.7 → **v0.11** (tail). Reason: tier-4,
+  event-shaped, lowest operator-frequency connector; deferred so agent runtime
+  leads. Unblocked and ready — can be pulled forward opportunistically.
+- **G9.3 Discovery history (topology time-travel)** — moved v0.3 → **v0.9**
+  (was floated for v0.7). Reason: value is gated by the Topology UI, so it
+  travels with the UI wherever the UI lands.
 
 ### Ownership today — the structural risk
 
@@ -397,8 +569,11 @@ Tier is fixed by operator value, not architectural dependency:
 | v0.4 | — | all | UNSTAFFED |
 | v0.5 | — | all | UNSTAFFED |
 | v0.6 | — | all | UNSTAFFED |
-| v0.7 | — | all | UNSTAFFED |
-| v0.8 | — | all | UNSTAFFED |
+| v0.7 | — | G11.1, G11.2, G11.3 (all) | **HIGH** — new lead release; the agent-runtime floor has no named owner |
+| v0.8 | — | G11.4, G11.5, G11.6 (all; child tasks unfiled) | UNSTAFFED |
+| v0.9 | G10.0–G10.4 (`@damir-topic`), G10.5 + G9.3 (`@zdamir`) | — | staffed |
+| v0.10 | — | G8.2 | UNSTAFFED |
+| v0.11 | G3.8 (`@kr3s0`) | — | staffed; ready to auto-implement |
 
 **Owner assignment is the single largest unmitigated risk to this roadmap.**
 Even MVP1 — partially merged, in flight — has zero named owners on four of its

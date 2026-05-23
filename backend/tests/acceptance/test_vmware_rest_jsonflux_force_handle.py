@@ -3,35 +3,30 @@
 
 """G3.1-T8 JSONFlux handle force-mode acceptance test.
 
-v0.2 ships only :class:`~meho_backplane.operations.reducer.PassThroughReducer`
-— the production reducer never produces a :class:`ResultHandle`. The
-real reducer (set-shaped payload reduction, MinIO/S3 spill,
-``result_query`` / ``result_aggregate`` meta-tools) lands in a
-follow-on Initiative. Until then, the JSONFlux *seam* between
-dispatcher and reducer is exercised here via a test-only
-:class:`ForceHandleReducer` that wraps every payload in a synthetic
-handle. The test:
+Exercises the JSONFlux dispatcher → reducer → ``OperationResult`` seam
+with the **real** :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(G0.6.1-T3 #753) in force mode (``row_threshold=0`` — every non-empty
+set materializes regardless of size). The test:
 
 * Dispatches ``GET:/vcenter/vm`` against vcsim's 50-VM seed.
 * Asserts the returned :class:`~meho_backplane.connectors.schemas.OperationResult`
-  carries a populated :attr:`OperationResult.handle` (UUID id,
-  non-empty summary_md, dict schema_, ≥1 sample row, ttl_seconds set).
+  carries a populated :attr:`OperationResult.handle` with the real
+  materialized shape (fresh UUID id, summary_md naming the row count,
+  a JSON-Schema ``schema_`` mapping inferred from the DuckDB table,
+  ≥1 real sample row, ttl_seconds set).
 * Asserts the inlined :attr:`OperationResult.result` carries the
-  reduced summary (row_count + sample) rather than the full set.
+  reduced summary (row_count + bounded sample) rather than the full
+  50-VM set.
 
 What the test does NOT cover
 ============================
 
-* Real reducer logic — MinIO/S3 spill, schema inference from payload,
-  the 50-row/4KB threshold heuristic. Those land with the production
-  reducer.
+* MinIO/S3 spill — the v0.2 reducer is DuckDB ``:memory:`` only
+  (Initiative #750 out-of-scope §3).
 * Audit-row ``handle_id`` propagation — v0.2's audit pipeline does
   not surface the handle's UUID on the audit row's
-  :attr:`AuditLog.extras` field. Once the production reducer ships,
-  the audit row's payload column gains a ``handle_id`` key; the
-  assertion below is intentionally focused on the
-  :class:`OperationResult` envelope rather than the audit-row shape
-  to keep the test resilient to that future change.
+  :attr:`AuditLog.extras` field. The assertion below is focused on the
+  :class:`OperationResult` envelope rather than the audit-row shape.
 """
 
 from __future__ import annotations
@@ -41,90 +36,30 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._canary_fixtures import IngestedCanaryVcsim
 
 
-class ForceHandleReducer:
-    """Test-only reducer that always produces a :class:`ResultHandle`.
-
-    Exists to exercise the JSONFlux dispatcher seam against a real
-    response — proves the dispatcher calls the reducer, threads the
-    handle through :func:`wrap_ok_result` onto the
-    :class:`OperationResult.handle` field, and ships the summary
-    on :attr:`OperationResult.result` (not the raw payload).
-
-    Set-shaped payload handling:
-
-    * ``dict`` with ``"value"`` key (vCenter REST's set-shape) →
-      ``rows = payload["value"]``; ``total_rows = len(rows)``.
-    * ``list`` → ``total_rows = len(payload)``.
-    * Anything else → ``total_rows = 1``, ``sample_rows = ()``.
-
-    The handle's ``schema_`` is a placeholder ``{"type": "array",
-    "items": {"type": "object"}}`` — a real reducer would infer the
-    schema from the payload, but the dispatcher seam test only needs
-    a non-empty dict to pass the
-    :class:`~meho_backplane.connectors.schemas.ResultHandle`
-    validator's frozen requirement.
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        """Always return ``(summary_dict, ResultHandle)``."""
-        del schema, context  # synthetic reducer ignores both
-        if isinstance(payload, dict) and "value" in payload:
-            rows = payload["value"]
-            if isinstance(rows, list):
-                total = len(rows)
-                sample = tuple(rows[:5]) if rows else ()
-            else:
-                total = 1
-                sample = ()
-        elif isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        else:
-            total = 1
-            sample = ()
-
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample if sample else None,
-            ttl_seconds=3600,
-        )
-        summary = {"row_count": total, "sample": list(sample)}
-        return summary, handle
-
-
 @pytest.fixture
 def force_handle_reducer() -> Any:
-    """Install :class:`ForceHandleReducer` as the dispatcher's default.
+    """Install :class:`JsonFluxReducer` in force mode as the dispatcher default.
 
-    The reducer is module-level state on
-    :mod:`meho_backplane.operations.dispatcher`; the test's setup
-    swaps it in via :func:`set_default_reducer` and teardown restores
-    :class:`PassThroughReducer` so a follow-on test in the same
-    pytest session sees the v0.2 default behaviour.
+    ``row_threshold=0`` forces every non-empty set to materialize, so
+    vcsim's 50-VM seed (at, not over, the default 50-row threshold)
+    produces a handle. The reducer is module-level state on
+    :mod:`meho_backplane.operations.dispatcher`; the test's setup swaps
+    it in via :func:`set_default_reducer` and teardown restores
+    :class:`PassThroughReducer` so a follow-on test in the same pytest
+    session sees the v0.2 default behaviour.
 
-    :func:`reset_dispatcher_caches` is called on teardown to drop
-    any connector-instance cache the dispatch built up; the
-    ``ingested_canary_vcsim`` fixture's own teardown handles its
-    own slice of that work, but explicit reset here keeps the
-    fixture independent of evaluation order.
+    :func:`reset_dispatcher_caches` is called on teardown to drop any
+    connector-instance cache the dispatch built up.
     """
-    set_default_reducer(ForceHandleReducer())
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         yield
     finally:
@@ -172,7 +107,7 @@ async def test_force_handle_reducer_populates_operation_result_handle(
     handle = result_envelope.get("handle")
     assert handle is not None, (
         f"expected OperationResult.handle to be populated by "
-        f"ForceHandleReducer; got handle=None on envelope={result_envelope!r}"
+        f"JsonFluxReducer; got handle=None on envelope={result_envelope!r}"
     )
     # ``model_dump`` ships the handle as a dict on the wire; the
     # assertions below match the JSON shape rather than re-instantiating
@@ -186,12 +121,22 @@ async def test_force_handle_reducer_populates_operation_result_handle(
     assert "50" in handle["summary_md"], (
         f"expected summary_md to mention the row count; got {handle['summary_md']!r}"
     )
+    # schema_ is the real JSON Schema the reducer inferred from the
+    # DuckDB-materialized table: an array-of-objects with typed columns.
     assert isinstance(handle["schema_"], dict) and handle["schema_"], (
         f"handle.schema_ must be a non-empty mapping; got {handle['schema_']!r}"
     )
+    assert handle["schema_"]["type"] == "array"
+    schema_props = handle["schema_"]["items"]["properties"]
+    assert schema_props, f"expected ≥1 inferred column in the handle schema; got {schema_props!r}"
     sample_rows = handle.get("sample_rows")
     assert sample_rows, (
         f"expected ≥1 sample row from vcsim's 50-VM list; got sample_rows={sample_rows!r}"
+    )
+    # Sample rows are real VM records whose keys match the inferred schema.
+    assert set(sample_rows[0]) == set(schema_props), (
+        f"sample-row columns must match the inferred schema; "
+        f"row keys={set(sample_rows[0])} schema keys={set(schema_props)}"
     )
 
     # The inlined result is the reducer's summary, not the raw 50-VM

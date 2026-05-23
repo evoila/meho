@@ -96,8 +96,9 @@ from meho_backplane.memory import (
 )
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
-from meho_backplane.operations import run_typed_op_registrars
+from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
 from meho_backplane.operations.ingest import load_catalog
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
@@ -244,6 +245,14 @@ async def _run_lifespan_startup() -> None:
     # to during the import pass above so descriptor rows are populated
     # before the first dispatch.
     await run_typed_op_registrars()
+    # Real JSONFlux reducer install (G0.6.1-T3 #753). Swaps the
+    # dispatcher's module-level :class:`PassThroughReducer` default for
+    # the production :class:`JsonFluxReducer`, so every connector's
+    # set-shaped response over the v0.1-spec §4 threshold (50 rows / 4 KB)
+    # comes back as a markdown summary + :class:`ResultHandle` instead of
+    # the raw list. Production-only: tests construct their own reducers
+    # via :func:`set_default_reducer`.
+    set_default_reducer(JsonFluxReducer())
     # MCP tool / resource auto-discovery (G0.5-T3, #248). Same shape
     # as connector auto-discovery: top-level register_mcp_tool /
     # register_mcp_resource calls run at module import.

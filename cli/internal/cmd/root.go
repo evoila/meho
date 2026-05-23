@@ -20,6 +20,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
+	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
 	"github.com/evoila/meho/cli/internal/cmd/memory"
@@ -36,7 +37,6 @@ import (
 	vcflogs "github.com/evoila/meho/cli/internal/cmd/vcf-logs"
 	vcfoperations "github.com/evoila/meho/cli/internal/cmd/vcf-operations"
 	"github.com/evoila/meho/cli/internal/cmd/vmware"
-	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
 	"github.com/evoila/meho/cli/internal/discovery"
 )
 

@@ -634,9 +634,9 @@ def get_settings() -> Settings:
         memory_expiry_enabled=parse_bool_env(
             os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
         ),
-        ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", ""),
-        ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", ""),
-        ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", ""),
+        ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
+        ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
+        ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
         topology_history_retention_days=int(
             os.environ.get("TOPOLOGY_HISTORY_RETENTION_DAYS", "90"),
         ),

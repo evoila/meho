@@ -163,8 +163,11 @@ async def dispatch_ingested(
     # the hook rather than hard-failing on a missing attribute.
     mount_op_path = getattr(connector, "mount_op_path", None)
     if mount_op_path is not None:
-        substituted = await mount_op_path(target, substituted)
-    raw_jwt = operator.raw_jwt
+        substituted = await mount_op_path(target, substituted, operator)
+    # Thread the full Operator (not just operator.raw_jwt) to the HTTP
+    # transport: the connector's credential loader resolves the per-target
+    # secret under the operator's identity (operator-context Vault read).
+    # See docs/architecture/connector-auth.md.
     if method in ("GET", "HEAD", "OPTIONS"):
         request_json = getattr(connector, "_request_json", None)
         if request_json is None:
@@ -176,7 +179,7 @@ async def dispatch_ingested(
             target,
             method,
             substituted,
-            raw_jwt=raw_jwt,
+            operator=operator,
             params=query_params or None,
             json=body_params or None,
         )
@@ -192,7 +195,7 @@ async def dispatch_ingested(
     return await post_json(
         target,
         substituted,
-        raw_jwt=raw_jwt,
+        operator=operator,
         json=body_params or None,
     )
 

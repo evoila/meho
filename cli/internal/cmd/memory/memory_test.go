@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/auth"
+	"github.com/evoila/meho/cli/internal/backplane"
 )
 
 // seedXDGAndToken seeds a per-test config dir + token store the way
@@ -256,7 +257,7 @@ func TestRequireTargetForScopeBlocks(t *testing.T) {
 }
 
 func TestNormaliseURLHappy(t *testing.T) {
-	got, err := normaliseURL("https://meho.test/")
+	got, err := backplane.NormaliseURL("https://meho.test/")
 	if err != nil {
 		t.Fatalf("normaliseURL: %v", err)
 	}
@@ -266,25 +267,25 @@ func TestNormaliseURLHappy(t *testing.T) {
 }
 
 func TestNormaliseURLRejectsHostless(t *testing.T) {
-	if _, err := normaliseURL("/just/a/path"); err == nil {
+	if _, err := backplane.NormaliseURL("/just/a/path"); err == nil {
 		t.Errorf("expected error for hostless URL")
 	}
 }
 
 func TestNormaliseURLRejectsEmpty(t *testing.T) {
-	if _, err := normaliseURL("   "); err == nil {
+	if _, err := backplane.NormaliseURL("   "); err == nil {
 		t.Errorf("expected error for empty URL")
 	}
 }
 
 func TestClassifyBackplaneErrorRoutesByCause(t *testing.T) {
-	wrapped := &errNoBackplaneConfigured{inner: auth.ErrConfigNotFound}
-	se := classifyBackplaneError(wrapped)
+	wrapped := &backplane.NotConfiguredError{Inner: auth.ErrConfigNotFound}
+	se := backplane.ClassifyError(wrapped)
 	if se == nil || se.Code != "auth_expired" {
 		t.Fatalf("wrapped ErrConfigNotFound should classify as auth_expired; got %+v", se)
 	}
 	other := errors.New("invalid URL")
-	se = classifyBackplaneError(other)
+	se = backplane.ClassifyError(other)
 	if se == nil || se.Code != "unexpected_response" {
 		t.Fatalf("other errors should classify as unexpected; got %+v", se)
 	}

@@ -3,19 +3,21 @@
 
 """G3.5-T8 JSONFlux force-mode acceptance for the Harbor connector.
 
-v0.2 ships only :class:`~meho_backplane.operations.reducer.PassThroughReducer`
-— the production reducer never produces a :class:`ResultHandle`. This test
-mirrors :mod:`tests.acceptance.test_g35_sddc_jsonflux_force_handle` verbatim,
-swapping in Harbor as the dispatched connector: it installs a test-only
-:class:`ForceHandleReducer` that wraps every payload in a synthetic handle,
-dispatches ``harbor.artifact.list`` against the seeded Harbor core, and asserts
-the :class:`~meho_backplane.connectors.schemas.OperationResult`'s ``handle``
-field carries a populated :class:`ResultHandle`.
+Drives the **real**
+:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(G0.6.1-T3 #753) in force mode (``row_threshold=0``) as the dispatcher
+default. Mirrors :mod:`tests.acceptance.test_g35_sddc_jsonflux_force_handle`,
+swapping in Harbor as the dispatched connector: it dispatches
+``harbor.artifact.list`` against the seeded Harbor core and asserts the
+:class:`~meho_backplane.connectors.schemas.OperationResult`'s ``handle``
+field carries a populated :class:`ResultHandle` with the real
+materialized shape (UUID id, summary_md naming the row count, an
+inferred JSON-Schema ``schema_``, ≥1 real sample row).
 
-Harbor's artifact list returns a plain JSON array (not a pagination envelope
-like NSX's ``results[]`` or SDDC's ``elements[]``). The
-:class:`ForceHandleReducer` handles this shape via its ``list`` branch so the
-dispatcher-seam test doesn't depend on the specific list-key name.
+Harbor's artifact list returns a plain JSON array (not a pagination
+envelope like NSX's ``results[]`` or SDDC's ``elements[]``). The
+reducer's collection detection handles a bare top-level list directly,
+so the dispatcher-seam test doesn't depend on a specific list-key name.
 """
 
 from __future__ import annotations
@@ -25,9 +27,9 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._harbor_canary_fixtures import (
@@ -38,59 +40,16 @@ from tests.acceptance._harbor_canary_fixtures import (
 )
 
 
-class ForceHandleReducer:
-    """Test-only reducer that always produces a :class:`ResultHandle`.
-
-    Recognises four payload shapes Harbor and sibling connectors use:
-
-    * ``list`` → total = ``len(payload)``.
-    * ``dict`` with ``"elements"`` key (SDDC Manager paginated envelope).
-    * ``dict`` with ``"results"`` key (NSX policy/manager API list shape).
-    * ``dict`` with ``"value"`` key (vCenter REST list shape).
-    * Anything else → total = 1, sample = ().
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        """Always return ``(summary_dict, ResultHandle)``."""
-        del schema, context
-        if isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        elif isinstance(payload, dict):
-            for key in ("elements", "results", "value"):
-                rows = payload.get(key)
-                if isinstance(rows, list):
-                    total = len(rows)
-                    sample = tuple(rows[:5]) if rows else ()
-                    break
-            else:
-                total = 1
-                sample = ()
-        else:
-            total = 1
-            sample = ()
-
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample if sample else None,
-            ttl_seconds=3600,
-        )
-        summary = {"row_count": total, "sample": list(sample)}
-        return summary, handle
-
-
 @pytest.fixture
 def force_handle_reducer() -> Any:
-    """Install :class:`ForceHandleReducer` as the dispatcher's default."""
-    set_default_reducer(ForceHandleReducer())
+    """Install :class:`JsonFluxReducer` in force mode as the dispatcher default.
+
+    ``row_threshold=0`` forces every non-empty set to materialize, so
+    the seeded artifact list (below the default 50-row threshold)
+    produces a handle. Teardown restores :class:`PassThroughReducer` so
+    a follow-on test in the same session sees the v0.2 default.
+    """
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         yield
     finally:
@@ -119,9 +78,9 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_harbor
     * ``result['row_count']`` matches the handle's total.
 
     The artifact list response is a plain JSON array (not a pagination
-    envelope), so the :class:`ForceHandleReducer`'s ``list`` branch is
+    envelope), so the reducer's bare-top-level-list detection branch is
     exercised here — different from the NSX and SDDC tests which hit the
-    ``results[]`` and ``elements[]`` branches respectively.
+    ``results[]`` and ``elements[]`` envelope branches respectively.
     """
     expected_rows = len(HARBOR_CANARY_ARTIFACTS)
 
@@ -141,7 +100,7 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_harbor
 
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        f"expected OperationResult.handle to be populated by ForceHandleReducer; "
+        f"expected OperationResult.handle to be populated by JsonFluxReducer; "
         f"got handle=None on envelope={result_envelope!r}"
     )
     uuid.UUID(handle["handle_id"])

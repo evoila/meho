@@ -560,11 +560,12 @@ class Bind9Connector(SshConnector):
         (two SSH command executions, one pooled connection).
 
         The returned dict is intentionally flat -- no nested
-        ``extras`` -- because the dispatcher's default reducer
-        forwards the value verbatim. Future reducers (real JSONFlux
-        reduction in a follow-on Initiative) flatten nested shapes
-        anyway; staying flat now means the v0.2 callers see the same
-        keys before and after the reducer swap.
+        ``extras`` -- so the dispatcher's default
+        :class:`meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+        passes this scalar (non-set-shaped) payload through verbatim
+        into ``OperationResult.result`` with a ``None`` handle; only
+        set-shaped responses above the threshold are materialized into a
+        :class:`~meho_backplane.connectors.schemas.ResultHandle`.
         """
         del params  # declared empty in schema; intentionally ignored
         result = await self.fingerprint(target)

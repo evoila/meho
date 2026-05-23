@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -55,16 +56,16 @@ func newVcenterListCmd() *cobra.Command {
 }
 
 func runVcenterList(cmd *cobra.Command, datacenterVmid, targetName string, jsonOut bool, backplaneOverride string) error {
-	backplaneURL, err := resolveBackplane(backplaneOverride)
+	backplaneURL, err := backplane.Resolve(backplaneOverride)
 	if err != nil {
-		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), jsonOut)
+		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{"dataCenterVmid": datacenterVmid}
-	r, err := dispatchOp(cmd.Context(), backplaneURL, vcenterListOpID, targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, vcenterListOpID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return renderCallResult(cmd, vcenterListOpID, r, jsonOut, printVcenterList)
+	return conn.Render(cmd, vcenterListOpID, r, jsonOut, printVcenterList)
 }
 
 func printVcenterList(w io.Writer, r *CallResult) {
@@ -75,7 +76,7 @@ func printVcenterList(w io.Writer, r *CallResult) {
 	}
 	entries, err := decodeListResult(r.Result)
 	if err != nil {
-		printGenericResult(w, vcenterListOpID, r)
+		conn.PrintGeneric(w, vcenterListOpID, r)
 		return
 	}
 	if len(entries) == 0 {

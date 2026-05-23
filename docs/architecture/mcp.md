@@ -81,7 +81,7 @@ class ToolDefinition(BaseModel):
     op_class: str              # "read" | "write" | "credential_read" | "audit_query"
 ```
 
-Wire shape (returned via `tools/list`) drops `required_role` and `op_class` — clients shouldn't see server-side policy.
+Wire shape (returned via `tools/list`) drops `required_role` and `op_class` — clients shouldn't see server-side policy. It also strips any top-level `oneOf` / `allOf` / `anyOf` from `inputSchema`: the Anthropic Messages API rejects a top-level JSON-Schema combinator in a tool's `input_schema` and 400s the whole `tools` array (so one offender breaks every call in the session), hence the published copy must be combinator-free. The full schema — combinators retained — stays on `inputSchema` for server-side `jsonschema` validation, so the `-32602` rejections for bad argument shapes are unaffected. See `_wire_safe_input_schema` in [`mcp/registry.py`](../../backend/src/meho_backplane/mcp/registry.py). (#905)
 
 ### `ResourceTemplateDefinition` + handler
 

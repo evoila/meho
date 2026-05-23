@@ -28,12 +28,23 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
-__all__ = ["TopologyEdge", "TopologyEdgeEndpoint", "TopologyNode", "TopologyPath"]
+__all__ = [
+    "TopologyDiffEntry",
+    "TopologyDiffResult",
+    "TopologyEdge",
+    "TopologyEdgeEndpoint",
+    "TopologyHistoryEntry",
+    "TopologyHistoryResult",
+    "TopologyNode",
+    "TopologyPath",
+    "TopologyTimelineEntry",
+    "TopologyTimelineResult",
+]
 
 
 def _deep_freeze(value: Any) -> Any:
@@ -200,3 +211,229 @@ class TopologyEdge(BaseModel):
         # field-serialiser contract.
         thawed: dict[str, Any] = _deep_thaw(value)
         return thawed
+
+
+class TopologyTimelineEntry(BaseModel):
+    """One row of the topology timeline (G9.3-T5).
+
+    Task #861 ships the tenant-wide chronological feed of graph
+    changes -- "what's been happening in the graph in the last hour"
+    without rooting at a specific resource. Each row projects one
+    ``graph_node_history`` or ``graph_edge_history`` mutation into a
+    compact summary the CLI / REST / MCP fronts can render or page
+    through.
+
+    Field-to-column mapping:
+
+    * ``valid_from`` -- ``*_history.valid_from``; every history row
+      from one operation carries the same timestamp (the diff-on-write
+      hook is the single source per :mod:`.history`).
+    * ``history_id`` -- ``*_history.history_id``. Required because the
+      cursor's tie-breaker discriminator is ``(valid_from, history_id,
+      source)`` -- ``valid_from`` alone is not unique within a refresh.
+    * ``source`` -- ``"node"`` for :class:`GraphNodeHistory`, ``"edge"``
+      for :class:`GraphEdgeHistory`. The discriminator the UNION
+      preserves.
+    * ``change_kind`` -- one of ``"created"`` / ``"updated"`` /
+      ``"removed"`` per :class:`GraphHistoryChangeKind`.
+    * ``resource_id`` -- ``node_id`` or ``edge_id`` of the mutated row.
+      ``None`` only after the referenced live row has been
+      hard-deleted (``ON DELETE SET NULL``) -- a rare survivability
+      shape; most timeline rows carry the FK intact.
+    * ``summary`` -- one-line human-readable description derived from
+      ``snapshot.before`` / ``snapshot.after``. Format:
+      ``"<change_kind> <kind> <name>"`` for nodes (e.g. ``"created vm
+      vm-prod"``); ``"<change_kind> <edge_kind> <from> -> <to>"`` for
+      edges (e.g. ``"removed runs-on vm-prod -> host-a"``). Falls back
+      to ``"<change_kind> <source>"`` when the live row is gone and
+      the snapshot did not preserve enough context.
+    * ``audit_id`` -- the soft-FK to the ``audit_log.id`` of the
+      operation that caused the mutation. ``None`` only for legacy
+      / mid-rollout rows; the diff-on-write hook always populates it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    valid_from: datetime
+    history_id: int
+    source: str
+    change_kind: str
+    resource_id: UUID | None
+    summary: str
+    audit_id: UUID | None
+
+
+class TopologyHistoryEntry(BaseModel):
+    """One row of the per-resource history walk (G9.3-T3).
+
+    Task #859 ships the operator surface ``meho topology history
+    <node>`` -- "what changed for THIS resource?" The differentiator
+    from :class:`TopologyTimelineEntry` (G9.3-T5) is that history
+    carries the full ``snapshot`` JSONB (``{before, after}``) per row
+    rather than a one-line summary -- the forensic shape for ``--json``
+    reconstruction. Field-to-column mapping otherwise matches
+    timeline:
+
+    * ``valid_from`` -- ``*_history.valid_from``.
+    * ``history_id`` -- ``*_history.history_id``.
+    * ``source`` -- ``"node"`` for :class:`GraphNodeHistory`, ``"edge"``
+      for :class:`GraphEdgeHistory` (only ``"edge"`` rows ever appear
+      when the caller passed ``include_edges=True``).
+    * ``change_kind`` -- one of ``"created"`` / ``"updated"`` /
+      ``"removed"`` per :class:`GraphHistoryChangeKind`.
+    * ``resource_id`` -- ``node_id`` for node-side rows, ``edge_id``
+      for edge-side rows. ``None`` only after the referenced live row
+      has been hard-deleted (``ON DELETE SET NULL``).
+    * ``snapshot`` -- the full ``{before, after}`` JSONB. ``None``
+      only for legacy / mid-rollout rows that pre-date the
+      diff-on-write hook; every hook-emitted row populates it.
+    * ``audit_id`` -- soft-FK to the ``audit_log.id`` of the
+      operation that caused the mutation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    valid_from: datetime
+    history_id: int
+    source: str
+    change_kind: str
+    resource_id: UUID | None
+    snapshot: dict[str, Any] | None
+    audit_id: UUID | None
+
+
+class TopologyHistoryResult(BaseModel):
+    """The full per-resource history walk plus the resolved anchor.
+
+    Unlike :class:`TopologyTimelineResult` (which is cursor-paginated),
+    the per-resource walk returns one page bounded by the substrate's
+    ``_MAX_HISTORY_ROWS`` cap -- per-resource history is bounded by
+    the retention window (default 90 days) and the operator typically
+    wants the complete chronology in one response. No ``next_cursor``;
+    a caller that overflows the cap narrows ``since`` / ``until``.
+
+    ``anchor_node_id`` is the resolved :class:`GraphNode.id` of the
+    anchor. Echoing it lets the CLI / MCP fronts surface "I resolved
+    your name X to node Y" in the human-readable header without a
+    second resolver round trip.
+
+    ``include_edges`` echoes the call-site flag so a consumer can
+    branch on whether edge rows are expected to appear in ``rows``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    anchor_node_id: UUID
+    include_edges: bool
+    rows: tuple[TopologyHistoryEntry, ...]
+
+
+class TopologyTimelineResult(BaseModel):
+    """Page of timeline rows plus the forward-only continuation cursor.
+
+    ``next_cursor`` is :data:`None` when fewer than ``limit`` rows
+    were available (the query reached the end of the matching set).
+    Consumers iterate by re-issuing the same filter with
+    ``cursor = next_cursor`` until ``next_cursor`` is None.
+
+    The cursor is opaque (base64-encoded JSON over ``(valid_from,
+    history_id, source)``) -- consumers treat it as a token. Stability
+    under concurrent inserts: a new history row landing in the window
+    between page N and page N+1 is naturally placed by the keyset
+    compare (``(valid_from, history_id) < (cursor.ts, cursor.id)``)
+    and either appears on a later page (if it falls below the cursor)
+    or never (if it lands above the cursor). No row is duplicated or
+    skipped by the act of paging.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # ``tuple`` (not ``list``) so the ``frozen=True`` immutability
+    # contract extends to in-place mutation: a list would still accept
+    # ``.append`` / ``.pop`` despite the ``frozen`` block on attribute
+    # reassignment. Consumers iterating over ``rows`` see the same shape.
+    rows: tuple[TopologyTimelineEntry, ...]
+    next_cursor: str | None
+
+
+class TopologyDiffEntry(BaseModel):
+    """One resource's net delta between ``ts1`` and ``ts2`` (G9.3-T4 #860).
+
+    Task #860 ships the graph-level *diff* between two timestamps. Each
+    entry summarises **one node or edge** that mutated in the window:
+
+    * ``change_kind`` is the **net** change for the resource in
+      ``(ts1, ts2]``. The fold rule per resource:
+
+      - ``created`` -- the first history row in window is ``created``
+        and the last in-window row is not ``removed``.
+      - ``removed`` -- the last in-window row is ``removed``.
+      - ``updated`` -- the resource existed before ``ts1`` and has at
+        least one in-window mutation.
+
+      A resource ``created`` *and* ``removed`` inside the same window
+      nets to ``removed`` (the post-window state is "gone"). This is
+      the operator's mental model for "what changed since ts1?".
+
+    * ``source`` -- ``"node"`` or ``"edge"`` (which history table the
+      resource was projected from).
+    * ``resource_id`` -- ``graph_node.id`` or ``graph_edge.id`` of the
+      mutated resource. ``None`` only when the live row has been
+      hard-deleted post-window via ``ON DELETE SET NULL``; rare.
+    * ``kind`` -- the resource's domain ``kind`` (``vm``, ``host``,
+      ``runs-on``, ``mounts``, ...). Picked from the post-state for
+      ``created``/``updated`` and from the pre-state for ``removed``
+      so the entry always carries a renderable kind even for
+      tombstones.
+    * ``name`` -- ``graph_node.name`` for nodes; ``None`` for edges
+      (the edge snapshot does not carry endpoint names -- the snapshot
+      stores FKs, not names; the CLI uses ``--json`` + a separate node
+      lookup if the operator wants full endpoint detail).
+    * ``summary`` -- one-line human-readable description, format
+      ``"<change_kind> <source> <kind> <name>"`` for nodes and
+      ``"<change_kind> <source> <kind>"`` for edges, matching the
+      timeline-entry summary style.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    # ``Literal`` rather than ``str`` so the autogen OpenAPI / MCP tool
+    # schemas carry the closed enum constraint. Generated Go / TS / Python
+    # SDK clients then enforce the closed vocabulary at compile time
+    # rather than parsing free-form strings.
+    change_kind: Literal["created", "updated", "removed"]
+    source: Literal["node", "edge"]
+    resource_id: UUID | None
+    kind: str
+    name: str | None
+    summary: str
+
+
+class TopologyDiffResult(BaseModel):
+    """Result of :func:`query_diff` -- the diff entries plus a truncation flag.
+
+    The v0.2 diff surface enforces a **1000-row hard cap** (the substrate
+    cap, mirrored by the CLI / REST / MCP fronts). When the seeded
+    cohort of changed resources exceeds the cap, the result is truncated
+    at 1000 entries and ``truncated`` flips to ``True``; ``truncation_hint``
+    carries the canonical operator-facing remediation line. Callers
+    rendering a structured summary should surface the hint verbatim so
+    every front shows the same "narrow the time window" recovery path.
+
+    Aggregate counts (``created`` / ``updated`` / ``removed``) are
+    derived from ``entries`` -- both the substrate result and the
+    fronts compute the totals from the same source so a UI re-rendering
+    the JSON can rely on the counts matching the entries.
+
+    Ordering: entries are returned in the same insertion order the
+    substrate folds them in -- ``(source, resource_id)`` after a
+    per-resource fold. Consumers wanting a presentation order
+    (``removed`` first, then ``updated``, then ``created``) sort
+    client-side; the substrate stays out of presentation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    entries: tuple[TopologyDiffEntry, ...]
+    truncated: bool
+    truncation_hint: str | None

@@ -84,11 +84,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.gcloud.session import (
     GcloudCredentialsLoader,
@@ -102,6 +103,9 @@ from meho_backplane.connectors.schemas import (
     OperationResult,
     ProbeResult,
 )
+
+if TYPE_CHECKING:
+    from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = ["GcloudConnector"]
 
@@ -286,7 +290,7 @@ class GcloudConnector(HttpConnector):
     async def auth_headers(
         self,
         target: GcloudTargetLike,
-        raw_jwt: str,
+        operator: Operator,
     ) -> dict[str, str]:
         """Return ``{"Authorization": "Bearer <token>"}`` for *target*.
 
@@ -305,11 +309,12 @@ class GcloudConnector(HttpConnector):
            builds impersonated credentials via ADC + impersonation if the
            cache is empty, then returns the bearer token.
 
-        ``raw_jwt`` is accepted for ABC-signature compatibility but unused —
-        ``IMPERSONATION`` auth drives all GCP calls through the
-        google-auth impersonation chain, not the operator's OIDC JWT.
+        The ``operator`` is forwarded to :meth:`_gate_sa_key_refusal` so the
+        credentials loader reads the per-target Vault secret under the
+        operator's identity. It is NOT forwarded to GCP — ``IMPERSONATION``
+        auth drives all GCP calls through the google-auth impersonation
+        chain, not the operator's OIDC JWT.
         """
-        del raw_jwt  # IMPERSONATION mode does not forward operator JWT
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
@@ -317,7 +322,7 @@ class GcloudConnector(HttpConnector):
                 f"{AuthModel.IMPERSONATION.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        await self._gate_sa_key_refusal(target)
+        await self._gate_sa_key_refusal(target, operator)
         token = await self._ensure_token(target)
         return {"Authorization": f"Bearer {token}"}
 
@@ -325,14 +330,16 @@ class GcloudConnector(HttpConnector):
     # SA-JSON-key refusal
     # ------------------------------------------------------------------
 
-    async def _gate_sa_key_refusal(self, target: GcloudTargetLike) -> None:
+    async def _gate_sa_key_refusal(self, target: GcloudTargetLike, operator: Operator) -> None:
         """Raise :exc:`ValueError` if the Vault secret carries SA-JSON-key fields.
 
         The check runs on every :meth:`auth_headers` call (not just the
         first) so a Vault secret rotation that introduces key material is
         caught on the next request rather than silently ignored due to
         caching. The credentials_loader is responsible for cache behaviour;
-        this method only validates the shape.
+        this method only validates the shape. ``operator`` is forwarded to the
+        loader so the per-target Vault read happens under the operator's
+        identity.
 
         Raises
         ------
@@ -340,7 +347,7 @@ class GcloudConnector(HttpConnector):
             When any SA-JSON-key field name is present in the loaded record,
             naming the target and the offending field names.
         """
-        record = await self._credentials_loader(target)
+        record = await self._credentials_loader(target, operator)
         if _contains_sa_key_fields(record):
             from meho_backplane.connectors.gcloud.session import _SA_KEY_FIELDS
 
@@ -665,7 +672,9 @@ class GcloudConnector(HttpConnector):
     # ------------------------------------------------------------------
 
     @classmethod
-    async def register_gcloud_typed_operations(cls) -> None:
+    async def register_gcloud_typed_operations(
+        cls, *, embedding_service: EmbeddingService | None = None
+    ) -> None:
         """Register all G3.7-T5 gcloud typed ops into ``endpoint_descriptor``.
 
         Called from the application lifespan after the registry has
@@ -679,7 +688,18 @@ class GcloudConnector(HttpConnector):
 
         Idempotent across pod restarts — mirrors the
         :meth:`Bind9Connector.register_operations` shape.
+
+        The keyword-only ``embedding_service`` is required for
+        runner-compatibility:
+        :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+        passes the process-wide :class:`EmbeddingService` (or a chassis-test
+        stub) to every queued registrar via ``registrar(embedding_service=...)``,
+        so a registrar that does not accept the kwarg crashes the lifespan with
+        :class:`TypeError`. It is accepted-and-discarded here (matching the
+        bind9 / k8s siblings) because :func:`register_typed_operation` resolves
+        the embedding service via its process-wide singleton fallback.
         """
+        del embedding_service  # see docstring — kwarg accepted for runner-compatibility
         from meho_backplane.connectors.gcloud.ops import GCLOUD_OPS
         from meho_backplane.operations.typed_register import register_typed_operation
 

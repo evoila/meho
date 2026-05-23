@@ -69,7 +69,7 @@ from sqlalchemy import select
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2
-from meho_backplane.connectors.schemas import FingerprintResult, ResultHandle
+from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_automation import (
     VCFA_CONNECTOR_ID,
     VCFA_CORE_GROUPS,
@@ -84,6 +84,7 @@ from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGrou
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 
@@ -357,48 +358,19 @@ def captured_events(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
-# ForceHandleReducer (acceptance criterion d)
-# ---------------------------------------------------------------------------
-
-
-class _ForceHandleReducer:
-    """Test-only reducer that always wraps a VCFA tenant list payload in a ResultHandle."""
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        del schema, context
-        if isinstance(payload, dict) and "content" in payload:
-            rows = payload["content"]
-            total = len(rows) if isinstance(rows, list) else 1
-            sample: tuple[Any, ...] = tuple(rows[:5]) if isinstance(rows, list) and rows else ()
-        elif isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        else:
-            total = 1
-            sample = ()
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample or None,
-            ttl_seconds=3600,
-        )
-        return {"row_count": total, "sample": list(sample)}, handle
-
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _vcfa_credentials_loader(_target: object) -> dict[str, str]:
-    """Stub credentials loader -- bypasses the not-yet-wired Vault read."""
+async def _vcfa_credentials_loader(_target: object, _operator: Operator) -> dict[str, str]:
+    """Stub credentials loader -- bypasses the live Vault read for the E2E dispatch tests.
+
+    The dual-plane dispatch acceptance criteria in #840 don't exercise
+    the operator-context Vault read (that's the responsibility of the
+    cred-read recorded-fixture E2E in
+    ``test_connectors_vcf_automation_credread.py``). Keeping the stub
+    here avoids forcing every dispatch test to wire the Vault fake.
+    """
     return {"username": "svc-meho", "password": "vcfa-e2e-password"}
 
 
@@ -778,14 +750,14 @@ async def test_vcfa_e2e_dispatch_writes_audit_row(
 async def test_vcfa_e2e_jsonflux_handle_populated_for_deployment_list(
     vcfa_e2e_canary: _VcfaE2EBundle,
 ) -> None:
-    """Tenant deployment list dispatched with ForceHandleReducer returns a populated handle.
+    """Tenant deployment list dispatched with the real JsonFluxReducer returns a populated handle.
 
     Exercises acceptance criterion (d) -- the JSONFlux seam threads
     the reducer's :class:`ResultHandle` onto :class:`OperationResult`.
     """
     expected_rows = len(_TENANT_DEPLOYMENTS["content"])  # type: ignore[arg-type]
 
-    set_default_reducer(_ForceHandleReducer())
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         result_envelope = await call_operation(
             _OPERATOR,
@@ -804,7 +776,7 @@ async def test_vcfa_e2e_jsonflux_handle_populated_for_deployment_list(
     )
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        "Expected OperationResult.handle to be populated by _ForceHandleReducer; "
+        "Expected OperationResult.handle to be populated by JsonFluxReducer; "
         f"got handle=None on envelope={result_envelope!r}"
     )
     uuid.UUID(handle["handle_id"])

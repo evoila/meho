@@ -363,8 +363,13 @@ def _param_schema_for(path: str) -> dict[str, object]:
     }
 
 
-async def _sddc_credentials_loader(_target: object) -> dict[str, str]:
-    """Stub credentials loader — bypasses the not-yet-wired Vault read."""
+async def _sddc_credentials_loader(_target: object, _operator: Operator) -> dict[str, str]:
+    """Stub credentials loader — bypasses the live operator-context Vault read.
+
+    The 2-arg signature matches the
+    :class:`~meho_backplane.connectors.sddc_manager.session.SddcCredentialsLoader`
+    G3.10-T1 (#945) introduced.
+    """
     return {"username": "sddc-canary-svc", "password": "sddc-canary-pw"}
 
 

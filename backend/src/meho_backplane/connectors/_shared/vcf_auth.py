@@ -14,7 +14,11 @@ small set of auth helpers:
   column-not-yet-populated sentinel — and reject everything else).
 * A Vault-credentials-loader protocol + first-use-cached per-target
   ``{"username": str, "password": str}`` dict with the
-  "missing-key → ``RuntimeError`` naming target" contract.
+  "missing-key → ``RuntimeError`` naming target" contract. The default
+  loader (:func:`load_credentials_from_vault`) performs a **live**
+  operator-context KV-v2 read via the shared
+  :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
+  helper (G3.10-T2 #946 wired the three VCF consumers to State 2).
 * A flexible session-login helper for products that POST credentials and
   consume a token from the response (vRLI specifically; vROps doesn't
   establish a session, Fleet doesn't either).
@@ -67,6 +71,8 @@ from typing import Any, Protocol, runtime_checkable
 import httpx
 import structlog
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors.schemas import AuthModel
 
 __all__ = [
@@ -145,7 +151,11 @@ class VcfTargetLike(Protocol):
     * ``host`` / ``port`` — forwarded to
       :meth:`meho_backplane.connectors.adapters.http.HttpConnector._base_url`.
     * ``secret_ref`` — Vault path the loader resolves to a
-      ``{"username": str, "password": str}`` dict.
+      ``{"username": str, "password": str}`` dict. ``str | None`` matches
+      the concrete ``Target.secret_ref`` column (nullable) and the
+      shared :class:`~meho_backplane.connectors._shared.vault_creds.BasicCredentialsTargetLike`
+      the loader forwards to; an unset ``secret_ref`` is rejected with
+      a clear error inside the loader, never a bare ``KeyError``.
     * ``auth_model`` — checked at the boundary by
       :func:`is_acceptable_auth_model`.
     """
@@ -153,7 +163,7 @@ class VcfTargetLike(Protocol):
     name: str
     host: str
     port: int | None
-    secret_ref: str
+    secret_ref: str | None
     auth_model: str | None
 
 
@@ -162,15 +172,26 @@ class VcfTargetLike(Protocol):
 # ---------------------------------------------------------------------------
 
 
-VcfCredentialsLoader = Callable[[VcfTargetLike], Awaitable[dict[str, str]]]
-"""Async callable resolving a target to ``{"username": ..., "password": ...}``.
+VcfCredentialsLoader = Callable[[VcfTargetLike, Operator], Awaitable[dict[str, str]]]
+"""Async callable resolving a ``(target, operator)`` pair to credentials.
 
-Injected on connector construction so:
+Returns ``{"username": ..., "password": ...}``. Injected on connector
+construction so:
 
-* Production deploys override the default loader once the operator-context
-  per-target Vault credential read is wired for the VCF connectors.
-* Unit tests pass a stub returning canned credentials.
+* Production deploys use the default loader
+  (:func:`load_credentials_from_vault`) which forwards the operator's
+  validated Keycloak JWT to Vault's JWT/OIDC auth method via the shared
+  :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
+  helper.
+* Unit tests pass a stub accepting ``(target, operator)`` returning canned
+  credentials.
 * Integration tests pass a loader yielding lab-account credentials.
+
+The ``operator`` parameter carries the full
+:class:`~meho_backplane.auth.operator.Operator` (frozen) so the live
+loader reads the per-target secret under the operator's identity via
+``vault_client_for_operator(operator)`` — the locked decision in
+``docs/architecture/connector-auth.md``.
 
 The return type is the looser ``dict[str, str]`` rather than a
 ``SessionCredentials`` Protocol because Python ``Protocol`` instances aren't
@@ -179,29 +200,37 @@ returns a plain dict and consumers read by key.
 """
 
 
-async def load_credentials_from_vault(target: VcfTargetLike) -> dict[str, str]:
-    """Default credential loader — Vault read by ``target.secret_ref``.
+async def load_credentials_from_vault(target: VcfTargetLike, operator: Operator) -> dict[str, str]:
+    """Default credential loader — live operator-context Vault KV-v2 read.
 
-    Deliberate stub mirroring
-    :func:`meho_backplane.connectors.harbor.session.load_credentials_from_vault`
-    and :func:`meho_backplane.connectors.nsx.session.load_session_credentials_from_vault`:
-    a production caller without an explicit loader override receives a clear
-    error rather than a silent fallback or a hallucinated credential pair.
+    Reads ``target.secret_ref`` as a KV-v2 secret **under the operator's
+    identity** (the operator's validated Keycloak JWT is forwarded to
+    Vault's JWT/OIDC auth method) and returns the service-account
+    ``{"username": ..., "password": ...}`` pair every VCF management-plane
+    consumer (vROps, vRLI, Fleet) sends as HTTP Basic on the wire (vROps,
+    Fleet) or via session-establish (vRLI). Delegates to the shared
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
+    helper (G3.9-T2 #941) so the read, the no-secret-in-logs discipline,
+    and the two-phase error contract live in one place every REST
+    connector reuses.
 
-    The supported workaround is to inject a custom loader on the
-    consuming connector at construction time. Tracked under the open
-    Goal #214 (Connector parity); once the operator-context Vault read
-    lands, this stub becomes the live implementation.
+    The error contract is the helper's:
+
+    * :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
+      — read-phase failure (empty ``operator.raw_jwt`` for a
+      system-initiated call, unset ``target.secret_ref``, a malformed
+      KV-v2 payload, or a missing ``username``/``password`` field). Never
+      a bare ``KeyError``.
+    * :class:`~meho_backplane.auth.vault.VaultClientError` (and its
+      subclasses) — login-phase failure (Vault unreachable, role denied).
+      Propagated verbatim so callers can distinguish login from read.
+
+    A custom :data:`VcfCredentialsLoader` can still be injected via
+    ``credentials_loader`` on the consuming connector (tests do exactly
+    that); this default is what production targets at rubric State 2
+    (``shared_service_account``) use.
     """
-    raise NotImplementedError(
-        "load_credentials_from_vault is a deliberate stub: the operator-context "
-        "per-target Vault credential read is not yet wired for the VCF "
-        f"management-plane connectors; target={target.name!r} "
-        f"secret_ref={target.secret_ref!r}. Workaround: inject a custom "
-        "credentials_loader on the connector at construction time. Tracked "
-        "under open Goal #214 (Connector parity): "
-        "https://github.com/evoila/meho/issues/214"
-    )
+    return await load_basic_credentials(target, operator)
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +277,20 @@ class CredentialsCache:
         self._cache: dict[str, dict[str, str]] = {}
         self._lock = asyncio.Lock()
 
-    async def get(self, target: VcfTargetLike) -> dict[str, str]:
+    async def get(self, target: VcfTargetLike, operator: Operator) -> dict[str, str]:
         """Return the cached credentials for *target*, loading on first use.
+
+        ``operator`` is forwarded to the loader so the live default
+        (:func:`load_credentials_from_vault`) performs the Vault read
+        under the operator's Identity entity via
+        :func:`~meho_backplane.auth.vault.vault_client_for_operator`. The
+        cache is keyed on ``target.name`` only — a single per-target
+        credential pair is shared across operators because the
+        ``shared_service_account`` auth model authenticates the connector
+        with a Vault-sourced service account, not the operator's OIDC
+        token. ``per_user`` / ``impersonation`` are explicitly out of
+        scope for State 2 (the auth-model boundary in each connector's
+        :meth:`auth_headers` rejects them before this method is reached).
 
         Raises :exc:`RuntimeError` if the loader returns a dict missing
         ``"username"`` or ``"password"``. The error message names both the
@@ -259,7 +300,7 @@ class CredentialsCache:
             cached = self._cache.get(target.name)
             if cached is not None:
                 return cached
-            raw = await self._loader(target)
+            raw = await self._loader(target, operator)
             for required in ("username", "password"):
                 if required not in raw:
                     raise RuntimeError(

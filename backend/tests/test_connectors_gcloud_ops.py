@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.gcloud import GcloudConnector
 from meho_backplane.connectors.gcloud.ops import GCLOUD_OPS, GcloudOp
 from meho_backplane.connectors.gcloud.session import GcloudTargetLike
@@ -64,7 +65,7 @@ _TARGET = _StubTarget(
 # ---------------------------------------------------------------------------
 
 
-async def _empty_loader(_target: GcloudTargetLike) -> dict[str, Any]:
+async def _empty_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
     return {}
 
 
@@ -999,6 +1000,32 @@ async def test_register_gcloud_typed_operations_idempotent() -> None:
         await GcloudConnector.register_gcloud_typed_operations()
     # 8 ops x 2 calls = 16 total register invocations
     assert mock_register.call_count == 16
+
+
+@pytest.mark.asyncio
+async def test_register_gcloud_typed_operations_accepts_embedding_service_kwarg() -> None:
+    """The registrar must accept the ``embedding_service`` kwarg.
+
+    Regression: ``run_typed_op_registrars`` (the lifespan path) calls every
+    queued registrar as ``registrar(embedding_service=...)``. A registrar that
+    omits the keyword crashes the whole app lifespan with ``TypeError`` — which
+    the direct-call tests above never exercise. This pins the runner contract.
+    """
+    mock_register = AsyncMock()
+    with (
+        patch(
+            "meho_backplane.connectors.gcloud.connector.register_typed_operation",
+            mock_register,
+            create=True,
+        ),
+        patch(
+            "meho_backplane.operations.typed_register.register_typed_operation",
+            mock_register,
+        ),
+    ):
+        # Mirrors run_typed_op_registrars: the kwarg is always supplied.
+        await GcloudConnector.register_gcloud_typed_operations(embedding_service=None)
+    assert mock_register.call_count == 8
 
 
 @pytest.mark.asyncio

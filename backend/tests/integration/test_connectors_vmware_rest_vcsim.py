@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.connectors.vmware_rest import (
     VmwareRestConnector,
@@ -128,7 +129,7 @@ async def vcsim_connector(
     /api/session`` is intercepted.
     """
 
-    async def _loader(_target: VsphereTargetLike) -> dict[str, str]:
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
         return {"username": "user", "password": "pass"}
 
     connector = VmwareRestConnector(session_loader=_loader)

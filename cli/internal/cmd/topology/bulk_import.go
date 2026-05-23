@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -222,10 +223,10 @@ func runBulkImport(cmd *cobra.Command, opts bulkImportOptions) error {
 			output.Unexpected("file contains no edges (the `edges:` list is missing or empty)"),
 			opts.JSONOut)
 	}
-	backplaneURL, err := resolveBackplane(opts.BackplaneOverride)
+	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(),
-			classifyBackplaneError(err), opts.JSONOut)
+			backplane.ClassifyError(err), opts.JSONOut)
 	}
 	body, err := json.Marshal(bulkImportRequest{
 		Edges:  doc.Edges,

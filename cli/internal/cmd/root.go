@@ -19,6 +19,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
+	"github.com/evoila/meho/cli/internal/cmd/gcloud"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
 	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
@@ -301,6 +302,21 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane
 	// manifest cannot shadow the built-in `bind9` parent.
 	root.AddCommand(bind9.NewRootCmd())
+
+	// G3.7-T6 (#851) -- gcloud-rest-1.0 operator alias verbs for
+	// Initiative #370. The verb tree pre-bakes connector_id=
+	// "gcloud-rest-1.0" on top of the existing /api/v1/operations/call
+	// dispatcher route so operators don't type the connector ID on
+	// every invocation. Auth uses GCP Application Default Credentials
+	// + Service Account Impersonation; SA JSON key material in any
+	// target secret_ref is refused by the backend (org policy
+	// constraints/iam.disableServiceAccountKeyCreation). Ships the 8
+	// read-only gcloud ops (about, project describe, services list, iam
+	// sa list, iam policy read, compute instances/networks/subnets
+	// list). Replaces ./scripts/gcloud.sh for the read-only surface.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `gcloud` parent.
+	root.AddCommand(gcloud.NewRootCmd())
 
 	// G3.7-T9 (#852) -- hetzner-rest-2026.04 operator alias verbs for
 	// Initiative #370. The verb tree pre-bakes connector_id=

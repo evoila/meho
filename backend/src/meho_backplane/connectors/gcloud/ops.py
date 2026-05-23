@@ -118,7 +118,18 @@ _GCLOUD_ABOUT_OP = GcloudOp(
             "needs to confirm which GCP project is behind the target and whether "
             "it is active. Returns the project_number (used in some GCP API paths), "
             "lifecycle_state (ACTIVE / DELETE_REQUESTED / etc.), and the parent "
-            "organization ID when the project belongs to one."
+            "organization ID when the project belongs to one.\n\n"
+            "Auth model: this connector uses GCP Application Default Credentials "
+            "(ADC) + Service Account Impersonation. The operator's ADC source "
+            "credentials (from ``gcloud auth application-default login`` or Workload "
+            "Identity) are used to impersonate the SA configured on the target "
+            "(target.gcp_impersonate_sa). SA JSON key material in target.secret_ref "
+            "is always refused — org policy ``constraints/iam.disableServiceAccountKeyCreation`` "
+            "forbids SA JSON keys on this organization. If this call returns a "
+            "permission-denied error, the impersonation chain is broken: verify "
+            "that the operator's ADC principal has ``roles/iam.serviceAccountTokenCreator`` "
+            "on the target SA and that the SA itself has the necessary project-level "
+            "roles (typically ``roles/viewer`` at minimum)."
         ),
         "parameter_hints": {},
         "output_shape": (

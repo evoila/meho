@@ -3404,14 +3404,31 @@
           "ui-auth"
         ],
         "summary": "Ui Auth Login",
-        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Validated\nvia :func:`_safe_return_to` to block open-redirect abuse.",
+        "description": "Mint a PKCE authorization URL and 302 the browser to Keycloak.\n\n``?return_to=<path>`` is the originally-requested path the\noperator was bounced from (the middleware writes it). Declared as\na typed FastAPI ``Query`` parameter so the OpenAPI document\nreflects the real query-string contract; the value is validated\nvia :func:`_safe_return_to` to block open-redirect abuse.",
         "operationId": "ui_auth_login_ui_auth_login_get",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Return To"
+            }
+          }
+        ],
         "responses": {
-          "200": {
-            "description": "Successful Response",
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -3424,14 +3441,61 @@
           "ui-auth"
         ],
         "summary": "Ui Auth Callback",
-        "description": "Finish the OAuth round-trip, create the session, set the cookie.",
+        "description": "Finish the OAuth round-trip, create the session, set the cookie.\n\n``code``, ``state``, ``error``, and ``error_description`` are all\ndeclared as typed FastAPI ``Query`` parameters so the OpenAPI\ndocument reflects the real callback-URL contract. They are\noptional because the IdP only ever populates one of the\n``code``/``state`` pair or the ``error``/``error_description``\npair; absent values in the wrong combination collapse to a 400\nvia :func:`_exchange_or_translate`. The full callback URL (which\nauthlib re-parses for token exchange) still comes from\n``request`` -- typed extraction is for OpenAPI fidelity, not a\nbehaviour change.",
         "operationId": "ui_auth_callback_ui_auth_callback_get",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Code"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "State"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Error"
+            }
+          },
+          {
+            "name": "error_description",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Error Description"
+            }
+          }
+        ],
         "responses": {
-          "200": {
-            "description": "Successful Response",
+          "302": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -3447,13 +3511,8 @@
         "description": "Revoke the session row, clear the cookie, 302 to the end-session URL.",
         "operationId": "ui_auth_logout_ui_auth_logout_get",
         "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
+          "302": {
+            "description": "Successful Response"
           }
         }
       }

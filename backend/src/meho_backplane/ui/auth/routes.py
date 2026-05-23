@@ -89,7 +89,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
-from typing import Final
+from typing import Annotated, Final
 from urllib.parse import urlencode
 
 import httpx
@@ -98,7 +98,7 @@ from authlib.integrations.base_client.errors import (
     MismatchingStateError,
     OAuthError,
 )
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
 from meho_backplane.auth.jwt import verify_jwt_for_audience
@@ -270,16 +270,19 @@ def _build_end_session_url(
     return f"{end_session_endpoint}{separator}{query}"
 
 
-async def _handle_login(request: Request) -> RedirectResponse:
+async def _handle_login(
+    return_to: Annotated[str | None, Query()] = None,
+) -> RedirectResponse:
     """Mint a PKCE authorization URL and 302 the browser to Keycloak.
 
     ``?return_to=<path>`` is the originally-requested path the
-    operator was bounced from (the middleware writes it). Validated
+    operator was bounced from (the middleware writes it). Declared as
+    a typed FastAPI ``Query`` parameter so the OpenAPI document
+    reflects the real query-string contract; the value is validated
     via :func:`_safe_return_to` to block open-redirect abuse.
     """
     log = structlog.get_logger(__name__)
-    raw_return_to = request.query_params.get("return_to")
-    return_to = _safe_return_to(raw_return_to)
+    return_to = _safe_return_to(return_to)
     try:
         url, state = await build_authorization_request(
             redirect_uri=compute_redirect_uri(),
@@ -401,13 +404,33 @@ async def _persist_session_from_tokens(
     return decrypted.id, operator.sub, operator.tenant_id
 
 
-async def _handle_callback(request: Request) -> RedirectResponse:
-    """Finish the OAuth round-trip, create the session, set the cookie."""
+async def _handle_callback(
+    request: Request,
+    code: Annotated[str | None, Query()] = None,
+    state: Annotated[str | None, Query()] = None,
+    error: Annotated[str | None, Query()] = None,
+    error_description: Annotated[str | None, Query()] = None,
+) -> RedirectResponse:
+    """Finish the OAuth round-trip, create the session, set the cookie.
+
+    ``code``, ``state``, ``error``, and ``error_description`` are all
+    declared as typed FastAPI ``Query`` parameters so the OpenAPI
+    document reflects the real callback-URL contract. They are
+    optional because the IdP only ever populates one of the
+    ``code``/``state`` pair or the ``error``/``error_description``
+    pair; absent values in the wrong combination collapse to a 400
+    via :func:`_exchange_or_translate`. The full callback URL (which
+    authlib re-parses for token exchange) still comes from
+    ``request`` -- typed extraction is for OpenAPI fidelity, not a
+    behaviour change.
+    """
     log = structlog.get_logger(__name__)
-    idp_error = request.query_params.get("error")
-    if idp_error:
-        _raise_idp_error(idp_error, request.query_params.get("error_description"))
-    state = request.query_params.get("state")
+    # ``code`` is consumed by ``str(request.url)`` below (authlib
+    # re-parses the full URL); the typed extraction here exists purely
+    # so the OpenAPI document lists the parameter.
+    del code
+    if error:
+        _raise_idp_error(error, error_description)
     # ``str(request.url)`` carries the full callback URL with query
     # string -- authlib's :meth:`fetch_token` parses ``code`` and
     # ``state`` out of it.
@@ -501,17 +524,34 @@ def build_router() -> APIRouter:
     under test do not share mutable state.
     """
     router = APIRouter(prefix="/ui/auth", tags=["ui-auth"])
-    router.add_api_route("/login", _handle_login, methods=["GET"], name="ui_auth_login")
+    # ``response_class`` + ``status_code`` on each route declare the
+    # real 302-redirect contract in the OpenAPI document so the CLI's
+    # generated Go client at ``cli/internal/api/client.gen.go``
+    # reflects the runtime behaviour. Without these, FastAPI defaults
+    # the OpenAPI response to ``200 application/json`` -- correct for
+    # the typical handler, wrong for a pure-redirect surface.
+    router.add_api_route(
+        "/login",
+        _handle_login,
+        methods=["GET"],
+        name="ui_auth_login",
+        response_class=RedirectResponse,
+        status_code=status.HTTP_302_FOUND,
+    )
     router.add_api_route(
         "/callback",
         _handle_callback,
         methods=["GET"],
         name="ui_auth_callback",
+        response_class=RedirectResponse,
+        status_code=status.HTTP_302_FOUND,
     )
     router.add_api_route(
         "/logout",
         _handle_logout,
         methods=["GET"],
         name="ui_auth_logout",
+        response_class=RedirectResponse,
+        status_code=status.HTTP_302_FOUND,
     )
     return router

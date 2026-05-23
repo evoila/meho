@@ -82,6 +82,7 @@ import pytest
 from sqlalchemy import delete, select
 
 import meho_backplane.operations._handler_resolve as _handler_resolve_module
+from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors.kubernetes import (
     KUBERNETES_OPS,
     KubernetesConnector,
@@ -310,7 +311,7 @@ async def k8s_e2e(
         cls=KubernetesConnector,
     )
 
-    async def _loader(_t: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_t: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return kubeconfig
 
     seeded_connector = KubernetesConnector(kubeconfig_loader=_loader)

@@ -68,6 +68,7 @@ from kubernetes_asyncio.client.models import (
     V1VolumeMount,
 )
 
+from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.kubernetes import (
     KUBERNETES_OPS,
     KubernetesConnector,
@@ -159,10 +160,27 @@ def _stub_kubeconfig() -> dict[str, Any]:
 
 
 def _make_connector() -> KubernetesConnector:
-    async def _loader(_target: KubernetesTargetLike) -> dict[str, Any]:
+    async def _loader(_target: KubernetesTargetLike, _operator: Operator) -> dict[str, Any]:
         return _stub_kubeconfig()
 
     return KubernetesConnector(kubeconfig_loader=_loader)
+
+
+def _make_operator() -> Operator:
+    """Build a non-system operator carrying a non-empty ``raw_jwt``.
+
+    G3.10-T4 (#948) added ``operator`` to every typed handler's
+    signature; the injected loader here ignores it, but the handler
+    forwards it to :meth:`KubernetesConnector._get_api_client`.
+    """
+    return Operator(
+        sub="op-workload-test",
+        name="Workload Test Operator",
+        email=None,
+        raw_jwt="op.workload.jwt",
+        tenant_id=__import__("uuid").UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +650,7 @@ async def test_k8s_pod_list_returns_rows_and_total() -> None:
         patch("meho_backplane.connectors.kubernetes.ops_workload.client.CoreV1Api") as core_v1_cls,
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list(pods))
-        result = await connector.k8s_pod_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_pod_list(_make_operator(), _TARGET, {"namespace": "argocd"})
 
     assert result["total"] == 2
     assert {row["name"] for row in result["rows"]} == {"argocd-server-x", "argocd-repo-y"}
@@ -660,7 +678,7 @@ async def test_k8s_pod_list_all_namespaces_uses_for_all_namespaces() -> None:
             return_value=_pod_list(pods)
         )
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock()
-        result = await connector.k8s_pod_list(_TARGET, {"all_namespaces": True})
+        result = await connector.k8s_pod_list(_make_operator(), _TARGET, {"all_namespaces": True})
 
     assert result["total"] == 2
     core_v1_cls.return_value.list_pod_for_all_namespaces.assert_awaited_once()
@@ -677,7 +695,9 @@ async def test_k8s_pod_list_label_selector_flows_through() -> None:
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list([]))
         await connector.k8s_pod_list(
-            _TARGET, {"namespace": "argocd", "label_selector": "app=argocd-server"}
+            _make_operator(),
+            _TARGET,
+            {"namespace": "argocd", "label_selector": "app=argocd-server"},
         )
     kwargs = core_v1_cls.return_value.list_namespaced_pod.call_args.kwargs
     assert kwargs["label_selector"] == "app=argocd-server"
@@ -693,7 +713,9 @@ async def test_k8s_pod_list_field_selector_flows_through() -> None:
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list([]))
         await connector.k8s_pod_list(
-            _TARGET, {"namespace": "argocd", "field_selector": "status.phase=Running"}
+            _make_operator(),
+            _TARGET,
+            {"namespace": "argocd", "field_selector": "status.phase=Running"},
         )
     kwargs = core_v1_cls.return_value.list_namespaced_pod.call_args.kwargs
     assert kwargs["field_selector"] == "status.phase=Running"
@@ -711,7 +733,9 @@ async def test_k8s_pod_list_server_side_pagination_returns_next_continue() -> No
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(
             return_value=_pod_list(pods, continue_token="page-2")
         )
-        result = await connector.k8s_pod_list(_TARGET, {"namespace": "argocd", "limit": 5})
+        result = await connector.k8s_pod_list(
+            _make_operator(), _TARGET, {"namespace": "argocd", "limit": 5}
+        )
 
     assert result["total"] == 5
     assert result["next_continue"] == "page-2"
@@ -729,7 +753,9 @@ async def test_k8s_pod_list_continue_token_passed_to_api_as_underscore_continue(
         patch("meho_backplane.connectors.kubernetes.ops_workload.client.CoreV1Api") as core_v1_cls,
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list([]))
-        await connector.k8s_pod_list(_TARGET, {"namespace": "argocd", "continue_token": "abc123"})
+        await connector.k8s_pod_list(
+            _make_operator(), _TARGET, {"namespace": "argocd", "continue_token": "abc123"}
+        )
     kwargs = core_v1_cls.return_value.list_namespaced_pod.call_args.kwargs
     assert kwargs["_continue"] == "abc123"
 
@@ -745,7 +771,7 @@ async def test_k8s_pod_list_omits_next_continue_when_no_more_pages() -> None:
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(
             return_value=_pod_list([_make_pod(name="solo", namespace="argocd")])
         )
-        result = await connector.k8s_pod_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_pod_list(_make_operator(), _TARGET, {"namespace": "argocd"})
     assert "next_continue" not in result
 
 
@@ -765,7 +791,7 @@ async def test_k8s_pod_info_exact_match_returns_full_detail() -> None:
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list([pod]))
         result = await connector.k8s_pod_info(
-            _TARGET, {"pod_name": "argocd-server", "namespace": "argocd"}
+            _make_operator(), _TARGET, {"pod_name": "argocd-server", "namespace": "argocd"}
         )
     assert result["name"] == "argocd-server"
     assert result["namespace"] == "argocd"
@@ -786,7 +812,7 @@ async def test_k8s_pod_info_unique_prefix_resolves_to_one_pod() -> None:
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list(pods))
         result = await connector.k8s_pod_info(
-            _TARGET, {"pod_name": "argocd-server", "namespace": "argocd"}
+            _make_operator(), _TARGET, {"pod_name": "argocd-server", "namespace": "argocd"}
         )
     assert result["name"] == "argocd-server-7c4b8d-x7r2k"
 
@@ -805,7 +831,9 @@ async def test_k8s_pod_info_ambiguous_prefix_raises() -> None:
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list(pods))
         with pytest.raises(AmbiguousPrefixError) as exc:
-            await connector.k8s_pod_info(_TARGET, {"pod_name": "api", "namespace": "argocd"})
+            await connector.k8s_pod_info(
+                _make_operator(), _TARGET, {"pod_name": "api", "namespace": "argocd"}
+            )
     assert exc.value.candidates == ["api-1", "api-2"]
 
 
@@ -819,7 +847,9 @@ async def test_k8s_pod_info_not_found_raises() -> None:
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list([]))
         with pytest.raises(WorkloadNotFoundError):
-            await connector.k8s_pod_info(_TARGET, {"pod_name": "ghost", "namespace": "argocd"})
+            await connector.k8s_pod_info(
+                _make_operator(), _TARGET, {"pod_name": "ghost", "namespace": "argocd"}
+            )
 
 
 @pytest.mark.asyncio
@@ -835,7 +865,9 @@ async def test_k8s_pod_info_exact_match_wins_over_prefix() -> None:
         patch("meho_backplane.connectors.kubernetes.ops_workload.client.CoreV1Api") as core_v1_cls,
     ):
         core_v1_cls.return_value.list_namespaced_pod = AsyncMock(return_value=_pod_list(pods))
-        result = await connector.k8s_pod_info(_TARGET, {"pod_name": "api-1", "namespace": "argocd"})
+        result = await connector.k8s_pod_info(
+            _make_operator(), _TARGET, {"pod_name": "api-1", "namespace": "argocd"}
+        )
     assert result["name"] == "api-1"
 
 
@@ -858,7 +890,9 @@ async def test_k8s_deployment_list_returns_rows_and_total() -> None:
         apps_v1_cls.return_value.list_namespaced_deployment = AsyncMock(
             return_value=_deployment_list(deps)
         )
-        result = await connector.k8s_deployment_list(_TARGET, {"namespace": "argocd"})
+        result = await connector.k8s_deployment_list(
+            _make_operator(), _TARGET, {"namespace": "argocd"}
+        )
 
     assert result["total"] == 2
     names = {row["name"] for row in result["rows"]}
@@ -881,7 +915,9 @@ async def test_k8s_deployment_list_all_namespaces_routes_to_all_namespaces_api()
             return_value=_deployment_list(deps)
         )
         apps_v1_cls.return_value.list_namespaced_deployment = AsyncMock()
-        result = await connector.k8s_deployment_list(_TARGET, {"all_namespaces": True})
+        result = await connector.k8s_deployment_list(
+            _make_operator(), _TARGET, {"all_namespaces": True}
+        )
     assert result["total"] == 2
     apps_v1_cls.return_value.list_deployment_for_all_namespaces.assert_awaited_once()
     apps_v1_cls.return_value.list_namespaced_deployment.assert_not_awaited()
@@ -898,7 +934,9 @@ async def test_k8s_deployment_list_pagination_returns_next_continue() -> None:
         apps_v1_cls.return_value.list_namespaced_deployment = AsyncMock(
             return_value=_deployment_list(deps, continue_token="page-2")
         )
-        result = await connector.k8s_deployment_list(_TARGET, {"namespace": "argocd", "limit": 3})
+        result = await connector.k8s_deployment_list(
+            _make_operator(), _TARGET, {"namespace": "argocd", "limit": 3}
+        )
     assert result["next_continue"] == "page-2"
     kwargs = apps_v1_cls.return_value.list_namespaced_deployment.call_args.kwargs
     assert kwargs["limit"] == 3
@@ -921,7 +959,7 @@ async def test_k8s_deployment_info_exact_match_returns_full_detail() -> None:
             return_value=_deployment_list([dep])
         )
         result = await connector.k8s_deployment_info(
-            _TARGET, {"deployment_name": "argocd-server", "namespace": "argocd"}
+            _make_operator(), _TARGET, {"deployment_name": "argocd-server", "namespace": "argocd"}
         )
     assert result["name"] == "argocd-server"
     assert result["status"]["replicas"] == 3
@@ -943,7 +981,7 @@ async def test_k8s_deployment_info_prefix_resolves_to_one_deployment() -> None:
             return_value=_deployment_list(deps)
         )
         result = await connector.k8s_deployment_info(
-            _TARGET, {"deployment_name": "argocd-serv", "namespace": "argocd"}
+            _make_operator(), _TARGET, {"deployment_name": "argocd-serv", "namespace": "argocd"}
         )
     assert result["name"] == "argocd-server"
 
@@ -964,7 +1002,7 @@ async def test_k8s_deployment_info_ambiguous_prefix_raises() -> None:
         )
         with pytest.raises(AmbiguousPrefixError) as exc:
             await connector.k8s_deployment_info(
-                _TARGET, {"deployment_name": "api", "namespace": "argocd"}
+                _make_operator(), _TARGET, {"deployment_name": "api", "namespace": "argocd"}
             )
     assert exc.value.candidates == ["api-1", "api-2"]
 
@@ -981,5 +1019,5 @@ async def test_k8s_deployment_info_not_found_raises() -> None:
         )
         with pytest.raises(WorkloadNotFoundError):
             await connector.k8s_deployment_info(
-                _TARGET, {"deployment_name": "ghost", "namespace": "argocd"}
+                _make_operator(), _TARGET, {"deployment_name": "ghost", "namespace": "argocd"}
             )

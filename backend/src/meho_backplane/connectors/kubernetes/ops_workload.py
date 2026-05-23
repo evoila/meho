@@ -1026,8 +1026,8 @@ K8S_DEPLOYMENT_INFO_LLM_INSTRUCTIONS: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# Response schemas -- informational; the dispatcher's pass-through reducer
-# does not validate outbound payloads in v0.2.
+# Response schemas -- informational; the dispatcher's default reducer
+# (JsonFluxReducer) does not validate outbound payloads against them.
 # ---------------------------------------------------------------------------
 
 

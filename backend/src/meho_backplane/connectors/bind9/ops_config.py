@@ -1396,9 +1396,9 @@ CONFIG_OPS: tuple[Bind9Op, ...] = (
             "``/var/backups/meho-bind9/`` and returns the backup ID + "
             "a listing of existing backups (newest-first). Additive "
             "(non-destructive); does NOT route through atomic-apply "
-            "because nothing in ``/etc/bind/`` mutates. The future "
-            "JSONFlux reducer swaps the ``rows`` list for a result "
-            "handle when ``total > 20``."
+            "because nothing in ``/etc/bind/`` mutates. The dispatcher's "
+            "default JsonFluxReducer wraps the ``rows`` list in a result "
+            "handle once the set exceeds its threshold."
         ),
         parameter_schema=BIND9_CONFIG_BACKUP_PARAMETER_SCHEMA,
         response_schema=_BIND9_CONFIG_BACKUP_RESPONSE_SCHEMA,

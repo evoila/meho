@@ -39,7 +39,7 @@ handlers are the thin SSH-call + parse + shape layer. The unit suite
 pins the parsers directly against fixture text without booting an event
 loop.
 
-JSONFlux handle pattern -- deferred to the reducer
+JSONFlux handle pattern -- owned by the reducer
 --------------------------------------------------
 
 The Issue #588 body's acceptance language ("JSONFlux handle when the
@@ -47,9 +47,9 @@ parsed record list exceeds ~20 rows / 4 KB") was patterned on Issue
 #322's identical clause for the K8s connector. The K8s landing
 (``ops_core.py``) **deliberately did not implement** per-handler
 threshold logic; that module's docstring spells out the rationale and
-points at :mod:`~meho_backplane.operations.reducer` (the v0.2 default is
-:class:`PassThroughReducer` -- handle creation is the future real
-reducer's job, not the connector's). The bind9 read group adopts the
+points at :mod:`~meho_backplane.operations.reducer` (handle creation is
+the dispatcher's default ``JsonFluxReducer``'s job, not the connector's,
+per ``docs/architecture/jsonflux.md``). The bind9 read group adopts the
 same posture for the same reasons:
 
 * Coupling every connector to the reducer's threshold calibration

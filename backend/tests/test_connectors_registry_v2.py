@@ -384,6 +384,28 @@ def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
     assert snapshot[key] is VcfFleetConnector
 
 
+def test_pfsense_connector_registered_under_v2_triple() -> None:
+    """PfSenseConnector package registers under (pfsense, 2.7, pfsense-ssh).
+
+    The autouse _clean_registry fixture clears the registry before this test,
+    so we manually re-register using the class attributes to assert the triple
+    resolves correctly. Same pattern as the SDDC Manager / Harbor /
+    VCF Automation tests above.
+    """
+    from meho_backplane.connectors.pfsense import PfSenseConnector
+
+    register_connector_v2(
+        product=PfSenseConnector.product,
+        version=PfSenseConnector.version,
+        impl_id=PfSenseConnector.impl_id,
+        cls=PfSenseConnector,
+    )
+    snapshot = all_connectors_v2()
+    key = ("pfsense", "2.7", "pfsense-ssh")
+    assert key in snapshot
+    assert snapshot[key] is PfSenseConnector
+
+
 def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
     """HetznerRobotConnector package registers under (hetzner-robot, 2026.04, hetzner-rest).
 

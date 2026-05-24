@@ -1948,6 +1948,35 @@ async def query_history(
 #: accidentally request an unbounded fold.
 _DIFF_HARD_CAP: Final[int] = 1000
 
+#: SQL-layer ceiling on the number of *distinct resources* fetched per
+#: side (#987). Bounds the rows materialised by ``fetchall`` so a wide
+#: window over a churning tenant cannot pull the whole history slice
+#: into memory before the Python fold caps it -- mirroring the
+#: list-query precedent (:data:`_MAX_EDGE_LIMIT` / :data:`_MAX_NODE_LIMIT`)
+#: where the bound lives in the statement, not in a post-fetch slice.
+#:
+#: The bound is on **distinct resources**, not raw rows, because the
+#: cap counts post-fold entries (one per resource) and a single
+#: resource can carry many in-window history rows (one ``updated`` per
+#: refresh heartbeat). A raw ``LIMIT`` would either split a resource's
+#: row group mid-fold (corrupting that entry) or undercount entries
+#: (1000 rows might fold to 500 resources, never tripping the cap). The
+#: ``DENSE_RANK`` window keeps **complete** row groups for the first
+#: ``_DIFF_HARD_CAP + 1`` distinct resources -- enough to fill the cap
+#: and observe one resource beyond it, so ``truncated`` is detected
+#: with the same outcome as the unbounded fetch for the unfiltered
+#: cohort (the load-bearing high-churn AC).
+#:
+#: Note on post-fold filters: ``changed_only`` / ``kind_filter`` drop
+#: entries *after* the fetch, so under those flags an adversarially
+#: wide window could fetch cap+1 resources, have some dropped, and
+#: report ``truncated=False`` where an unbounded fetch would have
+#: surfaced a later surviving resource. This is an accepted, bounded
+#: tradeoff: the substrate guard never over-fetches, the route layer
+#: caps tighter separately, and the unfiltered cohort -- the case the
+#: cap exists to protect -- stays exact.
+_DIFF_FETCH_RESOURCE_CAP: Final[int] = _DIFF_HARD_CAP + 1
+
 #: Canonical operator-facing remediation surfaced verbatim on every
 #: front when the cap fires. Pinned as a module constant so the CLI /
 #: REST / MCP wording stays in lock-step without duplicating the string
@@ -1958,59 +1987,155 @@ _DIFF_TRUNCATION_HINT: Final[str] = (
 )
 
 
-# Two literal SQL statements -- one per history table -- pulling every
-# in-window row tenant-scoped. The fold is Python-side because the
-# per-resource "first vs last in-window row" rule is awkward in pure
-# SQL and the projection-shape diff for ``--changed-only`` needs access
-# to the deserialised snapshot. Indexes the queries lean on (migration
-# 0012): ``graph_*_history_tenant_valid_from_idx`` -- composite
-# ``(tenant_id, valid_from DESC)`` so the per-tenant slice is sub-ms
-# under realistic load.
+# Two literal SQL statements -- one per history table -- pulling the
+# in-window rows tenant-scoped, bounded at the SQL layer to the first
+# ``:resource_cap`` distinct resources (#987). The fold is Python-side
+# because the per-resource "first vs last in-window row" rule is awkward
+# in pure SQL and the projection-shape diff for ``--changed-only`` needs
+# access to the deserialised snapshot. Indexes the queries lean on
+# (migration 0012): ``graph_*_history_tenant_valid_from_idx`` --
+# composite ``(tenant_id, valid_from DESC)`` so the per-tenant slice is
+# sub-ms under realistic load.
 #
 # ``valid_from`` is ``>`` ``ts1`` (exclusive lower) and ``<=`` ``ts2``
 # (inclusive upper) per the Task #860 contract.
 #
-# Ordering: ``valid_from ASC, history_id ASC`` so the fold sees the
-# in-window rows in chronological order. The "first vs last" rule then
-# falls out of a single left-to-right pass per resource.
+# SQL-side bound (#987): a ``DENSE_RANK`` window ranks resources by
+# their first in-window appearance (``valid_from ASC, history_id ASC``)
+# and the outer ``WHERE grp_rank <= :resource_cap`` keeps only the
+# first ``:resource_cap`` distinct resources' **complete** row groups.
+# The resource key is ``resource_id`` when present, else the row's own
+# ``history_id`` -- so a hard-deleted tombstone (``resource_id IS NULL``
+# after ``ON DELETE SET NULL``) counts as its own group rather than
+# collapsing every tombstone under one key (the create-then-delete
+# rejoin via the recovered id still happens Python-side after fetch).
+# Keeping whole groups means the fold never sees a partial resource;
+# bounding by distinct resources -- not raw rows -- means the cap is
+# reached on the same cohort as the unbounded fetch. ``:resource_cap``
+# is ``_DIFF_HARD_CAP + 1`` so the fold can observe one resource past
+# the cap and set ``truncated`` correctly.
+#
+# Ordering: the outer ``ORDER BY valid_from ASC, history_id ASC`` is
+# what the fold sees, so the "first vs last in-window row" rule falls
+# out of a single left-to-right pass per resource.
+#
+# Each side is a separate **fully-literal** ``text("...")`` -- the node
+# and edge statements differ only in the history table and the
+# resource-id column, but they are written out verbatim rather than
+# built from a shared ``.format()`` template so nothing is interpolated
+# into the SQL string. That keeps the convention this module documents
+# (see the module docstring) and keeps the SAST gate happy: a templated
+# ``text(template.format(...))`` reads as a SQL-injection sink to
+# ``avoid-sqlalchemy-text`` even when every substitution is a trusted
+# module constant, whereas a literal ``text("...")`` does not.
 _DIFF_NODE_SQL = text(
     """
+    WITH windowed AS (
+        SELECT
+            h.history_id    AS history_id,
+            h.node_id       AS resource_id,
+            h.change_kind   AS change_kind,
+            h.snapshot      AS snapshot,
+            h.valid_from    AS valid_from,
+            COALESCE(
+                CAST(h.node_id AS TEXT),
+                'h:' || CAST(h.history_id AS TEXT)
+            )               AS grp_key
+        FROM graph_node_history h
+        WHERE h.tenant_id = :tenant_id
+          AND h.valid_from > :ts1
+          AND h.valid_from <= :ts2
+    ),
+    grouped AS (
+        SELECT
+            w.*,
+            MIN(w.valid_from) OVER (PARTITION BY w.grp_key)
+                AS grp_first_valid_from,
+            FIRST_VALUE(w.history_id) OVER (
+                PARTITION BY w.grp_key
+                ORDER BY w.valid_from ASC, w.history_id ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            )               AS grp_first_history_id
+        FROM windowed w
+    ),
+    ranked AS (
+        SELECT
+            g.*,
+            DENSE_RANK() OVER (
+                ORDER BY g.grp_first_valid_from ASC, g.grp_first_history_id ASC
+            )               AS grp_rank
+        FROM grouped g
+    )
     SELECT
-        h.history_id    AS history_id,
-        h.node_id       AS resource_id,
-        h.change_kind   AS change_kind,
-        h.snapshot      AS snapshot,
-        h.valid_from    AS valid_from
-    FROM graph_node_history h
-    WHERE h.tenant_id = :tenant_id
-      AND h.valid_from > :ts1
-      AND h.valid_from <= :ts2
-    ORDER BY h.valid_from ASC, h.history_id ASC
+        r.history_id    AS history_id,
+        r.resource_id   AS resource_id,
+        r.change_kind   AS change_kind,
+        r.snapshot      AS snapshot,
+        r.valid_from    AS valid_from
+    FROM ranked r
+    WHERE r.grp_rank <= :resource_cap
+    ORDER BY r.valid_from ASC, r.history_id ASC
     """
 ).bindparams(
     bindparam("tenant_id", type_=SAUuid()),
     bindparam("ts1", type_=DateTime(timezone=True)),
     bindparam("ts2", type_=DateTime(timezone=True)),
+    bindparam("resource_cap"),
 )
 
 _DIFF_EDGE_SQL = text(
     """
+    WITH windowed AS (
+        SELECT
+            h.history_id    AS history_id,
+            h.edge_id       AS resource_id,
+            h.change_kind   AS change_kind,
+            h.snapshot      AS snapshot,
+            h.valid_from    AS valid_from,
+            COALESCE(
+                CAST(h.edge_id AS TEXT),
+                'h:' || CAST(h.history_id AS TEXT)
+            )               AS grp_key
+        FROM graph_edge_history h
+        WHERE h.tenant_id = :tenant_id
+          AND h.valid_from > :ts1
+          AND h.valid_from <= :ts2
+    ),
+    grouped AS (
+        SELECT
+            w.*,
+            MIN(w.valid_from) OVER (PARTITION BY w.grp_key)
+                AS grp_first_valid_from,
+            FIRST_VALUE(w.history_id) OVER (
+                PARTITION BY w.grp_key
+                ORDER BY w.valid_from ASC, w.history_id ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            )               AS grp_first_history_id
+        FROM windowed w
+    ),
+    ranked AS (
+        SELECT
+            g.*,
+            DENSE_RANK() OVER (
+                ORDER BY g.grp_first_valid_from ASC, g.grp_first_history_id ASC
+            )               AS grp_rank
+        FROM grouped g
+    )
     SELECT
-        h.history_id    AS history_id,
-        h.edge_id       AS resource_id,
-        h.change_kind   AS change_kind,
-        h.snapshot      AS snapshot,
-        h.valid_from    AS valid_from
-    FROM graph_edge_history h
-    WHERE h.tenant_id = :tenant_id
-      AND h.valid_from > :ts1
-      AND h.valid_from <= :ts2
-    ORDER BY h.valid_from ASC, h.history_id ASC
+        r.history_id    AS history_id,
+        r.resource_id   AS resource_id,
+        r.change_kind   AS change_kind,
+        r.snapshot      AS snapshot,
+        r.valid_from    AS valid_from
+    FROM ranked r
+    WHERE r.grp_rank <= :resource_cap
+    ORDER BY r.valid_from ASC, r.history_id ASC
     """
 ).bindparams(
     bindparam("tenant_id", type_=SAUuid()),
     bindparam("ts1", type_=DateTime(timezone=True)),
     bindparam("ts2", type_=DateTime(timezone=True)),
+    bindparam("resource_cap"),
 )
 
 
@@ -2334,6 +2459,13 @@ async def query_diff(
         "tenant_id": operator.tenant_id,
         "ts1": ts1,
         "ts2": ts2,
+        # Bound the fetch at the SQL layer to the first
+        # ``_DIFF_HARD_CAP + 1`` distinct resources per side (#987) so a
+        # wide window cannot materialise the whole history slice in
+        # memory. The +1 lets the Python fold observe one resource past
+        # the cap and set ``truncated`` with the same outcome as an
+        # unbounded fetch for the unfiltered cohort.
+        "resource_cap": _DIFF_FETCH_RESOURCE_CAP,
     }
 
     sessionmaker = get_sessionmaker()
@@ -2343,15 +2475,49 @@ async def query_diff(
         edge_result = await session.execute(_DIFF_EDGE_SQL, bind_params)
         edge_rows = edge_result.fetchall()
 
+    entries, truncated = _fold_diff_entries(
+        node_rows=node_rows,
+        edge_rows=edge_rows,
+        changed_only=changed_only,
+        kind_filter=kind_filter,
+    )
+
+    return TopologyDiffResult(
+        entries=tuple(entries),
+        truncated=truncated,
+        truncation_hint=_DIFF_TRUNCATION_HINT if truncated else None,
+    )
+
+
+def _fold_diff_entries(
+    *,
+    node_rows: Sequence[Row[Any]],
+    edge_rows: Sequence[Row[Any]],
+    changed_only: bool,
+    kind_filter: str | None,
+) -> tuple[list[TopologyDiffEntry], bool]:
+    """Fold the per-side history rows into net diff entries + a cap flag.
+
+    Folds the node side first, then the edge side. Within a side the
+    SQL's ``ORDER BY valid_from ASC, history_id ASC`` ordering is
+    preserved by :func:`_group_rows_by_resource`, so the per-side
+    iteration is deterministic. Across sides, nodes come before edges --
+    a stable presentation order that mirrors the timeline tie-breaker
+    (node before edge at the same key).
+
+    The :data:`_DIFF_HARD_CAP` truncation fires on the post-fold,
+    post-``kind_filter`` cohort and is shared across both sides:
+    ``entries`` accumulates node entries then edge entries, and the
+    cap trips when the combined count reaches the ceiling. The SQL
+    already bounded the fetch to :data:`_DIFF_FETCH_RESOURCE_CAP`
+    distinct resources per side (#987), so this fold can always observe
+    one resource past the cap for the unfiltered cohort.
+
+    Returns the ``(entries, truncated)`` pair the caller wraps in a
+    :class:`TopologyDiffResult`.
+    """
     entries: list[TopologyDiffEntry] = []
     truncated = False
-
-    # Fold node side first, then edge side. Within a side the SQL's
-    # ``ORDER BY valid_from ASC, history_id ASC`` ordering is preserved
-    # by :func:`_group_rows_by_resource`, so the per-side iteration is
-    # deterministic. Across sides, nodes come before edges -- a stable
-    # presentation order that mirrors the timeline tie-breaker (node
-    # before edge at the same key).
     sides: tuple[tuple[Literal["node", "edge"], Sequence[Row[Any]]], ...] = (
         ("node", node_rows),
         ("edge", edge_rows),
@@ -2375,9 +2541,4 @@ async def query_diff(
             entries.append(entry)
         if truncated:
             break
-
-    return TopologyDiffResult(
-        entries=tuple(entries),
-        truncated=truncated,
-        truncation_hint=_DIFF_TRUNCATION_HINT if truncated else None,
-    )
+    return entries, truncated

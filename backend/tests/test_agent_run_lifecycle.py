@@ -164,7 +164,16 @@ async def _make_run(
 
 @pytest.mark.parametrize(
     ("from_status", "to_status"),
-    [(frm, to) for frm, tos in ALLOWED_TRANSITIONS.items() for to in tos],
+    # ``ALLOWED_TRANSITIONS`` maps each state to a ``frozenset`` of
+    # targets; iterating a set is nondeterministic across processes
+    # (hash-seed dependent). pytest-xdist requires every worker to
+    # collect identical test ids in identical order, so sort the inner
+    # targets by their ``str`` value before flattening the edge list.
+    [
+        (frm, to)
+        for frm, tos in ALLOWED_TRANSITIONS.items()
+        for to in sorted(tos, key=lambda s: s.value)
+    ],
 )
 @pytest.mark.asyncio
 async def test_legal_transitions_succeed(

@@ -163,6 +163,13 @@ __all__ = [
 #: all the FK checks together. Keeping the list alphabetical so a
 #: diff reads cleanly.
 _TRUNCATE_TABLES: tuple[str, ...] = (
+    # ``agent_run.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0015`` (G11.1-T6 #813). PG rejects truncating ``tenant``
+    # unless every referencing table is listed in the same statement, so
+    # ``agent_run`` must appear here or every PG-backed acceptance test
+    # errors at setup with ``cannot truncate a table referenced in a
+    # foreign key constraint``.
+    "agent_run",
     "audit_log",
     "broadcast_override",
     "documents",

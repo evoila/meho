@@ -381,24 +381,26 @@ async def test_session_token_fast_path_fails_closed_on_empty_raw_jwt() -> None:
         mock.post("/api/session").respond(200, json=_SESSION_TOKEN)
         mock.delete("/api/session").respond(204)
         primed = await connector._session_token(target, _make_operator())
-    assert primed == _SESSION_TOKEN
-    assert connector._session_tokens[target.name] == _SESSION_TOKEN
+        assert primed == _SESSION_TOKEN
+        assert connector._session_tokens[target.name] == _SESSION_TOKEN
 
-    system_operator = Operator(
-        sub="system",
-        name="System",
-        email=None,
-        raw_jwt="",
-        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
-        tenant_role=TenantRole.OPERATOR,
-    )
-    with pytest.raises(VaultCredentialsReadError) as exc_info:
-        await connector._session_token(target, system_operator)
+        system_operator = Operator(
+            sub="system",
+            name="System",
+            email=None,
+            raw_jwt="",
+            tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+            tenant_role=TenantRole.OPERATOR,
+        )
+        with pytest.raises(VaultCredentialsReadError) as exc_info:
+            await connector._session_token(target, system_operator)
 
-    assert target.name in str(exc_info.value)
-    assert "operator" in str(exc_info.value).lower()
-    # The cache still holds the primed token; the guard ran ahead of
-    # any cache mutation.
-    assert connector._session_tokens[target.name] == _SESSION_TOKEN
+        assert target.name in str(exc_info.value)
+        assert "operator" in str(exc_info.value).lower()
+        # The cache still holds the primed token; the guard ran ahead of
+        # any cache mutation.
+        assert connector._session_tokens[target.name] == _SESSION_TOKEN
 
-    await connector.aclose()
+        # aclose() inside the respx.mock context so the DELETE /api/session
+        # cleanup is mocked and never leaks to live network.
+        await connector.aclose()

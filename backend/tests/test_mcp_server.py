@@ -53,6 +53,7 @@ from meho_backplane.mcp.schemas import (
     PARSE_ERROR,
     PROTOCOL_VERSION,
 )
+from meho_backplane.settings import get_settings
 
 _DISPATCH_TEST_OPERATOR: Operator = Operator(
     sub="dispatcher-test-operator",
@@ -79,7 +80,7 @@ async def _fixture_verify_mcp_jwt_and_bind() -> Operator:
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """:class:`TestClient` with ``verify_mcp_jwt_and_bind`` overridden.
 
     The shared :mod:`conftest` autouse fixture supplies a per-test
@@ -89,12 +90,29 @@ def client() -> Iterator[TestClient]:
     plumbing here. The dependency override skips the full Bearer-token
     chain (covered in :mod:`tests.test_mcp_auth`) so each test in this
     file can focus on JSON-RPC dispatch semantics.
+
+    The chassis env vars (``KEYCLOAK_ISSUER_URL`` / ``KEYCLOAK_AUDIENCE``
+    / ``VAULT_ADDR`` / ``BACKPLANE_URL``) are pinned here because the
+    dispatch path now calls :func:`~meho_backplane.settings.get_settings`
+    (to read ``mcp_require_session_id`` in
+    :func:`~meho_backplane.mcp.server._bind_mcp_session_id`), and
+    ``Settings`` raises on an unset Keycloak knob. This mirrors the
+    convention documented in :mod:`tests.conftest` (every test file pins
+    these) and the ``required_settings_env`` fixture in
+    :mod:`tests.mcp_test_fixtures`. The ``cache_clear`` brackets evict any
+    ``Settings`` constructed under a different env before/after this test.
     """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("BACKPLANE_URL", "https://meho.test")
+    get_settings.cache_clear()
     app.dependency_overrides[verify_mcp_jwt_and_bind] = _fixture_verify_mcp_jwt_and_bind
     try:
         yield TestClient(app)
     finally:
         app.dependency_overrides.pop(verify_mcp_jwt_and_bind, None)
+        get_settings.cache_clear()
 
 
 def _post_mcp(client: TestClient, body: Any) -> Any:

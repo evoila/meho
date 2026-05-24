@@ -30,6 +30,16 @@ The locked decision (#7 in [v0.2-decisions.md](../planning/v0.2-decisions.md)) w
 
 **Streamable HTTP**, not stdio. MEHO is a hosted server, not a local subprocess. The `/mcp` route accepts JSON-RPC 2.0 POST requests with a single envelope per body (batch arrays are unsupported — MCP Streamable HTTP transport mandates single envelopes).
 
+### Session id capture (audit correlation)
+
+Per the spec's *Session Management* section, a server MAY assign a session id at `initialize` that the client echoes in the `Mcp-Session-Id` header on later requests. MEHO runs **no** stateful session store in v0.2 — it captures the header purely for **audit correlation** so per-session replay (`meho audit replay <session-id>`, G8.2) can reconstruct one agent's full operation trace. On every `POST /mcp`, [`_bind_mcp_session_id`](../../backend/src/meho_backplane/mcp/server.py) binds an `mcp_session_id` structlog contextvar (G8.2-T2 #1010):
+
+- Header present and a parseable UUID → bind it.
+- Header present but malformed (non-UUID) → treated as absent (a malformed *client* header never 500s the call; a non-UUID can't go in a `uuid` column).
+- Header absent/empty → fresh `uuid4()` for the single-call duration, so the audit row still carries a stable, non-NULL session id (the spec permits servers to not require sessions).
+
+`MCP_REQUIRE_SESSION_ID=true` ([`Settings.mcp_require_session_id`](../../backend/src/meho_backplane/settings.py), default `false`) turns a missing/empty header into a JSON-RPC `-32600` Invalid Request **before** dispatch — no audit row is written for the rejected call. A present-but-malformed header is not a rejection in require-mode (the client did send an id); it falls back to a fresh `uuid4()` as in the default mode.
+
 Response shapes per the spec's *Sending Messages to the Server* section:
 
 | Input | Response |
@@ -39,6 +49,7 @@ Response shapes per the spec's *Sending Messages to the Server* section:
 | Parse error | HTTP 200 + `error: { code: -32700, ... }` |
 | Invalid request | HTTP 200 + `error: { code: -32600, ... }` |
 | Unsupported `MCP-Protocol-Version` | **HTTP 400** + JSON-RPC error envelope (spec MUST) |
+| Missing `Mcp-Session-Id` **and** `MCP_REQUIRE_SESSION_ID=true` | HTTP 200 + `error: { code: -32600, ... }` (no audit row written) |
 | Missing/invalid Bearer token | HTTP 401 + `WWW-Authenticate: Bearer resource_metadata="..."` |
 | Insufficient scope/role | HTTP 403 |
 | GET on `/mcp` | HTTP 405 (FastAPI default; SSE-on-GET unimplemented in v0.2) |
@@ -129,15 +140,19 @@ Per [G0.5-T5 (#250, PR #300)](https://github.com/evoila/meho/pull/300): MCP hand
 The per-operation writer is [`mcp/audit.py::write_mcp_audit_row`](../../backend/src/meho_backplane/mcp/audit.py), called from inside [`mcp/handlers.py`](../../backend/src/meho_backplane/mcp/handlers.py) for both `tools/call` and `resources/read`. MCP audit row shape:
 
 ```text
-operator_sub  ← from JWT (validated by /mcp auth chain)
-tenant_id     ← operator.tenant_id
-request_id    ← from RequestContextMiddleware (still runs)
-method        ← "MCP"
-path          ← "/mcp/tools/call/{tool_name}" or "/mcp/resources/read/{uri}"
-status_code   ← 200 / 400 / 403 / 404 / 500 (derived from JSON-RPC outcome)
-duration_ms   ← time.monotonic() bracket
-payload       ← {op_id, params_hash, op_class}
+operator_sub     ← from JWT (validated by /mcp auth chain)
+tenant_id        ← operator.tenant_id
+agent_session_id ← Mcp-Session-Id header (or fresh uuid4); NULL on chassis HTTP rows (G8.2-T2)
+parent_audit_id  ← parent_audit_id contextvar (forward-compat; unbound in v0.2)
+request_id       ← from RequestContextMiddleware (still runs)
+method           ← "MCP"
+path             ← "/mcp/tools/call/{tool_name}" or "/mcp/resources/read/{uri}"
+status_code      ← 200 / 400 / 403 / 404 / 500 (derived from JSON-RPC outcome)
+duration_ms      ← time.monotonic() bracket
+payload          ← {op_id, params_hash, op_class}
 ```
+
+`agent_session_id` and `parent_audit_id` are real `audit_log` columns (not payload keys), read from contextvars by [`_resolve_uuid_contextvar`](../../backend/src/meho_backplane/mcp/audit.py) — the same pattern the chassis uses for `target_id`. Chassis HTTP-side rows (written by `AuditMiddleware`) leave `agent_session_id` NULL by design: they are not part of an agent session.
 
 Fail-closed: audit write failure → MCP call fails with JSON-RPC `INTERNAL_ERROR` (-32603). Compliance-critical.
 

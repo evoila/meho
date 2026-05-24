@@ -85,6 +85,47 @@ def compute_params_hash(params: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _resolve_uuid_contextvar(name: str) -> uuid.UUID | None:
+    """Read structlog contextvar *name* and parse it as :class:`uuid.UUID`.
+
+    Mirrors :func:`~meho_backplane.audit._resolve_target_id`: the binder
+    stores the value as ``str(some_uuid)`` and this reader parses it
+    back. Used for the two graph columns on the MCP audit row:
+
+    * ``mcp_session_id`` — bound by
+      :func:`~meho_backplane.mcp.server._bind_mcp_session_id` from the
+      inbound ``Mcp-Session-Id`` header (G8.2-T2 #1010); lands on
+      ``AuditLog.agent_session_id``.
+    * ``parent_audit_id`` — forward-compat hook (G8.2-T2 #1010): in v0.2
+      no MCP caller binds it, but reading it now means a future
+      tool-calls-tool flow only has to ``bind_contextvars`` the parent
+      op's audit id for the closure walk (G8.2 recursive-CTE replay) to
+      see the edge.
+
+    Unbound → ``None`` (the chassis-era default for HTTP rows, and the
+    v0.2 default for ``parent_audit_id``). A bound value that fails the
+    type / UUID-parse check is a programming error (the binders only
+    bind canonical UUID strings); the row is still committed with the
+    column ``None`` and the malformed value is logged so the invariant
+    violation is visible rather than silently fatal.
+    """
+    raw = structlog.contextvars.get_contextvars().get(name)
+    if raw is None:
+        return None
+    log = structlog.get_logger(__name__)
+    if not isinstance(raw, str):
+        log.error("mcp_audit_malformed_uuid_contextvar", name=name, value=raw)
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        log.error("mcp_audit_malformed_uuid_contextvar", name=name, value=raw)
+        return None
+
+
+# code-quality-allow: linear fail-closed audit write; the length is a
+# compliance-critical docstring documenting the merge + fail-closed contract,
+# not branching logic — extracting helpers would fragment one DB transaction.
 async def write_mcp_audit_row(
     *,
     operator: Operator,
@@ -121,6 +162,10 @@ async def write_mcp_audit_row(
     parity) is the v0.2 caller; future MCP meta-tools that bind
     ``audit_*`` contextvars inherit the same surfacing automatically.
 
+    The ``agent_session_id`` / ``parent_audit_id`` graph columns are
+    read from contextvars via :func:`_resolve_uuid_contextvar`
+    (G8.2-T2 #1010), not the ``audit_*`` payload merge.
+
     Raises any DB-side exception verbatim — the caller's ``finally``
     block converts it into a JSON-RPC ``-32603`` so the client sees
     the operation as failed and the audit-write failure is the
@@ -147,6 +192,11 @@ async def write_mcp_audit_row(
     if contextvar_payload:
         payload = {**contextvar_payload, **payload}
 
+    # Graph columns off contextvars (G8.2-T2 #1010) — real columns, not
+    # payload keys; see :func:`_resolve_uuid_contextvar` for bind sources.
+    agent_session_id = _resolve_uuid_contextvar("mcp_session_id")
+    parent_audit_id = _resolve_uuid_contextvar("parent_audit_id")
+
     log = structlog.get_logger(__name__)
     if audit_id is None:
         audit_id = uuid.uuid4()
@@ -157,6 +207,8 @@ async def write_mcp_audit_row(
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
             tenant_id=operator.tenant_id,
+            agent_session_id=agent_session_id,
+            parent_audit_id=parent_audit_id,
             method=method,
             path=path,
             status_code=status_code,

@@ -439,6 +439,18 @@ class Settings(BaseModel):
         retention is policy-driven); ``enabled=False`` skips starting
         the loop entirely (no audit-row noise, no log line). Read once
         at lifespan startup; toggling post-start requires a pod restart.
+    mcp_require_session_id:
+        Whether ``POST /mcp`` rejects requests that omit the
+        ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
+        the MCP 2025-06-18 Streamable HTTP transport explicitly permits
+        servers to not require sessions, and MEHO only needs the id for
+        audit correlation, so a missing header falls back to a fresh
+        single-call ``uuid4()``. Flip ``MCP_REQUIRE_SESSION_ID=true``
+        in deployments that mandate every agent call carry a stable
+        session id (compliance environments that forbid synthetic
+        single-call ids); a missing/empty header then returns a
+        JSON-RPC ``-32600`` Invalid Request before dispatch, so no
+        audit row is written for the rejected call.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -516,6 +528,7 @@ class Settings(BaseModel):
     topology_history_retention_days: int = Field(default=90, ge=0, le=3650)
     topology_history_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     topology_history_prune_enabled: bool = True
+    mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -669,5 +682,8 @@ def get_settings() -> Settings:
         ),
         topology_history_prune_enabled=parse_bool_env(
             os.environ.get("TOPOLOGY_HISTORY_PRUNE_ENABLED", "true"),
+        ),
+        mcp_require_session_id=parse_bool_env(
+            os.environ.get("MCP_REQUIRE_SESSION_ID"),
         ),
     )

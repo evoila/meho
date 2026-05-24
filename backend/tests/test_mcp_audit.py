@@ -37,7 +37,8 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
-from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
+from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST
+from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     build_operator,
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
@@ -328,3 +329,183 @@ async def test_write_mcp_audit_row_persists_every_field() -> None:
     # SQLite stores Numeric via _PORTABLE_JSON if applicable; check value
     assert float(row.duration_ms or 0) == pytest.approx(12.34)
     assert json.loads(json.dumps(row.payload)) == payload
+
+
+# ---------------------------------------------------------------------------
+# G8.2-T2 (#1010): Mcp-Session-Id capture → agent_session_id column
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_header_propagates_to_agent_session_id(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """AC: a ``Mcp-Session-Id`` header lands on ``audit_log.agent_session_id``."""
+    client, _op = client_with_operator
+    session_id = uuid4()
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "meho.status", "arguments": {}},
+        },
+        headers={"Mcp-Session-Id": str(session_id)},
+    )
+    assert response.status_code == 200
+
+    rows = await _audit_rows()
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    assert mcp_rows[0].agent_session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_absent_session_header_gets_fresh_uuid_per_call(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """AC: no header → non-NULL ``agent_session_id``; two calls differ.
+
+    Single-call sessions are valid per the MCP spec; the fresh uuid4
+    keeps the column non-NULL so the row is still session-addressable.
+    Two header-less calls must get two distinct ids — otherwise the
+    fallback would collide every unattributed call into one bucket.
+    """
+    client, _op = client_with_operator
+    envelope = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "meho.status", "arguments": {}},
+    }
+
+    assert post_mcp(client, envelope).status_code == 200
+    assert post_mcp(client, {**envelope, "id": 2}).status_code == 200
+
+    rows = await _audit_rows()
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 2
+    ids = [r.agent_session_id for r in mcp_rows]
+    assert all(i is not None for i in ids)
+    assert ids[0] != ids[1]
+
+
+@pytest.mark.asyncio
+async def test_malformed_session_header_falls_back_to_fresh_uuid(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """AC: a non-UUID ``Mcp-Session-Id`` does not 500 — it falls back.
+
+    A malformed *client* header can't go in the ``uuid`` column, so it
+    is treated as absent: the call succeeds (no transport error) and the
+    row carries a fresh, non-NULL uuid4 rather than the bad header value.
+    """
+    client, _op = client_with_operator
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "meho.status", "arguments": {}},
+        },
+        headers={"Mcp-Session-Id": "not-a-uuid"},
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is False
+
+    rows = await _audit_rows()
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    assert mcp_rows[0].agent_session_id is not None
+
+
+@pytest.mark.asyncio
+async def test_require_session_id_rejects_missing_header_without_audit_row(
+    client_with_operator: tuple[TestClient, Operator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: ``MCP_REQUIRE_SESSION_ID=true`` + no header → -32600, no row.
+
+    The reject must fire *before* dispatch, so no audit row is written
+    for the rejected call (the operation never ran).
+    """
+    client, _op = client_with_operator
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
+    get_settings.cache_clear()
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "meho.status", "arguments": {}},
+        },
+    )
+    assert response.json()["error"]["code"] == INVALID_REQUEST
+
+    rows = await _audit_rows()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_require_session_id_accepts_when_header_present(
+    client_with_operator: tuple[TestClient, Operator],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: require-mode still succeeds when the header is supplied."""
+    client, _op = client_with_operator
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", "true")
+    get_settings.cache_clear()
+    session_id = uuid4()
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "meho.status", "arguments": {}},
+        },
+        headers={"Mcp-Session-Id": str(session_id)},
+    )
+    assert response.status_code == 200
+
+    rows = await _audit_rows()
+    mcp_rows = [r for r in rows if r.method == "MCP"]
+    assert len(mcp_rows) == 1
+    assert mcp_rows[0].agent_session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_write_helper_leaves_agent_session_id_null_without_contextvar() -> None:
+    """HTTP-shaped rows stay NULL: the writer reads no session contextvar.
+
+    The chassis ``AuditMiddleware`` never binds ``mcp_session_id``, so a
+    direct ``write_mcp_audit_row`` call with no contextvar bound (the
+    helper-level path) leaves ``agent_session_id`` / ``parent_audit_id``
+    NULL — proving the column is opt-in via the MCP transport's bind,
+    not a default on every row.
+    """
+    import structlog
+
+    structlog.contextvars.clear_contextvars()
+    op = build_operator()
+
+    await write_mcp_audit_row(
+        operator=op,
+        method="MCP",
+        path="/mcp/tools/call/test.tool",
+        status_code=200,
+        duration_ms=1.0,
+        payload={"op_id": "test.tool", "op_class": "read"},
+    )
+
+    rows = await _audit_rows()
+    assert len(rows) == 1
+    assert rows[0].agent_session_id is None
+    assert rows[0].parent_audit_id is None

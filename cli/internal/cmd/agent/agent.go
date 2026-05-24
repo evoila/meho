@@ -21,6 +21,19 @@
 //   - `meho agent delete <name> [--confirm] [--json]` — delete via
 //     DELETE /api/v1/agents/{name}. Role: tenant_admin.
 //
+// G11.1-T4 (#811) adds three operator-facing invocation verbs that wrap
+// the T4 REST surface (`backend/src/meho_backplane/api/v1/agent_runs.py`):
+//
+//   - `meho agent run <name> --input TEXT [--async] [--json]` — run an
+//     agent via POST /api/v1/agents/{name}/run. Sync (default) blocks for
+//     the result; --async (or a sync run past the server-side timeout)
+//     returns a handle. Role: operator.
+//   - `meho agent run-status <handle> [--json]` — poll a run's durable
+//     status via GET /api/v1/agents/runs/{handle}. Role: operator.
+//   - `meho agent run-events <name> --input TEXT [--json]` — stream a fresh
+//     run's events over SSE from POST /api/v1/agents/{name}/run/events.
+//     Role: operator.
+//
 // Authentication piggybacks on the token meho login wrote — same
 // pattern as `meho kb`, `meho broadcast`, `meho audit`. RBAC at the
 // backend rejects non-tenant_admin write callers with HTTP 403; the
@@ -75,6 +88,11 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newEditCmd())
 	cmd.AddCommand(newDeleteCmd())
+	// G11.1-T4 (#811): the invocation verbs — run (sync/async), run-status
+	// (poll), run-events (SSE stream of a fresh run).
+	cmd.AddCommand(newRunCmd())
+	cmd.AddCommand(newRunStatusCmd())
+	cmd.AddCommand(newRunEventsCmd())
 	return cmd
 }
 

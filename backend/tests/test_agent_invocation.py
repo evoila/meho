@@ -1,0 +1,439 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Behavioural tests for the agent invocation service + seam event stream.
+
+G11.1-T4 (#811). Covers the orchestration layer
+(:mod:`meho_backplane.agent.invocation`) and the seam's richer event
+stream (:meth:`meho_backplane.agent.run.PydanticAgentRun.stream_events`)
+against a deterministic :class:`~pydantic_ai.models.function.FunctionModel`
+so no real LLM is hit (python_best_practices §14 — no network in unit
+tests).
+
+Acceptance criteria from #811 map onto the tests as:
+
+* ``test_sync_run_blocks_and_returns_final_output`` — a short sync run
+  blocks and returns the final answer recorded on the durable run row.
+* ``test_long_sync_run_converts_to_async`` — a run that exceeds the
+  server-side timeout returns a still-running handle flagged
+  ``converted_to_async``; the run keeps going and later succeeds.
+* ``test_async_run_returns_handle_then_poll_succeeds`` — async mode hands
+  back a handle immediately; polling later shows the terminal state.
+* ``test_poll_after_request_returns_reads_durable_row`` — poll works for a
+  run whose in-memory store entry has been evicted (durability).
+* ``test_stream_events_emits_turn_tool_and_final`` — the event stream
+  surfaces turn / tool-call / tool-result / final events end to end.
+* ``test_run_rejects_unknown_and_disabled_definitions`` — a missing /
+  cross-tenant name and a disabled definition raise the typed errors.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Iterator
+from typing import Any
+from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
+
+import pytest
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+from meho_backplane.agent.invocation import (
+    AgentDisabledError,
+    AgentInvoker,
+    AgentNotFoundError,
+    AgentRunNotFoundError,
+)
+from meho_backplane.agent.run import AgentDefinition, AgentRunEventKind, PydanticAgentRun
+from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
+from meho_backplane.agents.service import AgentDefinitionService
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AgentRunStatus, Tenant
+from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
+from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
+from meho_backplane.settings import get_settings
+
+pytestmark = pytest.mark.asyncio
+
+_TENANT_A = UUID("11111111-1111-1111-1111-111111111111")
+_TENANT_B = UUID("22222222-2222-2222-2222-222222222222")
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the env vars :class:`Settings` requires; reset the lru cache."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_state() -> Iterator[None]:
+    """Clear the connector registry + dispatcher caches around each test."""
+    clear_registry()
+    reset_dispatcher_caches()
+    yield
+    clear_registry()
+    reset_dispatcher_caches()
+
+
+@pytest.fixture
+def stub_embedding_service() -> AsyncMock:
+    """A stub embedding service returning a fixed-dimension vector."""
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * EMBEDDING_DIMENSION
+    service.encode.return_value = [[0.1] * EMBEDDING_DIMENSION]
+    service.dimension = EMBEDDING_DIMENSION
+    return service
+
+
+def _make_operator(
+    *,
+    tenant_id: UUID = _TENANT_A,
+    role: TenantRole = TenantRole.OPERATOR,
+    sub: str = "op-agent",
+) -> Operator:
+    return Operator(
+        sub=sub,
+        name="Agent Operator",
+        email=None,
+        raw_jwt="<test-raw-jwt>",
+        tenant_id=tenant_id,
+        tenant_role=role,
+    )
+
+
+async def _seed_tenants() -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        for tid, slug in ((_TENANT_A, "tenant-a"), (_TENANT_B, "tenant-b")):
+            existing = await session.get(Tenant, tid)
+            if existing is None:
+                session.add(Tenant(id=tid, slug=slug, name=f"Tenant {slug}"))
+        await session.commit()
+
+
+async def _seed_definition(
+    *,
+    name: str = "reader",
+    tenant_id: UUID = _TENANT_A,
+    enabled: bool = True,
+    toolset: dict[str, Any] | None = None,
+) -> None:
+    """Insert an agent definition for *tenant_id* via the CRUD service."""
+    await _seed_tenants()
+    service = AgentDefinitionService()
+    await service.create(
+        tenant_id=tenant_id,
+        created_by_sub="seed-admin",
+        payload=AgentDefinitionCreate(
+            name=name,
+            identity_ref=f"agent:{name}",
+            model_tier=AgentModelTier.STANDARD,
+            system_prompt="You read secrets via MEHO operations.",
+            toolset=toolset or {},
+            turn_budget=5,
+            enabled=enabled,
+        ),
+    )
+
+
+class _NoOpVaultConnector(Connector):
+    """Connector class registered so resolver/dispatch lookups succeed."""
+
+    product = "vault"
+    version = "1.x"
+    impl_id = "vault"
+
+    async def fingerprint(self, target: Any) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+
+async def _echo_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Typed handler echoing its params — proves the dispatch path runs."""
+    return {"echo": params, "operator_sub": operator.sub}
+
+
+async def _seed_echo_op(stub_embedding_service: AsyncMock) -> None:
+    """Register the ``vault.kv.read`` typed op the agent tool will dispatch."""
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.read",
+        handler=_echo_handler,
+        summary="Read a secret.",
+        description="reads.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+
+def _final_text(text: str) -> FunctionModel:
+    """A model that answers immediately with *text* (no tool calls)."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart(text)])
+
+    return FunctionModel(fn)
+
+
+def _call_op_then_text(text: str) -> FunctionModel:
+    """A model that calls ``call_operation`` once, then answers with *text*."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        has_return = any(
+            getattr(part, "part_kind", "") == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not has_return:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "call_operation",
+                        {
+                            "connector_id": "vault-1.x",
+                            "op_id": "vault.kv.read",
+                            "params": {"path": "secret/foo"},
+                        },
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart(text)])
+
+    return FunctionModel(fn)
+
+
+def _invoker_with(model: FunctionModel) -> AgentInvoker:
+    """Build an invoker over a deterministic seam (no real LLM)."""
+    return AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: model))
+
+
+# ---------------------------------------------------------------------------
+# Sync invocation
+# ---------------------------------------------------------------------------
+
+
+async def test_sync_run_blocks_and_returns_final_output() -> None:
+    """A short sync run blocks and returns the final answer, recorded durably."""
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("done reading"))
+
+    outcome = await invoker.run(_make_operator(), "reader", "read secret/foo")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+    assert outcome.converted_to_async is False
+    assert outcome.output == {"text": "done reading"}
+
+    # The durable row carries the same terminal state.
+    view = await invoker.poll(_make_operator(), outcome.run_id)
+    assert view.status is AgentRunStatus.SUCCEEDED
+    assert view.output == {"text": "done reading"}
+    assert view.provider == "anthropic"
+
+
+async def test_long_sync_run_converts_to_async(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sync run past the server-side timeout returns a still-running handle."""
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("eventually"))
+
+    # Drive the timeout near zero so the wait abandons before the background
+    # task is scheduled — exercising the converted-to-async path
+    # deterministically without a real long-running loop.
+    monkeypatch.setenv("AGENT_SYNC_TIMEOUT_SECONDS", "0.0000001")
+    get_settings.cache_clear()
+
+    outcome = await invoker.run(_make_operator(), "reader", "go")
+
+    assert outcome.converted_to_async is True
+    assert outcome.status is AgentRunStatus.RUNNING
+
+    # The run keeps going in the background and eventually succeeds; poll
+    # until the durable row reaches a terminal state.
+    for _ in range(200):
+        view = await invoker.poll(_make_operator(), outcome.run_id)
+        if view.status is AgentRunStatus.SUCCEEDED:
+            break
+        await asyncio.sleep(0.01)
+    assert view.status is AgentRunStatus.SUCCEEDED
+
+
+# ---------------------------------------------------------------------------
+# Async invocation + poll
+# ---------------------------------------------------------------------------
+
+
+async def test_async_run_returns_handle_then_poll_succeeds() -> None:
+    """Async mode hands back a handle immediately; polling shows the terminal state."""
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("async done"))
+
+    outcome = await invoker.run(_make_operator(), "reader", "go", async_mode=True)
+    assert outcome.status is AgentRunStatus.RUNNING
+
+    for _ in range(200):
+        view = await invoker.poll(_make_operator(), outcome.run_id)
+        if view.status is AgentRunStatus.SUCCEEDED:
+            break
+        await asyncio.sleep(0.01)
+    assert view.status is AgentRunStatus.SUCCEEDED
+    assert view.output == {"text": "async done"}
+
+
+async def test_poll_after_store_eviction_reads_durable_row() -> None:
+    """Poll works for a run whose in-memory store entry has been evicted."""
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("durable"))
+
+    outcome = await invoker.run(_make_operator(), "reader", "go")
+    # Simulate the worker dropping the in-memory anchor (restart / GC).
+    invoker._store.clear()
+
+    view = await invoker.poll(_make_operator(), outcome.run_id)
+    assert view.status is AgentRunStatus.SUCCEEDED
+    assert view.output == {"text": "durable"}
+
+
+async def test_poll_cross_tenant_run_is_not_found() -> None:
+    """A run id owned by tenant A is invisible to tenant B's poll."""
+    await _seed_definition()
+    invoker = _invoker_with(_final_text("x"))
+    outcome = await invoker.run(_make_operator(tenant_id=_TENANT_A), "reader", "go")
+
+    with pytest.raises(AgentRunNotFoundError):
+        await invoker.poll(_make_operator(tenant_id=_TENANT_B, sub="op-b"), outcome.run_id)
+
+
+async def test_poll_unknown_handle_is_not_found() -> None:
+    """An unknown run id raises AgentRunNotFoundError."""
+    await _seed_tenants()
+    invoker = _invoker_with(_final_text("x"))
+    with pytest.raises(AgentRunNotFoundError):
+        await invoker.poll(_make_operator(), uuid4())
+
+
+# ---------------------------------------------------------------------------
+# SSE event stream (seam + service)
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_events_emits_turn_tool_and_final(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The event stream surfaces turn / tool-call / tool-result / final."""
+    await _seed_echo_op(stub_embedding_service)
+    await _seed_definition(toolset={"meta_tools": ["call_operation"]})
+    invoker = _invoker_with(_call_op_then_text("answer"))
+
+    kinds: list[AgentRunEventKind] = []
+    run_ids: set[str] = set()
+    final_payload: dict[str, Any] | None = None
+    async for run_id, event in invoker.stream_events(_make_operator(), "reader", "go"):
+        kinds.append(event.kind)
+        run_ids.add(str(run_id))
+        if event.kind is AgentRunEventKind.FINAL:
+            final_payload = event.data
+
+    assert AgentRunEventKind.TURN in kinds
+    assert AgentRunEventKind.TOOL_CALL in kinds
+    assert AgentRunEventKind.TOOL_RESULT in kinds
+    assert kinds[-1] is AgentRunEventKind.FINAL
+    assert final_payload == {"output": "answer"}
+    # All events share one durable run handle.
+    assert len(run_ids) == 1
+
+    # The streamed run's terminal outcome is recorded durably.
+    run_id = UUID(next(iter(run_ids)))
+    view = await invoker.poll(_make_operator(), run_id)
+    assert view.status is AgentRunStatus.SUCCEEDED
+    assert view.output == {"text": "answer"}
+
+
+async def test_seam_stream_events_surfaces_budget_error() -> None:
+    """A runaway loop yields a terminal ERROR event, not a raised exception."""
+    runtime = PydanticAgentRun(
+        model_factory=lambda: FunctionModel(
+            lambda messages, info: ModelResponse(parts=[ToolCallPart("nonexistent_tool", {})])
+        )
+    )
+    op = _make_operator()
+    # request_limit=1 trips the budget after one turn (the model keeps
+    # calling a tool that does not exist, so the loop never terminates on
+    # its own and only the budget can stop it).
+    definition = AgentDefinition(name="runaway", system_prompt="loop", request_limit=1)
+    events: list[Any] = []
+    async for event in runtime.stream_events(definition, op, "go", uuid4()):
+        events.append(event)
+    assert events[-1].kind is AgentRunEventKind.ERROR
+
+
+# ---------------------------------------------------------------------------
+# Error paths
+# ---------------------------------------------------------------------------
+
+
+async def test_run_rejects_unknown_definition() -> None:
+    """A missing / cross-tenant name raises AgentNotFoundError."""
+    await _seed_tenants()
+    invoker = _invoker_with(_final_text("x"))
+    with pytest.raises(AgentNotFoundError):
+        await invoker.run(_make_operator(), "nonexistent", "go")
+
+
+async def test_run_rejects_cross_tenant_definition() -> None:
+    """Tenant B cannot run tenant A's definition (surfaces as not-found)."""
+    await _seed_definition(tenant_id=_TENANT_A)
+    invoker = _invoker_with(_final_text("x"))
+    with pytest.raises(AgentNotFoundError):
+        await invoker.run(_make_operator(tenant_id=_TENANT_B, sub="op-b"), "reader", "go")
+
+
+async def test_run_rejects_disabled_definition() -> None:
+    """A disabled definition raises AgentDisabledError."""
+    await _seed_definition(enabled=False)
+    invoker = _invoker_with(_final_text("x"))
+    with pytest.raises(AgentDisabledError):
+        await invoker.run(_make_operator(), "reader", "go")
+
+
+async def test_failed_loop_records_failed_run() -> None:
+    """A loop that errors records a ``failed`` run with the error message."""
+    await _seed_definition()
+    runtime = PydanticAgentRun(
+        model_factory=lambda: FunctionModel(
+            lambda messages, info: ModelResponse(parts=[ToolCallPart("nonexistent", {})])
+        )
+    )
+    invoker = AgentInvoker(runtime=runtime)
+    # request_limit on the seeded definition is 5; a model that only calls a
+    # missing tool will exhaust the budget and surface as a failed run.
+    outcome = await invoker.run(_make_operator(), "reader", "go")
+    assert outcome.status is AgentRunStatus.FAILED
+    assert outcome.error is not None

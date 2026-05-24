@@ -3972,6 +3972,184 @@
         }
       }
     },
+    "/api/v1/agents/{name}/run": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Run Agent",
+        "description": "Run the named agent for the operator's tenant.\n\nSync (default) blocks up to ``agent_sync_timeout_seconds`` and returns\nthe final output at 200; a longer run converts to async and returns a\nhandle at 202. ``async=true`` returns the handle immediately. A\ncross-tenant / absent name is 404; a disabled definition is 409.",
+        "operationId": "run_agent_api_v1_agents__name__run_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/runs/{handle}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Get Run Status",
+        "description": "Poll a run's durable status by handle (the run id).\n\nReads the durable ``agent_run`` row, so it works after the request that\nstarted the run has returned. An unknown / cross-tenant handle is 404.",
+        "operationId": "get_run_status_api_v1_agents_runs__handle__get",
+        "parameters": [
+          {
+            "name": "handle",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Handle"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}/run/events": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Run Agent Events",
+        "description": "Stream a fresh run's events for the named agent as Server-Sent Events.\n\nDrives a new run inline and emits ``turn`` / ``tool_call`` /\n``tool_result`` / ``final`` / ``error`` events as they happen. The run\nis recorded on a durable ``agent_run`` row, so a consumer can poll the\nrun's recorded outcome after the stream ends (the ``data:`` field of\nevery frame carries the ``run_id``). A cross-tenant / absent name is\n404; a disabled definition is 409 \u2014 resolved before the stream opens so\nthe error is a normal HTTP status, not a torn stream.",
+        "operationId": "run_agent_events_api_v1_agents__name__run_events_post",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/.well-known/oauth-protected-resource": {
       "get": {
         "tags": [
@@ -4740,6 +4918,91 @@
         ],
         "title": "AgentModelTier",
         "description": "Logical model tier an agent definition runs against.\n\nThe tier is *logical* -- G11.5's multi-provider resolver maps it to\na concrete model backend at run time. T2 stores the tier verbatim;\nit does not resolve it. ``StrEnum`` (PEP 663, stdlib 3.11+) gives\nthe members ``str`` semantics so ``f\"tier={AgentModelTier.STANDARD}\"``\nrenders as ``\"tier=standard\"``, matching the\n:class:`~meho_backplane.auth.operator.TenantRole` /\n:class:`~meho_backplane.memory.schemas.MemoryScope` convention.\n\nThree tiers in v0.2:\n\n* ``standard`` -- the default general-purpose tier.\n* ``fast`` -- a cheaper / lower-latency tier for simple loops.\n* ``deep`` -- a more capable tier for harder reasoning."
+      },
+      "AgentRunRequest": {
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Input",
+            "description": "The user prompt to run the agent on."
+          },
+          "async": {
+            "type": "boolean",
+            "title": "Async",
+            "description": "Return a run handle immediately instead of blocking for the result.",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "input"
+        ],
+        "title": "AgentRunRequest",
+        "description": "POST body for ``/agents/{name}/run``.\n\n``extra=\"forbid\"`` rejects unknown fields with 422 (catches a client\ntypo before it lands as a silent no-op). ``async_`` is the async flag \u2014\nnamed with a trailing underscore because ``async`` is a Python keyword;\nits JSON alias is ``async`` so the wire field reads naturally."
+      },
+      "AgentRunStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "running",
+          "awaiting_approval",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ],
+        "title": "AgentRunStatus",
+        "description": "Closed lifecycle status of an :class:`AgentRun`.\n\nInitiative #802 (G11.1 Agent runtime), Task #813 (T6). The runtime\nhosts an LLM tool-use loop in MEHO's process; every invocation is\none ``agent_run`` row whose ``status`` walks an explicit, enforced\nstate machine. The legal transitions live in\n:data:`meho_backplane.operations.agent_run.ALLOWED_TRANSITIONS`; the\nservice rejects any edge not on that map so an illegal jump (e.g.\n``succeeded`` -> ``running``) cannot land in the DB.\n\nMembers:\n\n* :attr:`PENDING` -- the row was created but the loop has not\n  started executing yet (initial state on insert).\n* :attr:`RUNNING` -- the loop is executing tool-use turns.\n* :attr:`AWAITING_APPROVAL` -- the loop is paused on a\n  policy-gated tool call whose verdict is ``needs-approval``\n  (G11.2 resolves the verdict; the runtime parks the run here in\n  the meantime). Resumable back to ``running``.\n* :attr:`SUCCEEDED` -- the loop completed and produced ``output``\n  (terminal).\n* :attr:`FAILED` -- the loop errored or exhausted its turn budget\n  without producing a usable result (terminal).\n* :attr:`CANCELLED` -- an authorized operator cancelled a\n  non-terminal run (terminal). The cancellation path is the\n  ``running`` / ``pending`` / ``awaiting_approval`` ->\n  ``cancelled`` edge.\n\nMirrors the closed-enum + DB ``CHECK`` discipline\n:class:`GraphEdgeKind` / :class:`GraphHistoryChangeKind` set: the\nenum and the ``CHECK (status IN (...))`` constraint move in\nlock-step via migration ``0015``; the drift guard\n:func:`tests.test_db_agent_run.test_status_check_matches_enum`\nenforces the equality at unit-test time."
+      },
+      "AgentRunStatusResponse": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AgentRunStatus"
+          },
+          "turns": {
+            "type": "integer",
+            "title": "Turns"
+          },
+          "provider": {
+            "type": "string",
+            "nullable": true,
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "nullable": true,
+            "title": "Model"
+          },
+          "output": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Output"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "status",
+          "turns",
+          "provider",
+          "model",
+          "output",
+          "error"
+        ],
+        "title": "AgentRunStatusResponse",
+        "description": "Poll response for ``GET /agents/runs/{handle}``."
       },
       "AuditEntry": {
         "properties": {

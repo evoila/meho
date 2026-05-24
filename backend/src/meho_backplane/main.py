@@ -50,6 +50,7 @@ from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.api.v1.agent_runs import router as api_v1_agent_runs_router
 from meho_backplane.api.v1.agents import router as api_v1_agents_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
@@ -558,6 +559,13 @@ app.include_router(api_v1_broadcast_overrides_router)
 # existence is not leaked across tenant boundaries. Every mutation
 # writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_agents_router)
+# G11.1-T4 (#811) -- agent invocation surface. POST /agents/{name}/run
+# (sync block-and-return, or async handle on the timeout / async flag),
+# GET /agents/runs/{handle} (poll the durable run state), and POST
+# /agents/{name}/run/events (SSE stream of a fresh run's turn / tool-call
+# / final events). Operator-level; tenant-scoped via the JWT; runs only an
+# enabled definition in the operator's tenant.
+app.include_router(api_v1_agent_runs_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

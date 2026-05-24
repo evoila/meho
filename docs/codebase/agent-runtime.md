@@ -14,9 +14,10 @@ run-handle store, and audit wiring remain MEHO's. Nothing outside
 `meho_backplane.agent` imports `pydantic_ai`.
 
 This document describes the G11.1-T1 foundation (the seam + one bounded
-loop) and the G11.1-T3 toolset resolution layered on it. Other G11.1 tasks:
-agent-definition persistence (T2), the public sync/async invocation surface
-(T4), agent-invokes-agent composition (T5), and durable run records (T6).
+loop), the G11.1-T3 toolset resolution layered on it, and the G11.1-T5
+agent-invokes-agent composition. Other G11.1 tasks: agent-definition
+persistence (T2), the public sync/async invocation surface (T4), and durable
+run records (T6).
 
 ## Key types
 
@@ -149,6 +150,72 @@ for *its* tool surface, parallel to the MCP front-end's `register_mcp_tool`
 registrations — both adapt the same `meta_tools` handlers; neither wraps the
 other.
 
+## Composition — agent invokes agent (T5 #812)
+
+A running agent can invoke **another** agent definition in its tenant as a
+child run, via the `invoke_agent` meta-tool (in `meho_backplane/agent/invoke.py`).
+From MEHO's view a child run is just another governed call: it resolves through
+the same identity, the same RBAC-filtered toolset, the same dispatch + audit
+machinery. There is no "tier" concept in MEHO — a consumer's harness may
+escalate a cheap-tier agent to a deep-tier agent, but MEHO sees one agent run
+invoking another.
+
+`invoke_agent` is **off by default**. It is appended to a built agent only when
+the `PydanticAgentRun` carries a `child_agent_resolver` (injected at the edge by
+the T4 invocation surface, which owns the tenant-scoped definition lookup). With
+no resolver, the T1/T3 surface is unchanged.
+
+### Two independent bounds keep a cascade from escaping
+
+A naive agent-invokes-agent surface is the textbook runaway-cost foot-gun (a
+definition that invokes itself, directly or transitively, spawns an unbounded
+chain of LLM runs). The mechanism bounds it on two axes; a cascade terminates on
+whichever it hits first:
+
+- **Depth** — the *height* of the invocation tree. A per-task contextvar
+  (`agent_invoke_depth_var`) tracks how many `invoke_agent` frames the current
+  asyncio task is nested inside. The tool pre-increments + checks it against
+  `Settings.agent_invoke_max_depth` (default 4, env `AGENT_INVOKE_MAX_DEPTH`)
+  *before* the child run starts, so an over-depth invocation never spends. This
+  mirrors the composite-recursion cap exactly (`composite_depth_var` +
+  `Settings.composite_max_depth`).
+- **Budget** — the *total turn count* across the whole cascade. The child loop
+  is driven with `usage=ctx.usage` (Pydantic AI's budget-propagation knob), so
+  the parent's `RunUsage` accumulator is shared with the child. The shared
+  `UsageLimits(request_limit=...)` is enforced against the running total, so a
+  deep-but-narrow cascade and a shallow-but-wide one both trip the same budget.
+  The framework raises `UsageLimitExceeded`, surfaced as `AgentRunError`.
+
+An over-depth invocation (and an unresolvable agent name, and a failed child
+run) surfaces to the model as a `ModelRetry` — a structured, agent-reasonable
+error it can recover from ("answer directly or stop"), not a tool-execution
+crash. The depth ceiling is a deterministic termination condition the model
+never controls.
+
+### Lineage — the cascade tree is reconstructable
+
+The child run is recorded as a child of the parent in two parallel lineages:
+
+- **Run lineage** — the child `agent_run` row's `parent_run_id` points at the
+  parent run's id, and its `trigger` is `agent-invoked` (`AgentRunTrigger`).
+  Recording the row is delegated to an injected `ChildRunRecorder` callback (the
+  T4/T6 surface owns the DB session); when no recorder is wired (the pure
+  in-process path) the depth + budget bounds still apply, the row is just not
+  persisted.
+- **Session lineage** — `current_agent_run_id_var` carries the current run's id
+  for the duration of a child invocation, so a nested `invoke_agent` reads it as
+  the next child's `parent_run_id` and per-tool-call audit rows correlate to
+  their run.
+
+### Why a tool factory, not a standalone service
+
+The acceptance criterion is that a *running agent* can invoke another — so the
+mechanism is a registered tool, reachable from inside the loop. The factory
+shape (`make_invoke_agent_tool(resolver, child_runner, recorder)`) injects the
+`child_runner` (`PydanticAgentRun.run_child`, which owns the framework `Agent`
+construction + the `usage=ctx.usage` call, keeping `pydantic_ai` confined to
+`agent/run.py`) without `invoke.py` importing the framework's loop driver.
+
 ## Dependencies
 
 - **`pydantic-ai-slim[anthropic]`** (pinned in `backend/pyproject.toml`) —
@@ -210,6 +277,12 @@ Foundation) is G11.5.
   transport lives.
 - Run handles are in-memory `asyncio.Task`s. Durable `agent_run` records +
   a session-id lineage key + cancellation are T6 (#813).
+- The `invoke_agent` composition tool (T5) takes an injected
+  `child_agent_resolver` / `child_run_recorder`; the T4 invocation surface
+  (#811) wires the concrete resolver (tenant-scoped `AgentDefinitionService`
+  lookup) and recorder (`agent_run` lifecycle service) at the edge. Until then
+  the bounds (depth + shared budget) hold and a recorder-less run simply does
+  not persist the lineage row.
 - The identity-permission side of the intersection is the tenant role today.
   When the G11.2 per-op permission model lands, the resolver's role gate is
   the seam to extend (or replace) with the real per-op grant check — the
@@ -219,10 +292,15 @@ Foundation) is G11.5.
 ## References
 
 - Goal #800 (G11 agentic ops runtime); Initiative #802 (G11.1); Tasks #808
-  (T1 seam), #810 (T3 toolset resolution).
+  (T1 seam), #810 (T3 toolset resolution), #812 (T5 composition), #813 (T6 run
+  records).
 - Pydantic AI: agent concepts (`UsageLimits`, `run`, `deps`/`RunContext`,
-  `output_type`), tool registration (`Tool.from_schema`, the `tools=`
-  constructor arg, `ModelRetry`), Anthropic model + provider.
+  `output_type`, budget-aware sub-runs via `usage=ctx.usage`), tool
+  registration (`Tool.from_schema`, the `tools=` constructor arg, `ModelRetry`),
+  Anthropic model + provider.
 - Grounding: `operations/dispatcher.py` (`dispatch`), `operations/meta_tools.py`
   (`call_operation`, `list_operation_groups`, `search_operations`),
-  `mcp/registry.py` (`role_at_least`), `auth/operator.py`.
+  `mcp/registry.py` (`role_at_least`), `auth/operator.py`; composition cap
+  precedent `operations/composite.py` (`composite_depth_var` +
+  `Settings.composite_max_depth`) and `operations/agent_run.py`
+  (`create_run(parent_run_id=...)`).

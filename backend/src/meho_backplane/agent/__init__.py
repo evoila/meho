@@ -22,6 +22,16 @@ The wider G11.1 initiative (#802) builds on this seam: definition persistence
 types this package exports.
 """
 
+from meho_backplane.agent.invoke import (
+    AGENT_INVOKE_DEPTH_TOP_LEVEL,
+    AgentInvocationDepthExceeded,
+    ChildAgentResolver,
+    ChildRunner,
+    ChildRunRecorder,
+    agent_invoke_depth_var,
+    current_agent_run_id_var,
+    make_invoke_agent_tool,
+)
 from meho_backplane.agent.run import (
     AgentDefinition,
     AgentRun,
@@ -42,8 +52,10 @@ from meho_backplane.agent.toolset import (
 )
 
 __all__ = [
+    "AGENT_INVOKE_DEPTH_TOP_LEVEL",
     "META_TOOL_NAMES",
     "AgentDefinition",
+    "AgentInvocationDepthExceeded",
     "AgentRun",
     "AgentRunError",
     "AgentRunEvent",
@@ -51,9 +63,15 @@ __all__ = [
     "AgentRunHandle",
     "AgentRunResult",
     "AgentRunStatus",
+    "ChildAgentResolver",
+    "ChildRunRecorder",
+    "ChildRunner",
     "MetaToolSpec",
     "ModelFactory",
     "PydanticAgentRun",
+    "agent_invoke_depth_var",
+    "current_agent_run_id_var",
     "default_model_factory",
+    "make_invoke_agent_tool",
     "resolve_agent_tools",
 ]

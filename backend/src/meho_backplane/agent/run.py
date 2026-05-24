@@ -75,9 +75,15 @@ from uuid import UUID, uuid4
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic_ai import Agent, RunContext, UsageLimits
+from pydantic_ai import Agent, RunContext, Tool, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.usage import RunUsage
 
+from meho_backplane.agent.invoke import (
+    ChildAgentResolver,
+    ChildRunRecorder,
+    make_invoke_agent_tool,
+)
 from meho_backplane.agent.toolset import resolve_agent_tools
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
@@ -488,6 +494,20 @@ class PydanticAgentRun:
     """
 
     model_factory: ModelFactory = field(default=default_model_factory)
+    #: Optional child-agent resolver (G11.1-T5 #812). When set, every built
+    #: agent additionally carries the ``invoke_agent`` meta-tool, so a running
+    #: agent can invoke another definition in its tenant as a depth-capped,
+    #: budget-aware, audited child run. ``None`` (the default) means
+    #: composition is off -- the T1/T3 surface is unchanged. Injected at the
+    #: edge by the T4 invocation surface, which owns the
+    #: :class:`~meho_backplane.agent.invoke.ChildAgentResolver` (the
+    #: tenant-scoped definition lookup).
+    child_agent_resolver: ChildAgentResolver | None = None
+    #: Optional persistence of the child ``agent_run`` lineage row (G11.1-T5 /
+    #: T6 #813). Passed straight to
+    #: :func:`~meho_backplane.agent.invoke.make_invoke_agent_tool`. ``None``
+    #: keeps the in-process bounds without writing the lineage row.
+    child_run_recorder: ChildRunRecorder | None = None
 
     def _build_agent(
         self,
@@ -502,10 +522,20 @@ class PydanticAgentRun:
         passed to the framework via the ``tools=`` constructor argument. A
         definition with no toolset (``toolset is None``) falls back to the T1
         default two-meta-tool surface.
+
+        When this runtime carries a :attr:`child_agent_resolver` (G11.1-T5),
+        the ``invoke_agent`` composition tool is appended to whichever surface
+        the definition selected, so a running agent can invoke another
+        definition. The tool is bound to :meth:`run_child` as its
+        :class:`~meho_backplane.agent.invoke.ChildRunner`, so the child loop
+        runs with the parent's shared usage budget.
         """
         model = self.model_factory()
+        invoke_tool = self._maybe_build_invoke_tool()
         if definition.toolset is not None:
             tools = resolve_agent_tools(definition.toolset, operator)
+            if invoke_tool is not None:
+                tools = [*tools, invoke_tool]
             agent: Agent[Operator, Any] = Agent(
                 model,
                 deps_type=Operator,
@@ -519,9 +549,26 @@ class PydanticAgentRun:
             deps_type=Operator,
             system_prompt=definition.system_prompt,
             output_type=definition.output_type if definition.output_type is not None else str,
+            tools=[invoke_tool] if invoke_tool is not None else [],
         )
         _register_default_meta_tools(agent)
         return agent
+
+    def _maybe_build_invoke_tool(self) -> Tool[Operator] | None:
+        """Build the ``invoke_agent`` tool when composition is wired, else ``None``.
+
+        Composition is on exactly when a :attr:`child_agent_resolver` is
+        injected. The tool's :class:`~meho_backplane.agent.invoke.ChildRunner`
+        is :meth:`run_child` (bound to this instance), so the child loop shares
+        the parent's usage budget and the framework stays confined here.
+        """
+        if self.child_agent_resolver is None:
+            return None
+        return make_invoke_agent_tool(
+            resolver=self.child_agent_resolver,
+            child_runner=self.run_child,
+            recorder=self.child_run_recorder,
+        )
 
     async def _run_loop(
         self,
@@ -566,6 +613,55 @@ class PydanticAgentRun:
             operator_sub=operator.sub,
         )
         return result
+
+    async def run_child(
+        self,
+        *,
+        definition: AgentDefinition,
+        operator: Operator,
+        inputs: str,
+        usage: RunUsage,
+    ) -> Any:
+        """Drive one child loop budget-aware, sharing the parent's usage.
+
+        The :class:`~meho_backplane.agent.invoke.ChildRunner` the
+        ``invoke_agent`` tool (G11.1-T5 #812) calls. Builds the child agent
+        from *definition* under the parent's *operator* (so the child's tools
+        are resolved + RBAC-filtered exactly like a top-level run), then drives
+        the loop with ``usage=usage`` -- the parent's
+        :class:`~pydantic_ai.usage.RunUsage` accumulator -- so the child's turns
+        count against the parent's running total. The shared
+        ``UsageLimits(request_limit=...)`` (the child's own
+        :attr:`AgentDefinition.request_limit`) is enforced against that shared
+        total, so a cascade that would exceed the budget trips
+        :class:`~pydantic_ai.exceptions.UsageLimitExceeded` -- surfaced here as
+        :class:`AgentRunError`, the seam's uniform failure type.
+
+        Unlike :meth:`start`, this awaits the child loop inline (it runs inside
+        the parent loop's ``invoke_agent`` tool call, on the parent's event
+        loop) and returns the child's output directly rather than a handle: the
+        parent tool needs the child's answer to continue, and the child's
+        lifecycle is bounded by the parent tool call.
+        """
+        child = self._build_agent(definition, operator)
+        limits = UsageLimits(request_limit=definition.request_limit)
+        try:
+            run_result = await child.run(
+                inputs,
+                deps=operator,
+                usage=usage,
+                usage_limits=limits,
+            )
+        except UsageLimitExceeded as exc:
+            _log.warning(
+                "agent_child_run_budget_exhausted",
+                agent=definition.name,
+                request_limit=definition.request_limit,
+                shared_requests=usage.requests,
+                operator_sub=operator.sub,
+            )
+            raise AgentRunError(f"turn budget exhausted: {exc}") from exc
+        return run_result.output
 
     def start(
         self,

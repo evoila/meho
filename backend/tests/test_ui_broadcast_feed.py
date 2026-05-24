@@ -443,8 +443,14 @@ class TestBroadcastStreamGenerator:
         ``meho:feed:{B}`` -- it can never read tenant-A's stream.
         """
         broadcast_client = get_broadcast_client()
-        # The mock returns no entries (idle); we only assert the key.
-        mock = AsyncMock(return_value=None)
+        # Idle mock: returns one empty batch then sleeps + returns None on
+        # every later call. The sleep is the load-bearing part -- a bare
+        # ``AsyncMock(return_value=None)`` never suspends to the event loop,
+        # so the generator's ``while True`` spins uncancellably and the
+        # ``_collect_n_frames`` ``asyncio.timeout`` can never fire (it pins a
+        # CI worker core until the runner is declared lost). ``_xread_returning``
+        # supplies the yield point; we only assert the stream key here.
+        mock = _xread_returning([])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _ui_feed_generator(
                 tenant_id=_TENANT_B,
@@ -470,7 +476,9 @@ class TestBroadcastStreamGenerator:
         bridge.
         """
         broadcast_client = get_broadcast_client()
-        mock = AsyncMock(return_value=None)
+        # Idle mock with a real yield point (see the tenant-B test above for
+        # why a bare ``AsyncMock(return_value=None)`` hangs the generator).
+        mock = _xread_returning([])
         with patch.object(broadcast_client, "xread", new=mock):
             gen = _ui_feed_generator(
                 tenant_id=_TENANT_A,

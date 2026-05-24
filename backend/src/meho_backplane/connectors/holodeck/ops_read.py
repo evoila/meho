@@ -66,24 +66,43 @@ Safety -- read-only k8s exec
 
 The acceptance criterion calls for ``holodeck.k8s.exec`` to reject
 mutating ``kubectl`` verbs (``create``/``apply``/``delete``/``edit``/
-``scale``/``patch``/...). The defence runs in two layers:
+``scale``/``patch``/...) **and** the canonical shell-injection
+exploit shapes (``;`` / ``&&`` / ``|`` / ``$(...)`` / backticks /
+``>`` / ``<`` / newline). The defence runs in two complementary
+allowlist layers:
 
 1. **Schema layer** -- ``parameter_schema.properties.command`` carries
-   a ``pattern`` regex that requires the command to start with
-   ``kubectl`` followed by one of the read-only verbs. The
-   dispatcher's :func:`~meho_backplane.operations._validate.validate_params`
-   walks this before reaching the handler; bad shapes surface as a
+   a ``pattern`` regex anchored ``\\A ... \\Z`` that requires the
+   command to start with ``kubectl``, hit one of the read-only verbs,
+   and carry only characters from the allowlist
+   ``[A-Za-z0-9._/=:,@-]`` in its arguments. Whitespace between tokens
+   is constrained to space-or-tab (``[ \\t]``) so a newline cannot
+   smuggle a second command line through the ``\\s`` class. The
+   dispatcher's
+   :func:`~meho_backplane.operations._validate.validate_params` walks
+   this before reaching the handler; bad shapes surface as a
    ``result_invalid_params`` envelope.
 2. **Handler layer** -- before the SSH call lands, the handler
-   re-parses the command via :func:`parse_kubectl_command` and
-   compares the verb to :data:`_K8S_READ_VERBS`. Mutating verbs raise
+   re-parses the command via :func:`parse_kubectl_command`, which
+   (a) scans the raw command for any character in
+   :data:`_SHELL_METACHARS_RE` and refuses on hit, then (b) tokenises
+   via :func:`shlex.split` and (c) compares the verb to
+   :data:`_K8S_READ_VERBS`. Any rejected step raises
    :exc:`KubectlSafetyError`, which the dispatcher's exception path
-   turns into a ``result_connector_error`` envelope. This is the
-   belt-and-braces fallback for the case where a future schema edit
-   accidentally widens the pattern.
+   turns into a ``result_connector_error`` envelope. The metacharacter
+   reject is **load-bearing**: ``shlex.split`` in POSIX mode does not
+   treat shell separators as token boundaries, so a chained payload
+   like ``kubectl get pods; rm -rf /`` would otherwise tokenise to
+   ``['kubectl', 'get', 'pods;', ...]`` -- the verb-safelist check
+   on ``tokens[idx]`` would see ``'get'`` and approve, and the
+   handler would then forward the **raw string** to
+   ``asyncssh.SSHClientConnection.run``, which delegates to the
+   remote login shell where the shell interprets the metacharacter.
 
 The handler layer is the **authoritative** gate; the schema pattern
 is a guardrail so a misshapen call doesn't even reach the connector.
+Both layers reject every chained-shell shape independently -- a
+future widening on either side does not silently re-open the hole.
 
 References
 ----------
@@ -134,14 +153,19 @@ __all__ = [
 #: ``get`` / ``describe`` / ``logs`` are the three primary read verbs
 #: the Initiative #371 body calls out. ``top`` (metrics) and
 #: ``explain`` (schema) are pure reads. ``api-resources`` /
-#: ``api-versions`` / ``cluster-info`` / ``config`` (``view``) /
-#: ``version`` / ``auth`` (``can-i``) cover the inspection surface
-#: without mutating cluster state. Any verb absent from this set --
-#: notably ``create`` / ``apply`` / ``delete`` / ``edit`` /
-#: ``replace`` / ``patch`` / ``scale`` / ``rollout`` (``restart``) /
-#: ``label`` (``--overwrite``) / ``annotate`` / ``cp`` / ``exec`` /
-#: ``port-forward`` / ``proxy`` / ``drain`` / ``cordon`` --
-#: fails closed.
+#: ``api-versions`` / ``cluster-info`` / ``version`` cover the
+#: inspection surface without mutating cluster state. Any verb absent
+#: from this set -- notably ``create`` / ``apply`` / ``delete`` /
+#: ``edit`` / ``replace`` / ``patch`` / ``scale`` / ``rollout``
+#: (``restart``) / ``label`` (``--overwrite``) / ``annotate`` /
+#: ``cp`` / ``exec`` / ``port-forward`` / ``proxy`` / ``drain`` /
+#: ``cordon`` -- fails closed. Multi-word inspection verbs
+#: (``config view``, ``auth can-i``) are intentionally **not**
+#: surfaced today: the safelist matches on the single verb token, so
+#: ``kubectl config get-contexts`` would be approved through the
+#: ``config`` parent verb. Surfacing them safely requires a verb +
+#: sub-verb safelist, which is deferred -- callers that need them
+#: should file a follow-up.
 _K8S_READ_VERBS: frozenset[str] = frozenset(
     {
         "get",
@@ -155,6 +179,28 @@ _K8S_READ_VERBS: frozenset[str] = frozenset(
         "version",
     }
 )
+
+#: Shell metacharacters banned anywhere in a ``kubectl`` command line.
+#: ``shlex.split`` in POSIX mode does **not** treat these as token
+#: boundaries (it only splits on whitespace + quotes), so a chained
+#: payload like ``kubectl get pods; rm -rf /`` parses to verb=``get``
+#: with the verb-safelist check happy -- and ``_run_command`` then
+#: hands the **raw string** to ``asyncssh.SSHClientConnection.run``,
+#: which delegates to the remote login shell where the
+#: metacharacter is interpreted. Allowlist for safe characters is
+#: applied as a positive check by the schema layer regex; this
+#: blocklist is the handler-layer equivalent and the authoritative
+#: gate (a future schema widening must not let writes through). The
+#: character set covers every POSIX-shell control operator that can
+#: chain a command, expand to a subshell, or redirect IO:
+#:
+#: * ``;`` / newline / CR -- statement separators
+#: * ``&`` / ``|`` -- background, AND/OR list, pipe
+#: * ``<`` / ``>`` -- input / output redirection
+#: * ``$`` / ``(`` / ``)`` -- arithmetic, command, process substitution
+#: * backtick -- legacy command substitution
+#: * ``\\`` -- line continuation / escape into the next char
+_SHELL_METACHARS_RE: re.Pattern[str] = re.compile(r"[;&|<>`$()\\\n\r]")
 
 
 class KubectlSafetyError(ValueError):
@@ -184,9 +230,23 @@ def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
     (``"my pod"``) survive the parse; the safety check operates on the
     verb token, which is unquoted in every legal ``kubectl`` invocation.
 
-    Empty command, or command not starting with ``kubectl``, or verb
-    not in :data:`_K8S_READ_VERBS` -> :exc:`KubectlSafetyError`. The
-    handler raises before any SSH traffic happens.
+    Before tokenisation the function scans for POSIX-shell
+    metacharacters (:data:`_SHELL_METACHARS_RE`) and refuses the call
+    if any are found. This is **load-bearing**: ``shlex.split`` in
+    POSIX mode does not treat ``;`` / ``&&`` / ``|`` / ``$(...)`` /
+    backticks / ``>`` / ``<`` as token boundaries, so a chained payload
+    like ``kubectl get pods; rm -rf /`` would tokenise to
+    ``['kubectl', 'get', 'pods;', 'rm', '-rf', '/']``, the verb check
+    on ``tokens[idx]`` would see ``'get'`` and approve, and the
+    handler would then forward the **raw string** verbatim to
+    ``asyncssh.SSHClientConnection.run`` -- which delegates to the
+    remote login shell where the metacharacters are interpreted. The
+    metachar reject closes that hole before tokenisation runs.
+
+    Empty command, or command containing shell metacharacters, or
+    command not starting with ``kubectl``, or verb not in
+    :data:`_K8S_READ_VERBS` -> :exc:`KubectlSafetyError`. The handler
+    raises before any SSH traffic happens.
 
     Examples
     --------
@@ -198,6 +258,18 @@ def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
     """
     if not command or not command.strip():
         raise KubectlSafetyError("kubectl command is empty")
+    # Metacharacter rejection -- load-bearing security gate (see
+    # docstring above and :data:`_SHELL_METACHARS_RE`). Don't echo the
+    # offending character back in the message: that's an
+    # operator-visible surface and the rejected verbatim character
+    # set is auditable through the audit_log row's ``params_hash``.
+    if _SHELL_METACHARS_RE.search(command):
+        raise KubectlSafetyError(
+            "kubectl command rejected: shell metacharacter detected; "
+            "only a single unchained kubectl invocation is allowed "
+            "(no ';', '&&', '||', '|', '$(...)', backticks, '>', '<', "
+            "newlines, or line continuations)"
+        )
     try:
         tokens = shlex.split(command)
     except ValueError as exc:
@@ -489,18 +561,22 @@ async def holodeck_k8s_exec(
     Op-id: ``holodeck.k8s.exec``. *params* carries ``command`` (a
     string starting with ``kubectl <read-verb> ...``). The handler:
 
-    1. Parses the command via :func:`parse_kubectl_command`; mutating
-       verbs raise :exc:`KubectlSafetyError` (re-raised so the
-       dispatcher's ``result_connector_error`` path surfaces it).
+    1. Parses the command via :func:`parse_kubectl_command`; shell
+       metacharacters and mutating verbs raise
+       :exc:`KubectlSafetyError` **before** any SSH transport is
+       touched. The exception is folded into a ``result_connector_
+       error`` envelope by the structured-error path below.
     2. Runs the parsed command verbatim over plain SSH (no ``pwsh``;
        the in-appliance K8s is reached through the appliance's
        ``kubectl`` binary, not through PowerShell).
     3. Returns the command stdout / exit_status / stderr fragment.
 
-    The schema pattern in :data:`READ_OPS` enforces the
-    ``^kubectl (get|describe|logs|top|explain|api-resources|
-    api-versions|cluster-info|version)\\b`` shape at the validator
-    layer; this handler is the authoritative gate, not a fallback.
+    The schema pattern in :data:`READ_OPS` enforces an allowlist
+    shape (``\\Akubectl ... (read-verb) ([ \\t]+[A-Za-z0-9._/=:,@-]+)*
+    \\Z``) at the validator layer; this handler is the authoritative
+    gate, not a fallback. Both layers reject the canonical
+    shell-injection shapes (``;`` / ``&&`` / ``|`` / ``$(...)`` /
+    backticks / ``>`` / ``<`` / newline) independently.
 
     Stderr is **truncated** at 4096 chars to keep operator surfaces
     bounded (same convention as :class:`PwshRunError`). The
@@ -978,14 +1054,32 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "pattern": (
-                        # Anchored at start so leading whitespace / nbsp
-                        # cannot slip through. The verb alternation is
-                        # whitespace-bounded so a verb prefix
-                        # (``getfoo``) doesn't match ``get``.
-                        r"^kubectl(\s+--?[A-Za-z0-9_-]+(=\S+)?)*\s+"
-                        r"(get|describe|logs|top|explain|"
+                        # Allowlist-shaped regex: ``kubectl``, optional
+                        # global flags, a read-only verb, then a fully
+                        # constrained tail. The tail's character class
+                        # ``[A-Za-z0-9._/=:,@-]`` excludes every
+                        # POSIX-shell metacharacter that ``shlex.split``
+                        # would happily fold into a single token while
+                        # leaving the shell separator semantically
+                        # intact (``;`` / ``&`` / ``|`` / ``$`` /
+                        # backtick / ``>`` / ``<`` / parens / ``\\``).
+                        # Whitespace between tokens is constrained to
+                        # ``[ \\t]`` (space or tab) so a newline can't
+                        # be smuggled through ``\\s`` to introduce a
+                        # second command line. The end anchor ``\\Z``
+                        # is load-bearing -- without a tight end the
+                        # regex would accept ``kubectl get pods; rm
+                        # -rf /`` because the prefix is a valid match.
+                        # Verb alternation is followed by ``(?=[ \\t]
+                        # |\\Z)`` so verb prefixes (``getfoo``) don't
+                        # sneak through.
+                        r"\Akubectl"
+                        r"([ \t]+--?[A-Za-z0-9_-]+(=[A-Za-z0-9._/=:,@-]+)?)*"
+                        r"[ \t]+(get|describe|logs|top|explain|"
                         r"api-resources|api-versions|cluster-info|"
-                        r"version)(\s|$)"
+                        r"version)(?=[ \t]|\Z)"
+                        r"([ \t]+[A-Za-z0-9._/=:,@-]+)*"
+                        r"[ \t]*\Z"
                     ),
                     "description": (
                         "Full kubectl command line starting with "
@@ -996,7 +1090,11 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                         "delete, edit, replace, patch, scale, "
                         "rollout, label, annotate, cp, exec, "
                         "port-forward, proxy, drain, cordon) are "
-                        "rejected at the schema layer."
+                        "rejected at the schema layer. Arguments are "
+                        "restricted to ``[A-Za-z0-9._/=:,@-]`` -- shell "
+                        "metacharacters (``;``, ``&``, ``|``, ``$``, "
+                        "backticks, ``>``, ``<``, parens, ``\\``) are "
+                        "rejected before the handler is reached."
                     ),
                 },
             },

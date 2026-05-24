@@ -168,22 +168,38 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   Name,Status,DisplayName | ConvertTo-Json -Depth 4`. Same `{rows, total}`
   envelope and the same single-dict / `null` normalisation as `pod.list`.
 - **`holodeck.k8s.exec`** (group `k8s`, **read-only**). Forwards a
-  ``kubectl`` command to the in-appliance K8s cluster. Two layers of
-  read-only enforcement:
+  ``kubectl`` command to the in-appliance K8s cluster. Two complementary
+  allowlist layers reject both mutating verbs and shell-injection shapes
+  (`;`, `&&`, `||`, `|`, `$(...)`, backticks, `>`, `<`, newline):
 
-  1. *Schema layer.* The `command` parameter has a `pattern` regex anchored
-     at `^kubectl(\s+--?...)*` followed by `(get|describe|logs|top|explain|
-     api-resources|api-versions|cluster-info|version)`. The dispatcher's
-     `validate_params` rejects mutating verbs before reaching the handler.
-  2. *Handler layer (authoritative).* `parse_kubectl_command` re-parses
-     the command via `shlex.split`, walks past leading global flags
-     (both `--flag=value` and `--flag value` forms), and confirms the
-     verb is in `_K8S_READ_VERBS`. Mutating verbs raise
-     `KubectlSafetyError`; the handler returns
+  1. *Schema layer.* The `command` parameter has a `pattern` regex
+     anchored `\Akubectl ... \Z`. The verb alternation accepts the
+     nine read-only verbs (`get|describe|logs|top|explain|api-resources|
+     api-versions|cluster-info|version`); arguments are restricted to
+     `[A-Za-z0-9._/=:,@-]` so shell metacharacters can't survive
+     validator-layer rejection. Whitespace between tokens is constrained
+     to `[ \t]` (space or tab) so a newline can't smuggle a second
+     command line through the `\s` class. The dispatcher's
+     `validate_params` rejects bad shapes before reaching the handler.
+  2. *Handler layer (authoritative).* `parse_kubectl_command`
+     (a) scans the raw command against `_SHELL_METACHARS_RE`
+     (`[;&|<>` + backtick + `$()\\` + newline + carriage return]`) and
+     refuses on hit, (b) tokenises via `shlex.split`, (c) walks past
+     leading global flags (`--flag=value` and `--flag value` forms),
+     and (d) confirms the verb is in `_K8S_READ_VERBS`. Any rejected
+     step raises `KubectlSafetyError`; the handler returns
      `{stdout, stderr, exit_status, error}` with `error` set to the
-     safety-check message. The full command body is **not** echoed back
-     in the error message — only the rejected verb — so operator-supplied
-     resource names don't bleed into structured error envelopes.
+     safety-check message. The metacharacter reject is **load-bearing**:
+     `shlex.split` in POSIX mode does not treat shell separators as
+     token boundaries, so without it `kubectl get pods; rm -rf /`
+     would tokenise to `['kubectl', 'get', 'pods;', ...]`, the verb
+     check would approve `get`, and the handler would forward the raw
+     string to `asyncssh.SSHClientConnection.run`, which delegates to
+     the remote login shell. The reject runs **before** any SSH
+     transport is touched. The full command body is **not** echoed
+     back in the error message — only the rejected verb / metachar
+     category — so operator-supplied resource names don't bleed into
+     structured error envelopes.
 
   Stderr from the appliance is truncated at 4096 chars, matching the
   `PwshRunError` convention.

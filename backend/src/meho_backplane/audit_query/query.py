@@ -38,11 +38,16 @@ Filter coverage
 * ``result_status`` (one of ``"ok"`` / ``"error"`` / ``"denied"``) maps to
   ``status_code`` ranges that mirror
   :func:`~meho_backplane.audit._classify_http_status`.
-* ``parent_audit_id`` / ``agent_session_id`` raise
-  :class:`UnsupportedFilterError` — the columns do not exist in v0.2. The
-  ``AuditEntry`` shape exposes them as None so consumers can rely on the
-  field set; filtering on them waits for the schema additions tracked in
-  G0.6-T7 (#398) and beyond.
+* ``agent_session_id`` is a real column (G8.2-T1 #1009, migration ``0014``).
+  The filter narrows to ``audit_log.agent_session_id = :agent_session_id``;
+  the column is also surfaced on every returned ``AuditEntry`` and drives the
+  per-session replay query
+  (:func:`~meho_backplane.audit_query.replay.replay_session`).
+* ``parent_audit_id`` is a real column too (G0.6-T7 #398, migration ``0006``)
+  and is surfaced on every returned ``AuditEntry``, but the *flat filter* on
+  it still raises :class:`UnsupportedFilterError` — un-gating that filter is
+  out of scope for G8.2 (#377); replay reads the column directly via its
+  recursive CTE instead.
 """
 
 from __future__ import annotations
@@ -130,10 +135,6 @@ async def query_audit(
         raise UnsupportedFilterError(
             "parent_audit_id filter not supported in v0.2 — column lands with G0.6-T7 (#398)",
         )
-    if filters.agent_session_id is not None:
-        raise UnsupportedFilterError(
-            "agent_session_id filter not supported in v0.2 — column not on any current roadmap",
-        )
 
     stmt = (
         sa.select(AuditLog, Target.name.label("target_name"))
@@ -147,8 +148,50 @@ async def query_audit(
         .where(AuditLog.tenant_id == tenant_id)
     )
 
+    stmt = _apply_filters(stmt, filters, tenant_id=tenant_id)
+
+    stmt = stmt.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(
+        filters.limit + 1,
+    )
+
+    result = await session.execute(stmt)
+    raw_rows = list(result.all())
+    has_more = len(raw_rows) > filters.limit
+    page = raw_rows[: filters.limit]
+
+    entries = [_build_audit_entry(row.AuditLog, row.target_name) for row in page]
+
+    next_cursor: str | None = None
+    if has_more and entries:
+        last = entries[-1]
+        next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
+
+    return AuditQueryResult(rows=entries, next_cursor=next_cursor)
+
+
+# A flat chain of independent `if filters.X is not None` guards — one per
+# optional filter field — is the clearest shape for optional filter application;
+# splitting it into sub-helpers would fragment cohesive logic for no readability
+# code-quality-allow: gain (C901 is inherent to the optional-field count).
+def _apply_filters(
+    stmt: sa.Select[tuple[AuditLog, str]],
+    filters: AuditQueryFilters,
+    *,
+    tenant_id: uuid.UUID,
+) -> sa.Select[tuple[AuditLog, str]]:
+    """Apply every set column filter (and the cursor) to *stmt*.
+
+    Extracted from :func:`query_audit` so the handler stays a readable
+    fetch-build-page skeleton; each clause is added only when its filter field
+    is populated. The tenant scope is *not* re-applied here — the caller already
+    anchored it as the first WHERE clause — but ``target`` resolution re-scopes
+    its subquery on ``tenant_id`` so a name lookup never crosses the boundary.
+    """
     if filters.audit_id is not None:
         stmt = stmt.where(AuditLog.id == filters.audit_id)
+
+    if filters.agent_session_id is not None:
+        stmt = stmt.where(AuditLog.agent_session_id == filters.agent_session_id)
 
     if filters.principal is not None:
         escaped = _escape_like_literal(filters.principal)
@@ -199,23 +242,7 @@ async def query_audit(
             ),
         )
 
-    stmt = stmt.order_by(AuditLog.occurred_at.desc(), AuditLog.id.desc()).limit(
-        filters.limit + 1,
-    )
-
-    result = await session.execute(stmt)
-    raw_rows = list(result.all())
-    has_more = len(raw_rows) > filters.limit
-    page = raw_rows[: filters.limit]
-
-    entries = [_build_audit_entry(row.AuditLog, row.target_name) for row in page]
-
-    next_cursor: str | None = None
-    if has_more and entries:
-        last = entries[-1]
-        next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
-
-    return AuditQueryResult(rows=entries, next_cursor=next_cursor)
+    return stmt
 
 
 def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:
@@ -279,8 +306,8 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
         op_id=op_id,
         op_class=op_class,
         result_status=_derive_result_status(row.status_code),
-        parent_audit_id=None,
-        agent_session_id=None,
+        parent_audit_id=row.parent_audit_id,
+        agent_session_id=row.agent_session_id,
         broadcast_event_id=None,
     )
 

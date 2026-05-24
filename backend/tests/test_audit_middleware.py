@@ -248,6 +248,10 @@ async def test_authenticated_request_writes_one_audit_row(
     # ``verify_jwt_and_bind`` binds into contextvars and the audit
     # middleware reads back, parses, and writes here.
     assert row.tenant_id is not None
+    # G8.2-T2 (#1010): chassis HTTP-side rows are not part of an agent
+    # session — ``agent_session_id`` stays NULL. Only the MCP transport's
+    # ``Mcp-Session-Id`` capture populates it (see tests.test_mcp_audit).
+    assert row.agent_session_id is None
     assert str(row.tenant_id) == _DEFAULT_TENANT_ID
 
 

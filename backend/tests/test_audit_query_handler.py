@@ -18,7 +18,10 @@ Coverage matrix (G8.1-T1 acceptance criteria):
 * AC5 — Cursor pagination forward-only: 250 rows / ``limit=100`` produces 3
   pages, last page ``next_cursor=None``.
 * AC6 — ``op_id="vsphere.vm.*"`` glob matches MCP payload rows correctly.
-* AC8 — ``parent_audit_id`` filter raises :class:`UnsupportedFilterError`.
+* AC8 — ``parent_audit_id`` filter raises :class:`UnsupportedFilterError`
+  (the flat filter stays gated; ``agent_session_id`` is un-gated by G8.2-T3).
+* G8.2-T3 — ``agent_session_id`` filter narrows rows; ``parent_audit_id`` /
+  ``agent_session_id`` populate on the returned ``AuditEntry``.
 * :class:`InvalidCursorError` propagates when a tampered cursor is passed.
 * ``target_name`` denormalization via LEFT JOIN works (and is None when the
   audit row has no ``target_id``).
@@ -82,6 +85,8 @@ async def _seed_audit_row(
     status_code: int = 200,
     target_id: uuid.UUID | None = None,
     payload: dict[str, object] | None = None,
+    agent_session_id: uuid.UUID | None = None,
+    parent_audit_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Insert one :class:`AuditLog` row and return its ``id``."""
     row_id = uuid.uuid4()
@@ -97,6 +102,8 @@ async def _seed_audit_row(
             duration_ms=Decimal("1.0"),
             payload=payload or {},
             target_id=target_id,
+            agent_session_id=agent_session_id,
+            parent_audit_id=parent_audit_id,
         ),
     )
     return row_id
@@ -482,16 +489,47 @@ async def test_parent_audit_id_filter_raises_unsupported(
 
 
 @pytest.mark.asyncio
-async def test_agent_session_id_filter_raises_unsupported(
+async def test_agent_session_id_filter_narrows_rows(
     session: AsyncSession,
 ) -> None:
-    """``agent_session_id`` filter raises — no column on any current roadmap."""
-    with pytest.raises(UnsupportedFilterError):
-        await query_audit(
-            AuditQueryFilters(agent_session_id=uuid.uuid4()),
-            tenant_id=uuid.uuid4(),
-            session=session,
-        )
+    """``agent_session_id`` is a usable filter (G8.2-T3): it narrows to the session.
+
+    The column landed with G8.2-T1 (#1009); this task un-gates the filter and
+    adds the ``WHERE agent_session_id = :id`` clause. Rows with a different
+    session id — and chassis HTTP rows whose ``agent_session_id`` is NULL — are
+    excluded.
+    """
+    tenant_id = uuid.uuid4()
+    session_a = uuid.uuid4()
+    session_b = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        agent_session_id=session_a,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        agent_session_id=session_b,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 3, tzinfo=UTC),
+        agent_session_id=None,
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(agent_session_id=session_a),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    assert len(result.rows) == 1
+    assert result.rows[0].agent_session_id == session_a
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +858,12 @@ async def test_computed_op_class_classifies_audit_query(session: AsyncSession) -
 
 @pytest.mark.asyncio
 async def test_placeholders_always_none(session: AsyncSession) -> None:
-    """The four v0.2 placeholder fields are always None on the returned entry."""
+    """The two remaining v0.2 placeholder fields are always None on the entry.
+
+    ``parent_audit_id`` (#398) and ``agent_session_id`` (#1009) are now real
+    columns surfaced on the row (see ``test_lineage_populated_from_row``);
+    ``principal_name`` and ``broadcast_event_id`` stay None in v0.2.
+    """
     tenant_id = uuid.uuid4()
     await _seed_audit_row(
         session,
@@ -832,6 +875,39 @@ async def test_placeholders_always_none(session: AsyncSession) -> None:
     result = await query_audit(AuditQueryFilters(), tenant_id=tenant_id, session=session)
     entry = result.rows[0]
     assert entry.principal_name is None
-    assert entry.parent_audit_id is None
-    assert entry.agent_session_id is None
     assert entry.broadcast_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_lineage_populated_from_row(session: AsyncSession) -> None:
+    """``parent_audit_id`` / ``agent_session_id`` reflect the audit-log columns.
+
+    G8.2-T3 (#1011) drops the hardcoded ``None`` in ``_build_audit_entry`` and
+    reads both lineage columns off the row so replay can reconstruct the graph.
+    """
+    tenant_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    parent_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        agent_session_id=session_id,
+    )
+    child_id = await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        agent_session_id=session_id,
+        parent_audit_id=parent_id,
+    )
+    await session.commit()
+
+    result = await query_audit(
+        AuditQueryFilters(audit_id=child_id),
+        tenant_id=tenant_id,
+        session=session,
+    )
+
+    entry = result.rows[0]
+    assert entry.agent_session_id == session_id
+    assert entry.parent_audit_id == parent_id

@@ -454,6 +454,18 @@ class Settings(BaseModel):
         (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
+    mcp_require_session_id:
+        Whether ``POST /mcp`` rejects requests that omit the
+        ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
+        the MCP 2025-06-18 Streamable HTTP transport explicitly permits
+        servers to not require sessions, and MEHO only needs the id for
+        audit correlation, so a missing header falls back to a fresh
+        single-call ``uuid4()``. Flip ``MCP_REQUIRE_SESSION_ID=true``
+        in deployments that mandate every agent call carry a stable
+        session id (compliance environments that forbid synthetic
+        single-call ids); a missing/empty header then returns a
+        JSON-RPC ``-32600`` Invalid Request before dispatch, so no
+        audit row is written for the rejected call.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -540,6 +552,7 @@ class Settings(BaseModel):
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
     agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
     @classmethod
@@ -698,5 +711,8 @@ def get_settings() -> Settings:
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
             "anthropic:claude-sonnet-4-6",
+        ),
+        mcp_require_session_id=parse_bool_env(
+            os.environ.get("MCP_REQUIRE_SESSION_ID"),
         ),
     )

@@ -1,23 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSONFlux reducer protocol + v0.2 pass-through default.
+"""JSONFlux reducer protocol + pass-through shim (import-time default).
 
 G0.6-T6 (#397) of Initiative #388. The :class:`Reducer` :class:`typing.Protocol`
 is the contract every JSONFlux reducer satisfies; the dispatcher invokes
 :meth:`Reducer.reduce` after a handler returns and before the audit / broadcast
-phase fires (see :mod:`meho_backplane.operations.dispatcher`). v0.2 ships only
-:class:`PassThroughReducer` — the no-op default that returns the raw payload
-verbatim with a ``None`` :class:`ResultHandle`. Real reduction logic
-(set-shaped payload reduction, result-handle store, MinIO/S3 spill, the
-``result_query`` / ``result_aggregate`` meta-tools) ships in a follow-on
-Initiative once the first generic-ingested connectors produce real payloads
-to calibrate against.
+phase fires (see :mod:`meho_backplane.operations.dispatcher`). This module
+ships :class:`PassThroughReducer` — the no-op shim that returns the raw
+payload verbatim with a ``None`` :class:`ResultHandle`. It is the import-time
+``_DEFAULT_REDUCER`` and the reducer tests construct it explicitly; the
+**production** default is
+:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(G0.6.1-T3 #753), installed at app startup via :func:`set_default_reducer`,
+which reduces set-shaped payloads over the v0.1-spec §4 threshold
+(>50 rows / >4 KB) into a markdown summary + :class:`ResultHandle`. The
+result-handle spill backend (MinIO/S3) and the ``result_query`` /
+``result_aggregate`` read-back meta-tools remain a follow-on Initiative.
 
-The contract design is **future-proof hook with no-op default**: every
-connector ships JSONFlux-aware from day 1; swapping the real reducer in later
-touches one registration call, not every connector. See the parent Initiative
-#388 and v0.1-spec §"JSONFlux / result handles" L294-311.
+The contract design is **swappable hook with a no-op default**: every
+connector shipped JSONFlux-aware from day 1, so swapping the real reducer in
+(done in G0.6.1 #753) touched one registration call, not every connector. See
+the parent Initiative #388 and v0.1-spec §"JSONFlux / result handles" L294-311.
 
 :class:`ResultHandle` lives in :mod:`meho_backplane.connectors.schemas`
 alongside :class:`~meho_backplane.connectors.OperationResult` (which gained an
@@ -48,8 +52,10 @@ class Reducer(Protocol):
     The dispatcher always invokes :meth:`reduce` after the handler returns;
     the return value flows into the audit row's payload, the broadcast
     event, and the :class:`~meho_backplane.connectors.OperationResult` the
-    caller sees. v0.2 ships :class:`PassThroughReducer` as the only impl;
-    the real reducer (post-G0.6) returns a reduced payload + a
+    caller sees. Implementations: :class:`PassThroughReducer` (the no-op
+    shim / import-time default) and
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    (the production default since #753), which returns a reduced payload + a
     :class:`ResultHandle` for large set-shaped responses while leaving
     small / scalar payloads alone.
 

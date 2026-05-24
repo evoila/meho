@@ -66,6 +66,8 @@ from structlog.testing import capture_logs
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vcf_auth import CredentialsCache
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
 from meho_backplane.db.engine import get_sessionmaker
@@ -340,3 +342,50 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     events_blob = repr(captured_events)
     assert _CANARY_PASSWORD not in events_blob
     assert _CANARY_USERNAME not in events_blob
+
+
+@pytest.mark.asyncio
+async def test_credentials_cache_fast_path_fails_closed_on_empty_raw_jwt() -> None:
+    """CredentialsCache.get rejects an empty operator.raw_jwt before the cache lookup.
+
+    Exercises the defense-in-depth guard the shared cache enforces in
+    addition to each consuming connector's auth_headers boundary check.
+    Primes the cache via a normal first read under an authenticated
+    operator (using an injected stub loader, no Vault round-trip), then
+    issues a second call with raw_jwt="" against the SAME target and
+    asserts the cache raises VaultCredentialsReadError without returning
+    the primed entry. Mirrors the loader-path guard at
+    vault_creds._resolve_secret_ref so a future regression in any
+    consumer's auth_headers boundary check cannot open a silent
+    cache-hit path. See docs/architecture/connector-auth.md §
+    "Cache scoping under shared_service_account".
+    """
+    loader_calls = 0
+
+    async def _stub_loader(target: Any, operator: Operator) -> dict[str, str]:
+        nonlocal loader_calls
+        loader_calls += 1
+        return {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+
+    cache = CredentialsCache(_stub_loader, product_label="vrops")
+    target = _CredReadTarget()
+
+    primed = await cache.get(target, _make_operator())
+    assert primed == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    assert loader_calls == 1
+
+    system_operator = Operator(
+        sub="system",
+        name="System",
+        email=None,
+        raw_jwt="",
+        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a1"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+    with pytest.raises(VaultCredentialsReadError) as exc_info:
+        await cache.get(target, system_operator)
+
+    assert target.name in str(exc_info.value)
+    assert "operator" in str(exc_info.value).lower()
+    # Loader was not re-invoked; the guard ran ahead of the lookup.
+    assert loader_calls == 1

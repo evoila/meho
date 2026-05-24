@@ -582,15 +582,29 @@ def _isolate_global_registries() -> Iterator[None]:
     ``reset_handler_cache`` / ``reset_connector_instance_cache`` pair in
     :mod:`meho_backplane.operations._handler_resolve`.
 
-    Snapshot the *contents* (not the binding — other modules hold the
-    same dict/list objects, so rebinding would not propagate) at setup,
-    restore them verbatim at teardown. Restore-not-clear: registrations
-    a test legitimately makes survive *within* that test; only the
-    cross-test bleed is removed.
+    It also snapshots/restores the dispatcher's default reducer binding,
+    ``operations.dispatcher._DEFAULT_REDUCER``. The app lifespan swaps the
+    shipped ``PassThroughReducer`` for the production ``JsonFluxReducer``
+    via ``set_default_reducer(...)`` (``main.py``) and never restores it,
+    so the same lifespan-leak failure mode applied to the reducer too —
+    it bit the #753 vcsim e2e (green single-file, red in the full CI
+    sweep). This is the process-wide safety net beneath the per-test
+    reducer fixtures (e.g. those swapping in a row-thresholded
+    ``JsonFluxReducer``), which keep working unchanged.
+
+    Snapshot the registries' *contents* (not the binding — other modules
+    hold the same dict/list objects, so rebinding would not propagate)
+    and restore them verbatim. The reducer is the opposite shape: a
+    single module-level binding that ``dispatch()`` reads fresh on each
+    call, so its identity is captured and restored through the only
+    supported rebind path, ``set_default_reducer(saved)``. Restore-not-
+    clear: registrations (and reducer swaps) a test legitimately makes
+    survive *within* that test; only the cross-test bleed is removed.
     """
     from meho_backplane.connectors import registry as conn_reg
     from meho_backplane.mcp import registry as mcp_reg
     from meho_backplane.operations import _handler_resolve as handler_resolve
+    from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
 
     tools = dict(mcp_reg._TOOLS)
@@ -600,6 +614,7 @@ def _isolate_global_registries() -> Iterator[None]:
     registrars = list(typed_reg._TYPED_OP_REGISTRARS)
     handler_cache = dict(handler_resolve._HANDLER_CACHE)
     instance_cache = dict(handler_resolve._CONNECTOR_INSTANCE_CACHE)
+    default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
     finally:
@@ -616,6 +631,7 @@ def _isolate_global_registries() -> Iterator[None]:
         handler_resolve._HANDLER_CACHE.update(handler_cache)
         handler_resolve._CONNECTOR_INSTANCE_CACHE.clear()
         handler_resolve._CONNECTOR_INSTANCE_CACHE.update(instance_cache)
+        set_default_reducer(default_reducer)
 
 
 # ---------------------------------------------------------------------------

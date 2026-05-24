@@ -311,6 +311,13 @@ class PfSenseConnector(SshConnector):
           transient failure so operators get an actionable message
           ("enable SSH shell access on the pfSense WebGUI") rather
           than a generic timeout.
+        * ``command_failed`` -- the SSH handshake succeeded but the
+          post-connect ``cat /etc/version`` raised (connection dropped
+          mid-probe, an :exc:`asyncssh.Error`, or an
+          :exc:`asyncio.TimeoutError` from the command timeout). Caught
+          here so a mid-probe failure maps to a non-ok
+          :class:`~meho_backplane.connectors.schemas.ProbeResult` rather
+          than escaping ``probe`` as an unhandled exception (#986).
 
         The probe does not mutate state and does not write to any
         filesystem -- ``cat /etc/version`` is read-only.
@@ -352,7 +359,18 @@ class PfSenseConnector(SshConnector):
         # pfSense console menu and the command was swallowed. A non-zero
         # exit_status (file not found, permission denied) also signals a
         # broken shell environment and maps to no_shell_access.
-        version_proc = await self._run_command(target, "cat /etc/version", raw_jwt="")
+        #
+        # The post-connect command is guarded: a connection drop, an
+        # ``asyncssh.Error``, or a timeout after a successful handshake must
+        # map to ``command_failed`` rather than propagating an unhandled
+        # exception out of ``probe`` (#986). ``(OSError, asyncssh.Error)``
+        # is the same catch tuple ``fingerprint`` uses; ``TimeoutError`` is
+        # an ``OSError`` subclass so ``_run_command``'s ``asyncio.wait_for``
+        # expiry is covered.
+        try:
+            version_proc = await self._run_command(target, "cat /etc/version", raw_jwt="")
+        except (OSError, asyncssh.Error):
+            return _result(False, "command_failed")
         stdout = (version_proc.stdout or "") if hasattr(version_proc, "stdout") else ""
         content = stdout if isinstance(stdout, str) else ""
         if not content.strip() or version_proc.exit_status != 0:
@@ -374,9 +392,17 @@ class PfSenseConnector(SshConnector):
         fingerprint share one SSH command execution. The returned dict
         is flat (no nested ``extras``) because the dispatcher's default
         reducer forwards the value verbatim.
+
+        When the target is unreachable, :meth:`fingerprint` returns
+        ``reachable=False`` rather than raising. ``_assert_reachable``
+        re-raises that as a
+        :exc:`~meho_backplane.connectors.adapters.ssh.ConnectorUnreachableError`
+        so the dispatcher reports a non-ok op instead of a successful op
+        carrying empty/None identity fields (#986).
         """
         del params  # declared empty in schema; intentionally ignored
         result = await self.fingerprint(target)
+        self._assert_reachable(result)
         return {
             "vendor": result.vendor,
             "product": result.product,
@@ -430,8 +456,9 @@ class PfSenseConnector(SshConnector):
         Delegates to
         :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_firewall_state`.
         The state table can contain thousands of rows on busy firewalls;
-        the future JSONFlux reducer spills to the HandleStore
-        (key ``pfsense_firewall_state``) when ``total`` exceeds its
+        the dispatcher's default
+        :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+        wraps the result in a ``ResultHandle`` when ``total`` exceeds its
         configured threshold.
         """
         from meho_backplane.connectors.pfsense.ops_read import (

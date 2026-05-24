@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -114,6 +115,58 @@ func TestDecodeRowsResultHappy(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0]["name"] != "compute.googleapis.com" {
 		t.Fatalf("decoded: %+v", rows)
+	}
+}
+
+// TestDecodeRowsResultEmptyVsAbsent pins the load-bearing distinction:
+// a legitimately-empty `rows` list is a clean empty result, while an
+// envelope with no `rows` key at all is malformed and reported via the
+// errRowsKeyAbsent sentinel so callers route it to the fallback raw
+// render instead of a misleading "(0 rows)" line.
+func TestDecodeRowsResultEmptyVsAbsent(t *testing.T) {
+	// Empty list: nil error, zero-length, non-nil slice (renders "0 rows").
+	rows, err := decodeRowsResult(json.RawMessage(`{"rows":[],"total":0}`))
+	if err != nil {
+		t.Fatalf("empty rows should not error; got %v", err)
+	}
+	if rows == nil {
+		t.Fatalf("empty rows should be a non-nil empty slice; got nil")
+	}
+	if len(rows) != 0 {
+		t.Fatalf("empty rows should have len 0; got %d", len(rows))
+	}
+
+	// Absent key: errRowsKeyAbsent sentinel, no rows.
+	rows, err = decodeRowsResult(json.RawMessage(`{"total":0}`))
+	if !errors.Is(err, errRowsKeyAbsent) {
+		t.Fatalf("absent rows key should report errRowsKeyAbsent; got %v", err)
+	}
+	if rows != nil {
+		t.Fatalf("absent rows key should return nil rows; got %+v", rows)
+	}
+}
+
+// TestDecodeRowsResultNullResult — a JSON null (or empty) result is the
+// "nothing to render" case: (nil, nil), not an error. Distinct from an
+// absent `rows` key inside a non-null object envelope.
+func TestDecodeRowsResultNullResult(t *testing.T) {
+	for _, raw := range []json.RawMessage{nil, json.RawMessage(`null`)} {
+		rows, err := decodeRowsResult(raw)
+		if err != nil {
+			t.Fatalf("null/empty result should not error; got %v", err)
+		}
+		if rows != nil {
+			t.Fatalf("null/empty result should return nil rows; got %+v", rows)
+		}
+	}
+}
+
+// TestDecodeRowsResultMalformedEnvelope — a non-object top-level (e.g. a
+// bare array) is malformed and returns a decode error, routing the
+// caller to the fallback render.
+func TestDecodeRowsResultMalformedEnvelope(t *testing.T) {
+	if _, err := decodeRowsResult(json.RawMessage(`[1,2,3]`)); err == nil {
+		t.Fatalf("non-object envelope should error")
 	}
 }
 
@@ -262,6 +315,82 @@ func TestPrintIamPolicyReadTable(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("printIamPolicyRead missing %q in output:\n%s", want, out)
 		}
+	}
+}
+
+// iamPolicyWithMembers builds a single-binding policy result with the
+// given member count (member:N for N in 1..count). Helper for the
+// footer-honesty tests.
+func iamPolicyWithMembers(count int) json.RawMessage {
+	members := make([]string, 0, count)
+	for i := 1; i <= count; i++ {
+		members = append(members, fmt.Sprintf("user:m%d@example.com", i))
+	}
+	b, err := json.Marshal(members)
+	if err != nil {
+		panic(err)
+	}
+	return json.RawMessage(fmt.Sprintf(
+		`{"version":1,"etag":"E","bindings":[{"role":"roles/viewer","members":%s}]}`, b))
+}
+
+// countMembersShown reports how many "user:mN@example.com" member lines
+// appear in the render. Used to assert the cap was actually applied.
+func countMembersShown(out string) int {
+	return strings.Count(out, "@example.com")
+}
+
+// TestPrintIamPolicyReadFooterHonestyUnderCap — a binding with no more
+// than the cap of members prints every member and emits NO "…" footer.
+// This is the bug the Task targets: the old code printed every member
+// and *then* appended a misleading "… (N total)" that implied a
+// truncation that never happened.
+func TestPrintIamPolicyReadFooterHonestyUnderCap(t *testing.T) {
+	// Exactly maxPolicyMembersShown members: every one printed, no footer.
+	r := &CallResult{
+		Status: "ok",
+		OpID:   "gcloud.iam.policy.read",
+		Result: iamPolicyWithMembers(maxPolicyMembersShown),
+	}
+	var buf bytes.Buffer
+	printIamPolicyRead(&buf, r)
+	out := buf.String()
+
+	if strings.Contains(out, "…") {
+		t.Errorf("no member should be elided at the cap; output must not contain an ellipsis:\n%s", out)
+	}
+	if strings.Contains(out, "total)") {
+		t.Errorf("no footer should print when nothing is hidden:\n%s", out)
+	}
+	if got := countMembersShown(out); got != maxPolicyMembersShown {
+		t.Errorf("all %d members should be printed; got %d:\n%s", maxPolicyMembersShown, got, out)
+	}
+}
+
+// TestPrintIamPolicyReadFooterHonestyOverCap — a binding with more than
+// the cap of members truncates to the cap and reports an honest footer
+// stating how many were hidden and the true total. The "…" now reflects
+// a real elision.
+func TestPrintIamPolicyReadFooterHonestyOverCap(t *testing.T) {
+	total := maxPolicyMembersShown + 3 // 3 hidden
+	r := &CallResult{
+		Status: "ok",
+		OpID:   "gcloud.iam.policy.read",
+		Result: iamPolicyWithMembers(total),
+	}
+	var buf bytes.Buffer
+	printIamPolicyRead(&buf, r)
+	out := buf.String()
+
+	// Exactly the cap of member lines is printed (truncation happened).
+	if got := countMembersShown(out); got != maxPolicyMembersShown {
+		t.Errorf("expected %d member lines (capped); got %d:\n%s", maxPolicyMembersShown, got, out)
+	}
+	// Footer reports the hidden count and the true total honestly.
+	hidden := total - maxPolicyMembersShown
+	wantFooter := fmt.Sprintf("… (%d more, %d total)", hidden, total)
+	if !strings.Contains(out, wantFooter) {
+		t.Errorf("expected honest footer %q in output:\n%s", wantFooter, out)
 	}
 }
 

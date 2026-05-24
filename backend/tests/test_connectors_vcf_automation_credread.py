@@ -61,6 +61,7 @@ from structlog.testing import capture_logs
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
 from meho_backplane.db.engine import get_sessionmaker
@@ -455,3 +456,71 @@ async def test_credread_chain_never_leaks_credential_or_jwt_in_result_or_logs(
                 "appear in result envelopes or log events. Blob excerpt: "
                 f"{blob[:400]!r}"
             )
+
+
+@pytest.mark.asyncio
+async def test_session_token_fast_paths_fail_closed_on_empty_raw_jwt() -> None:
+    """Both vcf-automation cache fast-paths reject empty raw_jwt before lookup.
+
+    Exercises the defense-in-depth guard on both plane caches
+    (_provider_session_token + _tenant_session_token) in addition to
+    auth_headers' boundary check. Primes each plane's cache via a
+    normal first session-establish under an authenticated operator
+    (respx mocks the per-plane login endpoints and an injected loader
+    returns canned creds — no Vault round-trip), then invokes each
+    method again with raw_jwt="" against the SAME target and asserts
+    VaultCredentialsReadError without returning the cached token.
+    Mirrors the loader-path guard and the sibling check in
+    CredentialsCache.get / vcf_logs._session_token so a future
+    regression in auth_headers cannot leak a cached provider JWT or
+    tenant token to an unauthenticated caller. See
+    docs/architecture/connector-auth.md § "Cache scoping under
+    shared_service_account".
+    """
+
+    async def _stub_loader(target: Any, operator: Operator) -> dict[str, str]:
+        return {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+
+    connector = VcfAutomationConnector(credentials_loader=_stub_loader)
+    target = _CredReadTarget()
+    operator = _make_operator()
+
+    async with respx.mock(base_url=_VCFA_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _CANARY_PROVIDER_JWT}
+        )
+        mock.post("/iaas/api/login").respond(200, json={"token": _CANARY_TENANT_TOKEN})
+
+        primed_provider = await connector._provider_session_token(target, operator)
+        primed_tenant = await connector._tenant_session_token(target, operator)
+
+    assert primed_provider == _CANARY_PROVIDER_JWT
+    assert primed_tenant == _CANARY_TENANT_TOKEN
+    assert connector._provider_tokens[target.name] == _CANARY_PROVIDER_JWT
+    assert connector._tenant_tokens[target.name] == _CANARY_TENANT_TOKEN
+
+    system_operator = Operator(
+        sub="system",
+        name="System",
+        email=None,
+        raw_jwt="",
+        tenant_id=UUID("00000000-0000-0000-0000-00000000a0fa"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+
+    with pytest.raises(VaultCredentialsReadError) as exc_provider:
+        await connector._provider_session_token(target, system_operator)
+    assert target.name in str(exc_provider.value)
+    assert "operator" in str(exc_provider.value).lower()
+
+    with pytest.raises(VaultCredentialsReadError) as exc_tenant:
+        await connector._tenant_session_token(target, system_operator)
+    assert target.name in str(exc_tenant.value)
+    assert "operator" in str(exc_tenant.value).lower()
+
+    # Both caches still hold the primed tokens; the guards ran ahead
+    # of any cache mutation.
+    assert connector._provider_tokens[target.name] == _CANARY_PROVIDER_JWT
+    assert connector._tenant_tokens[target.name] == _CANARY_TENANT_TOKEN
+
+    await connector.aclose()

@@ -93,6 +93,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -266,7 +267,29 @@ class VcfAutomationConnector(HttpConnector):
         Otherwise the default ``target.secret_ref`` pair is used for
         both planes. See :func:`._auth.vcfa_provider_login` for the
         wire-level POST.
+
+        Raises :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
+        when ``operator.raw_jwt`` is empty -- defense-in-depth fail-closed
+        check mirroring the loader path's pre-Vault guard at
+        :func:`~meho_backplane.connectors._shared.vault_creds._resolve_secret_ref`.
+        The primary fail-closed gate against empty ``raw_jwt`` is the
+        loader's ``vault_client_for_operator`` / ``load_basic_credentials``
+        call chain; this cache fast-path enforces the same invariant so a
+        future regression in the loader cannot return a cached provider JWT
+        to an unauthenticated caller via a cache hit. :meth:`auth_headers`
+        enforces only the ``auth_model`` boundary (rejects ``per_user`` /
+        ``impersonation`` under ``shared_service_account`` scoping).
+        Raised before the cache lookup so a primed token from an
+        authenticated caller cannot leak to a system-initiated caller.
+        See ``docs/architecture/connector-auth.md`` § "Cache scoping under
+        ``shared_service_account``" for the contract.
         """
+        if not operator.raw_jwt:
+            raise VaultCredentialsReadError(
+                "operator-context credential read requires an authenticated operator; "
+                f"target={target.name!r} has no operator JWT (system-initiated calls "
+                "cannot read per-target vendor credentials)"
+            )
         async with self._provider_lock:
             cached = self._provider_tokens.get(target.name)
             if cached is not None:
@@ -291,7 +314,31 @@ class VcfAutomationConnector(HttpConnector):
         NOT honour ``provider_secret_ref`` -- it's strictly an SSO-ish
         account flow against ``target.secret_ref``. See
         :func:`._auth.tenant_login` for the wire-level POST.
+
+        Raises :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
+        when ``operator.raw_jwt`` is empty -- defense-in-depth fail-closed
+        check mirroring the loader path's pre-Vault guard at
+        :func:`~meho_backplane.connectors._shared.vault_creds._resolve_secret_ref`
+        and the sibling check in :meth:`_provider_session_token`. The
+        primary fail-closed gate against empty ``raw_jwt`` is the loader's
+        ``vault_client_for_operator`` / ``load_basic_credentials`` call
+        chain; this cache fast-path enforces the same invariant so a
+        future regression in the loader cannot return a cached tenant
+        token to an unauthenticated caller via a cache hit.
+        :meth:`auth_headers` enforces only the ``auth_model`` boundary
+        (rejects ``per_user`` / ``impersonation`` under
+        ``shared_service_account`` scoping). Raised before the cache
+        lookup so a primed token from an authenticated caller cannot
+        leak to a system-initiated caller. See
+        ``docs/architecture/connector-auth.md`` § "Cache scoping under
+        ``shared_service_account``" for the contract.
         """
+        if not operator.raw_jwt:
+            raise VaultCredentialsReadError(
+                "operator-context credential read requires an authenticated operator; "
+                f"target={target.name!r} has no operator JWT (system-initiated calls "
+                "cannot read per-target vendor credentials)"
+            )
         async with self._tenant_lock:
             cached = self._tenant_tokens.get(target.name)
             if cached is not None:

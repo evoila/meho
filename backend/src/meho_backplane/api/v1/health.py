@@ -193,8 +193,8 @@ async def _probe_vault_federation(
 
     if result.status == "ok":
         # The handler returns ``{"data": <secret>, "version": <int|None>}``;
-        # the dispatcher's :class:`PassThroughReducer` lands it as
-        # ``result.result`` unchanged.
+        # the dispatcher's default reducer passes this small scalar dict
+        # through as ``result.result`` unchanged.
         payload = result.result if isinstance(result.result, dict) else {}
         version = payload.get("version")
         detail = f"version={version}" if version is not None else "ok"

@@ -714,6 +714,126 @@ async def test_probe_ok_when_named_running_and_config_parses() -> None:
     assert result.latency_ms is not None and result.latency_ms >= 0.0
 
 
+@pytest.mark.parametrize(
+    "boom",
+    [
+        OSError("connection reset by peer"),
+        asyncssh.ConnectionLost("channel closed mid-command"),
+        TimeoutError("pgrep timed out"),
+    ],
+)
+async def test_probe_command_failed_when_run_command_raises_after_connect(
+    boom: Exception,
+) -> None:
+    """``_run_command`` raising after a successful ``_connect`` → ``command_failed``.
+
+    AC (#986): a mid-probe failure (connection drop, ``asyncssh.Error``,
+    or timeout after the handshake) must map to a non-ok
+    :class:`ProbeResult` with reason ``command_failed`` — no exception
+    escapes ``probe``. ``TimeoutError`` is an ``OSError`` subclass so the
+    ``(OSError, asyncssh.Error)`` catch tuple covers the timeout case.
+    """
+    connector = Bind9Connector()
+    with (
+        patch.object(connector, "_connect", AsyncMock(return_value=MagicMock())),
+        patch.object(connector, "_run_command", AsyncMock(side_effect=boom)),
+    ):
+        result = await connector.probe(_TARGET)
+    assert result.ok is False
+    assert result.reason == "command_failed"
+
+
+# ---------------------------------------------------------------------------
+# fingerprint -- unreachable guard mirrors pfsense (#986)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        OSError("Connection refused"),
+        asyncssh.PermissionDenied(reason="publickey auth failed"),
+        TimeoutError("named -v timed out"),
+    ],
+)
+async def test_fingerprint_unreachable_when_run_command_raises(boom: Exception) -> None:
+    """``_run_command`` raising → ``reachable=False`` + ``extras["error"]``.
+
+    AC (#986): bind9's ``fingerprint`` now guards the post-connect
+    commands the way the pfsense sibling does, so a mid-fingerprint
+    failure returns a non-reachable result rather than propagating. This
+    is what lets the shared ``_assert_reachable`` guard surface the
+    failure consistently from ``about``.
+    """
+    connector = Bind9Connector()
+    with patch.object(connector, "_run_command", AsyncMock(side_effect=boom)):
+        result = await connector.fingerprint(_TARGET)
+    assert result.reachable is False
+    assert result.vendor == "isc"
+    assert result.product == "bind9"
+    assert result.probe_method == "ssh: named -v"
+    assert "error" in result.extras
+
+
+# ---------------------------------------------------------------------------
+# about -- surfaces unreachability rather than masking it as status="ok" (#986)
+# ---------------------------------------------------------------------------
+
+
+async def test_about_raises_connector_unreachable_on_unreachable_target() -> None:
+    """``about`` against an unreachable target raises, never returns empty fields.
+
+    AC (#986): ``fingerprint`` returns ``reachable=False`` on a connection
+    failure; ``about`` must surface that as a
+    :exc:`ConnectorUnreachableError` rather than returning a dict of
+    empty/None identity fields the dispatcher would report as
+    ``status="ok"``.
+    """
+    from meho_backplane.connectors.adapters.ssh import ConnectorUnreachableError
+
+    connector = Bind9Connector()
+    with (
+        patch.object(
+            connector,
+            "_run_command",
+            AsyncMock(side_effect=OSError("Connection refused")),
+        ),
+        pytest.raises(ConnectorUnreachableError, match="Connection refused"),
+    ):
+        await connector.about(_TARGET, {})
+
+
+async def test_execute_about_unreachable_returns_connector_error_not_ok() -> None:
+    """End-to-end: ``execute("bind9.about")`` on an unreachable target → non-ok.
+
+    The dispatcher shim catches the ``ConnectorUnreachableError`` raised
+    by ``about`` and maps it to the ``connector_error`` envelope. The op
+    is reported as ``status="error"`` — not a successful op carrying empty
+    identity fields (#986).
+    """
+    from meho_backplane.operations import typed_register as tr_module
+    from meho_backplane.operations._handler_resolve import reset_handler_cache
+
+    reset_handler_cache()
+    with patch.object(tr_module, "encode_endpoint_text", AsyncMock(return_value=[0.1] * 384)):
+        await Bind9Connector.register_operations()
+
+    connector = Bind9Connector()
+    with patch.object(
+        connector,
+        "_run_command",
+        AsyncMock(side_effect=OSError("Connection refused")),
+    ):
+        result = await connector.execute(_TARGET, "bind9.about", {})
+
+    assert isinstance(result, OperationResult)
+    assert result.status == "error"
+    assert result.status != "ok"
+    assert result.error is not None and result.error.startswith("connector_error:")
+    assert result.extras.get("error_code") == "connector_error"
+    assert result.extras.get("exception_class") == "ConnectorUnreachableError"
+
+
 # ---------------------------------------------------------------------------
 # register_operations -- upsert + idempotency
 # ---------------------------------------------------------------------------

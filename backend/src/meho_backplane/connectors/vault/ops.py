@@ -168,8 +168,8 @@ VAULT_KV_READ_PARAMETER_SCHEMA: dict[str, Any] = {
 
 
 #: JSON Schema for the ``vault.kv.read`` response payload. Informational
-#: in v0.2 (the dispatcher's :class:`PassThroughReducer` does not validate
-#: outbound payloads); declared so the meta-tools (T8 #399) can surface
+#: (the dispatcher's default reducer does not validate outbound payloads
+#: against them); declared so the meta-tools (T8 #399) can surface
 #: it on ``describe_operation`` calls without a schema-construction
 #: round-trip.
 _VAULT_KV_READ_RESPONSE_SCHEMA: dict[str, Any] = {
@@ -250,8 +250,9 @@ async def vault_kv_read(operator: Operator, target: Any, params: dict[str, Any])
     -------
     dict[str, Any]
         ``{"data": <secret data dict>, "version": <int|None>}``. The
-        dispatcher's reducer (v0.2 :class:`PassThroughReducer`) lands
-        this dict as :attr:`OperationResult.result` verbatim.
+        dispatcher's default reducer passes this dict through as
+        :attr:`OperationResult.result` verbatim (it is below the
+        reduction threshold).
 
     Raises
     ------

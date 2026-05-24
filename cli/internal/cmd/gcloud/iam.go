@@ -193,6 +193,15 @@ func runIamPolicyRead(
 	return renderCallResult(cmd, "gcloud.iam.policy.read", r, jsonOut, printIamPolicyRead)
 }
 
+// maxPolicyMembersShown caps how many members of a single role binding
+// the human-readable policy render prints before eliding the rest. Wide
+// bindings (a role with dozens of members) would otherwise flood the
+// terminal one line per member. The cap only affects the human path;
+// `--json` always emits every member. When members are elided, an
+// honest "… (M more, N total)" footer reports exactly how many were
+// hidden so the "…" never implies truncation that didn't happen.
+const maxPolicyMembersShown = 5
+
 // printIamPolicyRead renders the IAM policy. Surfaces version, etag,
 // and the role→members bindings table in the human path.
 func printIamPolicyRead(w io.Writer, r *CallResult) {
@@ -233,18 +242,25 @@ func printIamPolicyRead(w io.Writer, r *CallResult) {
 				}
 			}
 		}
-		// Print role with first member; subsequent members on indented lines.
+		// Print role with first member; subsequent members on indented
+		// lines, capped at maxPolicyMembersShown. When members are
+		// elided, the footer reports the exact count hidden so the "…"
+		// reflects a real truncation.
 		if len(members) == 0 {
 			fmt.Fprintf(w, "  %-50s (0 members)\n", truncate(role, 50))
 			continue
 		}
-		fmt.Fprintf(w, "  %-50s %s\n", truncate(role, 50), members[0])
-		for _, m := range members[1:] {
+		shown := members
+		if len(shown) > maxPolicyMembersShown {
+			shown = shown[:maxPolicyMembersShown]
+		}
+		fmt.Fprintf(w, "  %-50s %s\n", truncate(role, 50), shown[0])
+		for _, m := range shown[1:] {
 			fmt.Fprintf(w, "  %-50s %s\n", "", m)
 		}
-		if len(members) > 5 {
-			fmt.Fprintf(w, "  %-50s … (%d total)\n", "",
-				len(members))
+		if hidden := len(members) - len(shown); hidden > 0 {
+			fmt.Fprintf(w, "  %-50s … (%d more, %d total)\n", "",
+				hidden, len(members))
 		}
 	}
 }

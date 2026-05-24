@@ -75,13 +75,17 @@ type fakeFeedRecord struct {
 }
 
 type fakeFeed struct {
-	URL     string
-	mu      sync.Mutex
-	calls   []fakeFeedRecord
-	hits    atomic.Int64
-	cursor  atomic.Int64
-	frames  [][]byte
-	status  int
+	URL    string
+	mu     sync.Mutex
+	calls  []fakeFeedRecord
+	notify chan struct{}
+	hits   atomic.Int64
+	cursor atomic.Int64
+	frames [][]byte
+	status int
+	// dropMid: connection 0 writes the first half of frames then
+	// returns so the client EOFs and reconnects (exercises the
+	// reconnect path).
 	dropMid bool
 }
 
@@ -97,16 +101,51 @@ func (f *fakeFeed) Records() []fakeFeedRecord {
 	return out
 }
 
-// record appends one received-request snapshot under the mutex.
+// record appends one received-request snapshot under the mutex, then
+// pokes the notify channel so waiters wake and re-check the count.
+// The send is non-blocking (buffered cap-1 + default) so the http
+// handler never stalls when no test goroutine is waiting.
 func (f *fakeFeed) record(r fakeFeedRecord) {
 	f.mu.Lock()
 	f.calls = append(f.calls, r)
 	f.mu.Unlock()
+	select {
+	case f.notify <- struct{}{}:
+	default:
+	}
+}
+
+// waitForRequests blocks until the feed has recorded at least n
+// requests, then returns; it fails the test if that has not happened
+// within timeout. This replaces the fixed `time.Sleep` races that
+// gated assertions on wall-clock scheduling — the test waits on the
+// observable event (a request landing) instead of guessing how long
+// the client takes to dial. Must be called from the test goroutine,
+// since t.Fatalf may not run on a spawned goroutine.
+func (f *fakeFeed) waitForRequests(t *testing.T, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		f.mu.Lock()
+		got := len(f.calls)
+		f.mu.Unlock()
+		if got >= n {
+			return
+		}
+		select {
+		case <-f.notify:
+			// A request landed; loop to re-check the count. The
+			// notify channel is edge-triggered and coalesces, so the
+			// length check above is the source of truth.
+		case <-deadline:
+			t.Fatalf("timeout waiting for %d request(s); got %d", n, got)
+		}
+	}
 }
 
 func newFakeFeed(t *testing.T, status int, frames [][]byte, dropMid bool) *fakeFeed {
 	t.Helper()
-	feed := &fakeFeed{frames: frames, status: status, dropMid: dropMid}
+	feed := &fakeFeed{frames: frames, status: status, dropMid: dropMid, notify: make(chan struct{}, 1)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/feed", func(w http.ResponseWriter, r *http.Request) {
 		idx := int(feed.hits.Add(1) - 1)
@@ -345,21 +384,25 @@ func TestRunWatch_FilterFlagsForwardToQuery(t *testing.T) {
 
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
 	go func() {
-		time.Sleep(30 * time.Millisecond)
-		cancel()
+		defer close(done)
+		_ = runWatch(ctx, watchOptions{
+			BackplaneURL: feed.URL,
+			OpClass:      "write",
+			Principal:    "alice",
+			Target:       "rdc-vcenter",
+			Stdout:       stdout,
+			Stderr:       stderr,
+			HTTPClient:   feed.client(),
+			Backoff:      fastBackoff,
+		})
 	}()
 
-	_ = runWatch(ctx, watchOptions{
-		BackplaneURL: feed.URL,
-		OpClass:      "write",
-		Principal:    "alice",
-		Target:       "rdc-vcenter",
-		Stdout:       stdout,
-		Stderr:       stderr,
-		HTTPClient:   feed.client(),
-		Backoff:      fastBackoff,
-	})
+	feed.waitForRequests(t, 1, 2*time.Second)
+	cancel()
+	<-done
 
 	records := feed.Records()
 	if len(records) == 0 {
@@ -380,20 +423,24 @@ func TestRunWatch_AuthHeaderSent(t *testing.T) {
 	feed := newFakeFeed(t, http.StatusOK, nil, false)
 	seedWatchCreds(t, xdg, feed.URL, jwtMarker)
 
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
 	go func() {
-		time.Sleep(30 * time.Millisecond)
-		cancel()
+		defer close(done)
+		_ = runWatch(ctx, watchOptions{
+			BackplaneURL: feed.URL,
+			Stdout:       stdout,
+			Stderr:       stderr,
+			HTTPClient:   feed.client(),
+			Backoff:      fastBackoff,
+		})
 	}()
 
-	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	_ = runWatch(ctx, watchOptions{
-		BackplaneURL: feed.URL,
-		Stdout:       stdout,
-		Stderr:       stderr,
-		HTTPClient:   feed.client(),
-		Backoff:      fastBackoff,
-	})
+	feed.waitForRequests(t, 1, 2*time.Second)
+	cancel()
+	<-done // runWatch returned: its stdout/stderr writes are complete
 
 	records := feed.Records()
 	if len(records) == 0 {
@@ -422,21 +469,27 @@ func TestRunWatch_ReconnectsWithLastEventID(t *testing.T) {
 
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
 	go func() {
-		// Allow first connection's first frame, the drop, the
-		// 1 ms backoff, the reconnect, the second frame, and a
-		// margin before cancelling.
-		time.Sleep(200 * time.Millisecond)
-		cancel()
+		defer close(done)
+		_ = runWatch(ctx, watchOptions{
+			BackplaneURL: feed.URL,
+			Stdout:       stdout,
+			Stderr:       stderr,
+			HTTPClient:   feed.client(),
+			Backoff:      fastBackoff,
+		})
 	}()
 
-	_ = runWatch(ctx, watchOptions{
-		BackplaneURL: feed.URL,
-		Stdout:       stdout,
-		Stderr:       stderr,
-		HTTPClient:   feed.client(),
-		Backoff:      fastBackoff,
-	})
+	// Wait for the initial connection plus the post-drop reconnect
+	// (2 requests) rather than guessing the dial + 1 ms backoff +
+	// redial timing with a fixed sleep. By the time the reconnect
+	// request lands, the client has parsed frame 0 and set its
+	// Last-Event-Id header, so the assertions below are stable.
+	feed.waitForRequests(t, 2, 2*time.Second)
+	cancel()
+	<-done
 
 	records := feed.Records()
 	if len(records) < 2 {

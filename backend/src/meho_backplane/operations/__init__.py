@@ -32,11 +32,12 @@ Sub-modules:
   hands it to the composite handler in place of raw
   :func:`dispatch`; the callable owns the audit-tree linkage +
   bounded-depth guard so handlers read as plain business logic.
-* :mod:`.reducer` — the v0.2 :class:`PassThroughReducer` stub +
-  :class:`Reducer` Protocol + :class:`ResultHandle`. T6 (#397) will
-  ship the full reducer implementation; the dispatcher already
-  invokes the reducer slot so today's pass-through gets swapped in
-  cleanly later.
+* :mod:`.reducer` — the :class:`PassThroughReducer` shim (import-time
+  default) + :class:`Reducer` Protocol + :class:`ResultHandle`. The
+  production reducer
+  :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+  (G0.6.1-T3 #753) is installed at startup via :func:`set_default_reducer`,
+  swapping the pass-through default cleanly.
 * :mod:`.typed_register` — :func:`register_typed_operation` and its
   G3.1-T4 (#504) sibling :func:`register_composite_operation` for
   typed/composite connector init-time registration, plus

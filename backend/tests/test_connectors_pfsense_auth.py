@@ -487,6 +487,96 @@ async def test_probe_ok_when_ssh_connects_and_version_returns_content() -> None:
     assert result.latency_ms >= 0.0
 
 
+@pytest.mark.parametrize(
+    "boom",
+    [
+        OSError("connection reset by peer"),
+        asyncssh.ConnectionLost("channel closed mid-command"),
+        TimeoutError("cat /etc/version timed out"),
+    ],
+)
+async def test_probe_command_failed_when_run_command_raises_after_connect(
+    boom: Exception,
+) -> None:
+    """``_run_command`` raising after a successful ``_connect`` → ``command_failed``.
+
+    AC (#986): a mid-probe failure (connection drop, ``asyncssh.Error``,
+    or timeout after the handshake) must map to a non-ok
+    :class:`ProbeResult` with reason ``command_failed`` — no exception
+    escapes ``probe``. ``TimeoutError`` is an ``OSError`` subclass so the
+    ``(OSError, asyncssh.Error)`` catch tuple covers the timeout case.
+    """
+    connector = PfSenseConnector()
+    conn_mock = MagicMock()
+    with (
+        patch.object(connector, "_connect", AsyncMock(return_value=conn_mock)),
+        patch.object(connector, "_run_command", AsyncMock(side_effect=boom)),
+    ):
+        result = await connector.probe(_NO_CREDS_TARGET)
+    assert result.ok is False
+    assert result.reason == "command_failed"
+
+
+# ---------------------------------------------------------------------------
+# about -- surfaces unreachability rather than masking it as status="ok" (#986)
+# ---------------------------------------------------------------------------
+
+
+async def test_about_raises_connector_unreachable_on_unreachable_target() -> None:
+    """``about`` against an unreachable target raises, never returns empty fields.
+
+    AC (#986): ``fingerprint`` returns ``reachable=False`` on a connection
+    failure; ``about`` must surface that as a
+    :exc:`ConnectorUnreachableError` rather than returning a dict of
+    empty/None identity fields the dispatcher would report as
+    ``status="ok"``.
+    """
+    from meho_backplane.connectors.adapters.ssh import ConnectorUnreachableError
+
+    connector = PfSenseConnector()
+    with (
+        patch.object(
+            connector,
+            "_run_command",
+            AsyncMock(side_effect=OSError("Connection refused")),
+        ),
+        pytest.raises(ConnectorUnreachableError, match="Connection refused"),
+    ):
+        await connector.about(_NO_CREDS_TARGET, {})
+
+
+async def test_execute_about_unreachable_returns_connector_error_not_ok() -> None:
+    """End-to-end: ``execute("pfsense.about")`` on an unreachable target → non-ok.
+
+    The dispatcher shim catches the ``ConnectorUnreachableError`` raised
+    by ``about`` and maps it to the ``connector_error`` envelope. The op
+    is reported as ``status="error"`` — not a successful op carrying empty
+    identity fields (#986).
+    """
+    from meho_backplane.connectors.schemas import OperationResult
+    from meho_backplane.operations import typed_register as tr_module
+    from meho_backplane.operations._handler_resolve import reset_handler_cache
+
+    reset_handler_cache()
+    with patch.object(tr_module, "encode_endpoint_text", AsyncMock(return_value=[0.1] * 384)):
+        await PfSenseConnector.register_operations()
+
+    connector = PfSenseConnector()
+    with patch.object(
+        connector,
+        "_run_command",
+        AsyncMock(side_effect=OSError("Connection refused")),
+    ):
+        result = await connector.execute(_NO_CREDS_TARGET, "pfsense.about", {})
+
+    assert isinstance(result, OperationResult)
+    assert result.status == "error"
+    assert result.status != "ok"
+    assert result.error is not None and result.error.startswith("connector_error:")
+    assert result.extras.get("error_code") == "connector_error"
+    assert result.extras.get("exception_class") == "ConnectorUnreachableError"
+
+
 # ---------------------------------------------------------------------------
 # Per-target isolation
 # ---------------------------------------------------------------------------

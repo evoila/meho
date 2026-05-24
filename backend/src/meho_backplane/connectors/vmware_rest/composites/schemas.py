@@ -253,9 +253,9 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 #
 # Each response schema captures the aggregated dict the corresponding
-# handler in :mod:`_read` returns. Informational in v0.2 (the
-# dispatcher's :class:`PassThroughReducer` does not validate outbound
-# payloads); declared so the meta-tools
+# handler in :mod:`_read` returns. Informational (the dispatcher's
+# default reducer does not validate outbound payloads against them);
+# declared so the meta-tools
 # (:mod:`meho_backplane.operations.meta_tools`) can surface the shape on
 # ``describe_operation`` calls and so the
 # :class:`~meho_backplane.db.models.EndpointDescriptor` row persists a

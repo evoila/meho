@@ -16,17 +16,19 @@ Coverage:
   leaves exactly one row.
 * **Slug collision regression.** Two distinct ``tenant_id`` UUIDs
   sharing an 8-hex prefix both seed without raising. Guards against
-  the truncated-slug regression: ``ON CONFLICT (id) DO NOTHING``
-  does not cover the separate ``UNIQUE`` index on ``tenant.slug``,
-  so a prefix-derived slug would raise an ``IntegrityError`` on the
-  second insert.
+  the truncated-slug regression: a prefix-derived slug would break the
+  slug↔id bijection, letting two distinct tenants collide on the
+  ``tenant.slug`` unique index and raise an ``IntegrityError`` on the
+  second insert. The full-UUID slug keeps the slug exactly as unique
+  as the ``id``.
 * **Pre-existing row untouched.** A ``tenant`` row that already has
   an operator-chosen ``slug`` / ``name`` (the v0.3 provisioning-API
   case) is not overwritten by a subsequent ``ensure_tenant`` — the
   ``ON CONFLICT DO NOTHING`` must never clobber.
 * **SQLite dialect dispatch.** The SQLite ``insert`` branch is the
   one exercised here; the PG branch is exercised by the integration
-  module. Both target ``tenant.id`` as the conflict key.
+  module. Both arbitrate ``ON CONFLICT DO NOTHING`` against every
+  unique index (no named ``index_elements``).
 
 These run against the autouse ``sqlite+aiosqlite`` engine the
 ``_default_database_url`` conftest fixture pre-migrates to
@@ -108,8 +110,13 @@ async def test_ensure_tenant_is_idempotent_under_concurrent_calls() -> None:
     """Concurrent first-writes for the same ``tenant_id`` → one row.
 
     The async-session contract is one connection per session, so each
-    coroutine gets its own session; ``ON CONFLICT (id) DO NOTHING``
+    coroutine gets its own session; ``ON CONFLICT DO NOTHING``
     is what keeps the racing inserts from raising or double-inserting.
+
+    Note: SQLite serialises writes, so this case never exercised the
+    PostgreSQL concurrent-race (#983) that the named-``id`` arbiter
+    could not survive; the PG-real reproduction lives in
+    :mod:`tests.integration.test_tenant_seed_pg`.
     """
     tenant_id = uuid.uuid4()
     sessionmaker = get_sessionmaker()
@@ -127,11 +134,11 @@ async def test_ensure_tenant_seeds_two_uuids_sharing_an_8hex_prefix() -> None:
     """Two UUIDs with the same first 8 hex chars both seed cleanly.
 
     Regression for the truncated-slug bug: the derived slug must be
-    bijective with the ``id`` primary key. ``ON CONFLICT (id) DO
-    NOTHING`` only guards the PK, not the separate ``UNIQUE`` index on
-    ``tenant.slug``. A ``tenant-<first-8-hex>`` slug collides for two
-    distinct UUIDs sharing that prefix and raises an ``IntegrityError``
-    on the second insert; deriving from the full UUID does not.
+    bijective with the ``id`` primary key. A ``tenant-<first-8-hex>``
+    slug collides for two distinct UUIDs sharing that prefix and raises
+    an ``IntegrityError`` on the ``tenant.slug`` unique index for the
+    second insert; deriving from the full UUID keeps the slug exactly
+    as unique as the ``id`` so the two inserts stay independent.
     """
     shared_prefix = uuid.uuid4().hex[:8]
     tenant_a = uuid.UUID(shared_prefix + uuid.uuid4().hex[8:])

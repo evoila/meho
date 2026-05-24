@@ -33,12 +33,16 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   `username:password` as-is; no realm suffix is appended. Replaced by the
   concrete `Target` model once G0.3 (#224) lands.
 - **`HarborCredentialsLoader`** (`session.py`) — async callable type resolving
-  a target to `{"username": ..., "password": ...}`. Injectable on connector
-  construction (`HarborConnector(credentials_loader=...)`) so unit tests,
-  integration tests, and pre-G0.3 production deploys override the default
-  Vault loader.
-- **`load_credentials_from_vault`** (`session.py`) — default loader, stubbed
-  `NotImplementedError` until G0.3 lands the operator-context Vault read path.
+  a `(target, operator)` pair to `{"username": ..., "password": ...}`. The
+  `operator: Operator` carries the dispatched identity so the live loader
+  reads the per-target secret under the operator's JWT. Injectable on
+  connector construction (`HarborConnector(credentials_loader=...)`) so unit
+  and integration tests override the default Vault loader.
+- **`load_credentials_from_vault`** (`session.py`) — default loader. Performs a
+  live operator-context Vault KV-v2 read of `target.secret_ref` under the
+  operator's identity, delegating to the shared `load_basic_credentials` helper
+  (G3.9-T2 #941, wired in G3.10-T1 #945). Returns the service-account
+  `{"username": ..., "password": ...}` pair.
 - **`HARBOR_CORE_OPS`** (`core_ops.py`) — tuple of 9 `HarborCoreOp` entries
   describing the operator-reviewed read-only op subset enabled at v0.2: system
   info, health, project list/info, repository list/info, artifact list/info,
@@ -90,12 +94,16 @@ Two account forms are supported:
 Both forms are stored verbatim in Vault under `target.secret_ref`. The
 connector passes the stored username through unchanged in the Basic auth header.
 
-1. `HarborConnector.auth_headers(target)` is called.
-2. `_load_credentials(target)` acquires the per-instance `asyncio.Lock`,
-   checks the `_creds_cache` dict (keyed on `target.name`), and calls the
-   loader on miss.
-3. The loader (default: `load_credentials_from_vault`, injected in tests)
-   returns `{"username": ..., "password": ...}`.
+1. `HarborConnector.auth_headers(target, operator)` is called. The
+   `operator: Operator` is the dispatched identity threaded down from the op
+   handler (the operator-context Vault read, #945 for read ops, #984 for the
+   robot lifecycle write ops).
+2. `_load_credentials(target, operator)` acquires the per-instance
+   `asyncio.Lock`, checks the `_creds_cache` dict (keyed on `target.name`),
+   and calls the loader with `(target, operator)` on miss.
+3. The loader (default: `load_credentials_from_vault`, which reads the secret
+   under the operator's identity; injectable in tests) returns
+   `{"username": ..., "password": ...}`.
 4. The result is cached under `target.name` and a `harbor_credentials_loaded`
    log event is emitted.
 5. `_basic_auth_header(username, password)` returns `"Basic <base64>"`.

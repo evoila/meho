@@ -16,9 +16,12 @@ Test matrix
 * **Upgrade adds the column + index.** ``upgrade head`` from a clean
   DB leaves ``audit_log.agent_session_id`` present and nullable, and
   the named ``audit_log_agent_session_id_idx`` index defined.
-* **Reversibility round-trip.** ``downgrade -1`` drops both the column
-  and the index; a subsequent ``upgrade head`` re-creates them. This
-  is the 0006 reversibility contract this migration inherits.
+* **Reversibility round-trip.** ``downgrade "0013"`` (0014's
+  ``down_revision``) drops both the column and the index; a subsequent
+  ``upgrade head`` re-creates them. This is the 0006 reversibility
+  contract this migration inherits. The target is the explicit
+  revision rather than head-relative ``"-1"`` so the test keeps
+  reverting *0014* even once a later migration becomes head.
 * **parent_audit_id is untouched.** The migration must not re-add the
   pre-existing ``parent_audit_id`` column / index (it shipped in 0006);
   both survive the upgrade unchanged and `agent_session_id` is a
@@ -149,11 +152,18 @@ def test_upgrade_adds_agent_session_id_column_and_index(
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade -1`` drops the column + index; ``upgrade head`` restores them.
+    """``downgrade "0013"`` drops the column + index; ``upgrade head`` restores them.
 
     This is the reversibility contract migration 0014 inherits from
     0006: the inverse must work cleanly on SQLite (and, by the same
     generic-DDL discipline, on PostgreSQL).
+
+    The downgrade target is the explicit revision ``"0013"`` (0014's
+    ``down_revision``) rather than head-relative ``"-1"``. ``"-1"``
+    reverts whatever sits at head, so the moment a later migration
+    (0015+) lands it would silently stop exercising 0014's reverse;
+    anchoring to ``"0013"`` keeps this test pinned to 0014 and matches
+    the repo convention (``test_targets_fingerprint.py``).
     """
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
@@ -162,7 +172,7 @@ def test_downgrade_then_upgrade_round_trips(
     assert "agent_session_id" in _audit_log_columns(sync_url)
     assert "audit_log_agent_session_id_idx" in _audit_log_indexes(sync_url)
 
-    command.downgrade(cfg, "-1")
+    command.downgrade(cfg, "0013")
     assert "agent_session_id" not in _audit_log_columns(sync_url), (
         "downgrade must drop audit_log.agent_session_id"
     )

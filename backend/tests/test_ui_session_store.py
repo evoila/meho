@@ -11,8 +11,9 @@ The tests exercise the four entry points the
 
 Coverage matrix (Task #864 acceptance criteria):
 
-* ``alembic upgrade head`` / ``alembic downgrade -1`` round-trips
-  the ``web_session`` table cleanly (migration ``0012``).
+* ``alembic upgrade head`` then ``downgrade "0012"`` round-trips
+  the ``web_session`` table cleanly (created by migration ``0013``;
+  ``0012`` is its ``down_revision``).
 * :func:`create_session` -> :func:`load_session` -> :func:`revoke_session`
   round-trips work; the DB columns hold encrypted bytes, never the
   plaintext tokens.
@@ -100,11 +101,17 @@ def test_alembic_round_trip_web_session_table(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``alembic upgrade head`` then ``downgrade -1`` round-trips cleanly.
+    """``alembic upgrade head`` then ``downgrade "0012"`` round-trips cleanly.
 
     Exercises the reversibility contract documented on
     ``0013_create_web_session``: ``upgrade`` creates the table + two
     indexes; ``downgrade`` drops them in inverse order.
+
+    The downgrade target is the explicit revision ``"0012"`` (0013's
+    ``down_revision``) rather than head-relative ``"-1"`` so the test
+    keeps reverting the ``web_session`` migration regardless of how
+    many migrations stack on top of head -- matching the repo
+    convention (``test_targets_fingerprint.py``, ``test_db_models.py``).
 
     The test function is **sync** (not ``async def``) because
     :func:`alembic.command.upgrade` invokes :func:`asyncio.run`
@@ -155,8 +162,8 @@ def test_alembic_round_trip_web_session_table(
     assert "web_session_operator_sub_idx" in up_indexes
     assert "web_session_expires_at_idx" in up_indexes
 
-    # Step 3 -- downgrade -1 drops the table.
-    command.downgrade(cfg, "-1")
+    # Step 3 -- downgrade to 0012 (0013's down_revision) drops the table.
+    command.downgrade(cfg, "0012")
     down_tables, _down_indexes = _table_names_and_indexes()
     assert "web_session" not in down_tables
 

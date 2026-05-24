@@ -28,6 +28,12 @@ Module layout:
   audit_id + broadcast event_id) the feed rows open via ``hx-get``;
   applies the same decision-#3 aggregate-only gate as the publisher so
   a sensitive op never leaks its payload on click.
+* :mod:`~meho_backplane.ui.routes.broadcast.history` -- the
+  ``GET /ui/broadcast/history`` route (T3 #869). The "Last 24h" tab's
+  HTMX target: a finite ``XRANGE`` pull of the tenant's last-24h events,
+  serialised as JSON the shared ``broadcastFeed`` controller renders
+  through ``_event_row.html``, so a replayed history row is identical to
+  a live row and opens the same T2 drawer.
 
 The umbrella :func:`build_router` aggregates both. It is mounted
 **before** :func:`meho_backplane.ui.routes.stubs.build_stubs_router` in
@@ -45,6 +51,7 @@ from fastapi import APIRouter
 
 from meho_backplane.ui.routes.broadcast.event import build_event_router
 from meho_backplane.ui.routes.broadcast.feed import build_feed_router
+from meho_backplane.ui.routes.broadcast.history import build_history_router
 from meho_backplane.ui.routes.broadcast.stream import build_stream_router
 
 __all__ = ["build_router"]
@@ -59,15 +66,16 @@ def build_router() -> APIRouter:
     :mod:`meho_backplane.ui.routes.topology`.
 
     The feed router is included **before** the event router so the
-    literal ``/ui/broadcast/feed`` fragment path is matched ahead of
-    the parametrised ``/ui/broadcast/event/{audit_id}`` -- they share
-    no overlapping segment, but declaration order is the contract
-    FastAPI resolves on, so keeping the literal route first is the safe
-    discipline (mirrors the targets router's ``/discover`` ahead of
-    ``/{name}``).
+    literal ``/ui/broadcast/feed`` / ``/ui/broadcast/history`` fragment
+    paths are matched ahead of the parametrised
+    ``/ui/broadcast/event/{audit_id}`` -- they share no overlapping
+    segment, but declaration order is the contract FastAPI resolves on,
+    so keeping the literal routes first is the safe discipline (mirrors
+    the targets router's ``/discover`` ahead of ``/{name}``).
     """
     router = APIRouter()
     router.include_router(build_feed_router())
     router.include_router(build_stream_router())
+    router.include_router(build_history_router())
     router.include_router(build_event_router())
     return router

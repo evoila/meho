@@ -1,0 +1,89 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Broadcast Last-24h replay fragment (Initiative #338, Task #869, work
+  item #6). The "Last 24h" tab ``hx-get``s ``/ui/broadcast/history`` and
+  swaps this fragment into ``#broadcast-history`` (``innerHTML``). The
+  server has already pulled the tenant's last-24h events via a finite
+  ``XRANGE`` and serialised them as ``history_events_json``; this
+  fragment seeds the SAME ``broadcastFeed`` Alpine controller with those
+  events (instead of an SSE subscription) so the rows render through the
+  SAME ``broadcast/_event_row.html`` partial and open the SAME T2
+  event-detail drawer on a click.
+
+  Why reuse ``broadcastFeed`` instead of server-rendering each row
+  ----------------------------------------------------------------
+  ``_event_row.html`` is Alpine-bound markup designed to live inside an
+  ``x-for`` -- it reads ``ev.*`` and calls the controller's helpers
+  (``badgeClass`` / ``formatTs`` / ``payloadSummary`` / ``openDrawer``).
+  Seeding the controller with the historical events keeps the row markup,
+  the badge palette, the 🔒 aggregate-only marker, and the
+  click-to-open-drawer behaviour single-sourced -- a history row is
+  byte-identical to a live row. The op_id client filter still applies
+  (``visibleEvents``), so an operator can narrow the replay the same way
+  they narrow the live feed; the SSE-specific wiring (``sse-connect`` /
+  ``onSseMessage``) is simply absent here.
+
+  Drawer reuse
+  ------------
+  ``openDrawer(ev)`` targets ``#event-drawer`` -- the same slot the live
+  feed uses. The history pane lives inside the same page, so a clicked
+  history row opens the identical drawer beside the feed.
+-#}
+<div
+  id="broadcast-history-pane"
+  x-data="broadcastFeed({
+    cap: {{ in_dom_row_cap }},
+    badgeClasses: {{ op_class_badge_json }},
+    opIdFilter: '',
+    events: {{ history_events_json | safe }}
+  })"
+>
+  {# ---------- Status bar -- count + window ---------- #}
+  <div
+    class="flex items-center justify-between gap-3 border-b border-base-300 px-3 py-1.5 text-xs opacity-70"
+  >
+    <span>Last {{ retention_hours }}h replay</span>
+    <span aria-live="polite" x-text="visibleEvents.length + ' / {{ in_dom_row_cap }} rows'"></span>
+  </div>
+
+  {# ---------- Column header row -- mirrors _event_row.html grid. ---------- #}
+  <div
+    class="grid grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60"
+  >
+    <span class="col-span-2">Time</span>
+    <span class="col-span-2">Principal</span>
+    <span class="col-span-3">Operation</span>
+    <span class="col-span-1">Class</span>
+    <span class="col-span-1">Status</span>
+    <span class="col-span-1">Target</span>
+    <span class="col-span-2">Payload</span>
+  </div>
+
+  {# ---------- Empty state ----------
+     No events in the last 24h window (or the op_id filter narrowed them
+     all out). -#}
+  <div
+    x-show="visibleEvents.length === 0"
+    class="px-3 py-10 text-center text-sm opacity-70"
+    id="broadcast-history-empty-state"
+  >
+    No activity in the last {{ retention_hours }}h. As operators run
+    commands, their activity will appear here.
+  </div>
+
+  {# ---------- History list -- newest first ----------
+     Each event renders via the shared server-authored row partial; a
+     click opens the same T2 drawer. -#}
+  <ul
+    x-show="visibleEvents.length > 0"
+    class="divide-y divide-base-300"
+    role="list"
+    aria-label="Last 24h broadcast events"
+  >
+    <template x-for="ev in visibleEvents" :key="ev.event_id">
+      {% include "broadcast/_event_row.html" %}
+    </template>
+  </ul>
+</div>

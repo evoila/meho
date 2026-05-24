@@ -2983,6 +2983,9 @@ type UiBroadcastFeedUiBroadcastGetParams struct {
 	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
 	Target    *string `form:"target,omitempty" json:"target,omitempty"`
 	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+
+	// Wall Render the minimal full-screen wall-monitor layout (no sidebar / top bar / filter bar).
+	Wall *bool `form:"wall,omitempty" json:"wall,omitempty"`
 }
 
 // UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams defines parameters for UiBroadcastEventDetailUiBroadcastEventAuditIdGet.
@@ -3492,6 +3495,9 @@ type ClientInterface interface {
 
 	// UiBroadcastFeedFragmentUiBroadcastFeedGet request
 	UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiBroadcastHistoryUiBroadcastHistoryGet request
+	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastStreamUiBroadcastStreamGet request
 	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4693,6 +4699,18 @@ func (c *Client) UiBroadcastEventDetailUiBroadcastEventAuditIdGet(ctx context.Co
 
 func (c *Client) UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -9699,6 +9717,22 @@ func NewUiBroadcastFeedUiBroadcastGetRequest(server string, params *UiBroadcastF
 
 		}
 
+		if params.Wall != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wall", runtime.ParamLocationQuery, *params.Wall); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -9853,6 +9887,33 @@ func NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(server string, params *
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiBroadcastHistoryUiBroadcastHistoryGetRequest generates requests for UiBroadcastHistoryUiBroadcastHistoryGet
+func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast/history")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -10549,6 +10610,9 @@ type ClientWithResponsesInterface interface {
 
 	// UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse request
 	UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error)
+
+	// UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request
+	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
 
 	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
 	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
@@ -12364,6 +12428,27 @@ func (r UiBroadcastFeedFragmentUiBroadcastFeedGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiBroadcastHistoryUiBroadcastHistoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiBroadcastHistoryUiBroadcastHistoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiBroadcastHistoryUiBroadcastHistoryGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiBroadcastStreamUiBroadcastStreamGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -13383,6 +13468,15 @@ func (c *ClientWithResponses) UiBroadcastFeedFragmentUiBroadcastFeedGetWithRespo
 		return nil, err
 	}
 	return ParseUiBroadcastFeedFragmentUiBroadcastFeedGetResponse(rsp)
+}
+
+// UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request returning *UiBroadcastHistoryUiBroadcastHistoryGetResponse
+func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
+	rsp, err := c.UiBroadcastHistoryUiBroadcastHistoryGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse(rsp)
 }
 
 // UiBroadcastStreamUiBroadcastStreamGetWithResponse request returning *UiBroadcastStreamUiBroadcastStreamGetResponse
@@ -15874,6 +15968,22 @@ func ParseUiBroadcastFeedFragmentUiBroadcastFeedGetResponse(rsp *http.Response) 
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse parses an HTTP response from a UiBroadcastHistoryUiBroadcastHistoryGetWithResponse call
+func ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse(rsp *http.Response) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiBroadcastHistoryUiBroadcastHistoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

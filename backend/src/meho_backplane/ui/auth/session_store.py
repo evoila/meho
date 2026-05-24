@@ -429,6 +429,13 @@ async def load_session(
     # update is server-side-controlled (never a client-supplied
     # value), so this is safe to run on every successful load.
     row.last_seen_at = now
+    # Sliding-session extension (G10.1-T3 #869): keep an actively-used
+    # session alive past its login-time ``expires_at`` so a long display
+    # (the broadcast wall-monitor) does not log out mid-stream. Bounded
+    # by an absolute cap from ``created_at`` so a permanent display
+    # cannot create an immortal session. Returns the (possibly extended)
+    # ``expires_at`` and mutates the row in place.
+    expires_at = _maybe_extend_expiry(row, created_at=_coerce_utc(row.created_at), now=now)
     await session.flush()
     return DecryptedSession(
         id=row.id,
@@ -636,6 +643,71 @@ async def rotate_refresh(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _maybe_extend_expiry(
+    row: WebSession,
+    *,
+    created_at: datetime,
+    now: datetime,
+) -> datetime:
+    """Slide a near-expiry session forward, bounded by an absolute cap.
+
+    The long-display refresh mechanism for the broadcast wall-monitor
+    (G10.1-T3 #869). The BFF session row's ``expires_at`` is set at
+    login to roughly the access-token TTL (minutes to ~an hour), so a
+    wall display left running for hours would cross ``expires_at``
+    mid-display; the next SSE reconnect to ``/ui/broadcast/stream``
+    would be 302-redirected to login, and the browser ``EventSource``
+    permanently fails on the non-200 -- the feed dies silently.
+
+    On every active ``/ui/*`` load (this function runs inside
+    :func:`load_session`, after the still-valid check), when the row is
+    within ``ui_session_sliding_extension_seconds`` of expiry, push
+    ``expires_at`` out to ``now + sliding_window`` -- but never past the
+    absolute ceiling ``created_at + ui_session_absolute_lifetime_seconds``.
+    The pairing is the standard idle-vs-absolute session-timeout shape
+    (OWASP ASVS v4 §3.3): the sliding window keeps an in-use session
+    alive; the absolute cap guarantees a daily re-auth even for a
+    permanently-displayed monitor.
+
+    A ``sliding`` value of ``0`` disables the extension entirely (the
+    session expires strictly at its login-time ``expires_at``). The
+    mutation is server-side-controlled (clock + config only, never a
+    client-supplied value), so running it on every successful load is
+    safe.
+
+    Returns the effective ``expires_at`` (extended or unchanged) and
+    mutates ``row.expires_at`` in place when an extension applies. The
+    caller's :func:`AsyncSession.flush` persists it.
+    """
+    settings = get_settings()
+    sliding = settings.ui_session_sliding_extension_seconds
+    if sliding <= 0:
+        return _coerce_utc(row.expires_at)
+
+    current = _coerce_utc(row.expires_at)
+    # Absolute ceiling from session birth -- the extension can never
+    # push expiry past this, so a permanent display still re-auths.
+    ceiling = created_at + timedelta(seconds=settings.ui_session_absolute_lifetime_seconds)
+    if current >= ceiling:
+        # Already at (or past) the absolute cap; no further sliding.
+        return current
+
+    # Only slide when the session is within the sliding window of
+    # expiry -- avoids a write on every single request for a freshly
+    # logged-in session whose expiry is still far off.
+    threshold = current - timedelta(seconds=sliding)
+    if now < threshold:
+        return current
+
+    extended = min(now + timedelta(seconds=sliding), ceiling)
+    # Monotonic guard: never move expiry backwards (a tiny sliding
+    # window vs a long login TTL could otherwise shrink it).
+    if extended <= current:
+        return current
+    row.expires_at = extended
+    return extended
 
 
 def _coerce_utc(value: datetime) -> datetime:

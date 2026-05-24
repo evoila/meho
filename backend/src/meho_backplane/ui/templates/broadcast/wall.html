@@ -1,0 +1,96 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Broadcast wall-monitor view (Initiative #338, Task #869, work item #5).
+
+  A minimal, no-chrome full-screen layout for a team-room monitor:
+    * NO sidebar, NO top navbar, NO filter bar -- the only affordance
+      is the feed itself, maximised to fill the viewport.
+    * A thin header strip (tenant + live pill + a link back to the
+      in-chrome console view) so an operator glancing at the wall can
+      still see which tenant and whether the stream is connected.
+    * The SAME ``broadcast/_feed.html`` fragment the in-chrome view
+      uses, rendered with ``wall=True`` so the rows are taller and the
+      list auto-scrolls to the newest event. Reusing the fragment means
+      the wall view inherits the live SSE wiring, the ``EventSource``
+      auto-reconnect + ``Last-Event-Id`` replay durability, and the
+      1000-row in-DOM cap unchanged -- only the surrounding chrome
+      differs.
+
+  Why a standalone document (not ``{% extends "base.html" %}``)
+  ------------------------------------------------------------
+  ``base.html`` is the DaisyUI ``drawer`` shell -- sidebar + navbar +
+  footer. The wall view's whole point is to drop that chrome, so it is
+  a self-contained ``<!doctype html>`` that loads the same vendored
+  CSS/JS the base layout does (the script order is load-bearing:
+  ``sse.min.js`` calls ``htmx.defineExtension`` at load, so it must run
+  after ``htmx.min.js``; ``defer`` preserves document order). The
+  ``broadcastFeed`` Alpine controller is loaded the same way the
+  in-chrome view loads it.
+
+  Long-display session refresh
+  ----------------------------
+  Session-cookie auth is unchanged -- the wall page is a ``/ui/*`` route
+  gated by ``UISessionMiddleware``. The long-display durability comes
+  from the server-side sliding-session extension in ``load_session``
+  (G10.1-T3 #869): every SSE reconnect to ``/ui/broadcast/stream`` is an
+  active ``/ui/*`` request that slides the session's ``expires_at``
+  forward (bounded by an absolute cap), so a wall display running for
+  hours keeps getting 200s and the ``EventSource`` never hits the
+  non-200 (login redirect) that would permanently kill it.
+-#}
+<!doctype html>
+<html lang="en" data-theme="corporate" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Broadcast wall &middot; MEHO Operator Console</title>
+    <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
+    {# Same vendored bundle + load order as base.html. #}
+    <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
+    <script src="/ui/static/src/vendor/sse.min.js" defer></script>
+    <script src="/ui/static/src/vendor/alpine.min.js" defer></script>
+  </head>
+  <body class="bg-base-200 text-base-content flex h-full flex-col overflow-hidden">
+    <section
+      class="flex h-full flex-col"
+      hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+    >
+      {# ---------- Thin header strip ---------- #}
+      <header
+        class="bg-base-100 border-base-300 flex flex-none items-center justify-between gap-4 border-b px-4 py-2"
+      >
+        <div class="flex items-center gap-2">
+          <span aria-hidden="true" class="text-xl">&#x1F4E1;</span>
+          <h1 class="text-lg font-semibold">Broadcast wall</h1>
+          <code class="badge badge-outline">{{ tenant_id }}</code>
+        </div>
+        <a href="/ui/broadcast" class="btn btn-ghost btn-sm"> Exit wall mode </a>
+      </header>
+
+      {# ---------- Maximised feed ----------
+         The feed fragment fills the remaining height; ``wall=True``
+         makes the rows taller and the list auto-scroll to newest. -#}
+      <div class="min-h-0 flex-1 p-3">
+        {% with wall = True %}
+          {% include "broadcast/_feed.html" %}
+        {% endwith %}
+      </div>
+
+      {# ---------- Drawer slot ----------
+         A row click still opens the T2 event-detail drawer. On the wall
+         layout it overlays as a right-hand panel rather than a column.
+         Reuses the same ``#event-drawer`` id the controller targets. -#}
+      <aside
+        id="event-drawer"
+        class="bg-base-100 border-base-300 fixed top-0 right-0 z-50 hidden h-full w-96 max-w-full overflow-auto border-l shadow-xl"
+        aria-live="polite"
+        aria-label="Event detail drawer"
+      ></aside>
+    </section>
+
+    {# Surface JS -- the shared ``broadcastFeed`` Alpine controller. #}
+    <script src="/ui/static/src/app/broadcast-feed.js" defer></script>
+  </body>
+</html>

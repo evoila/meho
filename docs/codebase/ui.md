@@ -362,7 +362,7 @@ content, CSRF rejection on missing/mismatched/forged tokens,
 positive control on matched token, and middleware-order sanity
 (/api/* passes through untouched).
 
-## Broadcast surface (Tasks #867, #868)
+## Broadcast surface (Tasks #867, #868, #869)
 
 Initiative [#338](https://github.com/evoila/meho/issues/338) (G10.1
 Activity broadcast UI), Task [#867](https://github.com/evoila/meho/issues/867)
@@ -371,17 +371,21 @@ Activity broadcast UI), Task [#867](https://github.com/evoila/meho/issues/867)
 list with an empty state and a 1000-row in-DOM cap. Task
 [#868](https://github.com/evoila/meho/issues/868) (G10.1-T2) adds the
 **filter bar** (op_class / principal / target / op_id), the **event
-detail drawer**, and the **PII 🔒 visualisation**. Wall-monitor mode +
-the Last-24h replay tab are T3 (#869).
+detail drawer**, and the **PII 🔒 visualisation**. Task
+[#869](https://github.com/evoila/meho/issues/869) (G10.1-T3) adds the
+**wall-monitor mode** (`?wall=1`), the **Last-24h replay tab**, and the
+**long-display session refresh** (a sliding-session extension) that
+keeps a full-screen wall display from logging out mid-stream.
 
 ### Routes
 
 | Route | Renders |
 | ----- | ------- |
-| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Accepts `?op_class=&principal=&target=&op_id=` so a copy-pasted filtered URL reproduces the view. |
+| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Accepts `?op_class=&principal=&target=&op_id=` so a copy-pasted filtered URL reproduces the view. `?wall=1` selects the no-chrome wall-monitor layout (`broadcast/wall.html`) instead. |
 | `GET /ui/broadcast/feed` | Filtered feed **fragment** (`broadcast/_feed.html`) — the filter-bar submit target. Re-renders the feed with the active server-side filters baked into a fresh `sse-connect` URL. |
 | `GET /ui/broadcast/stream` | Session-gated SSE bridge (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
-| `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). |
+| `GET /ui/broadcast/history` | Last-24h replay **fragment** (`broadcast/_history.html`) — the "Last 24h" tab's HTMX target. A finite `XRANGE` pull of the tenant's last-24h events seeded into the shared `broadcastFeed` controller. |
+| `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). Shared by the live feed, the wall view, and the history pane. |
 
 ### Why a UI-owned SSE bridge instead of subscribing to `/api/v1/feed`
 
@@ -434,7 +438,9 @@ the colour policy stays one auditable map.
 | `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Click opens the drawer; aggregate-only events render the 🔒 marker + placeholder. |
 | `broadcast/_event_drawer.html` | Event detail drawer: op identity, operation metadata, identifiers (audit_id / request_id / broadcast event_id), full payload (or the 🔒 placeholder for sensitive ops). Alpine `click.outside` / Escape / Close dismiss. |
 | `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
-| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap), the `openDrawer` helper, and the badge/timestamp/payload/aggregate-only helpers. |
+| `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
+| `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the historical events the `/ui/broadcast/history` route pulled via `XRANGE`, so the rows render through `_event_row.html` and open the same drawer as the live feed. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.events` seed (for the history replay pane), and the `opts.autoScroll` wall-monitor behaviour. |
 
 ### Performance + empty state
 
@@ -544,6 +550,80 @@ audit-side).
   streamed yet, or the op_id client filter narrowed everything out):
   "No activity matching your filters…" (work item #8).
 
+### Wall-monitor mode (Task #869, work item #5) — `?wall=1`
+
+`GET /ui/broadcast?wall=1` selects `broadcast/wall.html` instead of
+`broadcast/feed.html`. The wall view is a **standalone document** (not
+`{% extends "base.html" %}`) so it drops the DaisyUI drawer shell —
+no sidebar, no top navbar, no filter bar — and maximises the feed for a
+full-screen team-room monitor. It is opened in a new tab from the
+in-chrome view's "Wall mode" button so the monitor can be cast
+independently of the operator's working session.
+
+The wall view embeds the **same** `broadcast/_feed.html` fragment with
+`wall=True`, so it inherits the live SSE wiring, the `EventSource`
+auto-reconnect + `Last-Event-Id` replay durability, and the 1000-row
+in-DOM cap unchanged — only the chrome and the visual density differ.
+`wall=True` flips the `broadcastFeed` controller's `autoScroll` on (it
+scrolls the list to the top, where the newest event prepends, as events
+arrive) and renders taller rows (`_event_row.html` reads the `wall`
+flag). A clicked row still opens the T2 event-detail drawer, overlaid
+as a right-hand panel on the wall layout.
+
+### Long-display session refresh (Task #869, work item #5) — sliding session
+
+The wall monitor runs for hours, but the BFF session row's `expires_at`
+is set at login to roughly the access-token TTL (minutes to ~an hour).
+The load-bearing failure this guards against: the browser `EventSource`
+**permanently fails on a non-200 response** (WHATWG SSE spec) and does
+not reconnect. So once the session lapses, the next SSE reconnect to
+`/ui/broadcast/stream` is 302-redirected to login by
+`UISessionMiddleware` — a non-200 — and the feed dies silently with no
+recovery.
+
+The fix is a **server-side sliding-session extension** in
+`session_store.load_session` (not an OAuth token rotation — that needs a
+Keycloak refresh handler that does not exist in v0.2). On every active
+`/ui/*` load (each SSE reconnect is one), when the row is within
+`UI_SESSION_SLIDING_EXTENSION_SECONDS` of `expires_at`, the load pushes
+`expires_at` out to `now + sliding_window` — bounded by an absolute
+ceiling `created_at + UI_SESSION_ABSOLUTE_LIFETIME_SECONDS`. This is the
+standard idle-vs-absolute session-timeout pairing (OWASP ASVS v4 §3.3):
+the sliding window keeps an in-use display alive; the absolute cap
+guarantees a daily re-auth even for a permanently-displayed monitor.
+`sliding=0` disables the extension. The settings default to a 1h sliding
+window and a 12h absolute cap. The mutation is server-side-controlled
+(clock + config only, never client-supplied), so it runs safely on every
+load.
+
+### Last-24h replay pane (Task #869, work item #6) — `/ui/broadcast/history`
+
+The in-chrome view carries a **Live / Last 24h** tab strip. The Live tab
+is the SSE feed; the "Last 24h" tab lazy-loads `/ui/broadcast/history`
+the first time it is shown (`hx-trigger="intersect once"` fires the GET
+when the initially-hidden pane scrolls into view).
+
+The history route pulls the tenant's last-24h events with a **finite**
+`XRANGE` over `meho:feed:{session.tenant_id}` — the opposite shape from
+the live feed's BLOCKing `XREAD`: a bounded batch read that returns
+immediately (no streaming, no `while True`, so it cannot hang a worker).
+The window start is a bare millisecond timestamp `now - retention_hours`
+(`BROADCAST_RETENTION_HOURS`, default 24); Valkey `XRANGE` auto-completes
+the bare timestamp's sequence to `0`, so the range spans every entry from
+that millisecond to `+` (the live tail), bounded by `COUNT = 1000` (the
+same in-DOM row budget as the live feed). `XRANGE` returns oldest-first;
+the route reverses to newest-first to match the live feed.
+
+The route serialises the events as JSON and seeds the **same**
+`broadcastFeed` controller (`opts.events`) the live feed uses, so a
+history row renders through the same `_event_row.html` partial and opens
+the same T2 drawer on a click — a history row is byte-identical to a live
+row. The `init` op_id re-read is gated to `#broadcast-feed` (the live
+feed) so it never leaks the live filter onto the history pane, which
+keeps its own filter state. The history fetch is fail-soft: a transient
+Valkey error returns an empty list (the pane shows its empty state)
+rather than 500-ing the fragment.
+
 ### Cross-tenant isolation
 
 The page carries no tenant data beyond the operator's own identity; live
@@ -551,17 +631,21 @@ events arrive over the tenant-scoped bridge whose stream key is
 `meho:feed:{session.tenant_id}`. The target dropdown and the event
 drawer both scope to `session.tenant_id` at the SQL `WHERE` clause —
 never a query parameter — so a tenant-A operator can never surface
-tenant-B targets or audit rows. The
+tenant-B targets or audit rows. The history pane keys the same way: its
+`XRANGE` reads `meho:feed:{session.tenant_id}`, taken from the validated
+session, never a query parameter — so a tenant-A operator's replay can
+never surface tenant-B events. The wall view reuses the live feed
+fragment, so it inherits the live bridge's tenant scoping unchanged. The
 [T1 broadcast suite](../../backend/tests/test_ui_broadcast_feed.py) pins
 the generator's stream-key derivation per tenant; the
 [T2 filters suite](../../backend/tests/test_ui_broadcast_filters.py)
-pins the dropdown + drawer tenant scoping.
+pins the dropdown + drawer tenant scoping; the
+[T3 wall/replay suite](../../backend/tests/test_ui_broadcast_wall_replay.py)
+pins the history pane's per-tenant `XRANGE` key + the wall layout + the
+sliding-session extension.
 
 ### Known limits
 
-* **No wall-monitor / replay tab yet** — T1 + T2 ship the live feed,
-  filters, drawer, and PII viz. Wall-monitor mode (`?wall=1`) + the
-  Last-24h replay tab + long-display session refresh are T3 (#869).
 * **op_id filtering is client-side only** — it narrows the in-DOM
   `events` (bounded by the 1000-row cap), not the server stream. An op
   that fired before the operator typed an op_id substring, and has since

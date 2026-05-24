@@ -37,9 +37,16 @@
   Bound fields on ``ev`` (a parsed ``BroadcastEvent``):
     ev.event_id, ev.audit_id, ev.ts, ev.principal_sub, ev.principal_name,
     ev.op_id, ev.op_class, ev.result_status, ev.target_name, ev.payload.
+
+  ``wall`` (default ``false``): when the row renders inside the
+  wall-monitor feed (``broadcast/wall.html`` includes ``_feed.html`` with
+  ``wall=True``), the row uses taller padding + a larger type scale so
+  it is legible on a full-screen team-room monitor. The in-chrome feed
+  and the history pane render with the default (compact) density.
 -#}
+{% set wall = wall | default(false) %}
 <li
-  class="grid grid-cols-12 items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+  class="grid grid-cols-12 items-center gap-2 cursor-pointer hover:bg-base-200 focus:bg-base-200 focus:outline-none {% if wall %}px-4 py-4 text-base{% else %}px-3 py-2 text-sm{% endif %}"
   role="button"
   tabindex="0"
   :data-event-id="ev.event_id"

@@ -53,34 +53,106 @@
         <code class="badge badge-outline">{{ tenant_id }}</code>.
       </p>
     </div>
+    {# ---------- Wall-monitor entry (work item #5) ----------
+       Opens the no-chrome full-screen wall view in a new tab so the
+       team-room monitor can be cast independently of the operator's
+       working session. -#}
+    <a
+      href="/ui/broadcast?wall=1"
+      target="_blank"
+      rel="noopener"
+      class="btn btn-outline btn-sm"
+    >
+      <span aria-hidden="true">&#x1F5B5;</span>
+      Wall mode
+    </a>
   </header>
 
-  {# ---------- Filter bar (work item #3) ---------- #}
-  {% include "broadcast/_filter_bar.html" %}
-
-  {# ---------- Feed + drawer two-column layout ----------
-     On ``lg:`` viewports the feed takes 2/3 and the drawer 1/3; on
-     smaller viewports the drawer stacks below the feed. -#}
-  <div class="grid gap-4 lg:grid-cols-3">
-    <div class="lg:col-span-2">
-      {% include "broadcast/_feed.html" %}
+  {# ---------- Live / Last-24h tabs (work item #6) ----------
+     Alpine owns the active-tab state; the Last-24h pane lazy-loads its
+     history fragment once on first activation (``hx-trigger`` fires the
+     ``/ui/broadcast/history`` GET the first time the tab is shown). The
+     live feed stays mounted under the hidden pane so its SSE
+     subscription is not torn down when the operator peeks at history. -#}
+  <div x-data="{ tab: 'live' }">
+    <div role="tablist" class="tabs tabs-bordered">
+      <button
+        type="button"
+        role="tab"
+        class="tab"
+        :class="tab === 'live' ? 'tab-active' : ''"
+        x-on:click="tab = 'live'"
+        :aria-selected="(tab === 'live').toString()"
+      >
+        Live
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="tab"
+        :class="tab === 'history' ? 'tab-active' : ''"
+        x-on:click="tab = 'history'"
+        :aria-selected="(tab === 'history').toString()"
+      >
+        Last 24h
+      </button>
     </div>
 
-    {# ---------- Drawer slot (work item #4) ----------
-       Event-detail fragments swap into ``#event-drawer`` on a row
-       click via ``hx-target``. The placeholder shape mirrors the
-       happy-path / not-found fragments so the outerHTML swap stays
-       semantically consistent. -#}
-    <aside
-      id="event-drawer"
-      class="card bg-base-100 border-base-300 border shadow-sm self-start"
-      aria-live="polite"
-      aria-label="Event detail drawer"
-    >
-      <div class="card-body text-sm opacity-70">
-        Select an event to inspect its full audit detail.
+    {# ---------- Tab panes + shared drawer ----------
+       On ``lg:`` viewports the feed/history pane takes 2/3 and the
+       shared drawer 1/3; on smaller viewports the drawer stacks below.
+       The drawer is shared across both tabs so a history row and a live
+       row open the identical T2 event-detail drawer. -#}
+    <div class="grid gap-4 lg:grid-cols-3">
+      <div class="lg:col-span-2">
+        {# ---------- Live feed pane (work item #3) ----------
+           Shown on the Live tab; the filter bar above it submits to the
+           feed fragment route. The feed stays mounted (only hidden) when
+           the operator switches to the history tab so its SSE
+           subscription is not torn down. -#}
+        <div x-show="tab === 'live'" class="space-y-4">
+          {% include "broadcast/_filter_bar.html" %}
+          {% include "broadcast/_feed.html" %}
+        </div>
+
+        {# ---------- Last-24h replay pane (work item #6) ----------
+           Lazy-loads ``/ui/broadcast/history`` the first time the pane
+           becomes visible: ``hx-trigger="intersect once"`` fires the GET
+           the first time the (initially ``x-show``-hidden) container
+           scrolls into view, i.e. when the operator clicks the Last-24h
+           tab. The swapped-in fragment seeds the same ``broadcastFeed``
+           controller with the historical events. -#}
+        <div x-show="tab === 'history'">
+          <div
+            id="broadcast-history"
+            hx-get="/ui/broadcast/history"
+            hx-trigger="intersect once"
+            hx-swap="innerHTML"
+            class="overflow-hidden rounded-box border border-base-300 bg-base-100"
+          >
+            <div class="px-3 py-10 text-center text-sm opacity-70">
+              Loading the last 24 hours…
+            </div>
+          </div>
+        </div>
       </div>
-    </aside>
+
+      {# ---------- Shared drawer slot (work item #4) ----------
+         Event-detail fragments swap into ``#event-drawer`` on a row
+         click via ``hx-target``. The placeholder shape mirrors the
+         happy-path / not-found fragments so the outerHTML swap stays
+         semantically consistent. Shared by the live + history panes. -#}
+      <aside
+        id="event-drawer"
+        class="card bg-base-100 border-base-300 border shadow-sm self-start"
+        aria-live="polite"
+        aria-label="Event detail drawer"
+      >
+        <div class="card-body text-sm opacity-70">
+          Select an event to inspect its full audit detail.
+        </div>
+      </aside>
+    </div>
   </div>
 </section>
 {% endblock %}

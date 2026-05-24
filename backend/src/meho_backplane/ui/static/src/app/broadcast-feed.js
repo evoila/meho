@@ -39,11 +39,28 @@
 //
 // The colour table, cap, and the initial op_id filter are passed in from
 // the route context (``opts``) so the policy stays server-side.
+//
+// Two later (T3 #869) opts let the SAME component back three surfaces:
+//   * ``opts.events`` -- a seed array. The live feed leaves it empty and
+//     fills it from the SSE stream; the Last-24h replay pane
+//     (``_history.html``) seeds it with the historical events the server
+//     pulled via XRANGE, so a history row renders + opens the drawer
+//     identically to a live row.
+//   * ``opts.autoScroll`` -- when true (the wall-monitor feed), the
+//     controller keeps the newest event (the top row, since events
+//     ``unshift``) in view as the stream prepends, so a full-screen
+//     team-room monitor always shows the latest activity without manual
+//     scrolling.
 
 document.addEventListener("alpine:init", () => {
   Alpine.data("broadcastFeed", (opts) => ({
-    events: [],
+    // Seed from ``opts.events`` when provided (history replay pane);
+    // default to empty for the live feed, which fills it from the SSE
+    // stream. A shallow copy guards against two component instances on
+    // one page sharing the same seed array reference.
+    events: Array.isArray(opts.events) ? opts.events.slice() : [],
     connected: false,
+    autoScroll: opts.autoScroll === true,
     cap: opts.cap,
     badgeClasses: opts.badgeClasses,
     // Lower-cased once; the op_id filter is a case-insensitive substring
@@ -66,6 +83,16 @@ document.addEventListener("alpine:init", () => {
     // ``$nextTick`` defers the read until Alpine has settled the swapped
     // node, guarding against any swap/init ordering edge.
     init() {
+      // The op_id input + its server-swap reconciliation belong to the
+      // LIVE feed only (``#broadcast-feed``). The Last-24h replay pane
+      // (``#broadcast-history``) is a separate controller instance with
+      // no filter bar; re-reading the live feed's op_id input there
+      // would wrongly leak the live filter onto the history rows. Gate
+      // the re-read on the live-feed element id so each surface keeps
+      // its own filter state.
+      if (this.$el.id !== "broadcast-feed") {
+        return;
+      }
       this.$nextTick(() => {
         const input = document.querySelector('input[name="op_id"]');
         if (input) {
@@ -119,6 +146,16 @@ document.addEventListener("alpine:init", () => {
       this.events.unshift(parsed);
       if (this.events.length > this.cap) {
         this.events.length = this.cap;
+      }
+      // Wall-monitor auto-scroll: newest events ``unshift`` to the top,
+      // so "keep the latest in view" means scroll the list to its top.
+      // ``$nextTick`` waits for Alpine to render the prepended row before
+      // adjusting scrollTop; the ``$refs.list`` ref is only present in
+      // the wall feed fragment (``wall=True``).
+      if (this.autoScroll && this.$refs.list) {
+        this.$nextTick(() => {
+          this.$refs.list.scrollTop = 0;
+        });
       }
     },
 

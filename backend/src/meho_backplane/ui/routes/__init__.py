@@ -31,11 +31,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
 from meho_backplane.ui.routes.dashboard import build_dashboard_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 
 __all__ = [
+    "build_broadcast_router",
     "build_dashboard_router",
     "build_router",
     "build_stubs_router",
@@ -44,21 +46,25 @@ __all__ = [
 
 
 def build_router() -> APIRouter:
-    """Aggregate the dashboard + topology + stubs routers under ``/ui/*``.
+    """Aggregate the dashboard + broadcast + topology + stubs routers.
 
     Order matters: FastAPI matches by registration order, so a
     surface Initiative's real router is included **before** the
     stubs aggregate to win the first-match-wins path lookup. The
     dashboard ``/ui/`` route does not collide with any surface
-    sub-path; topology lands ``/ui/topology`` and
-    ``/ui/topology/node/{id}`` which would otherwise hit the
-    ``/ui/topology`` stub. Once G10.1-G10.4 land their surface
-    routers, each includes itself ahead of the stubs the same way.
+    sub-path; broadcast lands ``/ui/broadcast`` + ``/ui/broadcast/stream``
+    and topology lands ``/ui/topology`` + ``/ui/topology/node/{id}``,
+    each of which would otherwise hit a ``/ui/{slug}`` stub. The
+    ``broadcast`` stub is also dropped from the stubs enumeration so the
+    real route is the only ``/ui/broadcast`` registration in the OpenAPI
+    schema. Once G10.2-G10.4 land their surface routers, each includes
+    itself ahead of the stubs the same way.
     """
     router = APIRouter()
     router.include_router(build_dashboard_router())
     # Surface routers ahead of stubs -- their concrete paths win
     # the match against the stubs' placeholder ``/ui/{slug}``.
+    router.include_router(build_broadcast_router())
     router.include_router(build_topology_router())
     router.include_router(build_stubs_router())
     return router

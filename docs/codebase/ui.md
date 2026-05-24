@@ -44,7 +44,7 @@ Locked decisions:
 | ------ | ------- |
 | `meho_backplane.ui.paths` | Resolves `templates/`, `static/src/`, `static/dist/` directories at runtime. Source-tree dev and image deploy both work via `Path(__file__).resolve().parent`. |
 | `meho_backplane.ui.templating` | Jinja2 `Environment` factory with `FileSystemLoader`, `select_autoescape`, `StrictUndefined`, and the `app_version` global pre-bound from `meho_backplane.__version__`. |
-| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`) plus five surface stubs (`GET /ui/{broadcast,knowledge,topology,connectors,memory}`). Each stub renders `_stub.html` with the placeholder shape; G10.1-G10.5 replace the route handler with the real view. T5 (#866) lands the dashboard + stubs. |
+| `meho_backplane.ui.routes` | Aggregate `APIRouter`. `build_router()` aggregates the dashboard (`GET /ui/`), the real broadcast routes (`GET /ui/broadcast` + `/ui/broadcast/stream`, G10.1-T1 #867), the real topology routes (`GET /ui/topology` + node detail, G10.5-T1 #880), and the remaining surface stubs (`GET /ui/{knowledge,connectors,memory}`, `_stub.html` placeholders). Real routers are included **before** the stubs so their concrete paths win the first-match-wins lookup; the replaced surfaces are dropped from the stub enumeration. G10.2-G10.4 replace the remaining stubs the same way. |
 | `meho_backplane.ui.csrf` | T5 (#866) double-submit-cookie CSRF middleware on state-changing `/ui/*` requests (POST/PATCH/PUT/DELETE). Signed-double-submit per OWASP -- the token is `hmac_sha256(session_secret, session_id || random) + "." + random`; the cookie is JS-readable (`meho_csrf`) so HTMX can echo it in `X-CSRF-Token`. Mismatch / missing token / forged signature -> 403. Read-only methods + out-of-prefix paths pass through. |
 | `meho_backplane.ui.auth` | BFF auth subpackage. T3 (#864) landed `session_store` (encrypted token custody + RFC 9700 refresh-token rotation); T4 (#865) lands `/ui/auth/{login,callback,logout}` + session middleware. |
 | `meho_backplane.ui.auth.session_store` | Fernet-encrypted server-side session storage. `create_session`, `load_session`, `revoke_session`, `rotate_refresh` against the `web_session` Postgres table. Replay of a used refresh token revokes the session and writes a `ui.session.refresh_replay` audit row on a dedicated transaction so the security signal survives caller rollback. |
@@ -218,8 +218,16 @@ Current as of Task #863 (refresh procedure documented in
 | Tailwind CSS | 4.3.0 |
 | DaisyUI | 5.5.20 |
 | HTMX | 2.0.9 |
+| htmx-ext-sse | 2.2.4 |
 | Alpine.js | 3.15.12 |
 | Cytoscape.js | 3.33.4 |
+
+`htmx-ext-sse` (`sse.min.js`) is the SSE extension HTMX 2 split out of
+core (HTMX 1 bundled it). It is loaded in `base.html` right after
+`htmx.min.js` (script order matters — the extension calls
+`htmx.defineExtension` at load) and is required by both the dashboard
+recent-activity snippet (G10.0) and the broadcast live feed (G10.1):
+without it every `hx-ext="sse"` wrapper is inert.
 
 Every bump lands on its own `chore(ui): bump <library> to <version>`
 PR so the supply-chain trail records each move (same discipline the
@@ -353,6 +361,104 @@ card cells + HTMX SSE wiring), 5 stub routes -> 200 with placeholder
 content, CSRF rejection on missing/mismatched/forged tokens,
 positive control on matched token, and middleware-order sanity
 (/api/* passes through untouched).
+
+## Broadcast surface (Task #867)
+
+Initiative [#338](https://github.com/evoila/meho/issues/338) (G10.1
+Activity broadcast UI), Task [#867](https://github.com/evoila/meho/issues/867)
+(G10.1-T1) replaces the chassis stub at `/ui/broadcast` with the real
+**live activity feed**: an SSE-streamed, reverse-chronological event
+list with an empty state and a 1000-row in-DOM cap. Filters + the
+event-detail drawer + the PII visualisation are T2 (#868);
+wall-monitor mode + the Last-24h replay tab are T3 (#869).
+
+### Routes
+
+| Route | Renders |
+| ----- | ------- |
+| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. |
+| `GET /ui/broadcast/stream` | Session-gated SSE bridge (`text/event-stream`). The feed view's `sse-connect` target. |
+
+### Why a UI-owned SSE bridge instead of subscribing to `/api/v1/feed`
+
+The canonical per-tenant SSE feed is `GET /api/v1/feed` (G6.1-T4 #310),
+which authenticates via the `Authorization: Bearer <jwt>` header. The
+browser's `EventSource` — which the HTMX `sse` extension uses under the
+hood — **cannot set custom request headers** (the WHATWG `EventSource`
+constructor exposes only `withCredentials`); it sends cookies, not a
+Bearer token. So pointing `sse-connect` at `/api/v1/feed` from a
+logged-in operator's browser would be answered with a 401 and the SSE
+state machine would tighten into a reconnect loop. (The chassis
+dashboard's recent-activity snippet wired `sse-connect="/api/v1/feed"`
+directly for the same reason it only shows a "Connecting…" placeholder —
+that snippet is inert today; fixing it is tracked separately.)
+
+The broadcast view instead subscribes to `/ui/broadcast/stream`, a
+UI-owned route under `/ui/` so the existing `UISessionMiddleware` gates
+it with the BFF session cookie — the same auth boundary as every other
+`/ui/*` page. The stream's tenant comes from the validated session
+(`UISessionContext.tenant_id`), never a query parameter, so the
+cross-tenant isolation guarantee is identical to `/api/v1/feed`. The
+SSE frame format, per-entry filter/parse/skip logic, cursor-resolution
+precedence (`Last-Event-Id` > `since` > `$`), and cursor validation are
+reused verbatim from `meho_backplane.api.v1.feed` so a reconnect that
+started on either surface replays identically.
+
+### Live-streaming model (JSON feed → server-authored rows)
+
+`/api/v1/feed` (and the bridge) stream `BroadcastEvent` **JSON** — the
+same shape `meho status --watch` and the MCP resource consume, out of
+scope to reshape into HTML frames. The HTMX `sse` extension would
+otherwise swap that JSON in as raw text. Instead a hidden sink element
+carries `sse-swap="broadcast"` (so the extension subscribes and owns
+reconnect/backoff); the `broadcastFeed` Alpine controller hooks
+`htmx:sse-before-message`, parses the JSON, `preventDefault()`s the raw
+swap, and prepends the event to its bounded `events` array. Each event
+renders through the server-authored `broadcast/_event_row.html` partial
+via an Alpine `<template x-for>` — **server-side markup, client-side
+data binding** (the only split the JSON feed allows). The op_class →
+DaisyUI badge colour table is serialised server-side into the page so
+the colour policy stays one auditable map.
+
+### Templates + JS
+
+| File | Purpose |
+| ---- | ------- |
+| `broadcast/feed.html` | Full-page view: SSE sink wrapper, column header, empty state, the `<template x-for>` + `<script src>` for the controller. |
+| `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Aggregate-only events render `(aggregate-only)`. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim + the badge/timestamp/payload helpers. |
+
+### Performance + empty state
+
+* **1000-row cap** — `IN_DOM_ROW_CAP` is passed into the page; the
+  controller `unshift`s each event and trims `events.length` to the cap
+  so a sustained stream keeps the DOM bounded (work item #9).
+* **Empty state** — shown while `events` is empty (or, in T2, when
+  filters match nothing): "No activity matching your filters…" (work
+  item #8).
+
+### Cross-tenant isolation
+
+The page carries no tenant data beyond the operator's own identity; live
+events arrive over the tenant-scoped bridge whose stream key is
+`meho:feed:{session.tenant_id}`. There is no tenant query parameter on
+the page route or the stream, so a tenant-A operator can never surface
+tenant-B events. The
+[broadcast suite](../../backend/tests/test_ui_broadcast_feed.py) pins
+the generator's stream-key derivation per tenant.
+
+### Known limits
+
+* **No filters / drawer / wall-monitor yet** — T1 ships the live feed
+  core only. op_class/principal/target/op_id filters + the event-detail
+  drawer + the PII 🔒 viz are T2 (#868); wall-monitor mode (`?wall=1`) +
+  the Last-24h replay tab are T3 (#869).
+* **Reconnect replay is exercised at the feed-endpoint layer** — the
+  `Last-Event-Id` cursor resolver + validator are reused from
+  `/api/v1/feed` (covered by `test_api_v1_feed`); the UI suite asserts
+  the bridge forwards an explicit cursor to `xread` and rejects a
+  malformed one with 400. A browser-level Playwright reconnect test is
+  out of scope (the repo ships no Node/browser test harness).
 
 ## Topology surface (Task #880)
 

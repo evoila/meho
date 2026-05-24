@@ -2775,6 +2775,16 @@ type UiAuthLoginUiAuthLoginGetParams struct {
 	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
 }
 
+// UiBroadcastStreamUiBroadcastStreamGetParams defines parameters for UiBroadcastStreamUiBroadcastStreamGet.
+type UiBroadcastStreamUiBroadcastStreamGetParams struct {
+	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
+	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
+	Target    *string `form:"target,omitempty" json:"target,omitempty"`
+
+	// Since Explicit replay cursor; superseded by Last-Event-Id when present.
+	Since *string `form:"since,omitempty" json:"since,omitempty"`
+}
+
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
 	Sort      *UnderscoreSortColumn    `form:"sort,omitempty" json:"sort,omitempty"`
@@ -3222,8 +3232,11 @@ type ClientInterface interface {
 	// UiAuthLogoutUiAuthLogoutGet request
 	UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// UiStubBroadcastUiBroadcastGet request
-	UiStubBroadcastUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// UiBroadcastFeedUiBroadcastGet request
+	UiBroadcastFeedUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiBroadcastStreamUiBroadcastStreamGet request
+	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiStubConnectorsUiConnectorsGet request
 	UiStubConnectorsUiConnectorsGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4300,8 +4313,20 @@ func (c *Client) UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiStubBroadcastUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiStubBroadcastUiBroadcastGetRequest(c.Server)
+func (c *Client) UiBroadcastFeedUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastFeedUiBroadcastGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastStreamUiBroadcastStreamGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -8882,8 +8907,8 @@ func NewUiAuthLogoutUiAuthLogoutGetRequest(server string) (*http.Request, error)
 	return req, nil
 }
 
-// NewUiStubBroadcastUiBroadcastGetRequest generates requests for UiStubBroadcastUiBroadcastGet
-func NewUiStubBroadcastUiBroadcastGetRequest(server string) (*http.Request, error) {
+// NewUiBroadcastFeedUiBroadcastGetRequest generates requests for UiBroadcastFeedUiBroadcastGet
+func NewUiBroadcastFeedUiBroadcastGetRequest(server string) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -8899,6 +8924,103 @@ func NewUiStubBroadcastUiBroadcastGetRequest(server string) (*http.Request, erro
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiBroadcastStreamUiBroadcastStreamGetRequest generates requests for UiBroadcastStreamUiBroadcastStreamGet
+func NewUiBroadcastStreamUiBroadcastStreamGetRequest(server string, params *UiBroadcastStreamUiBroadcastStreamGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast/stream")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.OpClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Principal != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "since", runtime.ParamLocationQuery, *params.Since); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -9468,8 +9590,11 @@ type ClientWithResponsesInterface interface {
 	// UiAuthLogoutUiAuthLogoutGetWithResponse request
 	UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error)
 
-	// UiStubBroadcastUiBroadcastGetWithResponse request
-	UiStubBroadcastUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubBroadcastUiBroadcastGetResponse, error)
+	// UiBroadcastFeedUiBroadcastGetWithResponse request
+	UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error)
+
+	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
+	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
 
 	// UiStubConnectorsUiConnectorsGetWithResponse request
 	UiStubConnectorsUiConnectorsGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubConnectorsUiConnectorsGetResponse, error)
@@ -11079,13 +11204,13 @@ func (r UiAuthLogoutUiAuthLogoutGetResponse) StatusCode() int {
 	return 0
 }
 
-type UiStubBroadcastUiBroadcastGetResponse struct {
+type UiBroadcastFeedUiBroadcastGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
 }
 
 // Status returns HTTPResponse.Status
-func (r UiStubBroadcastUiBroadcastGetResponse) Status() string {
+func (r UiBroadcastFeedUiBroadcastGetResponse) Status() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Status
 	}
@@ -11093,7 +11218,29 @@ func (r UiStubBroadcastUiBroadcastGetResponse) Status() string {
 }
 
 // StatusCode returns HTTPResponse.StatusCode
-func (r UiStubBroadcastUiBroadcastGetResponse) StatusCode() int {
+func (r UiBroadcastFeedUiBroadcastGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiBroadcastStreamUiBroadcastStreamGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiBroadcastStreamUiBroadcastStreamGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiBroadcastStreamUiBroadcastStreamGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -12002,13 +12149,22 @@ func (c *ClientWithResponses) UiAuthLogoutUiAuthLogoutGetWithResponse(ctx contex
 	return ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp)
 }
 
-// UiStubBroadcastUiBroadcastGetWithResponse request returning *UiStubBroadcastUiBroadcastGetResponse
-func (c *ClientWithResponses) UiStubBroadcastUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiStubBroadcastUiBroadcastGetResponse, error) {
-	rsp, err := c.UiStubBroadcastUiBroadcastGet(ctx, reqEditors...)
+// UiBroadcastFeedUiBroadcastGetWithResponse request returning *UiBroadcastFeedUiBroadcastGetResponse
+func (c *ClientWithResponses) UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error) {
+	rsp, err := c.UiBroadcastFeedUiBroadcastGet(ctx, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
-	return ParseUiStubBroadcastUiBroadcastGetResponse(rsp)
+	return ParseUiBroadcastFeedUiBroadcastGetResponse(rsp)
+}
+
+// UiBroadcastStreamUiBroadcastStreamGetWithResponse request returning *UiBroadcastStreamUiBroadcastStreamGetResponse
+func (c *ClientWithResponses) UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error) {
+	rsp, err := c.UiBroadcastStreamUiBroadcastStreamGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp)
 }
 
 // UiStubConnectorsUiConnectorsGetWithResponse request returning *UiStubConnectorsUiConnectorsGetResponse
@@ -14227,17 +14383,43 @@ func ParseUiAuthLogoutUiAuthLogoutGetResponse(rsp *http.Response) (*UiAuthLogout
 	return response, nil
 }
 
-// ParseUiStubBroadcastUiBroadcastGetResponse parses an HTTP response from a UiStubBroadcastUiBroadcastGetWithResponse call
-func ParseUiStubBroadcastUiBroadcastGetResponse(rsp *http.Response) (*UiStubBroadcastUiBroadcastGetResponse, error) {
+// ParseUiBroadcastFeedUiBroadcastGetResponse parses an HTTP response from a UiBroadcastFeedUiBroadcastGetWithResponse call
+func ParseUiBroadcastFeedUiBroadcastGetResponse(rsp *http.Response) (*UiBroadcastFeedUiBroadcastGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
 	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
 
-	response := &UiStubBroadcastUiBroadcastGetResponse{
+	response := &UiBroadcastFeedUiBroadcastGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiBroadcastStreamUiBroadcastStreamGetResponse parses an HTTP response from a UiBroadcastStreamUiBroadcastStreamGetWithResponse call
+func ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp *http.Response) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiBroadcastStreamUiBroadcastStreamGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

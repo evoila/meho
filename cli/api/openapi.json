@@ -4179,6 +4179,100 @@
         }
       }
     },
+    "/ui/broadcast": {
+      "get": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast Feed",
+        "description": "Render ``GET /ui/broadcast`` for the authenticated operator.\n\nThe page subscribes to ``/ui/broadcast/stream`` (the session-gated\nSSE bridge), so the operator sees their tenant's live events with\nno further auth round-trip. The CSRF cookie is set + echoed via the\ntemplate's ``hx-headers`` so any future state-changing HTMX request\nfrom this surface (T2's filters submit via ``hx-get``, which is\nsafe, but the chain is in place for any later mutation) passes the\ndouble-submit check -- mirroring the dashboard + topology surfaces.",
+        "operationId": "ui_broadcast_feed_ui_broadcast_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/broadcast/stream": {
+      "get": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast Stream",
+        "description": "``GET /ui/broadcast/stream`` -- stream the session tenant's feed.\n\nTenant is taken from the validated session, never a query\nparameter. ``Last-Event-Id`` (sent by ``EventSource`` on\nreconnect) takes precedence over ``since`` for replay.",
+        "operationId": "ui_broadcast_stream_ui_broadcast_stream_get",
+        "parameters": [
+          {
+            "name": "op_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Op Class"
+            }
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Principal"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "Target"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Explicit replay cursor; superseded by Last-Event-Id when present.",
+              "title": "Since"
+            },
+            "description": "Explicit replay cursor; superseded by Last-Event-Id when present."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/topology": {
       "get": {
         "tags": [
@@ -4319,27 +4413,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/ui/broadcast": {
-      "get": {
-        "tags": [
-          "ui-stubs"
-        ],
-        "summary": "Ui Stub Broadcast",
-        "operationId": "ui_stub_broadcast_ui_broadcast_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "text/html": {
-                "schema": {
-                  "type": "string"
                 }
               }
             }

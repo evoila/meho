@@ -105,10 +105,23 @@
        in-browser. Each keystroke dispatches a window event the feed
        controller re-applies. ``x-data`` here is a tiny standalone island
        (the feed controller lives in the swapped fragment) whose only job
-       is to debounce-emit the op_id. -#}
+       is to debounce-emit the op_id.
+
+       XSS hardening (review finding on PR #1044, same class as the
+       ``_feed.html`` and B1 history fixes). ``opId`` echoes the reflected
+       ``op_id`` query param. ``| tojson`` does NOT escape the
+       double-quote ``"``, so inside a DOUBLE-quoted ``x-data="..."`` a
+       crafted ``op_id`` (e.g. ``" autofocus onfocus=alert(1) x="``)
+       breaks out of the attribute and injects live handlers. The
+       attribute is therefore SINGLE-quoted: ``tojson`` escapes ``'`` to
+       ``\u0027`` (it never emits a raw ``'``), so a single-quoted attribute
+       is breakout-proof for any scalar, and the value's ``"`` bytes ride
+       harmlessly inside it. (The sibling ``value="{{ op_id_filter }}"``
+       below is in an autoescaped attribute -- Jinja escapes ``"`` to
+       ``&#34;`` there -- so it is already safe.) -#}
     <label
       class="form-control"
-      x-data="{ opId: {{ op_id_filter | tojson }} }"
+      x-data='{ opId: {{ op_id_filter | tojson }} }'
     >
       <span class="label-text">Operation id</span>
       <input

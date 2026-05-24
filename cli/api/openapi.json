@@ -4690,7 +4690,7 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Feed",
-        "description": "``GET /ui/broadcast[?op_class=&principal=&target=&op_id=]``.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the filter bar sets\n``hx-push-url`` on the fragment route, mirroring topology).",
+        "description": "``GET /ui/broadcast[?op_class=&principal=&target=&op_id=&wall=1]``.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the filter bar sets\n``hx-push-url`` on the fragment route, mirroring topology).\n``wall=1`` selects the no-chrome wall-monitor layout (work item\n#5).",
         "operationId": "ui_broadcast_feed_ui_broadcast_get",
         "parameters": [
           {
@@ -4736,6 +4736,18 @@
               "default": "",
               "title": "Op Id"
             }
+          },
+          {
+            "name": "wall",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Render the minimal full-screen wall-monitor layout (no sidebar / top bar / filter bar).",
+              "default": false,
+              "title": "Wall"
+            },
+            "description": "Render the minimal full-screen wall-monitor layout (no sidebar / top bar / filter bar)."
           }
         ],
         "responses": {
@@ -4905,6 +4917,28 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/broadcast/history": {
+      "get": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast History",
+        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via a finite\n``XRANGE``, passes them as a list the template serialises with\nJinja ``| tojson`` into a ``<script type=\"application/json\">``\ndata island the shared ``broadcastFeed`` controller seeds from,\nand returns the ``broadcast/_history.html`` fragment (no\n``base.html`` chrome -- the tab swaps it into the page's history\ncontainer). The tenant comes from the validated session, never a\nquery parameter.",
+        "operationId": "ui_broadcast_history_ui_broadcast_history_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }

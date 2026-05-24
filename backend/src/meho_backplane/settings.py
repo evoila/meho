@@ -423,6 +423,43 @@ class Settings(BaseModel):
         becomes un-decryptable on key rotation; the operator-facing
         contract is "log everyone out, then bump the key"); v0.2
         ships one key end-to-end.
+    ui_session_sliding_extension_seconds:
+        Sliding-session window, in seconds. Initiative #338
+        (G10.1 Activity broadcast UI), Task #869 (the broadcast
+        wall-monitor's long-display requirement). The BFF session row's
+        ``expires_at`` is set at login to roughly the access-token TTL,
+        so a wall-monitor display left running for hours would otherwise
+        cross ``expires_at`` mid-display; the next SSE reconnect to
+        ``/ui/broadcast/stream`` would then be 302-redirected to login,
+        and the browser ``EventSource`` permanently fails on a non-200
+        response -- the feed dies silently. On every active ``/ui/*``
+        request,
+        :func:`meho_backplane.ui.auth.session_store.load_session`
+        extends ``expires_at`` to ``now + this window`` when the row is
+        within the window of expiry, so an in-use session never lapses
+        mid-display. ``0`` disables the sliding extension (the session
+        expires strictly at its login-time ``expires_at``). Default
+        3600 (one hour) -- a value large enough that a wall display
+        refreshing the page or reconnecting the stream within the hour
+        keeps the session alive, small enough that an abandoned tab
+        lapses within the hour. Always bounded by
+        ``ui_session_absolute_lifetime_seconds`` so the extension is not
+        unbounded.
+    ui_session_absolute_lifetime_seconds:
+        Hard ceiling, in seconds, on how long a BFF session may live
+        from ``created_at`` regardless of sliding extension. Task #869.
+        The sliding extension (above) keeps an actively-viewed session
+        alive, but without an absolute cap a permanently-displayed wall
+        monitor would create an immortal session -- a standard
+        idle-vs-absolute session-timeout pairing (OWASP ASVS v4 §3.3).
+        :func:`load_session` never extends ``expires_at`` past
+        ``created_at + this cap``; once the cap is reached the session
+        lapses on its next load and the operator re-authenticates.
+        Default 43200 (12 hours) -- one working day of continuous wall
+        display without forcing a mid-shift re-login, while still
+        guaranteeing a daily re-auth. Must exceed
+        ``ui_session_sliding_extension_seconds`` for the sliding window
+        to have any effect.
     topology_history_retention_days:
         Maximum age (in days) of ``graph_node_history`` /
         ``graph_edge_history`` rows the G9.3-T6 (#858) retention prune
@@ -569,6 +606,15 @@ class Settings(BaseModel):
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
+    # G10.1-T3 #869 — BFF sliding-session knobs for the broadcast
+    # wall-monitor's long-display requirement. The sliding extension
+    # keeps an actively-viewed session alive past its login-time
+    # ``expires_at`` (so a wall display never logs out mid-stream);
+    # the absolute cap bounds that extension so a permanent display
+    # cannot create an immortal session. ``sliding=0`` disables the
+    # extension. See the field docstrings above for the full rationale.
+    ui_session_sliding_extension_seconds: int = Field(default=3600, ge=0)
+    ui_session_absolute_lifetime_seconds: int = Field(default=43200, gt=0)
     # G9.3-T6 #858 — topology history retention prune knobs. ``days=0`` is
     # the opt-out sentinel ("keep forever"); ``enabled=False`` skips the
     # background task entirely. The two flags are deliberately distinct
@@ -743,6 +789,12 @@ def get_settings() -> Settings:
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),
         ui_session_encryption_key=os.environ.get("UI_SESSION_ENCRYPTION_KEY", "").strip(),
+        ui_session_sliding_extension_seconds=int(
+            os.environ.get("UI_SESSION_SLIDING_EXTENSION_SECONDS", "3600"),
+        ),
+        ui_session_absolute_lifetime_seconds=int(
+            os.environ.get("UI_SESSION_ABSOLUTE_LIFETIME_SECONDS", "43200"),
+        ),
         topology_history_retention_days=int(
             os.environ.get("TOPOLOGY_HISTORY_RETENTION_DAYS", "90"),
         ),

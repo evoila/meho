@@ -39,11 +39,35 @@
 //
 // The colour table, cap, and the initial op_id filter are passed in from
 // the route context (``opts``) so the policy stays server-side.
+//
+// Two later (T3 #869) opts let the SAME component back three surfaces:
+//   * ``opts.seedFrom`` -- the id of a ``<script type="application/json">``
+//     data island holding the seed events array. The live feed omits it
+//     and fills ``events`` from the SSE stream; the Last-24h replay pane
+//     (``_history.html``) points it at ``#broadcast-history-data``, whose
+//     ``textContent`` the controller ``JSON.parse``s on init, so a history
+//     row renders + opens the drawer identically to a live row. The seed
+//     events ride in a script-block data island (NOT the ``x-data``
+//     attribute) so an event field containing ``"`` / ``'`` / ``<`` /
+//     ``>`` / ``&`` / ``</script>`` cannot break out of the attribute and
+//     inject markup -- Jinja's ``| tojson`` escapes all of those (plus
+//     U+2028/U+2029) for the script-element text context (B1, PR #1044).
+//   * ``opts.autoScroll`` -- when true (the wall-monitor feed), the
+//     controller keeps the newest event (the top row, since events
+//     ``unshift``) in view as the stream prepends, so a full-screen
+//     team-room monitor always shows the latest activity without manual
+//     scrolling.
 
 document.addEventListener("alpine:init", () => {
   Alpine.data("broadcastFeed", (opts) => ({
+    // The live feed starts empty and fills ``events`` from the SSE
+    // stream. The Last-24h replay pane instead seeds these on ``init``
+    // from the ``opts.seedFrom`` data island (see ``seedFromIsland``);
+    // an array literal here is never passed through the ``x-data``
+    // attribute, so untrusted event fields can never break out of it.
     events: [],
     connected: false,
+    autoScroll: opts.autoScroll === true,
     cap: opts.cap,
     badgeClasses: opts.badgeClasses,
     // Lower-cased once; the op_id filter is a case-insensitive substring
@@ -66,12 +90,55 @@ document.addEventListener("alpine:init", () => {
     // ``$nextTick`` defers the read until Alpine has settled the swapped
     // node, guarding against any swap/init ordering edge.
     init() {
+      // Seed the replay pane from its ``<script type="application/json">``
+      // data island (the live feed omits ``seedFrom`` and stays empty
+      // until the SSE stream fills it). The events arrive as inert script
+      // text -- never as an ``x-data`` attribute -- so a ``"`` / ``<`` /
+      // ``</script>``-bearing event field cannot break out and inject
+      // markup (B1, PR #1044).
+      this.seedFromIsland();
+
+      // The op_id input + its server-swap reconciliation belong to the
+      // LIVE feed only (``#broadcast-feed``). The Last-24h replay pane
+      // (``#broadcast-history-pane``) is a separate controller instance
+      // with no filter bar; re-reading the live feed's op_id input there
+      // would wrongly leak the live filter onto the history rows. Gate
+      // the re-read on the live-feed element id so each surface keeps
+      // its own filter state.
+      if (this.$el.id !== "broadcast-feed") {
+        return;
+      }
       this.$nextTick(() => {
         const input = document.querySelector('input[name="op_id"]');
         if (input) {
           this.opIdFilter = (input.value || "").toLowerCase();
         }
       });
+    },
+
+    // Seed ``events`` from a ``<script type="application/json">`` data
+    // island whose id is ``opts.seedFrom``. The island's ``textContent``
+    // is JSON the server emitted via Jinja ``| tojson`` (XSS-safe for the
+    // script-element text context). No-op when ``seedFrom`` is unset (the
+    // live feed) or the element / JSON is missing or malformed -- the
+    // pane then renders its empty state rather than tearing down.
+    seedFromIsland() {
+      if (!opts.seedFrom) {
+        return;
+      }
+      const el = document.getElementById(opts.seedFrom);
+      if (!el) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(el.textContent || "[]");
+        if (Array.isArray(parsed)) {
+          this.events = parsed;
+        }
+      } catch (e) {
+        // A malformed island leaves ``events`` empty (the pane shows its
+        // empty state) rather than throwing during component init.
+      }
     },
 
     // Re-apply the op_id filter when the filter bar's input changes. The
@@ -119,6 +186,16 @@ document.addEventListener("alpine:init", () => {
       this.events.unshift(parsed);
       if (this.events.length > this.cap) {
         this.events.length = this.cap;
+      }
+      // Wall-monitor auto-scroll: newest events ``unshift`` to the top,
+      // so "keep the latest in view" means scroll the list to its top.
+      // ``$nextTick`` waits for Alpine to render the prepended row before
+      // adjusting scrollTop; the ``$refs.list`` ref is only present in
+      // the wall feed fragment (``wall=True``).
+      if (this.autoScroll && this.$refs.list) {
+        this.$nextTick(() => {
+          this.$refs.list.scrollTop = 0;
+        });
       }
     },
 

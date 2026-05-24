@@ -237,10 +237,11 @@ async def _render_page(
     principal: str,
     target: str,
     op_id: str,
+    wall: bool,
     session_ctx: UISessionContext,
     db_session: AsyncSession,
 ) -> HTMLResponse:
-    """Render ``GET /ui/broadcast`` -- the full page.
+    """Render ``GET /ui/broadcast`` -- the full page (or the wall view).
 
     The page subscribes to ``/ui/broadcast/stream`` (the session-gated
     SSE bridge), so the operator sees their tenant's live events with no
@@ -248,6 +249,16 @@ async def _render_page(
     template's ``hx-headers`` so the filter bar's ``hx-get`` (and any
     later state-changing HTMX request from this surface) passes the
     double-submit check -- mirroring the dashboard + topology surfaces.
+
+    ``wall`` selects the wall-monitor template (work item #5): a minimal
+    no-chrome layout (no sidebar, no top bar, no filter bar) that
+    maximises the feed for a full-screen team-room monitor. It reuses
+    the **same** ``broadcast/_feed.html`` fragment -- so the same SSE
+    wiring, the same ``EventSource`` reconnect / ``Last-Event-Id``
+    replay durability, the same 1000-row cap -- and only swaps the
+    surrounding chrome. The wall view subscribes to the live tail with
+    no server-side filters (a wall monitor shows everything the tenant
+    produces); the filter bar is the in-chrome surface's affordance.
     """
     target_names = await _target_names(db_session, session_ctx.tenant_id)
     csrf_token = mint_csrf_token(str(session_ctx.session_id))
@@ -270,7 +281,8 @@ async def _render_page(
             op_id=op_id,
         ),
     }
-    response = get_templates().TemplateResponse(request, "broadcast/feed.html", context)
+    template = "broadcast/wall.html" if wall else "broadcast/feed.html"
+    response = get_templates().TemplateResponse(request, template, context)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,
@@ -336,14 +348,23 @@ def build_feed_router() -> APIRouter:
         principal: str = Query(default="", max_length=256),
         target: str = Query(default="", max_length=256),
         op_id: str = Query(default="", max_length=256),
+        wall: bool = Query(
+            default=False,
+            description=(
+                "Render the minimal full-screen wall-monitor layout "
+                "(no sidebar / top bar / filter bar)."
+            ),
+        ),
         session_ctx: UISessionContext = _require_ui_session_dep,
         db_session: AsyncSession = _get_raw_session_dep,
     ) -> HTMLResponse:
-        """``GET /ui/broadcast[?op_class=&principal=&target=&op_id=]``.
+        """``GET /ui/broadcast[?op_class=&principal=&target=&op_id=&wall=1]``.
 
         Filters are accepted on the full-page route too so a copy-pasted
         filtered URL reproduces the operator's view (the filter bar sets
         ``hx-push-url`` on the fragment route, mirroring topology).
+        ``wall=1`` selects the no-chrome wall-monitor layout (work item
+        #5).
         """
         return await _render_page(
             request,
@@ -351,6 +372,7 @@ def build_feed_router() -> APIRouter:
             principal=principal,
             target=target,
             op_id=op_id,
+            wall=wall,
             session_ctx=session_ctx,
             db_session=db_session,
         )

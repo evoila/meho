@@ -20,15 +20,46 @@
   in-browser as the operator types (the filter bar mirrors the input
   into the controller via an ``x-model``-bound hidden field; see
   ``_filter_bar.html``).
+
+  Wall-monitor variant (Task #869, work item #5)
+  ----------------------------------------------
+  When included with ``wall=True`` (from ``broadcast/wall.html``) the
+  fragment renders the maximised team-room layout: the list scrolls
+  within the available height and ``autoScroll`` keeps the newest event
+  in view, and the rows render taller (the ``wall`` flag is forwarded to
+  ``_event_row.html``). The SSE wiring, controller, op_id filter, and
+  1000-row cap are all unchanged -- only the visual density differs.
+  ``wall`` defaults to ``False`` so the in-chrome feed view (which never
+  passes it) renders exactly as before.
+-#}
+{% set wall = wall | default(false) %}
+{#-
+  XSS hardening (review finding on PR #1044, same class as the B1
+  history fix). ``opIdFilter`` echoes the reflected ``op_id`` query
+  param. Jinja's ``| tojson`` escapes ``<`` / ``>`` / ``&`` / ``'`` and
+  U+2028/U+2029 but NOT the double-quote ``"`` -- it keeps the JSON
+  string's own ``"`` delimiters and renders an inner ``"`` as a literal
+  ``\"`` byte. Inside a DOUBLE-quoted ``x-data="..."`` those raw ``"``
+  bytes terminate the attribute early, letting a crafted ``op_id`` (e.g.
+  ``" autofocus onfocus=alert(1) x="``) inject live event handlers ->
+  reflected XSS. The ``x-data`` attribute is therefore SINGLE-quoted:
+  ``tojson`` never emits a raw ``'`` (it escapes it to ``\u0027``), so
+  single-quoted attribute cannot be broken out of by any scalar, and the
+  ``"`` bytes ride harmlessly inside it. The static config has no raw
+  ``'`` (``op_class_badge_json`` is ``json.dumps`` output -- only ``"``),
+  so the single-quote delimiter is unambiguous. Behaviour is identical:
+  the controller still receives the same ``opIdFilter`` / ``cap`` /
+  ``badgeClasses`` / ``autoScroll`` values.
 -#}
 <div
   id="broadcast-feed"
-  class="overflow-hidden rounded-box border border-base-300 bg-base-100"
-  x-data="broadcastFeed({
+  class="rounded-box border border-base-300 bg-base-100 {% if wall %}flex h-full flex-col overflow-hidden{% else %}overflow-hidden{% endif %}"
+  x-data='broadcastFeed({
     cap: {{ in_dom_row_cap }},
     badgeClasses: {{ op_class_badge_json }},
-    opIdFilter: {{ op_id_filter | tojson }}
-  })"
+    opIdFilter: {{ op_id_filter | tojson }},
+    autoScroll: {{ wall | tojson }}
+  })'
   x-on:broadcast-op-id-changed.window="onOpIdChanged($event)"
 >
   {# ---------- SSE sink ----------
@@ -95,13 +126,16 @@
      Each event renders via the server-authored row partial. ``:key``
      keeps Alpine's DOM diff stable as rows prepend + trim. A click
      opens the detail drawer via the row's ``hx-get`` (wired in the row
-     partial). -#}
+     partial). In wall mode the list scrolls within the available height
+     and ``x-ref="list"`` lets the controller keep the newest (top) row
+     in view as events prepend. -#}
   <ul
     x-show="visibleEvents.length > 0"
-    class="divide-y divide-base-300"
+    class="divide-y divide-base-300{% if wall %} min-h-0 flex-1 overflow-y-auto{% endif %}"
     role="list"
     aria-label="Live broadcast events"
     aria-live="polite"
+    {% if wall %}x-ref="list"{% endif %}
   >
     <template x-for="ev in visibleEvents" :key="ev.event_id">
       {% include "broadcast/_event_row.html" %}

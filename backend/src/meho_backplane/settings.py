@@ -297,6 +297,31 @@ class Settings(BaseModel):
         ``COMPOSITE_MAX_DEPTH`` env var. Read once per
         ``dispatch_child`` call -- no caching beyond
         :func:`get_settings`'s :func:`lru_cache`.
+    agent_invoke_max_depth:
+        Hard cap on how deep an agent-invokes-agent cascade
+        (G11.1-T5 #812) may nest. The ``invoke_agent`` tool a running
+        agent's loop carries lets one agent run another agent
+        definition in the same tenant; without a cap, a definition that
+        (directly or transitively) invokes itself would spawn an
+        unbounded chain of LLM runs, burning the provider budget before
+        anything stops it. The cap mirrors :attr:`composite_max_depth`:
+        a per-task contextvar tracks the current invocation depth, the
+        ``invoke_agent`` tool pre-increments + checks it against this
+        ceiling before starting the child run, and an over-depth
+        invocation raises a structured error the model receives as a
+        :class:`pydantic_ai.ModelRetry` (it can pick a different action
+        or stop) rather than spending. Default 4 -- a cheap-tier agent
+        escalating to a deep-tier agent is depth-1; a two-hop
+        escalation chain is depth-2; 4 gives headroom for legitimate
+        composition while catching a runaway self-invocation in
+        seconds. Distinct from the *budget* cap (the shared turn count
+        threaded via ``usage=ctx.usage``, enforced by the loop's
+        ``UsageLimits``): depth bounds the *tree height*, budget bounds
+        the *total turns* across the whole cascade -- a cascade
+        terminates on whichever it hits first. Operators whose agents
+        compose more deeply override via ``AGENT_INVOKE_MAX_DEPTH``.
+        Read once per ``invoke_agent`` call through
+        :func:`get_settings`'s cache.
     topology_refresh_interval_seconds:
         Cadence of the G9.1-T3 background topology-refresh loop, in
         seconds. The scheduler (registered in the FastAPI lifespan)
@@ -527,6 +552,7 @@ class Settings(BaseModel):
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
+    agent_invoke_max_depth: int = Field(default=4, gt=0)
     topology_refresh_interval_seconds: int = Field(default=3600, gt=0)
     memory_user_default_ttl_days: int = Field(default=7, ge=1, le=365)
     memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
@@ -682,6 +708,9 @@ def get_settings() -> Settings:
         ),
         composite_max_depth=int(
             os.environ.get("COMPOSITE_MAX_DEPTH", "8"),
+        ),
+        agent_invoke_max_depth=int(
+            os.environ.get("AGENT_INVOKE_MAX_DEPTH", "4"),
         ),
         topology_refresh_interval_seconds=int(
             os.environ.get("TOPOLOGY_REFRESH_INTERVAL_SECONDS", "3600"),

@@ -100,7 +100,7 @@ async def ensure_tenant(tenant_id: UUID, session: AsyncSession) -> None:
 
     Issues a single dialect-native
     ``INSERT INTO tenant (id, slug, name) VALUES (...)
-    ON CONFLICT (id) DO NOTHING``. Calling it N times for the same
+    ON CONFLICT DO NOTHING``. Calling it N times for the same
     *tenant_id* — including concurrently — leaves exactly one row and
     never overwrites an existing row's ``slug`` / ``name`` (a v0.3
     provisioning API may rename them; this path must not clobber that).
@@ -108,12 +108,20 @@ async def ensure_tenant(tenant_id: UUID, session: AsyncSession) -> None:
     The dialect is resolved from the session's bound connection, the
     same idiom the targets resolver uses
     (``conn.dialect.name``). Both the PostgreSQL and SQLite dialects
-    expose ``on_conflict_do_nothing()``; called with no arguments it
-    targets the primary key (``tenant.id``), which is exactly the
-    idempotency key here. The generic Core ``insert()`` has no
-    ``on_conflict`` clause, so the dialect-specific constructor is
-    required on each path — there is no portable single-statement
-    form.
+    expose ``on_conflict_do_nothing()``; called with **no**
+    ``index_elements`` the ``DO NOTHING`` arbiter is *every* unique
+    index on ``tenant`` — the ``id`` primary key **and** the separate
+    ``tenant_slug_idx`` unique index. This is required, not cosmetic:
+    naming only ``id`` as the arbiter (the previous shape) left a
+    concurrent same-``id`` insert free to raise
+    ``UniqueViolationError`` on ``tenant_slug_idx`` before the winning
+    row was visible, 500-ing one of N racing first-writes. Arbitrating
+    on every unique index is safe because ``_derive_slug`` keeps the
+    slug bijective with the ``id`` (a slug conflict ⟺ an ``id``
+    conflict), so DO-NOTHING on either is the same idempotent no-op.
+    The generic Core ``insert()`` has no ``on_conflict`` clause, so the
+    dialect-specific constructor is required on each path — there is no
+    portable single-statement form.
 
     Args:
         tenant_id: The verified tenant UUID from the operator's JWT

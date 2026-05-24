@@ -3972,6 +3972,333 @@
         }
       }
     },
+    "/api/v1/conventions": {
+      "get": {
+        "tags": [
+          "conventions"
+        ],
+        "summary": "List Conventions",
+        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.",
+        "operationId": "list_conventions_api_v1_conventions_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ConventionKind",
+              "nullable": true,
+              "description": "Filter by kind (operational / workflow / reference).",
+              "title": "Kind"
+            },
+            "description": "Filter by kind (operational / workflow / reference)."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConventionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "conventions"
+        ],
+        "summary": "Create Convention",
+        "description": "Create one convention; writes one history row in the same transaction.\n\nSequence: budget 422 -> pre-allocate audit_id -> insert\nconvention + history rows -> 409 on duplicate ``(tenant_id,\nslug)``. The CREATE history row has ``body_before=NULL``;\n``body_after=body.body``.",
+        "operationId": "create_convention_api_v1_conventions_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConventionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Convention"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conventions/{slug}": {
+      "get": {
+        "tags": [
+          "conventions"
+        ],
+        "summary": "Show Convention",
+        "description": "Fetch one convention by slug. 404 on absent OR cross-tenant.\n\nThe 404-vs-403 collapse on cross-tenant probes preserves the\ntenant-boundary info-leak avoidance contract (the lookup\nfilters on both ``tenant_id`` AND ``slug``).",
+        "operationId": "show_convention_api_v1_conventions__slug__get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Convention"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "conventions"
+        ],
+        "summary": "Update Convention",
+        "description": "Update one convention; writes one history row in the same transaction.\n\nPATCH applies only fields explicitly set in the request body\n(via :attr:`BaseModel.model_fields_set` -- the v2 pattern that\ndistinguishes \"absent\" from \"present null\"). The 422 budget\ngate fires on a ``body`` change; PATCH cannot change ``kind``\nso the check uses the existing row's kind. A priority-only\nor title-only PATCH still writes a history row carrying the\nunchanged body in both ``body_before`` and ``body_after`` --\nthe operation happened and the diff trail is the causal record\n(T3's CLI renders an empty diff as \"(no body change)\").",
+        "operationId": "update_convention_api_v1_conventions__slug__patch",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConventionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Convention"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "conventions"
+        ],
+        "summary": "Delete Convention",
+        "description": "Delete one convention; writes one history row in the same transaction.\n\nThe history row carries ``body_after=<final body>`` -- a\nlegible last-known state for audit forensics, not a sentinel\nmarker (the lifecycle distinction lives in the audit row's\n``method='DELETE'``). 404 on absent / cross-tenant -- the\nsurface is deliberately NOT the idempotent-delete shape kb /\nmemory use because the issue's \"writes one history row + one\naudit_log row\" requires a real row to delete from; an\nidempotent 204-on-missing would produce an audit row with no\nhistory counterpart.",
+        "operationId": "delete_convention_api_v1_conventions__slug__delete",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conventions/{slug}/history": {
+      "get": {
+        "tags": [
+          "conventions"
+        ],
+        "summary": "List History",
+        "description": "List history entries for one convention, newest first.\n\nTwo-step lookup (resolve ``(tenant_id, slug)`` to convention\nid, then scan history) keeps the tenant-scope check explicit\nin the code; collapsing to a JOIN would not change cost profile\nbut would obscure the boundary.\n\nNewest-first per the issue's \"documented v0.2 ordering\"\nacceptance. Cross-tenant 404 mirrors the show route.",
+        "operationId": "list_history_api_v1_conventions__slug__history_get",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Slug"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConventionHistoryEntry"
+                  },
+                  "title": "Response List History Api V1 Conventions  Slug  History Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/.well-known/oauth-protected-resource": {
       "get": {
         "tags": [
@@ -5474,6 +5801,278 @@
         ],
         "title": "ConnectorSpecEntry",
         "description": "One curated ``(product, version)`` -> spec-source mapping.\n\n``upstream is None`` marks a typed connector with no ingestable spec;\nthe CLI's ``ingest --catalog`` path (#915) refuses such an entry rather\nthan POSTing an empty ``specs`` list."
+      },
+      "Convention": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "priority": {
+            "type": "integer",
+            "title": "Priority"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "slug",
+          "title",
+          "body",
+          "kind",
+          "priority",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Convention",
+        "description": "Full-row representation returned by GET-single / POST / PATCH.\n\nCarries the entire ``body`` text -- the natural shape for\n``GET /{slug}`` and the return value of POST/PATCH where the\ncaller wants to confirm what they wrote landed verbatim.\n``kind`` is exposed as the raw string from the DB rather than\nas :class:`ConventionKind`; the API layer's pydantic models\nbound writes to the enum but read paths surface whatever the\nDB stored (a future ``kind`` value introduced by a migration\nwould otherwise blow up the JSON encoder on every read)."
+      },
+      "ConventionCreate": {
+        "properties": {
+          "slug": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Slug"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 64000,
+            "minLength": 1,
+            "title": "Body"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ConventionKind"
+          },
+          "priority": {
+            "type": "integer",
+            "maximum": 32767.0,
+            "minimum": -32768.0,
+            "title": "Priority",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "slug",
+          "title",
+          "body",
+          "kind"
+        ],
+        "title": "ConventionCreate",
+        "description": "POST body for ``/api/v1/conventions``.\n\n``slug`` is the operator-visible identifier the URL / CLI / audit\nlog all reference; it is the natural key within a tenant (the\ncomposite-unique index in T1's migration enforces uniqueness).\nBounded at 128 characters and constrained to a URL-safe shape\n(lowercase ASCII, digits, hyphen) so audit log paths stay\ngrep-friendly and no operator can sneak a slash through. The\ntitle and body are bounded only by a generous upper limit; the\nreal budget gate is the over-budget 422 in the route handler,\nwhich runs :func:`estimate_tokens` against ``body`` before\ninsert and rejects any single ``operational`` entry exceeding\n:data:`DEFAULT_MAX_PREAMBLE_TOKENS`.\n\n``priority`` is optional with a default of 0; the SmallInteger\ncolumn on :class:`TenantConvention` bounds the range to\n-32768..32767. Per the issue body, ``priority`` is the ranking\nkey T4's preamble packer uses to drop low-priority entries\nwhole on budget overflow -- higher value wins. The default of\n0 matches the column's ``server_default`` so omitting the field\nround-trips identically through create + show."
+      },
+      "ConventionHistoryEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "convention_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Convention Id"
+          },
+          "body_before": {
+            "type": "string",
+            "nullable": true,
+            "title": "Body Before"
+          },
+          "body_after": {
+            "type": "string",
+            "title": "Body After"
+          },
+          "actor_sub": {
+            "type": "string",
+            "title": "Actor Sub"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Audit Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "convention_id",
+          "body_before",
+          "body_after",
+          "actor_sub",
+          "ts",
+          "audit_id"
+        ],
+        "title": "ConventionHistoryEntry",
+        "description": "One row from ``GET /api/v1/conventions/{slug}/history``.\n\nPer the issue's acceptance criterion, history returns newest\nfirst (\"pick newest first for v0.2; documented\"); the route's\nORDER BY ``ts DESC`` enforces this. ``audit_id`` is the soft-FK\nthat G8's audit-query path joins on; it is nullable because\nT5's seed migration inserts history rows with no audit_log row\n(seeded rows pre-date any HTTP request).\n\n``body_before`` is nullable -- the first history row (the\nCREATE event) has no prior state. DELETE history rows get\n``body_after=<final body>`` (a legible last-known state for\naudit forensics) rather than an empty-string sentinel; the\nlifecycle distinction (create / update / delete) lives in the\naudit log row's ``method`` / ``path`` columns, not on the\nhistory row itself."
+      },
+      "ConventionKind": {
+        "type": "string",
+        "enum": [
+          "operational",
+          "workflow",
+          "reference"
+        ],
+        "title": "ConventionKind",
+        "description": "Closed vocabulary for ``TenantConvention.kind``.\n\nThe DB column itself is free-form ``TEXT`` per the issue body's\nOut of scope (\"DB-level enum on ``kind``\" deferred); this enum\nis the API-layer single line of defence. A request with\n``kind=\"garbage\"`` trips 422 at pydantic parse time before the\nhandler runs -- the same surface shape pydantic raises for\nevery other validation failure, so callers can branch on 4xx\nuniformly. Per the issue body, only ``operational`` conventions\nare packed into the session preamble; ``workflow`` /\n``reference`` are reference material the operator surfaces on\ndemand and are exempt from the over-budget 422 rejection."
+      },
+      "ConventionListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ConventionSummary"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "title": "ConventionListResponse",
+        "description": "Response envelope for ``GET /api/v1/conventions``.\n\nWrapped in ``{\"entries\": [...]}`` so a future cursor / total\nfield can land non-breakingly. Same shape the kb + memory list\nsurfaces adopted; consistency across the v0.2 read APIs keeps\nthe CLI's list renderer one switch statement, not three."
+      },
+      "ConventionSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "slug": {
+            "type": "string",
+            "title": "Slug"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "priority": {
+            "type": "integer",
+            "title": "Priority"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "slug",
+          "title",
+          "kind",
+          "priority",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ConventionSummary",
+        "description": "List-row representation returned by ``GET /api/v1/conventions``.\n\nLighter than :class:`Convention` -- omits the full ``body`` so\na list of 20 conventions doesn't materialise 20 KB of rule\ntext on every list call. The CLI's ``meho conventions list``\nuses this shape to render a one-line-per-convention table;\n``meho conventions show <slug>`` reaches for the full\n:class:`Convention` shape via the per-slug GET route.\n``from_attributes=True`` lets the handler return the SQLAlchemy\nORM object directly."
+      },
+      "ConventionUpdate": {
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 64000,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Body"
+          },
+          "priority": {
+            "type": "integer",
+            "maximum": 32767.0,
+            "minimum": -32768.0,
+            "nullable": true,
+            "title": "Priority"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ConventionUpdate",
+        "description": "PATCH body for ``/api/v1/conventions/{slug}``.\n\nAll fields optional -- PATCH semantics means \"update only what's\nprovided\". Pydantic v2's :attr:`BaseModel.model_fields_set`\ndistinguishes \"field absent from JSON\" from \"field present with\nnull\", and the route handler uses that view to apply only the\nexplicitly-set keys to the ORM row. The kind discriminator is\nexcluded from the PATCH surface: changing a convention's kind\nin-place would silently change its preamble-inclusion behaviour\n(an ``operational`` rule becoming ``reference`` would disappear\nfrom every future preamble without an audit signal); operators\ndelete + recreate to switch kind, which produces a clean two-\nrow history trail.\n\n``priority`` is included because reranking is the most common\nedit shape (a rule that became more / less urgent without its\ntext changing). ``slug`` is not in the PATCH surface either --\nrenaming a convention is a delete + recreate as well, since\nthe audit log and history rows reference the old slug by\nnatural key."
       },
       "CriterionResult": {
         "properties": {

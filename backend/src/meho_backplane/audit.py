@@ -110,7 +110,7 @@ from meho_backplane.broadcast import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 
-__all__ = ["AuditMiddleware"]
+__all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
 
 #: Body returned when the audit insert fails (fail-closed 500). Pinned
 #: as a module constant so the contract is greppable from tests.
@@ -156,6 +156,27 @@ def _coerce_request_id(raw: object) -> uuid.UUID | None:
 #: payload.
 _AUDIT_PAYLOAD_PREFIX: Final[str] = "audit_"
 
+#: Contextvar key a route can bind to pre-allocate the audit row's
+#: ``id`` before the AuditMiddleware allocates a fresh ``uuid4()``.
+#:
+#: G7.1-T2 (#314): the convention CRUD routes need to write a
+#: ``tenant_convention_history`` row whose ``audit_id`` soft-FK
+#: points at the audit row that the middleware writes for the same
+#: request. The middleware runs *after* the route handler returns,
+#: so the row's id is otherwise unavailable to the handler -- which
+#: would force a second audit row written by the handler (the
+#: topology-nodes pattern), producing two audit rows per convention
+#: write. Pre-allocating the id in the handler and binding it here
+#: lets the middleware reuse it; the handler stores the same uuid
+#: on the history row inside its own transaction.
+#:
+#: Deliberately NOT under :data:`_AUDIT_PAYLOAD_PREFIX` so the value
+#: does not also land in the audit row's payload dict (the id is the
+#: row's primary key, not a payload field). The contextvar is opt-in;
+#: when unset the middleware falls back to allocating a fresh uuid4
+#: as before -- no behavioural change for the chassis-era surfaces.
+_PREALLOCATED_AUDIT_ID_KEY: Final[str] = "preallocated_audit_id"
+
 
 def _resolve_audit_payload() -> dict[str, Any]:
     """Build the audit payload from ``audit_*`` contextvars.
@@ -178,6 +199,73 @@ def _resolve_audit_payload() -> dict[str, Any]:
         if stripped:
             payload[stripped] = value
     return payload
+
+
+def bind_preallocated_audit_id(audit_id: uuid.UUID) -> None:
+    """Pre-allocate the audit row's primary key for the current request.
+
+    The AuditMiddleware otherwise generates a fresh ``uuid4()`` per
+    request when it commits the audit row (after the handler
+    returns). Routes that need the audit row's id *before* commit --
+    typically to write a soft-FK from an in-transaction history /
+    side-channel row -- can call this helper inside the handler with
+    a uuid they minted themselves; the middleware then commits the
+    audit row with that same id instead of allocating its own.
+
+    G7.1-T2 (#314) ships the convention CRUD routes which write a
+    ``tenant_convention_history`` row with an ``audit_id`` soft-FK
+    in the same DB transaction as the convention mutation. Without
+    this primitive the route would have to either (a) skip the
+    chassis audit and write its own audit row inline (producing two
+    audit rows per write because the middleware also fires), or
+    (b) reconcile a NULL ``audit_id`` after-the-fact (forensic
+    fragility). Pre-allocating the id keeps the contract one-row,
+    one-write, one-soft-FK.
+
+    The helper is intentionally side-effect-only: it binds the uuid
+    onto the structlog contextvar slot the middleware reads. Routes
+    pass the same uuid into their own
+    :class:`~meho_backplane.db.models.AuditLog` writes (if any) --
+    not relevant for convention CRUD (the middleware is the sole
+    audit writer there) but documented here for completeness.
+
+    Opt-in: when no route calls this helper the middleware allocates
+    a fresh uuid4 (the v0.1 chassis behaviour). No behavioural
+    change for the chassis-era surfaces.
+    """
+    structlog.contextvars.bind_contextvars(
+        **{_PREALLOCATED_AUDIT_ID_KEY: str(audit_id)},
+    )
+
+
+def _resolve_preallocated_audit_id() -> uuid.UUID | None:
+    """Pull the pre-allocated audit_id out of the contextvar, if any.
+
+    Returns the uuid bound by :func:`bind_preallocated_audit_id`
+    in the active request, or ``None`` when the contextvar is unset
+    or holds an unparseable value. A bound value that fails the
+    UUID parse logs a warning and falls back to ``None`` -- the
+    middleware then mints a fresh uuid4 the way it did before T2,
+    so a programming bug in a route never blocks the audit row from
+    being written.
+    """
+    raw = structlog.contextvars.get_contextvars().get(_PREALLOCATED_AUDIT_ID_KEY)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        structlog.get_logger(__name__).warning(
+            "audit_preallocated_id_malformed",
+            value=repr(raw),
+        )
+        return None
+    try:
+        return uuid.UUID(raw)
+    except (ValueError, AttributeError):
+        structlog.get_logger(__name__).warning(
+            "audit_preallocated_id_malformed",
+            value=raw,
+        )
+        return None
 
 
 def _resolve_target_id() -> uuid.UUID | None:
@@ -544,6 +632,7 @@ class AuditMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
+    # code-quality-allow: pre-existing legacy __call__; G7.1-T2 only added audit_id pre-allocation
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -601,7 +690,10 @@ class AuditMiddleware:
             path=path,
             log=log,
         )
-        audit_id = uuid.uuid4()
+        # G7.1-T2 (#314): honor a pre-allocated audit_id when a route
+        # bound one via :func:`bind_preallocated_audit_id`. The default
+        # path (no binding) is unchanged -- fresh uuid4 per request.
+        audit_id = _resolve_preallocated_audit_id() or uuid.uuid4()
         target_id = _resolve_target_id()
 
         # G6.3-T2 (#379): resolve broadcast detail BEFORE the audit row

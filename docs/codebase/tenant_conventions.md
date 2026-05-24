@@ -10,8 +10,8 @@ models, and access patterns. Layer 2 lives in
 [docs/examples/consumer-onboarding/](../examples/consumer-onboarding/)
 (landed by sibling task #318).
 
-This document is current as of T1 (#313). Sibling tasks T2-T5 will
-extend it with the API, CLI, preamble assembler, and seed details as
+This document is current as of T2 (#314). Sibling tasks T3-T5 will
+extend it with the CLI, preamble assembler, and seed details as
 they land.
 
 ## Overview
@@ -91,39 +91,50 @@ Same module. Write-once, read-mostly. T3's `meho conventions history
 
 ## Control flow
 
-T1 (this task) ships **schema only** -- no read or write paths exist
-yet. The end-to-end flow lands across T2-T5:
+T2 (this task) ships the **6 HTTP routes** + Pydantic schemas. T1
+shipped the schema; T3-T5 layer CLI / preamble / seed on top.
 
 1. **POST /api/v1/conventions** (T2 #314) -- `tenant_admin` role
    required. Inserts one row into `tenant_conventions` and one row
    into `tenant_convention_history` (with `body_before=NULL`) inside
    the same transaction. The audit middleware writes its own row
-   into `audit_log`; T2 captures the audit row id and stores it in
-   the history row's `audit_id` column so G8's audit-replay can
-   join.
+   into `audit_log`; the route handler pre-allocates the audit row's
+   uuid via
+   [`bind_preallocated_audit_id`](../../backend/src/meho_backplane/audit.py)
+   so the middleware reuses it, and the history row's `audit_id`
+   soft-FK references that same uuid -- a single audit row joins
+   to the history row by exact-match uuid.
 
 2. **PATCH /api/v1/conventions/{slug}** (T2) -- `tenant_admin` role
    required. Looks up the existing row by `(tenant_id, slug)`,
-   updates `body` (and/or `title`), inserts a history row with the
-   previous body in `body_before` and the new body in `body_after`.
-   Same single-transaction discipline as POST.
+   updates `body` (and/or `title` / `priority`), inserts a history
+   row with the previous body in `body_before` and the new body in
+   `body_after`. Same single-transaction discipline as POST.
+   Priority-only or title-only PATCHes still write a history row
+   (the operation happened; the diff trail is the causal record).
 
 3. **DELETE /api/v1/conventions/{slug}** (T2) -- `tenant_admin` role
-   required. Deletes the row from `tenant_conventions`; the history
-   row gets `body_after=<final body>` (a legible last-known state)
-   rather than a sentinel marker. The lifecycle distinction lives in
-   the audit row, not in `tenant_convention_history`.
+   required. Inserts a history row with `body_after=<final body>`
+   (a legible last-known state for audit forensics) before deleting
+   the convention row from `tenant_conventions`. The lifecycle
+   distinction lives in the audit row's `method='DELETE'`, not in
+   `tenant_convention_history`.
 
 4. **GET /api/v1/conventions** (T2) -- list all conventions for the
    operator's tenant. Filters by `tenant_id` (resolved from the JWT
-   claim by G0.1's contextvar binding).
+   claim by G0.1's contextvar binding). Optional `?kind=operational`
+   query param mirrors the CLI's `meho conventions list --kind`
+   verb. Ordering is `priority DESC, created_at ASC` -- the same
+   key T4's preamble assembler will use, so the list view surfaces
+   conventions in the order T4 considers them.
 
 5. **GET /api/v1/conventions/{slug}** (T2) -- single-row lookup by
    `(tenant_id, slug)`; the unique index makes it a btree probe.
 
-6. **GET /api/v1/conventions/{slug}/history** (T2) -- chronological
-   list of history rows for the convention, with optional
-   cross-reference to `audit_log` via `audit_id`.
+6. **GET /api/v1/conventions/{slug}/history** (T2) -- list of
+   history rows for the convention ordered `ts DESC` (newest first
+   per the issue's "documented v0.2 ordering" decision), with
+   optional cross-reference to `audit_log` via `audit_id`.
 
 7. **Session preamble** (T4 #316) -- on MCP `initialize`, MEHO loads
    all `kind='operational'` conventions for the tenant, packs them
@@ -139,6 +150,59 @@ yet. The end-to-end flow lands across T2-T5:
    only when) `capabilities.resources.subscribe: true`, edits emit
    `notifications/resources/updated` so subscribing clients refresh
    mid-session.
+
+## Write-time 422 validation (T2)
+
+`POST /api/v1/conventions` and `PATCH /api/v1/conventions/{slug}`
+both run a write-time over-budget gate: if the submitted body is
+`kind='operational'` and its token estimate alone exceeds the
+preamble budget (`DEFAULT_MAX_PREAMBLE_TOKENS = 600`), the route
+rejects with **422** + a detail message naming `estimated` vs
+`budget`. PATCH evaluates against the **existing** kind (the
+PATCH surface deliberately cannot change `kind` -- see
+[`ConventionUpdate`](../../backend/src/meho_backplane/conventions/schemas.py)).
+
+The estimator is `meho_backplane.conventions.schemas.estimate_tokens`
+-- a chars-per-token heuristic (`ceil(len / 3.3)`) the
+`v0.1-spec §"Memory / context layer"` lines 457-487 baselines. T4
+(#316) reuses the same function for its priority-ranked packer,
+so the two sites cannot drift -- a divergence would silently let a
+write through the API only for the preamble packer to drop it at
+every future assembly (the "`kubectl apply --dry-run=server`
+discipline" the issue body names).
+
+`workflow` and `reference` conventions are not preamble-bound and
+are exempt from the 422 -- a `workflow` convention of arbitrary
+size is accepted.
+
+## Audit row + history row in one transaction (T2)
+
+Every write route (POST / PATCH / DELETE) writes:
+
+1. The convention mutation (INSERT for POST, UPDATE for PATCH,
+   INSERT-history-then-DELETE for DELETE).
+2. One `tenant_convention_history` row carrying the
+   `(body_before, body_after, actor_sub, ts, audit_id)` tuple.
+3. The chassis `audit_log` row (the
+   [`AuditMiddleware`](../../backend/src/meho_backplane/audit.py)
+   inserts this after the handler returns).
+
+All three commit or roll back together: the convention mutation +
+history row land in the same `session.begin()` block opened by
+`get_session`; the audit row commits in the same response cycle
+via the middleware. The history row's `audit_id` soft-FK
+references the audit row by exact-match uuid -- the route handler
+pre-allocates the uuid via `bind_preallocated_audit_id` and the
+middleware honors the contextvar instead of minting its own. G8's
+audit-query path joins `tenant_convention_history` on `audit_log`
+by `audit_id` to answer "who edited which rule when" with one
+SQL join.
+
+The pre-allocation primitive is a small, additive chassis change
+(opt-in contextvar; when unset, the middleware falls back to the
+v0.1 fresh-uuid behaviour). The alternative -- having the route
+write its own audit row (the topology-nodes pattern) -- would
+double-audit because the middleware also fires per HTTP request.
 
 ## Dependencies
 
@@ -195,11 +259,16 @@ by 0001-0014:
   bypassed the Pydantic layer could land an invalid `kind`; the API
   layer's validation is the single line of defence in v0.2.
 
-- **No content validation.** T1 does not enforce length, format, or
-  budget limits on `body`. T2 will add over-budget write-time 422
-  validation (a single `operational` convention whose token estimate
-  exceeds the preamble budget is rejected at POST/PATCH time, not
-  silently dropped at every future preamble assembly).
+- **Content validation lands at the API layer (T2), not the DB
+  layer.** T2's
+  [`ConventionCreate`](../../backend/src/meho_backplane/conventions/schemas.py)
+  bounds `slug` to lowercase-ASCII + hyphen (URL-safe), `title` to
+  200 chars, `body` to 64 KB, `priority` to the SmallInteger
+  range; over-budget single-entry `operational` rejection happens
+  here too. A row reaching the DB through any other path (a future
+  CLI tool, a migration, manual psql) bypasses these gates --
+  v0.2.next may add CHECK constraints to the table once the
+  validation contract has settled across all callers.
 
 - **No backref from `Tenant`.** Querying "all conventions for tenant
   X" goes through the application layer, not via a SQLAlchemy

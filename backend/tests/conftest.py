@@ -374,6 +374,48 @@ def real_descriptor_embeddings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
 
 
 @pytest.fixture(autouse=True)
+def _amortize_typed_op_registrars(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> Iterator[None]:
+    """Amortize the per-test app-boot ``run_typed_op_registrars`` cost (#901).
+
+    Every app-booting test (the whole ``test_mcp_*`` family, plus
+    middleware / auth_config tests that exercise the lifespan via
+    ``TestClient``) re-runs every connector's typed-op registrar against
+    the fresh per-test DB: ~90 ops x (group resolve + natural-key lookup
+    + INSERT + flush). The work is identical on every boot (deterministic
+    op set; embeddings already stubbed to a zero vector by
+    :func:`_stub_descriptor_embedding`), so it amortizes cleanly. Setting
+    ``MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS`` makes
+    :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+    snapshot the built-in descriptor + group rows on the **first** boot in
+    the worker, then replay that snapshot as two bulk inserts on every
+    subsequent boot — ~105 ms -> ~1 ms per boot (the #901 measurement),
+    the same replay-a-once-computed-artifact shape as the schema-template
+    amortization above (#793/#898).
+
+    Gated off when ``real_descriptor_embeddings`` is requested: that
+    opt-out wants the registrar to compute genuine vectors, so it must
+    take the real (un-amortized, un-stubbed) path.
+
+    The snapshot deliberately **persists across tests** in the worker —
+    that cross-boot reuse is the whole amortization. It stays correct
+    because the built-in op corpus is fixed in source (no test mutates a
+    built-in descriptor's body), and the runner fingerprints the
+    registrar set so a boot whose registrar list differs re-captures
+    rather than replaying a stale corpus.
+    """
+    if "real_descriptor_embeddings" in request.fixturenames:
+        yield
+        return
+    monkeypatch.setenv("MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS", "1")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _default_backplane_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pin a non-empty ``BACKPLANE_URL`` so the lifespan boots in tests.
 

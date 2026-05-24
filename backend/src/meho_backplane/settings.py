@@ -461,6 +461,21 @@ class Settings(BaseModel):
     #: production: stubbed descriptor vectors make operation search
     #: return meaningless rankings.
     test_stub_descriptor_embedding: bool = False
+    #: Test-only: when True, ``run_typed_op_registrars`` snapshots the
+    #: built-in descriptor + operation-group rows into a per-process
+    #: cache on its first invocation, then on every subsequent
+    #: invocation bulk-inserts that snapshot instead of re-running every
+    #: connector's registrar callable. Set via
+    #: ``MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS`` by the test conftest:
+    #: the unit suite boots the FastAPI app ~200+ times (once per
+    #: app-booting test) against a fresh per-test DB, and replaying a
+    #: cached snapshot as two bulk inserts is ~100x cheaper than
+    #: re-running ~90 per-op registrations (group resolve + natural-key
+    #: lookup + INSERT + flush) on every boot. NEVER set in production:
+    #: a pod boots once, so the cache never hits, and a stale cache from
+    #: a prior boot would mask a connector's registration change. See
+    #: ``run_typed_op_registrars`` for the snapshot/replay contract.
+    test_amortize_typed_op_registrars: bool = False
     backplane_url: str = ""
     mcp_resource_uri: str = ""
     vault_addr: HttpUrl
@@ -547,6 +562,12 @@ class Settings(BaseModel):
         return value
 
 
+# Flat env-var -> Settings constructor, one kwarg per field: the length is
+# the field count, not branching complexity (McCabe is trivial). Extracting
+# "helpers" would scatter the env-var contract this function deliberately
+# keeps obvious in one place (see the docstring). #901 added one test-only
+# kwarg, tipping it 2 lines over the 100-line guidance.
+# code-quality-allow: flat one-kwarg-per-field Settings constructor (above).
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the process-wide :class:`Settings` singleton.
@@ -582,6 +603,9 @@ def get_settings() -> Settings:
         ),
         test_stub_descriptor_embedding=parse_bool_env(
             os.environ.get("MEHO_TEST_STUB_DESCRIPTOR_EMBEDDING"),
+        ),
+        test_amortize_typed_op_registrars=parse_bool_env(
+            os.environ.get("MEHO_TEST_AMORTIZE_TYPED_OP_REGISTRARS"),
         ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),

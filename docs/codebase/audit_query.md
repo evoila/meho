@@ -250,9 +250,10 @@ Error mapping at the tool boundary:
 * `pydantic.ValidationError` (post-jsonschema, e.g. malformed UUID
   slipping past `format: uuid`) — same mapping.
 * `InvalidCursorError` (substrate, tampered cursor) — same mapping.
-* `UnsupportedFilterError` (substrate, `parent_audit_id` /
-  `agent_session_id` in v0.2) — same mapping with the column-name
-  message.
+* `UnsupportedFilterError` (substrate, the flat `parent_audit_id`
+  filter, still gated in v0.2) — same mapping with the column-name
+  message. The `agent_session_id` filter is **un-gated** (G8.2-T3
+  #1011) and no longer raises.
 * Anything else propagates; the dispatcher's outer try/except turns
   it into JSON-RPC `-32603` Internal Error.
 
@@ -260,6 +261,71 @@ RBAC: `operator` role minimum. `read_only` callers find the tool
 absent from `tools/list` and get `-32602` on a direct `tools/call`
 attempt (the dispatcher's per-call RBAC re-check, not a transport
 401 — JSON-RPC has no 403 analogue).
+
+### `shape="tree"` self-session replay (G8.2-T6 #1014)
+
+`query_audit` grows a `shape` enum (`"flat"` default / `"tree"`). With
+`shape="tree"` the handler short-circuits the flat filter path and
+reconstructs the caller's session as a `ReplayNode` forest via
+`replay_session`, returning `{root, session_id, tenant_id, row_count}`
+(same envelope as the admin tool below).
+
+The tree path is **self-session only** and intentionally stricter than
+the flat path (which already returns other in-tenant principals' rows):
+`agent_session_id` must be present **and** equal to the caller's own
+bound MCP session id — the `mcp_session_id` structlog contextvar the
+transport binds from the inbound `Mcp-Session-Id` header (G8.2-T2
+#1010). Any mismatch — a different session id, an absent
+`agent_session_id`, or no session header at all (the transport then
+binds a fresh uuid4 the client can't predict) — is rejected with
+`-32602`. Cross-session forensic replay is the `tenant_admin`-gated
+`meho.audit.replay` tool, not this path.
+
+## `meho.audit.replay` admin tool (G8.2-T6 #1014)
+
+A dedicated `tenant_admin` meta-tool in the `meho.*` admin namespace
+(alongside `meho.broadcast.overrides.*`), registered in the same
+`mcp/tools/audit.py` module. It is the cross-session escalation: an
+admin replays *another* agent's session, where `query_audit`'s
+`shape="tree"` path replays only *your own*.
+
+* `inputSchema`: `{session_id: uuid (required), max_depth: int
+  (1–100, default 20)}`, `additionalProperties: false`.
+* Handler: count-first 10k guard (see below), then
+  `replay_session(session_id, tenant_id=operator.tenant_id,
+  session=…, max_depth=…)`. Tenant scope is the JWT's — never an
+  argument — so an admin cannot replay another tenant's session (a
+  foreign session id yields an empty `root`).
+* Returns `{root: [ReplayNode…], session_id, tenant_id, row_count}`
+  via `model_dump(mode="json")`; `row_count` is the total node count
+  in the returned tree.
+* `op_class="audit_query"`, so — via the matching `meho.audit.` arm
+  in `classify_op` — the MCP broadcast event is aggregate-only
+  (`{op_class, result_status, row_count}`), never the `ReplayNode`
+  payload.
+
+**Count-first 10k guard.** Both replay surfaces share
+`_build_replay_response`, which counts the tenant-scoped anchor rows
+(`agent_session_id = :id`) *before* the recursive walk + tree
+assembly. The anchor count is a sound lower bound on the closure size
+(the CTE only adds lineage descendants), so an over-cap session is
+rejected with `-32602` carrying the `session_too_large` token — the
+MCP analogue of T4's REST 413, since the JSON-RPC transport has no
+streaming body for a partial response. The cap (`_REPLAY_MAX_ROWS =
+10_000`) matches T4 so operators see the same boundary on both
+surfaces.
+
+### `meho.audit.` broadcast-classifier arm
+
+The MCP broadcast path derives `op_class` from `classify_op(op_id)`
+with the **tool name verbatim** — it does not honor
+`ToolDefinition.op_class`. `classify_op` therefore grew a
+`meho.audit.` prefix arm next to the existing `audit.` arm: without
+it, `meho.audit.replay` (prefix `meho.audit.`) would fall through to
+`other` and broadcast its full `ReplayNode` tree instead of the
+aggregate-only view. (The literal tool name `query_audit` has the same
+MCP-path classification gap today — a pre-existing G8.1 concern, out
+of scope for #377.)
 
 ## Dependencies
 
@@ -273,9 +339,10 @@ Reverse dependencies:
 
 * `meho_backplane.api.v1.audit` (T2 #466) — REST router for the four
   consumer-facing routes; dispatches every call through `query_audit`.
-* `meho_backplane.mcp.tools.audit` (T4 #468) — single MCP meta-tool
-  registered against the G0.5 registry; dispatches every call through
-  `query_audit`.
+* `meho_backplane.mcp.tools.audit` (T4 #468, extended G8.2-T6 #1014) —
+  the `query_audit` MCP meta-tool plus the `meho.audit.replay` admin
+  tool; dispatches flat queries through `query_audit` and replay
+  (admin tool + `shape="tree"`) through `replay_session`.
 * T3 #467 (CLI) follows.
 
 ## Known issues / v0.2 gaps

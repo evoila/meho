@@ -561,13 +561,26 @@ def _isolate_global_registries() -> Iterator[None]:
     The backplane keeps mutable module-level registries that the app
     lifespan and ``@register_*`` decorators populate:
     ``mcp.registry._TOOLS`` / ``_RESOURCES``,
-    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``, and
-    ``operations.typed_register._TYPED_OP_REGISTRARS``. None had a
-    process-wide per-test reset, so a test that triggered the lifespan
-    leaked real registrations into whatever test the (xdist) scheduler
-    ran next on the same worker. #540 fixed exactly one of these with a
-    local fixture; this generalises the snapshot/restore to all of
-    them, process-wide.
+    ``connectors.registry._REGISTRY`` / ``_REGISTRY_V2``,
+    ``operations.typed_register._TYPED_OP_REGISTRARS``, and the
+    dispatcher's per-process caches
+    ``operations._handler_resolve._HANDLER_CACHE`` /
+    ``_CONNECTOR_INSTANCE_CACHE``. None had a process-wide per-test
+    reset, so a test that triggered the lifespan (or dispatched an op)
+    leaked real registrations / a cached connector singleton into
+    whatever test the (xdist) scheduler ran next on the same worker.
+    #540 fixed exactly one of these with a local fixture; this
+    generalises the snapshot/restore to all of them, process-wide.
+
+    The connector-instance cache is the load-bearing addition for #984
+    (PR #998): a dispatch-based test that patches the cached connector
+    singleton's ``_credentials_loader`` to an operator-ignoring stub
+    (``test_broadcast_credential_mint_dispatch``) relied on its own
+    ``reset_dispatcher_caches()`` teardown; the autouse net now restores
+    the cache regardless, so a leaked patched singleton can never bleed
+    into another connector test on the same worker. Mirrors the
+    ``reset_handler_cache`` / ``reset_connector_instance_cache`` pair in
+    :mod:`meho_backplane.operations._handler_resolve`.
 
     It also snapshots/restores the dispatcher's default reducer binding,
     ``operations.dispatcher._DEFAULT_REDUCER``. The app lifespan swaps the
@@ -590,6 +603,7 @@ def _isolate_global_registries() -> Iterator[None]:
     """
     from meho_backplane.connectors import registry as conn_reg
     from meho_backplane.mcp import registry as mcp_reg
+    from meho_backplane.operations import _handler_resolve as handler_resolve
     from meho_backplane.operations import dispatcher, set_default_reducer
     from meho_backplane.operations import typed_register as typed_reg
 
@@ -598,6 +612,8 @@ def _isolate_global_registries() -> Iterator[None]:
     connectors_v1 = dict(conn_reg._REGISTRY)
     connectors_v2 = dict(conn_reg._REGISTRY_V2)
     registrars = list(typed_reg._TYPED_OP_REGISTRARS)
+    handler_cache = dict(handler_resolve._HANDLER_CACHE)
+    instance_cache = dict(handler_resolve._CONNECTOR_INSTANCE_CACHE)
     default_reducer = dispatcher._DEFAULT_REDUCER
     try:
         yield
@@ -611,6 +627,10 @@ def _isolate_global_registries() -> Iterator[None]:
         conn_reg._REGISTRY_V2.clear()
         conn_reg._REGISTRY_V2.update(connectors_v2)
         typed_reg._TYPED_OP_REGISTRARS[:] = registrars
+        handler_resolve._HANDLER_CACHE.clear()
+        handler_resolve._HANDLER_CACHE.update(handler_cache)
+        handler_resolve._CONNECTOR_INSTANCE_CACHE.clear()
+        handler_resolve._CONNECTOR_INSTANCE_CACHE.update(instance_cache)
         set_default_reducer(default_reducer)
 
 

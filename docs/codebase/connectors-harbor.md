@@ -33,12 +33,16 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   `username:password` as-is; no realm suffix is appended. Replaced by the
   concrete `Target` model once G0.3 (#224) lands.
 - **`HarborCredentialsLoader`** (`session.py`) — async callable type resolving
-  a target to `{"username": ..., "password": ...}`. Injectable on connector
-  construction (`HarborConnector(credentials_loader=...)`) so unit tests,
-  integration tests, and pre-G0.3 production deploys override the default
-  Vault loader.
-- **`load_credentials_from_vault`** (`session.py`) — default loader, stubbed
-  `NotImplementedError` until G0.3 lands the operator-context Vault read path.
+  a `(target, operator)` pair to `{"username": ..., "password": ...}`. The
+  `operator: Operator` carries the dispatched identity so the live loader
+  reads the per-target secret under the operator's JWT. Injectable on
+  connector construction (`HarborConnector(credentials_loader=...)`) so unit
+  and integration tests override the default Vault loader.
+- **`load_credentials_from_vault`** (`session.py`) — default loader. Performs a
+  live operator-context Vault KV-v2 read of `target.secret_ref` under the
+  operator's identity, delegating to the shared `load_basic_credentials` helper
+  (G3.9-T2 #941, wired in G3.10-T1 #945). Returns the service-account
+  `{"username": ..., "password": ...}` pair.
 - **`HARBOR_CORE_OPS`** (`core_ops.py`) — tuple of 9 `HarborCoreOp` entries
   describing the operator-reviewed read-only op subset enabled at v0.2: system
   info, health, project list/info, repository list/info, artifact list/info,
@@ -90,12 +94,16 @@ Two account forms are supported:
 Both forms are stored verbatim in Vault under `target.secret_ref`. The
 connector passes the stored username through unchanged in the Basic auth header.
 
-1. `HarborConnector.auth_headers(target)` is called.
-2. `_load_credentials(target)` acquires the per-instance `asyncio.Lock`,
-   checks the `_creds_cache` dict (keyed on `target.name`), and calls the
-   loader on miss.
-3. The loader (default: `load_credentials_from_vault`, injected in tests)
-   returns `{"username": ..., "password": ...}`.
+1. `HarborConnector.auth_headers(target, operator)` is called. The
+   `operator: Operator` is the dispatched identity threaded down from the op
+   handler (the operator-context Vault read, #945 for read ops, #984 for the
+   robot lifecycle write ops).
+2. `_load_credentials(target, operator)` acquires the per-instance
+   `asyncio.Lock`, checks the `_creds_cache` dict (keyed on `target.name`),
+   and calls the loader with `(target, operator)` on miss.
+3. The loader (default: `load_credentials_from_vault`, which reads the secret
+   under the operator's identity; injectable in tests) returns
+   `{"username": ..., "password": ...}`.
 4. The result is cached under `target.name` and a `harbor_credentials_loaded`
    log event is emitted.
 5. `_basic_auth_header(username, password)` returns `"Basic <base64>"`.
@@ -122,14 +130,22 @@ This differs from the SDDC Manager / NSX precedents that delegate to
 checks and covers subsystem state (DB, redis, registry, jobservice) that
 `systeminfo` does not expose.
 
-### robot_create(target, params)
+### robot_create(operator, target, params)
 
 Typed op handler for `harbor.robot.create`. Classified `credential_mint` by
 `classify_op` in `broadcast/events.py` — the broadcast collapses to aggregate-only
 so the minted secret never appears in the SSE stream.
 
+The signature carries `operator: Operator` so `dispatch_typed`
+(`operations/_branches.py`, name-keyed operator threading) passes the
+dispatched operator into the handler. The operator is forwarded to `_post_json`
+→ `auth_headers` → `_load_credentials` so the per-target service-account
+credential is read under the operator's identity (the operator-context Vault
+read, #984). The operator's JWT authenticates the credential read, not the
+Harbor request itself.
+
 1. Validates `name`, `project`, `duration` from `params`.
-2. Calls `_post_json(target, "/api/v2.0/projects/{project}/robots", json=body)`.
+2. Calls `_post_json(target, "/api/v2.0/robots", operator=operator, json=body)`.
    Non-retried — Harbor's create endpoint is non-idempotent.
 3. Returns `{id, name, secret}` extracted from Harbor's 201 response.
    The `secret` is the minted credential, returned only on creation.
@@ -137,14 +153,19 @@ so the minted secret never appears in the SSE stream.
 The `permissions` body grants push + pull access on the named project
 (`level="project"`). System-level robot creation is out of scope for this Task.
 
-### robot_delete(target, params)
+### robot_delete(operator, target, params)
 
 Typed op handler for `harbor.robot.delete`. Classified `write` (suffix-based).
 No secret material in the response.
 
+Like `robot_create`, the signature carries `operator: Operator` so the
+dispatched operator threads in and is forwarded to `auth_headers` →
+`_load_credentials` for the operator-context Vault read (#984).
+
 1. Validates `project`, `id` from `params`.
-2. Acquires the pooled httpx client via `_http_client(target)` and calls
-   `client.request("DELETE", "/api/v2.0/projects/{project}/robots/{id}", headers=auth_headers)`.
+2. Acquires the pooled httpx client via `_http_client(target)`, computes the
+   Basic-auth header with `auth_headers(target, operator)`, and calls
+   `client.request("DELETE", "/api/v2.0/robots/{id}", headers=auth_headers)`.
    Direct client call (no `_delete_json` helper on `HttpConnector`) — non-retried.
 3. Calls `resp.raise_for_status()` — propagates `httpx.HTTPStatusError` on 4xx/5xx.
 4. Returns `{id, deleted: True}` (Harbor returns HTTP 200 with empty body;
@@ -210,9 +231,13 @@ acceptance fixtures and unit tests assert this invariant explicitly.
 
 ## Known issues
 
-- `load_credentials_from_vault` is a `NotImplementedError` stub until G0.3
-  (#224) lands the operator-context Vault read path. Tests inject a custom
-  loader.
+- `load_credentials_from_vault` performs the live operator-context Vault
+  read (G3.10-T1 #945) via the shared `load_basic_credentials` helper; all
+  ops — read core (#945) and the robot lifecycle write ops (#984) — read the
+  per-target service-account credential under the dispatched operator's
+  identity. Tests can still inject a custom loader, but the robot-op suite
+  exercises the live read against the in-process Vault fake rather than a
+  masking stub.
 - `harbor.robot.create` grants push + pull access on the named project only.
   System-level robot creation (`POST /api/v2.0/robots`) is out of scope for this Task.
 - Robot secret rotation / refresh is out of scope — tracked as a follow-up.

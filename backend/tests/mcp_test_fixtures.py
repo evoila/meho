@@ -143,6 +143,9 @@ def isolated_registry() -> Iterator[None]:
     """
     from meho_backplane.mcp.resources import kb as kb_resource
     from meho_backplane.mcp.resources import memory as memory_resource
+    from meho_backplane.mcp.resources import (
+        tenant_conventions as tenant_conventions_resource,
+    )
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
         agent_runs,
@@ -183,6 +186,13 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)
     importlib.reload(memory_resource)
+    # G7.1-T4 (#316): the tenant-conventions per-slug resource
+    # (``meho://tenant/{tenant_id}/conventions/{slug}``) joins the
+    # reload list for the same reason every other resource module
+    # does -- the autouse clear_registries() above would otherwise
+    # leave it unregistered in any test file that imports this
+    # fixture after the first one runs in the process.
+    importlib.reload(tenant_conventions_resource)
     yield
     clear_registries()
 

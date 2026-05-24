@@ -192,13 +192,16 @@ For a target tagged `shared_service_account`:
 
 All five cache sites apply the same fail-closed guard before the cache
 lookup: an empty `operator.raw_jwt` raises `VaultCredentialsReadError`
-without touching the cache. That mirrors the loader path's identical guard
-at
-[`vault_creds.py:188`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L188)
-and exists as defense-in-depth — every consuming connector's
-`auth_headers` already rejects system-initiated calls (`raw_jwt == ""`)
-at the boundary, but a future regression in that boundary check must not
-open a silent cache-hit path.
+without touching the cache. The **primary** fail-closed gate against empty
+`raw_jwt` lives one layer deeper, in the credential loader's
+`_resolve_secret_ref` helper at
+[`vault_creds.py:188`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L188);
+the cache guards exist as the **second** layer — defense-in-depth so a
+cache hit can never short-circuit past the loader and return a
+previously-primed token to a caller without an operator JWT. (Each
+consuming connector's `auth_headers` enforces a separate constraint —
+the `auth_model == "shared_service_account"` boundary — and does not
+itself reject empty `raw_jwt`; the loader and the cache guards do.)
 
 ### Why not key the cache on the operator too
 

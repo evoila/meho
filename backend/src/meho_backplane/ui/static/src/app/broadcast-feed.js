@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 evoila Group
 //
-// Broadcast live-feed Alpine controller (Initiative #338 Task #867).
+// Broadcast live-feed Alpine controller (Initiative #338; Task #867
+// shipped the core, Task #868 added the op_id client filter + the
+// click-to-open drawer + the PII 🔒 marker helper).
 //
 // Registered on ``alpine:init`` so the ``x-data="broadcastFeed(...)"``
-// wrapper in ``broadcast/feed.html`` resolves to this component. Kept in
+// wrapper in ``broadcast/_feed.html`` resolves to this component. Kept in
 // a static file (loaded via ``<script src=... defer>`` from the page's
 // ``{% block scripts %}``) rather than an inline ``<script>`` block so a
 // future nonce-based CSP needs no inline-script exception -- matching the
@@ -14,15 +16,22 @@
 //   * Subscribe (indirectly) to the SSE feed: the HTMX ``sse`` extension
 //     owns the EventSource; this controller hooks
 //     ``htmx:sseBeforeMessage`` to parse each ``event: broadcast`` frame
-//     and route it into the Alpine ``events`` array instead of letting
-//     the extension swap the raw JSON text into the DOM.
+//     and route it into the ``events`` array instead of letting the
+//     extension swap the raw JSON text into the DOM.
 //   * Prepend newest-first and trim to the in-DOM row cap (work item #9).
+//   * Apply the op_id client-side filter (work item #3): the stream has
+//     no op_id parameter, so op_id narrows the streamed events in-browser
+//     via ``visibleEvents``. The filter bar's op_id input dispatches a
+//     ``broadcast-op-id-changed`` window event this controller listens for.
+//   * Open the event-detail drawer on a row click (work item #4):
+//     ``htmx.ajax`` GET ``/ui/broadcast/event/{audit_id}?event_id=...``
+//     into ``#event-drawer``.
 //   * Provide the row-render helpers the server-authored
 //     ``_event_row.html`` partial binds to (badge colour, timestamp,
-//     payload summary).
+//     payload summary, aggregate-only check).
 //
-// The colour table + cap are passed in from the route context
-// (``opts``) so the policy stays server-side.
+// The colour table, cap, and the initial op_id filter are passed in from
+// the route context (``opts``) so the policy stays server-side.
 
 document.addEventListener("alpine:init", () => {
   Alpine.data("broadcastFeed", (opts) => ({
@@ -30,6 +39,32 @@ document.addEventListener("alpine:init", () => {
     connected: false,
     cap: opts.cap,
     badgeClasses: opts.badgeClasses,
+    // Lower-cased once; the op_id filter is a case-insensitive substring
+    // match against ``ev.op_id``. Seeded from the server context so a
+    // copy-pasted filtered URL renders the narrowed view on first paint.
+    opIdFilter: (opts.opIdFilter || "").toLowerCase(),
+
+    // Re-apply the op_id filter when the filter bar's input changes. The
+    // ``.window`` listener is declared in the template; this handler
+    // normalises + stores the new value. ``$event.detail.opId`` is the
+    // payload the filter bar's ``$dispatch`` sends.
+    onOpIdChanged(evt) {
+      const next = (evt.detail && evt.detail.opId) || "";
+      this.opIdFilter = next.toLowerCase();
+    },
+
+    // The op_id-filtered view of ``events`` the template renders. An
+    // empty filter shows every streamed event; a non-empty filter keeps
+    // only events whose ``op_id`` contains the substring. Recomputed by
+    // Alpine reactivity whenever ``events`` or ``opIdFilter`` changes.
+    get visibleEvents() {
+      if (!this.opIdFilter) {
+        return this.events;
+      }
+      return this.events.filter(
+        (ev) => (ev.op_id || "").toLowerCase().includes(this.opIdFilter),
+      );
+    },
 
     // Parse one SSE ``event: broadcast`` frame and prepend it, trimming
     // to the in-DOM cap. ``$event.detail`` is the MessageEvent the sse
@@ -57,6 +92,32 @@ document.addEventListener("alpine:init", () => {
       }
     },
 
+    // Open the event-detail drawer for a clicked row (work item #4). The
+    // drawer is resolved by AUDIT id (the canonical PG row), not the
+    // broadcast event_id (ephemeral Valkey id) -- see the event route's
+    // docstring. The broadcast event_id rides along as a query param for
+    // display only. ``htmx.ajax`` issues the GET and swaps the response
+    // into ``#event-drawer`` (outerHTML) so the returned fragment's own
+    // ``id="event-drawer"`` replaces the slot.
+    openDrawer(ev) {
+      if (!ev || !ev.audit_id) {
+        return;
+      }
+      const params = new URLSearchParams();
+      if (ev.event_id) {
+        params.set("event_id", ev.event_id);
+      }
+      const qs = params.toString();
+      const url =
+        "/ui/broadcast/event/" +
+        encodeURIComponent(ev.audit_id) +
+        (qs ? "?" + qs : "");
+      window.htmx.ajax("GET", url, {
+        target: "#event-drawer",
+        swap: "outerHTML",
+      });
+    },
+
     // DaisyUI badge variant for an op_class; unknown classes fall back
     // to the neutral ghost badge.
     badgeClass(opClass) {
@@ -70,12 +131,22 @@ document.addEventListener("alpine:init", () => {
       return isNaN(d.getTime()) ? ts : d.toLocaleTimeString();
     },
 
-    // One-line payload summary. Aggregate-only events (credential reads,
-    // audit queries -- decision #3) carry no ``params`` key in their
-    // redacted payload, so they render the explicit ``(aggregate-only)``
-    // placeholder instead of an empty cell.
+    // True when the event is aggregate-only (credential reads, audit
+    // queries -- decision #3): its redacted payload carries no ``params``
+    // key. The row renders the 🔒 marker + placeholder for these instead
+    // of a param summary. Same signal ``payloadSummary`` keys off, lifted
+    // to a named predicate the template's PII branch reads.
+    isAggregateOnly(ev) {
+      const p = (ev && ev.payload) || {};
+      return !("params" in p);
+    },
+
+    // One-line payload summary for non-aggregate events. Aggregate-only
+    // events never reach here (the template branches on
+    // ``isAggregateOnly`` first), but the guard is kept so a direct call
+    // stays safe.
     payloadSummary(ev) {
-      const p = ev.payload || {};
+      const p = (ev && ev.payload) || {};
       if (!("params" in p)) {
         return "(aggregate-only)";
       }

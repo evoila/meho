@@ -2,35 +2,38 @@
   SPDX-License-Identifier: Apache-2.0
   Copyright (c) 2026 evoila Group
 
-  Broadcast live-feed view (Initiative #338 Task #867, work items
-  #1/#2/#8/#9). Extends ``base.html`` so the chrome (navbar, sidebar,
-  footer) matches every other surface; the sidebar's Broadcast link is
-  marked active via ``active_surface="broadcast"`` passed by the route.
+  Broadcast live-feed view. Task #867 (G10.1-T1) shipped the live feed
+  (work items #1/#2/#8/#9); Task #868 (G10.1-T2) adds the filter bar
+  (work item #3), the event-detail drawer (work item #4), and the PII 🔒
+  visualisation (work item #7).
 
-  Live-streaming model
-  --------------------
-  The HTMX ``sse`` extension (``hx-ext="sse"``, vendored in HTMX 2 as a
-  separate plugin) opens an ``EventSource`` to ``stream_endpoint`` --
-  the session-gated ``/ui/broadcast/stream`` bridge, NOT ``/api/v1/feed``
-  directly (the browser ``EventSource`` cannot send the Bearer header
-  that API route requires; see the stream route's docstring). The
-  extension owns connection lifecycle + exponential-backoff reconnect +
-  ``Last-Event-Id`` replay.
+  Layout (top-down):
+    * Header -- title + tenant badge + connection/row-count pills.
+    * Filter bar (``broadcast/_filter_bar.html``) -- op_class select,
+      principal text, target dropdown, op_id search. The three
+      stream-supported filters (op_class/principal/target) ``hx-get`` to
+      ``/ui/broadcast/feed`` and swap the feed fragment so a fresh
+      ``sse-connect`` URL carries them server-side; op_id narrows the
+      already-streamed events client-side (the stream has no op_id
+      param).
+    * Feed fragment (``broadcast/_feed.html``) -- the SSE sink +
+      reverse-chronological list. Wrapped in the ``broadcastFeed`` Alpine
+      controller; the whole fragment is the HTMX swap target so a filter
+      re-render replaces the SSE subscription AND resets the event list.
+    * Drawer slot (``#event-drawer``) -- event-detail fragments swap in
+      on a row click; Alpine click-outside dismisses.
 
-  A hidden sink element carries ``sse-swap="broadcast"`` so the extension
-  subscribes to the feed's ``event: broadcast`` frames. We hook
-  ``htmx:sseBeforeMessage`` (cancelable) to (a) parse the JSON payload
-  into the Alpine ``events`` array and (b) ``preventDefault()`` so the
-  extension does NOT swap the raw JSON text into the DOM. Each event then
-  renders through the server-authored ``broadcast/_event_row.html``
-  partial via an Alpine ``<template x-for>`` -- server-side markup,
-  client-side data binding (work item #2).
-
-  Performance discipline (work item #9): new events ``unshift`` to the
-  front (reverse-chronological) and the controller trims the array to
-  ``in_dom_row_cap`` (1000) so a sustained stream keeps the DOM bounded.
-
-  Empty state (work item #8): rendered while ``events`` is empty.
+  Live-streaming model (unchanged from T1)
+  ----------------------------------------
+  The HTMX ``sse`` extension opens an ``EventSource`` to the feed
+  fragment's ``sse-connect`` -- the session-gated ``/ui/broadcast/stream``
+  bridge, NOT ``/api/v1/feed`` directly (the browser ``EventSource``
+  cannot send the Bearer header that API route requires; see the stream
+  route's docstring). A hidden sink carries ``sse-swap="broadcast"``; the
+  ``broadcastFeed`` controller hooks ``htmx:sse-before-message``, parses
+  the JSON, ``preventDefault()``s the raw swap, and prepends the event
+  to its bounded ``events`` array. Each event renders through the
+  server-authored ``broadcast/_event_row.html`` partial.
 -#}
 {% extends "base.html" %}
 
@@ -40,10 +43,6 @@
 <section
   class="space-y-4"
   hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
-  x-data="broadcastFeed({
-    cap: {{ in_dom_row_cap }},
-    badgeClasses: {{ op_class_badge_json }}
-  })"
 >
   {# ---------- Header ---------- #}
   <header class="flex flex-wrap items-center justify-between gap-4">
@@ -54,79 +53,34 @@
         <code class="badge badge-outline">{{ tenant_id }}</code>.
       </p>
     </div>
-    <div class="flex items-center gap-3 text-sm opacity-70">
-      {# Connection status pill -- Alpine reflects the SSE open/error
-         state the extension surfaces via htmx:sseOpen / htmx:sseError. #}
-      <span class="flex items-center gap-1" aria-live="polite">
-        <span
-          class="inline-block h-2 w-2 rounded-full"
-          :class="connected ? 'bg-success' : 'bg-warning'"
-          aria-hidden="true"
-        ></span>
-        <span x-text="connected ? 'live' : 'connecting…'"></span>
-      </span>
-      <span aria-live="polite" x-text="events.length + ' / {{ in_dom_row_cap }} rows'"></span>
-    </div>
   </header>
 
-  {# ---------- SSE sink ----------
-     Hidden element the sse extension binds the EventSource listener to.
-     ``hx-ext="sse"`` activates the extension; ``sse-connect`` opens the
-     stream; ``sse-swap="broadcast"`` subscribes to the feed's
-     ``event: broadcast`` frames. We cancel the default swap in
-     ``htmx:sseBeforeMessage`` and route the data through Alpine instead.
-  -#}
-  <div
-    hx-ext="sse"
-    sse-connect="{{ stream_endpoint }}"
-    sse-swap="broadcast"
-    class="hidden"
-    aria-hidden="true"
-    x-on:htmx:sse-before-message="onSseMessage($event)"
-    x-on:htmx:sse-open="connected = true"
-    x-on:htmx:sse-error="connected = false"
-  ></div>
+  {# ---------- Filter bar (work item #3) ---------- #}
+  {% include "broadcast/_filter_bar.html" %}
 
-  {# ---------- Feed list ---------- #}
-  <div class="overflow-hidden rounded-box border border-base-300 bg-base-100">
-    {# Column header row -- mirrors the grid in _event_row.html. #}
-    <div
-      class="grid grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60"
-    >
-      <span class="col-span-2">Time</span>
-      <span class="col-span-2">Principal</span>
-      <span class="col-span-3">Operation</span>
-      <span class="col-span-1">Class</span>
-      <span class="col-span-1">Status</span>
-      <span class="col-span-1">Target</span>
-      <span class="col-span-2">Payload</span>
+  {# ---------- Feed + drawer two-column layout ----------
+     On ``lg:`` viewports the feed takes 2/3 and the drawer 1/3; on
+     smaller viewports the drawer stacks below the feed. -#}
+  <div class="grid gap-4 lg:grid-cols-3">
+    <div class="lg:col-span-2">
+      {% include "broadcast/_feed.html" %}
     </div>
 
-    {# Empty state (work item #8) -- shown until the first event lands
-       or when filters (T2) match nothing. #}
-    <div
-      x-show="events.length === 0"
-      class="px-3 py-10 text-center text-sm opacity-70"
-      id="broadcast-empty-state"
-    >
-      No activity matching your filters. Try adjusting the op_class or
-      target filter, or wait for new events.
-    </div>
-
-    {# Live list -- newest first. Each event renders via the
-       server-authored row partial. ``:key`` keeps Alpine's DOM diff
-       stable as rows prepend + trim. #}
-    <ul
-      x-show="events.length > 0"
-      class="divide-y divide-base-300"
-      role="list"
-      aria-label="Live broadcast events"
+    {# ---------- Drawer slot (work item #4) ----------
+       Event-detail fragments swap into ``#event-drawer`` on a row
+       click via ``hx-target``. The placeholder shape mirrors the
+       happy-path / not-found fragments so the outerHTML swap stays
+       semantically consistent. -#}
+    <aside
+      id="event-drawer"
+      class="card bg-base-100 border-base-300 border shadow-sm self-start"
       aria-live="polite"
+      aria-label="Event detail drawer"
     >
-      <template x-for="ev in events" :key="ev.event_id">
-        {% include "broadcast/_event_row.html" %}
-      </template>
-    </ul>
+      <div class="card-body text-sm opacity-70">
+        Select an event to inspect its full audit detail.
+      </div>
+    </aside>
   </div>
 </section>
 {% endblock %}
@@ -134,7 +88,7 @@
 {# Surface JS -- the ``broadcastFeed`` Alpine controller. Loaded as an
    external deferred script (not inline) so a future nonce-based CSP
    needs no special-casing. Registers on ``alpine:init`` before Alpine
-   processes the ``x-data`` above. #}
+   processes the ``x-data`` in the feed fragment. #}
 {% block scripts %}
   <script src="/ui/static/src/app/broadcast-feed.js" defer></script>
 {% endblock %}

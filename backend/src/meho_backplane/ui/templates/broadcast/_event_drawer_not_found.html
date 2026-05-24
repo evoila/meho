@@ -1,0 +1,47 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Drawer fragment rendered when the requested audit id does not resolve
+  in the operator's tenant. Returned with HTTP 404 by
+  ``GET /ui/broadcast/event/{audit_id}``.
+
+  The fragment swaps into ``#event-drawer`` exactly like the happy path
+  so the operator sees the not-found message without a full-page reload.
+  It carries the same ``x-data``/``click.outside`` dismiss island so a
+  click outside (or Escape / Close) clears it consistently. The audit
+  row may have aged out of the retention window, the id may belong to
+  another tenant (the boundary is opaque), or the feed may be stale.
+-#}
+<aside
+  id="event-drawer"
+  class="card bg-base-100 border-base-300 border shadow-sm self-start"
+  aria-label="Event detail drawer"
+  x-data="{ open: true }"
+  x-show="open"
+  x-on:click.outside="open = false"
+  x-on:keydown.escape.window="open = false"
+>
+  <div class="card-body space-y-2">
+    <header class="flex items-start justify-between gap-2">
+      <h2 class="card-title text-base">Event not found</h2>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        aria-label="Close event detail drawer"
+        x-on:click="open = false"
+      >
+        Close
+      </button>
+    </header>
+    <p class="text-sm opacity-70">
+      No audit record with id <code class="font-mono break-all">{{ audit_id }}</code>
+      exists in this tenant.
+    </p>
+    <p class="text-xs opacity-60">
+      The record may have aged out of the retention window, the id may belong to
+      another tenant (the boundary is opaque), or the feed may be stale — refresh
+      the page to re-subscribe.
+    </p>
+  </div>
+</aside>

@@ -124,7 +124,7 @@ import shlex
 from typing import TYPE_CHECKING, Any
 
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
-from meho_backplane.connectors.holodeck.ops import HolodeckOp
+from meho_backplane.connectors.holodeck.ops import SSH_TRANSPORT_NOTE, HolodeckOp
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.holodeck.connector import HolodeckConnector
@@ -825,16 +825,12 @@ _EMPTY_PARAMS: dict[str, Any] = {
 }
 
 
-#: SSH-only / pwsh transport reminder copied verbatim into every op's
-#: ``llm_instructions``. The Initiative #371 body and CLAUDE.md
-#: postulate 5 both require agent-facing descriptions to call out the
-#: PowerShell-over-SSH transport so an LLM doesn't compose against a
-#: non-existent REST surface.
-_SSH_TRANSPORT_NOTE: str = (
-    "Holodeck has no REST API; the underlying transport is "
-    "PowerShell-over-SSH (pwsh -EncodedCommand routed through asyncssh) "
-    "for cmdlet ops, plain SSH for kubectl / shell-pipeline ops."
-)
+#: Module-local alias for the canonical SSH-only/pwsh transport reminder
+#: hoisted onto :mod:`~meho_backplane.connectors.holodeck.ops` by
+#: G3.8-T3 (#855) so the T1 canary op (``holodeck.about``) shares the
+#: same string verbatim with the 7 T2 read ops below. The alias keeps
+#: every existing reference in this file readable without churn.
+_SSH_TRANSPORT_NOTE: str = SSH_TRANSPORT_NOTE
 
 
 READ_OPS: tuple[HolodeckOp, ...] = (

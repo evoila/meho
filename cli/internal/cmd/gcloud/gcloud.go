@@ -450,20 +450,41 @@ func prettyJSON(raw json.RawMessage) (string, error) {
 	return string(out), nil
 }
 
+// errRowsKeyAbsent is returned by decodeRowsResult when the result
+// envelope is a well-formed JSON object that carries no `rows` key at
+// all. This is distinct from an empty list (`{"rows": []}`): an absent
+// key signals a malformed or unexpected envelope, so callers route it
+// to fallbackResultRender (dump the raw shape) rather than rendering a
+// misleading "(0 rows)" line. A sentinel so callers can branch on it
+// via errors.Is if they ever need to.
+var errRowsKeyAbsent = errors.New("rows key absent from result envelope")
+
 // decodeRowsResult decodes the canonical `{"rows": [...], "total": N}`
 // envelope that every set-shaped gcloud read op returns. Returns the
-// row list or an error when the shape doesn't match.
+// row list, or an error when the shape doesn't match.
+//
+// An absent `rows` key is treated as a malformed envelope and reported
+// as errRowsKeyAbsent — distinct from a legitimately-empty list
+// (`{"rows": []}`), which returns an empty slice and a nil error. A
+// JSON null result (or no result at all) is the operation's "nothing to
+// render" case and returns (nil, nil), unchanged from before.
 func decodeRowsResult(raw json.RawMessage) ([]map[string]any, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
-	var envelope struct {
-		Rows []map[string]any `json:"rows"`
-	}
+	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, fmt.Errorf("decode rows envelope: %w", err)
+	}
+	rowsRaw, ok := envelope["rows"]
+	if !ok {
+		return nil, errRowsKeyAbsent
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rowsRaw, &rows); err != nil {
 		return nil, fmt.Errorf("decode rows: %w", err)
 	}
-	return envelope.Rows, nil
+	return rows, nil
 }
 
 // decodeFlatResult decodes a flat-dict result (gcloud.about,

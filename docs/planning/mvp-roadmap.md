@@ -14,12 +14,12 @@ v0.2" framing on the board.
 | Version | MVP | Headline | Status |
 |---|---|---|---|
 | **v0.1** | (pre-MVP) | FastAPI chassis, Keycloak JWT, audit middleware, Helm chart, CI, broadcast SSE feed | **shipped — on `main`** |
-| **v0.2** | **MVP1** | Substrate complete + vSphere (REST + vi-json + composites) + KB | in flight (~19 open tasks) |
-| **v0.2.1** | **MVP1 hardening** | Dogfood corrective — make the shipped v0.2 actually consumer-usable (7 upstream wall signals) | all 8 tasks closed; blocks new v0.3/v0.4 starts until done |
-| **v0.3** | **MVP2** | k8s + Vault + bind9 + topology graph | filed, mostly unstaffed |
-| **v0.4** | **MVP3** | NSX + SDDC + Harbor + agent memory | partially filed |
-| **v0.5** | **MVP4** | VCF mgmt plane + broadcast *complete* (live SSE + historical query) | partially filed |
-| **v0.6** | **MVP5** | pfSense + gcloud + Hetzner Robot + tenant conventions | partially filed |
+| **v0.2** | **MVP1** | Substrate complete + vSphere (REST + vi-json + composites) + KB | **shipped — tag `v0.2.0` (2026-05-16)** |
+| **v0.2.1** | **MVP1 hardening** | Dogfood corrective — make the shipped v0.2 actually consumer-usable (7 upstream wall signals) | **shipped — tag `v0.2.1`** |
+| **v0.3** | **MVP2** | k8s + Vault + bind9 + topology graph | **shipped — tag `v0.3.1` (2026-05-21)**; connectors at State 1, execution gated by [#944](https://github.com/evoila/meho/issues/944) — see overlay |
+| **v0.4** | **MVP3** | NSX + SDDC + Harbor + agent memory | **shipped — folded into `v0.5.0` (no own tag cut)**; connectors at State 1 |
+| **v0.5** | **MVP4** | VCF mgmt plane + broadcast *complete* (live SSE + historical query) | **shipped — tag `v0.5.1` (2026-05-22)**; connectors at State 1, execution gated by [#944](https://github.com/evoila/meho/issues/944) |
+| **v0.6** | **MVP5** | pfSense + gcloud + Hetzner Robot + tenant conventions | **◀ next to ship** — in flight ([G7 conventions #229](https://github.com/evoila/meho/issues/229) open) |
 | **v0.7** | **MVP6** | **Agent runtime — floor** (G11.1 runtime + G11.2 identity/RBAC/approval + G11.3 scheduler) | filed (17 tasks); unstaffed |
 | **v0.8** | **MVP7** | **Agent runtime — hardening** (G11.4 sanitization + G11.5 providers/budgets + G11.6 reference patterns) | initiatives filed; child tasks unfiled |
 | **v0.9** | **MVP8** | Operator web UI (broadcast / KB / connectors / memory / topology) + topology time-travel | filed |

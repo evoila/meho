@@ -132,15 +132,16 @@ class ProbeResult(BaseModel):
 class ResultHandle(BaseModel):
     """Reference to a set-shaped payload stored out-of-band (MinIO / S3 / …).
 
-    JSONFlux contract per v0.1-spec L294-311. The v0.2 default reducer
-    (:class:`~meho_backplane.operations.reducer.PassThroughReducer`) **never**
-    produces a handle — the field on :class:`OperationResult` stays ``None``
-    on every successful dispatch in v0.2. Real reduction lands in a separate
-    Initiative once the first generic-ingested connectors produce real
-    response payloads to calibrate against; that work populates the handle
-    on >50-row / >4 KB set-shaped responses, stores the full payload in an
-    addressable backing store (MinIO/S3/Valkey), and ships the
-    ``result_query`` / ``result_aggregate`` meta-tools that read it back.
+    JSONFlux contract per v0.1-spec L294-311. The dispatcher's default
+    reducer
+    (:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
+    installed via ``set_default_reducer``) populates this handle for
+    set-shaped responses above its threshold (>50 rows / >4 KB); smaller /
+    scalar payloads pass through and the field on :class:`OperationResult`
+    stays ``None``. The materialized payload is held in DuckDB (in-memory)
+    for v0.2; an addressable spill backing store (MinIO/S3/Valkey) and the
+    ``result_query`` / ``result_aggregate`` read-back meta-tools are a later
+    Initiative.
 
     ``schema_`` (trailing underscore) is the JSON Schema of the underlying
     payload — the trailing underscore avoids collision with Pydantic's own

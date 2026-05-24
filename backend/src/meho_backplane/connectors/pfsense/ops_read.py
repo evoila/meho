@@ -38,12 +38,12 @@ Setting handle creation here would couple every connector to the
 reducer's calibration threshold and bypass the reducer's
 audit / TTL / store-routing logic.
 
-The handler ships ``rows`` + ``total`` so a future JSONFlux reducer
-can pull both signals (inlined sample size + total) to drive its
-threshold check, exactly as the bind9 sibling does. No handle exists
-today — the current
-:class:`~meho_backplane.operations.reducer.PassThroughReducer` always
-returns the inline payload unchanged.
+The handler ships ``rows`` + ``total`` so the dispatcher's default
+reducer can pull both signals (inlined sample size + total) to drive its
+threshold check, exactly as the bind9 sibling does. The default
+:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+wraps the payload in a ``ResultHandle`` once the set exceeds its
+threshold; smaller payloads pass through unchanged.
 
 References
 ----------
@@ -533,11 +533,12 @@ async def pfsense_firewall_state(
 
     Op-id: ``pfsense.firewall.state``. Active connection state tables
     on busy firewalls can contain thousands of rows; this handler ships
-    the full parsed list plus a ``total`` count so a future JSONFlux
-    reducer can spill out-of-band when the row count exceeds its
-    threshold (key ``pfsense_firewall_state``). Today's
-    :class:`~meho_backplane.operations.reducer.PassThroughReducer` always
-    returns the inline payload unchanged.
+    the full parsed list plus a ``total`` count so the dispatcher's
+    default reducer can spill out-of-band when the row count exceeds its
+    threshold (key ``pfsense_firewall_state``). The default
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    wraps large state tables in a ``ResultHandle``; smaller payloads pass
+    through unchanged.
     """
     del params  # declared empty; intentionally ignored
     proc = await self._run_command(target, "pfctl -ss", raw_jwt="")

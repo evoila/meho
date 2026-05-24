@@ -2018,19 +2018,30 @@ _DIFF_TRUNCATION_HINT: Final[str] = (
 # Ordering: the outer ``ORDER BY valid_from ASC, history_id ASC`` is
 # what the fold sees, so the "first vs last in-window row" rule falls
 # out of a single left-to-right pass per resource.
-_DIFF_SQL_TEMPLATE = """
+#
+# Each side is a separate **fully-literal** ``text("...")`` -- the node
+# and edge statements differ only in the history table and the
+# resource-id column, but they are written out verbatim rather than
+# built from a shared ``.format()`` template so nothing is interpolated
+# into the SQL string. That keeps the convention this module documents
+# (see the module docstring) and keeps the SAST gate happy: a templated
+# ``text(template.format(...))`` reads as a SQL-injection sink to
+# ``avoid-sqlalchemy-text`` even when every substitution is a trusted
+# module constant, whereas a literal ``text("...")`` does not.
+_DIFF_NODE_SQL = text(
+    """
     WITH windowed AS (
         SELECT
             h.history_id    AS history_id,
-            h.{resource_col} AS resource_id,
+            h.node_id       AS resource_id,
             h.change_kind   AS change_kind,
             h.snapshot      AS snapshot,
             h.valid_from    AS valid_from,
             COALESCE(
-                CAST(h.{resource_col} AS TEXT),
+                CAST(h.node_id AS TEXT),
                 'h:' || CAST(h.history_id AS TEXT)
             )               AS grp_key
-        FROM {history_table} h
+        FROM graph_node_history h
         WHERE h.tenant_id = :tenant_id
           AND h.valid_from > :ts1
           AND h.valid_from <= :ts2
@@ -2064,32 +2075,68 @@ _DIFF_SQL_TEMPLATE = """
     FROM ranked r
     WHERE r.grp_rank <= :resource_cap
     ORDER BY r.valid_from ASC, r.history_id ASC
-"""
-
-
-def _diff_sql(*, history_table: str, resource_col: str) -> Any:
-    """Build a per-side diff statement from :data:`_DIFF_SQL_TEMPLATE`.
-
-    Node and edge sides differ only in the history table and the
-    resource-id column; everything else (the distinct-resource SQL
-    bound, the fold-friendly ordering) is shared.
     """
-    return text(
-        _DIFF_SQL_TEMPLATE.format(
-            history_table=history_table,
-            resource_col=resource_col,
-        )
-    ).bindparams(
-        bindparam("tenant_id", type_=SAUuid()),
-        bindparam("ts1", type_=DateTime(timezone=True)),
-        bindparam("ts2", type_=DateTime(timezone=True)),
-        bindparam("resource_cap"),
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("ts1", type_=DateTime(timezone=True)),
+    bindparam("ts2", type_=DateTime(timezone=True)),
+    bindparam("resource_cap"),
+)
+
+_DIFF_EDGE_SQL = text(
+    """
+    WITH windowed AS (
+        SELECT
+            h.history_id    AS history_id,
+            h.edge_id       AS resource_id,
+            h.change_kind   AS change_kind,
+            h.snapshot      AS snapshot,
+            h.valid_from    AS valid_from,
+            COALESCE(
+                CAST(h.edge_id AS TEXT),
+                'h:' || CAST(h.history_id AS TEXT)
+            )               AS grp_key
+        FROM graph_edge_history h
+        WHERE h.tenant_id = :tenant_id
+          AND h.valid_from > :ts1
+          AND h.valid_from <= :ts2
+    ),
+    grouped AS (
+        SELECT
+            w.*,
+            MIN(w.valid_from) OVER (PARTITION BY w.grp_key)
+                AS grp_first_valid_from,
+            FIRST_VALUE(w.history_id) OVER (
+                PARTITION BY w.grp_key
+                ORDER BY w.valid_from ASC, w.history_id ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            )               AS grp_first_history_id
+        FROM windowed w
+    ),
+    ranked AS (
+        SELECT
+            g.*,
+            DENSE_RANK() OVER (
+                ORDER BY g.grp_first_valid_from ASC, g.grp_first_history_id ASC
+            )               AS grp_rank
+        FROM grouped g
     )
-
-
-_DIFF_NODE_SQL = _diff_sql(history_table="graph_node_history", resource_col="node_id")
-
-_DIFF_EDGE_SQL = _diff_sql(history_table="graph_edge_history", resource_col="edge_id")
+    SELECT
+        r.history_id    AS history_id,
+        r.resource_id   AS resource_id,
+        r.change_kind   AS change_kind,
+        r.snapshot      AS snapshot,
+        r.valid_from    AS valid_from
+    FROM ranked r
+    WHERE r.grp_rank <= :resource_cap
+    ORDER BY r.valid_from ASC, r.history_id ASC
+    """
+).bindparams(
+    bindparam("tenant_id", type_=SAUuid()),
+    bindparam("ts1", type_=DateTime(timezone=True)),
+    bindparam("ts2", type_=DateTime(timezone=True)),
+    bindparam("resource_cap"),
+)
 
 
 def _deserialise_snapshot(snapshot_raw: Any) -> dict[str, Any] | None:

@@ -58,6 +58,7 @@ from meho_backplane.api.v1.broadcast_overrides import (
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
+from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
@@ -550,6 +551,19 @@ app.include_router(api_v1_audit_router)
 # boundaries. Every mutation writes an audit row and broadcasts
 # under op_class=write.
 app.include_router(api_v1_broadcast_overrides_router)
+# G7.1-T2 (#314) -- tenant-conventions CRUD + history (list / show /
+# create / update / delete / history). Reads gated to operator+;
+# writes gated to tenant_admin. Tenant-scoped via the JWT's
+# tenant_id claim; cross-tenant probes return 404. Every write
+# inserts both a convention mutation and a
+# ``tenant_convention_history`` row in the same transaction, with
+# the history row's ``audit_id`` soft-FK referencing the chassis
+# audit row via the ``preallocated_audit_id`` contextvar this Task
+# adds to the AuditMiddleware. POST/PATCH on a single
+# ``operational`` body exceeding the preamble budget surface 422
+# at write time per the "kubectl apply --dry-run=server"
+# discipline.
+app.include_router(api_v1_conventions_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

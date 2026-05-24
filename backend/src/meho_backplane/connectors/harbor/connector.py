@@ -388,6 +388,7 @@ class HarborConnector(HttpConnector):
 
     async def robot_create(
         self,
+        operator: Operator,
         target: HarborTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -406,8 +407,22 @@ class HarborConnector(HttpConnector):
         Harbor v2 robot API (``POST /api/v2.0/robots`` with ``level=project``).
         System-level access (omit ``level`` + ``namespace``) is out of scope.
 
+        The dispatched ``operator`` is forwarded to :meth:`_post_json`
+        (and onward to :meth:`auth_headers` → :meth:`_load_credentials`)
+        so the live default loader reads the per-target service-account
+        credential under the operator's identity (the operator-context
+        Vault read, G3.10). The dispatcher threads ``operator`` by
+        parameter name — see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`. The
+        operator's JWT authenticates the credential read, not the Harbor
+        request itself.
+
         Parameters
         ----------
+        operator
+            Request-scoped operator dispatched into the handler. Its
+            validated JWT authenticates the per-target Vault credential
+            read.
         target
             Resolved Harbor target (must satisfy :class:`HarborTargetLike`).
         params
@@ -449,9 +464,7 @@ class HarborConnector(HttpConnector):
             ],
         }
         path = "/api/v2.0/robots"
-        result = await self._post_json(
-            target, path, operator=synthesise_system_operator(), json=body
-        )
+        result = await self._post_json(target, path, operator=operator, json=body)
         return {
             "id": result["id"],
             "name": result["name"],
@@ -460,6 +473,7 @@ class HarborConnector(HttpConnector):
 
     async def robot_delete(
         self,
+        operator: Operator,
         target: HarborTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -474,8 +488,19 @@ class HarborConnector(HttpConnector):
         ``_delete_json`` helper exists on the base class). Permanent
         removal — irreversible.
 
+        The dispatched ``operator`` is forwarded to :meth:`auth_headers`
+        (and onward to :meth:`_load_credentials`) so the live default
+        loader reads the per-target service-account credential under the
+        operator's identity (the operator-context Vault read, G3.10). The
+        dispatcher threads ``operator`` by parameter name — see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`.
+
         Parameters
         ----------
+        operator
+            Request-scoped operator dispatched into the handler. Its
+            validated JWT authenticates the per-target Vault credential
+            read.
         target
             Resolved Harbor target.
         params
@@ -498,7 +523,7 @@ class HarborConnector(HttpConnector):
 
         path = f"/api/v2.0/robots/{robot_id}"
         client = await self._http_client(target)
-        headers = await self.auth_headers(target, synthesise_system_operator())
+        headers = await self.auth_headers(target, operator)
         resp = await client.request("DELETE", path, headers=headers)
         resp.raise_for_status()
         return {"id": robot_id, "deleted": True}

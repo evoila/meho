@@ -122,14 +122,22 @@ This differs from the SDDC Manager / NSX precedents that delegate to
 checks and covers subsystem state (DB, redis, registry, jobservice) that
 `systeminfo` does not expose.
 
-### robot_create(target, params)
+### robot_create(operator, target, params)
 
 Typed op handler for `harbor.robot.create`. Classified `credential_mint` by
 `classify_op` in `broadcast/events.py` — the broadcast collapses to aggregate-only
 so the minted secret never appears in the SSE stream.
 
+The signature carries `operator: Operator` so `dispatch_typed`
+(`operations/_branches.py`, name-keyed operator threading) passes the
+dispatched operator into the handler. The operator is forwarded to `_post_json`
+→ `auth_headers` → `_load_credentials` so the per-target service-account
+credential is read under the operator's identity (the operator-context Vault
+read, #984). The operator's JWT authenticates the credential read, not the
+Harbor request itself.
+
 1. Validates `name`, `project`, `duration` from `params`.
-2. Calls `_post_json(target, "/api/v2.0/projects/{project}/robots", json=body)`.
+2. Calls `_post_json(target, "/api/v2.0/robots", operator=operator, json=body)`.
    Non-retried — Harbor's create endpoint is non-idempotent.
 3. Returns `{id, name, secret}` extracted from Harbor's 201 response.
    The `secret` is the minted credential, returned only on creation.
@@ -137,14 +145,19 @@ so the minted secret never appears in the SSE stream.
 The `permissions` body grants push + pull access on the named project
 (`level="project"`). System-level robot creation is out of scope for this Task.
 
-### robot_delete(target, params)
+### robot_delete(operator, target, params)
 
 Typed op handler for `harbor.robot.delete`. Classified `write` (suffix-based).
 No secret material in the response.
 
+Like `robot_create`, the signature carries `operator: Operator` so the
+dispatched operator threads in and is forwarded to `auth_headers` →
+`_load_credentials` for the operator-context Vault read (#984).
+
 1. Validates `project`, `id` from `params`.
-2. Acquires the pooled httpx client via `_http_client(target)` and calls
-   `client.request("DELETE", "/api/v2.0/projects/{project}/robots/{id}", headers=auth_headers)`.
+2. Acquires the pooled httpx client via `_http_client(target)`, computes the
+   Basic-auth header with `auth_headers(target, operator)`, and calls
+   `client.request("DELETE", "/api/v2.0/robots/{id}", headers=auth_headers)`.
    Direct client call (no `_delete_json` helper on `HttpConnector`) — non-retried.
 3. Calls `resp.raise_for_status()` — propagates `httpx.HTTPStatusError` on 4xx/5xx.
 4. Returns `{id, deleted: True}` (Harbor returns HTTP 200 with empty body;
@@ -210,9 +223,13 @@ acceptance fixtures and unit tests assert this invariant explicitly.
 
 ## Known issues
 
-- `load_credentials_from_vault` is a `NotImplementedError` stub until G0.3
-  (#224) lands the operator-context Vault read path. Tests inject a custom
-  loader.
+- `load_credentials_from_vault` performs the live operator-context Vault
+  read (G3.10-T1 #945) via the shared `load_basic_credentials` helper; all
+  ops — read core (#945) and the robot lifecycle write ops (#984) — read the
+  per-target service-account credential under the dispatched operator's
+  identity. Tests can still inject a custom loader, but the robot-op suite
+  exercises the live read against the in-process Vault fake rather than a
+  masking stub.
 - `harbor.robot.create` grants push + pull access on the named project only.
   System-level robot creation (`POST /api/v2.0/robots`) is out of scope for this Task.
 - Robot secret rotation / refresh is out of scope — tracked as a follow-up.

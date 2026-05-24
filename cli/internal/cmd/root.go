@@ -22,6 +22,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/gcloud"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
 	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
+	"github.com/evoila/meho/cli/internal/cmd/holodeck"
 	"github.com/evoila/meho/cli/internal/cmd/k8s"
 	"github.com/evoila/meho/cli/internal/cmd/kb"
 	"github.com/evoila/meho/cli/internal/cmd/memory"
@@ -345,6 +346,29 @@ func newRootCmd() *cobra.Command {
 	// Registered before registerDynamicSubcommands so the backplane manifest
 	// cannot shadow the built-in `hetzner-robot` parent.
 	root.AddCommand(hetznerrobot.NewRootCmd())
+
+	// G3.8-T3 (#855) -- holodeck-ssh-9.0 operator alias verbs for
+	// Initiative #371 (G3.8 Holodeck typed-SSH connector — closes the G3
+	// wrapper-retirement story per Goal #214). The verb tree pre-bakes
+	// connector_id="holodeck-ssh-9.0" on top of the existing
+	// /api/v1/operations/call dispatcher route so operators don't type
+	// the connector ID on every invocation. Ships the 8 read-only ops
+	// (about, config show, pod list/info, service list, k8s exec
+	// (read-only), logs tail, networking show) registered by G3.8-T1/T2
+	// (#853/#854). `meho holodeck pod list --target holorouter` replaces
+	// the consumer's `holodeck.sh --target holorouter 'pwsh -c
+	// "Get-HoloDeckPod | Format-Table"'` invocation 1:1. The sister
+	// `clone-holodeck-instance.sh` wrapper (multi-step nested-lab
+	// bring-up) stays in the wrapper for v0.2 and surfaces as a Runbook
+	// in a future Goal G11 per docs/cross-repo/holodeck-onboarding.md.
+	// IMPORTANT: the holodeck.k8s.exec CLI verb forwards the
+	// operator-supplied kubectl command verbatim; the read-only safelist
+	// + shell-metacharacter guard live on the backend handler
+	// (parse_kubectl_command). Duplicating the gate client-side would
+	// risk drift with the authoritative backend gate.
+	// Registered before registerDynamicSubcommands so the backplane
+	// manifest cannot shadow the built-in `holodeck` parent.
+	root.AddCommand(holodeck.NewRootCmd())
 
 	// G3.6-T12 (#840) -- vcfa-rest-9.0 operator alias verbs for
 	// Initiative #369. The verb tree pre-bakes connector_id=

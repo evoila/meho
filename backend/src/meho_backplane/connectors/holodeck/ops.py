@@ -25,7 +25,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-__all__ = ["HOLODECK_OPS", "HolodeckOp", "_holodeck_ops"]
+__all__ = ["HOLODECK_OPS", "SSH_TRANSPORT_NOTE", "HolodeckOp", "_holodeck_ops"]
+
+
+#: Canonical SSH-only/pwsh transport reminder copied verbatim into every
+#: op's ``llm_instructions``. The Initiative #371 body and CLAUDE.md
+#: postulate 5 both require agent-facing descriptions to call out the
+#: PowerShell-over-SSH transport so an LLM doesn't compose against a
+#: non-existent REST surface. G3.8-T3 (#855) hoisted this constant from
+#: ``ops_read.py`` into ``ops.py`` so the T1 canary op (``holodeck.about``,
+#: defined here) can share it verbatim with the 7 T2 read ops -- the MCP
+#: review acceptance criterion on #855 calls for the same wording across
+#: all 8 ops, and one shared constant is the cleanest way to keep that
+#: true forever (a future op author can't accidentally drift).
+SSH_TRANSPORT_NOTE: str = (
+    "Holodeck has no REST API; the underlying transport is "
+    "PowerShell-over-SSH (pwsh -EncodedCommand routed through asyncssh) "
+    "for cmdlet ops, plain SSH for kubectl / shell-pipeline ops."
+)
 
 
 @dataclass(frozen=True)
@@ -102,9 +119,7 @@ _HOLODECK_ABOUT_OP = HolodeckOp(
             "Call when the operator wants to identify the Holodeck "
             "appliance behind a target before issuing higher-level "
             "pod / service / log ops, or when the agent needs to "
-            "confirm the appliance is reachable via SSH + pwsh. "
-            "Holodeck has no REST surface; this op and the other "
-            "Holodeck ops are reached through PowerShell-over-SSH."
+            "confirm the appliance is reachable via SSH + pwsh. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {},
         "output_shape": (

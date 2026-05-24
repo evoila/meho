@@ -58,7 +58,11 @@ from meho_backplane.db.models import (
     Tenant,
 )
 from meho_backplane.settings import get_settings
-from meho_backplane.topology.query import query_diff
+from meho_backplane.topology.query import (
+    _DIFF_FETCH_RESOURCE_CAP,
+    _DIFF_NODE_SQL,
+    query_diff,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -629,6 +633,51 @@ async def test_under_cap_returns_not_truncated(session: AsyncSession) -> None:
     assert result.truncated is False
     assert result.truncation_hint is None
     assert len(result.entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_diff_sql_bounds_fetch_at_resource_cap(session: AsyncSession) -> None:
+    """The diff statement caps the fetch at the SQL layer, not after fetchall (#987).
+
+    Seeds well over the per-side fetch ceiling of distinct resources,
+    then executes ``_DIFF_NODE_SQL`` with the production ``resource_cap``
+    bind and asserts the statement returns rows for at most
+    ``_DIFF_FETCH_RESOURCE_CAP`` distinct resources -- proving a wide
+    window over a churning tenant never materialises the whole history
+    slice in memory. The +50 slack guarantees the bound is the SQL's
+    doing, not the seed count.
+    """
+    tenant_id = await _seed_tenant(session)
+    base = datetime(2026, 5, 22, 9, 0, 0, tzinfo=UTC)
+    seeded = _DIFF_FETCH_RESOURCE_CAP + 50
+    for i in range(seeded):
+        node_id = await _seed_node(session, tenant_id, name=f"vm-{i:05d}")
+        await _seed_node_history(
+            session,
+            tenant_id=tenant_id,
+            node_id=node_id,
+            valid_from=base + timedelta(seconds=i + 1),
+            change_kind=GraphHistoryChangeKind.CREATED,
+            before=None,
+            after=_node_snapshot(name=f"vm-{i:05d}"),
+        )
+    await session.commit()
+
+    result = await session.execute(
+        _DIFF_NODE_SQL,
+        {
+            "tenant_id": tenant_id,
+            "ts1": base,
+            "ts2": base + timedelta(seconds=seeded + 10),
+            "resource_cap": _DIFF_FETCH_RESOURCE_CAP,
+        },
+    )
+    rows = result.fetchall()
+    distinct_resources = {row._mapping["resource_id"] for row in rows}
+    # Each resource here has exactly one in-window row, so the row count
+    # equals the distinct-resource count; both are bounded by the cap.
+    assert len(distinct_resources) == _DIFF_FETCH_RESOURCE_CAP
+    assert len(rows) == _DIFF_FETCH_RESOURCE_CAP
 
 
 # ---------------------------------------------------------------------------

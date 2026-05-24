@@ -846,6 +846,33 @@ verbatim; the substrate is authoritative. The cap exists because a
 hostile / wide time window over a churning tenant could otherwise
 return tens of thousands of resources.
 
+**SQL-layer fetch bound (#987).** The cap is enforced twice: once at
+the SQL layer to bound *memory*, once in the Python fold to compute
+the net delta. The diff statements (`_DIFF_NODE_SQL` /
+`_DIFF_EDGE_SQL`) wrap the in-window scan in a `DENSE_RANK` window
+that ranks resources by first in-window appearance and keep only the
+first `_DIFF_FETCH_RESOURCE_CAP = _DIFF_HARD_CAP + 1` distinct
+resources' **complete** row groups (`WHERE grp_rank <= :resource_cap`).
+Without this, `fetchall` materialised every in-window row for a wide
+window before the Python cap fired -- a memory blow-up (the same risk
+the list verbs avoid with `_MAX_EDGE_LIMIT` / `_MAX_NODE_LIMIT`). The
+bound is on **distinct resources**, not raw rows, because (a) one
+resource can carry many history rows -- a raw `LIMIT` could split a
+resource's group mid-fold and corrupt that entry, and (b) the cap
+counts post-fold entries (one per resource), so a raw row `LIMIT`
+could undercount and never trip `truncated`. The resource key is
+`resource_id` when present, else the row's own `history_id`, so a
+hard-deleted tombstone (`resource_id IS NULL`) counts as its own
+group; the create-then-delete rejoin via the recovered id still
+happens Python-side after fetch. The `+ 1` lets the fold see one
+resource past the cap and set `truncated` with the same outcome as the
+old unbounded fetch for the unfiltered cohort. Under `changed_only` /
+`kind_filter` -- which drop entries *after* the fetch -- an
+adversarially wide window can report `truncated=False` where the
+unbounded fetch would have surfaced a later surviving resource; this
+is an accepted, bounded tradeoff (the route layer caps tighter
+separately and the unfiltered cohort stays exact).
+
 Surfaces:
 
 * `meho topology diff <ts1> <ts2> [--kind ...] [--changed-only] [--json]`

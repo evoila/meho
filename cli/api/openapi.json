@@ -4512,8 +4512,54 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast Feed",
-        "description": "Render ``GET /ui/broadcast`` for the authenticated operator.\n\nThe page subscribes to ``/ui/broadcast/stream`` (the session-gated\nSSE bridge), so the operator sees their tenant's live events with\nno further auth round-trip. The CSRF cookie is set + echoed via the\ntemplate's ``hx-headers`` so any future state-changing HTMX request\nfrom this surface (T2's filters submit via ``hx-get``, which is\nsafe, but the chain is in place for any later mutation) passes the\ndouble-submit check -- mirroring the dashboard + topology surfaces.",
+        "description": "``GET /ui/broadcast[?op_class=&principal=&target=&op_id=]``.\n\nFilters are accepted on the full-page route too so a copy-pasted\nfiltered URL reproduces the operator's view (the filter bar sets\n``hx-push-url`` on the fragment route, mirroring topology).",
         "operationId": "ui_broadcast_feed_ui_broadcast_get",
+        "parameters": [
+          {
+            "name": "op_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "default": "",
+              "title": "Op Class"
+            }
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Principal"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Op Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -4521,6 +4567,94 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/broadcast/feed": {
+      "get": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast Feed Fragment",
+        "description": "``GET /ui/broadcast/feed[?op_class=&principal=&target=&op_id=]``.\n\nThe filter-bar submit target. Returns the feed fragment with the\nfiltered ``sse-connect`` URL embedded.",
+        "operationId": "ui_broadcast_feed_fragment_ui_broadcast_feed_get",
+        "parameters": [
+          {
+            "name": "op_class",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "default": "",
+              "title": "Op Class"
+            }
+          },
+          {
+            "name": "principal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Principal"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Target"
+            }
+          },
+          {
+            "name": "op_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Op Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -4586,6 +4720,69 @@
         "responses": {
           "200": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/broadcast/event/{audit_id}": {
+      "get": {
+        "tags": [
+          "ui-broadcast"
+        ],
+        "summary": "Ui Broadcast Event Detail",
+        "description": "``GET /ui/broadcast/event/{audit_id}[?event_id=...]``.\n\nResolves the audit row tenant-scoped, classifies its op for the\naggregate-only gate, and renders ``broadcast/_event_drawer.html``\nwith the full detail (or the \ud83d\udd12 placeholder for sensitive\nclasses). A missing / cross-tenant id renders the not-found\nfragment with HTTP 404.",
+        "operationId": "ui_broadcast_event_detail_ui_broadcast_event__audit_id__get",
+        "parameters": [
+          {
+            "name": "audit_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Audit Id"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "Broadcast (Valkey-stream) event id, for display only.",
+              "default": "",
+              "title": "Event Id"
+            },
+            "description": "Broadcast (Valkey-stream) event id, for display only."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Audit id does not exist in this tenant (or exists only for another tenant). Returns the not-found drawer fragment.",
+            "content": {
+              "text/html": {}
+            }
           },
           "422": {
             "description": "Validation Error",

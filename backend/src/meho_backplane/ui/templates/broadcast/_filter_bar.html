@@ -1,0 +1,128 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Broadcast filter bar (Task #868 work item #3). Four controls:
+
+    * op_class  -- <select>, the closed sensitivity vocabulary + "All".
+    * principal -- free-text, exact-match on the event ``principal_sub``.
+    * target    -- <select> of the tenant's target names (G0.3 registry).
+    * op_id     -- free-text substring search.
+
+  Server-side vs client-side
+  --------------------------
+  op_class / principal / target are the three filters the stream bridge
+  (and ``/api/v1/feed``) support. They ``hx-get`` to ``/ui/broadcast/feed``
+  and swap the ``#broadcast-feed`` fragment so the re-rendered fragment's
+  ``sse-connect`` URL carries them server-side -- the server drops
+  non-matching events before they reach the browser.
+
+  op_id has no stream parameter (layering it on would diverge the bridge
+  from ``/api/v1/feed``), so it narrows the already-streamed events
+  CLIENT-side. The op_id input lives OUTSIDE the swapped ``#broadcast-feed``
+  fragment, so the input ELEMENT (and the operator's typed value) survives
+  a server-side filter re-render. The ACTIVE filtering, though, lives in
+  the ``broadcastFeed`` controller INSIDE the swapped fragment: a server
+  re-render re-mounts that controller with a fresh, empty ``opIdFilter``
+  (op_id is excluded from ``hx-include`` below, so the server fragment
+  route never receives it and seeds the controller empty). The controller
+  closes that gap in its ``init`` -- on every mount, including each swap,
+  it re-reads this input's value as the single source of truth, so the
+  client-side narrowing keeps applying after a server re-render. On each
+  keystroke the input also dispatches a ``broadcast-op-id-changed`` event
+  on ``window`` that the controller listens for
+  (``x-on:broadcast-op-id-changed.window``) and re-applies live -- without
+  tearing down the SSE subscription.
+
+  The form deliberately does NOT include the op_id field in its
+  ``hx-include`` (``hx-include="[name=op_class],[name=principal],[name=target]"``)
+  so an op_class/principal/target change never carries op_id to the
+  server (it is not a server filter); op_id rides the page URL only via
+  the controller, not the fragment route.
+-#}
+<form
+  class="card bg-base-100 border-base-300 border shadow-sm"
+  hx-get="/ui/broadcast/feed"
+  hx-target="#broadcast-feed"
+  hx-swap="outerHTML"
+  hx-trigger="change from:find select, input changed delay:300ms from:find input[name=principal]"
+  hx-include="[name=op_class], [name=principal], [name=target]"
+  hx-push-url="true"
+  role="search"
+  aria-label="Filter broadcast events"
+  onsubmit="return false;"
+>
+  <div class="card-body grid gap-3 md:grid-cols-4">
+    {# ---------- op_class ---------- #}
+    <label class="form-control">
+      <span class="label-text">Op class</span>
+      <select
+        name="op_class"
+        class="select select-bordered select-sm"
+        aria-label="Filter events by op class"
+      >
+        <option value="" {% if not op_class_filter %}selected{% endif %}>All</option>
+        {% for option in op_class_options %}
+          <option value="{{ option }}" {% if option == op_class_filter %}selected{% endif %}>
+            {{ option }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    {# ---------- principal ---------- #}
+    <label class="form-control">
+      <span class="label-text">Principal</span>
+      <input
+        type="search"
+        name="principal"
+        value="{{ principal_filter }}"
+        placeholder="Exact sub match"
+        class="input input-bordered input-sm"
+        aria-label="Filter events by principal sub"
+      />
+    </label>
+
+    {# ---------- target ---------- #}
+    <label class="form-control">
+      <span class="label-text">Target</span>
+      <select
+        name="target"
+        class="select select-bordered select-sm"
+        aria-label="Filter events by target"
+      >
+        <option value="" {% if not target_filter %}selected{% endif %}>All targets</option>
+        {% for option in target_options %}
+          <option value="{{ option }}" {% if option == target_filter %}selected{% endif %}>
+            {{ option }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    {# ---------- op_id (client-side) ----------
+       Not in the form's ``hx-include`` -- it narrows the streamed events
+       in-browser. Each keystroke dispatches a window event the feed
+       controller re-applies. ``x-data`` here is a tiny standalone island
+       (the feed controller lives in the swapped fragment) whose only job
+       is to debounce-emit the op_id. -#}
+    <label
+      class="form-control"
+      x-data="{ opId: {{ op_id_filter | tojson }} }"
+    >
+      <span class="label-text">Operation id</span>
+      <input
+        type="search"
+        name="op_id"
+        x-model="opId"
+        value="{{ op_id_filter }}"
+        placeholder="Substring match"
+        class="input input-bordered input-sm"
+        aria-label="Filter events by operation id substring"
+        x-on:input.debounce.250ms="
+          $dispatch('broadcast-op-id-changed', { opId });
+        "
+      />
+    </label>
+  </div>
+</form>

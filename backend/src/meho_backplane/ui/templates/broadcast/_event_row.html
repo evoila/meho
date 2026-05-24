@@ -2,35 +2,51 @@
   SPDX-License-Identifier: Apache-2.0
   Copyright (c) 2026 evoila Group
 
-  Broadcast event-row partial (Initiative #338 Task #867, work item #2).
+  Broadcast event-row partial (Task #867 work item #2; extended by Task
+  #868 work items #4/#7).
 
   This is the server-authored Jinja2 markup for one feed row. It is
-  emitted inside an Alpine ``<template x-for="ev in events">`` in
-  ``feed.html`` so the column structure, the DaisyUI badge palette, and
-  the aggregate-only placeholder are all authored here (server-side, one
-  reviewable template) while the per-event data binding is Alpine
-  client-side.
+  emitted inside an Alpine ``<template x-for="ev in visibleEvents">`` in
+  ``_feed.html`` so the column structure, the DaisyUI badge palette, the
+  aggregate-only placeholder, and the 🔒 PII marker are all authored here
+  (server-side, one reviewable template) while the per-event data binding
+  is Alpine client-side.
 
   Why client-side data binding: the shared ``/api/v1/feed`` substrate
   (G6.1-T4) streams ``BroadcastEvent`` JSON -- consumed identically by
   ``meho status --watch`` and the MCP resource -- and is out of scope to
-  reshape into per-event HTML frames. The HTMX ``sse`` extension would
-  swap that JSON in as raw text; instead the feed controller parses each
-  frame and this template renders it.
+  reshape into per-event HTML frames.
 
   Columns (reverse-chronological list; newest prepended):
     timestamp · principal@tenant badge · op_id · op_class badge
-    (colour-coded) · result_status icon · target · payload summary
-    (``(aggregate-only)`` when the redacted payload carries no params).
+    (colour-coded) · result_status icon · target · payload summary.
+
+  T2 additions:
+    * Click-to-open drawer (work item #4): a click calls ``openDrawer(ev)``
+      which ``htmx.ajax``-GETs ``/ui/broadcast/event/{audit_id}?event_id=...``
+      into ``#event-drawer``. The row is keyboard-focusable + ``role=button``
+      so the drawer is reachable without a mouse.
+    * PII 🔒 marker (work item #7): aggregate-only events
+      (credential_read / credential_mint / audit_query -- decision #3)
+      render the 🔒 icon and the "(aggregate-only — credential read;
+      details not broadcast)" copy in the payload column instead of any
+      params. ``isAggregateOnly(ev)`` keys off the redacted payload's
+      missing ``params`` (the same signal T1 used) so the marker tracks
+      the publisher's redaction exactly.
 
   Bound fields on ``ev`` (a parsed ``BroadcastEvent``):
-    ev.ts, ev.principal_sub, ev.principal_name, ev.op_id, ev.op_class,
-    ev.result_status, ev.target_name, ev.payload.
+    ev.event_id, ev.audit_id, ev.ts, ev.principal_sub, ev.principal_name,
+    ev.op_id, ev.op_class, ev.result_status, ev.target_name, ev.payload.
 -#}
 <li
-  class="grid grid-cols-12 items-center gap-2 px-3 py-2 text-sm"
-  role="listitem"
+  class="grid grid-cols-12 items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+  role="button"
+  tabindex="0"
   :data-event-id="ev.event_id"
+  :aria-label="'Inspect event ' + ev.op_id"
+  x-on:click="openDrawer(ev)"
+  x-on:keydown.enter="openDrawer(ev)"
+  x-on:keydown.space.prevent="openDrawer(ev)"
 >
   {# ---------- timestamp ---------- #}
   <span class="col-span-2 font-mono text-xs opacity-70">
@@ -80,8 +96,21 @@
     <span x-text="ev.target_name || '—'"></span>
   </span>
 
-  {# ---------- payload summary ---------- #}
-  <span class="col-span-2 truncate text-xs opacity-60" :title="payloadSummary(ev)">
-    <span x-text="payloadSummary(ev)"></span>
+  {# ---------- payload summary / PII marker (work item #7) ----------
+     Aggregate-only events render the 🔒 lock + the placeholder copy; all
+     other events render the one-line param summary. -#}
+  <span class="col-span-2 truncate text-xs">
+    <template x-if="isAggregateOnly(ev)">
+      <span
+        class="flex items-center gap-1 text-warning"
+        title="Credential read — details are not broadcast (decision #3)"
+      >
+        <span aria-hidden="true">&#x1F512;</span>
+        <span class="truncate">(aggregate-only — credential read; details not broadcast)</span>
+      </span>
+    </template>
+    <template x-if="!isAggregateOnly(ev)">
+      <span class="opacity-60" :title="payloadSummary(ev)" x-text="payloadSummary(ev)"></span>
+    </template>
   </span>
 </li>

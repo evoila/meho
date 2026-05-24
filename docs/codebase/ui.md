@@ -362,22 +362,26 @@ content, CSRF rejection on missing/mismatched/forged tokens,
 positive control on matched token, and middleware-order sanity
 (/api/* passes through untouched).
 
-## Broadcast surface (Task #867)
+## Broadcast surface (Tasks #867, #868)
 
 Initiative [#338](https://github.com/evoila/meho/issues/338) (G10.1
 Activity broadcast UI), Task [#867](https://github.com/evoila/meho/issues/867)
 (G10.1-T1) replaces the chassis stub at `/ui/broadcast` with the real
 **live activity feed**: an SSE-streamed, reverse-chronological event
-list with an empty state and a 1000-row in-DOM cap. Filters + the
-event-detail drawer + the PII visualisation are T2 (#868);
-wall-monitor mode + the Last-24h replay tab are T3 (#869).
+list with an empty state and a 1000-row in-DOM cap. Task
+[#868](https://github.com/evoila/meho/issues/868) (G10.1-T2) adds the
+**filter bar** (op_class / principal / target / op_id), the **event
+detail drawer**, and the **PII 🔒 visualisation**. Wall-monitor mode +
+the Last-24h replay tab are T3 (#869).
 
 ### Routes
 
 | Route | Renders |
 | ----- | ------- |
-| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. |
-| `GET /ui/broadcast/stream` | Session-gated SSE bridge (`text/event-stream`). The feed view's `sse-connect` target. |
+| `GET /ui/broadcast` | Full-page live-feed view (`broadcast/feed.html`, extends `base.html`). Sidebar active-state on Broadcast. Accepts `?op_class=&principal=&target=&op_id=` so a copy-pasted filtered URL reproduces the view. |
+| `GET /ui/broadcast/feed` | Filtered feed **fragment** (`broadcast/_feed.html`) — the filter-bar submit target. Re-renders the feed with the active server-side filters baked into a fresh `sse-connect` URL. |
+| `GET /ui/broadcast/stream` | Session-gated SSE bridge (`text/event-stream`). The feed view's `sse-connect` target. Accepts `op_class` / `principal` / `target` filters. |
+| `GET /ui/broadcast/event/{audit_id}` | Event detail drawer **fragment** (`broadcast/_event_drawer.html`; `_event_drawer_not_found.html` + HTTP 404 for a missing / cross-tenant id). |
 
 ### Why a UI-owned SSE bridge instead of subscribing to `/api/v1/feed`
 
@@ -424,9 +428,13 @@ the colour policy stays one auditable map.
 
 | File | Purpose |
 | ---- | ------- |
-| `broadcast/feed.html` | Full-page view: SSE sink wrapper, column header, empty state, the `<template x-for>` + `<script src>` for the controller. |
-| `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Aggregate-only events render `(aggregate-only)`. |
-| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim + the badge/timestamp/payload helpers. |
+| `broadcast/feed.html` | Full-page view: header, filter bar include, feed-fragment include, drawer slot, `<script src>` for the controller. |
+| `broadcast/_filter_bar.html` | The op_class / principal / target / op_id controls. The three server filters `hx-get` to `/ui/broadcast/feed`; op_id dispatches a `broadcast-op-id-changed` window event for the client-side filter. |
+| `broadcast/_feed.html` | The swappable feed fragment: the SSE sink (with the filtered `sse-connect` URL), status bar, column header, empty state, `<template x-for>`. Wraps the `broadcastFeed` Alpine controller so a filter re-render resets the event list and re-subscribes. |
+| `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Click opens the drawer; aggregate-only events render the 🔒 marker + placeholder. |
+| `broadcast/_event_drawer.html` | Event detail drawer: op identity, operation metadata, identifiers (audit_id / request_id / broadcast event_id), full payload (or the 🔒 placeholder for sensitive ops). Alpine `click.outside` / Escape / Close dismiss. |
+| `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap), the `openDrawer` helper, and the badge/timestamp/payload/aggregate-only helpers. |
 
 ### Performance + empty state
 
@@ -437,22 +445,129 @@ the colour policy stays one auditable map.
   filters match nothing): "No activity matching your filters…" (work
   item #8).
 
+### Filters (Task #868, work item #3) — server-side three vs client-side op_id
+
+The filter bar exposes four controls but they split across two layers:
+
+* **op_class / principal / target — server-side.** These are the three
+  filters the stream bridge (and `/api/v1/feed`) accept. The filter bar
+  `hx-get`s `/ui/broadcast/feed` (`hx-include` carries the three values,
+  `hx-target="#broadcast-feed"`, `hx-swap="outerHTML"`,
+  `hx-push-url="true"`). The fragment route embeds them in a fresh
+  `sse-connect="/ui/broadcast/stream?op_class=…&principal=…&target=…"`
+  URL (built by `_stream_url`, `urlencode`-escaped). HTMX
+  auto-processes the swapped fragment, so the `sse` extension tears down
+  the prior subscription (the replaced node) and opens the filtered one
+  — the **server** drops non-matching events before they reach the
+  browser. Empty filters are omitted from the URL so "All" streams
+  everything.
+* **op_id — client-side.** The stream exposes no op_id parameter, and
+  adding one would diverge the bridge from `/api/v1/feed` (out of
+  scope). Instead the op_id input lives **outside** the swapped
+  fragment, so the input **element** (and the operator's typed value)
+  survives a server-filter re-render. The **active filtering**, though,
+  lives in the `broadcastFeed` controller **inside** the swapped
+  fragment: a server-side op_class/principal/target change `hx-get`s the
+  fragment route **without** op_id (it is excluded from `hx-include`),
+  re-mounts the controller, and seeds `opIdFilter` empty — so without
+  more, the op_id filter would silently stop applying after every server
+  re-render even though the input still shows the text. The controller
+  closes that gap in its `init`: on every mount (initial load **and**
+  each swap) it re-reads the live op_id input as the single source of
+  truth, so the client-side narrowing keeps applying. On each debounced
+  keystroke the input also dispatches a `broadcast-op-id-changed` window
+  event the controller listens for
+  (`x-on:broadcast-op-id-changed.window`) and recomputes `visibleEvents`
+  — a case-insensitive substring filter over the already-streamed
+  `events` — without touching the live SSE subscription. The op_id seed
+  is also passed into the controller on render so a copy-pasted
+  `?op_id=` URL narrows the view on first paint (the `init` read then
+  reconciles it with the live input value).
+
+The target dropdown is populated from the `targets` table scoped to the
+session tenant (`feed._target_names`, capped at 500) — a tenant-A
+operator can only filter by tenant-A targets.
+
+### Event detail drawer (Task #868, work item #4) — keyed on audit_id
+
+A feed-row click calls the controller's `openDrawer(ev)`, which
+`htmx.ajax`-GETs the drawer fragment into `#event-drawer`. The path
+parameter is the **audit id**, not the broadcast event id:
+
+* The broadcast `event_id` lives only on the ephemeral, MAXLEN-trimmed
+  Valkey stream — it is not a column on any table.
+* The canonical, queryable record is the `audit_log` row, keyed by
+  `audit_log.id`, which every `BroadcastEvent` carries as `audit_id`.
+  The drawer's full payload + `request_id` exist only there.
+
+So the row builder reads `ev.audit_id` for the path and passes
+`ev.event_id` as the `event_id` query param for display only. The route
+resolves the row tenant-scoped (`audit_log.tenant_id =
+session.tenant_id` as the first `WHERE` predicate; a cross-tenant id is
+an opaque 404) and renders identity + metadata + the three identifiers
+(audit_id / request_id / broadcast event_id). Alpine
+`x-on:click.outside` (+ Escape + Close) dismisses the drawer; Alpine
+only evaluates `.outside` while the element is visible, so the swap-in
+click cannot immediately re-close it.
+
+### PII discipline in the drawer (Task #868, work item #7)
+
+The feed row's 🔒 marker keys off the **redacted** broadcast payload
+(missing `params` ⇒ aggregate-only — the T1 signal). The drawer is the
+sharper case: it reads the **unredacted** `audit_log` payload, so
+rendering it raw for a `credential_read` op would defeat decision #3 on
+click. The drawer therefore reproduces the publisher's verdict:
+
+* When the audit row carries `payload["broadcast_detail_effective"]`
+  (the G6.3 resolver's recorded `"full"` / `"aggregate"` decision —
+  including any per-tenant override), the drawer honours it verbatim.
+* Otherwise it classifies the op via `classify_op` against the op id
+  (recovered from `payload["op_id"]`, falling back to the publisher's
+  own `http.{method}:{path}` heuristic so the class matches) and treats
+  the `credential_read` / `credential_mint` / `audit_query` classes as
+  aggregate-only.
+
+For an aggregate-only verdict the drawer never builds the payload view
+at all — it renders the 🔒 placeholder. For the full-detail path it
+strips the audit-only keys (`op_id`, `op_class`,
+`broadcast_detail_origin`, `broadcast_detail_effective`) before the
+`| tojson` dump so the drawer shows the request params only, never the
+internal forensic metadata (`tenant_rule:<uuid>` origins stay
+audit-side).
+
+### Performance + empty state
+
+* **1000-row cap** — `IN_DOM_ROW_CAP` is passed into the page; the
+  controller `unshift`s each event and trims `events.length` to the cap
+  so a sustained stream keeps the DOM bounded (work item #9).
+* **Empty state** — shown while `visibleEvents` is empty (no events
+  streamed yet, or the op_id client filter narrowed everything out):
+  "No activity matching your filters…" (work item #8).
+
 ### Cross-tenant isolation
 
 The page carries no tenant data beyond the operator's own identity; live
 events arrive over the tenant-scoped bridge whose stream key is
-`meho:feed:{session.tenant_id}`. There is no tenant query parameter on
-the page route or the stream, so a tenant-A operator can never surface
-tenant-B events. The
-[broadcast suite](../../backend/tests/test_ui_broadcast_feed.py) pins
-the generator's stream-key derivation per tenant.
+`meho:feed:{session.tenant_id}`. The target dropdown and the event
+drawer both scope to `session.tenant_id` at the SQL `WHERE` clause —
+never a query parameter — so a tenant-A operator can never surface
+tenant-B targets or audit rows. The
+[T1 broadcast suite](../../backend/tests/test_ui_broadcast_feed.py) pins
+the generator's stream-key derivation per tenant; the
+[T2 filters suite](../../backend/tests/test_ui_broadcast_filters.py)
+pins the dropdown + drawer tenant scoping.
 
 ### Known limits
 
-* **No filters / drawer / wall-monitor yet** — T1 ships the live feed
-  core only. op_class/principal/target/op_id filters + the event-detail
-  drawer + the PII 🔒 viz are T2 (#868); wall-monitor mode (`?wall=1`) +
-  the Last-24h replay tab are T3 (#869).
+* **No wall-monitor / replay tab yet** — T1 + T2 ship the live feed,
+  filters, drawer, and PII viz. Wall-monitor mode (`?wall=1`) + the
+  Last-24h replay tab + long-display session refresh are T3 (#869).
+* **op_id filtering is client-side only** — it narrows the in-DOM
+  `events` (bounded by the 1000-row cap), not the server stream. An op
+  that fired before the operator typed an op_id substring, and has since
+  scrolled past the cap, is not retroactively matched. This is the
+  intended scope (op_id is a live-narrowing convenience, not a history
+  query — that is G8 audit-query territory).
 * **Reconnect replay is exercised at the feed-endpoint layer** — the
   `Last-Event-Id` cursor resolver + validator are reused from
   `/api/v1/feed` (covered by `test_api_v1_feed`); the UI suite asserts

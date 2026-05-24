@@ -169,10 +169,35 @@ def _structural_unwrap(payload: object, *, target_name: str) -> dict[str, object
     return secret_data
 
 
+def _is_api_path_shaped(secret_ref: str) -> bool:
+    """Return ``True`` when *secret_ref* carries a KV-v2 API-path signature.
+
+    ``secret_ref`` must be the *logical* KV-v2 path relative to the mount —
+    hvac's ``read_secret_version`` builds the wire URL as
+    ``/{mount_point}/data/{path}``, inserting the ``/data/`` segment itself
+    (verified against hvac 2.4.0). A value that already embeds the mount or
+    the ``/data/`` API segment (``secret/data/foo``, ``kv/data/foo``,
+    ``data/foo``) therefore double-resolves to ``secret/data/<mount>/data/foo``
+    and 404s.
+
+    The predicate is **specific** to that signature so it never trips on a
+    logical segment legitimately named ``data`` deeper in the path: it
+    matches only when the **first** path segment is ``data`` (``data/foo``)
+    or the **second** is ``data`` (``<mount>/data/foo`` — covers
+    ``secret/data/…`` and ``kv/data/…``). A path like
+    ``targets/data-center-01/host`` (second segment ``data-center-01``) or
+    ``vsphere/vcenter-a`` (second segment ``vcenter-a``) is accepted.
+    """
+    segments = secret_ref.split("/")
+    if segments[0] == "data":
+        return True
+    return len(segments) >= 2 and segments[1] == "data"
+
+
 def _resolve_secret_ref(target: BasicCredentialsTargetLike, operator: Operator) -> str:
     """Validate the pre-read preconditions and return the KV-v2 path.
 
-    Two fail-closed guards, both raising :class:`VaultCredentialsReadError`
+    Three fail-closed guards, all raising :class:`VaultCredentialsReadError`
     *before* Vault is touched:
 
     * empty ``operator.raw_jwt`` — an operator-context read requires an
@@ -181,6 +206,11 @@ def _resolve_secret_ref(target: BasicCredentialsTargetLike, operator: Operator) 
       than silently falling back to a backplane identity (the decision's
       system-call carve-out).
     * unset ``target.secret_ref`` — the target is unconfigured.
+    * API-path-shaped ``secret_ref`` — a value embedding the mount or the
+      ``/data/`` API segment (``secret/data/…``, ``kv/data/…``,
+      ``data/…``). hvac inserts ``/data/`` itself, so such a value
+      silently double-resolves to a 404; we reject it with an actionable
+      error rather than guessing operator intent (no auto-stripping).
 
     Returns the stripped ``secret_ref`` path so trailing whitespace never
     slips into the hvac call.
@@ -196,7 +226,16 @@ def _resolve_secret_ref(target: BasicCredentialsTargetLike, operator: Operator) 
             f"target {target.name!r} has no secret_ref configured; cannot read "
             "its basic credentials from Vault"
         )
-    return target.secret_ref.strip()
+    secret_ref = target.secret_ref.strip()
+    if _is_api_path_shaped(secret_ref):
+        raise VaultCredentialsReadError(
+            f"target {target.name!r} has a KV-v2 API-path-shaped secret_ref "
+            f"{secret_ref!r}; secret_ref must be the logical KV-v2 path relative "
+            "to the mount (e.g. 'targets/<id>'). Drop the 'secret/data/' / "
+            "'kv/data/' / 'data/' prefix — Vault adds the '/data/' segment for "
+            "KV-v2 reads, so a prefixed value double-resolves to a 404."
+        )
+    return secret_ref
 
 
 def _extract_fields(

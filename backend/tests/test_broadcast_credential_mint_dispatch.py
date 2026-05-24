@@ -140,7 +140,7 @@ class _HarborDispatchTarget:
         self.name = "harbor-test-prod"
         self.host = "harbor.test.invalid"
         self.port: int | None = 443
-        self.secret_ref = "kv/data/harbor/harbor-test-prod"
+        self.secret_ref = "harbor/harbor-test-prod"
         self.auth_model: str | None = "shared_service_account"
 
 

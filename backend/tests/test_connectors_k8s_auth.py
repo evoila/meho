@@ -101,13 +101,13 @@ _TARGET_A = _StubTarget(
     name="rke2-meho",
     host="rke2-meho.test.invalid",
     port=6443,
-    secret_ref="kv/data/k8s/rke2-meho",
+    secret_ref="k8s/rke2-meho",
 )
 _TARGET_B = _StubTarget(
     name="rke2-infra",
     host="rke2-infra.test.invalid",
     port=None,
-    secret_ref="kv/data/k8s/rke2-infra",
+    secret_ref="k8s/rke2-infra",
 )
 
 
@@ -612,12 +612,8 @@ async def test_api_client_cache_key_is_secret_ref_not_name() -> None:
     cross-pollinate ApiClients across tenants. ``secret_ref`` is the
     operator's chosen globally-unique Vault path.
     """
-    tenant_a = _StubTarget(
-        name="rke2-meho", host="t-a.test", port=6443, secret_ref="kv/data/tenant-a/k8s"
-    )
-    tenant_b = _StubTarget(
-        name="rke2-meho", host="t-b.test", port=6443, secret_ref="kv/data/tenant-b/k8s"
-    )
+    tenant_a = _StubTarget(name="rke2-meho", host="t-a.test", port=6443, secret_ref="tenant-a/k8s")
+    tenant_b = _StubTarget(name="rke2-meho", host="t-b.test", port=6443, secret_ref="tenant-b/k8s")
 
     async def _loader(target: KubernetesTargetLike, operator: Operator) -> dict[str, Any]:
         del operator

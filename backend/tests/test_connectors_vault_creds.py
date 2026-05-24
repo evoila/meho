@@ -263,6 +263,98 @@ async def test_malformed_payload_raises_helper_error(
 
 
 # ---------------------------------------------------------------------------
+# Fail-closed: API-path-shaped secret_ref (the #989 shape guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_ref",
+    [
+        "secret/data/foo",
+        "kv/data/foo",
+        "data/foo",
+        "secret/data/vsphere/vcenter-a",
+        "kv/data/k8s/rke2-meho",
+        "  kv/data/foo  ",  # rejected after the strip, too
+    ],
+)
+async def test_api_path_shaped_secret_ref_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, bad_ref: str
+) -> None:
+    """A KV-v2 API-path-shaped secret_ref fails closed before the read.
+
+    hvac inserts the ``/data/`` segment itself, so a value embedding the
+    mount or the ``/data/`` API prefix double-resolves to a 404. The guard
+    rejects it with an actionable message naming the target and the fix,
+    before Vault is touched.
+    """
+    fake = install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
+
+    with pytest.raises(VaultCredentialsReadError) as exc:
+        await load_basic_credentials(_Target(secret_ref=bad_ref), _make_operator())
+
+    msg = str(exc.value)
+    assert "API-path-shaped secret_ref" in msg
+    assert "logical KV-v2 path relative" in msg
+    assert "vc-lab-01" in msg  # the target is named
+    # Vault was never reached — the guard runs before login and read.
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
+
+
+@pytest.mark.parametrize(
+    "good_ref",
+    [
+        "targets/data-center-01/host",  # 'data' only as a substring, not a segment
+        "vsphere/vcenter-a",
+        "targets/vc-lab-01",
+        "data-store/primary",  # first segment merely starts with 'data'
+        "k8s/rke2-meho/kubeconfig",
+        "secret-data/foo",  # 'secret-data' is one segment, not 'secret/data'
+    ],
+)
+async def test_logical_secret_ref_with_data_substring_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, good_ref: str
+) -> None:
+    """A logical path containing 'data' as a non-signature segment is accepted.
+
+    The guard is specific to the leading ``data/`` / ``<mount>/data/``
+    signature; ``data`` appearing as a substring or deeper segment must not
+    trip a false positive.
+    """
+    fake = install_fake_client(monkeypatch, secret={"username": "u", "password": "p"})
+
+    creds = await load_basic_credentials(_Target(secret_ref=good_ref), _make_operator())
+
+    assert creds == {"username": "u", "password": "p"}
+    # The read addressed the logical path verbatim (stripped), proving it
+    # passed the shape guard.
+    assert fake.secrets.kv.v2.read_calls[-1]["path"] == good_ref.strip()
+
+
+async def test_api_path_guard_message_carries_no_credential_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape-guard error names only the path/target — never a credential.
+
+    The guard fires before any Vault read, so no secret is even loaded; the
+    message echoes the offending secret_ref path (operator-actionable) but
+    no credential value can appear in it.
+    """
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+
+    with pytest.raises(VaultCredentialsReadError) as exc:
+        await load_basic_credentials(_Target(secret_ref="secret/data/foo"), _make_operator())
+
+    msg = str(exc.value)
+    assert _CANARY_PASSWORD not in msg
+    assert _CANARY_USERNAME not in msg
+
+
+# ---------------------------------------------------------------------------
 # Login-phase errors propagate verbatim
 # ---------------------------------------------------------------------------
 

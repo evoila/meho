@@ -73,13 +73,13 @@ _TARGET_A = _StubTarget(
     name="vrops-a",
     host="vrops-a.test.invalid",
     port=443,
-    secret_ref="kv/data/vcf-operations/vrops-a",
+    secret_ref="vcf-operations/vrops-a",
 )
 _TARGET_B = _StubTarget(
     name="vrops-b",
     host="vrops-b.test.invalid",
     port=443,
-    secret_ref="kv/data/vcf-operations/vrops-b",
+    secret_ref="vcf-operations/vrops-b",
 )
 
 

@@ -524,7 +524,7 @@ async def ingested_harbor_canary(
             host=HARBOR_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
-            secret_ref="kv/data/harbor/harbor-canary",
+            secret_ref="harbor/harbor-canary",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

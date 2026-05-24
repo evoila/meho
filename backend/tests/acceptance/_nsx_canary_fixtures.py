@@ -517,7 +517,7 @@ async def ingested_nsx_canary(
             host=NSX_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
-            secret_ref="kv/data/nsx/nsx-canary",
+            secret_ref="nsx/nsx-canary",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

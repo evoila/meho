@@ -463,7 +463,7 @@ async def _seed_target(*, host: str, fqdn: str | None) -> Target:
             host=host,
             port=443,
             fqdn=fqdn,
-            secret_ref="kv/data/vcfa/e2e",
+            secret_ref="vcfa/e2e",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

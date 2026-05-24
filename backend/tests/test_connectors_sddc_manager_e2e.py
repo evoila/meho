@@ -140,7 +140,7 @@ async def _seed_target() -> Any:
             host=SDDC_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
-            secret_ref="kv/data/sddc-manager/sddc-e2e",
+            secret_ref="sddc-manager/sddc-e2e",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

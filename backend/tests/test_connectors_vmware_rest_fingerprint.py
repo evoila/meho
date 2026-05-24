@@ -58,7 +58,7 @@ _TARGET = _StubTarget(
     name="vcenter-fp",
     host="vcenter-fp.test.invalid",
     port=443,
-    secret_ref="kv/data/vsphere/vcenter-fp",
+    secret_ref="vsphere/vcenter-fp",
 )
 
 

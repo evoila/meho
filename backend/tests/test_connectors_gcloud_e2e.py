@@ -104,7 +104,7 @@ _E2E_TARGET = _StubTarget(
     name=_TARGET_NAME,
     gcp_project=_GCP_PROJECT,
     gcp_impersonate_sa=_SA_EMAIL,
-    secret_ref="kv/data/gcloud/e2e",
+    secret_ref="gcloud/e2e",
 )
 
 
@@ -739,7 +739,7 @@ async def test_gcloud_live_integration_about() -> None:
         name="live-gcloud-target",
         gcp_project=project,
         gcp_impersonate_sa=impersonate_sa,
-        secret_ref="kv/data/gcloud/live",
+        secret_ref="gcloud/live",
         auth_model=AuthModel.IMPERSONATION.value,
     )
 
@@ -786,7 +786,7 @@ async def test_gcloud_live_integration_all_8_ops_return_ok_status() -> None:
         name="live-gcloud-all-ops",
         gcp_project=project,
         gcp_impersonate_sa=impersonate_sa,
-        secret_ref="kv/data/gcloud/live",
+        secret_ref="gcloud/live",
         auth_model=AuthModel.IMPERSONATION.value,
     )
 

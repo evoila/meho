@@ -440,7 +440,7 @@ async def ingested_sddc_canary(
             host=SDDC_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
-            secret_ref="kv/data/sddc-manager/sddc-canary",
+            secret_ref="sddc-manager/sddc-canary",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

@@ -105,13 +105,13 @@ _TARGET_A = _StubTarget(
     name="vcf-fleet-a",
     host="vcf-fleet-a.test.invalid",
     port=443,
-    secret_ref="kv/data/vcf-fleet/vcf-fleet-a",
+    secret_ref="vcf-fleet/vcf-fleet-a",
 )
 _TARGET_B = _StubTarget(
     name="vcf-fleet-b",
     host="vcf-fleet-b.test.invalid",
     port=443,
-    secret_ref="kv/data/vcf-fleet/vcf-fleet-b",
+    secret_ref="vcf-fleet/vcf-fleet-b",
 )
 
 
@@ -318,7 +318,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="vcf-fleet-per-user",
         host="vcf-fleet.test.invalid",
         port=443,
-        secret_ref="kv/data/vcf-fleet/per-user",
+        secret_ref="vcf-fleet/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -338,7 +338,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="vcf-fleet-pre-g03",
         host="vcf-fleet.test.invalid",
         port=443,
-        secret_ref="kv/data/vcf-fleet/pre-g03",
+        secret_ref="vcf-fleet/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -354,7 +354,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
         name="vcf-fleet-enum",
         host="vcf-fleet.test.invalid",
         port=443,
-        secret_ref="kv/data/vcf-fleet/enum",
+        secret_ref="vcf-fleet/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()

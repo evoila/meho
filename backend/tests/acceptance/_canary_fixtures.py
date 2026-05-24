@@ -415,7 +415,7 @@ async def ingested_canary_vcsim(
             host=CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
-            secret_ref="kv/data/vsphere/vcenter-canary",
+            secret_ref="vsphere/vcenter-canary",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

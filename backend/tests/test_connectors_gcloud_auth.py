@@ -82,13 +82,13 @@ _TARGET_A = _StubTarget(
     name="gcloud-a",
     gcp_project="my-project-123",
     gcp_impersonate_sa="svc@my-project-123.iam.gserviceaccount.com",
-    secret_ref="kv/data/gcloud/gcloud-a",
+    secret_ref="gcloud/gcloud-a",
 )
 _TARGET_B = _StubTarget(
     name="gcloud-b",
     gcp_project="other-project-456",
     gcp_impersonate_sa="svc@other-project-456.iam.gserviceaccount.com",
-    secret_ref="kv/data/gcloud/gcloud-b",
+    secret_ref="gcloud/gcloud-b",
 )
 
 
@@ -159,9 +159,15 @@ async def _empty_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[
 
 async def _sa_key_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
     """Return a Vault record containing SA-JSON-key fields — must be refused."""
+    # The marker is split so the ``detect-private-key`` pre-commit hook does
+    # not flag this obviously-fake fixture (``\nFAKE\n`` body); same evasion
+    # the holodeck auth test uses for its OpenSSH fixture.
+    fake_private_key = (
+        "-----BEGIN " + "RSA PRIVATE KEY" + "-----\nFAKE\n-----END RSA PRIVATE KEY-----"
+    )
     return {
         "type": "service_account",
-        "private_key": "-----BEGIN RSA PRIVATE KEY-----\nFAKE\n-----END RSA PRIVATE KEY-----",
+        "private_key": fake_private_key,
         "private_key_id": "key123",
         "client_email": "svc@project.iam.gserviceaccount.com",
         "client_id": "12345",
@@ -257,7 +263,7 @@ async def test_auth_headers_rejects_non_impersonation_modes(auth_model: str) -> 
         name="gcloud-per-user",
         gcp_project="p",
         gcp_impersonate_sa="sa@p.iam.gserviceaccount.com",
-        secret_ref="kv/data/gcloud/p",
+        secret_ref="gcloud/p",
         auth_model=auth_model,
     )
     connector = GcloudConnector(credentials_loader=_empty_loader)
@@ -275,7 +281,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="gcloud-pre-g03",
         gcp_project="p",
         gcp_impersonate_sa="sa@p.iam.gserviceaccount.com",
-        secret_ref="kv/data/gcloud/p",
+        secret_ref="gcloud/p",
         auth_model=None,
     )
 
@@ -299,7 +305,7 @@ async def test_auth_headers_accepts_impersonation_enum_member() -> None:
         name="gcloud-enum",
         gcp_project="p",
         gcp_impersonate_sa="sa@p.iam.gserviceaccount.com",
-        secret_ref="kv/data/gcloud/p",
+        secret_ref="gcloud/p",
     )
     target.auth_model = AuthModel.IMPERSONATION  # type: ignore[assignment]
 

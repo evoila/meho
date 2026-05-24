@@ -212,7 +212,7 @@ class _ContainerCreds:
 # preseeded :class:`_SeededBind9Connector` short-circuits the
 # Vault resolve to the testcontainer's real credentials, so the
 # path itself is never resolved against a Vault server. Mirrors the
-# K8s E2E harness's ``"kv/data/k8s/k3s-e2e"`` placeholder.
+# K8s E2E harness's ``"k8s/k3s-e2e"`` logical placeholder.
 _BIND9_VAULT_PATH: str = "kv/dev/bind9/e2e"
 
 

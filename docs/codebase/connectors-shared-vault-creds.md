@@ -61,22 +61,33 @@ dispatcher's `connector_error` branch.
    read and must error, never silently fall back to a backplane identity.
 2. **Reject unset `secret_ref`.** A target with `secret_ref=None` is
    unconfigured → `VaultCredentialsReadError`.
-3. **Read under operator identity.** `async with
+3. **Reject an API-path-shaped `secret_ref`.** `secret_ref` must be the
+   *logical* KV-v2 path relative to the mount — hvac builds the wire URL
+   as `/{mount_point}/data/{path}` and inserts the `/data/` segment
+   itself. A value embedding the mount or that segment (`secret/data/…`,
+   `kv/data/…`, leading `data/…`) double-resolves to a 404, so the guard
+   (`_is_api_path_shaped`) rejects it with a `VaultCredentialsReadError`
+   naming the target and the logical-path fix — no auto-stripping. The
+   predicate is *specific*: it trips only when the first path segment is
+   `data` or the second is `data`, so a logical segment legitimately
+   named `data` deeper in the path (`targets/data-center-01/host`) stays
+   valid.
+4. **Read under operator identity.** `async with
    vault_client_for_operator(operator) as client:` performs the JWT/OIDC
    login, then `await asyncio.to_thread(client.secrets.kv.v2.\
    read_secret_version, path=..., mount_point=mount,
    raise_on_deleted_version=False)`. Login-phase failures
    (`VaultUnreachableError` / `VaultRoleDeniedError`) propagate verbatim.
    The per-request Vault token is revoked on context exit.
-4. **Structural unwrap.** KV-v2's GET returns `{"data": {"data":
+5. **Structural unwrap.** KV-v2's GET returns `{"data": {"data":
    {<secret kv>}, "metadata": {...}}}`; the secret content is the nested
    `data["data"]` (the same double-unwrap `vault/ops.py:308` performs). A
    malformed payload raises `VaultCredentialsReadError`, not a bare
    `KeyError`.
-5. **Extract fields.** For each name in `fields`, a missing key raises
+6. **Extract fields.** For each name in `fields`, a missing key raises
    `VaultCredentialsReadError` naming the target + the missing field +
    the `secret_ref`. Present values are coerced to `str`.
-6. **Log non-secret attribution only.** A single
+7. **Log non-secret attribution only.** A single
    `vault_basic_credentials_loaded` structlog event carries `target` /
    `host` / the requested field *names* — never a value. The returned
    dict is ephemeral in-memory state and must not enter any log event,
@@ -102,9 +113,13 @@ dispatcher's `connector_error` branch.
 ## Known issues
 
 - The `secret_ref` is read under a single `mount` (default `"secret"`).
-  Mount/path embedded in the ref string (e.g. `kv2/data/...`) is not
-  parsed apart — pass `mount=` for a non-default mount. This matches the
-  consumer convention (one default mount, path-only `secret_ref`).
+  A non-default mount is passed via `mount=`, not embedded in the ref
+  string. An API-path-shaped ref (mount or `/data/` segment embedded, e.g.
+  `kv/data/...`) is **rejected** by the shape guard (step 3) rather than
+  silently double-resolving — `secret_ref` is path-only and logical, per
+  the consumer convention. Registration-time validation (a Pydantic
+  validator on `Target.secret_ref` that fails even earlier) is out of
+  scope for the read-path guard and can be filed separately (#989 scope).
 - A kubeconfig variant / generic `read_secret_fields` is **out of scope**
   — k8s (#G3.10-T4) returns a kubeconfig dict and has its own parse;
   this helper stays basic-credentials-shaped.
@@ -119,9 +134,11 @@ dispatcher's `connector_error` branch.
   (`tests/_vault_fakes.install_fake_client`, which patches
   `auth.vault._build_client`) so `vault_client_for_operator` runs its
   real login path against the fake. Covers fail-closed, missing
-  `secret_ref`, missing field (asserts not a bare `KeyError`), malformed
-  payload, login-error propagation, and no-secret-in-logs via
-  `capture_logs`.
+  `secret_ref`, the API-path-shape guard (parametrized reject **and**
+  accept cases — `secret/data/foo` / `kv/data/foo` / `data/foo` rejected,
+  `targets/data-center-01/host` / `vsphere/vcenter-a` accepted), missing
+  field (asserts not a bare `KeyError`), malformed payload, login-error
+  propagation, and no-secret-in-logs via `capture_logs`.
 - **Live** (`backend/tests/integration/test_connectors_vault_creds_dev_e2e.py`)
   — the rubric State-2 bar. Boots a real `hashicorp/vault:1.18` dev-mode
   container via testcontainers, seeds a KV-v2 secret, monkeypatches
@@ -136,6 +153,7 @@ dispatcher's `connector_error` branch.
 ## References
 
 - Task: https://github.com/evoila/meho/issues/941
+- Shape guard: https://github.com/evoila/meho/issues/989
 - Parent Initiative: https://github.com/evoila/meho/issues/939
 - Parent Goal: https://github.com/evoila/meho/issues/214
 - Decision: `docs/architecture/connector-auth.md` (Option A,

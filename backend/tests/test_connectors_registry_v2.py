@@ -58,6 +58,45 @@ def _clean_registry() -> Iterator[None]:
     clear_registry()
 
 
+def _ensure_registered_v2(cls: type[Connector]) -> None:
+    """Idempotently register ``cls`` under its v2 triple.
+
+    Bridges the gap between full-suite and subset-isolation runs of the
+    ``test_*_connector_registered_under_v2_triple`` cases below.
+
+    Under the full suite, some earlier test imports the connector
+    package; the module-level ``register_connector_v2`` side-effect in
+    ``connectors/<product>/__init__.py`` fires once and is cached. By
+    the time this file's ``_clean_registry`` autouse runs, the package
+    module is in ``sys.modules`` so the test's own ``from ... import``
+    is a no-op — the registry is genuinely empty after clear, and the
+    test's explicit re-register succeeds.
+
+    Under ``pytest -k <one-test>`` (or `pytest <file>::<one-test>`),
+    nothing else imports the connector package first. The autouse
+    fixture clears the registry, the test's ``from ... import`` then
+    triggers the package's first import in this worker process, the
+    module-top ``register_connector_v2`` call fires *inside* the test
+    (post-clear), and the test's own follow-up ``register_connector_v2``
+    raises ``RuntimeError("connector already registered for v2 key …")``.
+
+    Introspecting first and only registering when absent makes both
+    paths green without changing connector packages or
+    ``register_connector_v2`` semantics. The duplicate-registration
+    guard remains correct for genuine programming bugs; this helper
+    just signals "ensure the triple is present" instead of "always
+    register, fail on duplicate".
+    """
+    key = (cls.product, cls.version, cls.impl_id)
+    if key not in all_connectors_v2():
+        register_connector_v2(
+            product=cls.product,
+            version=cls.version,
+            impl_id=cls.impl_id,
+            cls=cls,
+        )
+
+
 # ---------------------------------------------------------------------------
 # register_connector_v2 — happy paths
 # ---------------------------------------------------------------------------
@@ -257,19 +296,15 @@ def test_all_connectors_v2_returns_copy() -> None:
 def test_sddc_manager_connector_registered_under_v2_triple() -> None:
     """SddcManagerConnector package registers under (sddc-manager, 9.0, sddc-rest) at import.
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we re-import the package (which is a no-op if already imported) and
-    then manually re-register to assert the triple resolves correctly. Mirrors
-    the pattern in test_connectors_nsx_auth.py.
+    Uses :func:`_ensure_registered_v2` so the test passes whether the
+    connector package was imported (and self-registered) before
+    ``_clean_registry`` cleared the registry, or fresh inside this test
+    body under subset isolation. See the helper's docstring for the
+    pytest-xdist subset-isolation rationale.
     """
     from meho_backplane.connectors.sddc_manager import SddcManagerConnector
 
-    register_connector_v2(
-        product=SddcManagerConnector.product,
-        version=SddcManagerConnector.version,
-        impl_id=SddcManagerConnector.impl_id,
-        cls=SddcManagerConnector,
-    )
+    _ensure_registered_v2(SddcManagerConnector)
     snapshot = all_connectors_v2()
     key = ("sddc-manager", "9.0", "sddc-rest")
     assert key in snapshot
@@ -279,18 +314,11 @@ def test_sddc_manager_connector_registered_under_v2_triple() -> None:
 def test_harbor_connector_registered_under_v2_triple() -> None:
     """HarborConnector package registers under (harbor, 2.x, harbor-rest) at import.
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager test above.
+    Same idempotent-registration pattern as the SDDC Manager test above.
     """
     from meho_backplane.connectors.harbor import HarborConnector
 
-    register_connector_v2(
-        product=HarborConnector.product,
-        version=HarborConnector.version,
-        impl_id=HarborConnector.impl_id,
-        cls=HarborConnector,
-    )
+    _ensure_registered_v2(HarborConnector)
     snapshot = all_connectors_v2()
     key = ("harbor", "2.x", "harbor-rest")
     assert key in snapshot
@@ -300,18 +328,12 @@ def test_harbor_connector_registered_under_v2_triple() -> None:
 def test_vcf_automation_connector_registered_under_v2_triple() -> None:
     """VcfAutomationConnector package registers under (vcf-automation, 9.0, vcfa-rest).
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager / Harbor tests above.
+    Same idempotent-registration pattern as the SDDC Manager / Harbor
+    tests above.
     """
     from meho_backplane.connectors.vcf_automation import VcfAutomationConnector
 
-    register_connector_v2(
-        product=VcfAutomationConnector.product,
-        version=VcfAutomationConnector.version,
-        impl_id=VcfAutomationConnector.impl_id,
-        cls=VcfAutomationConnector,
-    )
+    _ensure_registered_v2(VcfAutomationConnector)
     snapshot = all_connectors_v2()
     key = ("vcf-automation", "9.0", "vcfa-rest")
     assert key in snapshot
@@ -321,19 +343,12 @@ def test_vcf_automation_connector_registered_under_v2_triple() -> None:
 def test_vcf_operations_connector_registered_under_v2_triple() -> None:
     """VcfOperationsConnector package registers under (vcf-operations, 9.0, vrops-rest).
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager / Harbor /
+    Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
     """
     from meho_backplane.connectors.vcf_operations import VcfOperationsConnector
 
-    register_connector_v2(
-        product=VcfOperationsConnector.product,
-        version=VcfOperationsConnector.version,
-        impl_id=VcfOperationsConnector.impl_id,
-        cls=VcfOperationsConnector,
-    )
+    _ensure_registered_v2(VcfOperationsConnector)
     snapshot = all_connectors_v2()
     key = ("vcf-operations", "9.0", "vrops-rest")
     assert key in snapshot
@@ -343,19 +358,12 @@ def test_vcf_operations_connector_registered_under_v2_triple() -> None:
 def test_vcf_logs_connector_registered_under_v2_triple() -> None:
     """VcfLogsConnector package registers under (vcf-logs, 9.0, vrli-rest).
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager / Harbor /
+    Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
     """
     from meho_backplane.connectors.vcf_logs import VcfLogsConnector
 
-    register_connector_v2(
-        product=VcfLogsConnector.product,
-        version=VcfLogsConnector.version,
-        impl_id=VcfLogsConnector.impl_id,
-        cls=VcfLogsConnector,
-    )
+    _ensure_registered_v2(VcfLogsConnector)
     snapshot = all_connectors_v2()
     key = ("vcf-logs", "9.0", "vrli-rest")
     assert key in snapshot
@@ -365,19 +373,12 @@ def test_vcf_logs_connector_registered_under_v2_triple() -> None:
 def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
     """VcfFleetConnector package registers under (vcf-fleet, 9.0, fleet-rest).
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager / Harbor /
+    Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
     """
     from meho_backplane.connectors.vcf_fleet import VcfFleetConnector
 
-    register_connector_v2(
-        product=VcfFleetConnector.product,
-        version=VcfFleetConnector.version,
-        impl_id=VcfFleetConnector.impl_id,
-        cls=VcfFleetConnector,
-    )
+    _ensure_registered_v2(VcfFleetConnector)
     snapshot = all_connectors_v2()
     key = ("vcf-fleet", "9.0", "fleet-rest")
     assert key in snapshot
@@ -387,19 +388,12 @@ def test_vcf_fleet_connector_registered_under_v2_triple() -> None:
 def test_gcloud_connector_registered_under_v2_triple() -> None:
     """GcloudConnector package registers under (gcloud, 1.0, gcloud-rest) at import.
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager / Harbor /
+    Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Fleet tests above.
     """
     from meho_backplane.connectors.gcloud import GcloudConnector
 
-    register_connector_v2(
-        product=GcloudConnector.product,
-        version=GcloudConnector.version,
-        impl_id=GcloudConnector.impl_id,
-        cls=GcloudConnector,
-    )
+    _ensure_registered_v2(GcloudConnector)
     snapshot = all_connectors_v2()
     key = ("gcloud", "1.0", "gcloud-rest")
     assert key in snapshot
@@ -409,19 +403,12 @@ def test_gcloud_connector_registered_under_v2_triple() -> None:
 def test_pfsense_connector_registered_under_v2_triple() -> None:
     """PfSenseConnector package registers under (pfsense, 2.7, pfsense-ssh).
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager / Harbor /
+    Same idempotent-registration pattern as the SDDC Manager / Harbor /
     VCF Automation tests above.
     """
     from meho_backplane.connectors.pfsense import PfSenseConnector
 
-    register_connector_v2(
-        product=PfSenseConnector.product,
-        version=PfSenseConnector.version,
-        impl_id=PfSenseConnector.impl_id,
-        cls=PfSenseConnector,
-    )
+    _ensure_registered_v2(PfSenseConnector)
     snapshot = all_connectors_v2()
     key = ("pfsense", "2.7", "pfsense-ssh")
     assert key in snapshot
@@ -431,18 +418,12 @@ def test_pfsense_connector_registered_under_v2_triple() -> None:
 def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
     """HetznerRobotConnector package registers under (hetzner-robot, 2026.04, hetzner-rest).
 
-    The autouse _clean_registry fixture clears the registry before this test,
-    so we manually re-register using the class attributes to assert the triple
-    resolves correctly. Same pattern as the SDDC Manager / Harbor tests above.
+    Same idempotent-registration pattern as the SDDC Manager / Harbor
+    tests above.
     """
     from meho_backplane.connectors.hetzner_robot.connector import HetznerRobotConnector
 
-    register_connector_v2(
-        product=HetznerRobotConnector.product,
-        version=HetznerRobotConnector.version,
-        impl_id=HetznerRobotConnector.impl_id,
-        cls=HetznerRobotConnector,
-    )
+    _ensure_registered_v2(HetznerRobotConnector)
     snapshot = all_connectors_v2()
     key = ("hetzner-robot", "2026.04", "hetzner-rest")
     assert key in snapshot
@@ -452,19 +433,12 @@ def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
 def test_holodeck_connector_registered_under_v2_triple() -> None:
     """HolodeckConnector package registers under (holodeck, 9.0, holodeck-ssh).
 
-    G3.8-T1 (#853) skeleton. The autouse _clean_registry fixture clears the
-    registry before this test, so we manually re-register using the class
-    attributes to assert the triple resolves correctly. Same pattern as
+    G3.8-T1 (#853) skeleton. Same idempotent-registration pattern as
     the SDDC Manager / Harbor / pfSense tests above.
     """
     from meho_backplane.connectors.holodeck import HolodeckConnector
 
-    register_connector_v2(
-        product=HolodeckConnector.product,
-        version=HolodeckConnector.version,
-        impl_id=HolodeckConnector.impl_id,
-        cls=HolodeckConnector,
-    )
+    _ensure_registered_v2(HolodeckConnector)
     snapshot = all_connectors_v2()
     key = ("holodeck", "9.0", "holodeck-ssh")
     assert key in snapshot

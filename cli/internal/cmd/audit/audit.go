@@ -57,7 +57,7 @@ import (
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "audit",
-		Short: "Query the MEHO audit log (query / recent / show / who-touched / my-recent)",
+		Short: "Query the MEHO audit log (query / recent / show / who-touched / my-recent / replay)",
 		Long: "Query the WORM-grade audit log written by the backplane on " +
 			"every authenticated request. Wraps the G8.1-T2 REST surface " +
 			"(/api/v1/audit/*). All verbs are tenant-scoped via the operator's " +
@@ -69,6 +69,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newShowCmd())
 	cmd.AddCommand(newWhoTouchedCmd())
 	cmd.AddCommand(newMyRecentCmd())
+	cmd.AddCommand(newReplayCmd())
 	return cmd
 }
 
@@ -207,6 +208,21 @@ func renderHTTPError(
 			output.Unexpected("audit row not found"),
 			jsonOut,
 		)
+	case http.StatusRequestEntityTooLarge:
+		// Only the replay endpoint emits 413 (session_too_large): a
+		// session above the server's replayRowCap anchor rows. The
+		// replay verb intercepts this status before reaching here so it
+		// can append the `meho audit query --session-id <id>` redirect
+		// (it knows the session id; this shared renderer does not). This
+		// arm is the defensive fallback for any other caller — surface
+		// the cardinality and the same query-verb pointer.
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"session too large to replay (%s rows, cap %d); "+
+					"use `meho audit query --session-id <id>` to page the flat rows",
+				decodeSessionTooLargeRowCount(he.Body), replayRowCap)),
+			jsonOut,
+		)
 	case http.StatusUnprocessableEntity:
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf("invalid request: %s", he.Body)),
@@ -219,6 +235,42 @@ func renderHTTPError(
 			jsonOut,
 		)
 	}
+}
+
+// replayRowCap mirrors the backend `_REPLAY_ROW_CAP`
+// (`backend/src/meho_backplane/api/v1/audit.py`): the maximum number of
+// anchor rows a single session may carry before the replay route's
+// count-first guard refuses with 413 `session_too_large`. Surfaced in
+// the CLI's 413 redirect so the operator sees the threshold they
+// crossed. Kept in sync by hand — the value is part of the route's
+// public contract (the 413 body always quotes the actual `row_count`,
+// so a drift here only mis-renders the *cap* in the hint, never the
+// real count).
+const replayRowCap = 10000
+
+// sessionTooLargeDetail models the structured 413 body the replay route
+// emits: `{"detail": {"detail": "session_too_large", "row_count": N}}`.
+// FastAPI wraps the route's `HTTPException(detail=...)` dict under a
+// top-level `detail` key, so the row count lives two levels deep.
+type sessionTooLargeDetail struct {
+	Detail struct {
+		Detail   string      `json:"detail"`
+		RowCount json.Number `json:"row_count"`
+	} `json:"detail"`
+}
+
+// decodeSessionTooLargeRowCount pulls the `row_count` out of a 413
+// `session_too_large` body. Returns the count as a string (so a 64-bit
+// count renders exactly) or "?" when the body isn't the expected shape
+// — the redirect stays useful even if the backend changes the envelope.
+func decodeSessionTooLargeRowCount(body string) string {
+	var d sessionTooLargeDetail
+	if err := json.Unmarshal([]byte(body), &d); err == nil {
+		if rc := d.Detail.RowCount.String(); rc != "" {
+			return rc
+		}
+	}
+	return "?"
 }
 
 // detailEnvelope models FastAPI's HTTPException JSON shape.

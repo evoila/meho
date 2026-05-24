@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/backplane"
@@ -23,17 +25,18 @@ import (
 // special-cases the unset state because Go's zero-value int collides
 // with the backend's `ge=1` validation otherwise.
 type auditQueryRequest struct {
-	Target        *string `json:"target,omitempty"`
-	Principal     *string `json:"principal,omitempty"`
-	OpID          *string `json:"op_id,omitempty"`
-	OpClass       *string `json:"op_class,omitempty"`
-	ResultStatus  *string `json:"result_status,omitempty"`
-	Since         *string `json:"since,omitempty"`
-	Until         *string `json:"until,omitempty"`
-	AuditID       *string `json:"audit_id,omitempty"`
-	ParentAuditID *string `json:"parent_audit_id,omitempty"`
-	Limit         int     `json:"limit,omitempty"`
-	Cursor        *string `json:"cursor,omitempty"`
+	Target         *string `json:"target,omitempty"`
+	Principal      *string `json:"principal,omitempty"`
+	OpID           *string `json:"op_id,omitempty"`
+	OpClass        *string `json:"op_class,omitempty"`
+	ResultStatus   *string `json:"result_status,omitempty"`
+	Since          *string `json:"since,omitempty"`
+	Until          *string `json:"until,omitempty"`
+	AuditID        *string `json:"audit_id,omitempty"`
+	ParentAuditID  *string `json:"parent_audit_id,omitempty"`
+	AgentSessionID *string `json:"agent_session_id,omitempty"`
+	Limit          int     `json:"limit,omitempty"`
+	Cursor         *string `json:"cursor,omitempty"`
 }
 
 // newQueryCmd returns the `meho audit query` command.
@@ -52,6 +55,7 @@ type auditQueryRequest struct {
 //	  [--cursor C]                 # opaque forward-pagination cursor
 //	  [--audit-id ID]              # exact-id lookup
 //	  [--parent-audit-id ID]       # v0.2 substrate rejects (400)
+//	  [--session-id ID]            # narrow to one agent session (UUID)
 //	  [--json]                     # raw RetireChecklistReport JSON
 //	  [--backplane <url>]          # override the configured backplane
 //
@@ -75,6 +79,7 @@ func newQueryCmd() *cobra.Command {
 		cursor            string
 		auditID           string
 		parentAuditID     string
+		sessionID         string
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -105,6 +110,7 @@ func newQueryCmd() *cobra.Command {
 				Cursor:            cursor,
 				AuditID:           auditID,
 				ParentAuditID:     parentAuditID,
+				SessionID:         sessionID,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -133,6 +139,8 @@ func newQueryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&parentAuditID, "parent-audit-id", "",
 		"narrow to the composite-op subtree under this audit-id "+
 			"(v0.2 substrate rejects with 400; column lands with G0.6-T7 #398)")
+	cmd.Flags().StringVar(&sessionID, "session-id", "",
+		"narrow to one agent session (UUID); the flat companion to `meho audit replay`")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit raw QueryResult JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -152,6 +160,7 @@ type queryOptions struct {
 	Cursor            string
 	AuditID           string
 	ParentAuditID     string
+	SessionID         string
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -163,6 +172,20 @@ func runQuery(cmd *cobra.Command, opts queryOptions) error {
 			output.Unexpected(fmt.Sprintf("--limit must be between 1 and 1000; got %d", opts.Limit)),
 			opts.JSONOut,
 		)
+	}
+	if opts.SessionID != "" {
+		// The backend declares agent_session_id as a UUID and rejects a
+		// malformed value with 422. Catch it client-side so the operator
+		// sees a clear "not a UUID" message instead of a FastAPI
+		// validation envelope after a round-trip.
+		if _, err := uuid.Parse(strings.TrimSpace(opts.SessionID)); err != nil {
+			return output.RenderError(
+				cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"--session-id must be a valid UUID; %q is not a UUID", opts.SessionID)),
+				opts.JSONOut,
+			)
+		}
 	}
 	backplaneURL, err := backplane.Resolve(opts.BackplaneOverride)
 	if err != nil {
@@ -213,6 +236,9 @@ func buildQueryRequest(opts queryOptions) auditQueryRequest {
 	}
 	if opts.ParentAuditID != "" {
 		body.ParentAuditID = &opts.ParentAuditID
+	}
+	if opts.SessionID != "" {
+		body.AgentSessionID = &opts.SessionID
 	}
 	if opts.Cursor != "" {
 		body.Cursor = &opts.Cursor

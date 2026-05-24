@@ -219,8 +219,10 @@ const (
 //   - “method“ / “path“ / “status_code“ / “request_id“ / “duration_ms“
 //     / “payload“ ← columns of the same name
 //   - “op_id“ / “op_class“ / “result_status“ — computed at query time
-//   - “principal_name“ / “parent_audit_id“ / “agent_session_id“ /
-//     “broadcast_event_id“ — v0.2 placeholders, always None
+//   - “parent_audit_id“ ← “audit_log.parent_audit_id“ (lineage; #398)
+//   - “agent_session_id“ ← “audit_log.agent_session_id“ (MCP session; #1009)
+//   - “principal_name“ / “broadcast_event_id“ — v0.2 placeholders, always
+//     None
 type AuditEntry struct {
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`

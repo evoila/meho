@@ -82,9 +82,11 @@ def test_filters_frozen_blocks_reassignment() -> None:
 def _make_entry(**overrides: object) -> AuditEntry:
     """Build a populated :class:`AuditEntry` with every field set.
 
-    The substrate's placeholder fields (``principal_name``,
-    ``parent_audit_id``, ``agent_session_id``, ``broadcast_event_id``)
-    default to None so a happy-path test does not need to spell them out.
+    Every field on the model is required (none carries a Pydantic default), so
+    the helper spells out all of them — including the two v0.2 placeholders
+    that the handler always sets to None (``principal_name`` /
+    ``broadcast_event_id``) and the two lineage columns the handler now
+    populates from the row (``parent_audit_id`` / ``agent_session_id``).
     """
     defaults: dict[str, object] = {
         "id": uuid.uuid4(),
@@ -138,11 +140,14 @@ def test_entry_frozen_blocks_reassignment() -> None:
 
 
 def test_entry_placeholders_default_to_none() -> None:
-    """The four substrate-placeholder fields stay None in v0.2."""
+    """The two remaining v0.2 placeholder fields stay None.
+
+    ``parent_audit_id`` (#398) and ``agent_session_id`` (#1009) are now real
+    columns the handler reads off the row; only ``principal_name`` and
+    ``broadcast_event_id`` are still unconditionally None in v0.2.
+    """
     entry = _make_entry()
     assert entry.principal_name is None
-    assert entry.parent_audit_id is None
-    assert entry.agent_session_id is None
     assert entry.broadcast_event_id is None
 
 

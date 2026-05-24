@@ -41,8 +41,8 @@ patched to a recording stub so tests can assert on the
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
-from typing import Any
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -936,6 +936,46 @@ async def test_dispatch_uses_swapped_reducer(
         assert seen == [{"echo": {"path": "/secret"}}]
     finally:
         set_default_reducer(PassThroughReducer())
+
+
+def test_isolate_global_registries_restores_default_reducer() -> None:
+    """The autouse isolation fixture restores the default reducer (#981).
+
+    A test that swaps the dispatcher's module-level default reducer (the
+    app lifespan does exactly this in production) must not leak that
+    binding into the next test on the same xdist worker. Drive the actual
+    conftest fixture as a generator: run its setup, install a sentinel
+    reducer mid-"test", then run its teardown and assert the pre-test
+    reducer identity is back. Driving the fixture by hand (rather than
+    relying on it autouse) makes the assertion observe the *post-teardown*
+    state, which a test body otherwise can't see.
+
+    ``@pytest.fixture`` wraps the generator function in a
+    ``FixtureFunctionDefinition`` whose original is reachable via
+    ``__wrapped__`` (set by the decorator); the type stub omits the
+    attribute, so it's read through a typed cast.
+    """
+    from meho_backplane.operations import dispatcher, set_default_reducer
+    from tests import conftest
+
+    isolate_gen_fn = cast(
+        "Callable[[], Iterator[None]]",
+        conftest._isolate_global_registries.__wrapped__,  # type: ignore[attr-defined]
+    )
+
+    pre_test_reducer = dispatcher._DEFAULT_REDUCER
+
+    gen = isolate_gen_fn()
+    next(gen)  # setup: snapshot the current bindings
+
+    sentinel = PassThroughReducer()
+    set_default_reducer(sentinel)
+    assert dispatcher._DEFAULT_REDUCER is sentinel
+
+    with pytest.raises(StopIteration):
+        next(gen)  # teardown: restore the snapshot
+
+    assert dispatcher._DEFAULT_REDUCER is pre_test_reducer
 
 
 # ---------------------------------------------------------------------------

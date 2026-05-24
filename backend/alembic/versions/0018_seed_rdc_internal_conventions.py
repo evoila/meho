@@ -55,6 +55,16 @@ What it does
    already owns avoids polluting their edit trail with a synthetic
    "seed" entry that never happened from their perspective.
 
+   **G8 audit-trace query semantics.** Because seed-authored history
+   rows carry ``audit_id=NULL``, any G8 query that joins
+   ``tenant_convention_history`` to ``audit_log`` on
+   ``history.audit_id = audit_log.id`` **must** use ``LEFT JOIN``;
+   ``INNER JOIN`` would silently drop the seeded rows from the
+   audit-replay view. Operator-authored edits (PATCH via T2) carry a
+   real ``audit_id`` and join cleanly under either shape. See
+   ``docs/architecture/conventions-seed.md`` for the recommended
+   query template.
+
 The 8 conventions
 -----------------
 
@@ -183,8 +193,8 @@ Cross-references
   rows into MCP ``initialize.instructions`` content.
 * ``backend/alembic/versions/0011_backfill_operation_group_when_to_use.py``
   -- the prior-art data-migration shape this file mirrors
-  (self-contained ``sa.table`` shims, Python-side timestamp, no ORM
-  import).
+  (Python-side timestamp, no ORM import, raw ``sa.text`` statements
+  with parameterised binds for dialect portability).
 * ``docs/architecture/conventions-seed.md`` -- slug → source paragraph
   → priority mapping table.
 * :mod:`tests.test_alembic_seed_rdc_conventions` -- behavioural
@@ -247,7 +257,7 @@ _SEED_CONVENTIONS: Final[tuple[tuple[str, str, int, str], ...]] = (
             "bootstrap-residual only (Vault unseal shares + initial "
             "admin userpass). Never write to 1Password; always read "
             "from Vault. Pipe secrets directly into the consuming "
-            "command -- never paste into chat, never commit to repos."
+            "command — never paste into chat, never commit to repos."
         ),
     ),
     (
@@ -259,7 +269,7 @@ _SEED_CONVENTIONS: Final[tuple[tuple[str, str, int, str], ...]] = (
             "IPs, ticket titles, lab object names) must never contain "
             "AI-tool names like 'claude', 'gpt', or other model-shaped "
             "tokens. The lab program's Holodeck `claude` legacy is the "
-            "exception -- operator-visible refs renamed; VM-internal "
+            "exception — operator-visible refs renamed; VM-internal "
             "refs are stuck pending destroy+redeploy. New names start "
             "clean."
         ),
@@ -284,7 +294,7 @@ _SEED_CONVENTIONS: Final[tuple[tuple[str, str, int, str], ...]] = (
             "While MEHO is in transition (v0.2), existing "
             "`scripts/*.sh` wrappers remain available as fallback. "
             "Never delete a wrapper until its `meho` equivalent has "
-            "been in daily use for >= 2 weeks against real targets. "
+            "been in daily use for ≥ 2 weeks against real targets. "
             "Document the wrapper-to-meho mapping in the PR "
             "description."
         ),
@@ -342,55 +352,6 @@ _SEED_CONVENTIONS: Final[tuple[tuple[str, str, int, str], ...]] = (
 )
 
 
-def _tenant_table() -> sa.TableClause:
-    """Return a Core ``sa.table`` shim for ``tenant``.
-
-    Self-contained per the Alembic data-migration cookbook -- never
-    imports the ORM model (which would pin the migration to one
-    moment in the schema's history and break under future column
-    adds). Mirrors the discipline migration ``0011`` follows for the
-    ``operation_group`` data migration.
-    """
-    return sa.table(
-        "tenant",
-        sa.column("id", sa.Uuid()),
-        sa.column("slug", sa.Text()),
-        sa.column("name", sa.Text()),
-        sa.column("created_at", sa.DateTime(timezone=True)),
-    )
-
-
-def _convention_table() -> sa.TableClause:
-    """Return a Core ``sa.table`` shim for ``tenant_conventions``."""
-    return sa.table(
-        "tenant_conventions",
-        sa.column("id", sa.Uuid()),
-        sa.column("tenant_id", sa.Uuid()),
-        sa.column("slug", sa.Text()),
-        sa.column("title", sa.Text()),
-        sa.column("body", sa.Text()),
-        sa.column("kind", sa.Text()),
-        sa.column("priority", sa.SmallInteger()),
-        sa.column("created_by_sub", sa.Text()),
-        sa.column("created_at", sa.DateTime(timezone=True)),
-        sa.column("updated_at", sa.DateTime(timezone=True)),
-    )
-
-
-def _history_table() -> sa.TableClause:
-    """Return a Core ``sa.table`` shim for ``tenant_convention_history``."""
-    return sa.table(
-        "tenant_convention_history",
-        sa.column("id", sa.Uuid()),
-        sa.column("convention_id", sa.Uuid()),
-        sa.column("body_before", sa.Text()),
-        sa.column("body_after", sa.Text()),
-        sa.column("actor_sub", sa.Text()),
-        sa.column("ts", sa.DateTime(timezone=True)),
-        sa.column("audit_id", sa.Uuid()),
-    )
-
-
 def _coerce_uuid(value: object) -> uuid.UUID:
     """Coerce a DB-returned UUID-shaped value to :class:`uuid.UUID`.
 
@@ -412,12 +373,21 @@ def _uuid_param(value: uuid.UUID, *, is_postgres: bool) -> object:
     on SQLite via aiosqlite a raw :class:`uuid.UUID` trips
     ``ProgrammingError: type 'UUID' is not supported`` because the
     sqlite3 stdlib driver does not register a UUID adapter by default.
-    Passing the hex form (``str(uuid_value)``) is the dialect-portable
-    shape -- mirrors the same string-cast discipline the existing
-    test fixtures (e.g. ``tests.test_migration_0011_backfill_when_to_use``)
-    apply when issuing raw-SQL inserts against SQLite.
+
+    SQLite gets the **32-char hex form** (``value.hex``), NOT the
+    36-char canonical form (``str(value)``). SQLAlchemy's
+    :class:`~sqlalchemy.types.Uuid` column type stores UUIDs in 32-char
+    hex on SQLite by default (its bind processor calls ``value.hex``),
+    so any later FK reference made through the ORM compares against
+    that storage form bytewise. Writing the seed in 36-char dashed
+    form would silently produce a row whose ``id`` is invisible to
+    ORM-issued FK joins (the test suite saw this as a cascade of
+    ``FOREIGN KEY constraint failed`` traps once the
+    :func:`tests.conftest._schema_template_db` started embedding the
+    seeded tenant). On PG, ``uuid`` columns normalise both forms so
+    the same shape works.
     """
-    return value if is_postgres else str(value)
+    return value if is_postgres else value.hex
 
 
 def _upsert_rdc_internal_tenant(
@@ -441,7 +411,6 @@ def _upsert_rdc_internal_tenant(
     and the ``ON CONFLICT DO UPDATE`` path returns the existing row's
     id either way.
     """
-    tenant = _tenant_table()
     new_id = uuid.uuid4()
     stmt_text = sa.text(
         """
@@ -460,12 +429,7 @@ def _upsert_rdc_internal_tenant(
             "created_at": now,
         },
     )
-    tenant_id = _coerce_uuid(result.scalar_one())
-    # Silence the unused-table warning -- the shim is built for
-    # symmetry with the other table accessors even when the explicit
-    # text-statement path doesn't reference it.
-    _ = tenant
-    return tenant_id
+    return _coerce_uuid(result.scalar_one())
 
 
 def upgrade() -> None:
@@ -495,9 +459,6 @@ def upgrade() -> None:
         now=now,
         is_postgres=is_postgres,
     )
-
-    convention = _convention_table()
-    history = _history_table()
 
     # Build the per-row INSERT once outside the loop; each iteration
     # re-binds parameters. ``ON CONFLICT (tenant_id, slug) DO NOTHING
@@ -569,10 +530,6 @@ def upgrade() -> None:
                 "audit_id": None,
             },
         )
-    # Silence the unused-table warning -- the shims are built for
-    # symmetry with the other migrations even when the explicit
-    # text-statement path doesn't reference them directly.
-    _ = (convention, history)
 
 
 def downgrade() -> None:

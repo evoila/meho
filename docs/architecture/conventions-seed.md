@@ -71,6 +71,30 @@ The total estimated token cost of all 8 conventions packed together is approxima
 
 Operators can re-rank individual conventions via the `PATCH /api/v1/conventions/{slug}` route (T2) once the seed has landed -- the seed sets initial priorities, not immutable ones.
 
+## Audit-trace join semantics (G8)
+
+Seed-authored history rows carry `audit_id = NULL` (the migration runs outside any HTTP request, so there is no `audit_log` row to point at). Any G8 audit-replay or audit-trace query that joins `tenant_convention_history` to `audit_log` **must use `LEFT JOIN`** -- an `INNER JOIN` silently drops every seeded history row from the result set.
+
+Operator-authored edits (PATCH via [T2 #314](https://github.com/evoila/meho/issues/314)'s API) carry a real `audit_id` and join cleanly under either shape, so the gap only shows up against seeded slugs whose history has never been touched by an operator.
+
+Recommended query template:
+
+```sql
+SELECT h.id,
+       h.convention_id,
+       h.actor_sub,
+       h.ts,
+       a.method,    -- NULL on seeded rows
+       a.path,      -- NULL on seeded rows
+       a.operator_sub  -- NULL on seeded rows; h.actor_sub carries the seed marker
+FROM tenant_convention_history h
+LEFT JOIN audit_log a ON a.id = h.audit_id
+WHERE h.convention_id = :convention_id
+ORDER BY h.ts ASC;
+```
+
+The `actor_sub = 'migration:seed-rdc-conventions'` row reliably identifies seeded history entries even when the `audit_log` columns come back `NULL`, so callers can distinguish "seeded, no audit trail" from "operator edit, audit row was somehow pruned".
+
 ## Idempotency
 
 Re-running the migration is a no-op for already-seeded data:

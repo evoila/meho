@@ -205,7 +205,12 @@ def _insert_tenant_row(
                     """,
                 ),
                 {
-                    "id": str(tenant_id),
+                    # 32-char hex form mirrors SQLAlchemy's ``Uuid`` bind
+                    # processor for SQLite (``value.hex``); the seed
+                    # migration uses the same form via its ``_uuid_param``
+                    # helper so an ORM-issued FK lookup against the
+                    # seeded tenant matches bytewise.
+                    "id": tenant_id.hex,
                     "slug": slug,
                     "name": name,
                     "created_at": now,
@@ -246,8 +251,11 @@ def _insert_convention_row(
                     """,
                 ),
                 {
-                    "id": str(convention_id),
-                    "tenant_id": str(tenant_id),
+                    # 32-char hex form -- see ``_insert_tenant_row``
+                    # rationale above. Same store form as the ORM and
+                    # the seed migration's ``_uuid_param`` helper.
+                    "id": convention_id.hex,
+                    "tenant_id": tenant_id.hex,
                     "slug": slug,
                     "title": title,
                     "body": body,
@@ -290,8 +298,9 @@ def _insert_history_row(
                     """,
                 ),
                 {
-                    "id": str(history_id),
-                    "convention_id": str(convention_id),
+                    # 32-char hex -- same rationale as ``_insert_tenant_row``.
+                    "id": history_id.hex,
+                    "convention_id": convention_id.hex,
                     "body_before": body_before,
                     "body_after": body_after,
                     "actor_sub": actor_sub,
@@ -481,13 +490,13 @@ def test_pre_existing_tenant_is_upserted_not_recreated(
     command.upgrade(cfg, "head")
 
     tenant_id = _fetch_tenant_id(sync_url, _TENANT_SLUG)
-    assert tenant_id == str(pre_existing_id), (
+    assert tenant_id == pre_existing_id.hex, (
         "the pre-existing tenant row's id must survive the upsert -- "
         "ON CONFLICT (slug) DO UPDATE preserves the row, only refreshes name"
     )
 
     # The 8 conventions land against that pre-existing tenant id.
-    rows = _fetch_convention_rows(sync_url, str(pre_existing_id))
+    rows = _fetch_convention_rows(sync_url, pre_existing_id.hex)
     assert {str(r["slug"]) for r in rows} == _EXPECTED_SLUGS
 
 
@@ -531,9 +540,9 @@ def test_operator_curated_convention_survives_seed(
     command.upgrade(cfg, "head")
 
     # The operator's row survives unchanged.
-    rows = _fetch_convention_rows(sync_url, str(operator_tenant_id))
+    rows = _fetch_convention_rows(sync_url, operator_tenant_id.hex)
     operator_row = next(r for r in rows if r["slug"] == "vault-canonical")
-    assert str(operator_row["id"]) == str(operator_convention_id), (
+    assert str(operator_row["id"]) == operator_convention_id.hex, (
         "operator-authored row id must survive -- ON CONFLICT DO NOTHING "
         "skips the seed insert, the operator's row stays put"
     )
@@ -544,7 +553,7 @@ def test_operator_curated_convention_survives_seed(
     # And no synthetic seed history row landed against the operator's
     # convention -- the RETURNING-id gate yields zero rows when the
     # insert was skipped, so the history-write branch never fires.
-    history = _fetch_history_rows(sync_url, str(operator_convention_id))
+    history = _fetch_history_rows(sync_url, operator_convention_id.hex)
     assert history == [], (
         "no seed history row may land against an operator-authored "
         "convention -- lying about the lineage of a row the operator owns"
@@ -620,7 +629,7 @@ def test_downgrade_removes_seed_keeps_tenant_and_operator_history(
                     WHERE id = :id
                     """,
                 ),
-                {"id": str(operator_history_id)},
+                {"id": operator_history_id.hex},
             ).first()
     finally:
         sync_eng.dispose()

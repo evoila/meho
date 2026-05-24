@@ -15,6 +15,7 @@ import (
 
 	"github.com/evoila/meho/cli/internal/auth"
 	"github.com/evoila/meho/cli/internal/cmd/admin"
+	"github.com/evoila/meho/cli/internal/cmd/agent"
 	"github.com/evoila/meho/cli/internal/cmd/audit"
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
@@ -172,6 +173,14 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(memory.NewForgetCmd())
 	root.AddCommand(memory.NewListCmd())
 	root.AddCommand(memory.NewPromoteCmd())
+
+	// G11.1-T2 (#809) -- agent-definition CRUD verbs (list / show /
+	// create / edit / delete) for Initiative #802. Wraps the five
+	// /api/v1/agents routes shipped by this Task. Read verbs are
+	// operator-level; write verbs require tenant_admin. Registered
+	// before registerDynamicSubcommands so the backplane manifest
+	// cannot shadow the built-in `agent` parent.
+	root.AddCommand(agent.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=

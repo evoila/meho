@@ -231,6 +231,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 __all__ = [
+    "AgentDefinition",
     "AuditLog",
     "Base",
     "BroadcastOverride",
@@ -2088,6 +2089,168 @@ class WebSession(Base):
         Index(
             "web_session_expires_at_idx",
             "expires_at",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class AgentDefinition(Base):
+    """A first-class, tenant-scoped definition of an LLM agent MEHO can run.
+
+    G11.1-T2 (#809) under Initiative #802 (the P1 agent runtime). The
+    runtime (T1 #808) executes a tool-use loop in MEHO's process; this
+    table is what that loop loads to know *which* agent it is running:
+    the identity it runs as, the logical model tier, the system prompt,
+    the toolset spec, the turn budget, and an optional structured-output
+    schema. Storing the definition as a typed row (not an ad-hoc API
+    payload) makes agents listable, versionable, and auditable objects.
+
+    Dedicated-table choice
+    ----------------------
+
+    Unlike kb / memory (which wrap the shared ``documents`` retrieval
+    substrate), an agent definition is a *structured* record with typed
+    columns -- an integer turn budget, a bounded model tier, a JSON
+    toolset spec -- not a retrievable text blob. The
+    :class:`BroadcastOverride` precedent (a dedicated tenant-scoped
+    CRUD table with a real FK to ``tenant.id``) is the load-bearing
+    shape this model copies.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape
+      every other model uses; PG gets ``gen_random_uuid()`` via the
+      migration, the ORM falls back to ``default=uuid.uuid4`` on
+      SQLite.
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES
+      tenant(id)`` FK. Same precedent as :class:`Document` /
+      :class:`BroadcastOverride`: a brand-new table with no chassis-era
+      rows and a clean downgrade that drops the whole table can enforce
+      the FK at the substrate boundary without a backfill/cascade
+      trade-off. An orphan row for a typo'd / deleted / replayed tenant
+      id surfaces as :class:`IntegrityError` at insert time rather than
+      as a never-resolving definition at run time.
+    * ``name`` -- Text NOT NULL. The operator-facing slug
+      (``incident-triage``, ``vm-inventory-bot``). Validated against the
+      safe-URL alphabet at the API / service layer (it is a URL path
+      segment for the REST surface). Unique per tenant via the named
+      ``agent_definition_tenant_name_idx``.
+    * ``identity_ref`` -- Text NOT NULL. A *reference* to the agent
+      principal whose permissions the toolset is intersected with at run
+      time (G11.2). Stored as opaque text (a soft reference, no FK) --
+      the agent-identity table itself is G11.2-T1's scope, and this
+      Task deliberately stores only the reference, not the identity.
+    * ``model_tier`` -- Text NOT NULL. A *logical* tier
+      (``standard`` / ``fast`` / ``deep``) that G11.5's multi-provider
+      resolver maps to a concrete backend at run time. The bounded set
+      is enforced at the Pydantic layer (a ``Literal``), not via a DB
+      ``CHECK``, so a future tier lands without a migration -- the same
+      forward-compat argument :class:`BroadcastOverride.scope_field`
+      makes.
+    * ``system_prompt`` -- Text NOT NULL. The agent's system prompt.
+      Stored as-is; the runtime feeds it to the model verbatim.
+    * ``toolset`` -- Portable :class:`JSON` -> :class:`JSONB`, NOT NULL
+      DEFAULT ``{}``. The allowed meta-tools / connector-ops spec.
+      T3 (#810) resolves it and intersects it with the identity's
+      permissions; T2 only stores it. JSON-shaped so the spec can grow
+      (allow-lists, glob patterns, per-op arg constraints) without a
+      migration.
+    * ``turn_budget`` -- Integer NOT NULL. The maximum number of
+      model turns the runtime allows before stopping the loop (maps to
+      Pydantic AI's ``UsageLimits(request_limit=...)`` in T1). A
+      positive-integer floor is enforced at the Pydantic layer.
+    * ``output_schema`` -- Portable JSON, *nullable*. An optional JSON
+      Schema the runtime uses for structured output (Pydantic AI's
+      ``output_type``); ``NULL`` means free-form text output.
+    * ``enabled`` -- Boolean NOT NULL DEFAULT ``True``. A soft on/off
+      switch so an operator can park a definition without deleting it
+      (and the run surface T4 can refuse to start a disabled agent).
+    * ``created_by_sub`` -- Text NOT NULL. JWT ``sub`` of the
+      tenant-admin who created the definition -- captures authorship
+      for the audit trail, mirroring
+      :attr:`BroadcastOverride.created_by_sub`.
+    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL.
+      PG-side ``now()`` server defaults via the migration; the ORM also
+      declares ``default=lambda: datetime.now(UTC)`` plus
+      ``onupdate=lambda: datetime.now(UTC)`` on ``updated_at`` so
+      ORM-side edits bump the timestamp.
+
+    Index
+    -----
+
+    * ``agent_definition_tenant_name_idx`` -- unique composite b-tree
+      on ``(tenant_id, name)``. Enforces per-tenant name uniqueness
+      (the natural key for the CRUD upsert / lookup) and drives the
+      tenant-scoped list query. Uniqueness is declared exclusively via
+      the named index (no per-column ``unique=True``) so PG does not
+      auto-create a redundant duplicate -- the
+      :class:`Tenant` / :class:`Target` / :class:`BroadcastOverride`
+      convention.
+
+    The model deliberately ships with no helper methods -- read / write
+    paths live in :mod:`meho_backplane.agents.service`. The ORM class is
+    a pure data shape.
+    """
+
+    __tablename__ = "agent_definition"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NOT NULL with a real REFERENCES tenant(id) FK -- see class
+    # docstring for the Document / BroadcastOverride precedent rationale.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Soft reference to the G11.2 agent principal -- no FK (that table is
+    # G11.2-T1's scope; this Task stores only the reference).
+    identity_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    # Logical tier ("standard" | "fast" | "deep"); bounded at the
+    # Pydantic layer, not via a DB CHECK (forward-compat -- see docstring).
+    model_tier: Mapped[str] = mapped_column(Text, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    toolset: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    turn_budget: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Optional JSON Schema for structured output; NULL = free-form text.
+    output_schema: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=True,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_definition_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
             postgresql_using="btree",
         ),
     )

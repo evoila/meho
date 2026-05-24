@@ -145,6 +145,7 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.resources import memory as memory_resource
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
+        agents,
         audit,
         broadcast_overrides,
         connector_admin,
@@ -168,6 +169,12 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(topology_create_node)
     importlib.reload(memory_tools)
     importlib.reload(memory_promote_tool)
+    # G11.1-T2 (#809): the agent-definition MCP tools join the reload
+    # list for the same reason every other tool module does -- the
+    # autouse clear_registries() above would otherwise leave them
+    # unregistered in any test file that imports this fixture after the
+    # first one runs in the process.
+    importlib.reload(agents)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)

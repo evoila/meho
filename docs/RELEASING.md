@@ -50,7 +50,29 @@ Choose the bump from what's in `[Unreleased]`:
 ### 1. Pre-flight
 
 - [ ] The release Initiative's Tasks are merged and closed.
-- [ ] CI is green on `main`.
+- [ ] **Release only from a confirmed-green `main` HEAD.** Every publish
+  workflow (`image.yml` / `cli-release.yml` / `chart.yml`) fires on the
+  `v*` tag with **no** other gate, so the tag publishes whatever `main`
+  is at — a red `main` ships a broken or incomplete image, chart, and
+  CLI. Confirm the **tagged commit's** `main` CI run is green before
+  step 4:
+
+  ```bash
+  gh run list --repo evoila/meho --branch main --limit 5 \
+    --json headSha,conclusion,status,name,url
+  ```
+
+- [ ] **"cancelled" ≠ "green".** A cancelled CI run is *inconclusive*,
+  not a pass. Merge-storm concurrency cancellation (a later push
+  cancels an in-flight run on the same ref) is the common cause, and a
+  cancelled run reads green-ish in a glance — it is not. If the latest
+  `main` run for the tagged commit is `cancelled`, **re-run it and wait
+  for a real `success`** before tagging:
+
+  ```bash
+  gh run rerun <run-id> --repo evoila/meho   # then re-check conclusion
+  ```
+
 - [ ] Pick `vX.Y.Z`.
 
 ### 2. Roll the CHANGELOG — the load-bearing step
@@ -122,7 +144,8 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 ## Checklist
 
 ```
-[ ] 1. Tasks merged + CI green on main; version picked
+[ ] 1. Tasks merged; main CI GREEN on the tagged commit (cancelled ≠ green —
+       re-run + wait for success); version picked
 [ ] 2. CHANGELOG: completeness audited, missing bullets backfilled,
        [Unreleased] rolled to [X.Y.Z] (post-tag work left behind)
 [ ] 3. Release-cutting PR merged to main
@@ -141,3 +164,11 @@ The push fans out to `cli-release.yml`, `image.yml`, `chart.yml`.
 - **Empty release notes:** `cli-release.yml` falls back to `[Unreleased]`
   when no `## [X.Y.Z]` section exists at tag time. Always roll (step 2)
   *before* tagging (step 4).
+- **Tagging off a red / cancelled `main` (v0.5.0):** the publish
+  workflows have no green-main gate — the `v*` tag publishes whatever
+  `main` is. During the v0.5.0 cut, merge-storm concurrency cancellation
+  made a red `main` read as "cancelled" rather than "failed", and a
+  cancelled run was treated as good enough to tag. A cancelled run is
+  inconclusive, not a pass. Step 1 now makes both gates explicit:
+  confirm the tagged commit's `main` run is a real `success`, and
+  re-run any `cancelled` run before trusting it.

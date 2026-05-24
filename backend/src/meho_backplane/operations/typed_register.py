@@ -133,7 +133,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -145,6 +145,7 @@ from meho_backplane.operations.embed import (
     encode_endpoint_text,
 )
 from meho_backplane.retrieval.embedding import EmbeddingService
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "CompositeOpHandler",
@@ -152,6 +153,7 @@ __all__ = [
     "HandlerSignatureError",
     "TypedOpHandler",
     "clear_typed_op_registrars",
+    "clear_typed_op_snapshot",
     "derive_handler_ref",
     "register_composite_operation",
     "register_typed_op_registrar",
@@ -218,6 +220,143 @@ def clear_typed_op_registrars() -> None:
     _TYPED_OP_REGISTRARS.clear()
 
 
+#: Per-process snapshot of the built-in descriptor + operation-group
+#: rows the registrars produce, plus the registrar-set fingerprint it
+#: was captured under. Populated on the first
+#: :func:`run_typed_op_registrars` call **only when the
+#: ``test_amortize_typed_op_registrars`` settings seam is on** (the test
+#: conftest sets it; production never does). The row entries are plain
+#: dicts of column-name -> value, captured by reading the rows back
+#: after a real registrar pass, so the snapshot is generic over any
+#: connector/registrar without coupling to a registrar's internals. The
+#: fingerprint is the tuple of registrar dotted-paths the snapshot was
+#: built from: a boot whose registrar set differs (a test mutated the
+#: list before booting) re-captures rather than replaying a stale set.
+#: ``None`` means "not yet captured".
+_TypedOpSnapshot = tuple[
+    tuple[str, ...],  # registrar-set fingerprint
+    list[dict[str, Any]],  # operation_group rows
+    list[dict[str, Any]],  # endpoint_descriptor rows
+]
+_TYPED_OP_SNAPSHOT: _TypedOpSnapshot | None = None
+
+
+def _registrar_fingerprint() -> tuple[str, ...]:
+    """Identity of the current registrar set — its dotted paths, in order."""
+    return tuple(f"{r.__module__}.{r.__qualname__}" for r in _TYPED_OP_REGISTRARS)
+
+
+def clear_typed_op_snapshot() -> None:
+    """Drop the per-process descriptor/group snapshot. Test-only.
+
+    The snapshot (see :data:`_TYPED_OP_SNAPSHOT`) is a per-worker cache
+    fingerprinted on the registrar set it was captured from. A boot with
+    a different registrar set re-captures automatically; this hook lets a
+    test force a re-capture unconditionally. Production never calls it —
+    the amortization seam is off, so the snapshot is never populated.
+    """
+    global _TYPED_OP_SNAPSHOT
+    _TYPED_OP_SNAPSHOT = None
+
+
+async def _run_registrars(
+    *,
+    embedding_service: EmbeddingService | None,
+) -> None:
+    """Invoke every registered registrar in order (the real, un-amortized pass)."""
+    log = structlog.get_logger(__name__)
+    for registrar in _TYPED_OP_REGISTRARS:
+        log.info(
+            "typed_op_registrar_running",
+            registrar=f"{registrar.__module__}.{registrar.__qualname__}",
+        )
+        await registrar(embedding_service=embedding_service)
+
+
+def _row_to_dict(row: Any) -> dict[str, Any]:
+    """Snapshot one ORM row as a plain column-name -> value dict.
+
+    Reads the mapped table's column names off the model so a future
+    column addition is captured automatically (no hand-maintained field
+    list). The values are detached primitives (UUID, str, list, dict,
+    datetime) safe to re-`INSERT` into a different engine's session.
+    """
+    return {col.name: getattr(row, col.name) for col in row.__table__.columns}
+
+
+async def _capture_typed_op_snapshot(session: AsyncSession, fingerprint: tuple[str, ...]) -> None:
+    """Read the built-in descriptor + group rows into the per-process cache.
+
+    Called once, immediately after the first real registrar pass under
+    the amortization seam. Captures only the built-in
+    (``tenant_id IS NULL``) typed/composite surface the registrars
+    produce — never tenant-curated rows a test might have added — so the
+    replay reconstructs exactly what a fresh boot's registrars would. The
+    *fingerprint* (the registrar dotted-paths this pass ran) is stored
+    alongside so a later boot with a different registrar set re-captures.
+    """
+    global _TYPED_OP_SNAPSHOT
+    groups = (
+        (await session.execute(select(OperationGroup).where(OperationGroup.tenant_id.is_(None))))
+        .scalars()
+        .all()
+    )
+    descriptors = (
+        (
+            await session.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.tenant_id.is_(None),
+                    EndpointDescriptor.source_kind.in_(("typed", "composite")),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    _TYPED_OP_SNAPSHOT = (
+        fingerprint,
+        [_row_to_dict(g) for g in groups],
+        [_row_to_dict(d) for d in descriptors],
+    )
+
+
+async def _replay_typed_op_snapshot(snapshot: _TypedOpSnapshot) -> None:
+    """Bulk-insert the cached snapshot into the boot's DB. The amortized path.
+
+    Two ``INSERT ... VALUES (...)`` statements (groups first so the
+    descriptors' ``group_id`` FK resolves) replace the ~90 per-op
+    round-trips a full registrar pass costs.
+
+    Idempotent like the real registrars: a no-op when the built-in rows
+    already exist. The common case is a fresh per-test DB (the rows are
+    absent), but a single test can boot the app twice against the *same*
+    DB (e.g. two ``with TestClient(app)`` blocks) — the second boot finds
+    the first boot's rows already present and must not re-insert them and
+    trip the ``operation_group`` partial-unique index. Mirrors the
+    natural-key-lookup short-circuit the un-amortized path already has.
+    """
+    _fingerprint, group_rows, descriptor_rows = snapshot
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        already_present = (
+            await session.execute(
+                select(EndpointDescriptor.id)
+                .where(
+                    EndpointDescriptor.tenant_id.is_(None),
+                    EndpointDescriptor.source_kind.in_(("typed", "composite")),
+                )
+                .limit(1)
+            )
+        ).first()
+        if already_present is not None:
+            return
+        if group_rows:
+            await session.execute(insert(OperationGroup), group_rows)
+        if descriptor_rows:
+            await session.execute(insert(EndpointDescriptor), descriptor_rows)
+        await session.commit()
+
+
 async def run_typed_op_registrars(
     *,
     embedding_service: EmbeddingService | None = None,
@@ -246,14 +385,44 @@ async def run_typed_op_registrars(
     :func:`register_typed_operation` body; test callers (chassis
     integration tests) inject a stub so the suite doesn't pull the
     ONNX model on every run.
+
+    Per-process amortization (test-only, #901)
+    ------------------------------------------
+
+    The unit suite boots the FastAPI app ~200+ times — once per
+    app-booting test — and each boot re-runs every connector's
+    registrar against a *fresh* per-test DB: ~90 ops x (group resolve +
+    natural-key lookup + INSERT + flush). The work is identical every
+    boot (deterministic op set, embeddings stubbed to a zero vector by
+    the #771 seam), so it amortizes cleanly. When
+    :attr:`Settings.test_amortize_typed_op_registrars` is set (only the
+    conftest sets it), the **first** call runs the registrars for real
+    then snapshots the built-in rows into :data:`_TYPED_OP_SNAPSHOT`;
+    every **subsequent** call replays that snapshot as two bulk
+    ``INSERT``s — ~100x cheaper per boot than a full pass (measured:
+    ~105 ms -> ~1 ms per boot). Production leaves the seam off, so this
+    branch never runs there: a pod boots once (the cache would never
+    hit) and a stale cache could mask a registration change. This
+    mirrors the schema-template amortization in ``tests/conftest.py``
+    (#793/#898) — replay a once-computed artifact instead of recomputing
+    it per test.
     """
-    log = structlog.get_logger(__name__)
-    for registrar in _TYPED_OP_REGISTRARS:
-        log.info(
-            "typed_op_registrar_running",
-            registrar=f"{registrar.__module__}.{registrar.__qualname__}",
-        )
-        await registrar(embedding_service=embedding_service)
+    if get_settings().test_amortize_typed_op_registrars:
+        fingerprint = _registrar_fingerprint()
+        snapshot = _TYPED_OP_SNAPSHOT
+        if snapshot is not None and snapshot[0] == fingerprint:
+            await _replay_typed_op_snapshot(snapshot)
+            return
+        # First call this process (or the registrar set changed since
+        # capture): run for real, then capture the built-in rows so later
+        # boots with the same registrar set replay the snapshot.
+        await _run_registrars(embedding_service=embedding_service)
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            await _capture_typed_op_snapshot(session, fingerprint)
+        return
+
+    await _run_registrars(embedding_service=embedding_service)
 
 
 #: Type alias for typed-op handlers -- async callables returning a

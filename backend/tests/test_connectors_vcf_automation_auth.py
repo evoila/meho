@@ -115,13 +115,13 @@ _TARGET_A = _StubTarget(
     name="vcfa-a",
     host="vcfa-a.test.invalid",
     port=443,
-    secret_ref="kv/data/vcfa/vcfa-a",
+    secret_ref="vcfa/vcfa-a",
 )
 _TARGET_B = _StubTarget(
     name="vcfa-b",
     host="vcfa-b.test.invalid",
     port=443,
-    secret_ref="kv/data/vcfa/vcfa-b",
+    secret_ref="vcfa/vcfa-b",
 )
 
 
@@ -206,7 +206,7 @@ def test_base_url_uses_fqdn_when_set() -> None:
         name="vcfa-vhost",
         host="10.0.0.5",
         port=443,
-        secret_ref="kv/data/vcfa/vhost",
+        secret_ref="vcfa/vhost",
         fqdn="vcfa.canonical.invalid",
     )
     connector = _make_connector()
@@ -225,7 +225,7 @@ def test_base_url_with_non_default_port_is_appended() -> None:
         name="vcfa-port",
         host="vcfa-port.test.invalid",
         port=8443,
-        secret_ref="kv/data/vcfa/port",
+        secret_ref="vcfa/port",
     )
     connector = _make_connector()
     assert connector._base_url(target) == "https://vcfa-port.test.invalid:8443"
@@ -246,7 +246,7 @@ def test_base_url_raises_configuration_error_when_ip_host_has_no_fqdn(ip_host: s
         name="vcfa-ip",
         host=ip_host,
         port=443,
-        secret_ref="kv/data/vcfa/ip",
+        secret_ref="vcfa/ip",
     )
     connector = _make_connector()
     with pytest.raises(VcfAutomationConfigurationError) as exc_info:
@@ -360,7 +360,7 @@ async def test_tenant_login_forwards_domain_when_target_has_domain() -> None:
         name="vcfa-domain",
         host="vcfa-domain.test.invalid",
         port=443,
-        secret_ref="kv/data/vcfa/domain",
+        secret_ref="vcfa/domain",
         domain="corp.example",
     )
     connector = _make_connector()
@@ -493,7 +493,7 @@ async def test_provider_username_override_is_used_verbatim() -> None:
         name="vcfa-prov-user",
         host="vcfa-prov-user.test.invalid",
         port=443,
-        secret_ref="kv/data/vcfa/prov-user",
+        secret_ref="vcfa/prov-user",
         provider_username="admin@System",
     )
     connector = _make_connector()
@@ -523,8 +523,8 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
         name="vcfa-prov-secret",
         host="vcfa-prov-secret.test.invalid",
         port=443,
-        secret_ref="kv/data/vcfa/sso",
-        provider_secret_ref="kv/data/vcfa/provider",
+        secret_ref="vcfa/sso",
+        provider_secret_ref="vcfa/provider",
         provider_username="admin@System",
     )
 
@@ -534,7 +534,7 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
         t: VcfAutomationTargetLike, _operator: Operator
     ) -> dict[str, str]:
         seen_secret_refs.append(t.secret_ref)
-        if t.secret_ref == "kv/data/vcfa/provider":
+        if t.secret_ref == "vcfa/provider":
             return {"username": "admin", "password": "provider-secret"}
         return {"username": "svc-meho", "password": "tenant-secret"}
 
@@ -550,7 +550,7 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
     auth = login.calls[0].request.headers["Authorization"]
     _, password = _decode_basic_auth(auth)
     assert password == "provider-secret"
-    assert "kv/data/vcfa/provider" in seen_secret_refs
+    assert "vcfa/provider" in seen_secret_refs
     await connector.aclose()
 
 
@@ -654,7 +654,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="vcfa-per-user",
         host="vcfa.test.invalid",
         port=443,
-        secret_ref="kv/data/vcfa/per-user",
+        secret_ref="vcfa/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -673,7 +673,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="vcfa-pre-g03",
         host="vcfa.test.invalid",
         port=443,
-        secret_ref="kv/data/vcfa/pre-g03",
+        secret_ref="vcfa/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -696,7 +696,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
         name="vcfa-enum",
         host="vcfa.test.invalid",
         port=443,
-        secret_ref="kv/data/vcfa/enum",
+        secret_ref="vcfa/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()
@@ -894,7 +894,7 @@ async def test_fingerprint_ip_host_without_fqdn_surfaces_configuration_error() -
         name="vcfa-ip-fp",
         host="10.0.0.5",
         port=443,
-        secret_ref="kv/data/vcfa/ip-fp",
+        secret_ref="vcfa/ip-fp",
     )
     connector = _make_connector()
 

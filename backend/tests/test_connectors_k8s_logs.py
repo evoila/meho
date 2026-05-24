@@ -71,7 +71,7 @@ _TARGET = _StubTarget(
     name="rke2-meho",
     host="rke2-meho.test.invalid",
     port=6443,
-    secret_ref="kv/data/k8s/rke2-meho",
+    secret_ref="k8s/rke2-meho",
 )
 
 

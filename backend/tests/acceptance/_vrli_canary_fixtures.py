@@ -396,7 +396,7 @@ async def ingested_vrli_canary(
             host=VRLI_CANARY_BASE_URL.removeprefix("https://"),
             port=443,
             fqdn=None,
-            secret_ref="kv/data/vrli/vrli-canary",
+            secret_ref="vrli/vrli-canary",
             auth_model="shared_service_account",
             vpn_required=False,
             extras={},

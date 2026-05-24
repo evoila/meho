@@ -89,13 +89,13 @@ _TARGET_A = _StubTarget(
     name="nsx-a",
     host="nsx-a.test.invalid",
     port=443,
-    secret_ref="kv/data/nsx/nsx-a",
+    secret_ref="nsx/nsx-a",
 )
 _TARGET_B = _StubTarget(
     name="nsx-b",
     host="nsx-b.test.invalid",
     port=443,
-    secret_ref="kv/data/nsx/nsx-b",
+    secret_ref="nsx/nsx-b",
 )
 
 
@@ -326,7 +326,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="nsx-per-user",
         host="nsx.test.invalid",
         port=443,
-        secret_ref="kv/data/nsx/per-user",
+        secret_ref="nsx/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -346,7 +346,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="nsx-pre-g03",
         host="nsx.test.invalid",
         port=443,
-        secret_ref="kv/data/nsx/pre-g03",
+        secret_ref="nsx/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -366,7 +366,7 @@ async def test_auth_headers_accepts_enum_value_for_auth_model() -> None:
         name="nsx-enum",
         host="nsx.test.invalid",
         port=443,
-        secret_ref="kv/data/nsx/enum",
+        secret_ref="nsx/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()

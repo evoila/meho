@@ -112,13 +112,13 @@ _TARGET_A = _StubTarget(
     name="vrli-a",
     host="vrli-a.test.invalid",
     port=443,
-    secret_ref="kv/data/vrli/vrli-a",
+    secret_ref="vrli/vrli-a",
 )
 _TARGET_B = _StubTarget(
     name="vrli-b",
     host="vrli-b.test.invalid",
     port=443,
-    secret_ref="kv/data/vrli/vrli-b",
+    secret_ref="vrli/vrli-b",
 )
 
 
@@ -248,7 +248,7 @@ async def test_auth_headers_uses_target_provider_when_set() -> None:
         name="vrli-ad",
         host="vrli-ad.test.invalid",
         port=443,
-        secret_ref="kv/data/vrli/vrli-ad",
+        secret_ref="vrli/vrli-ad",
         provider="ActiveDirectory",
     )
 
@@ -409,7 +409,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="vrli-per-user",
         host="vrli.test.invalid",
         port=443,
-        secret_ref="kv/data/vrli/per-user",
+        secret_ref="vrli/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -429,7 +429,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="vrli-pre-g03",
         host="vrli.test.invalid",
         port=443,
-        secret_ref="kv/data/vrli/pre-g03",
+        secret_ref="vrli/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -449,7 +449,7 @@ async def test_auth_headers_accepts_enum_value_for_auth_model() -> None:
         name="vrli-enum",
         host="vrli.test.invalid",
         port=443,
-        secret_ref="kv/data/vrli/enum",
+        secret_ref="vrli/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()

@@ -89,13 +89,13 @@ _TARGET_A = _StubTarget(
     name="sddc-a",
     host="sddc-a.test.invalid",
     port=443,
-    secret_ref="kv/data/sddc/sddc-a",
+    secret_ref="sddc/sddc-a",
 )
 _TARGET_B = _StubTarget(
     name="sddc-b",
     host="sddc-b.test.invalid",
     port=443,
-    secret_ref="kv/data/sddc/sddc-b",
+    secret_ref="sddc/sddc-b",
 )
 
 
@@ -197,7 +197,7 @@ async def test_auth_headers_honors_explicit_sso_realm_override() -> None:
         name="sddc-custom",
         host="sddc-custom.test.invalid",
         port=443,
-        secret_ref="kv/data/sddc/custom",
+        secret_ref="sddc/custom",
         sso_realm="corp.example.com",
     )
     connector = _make_connector()
@@ -300,7 +300,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="sddc-per-user",
         host="sddc.test.invalid",
         port=443,
-        secret_ref="kv/data/sddc/per-user",
+        secret_ref="sddc/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -320,7 +320,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="sddc-pre-g03",
         host="sddc.test.invalid",
         port=443,
-        secret_ref="kv/data/sddc/pre-g03",
+        secret_ref="sddc/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -336,7 +336,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
         name="sddc-enum",
         host="sddc.test.invalid",
         port=443,
-        secret_ref="kv/data/sddc/enum",
+        secret_ref="sddc/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()

@@ -140,13 +140,13 @@ _TARGET_A = _StubTarget(
     name="vcenter-a",
     host="vcenter-a.test.invalid",
     port=443,
-    secret_ref="kv/data/vsphere/vcenter-a",
+    secret_ref="vsphere/vcenter-a",
 )
 _TARGET_B = _StubTarget(
     name="vcenter-b",
     host="vcenter-b.test.invalid",
     port=443,
-    secret_ref="kv/data/vsphere/vcenter-b",
+    secret_ref="vsphere/vcenter-b",
 )
 
 
@@ -586,7 +586,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="vcenter-per-user",
         host="vc.test.invalid",
         port=443,
-        secret_ref="kv/data/vsphere/per-user",
+        secret_ref="vsphere/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -607,7 +607,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="vcenter-pre-g03",
         host="vc.test.invalid",
         port=443,
-        secret_ref="kv/data/vsphere/pre-g03",
+        secret_ref="vsphere/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -628,7 +628,7 @@ async def test_auth_headers_accepts_enum_value_for_auth_model() -> None:
         name="vcenter-enum",
         host="vc.test.invalid",
         port=443,
-        secret_ref="kv/data/vsphere/enum",
+        secret_ref="vsphere/enum",
     )
     # Use the enum member directly rather than its .value
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]

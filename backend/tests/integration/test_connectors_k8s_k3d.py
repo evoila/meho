@@ -121,7 +121,7 @@ def k3s_kubeconfig_and_target() -> Any:
             name="k3s-test",
             host=parsed.hostname or "127.0.0.1",
             port=parsed.port,
-            secret_ref="kv/data/k8s/k3s-test",
+            secret_ref="k8s/k3s-test",
         )
         yield kubeconfig, target
     finally:

@@ -64,7 +64,7 @@ _TARGET = _StubTarget(
     name="gcloud-ops-test",
     gcp_project="my-project-123",
     gcp_impersonate_sa="svc@my-project-123.iam.gserviceaccount.com",
-    secret_ref="kv/data/gcloud/test",
+    secret_ref="gcloud/test",
 )
 
 # ---------------------------------------------------------------------------

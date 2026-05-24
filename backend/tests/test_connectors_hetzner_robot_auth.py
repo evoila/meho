@@ -88,13 +88,13 @@ _TARGET_A = _StubTarget(
     name="robot-a",
     host="robot.your-server.de",
     port=443,
-    secret_ref="kv/data/hetzner/robot-a",
+    secret_ref="hetzner/robot-a",
 )
 _TARGET_B = _StubTarget(
     name="robot-b",
     host="robot.your-server.de",
     port=None,
-    secret_ref="kv/data/hetzner/robot-b",
+    secret_ref="hetzner/robot-b",
 )
 
 
@@ -363,7 +363,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="robot-per-user",
         host="robot.your-server.de",
         port=443,
-        secret_ref="kv/data/hetzner/per-user",
+        secret_ref="hetzner/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -383,7 +383,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="robot-pre-g03",
         host="robot.your-server.de",
         port=443,
-        secret_ref="kv/data/hetzner/pre-g03",
+        secret_ref="hetzner/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -399,7 +399,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
         name="robot-enum",
         host="robot.your-server.de",
         port=443,
-        secret_ref="kv/data/hetzner/enum",
+        secret_ref="hetzner/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()

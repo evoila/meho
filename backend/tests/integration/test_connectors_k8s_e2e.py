@@ -228,7 +228,7 @@ def k3s_kubeconfig_and_target() -> Iterator[tuple[dict[str, Any], _K3sTarget]]:
             name="k3s-e2e",
             host=parsed.hostname or "127.0.0.1",
             port=parsed.port,
-            secret_ref="kv/data/k8s/k3s-e2e",
+            secret_ref="k8s/k3s-e2e",
         )
         yield kubeconfig, target
     finally:

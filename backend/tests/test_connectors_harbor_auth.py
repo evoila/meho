@@ -87,13 +87,13 @@ _TARGET_A = _StubTarget(
     name="harbor-a",
     host="harbor-a.test.invalid",
     port=443,
-    secret_ref="kv/data/harbor/harbor-a",
+    secret_ref="harbor/harbor-a",
 )
 _TARGET_B = _StubTarget(
     name="harbor-b",
     host="harbor-b.test.invalid",
     port=443,
-    secret_ref="kv/data/harbor/harbor-b",
+    secret_ref="harbor/harbor-b",
 )
 
 
@@ -297,7 +297,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(auth_model:
         name="harbor-per-user",
         host="harbor.test.invalid",
         port=443,
-        secret_ref="kv/data/harbor/per-user",
+        secret_ref="harbor/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -317,7 +317,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="harbor-pre-g03",
         host="harbor.test.invalid",
         port=443,
-        secret_ref="kv/data/harbor/pre-g03",
+        secret_ref="harbor/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -333,7 +333,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
         name="harbor-enum",
         host="harbor.test.invalid",
         port=443,
-        secret_ref="kv/data/harbor/enum",
+        secret_ref="harbor/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()

@@ -523,7 +523,7 @@ async def _seed_target(
                 product=product,
                 host=host,
                 port=443,
-                secret_ref="vault:kv/data/x",
+                secret_ref="targets/topology-x",
                 auth_model="shared_service_account",
             )
         )

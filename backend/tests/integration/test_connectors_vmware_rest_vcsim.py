@@ -111,7 +111,7 @@ def vcsim_target() -> _VcsimTarget:
         name="vcsim-test",
         host=VCENTER_BASE_URL.removeprefix("https://"),
         port=443,
-        secret_ref="kv/data/vsphere/vcsim-test",
+        secret_ref="vsphere/vcsim-test",
     )
 
 

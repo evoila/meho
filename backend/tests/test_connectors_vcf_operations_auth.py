@@ -97,19 +97,19 @@ _TARGET_A = _StubTarget(
     name="vrops-a",
     host="vrops-a.test.invalid",
     port=443,
-    secret_ref="kv/data/vrops/vrops-a",
+    secret_ref="vrops/vrops-a",
 )
 _TARGET_B = _StubTarget(
     name="vrops-b",
     host="vrops-b.test.invalid",
     port=443,
-    secret_ref="kv/data/vrops/vrops-b",
+    secret_ref="vrops/vrops-b",
 )
 _TARGET_WITH_AUTH_SOURCE = _StubTarget(
     name="vrops-ad",
     host="vrops-ad.test.invalid",
     port=443,
-    secret_ref="kv/data/vrops/vrops-ad",
+    secret_ref="vrops/vrops-ad",
     auth_source="corp-ad",
 )
 
@@ -308,7 +308,7 @@ async def test_auth_headers_rejects_non_shared_service_account_modes(
         name="vrops-per-user",
         host="vrops.test.invalid",
         port=443,
-        secret_ref="kv/data/vrops/per-user",
+        secret_ref="vrops/per-user",
         auth_model=auth_model,
     )
     connector = _make_connector()
@@ -328,7 +328,7 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         name="vrops-pre-g03",
         host="vrops.test.invalid",
         port=443,
-        secret_ref="kv/data/vrops/pre-g03",
+        secret_ref="vrops/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
@@ -344,7 +344,7 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
         name="vrops-enum",
         host="vrops.test.invalid",
         port=443,
-        secret_ref="kv/data/vrops/enum",
+        secret_ref="vrops/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()
@@ -401,7 +401,7 @@ async def test_auth_source_empty_string_is_treated_as_unset() -> None:
         name="vrops-empty-source",
         host="vrops-empty-source.test.invalid",
         port=443,
-        secret_ref="kv/data/vrops/empty-source",
+        secret_ref="vrops/empty-source",
         auth_source="",
     )
     connector = _make_connector()

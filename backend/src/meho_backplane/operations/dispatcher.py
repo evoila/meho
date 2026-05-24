@@ -26,9 +26,10 @@ phases the parent Initiative names:
    structured ``no_connector`` error.
 6. Branch on ``descriptor.source_kind`` -- ``ingested`` / ``typed`` /
    ``composite``. See :mod:`meho_backplane.operations._branches`.
-7. JSONFlux-wrap the response via the :class:`Reducer` (v0.2 default
-   is :class:`~meho_backplane.operations.reducer.PassThroughReducer`;
-   T6 #397 ships the real reduction).
+7. JSONFlux-wrap the response via the :class:`Reducer` (production default
+   is :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`,
+   installed at startup; the import-time default is the
+   :class:`~meho_backplane.operations.reducer.PassThroughReducer` shim).
 8. Write the audit row synchronously + publish a broadcast event
    (:func:`~meho_backplane.operations._audit.audit_and_broadcast_safe`).
 9. Return the :class:`OperationResult`.
@@ -427,10 +428,12 @@ async def _reduce_or_error(
 ) -> tuple[Any, ResultHandle | None] | OperationResult:
     """Run the JSONFlux reducer; return ``(summary, handle)`` or a structured error.
 
-    The dispatcher's module docstring contracts "never raises". v0.2's
-    :class:`~meho_backplane.operations.reducer.PassThroughReducer` can't
-    raise, but :func:`set_default_reducer` invites swappable real reducers
-    (MinIO/S3 I/O, schema validation) that will. Any reducer exception is
+    The dispatcher's module docstring contracts "never raises". The
+    :class:`~meho_backplane.operations.reducer.PassThroughReducer` shim can't
+    raise, but the production
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    (and other swappable reducers — DuckDB materialization, future MinIO/S3
+    I/O, schema validation) can. Any reducer exception is
     converted to a structured ``connector_error``
     :class:`OperationResult` — same shape the handler-call exception path
     produces — and the audit row + broadcast event still fire so the

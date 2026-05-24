@@ -95,6 +95,8 @@ __all__ = [
     "AgentDefinition",
     "AgentRun",
     "AgentRunError",
+    "AgentRunEvent",
+    "AgentRunEventKind",
     "AgentRunHandle",
     "AgentRunResult",
     "AgentRunStatus",
@@ -196,6 +198,50 @@ class AgentRunResult:
     tool_call_count: int
 
 
+class AgentRunEventKind(StrEnum):
+    """The kind of a single :class:`AgentRunEvent` the loop emits.
+
+    A closed enum so the T4 SSE surface can render each event under a
+    stable ``event:`` name and a consumer can switch exhaustively. The
+    vocabulary is the runtime-observable progress of one bounded loop —
+    not the framework's full node-graph taxonomy, which is intentionally
+    not leaked across the seam:
+
+    * :attr:`TURN` — the loop made a model request (one turn boundary).
+    * :attr:`TOOL_CALL` — the model asked to call a tool; ``data`` carries
+      ``{"tool_name": ..., "args": ...}``.
+    * :attr:`TOOL_RESULT` — a tool returned; ``data`` carries
+      ``{"tool_name": ..., "content": ...}``.
+    * :attr:`FINAL` — the loop produced its terminal output; ``data``
+      carries ``{"output": ...}``.
+    * :attr:`ERROR` — the loop failed (budget exhausted, a tool raised,
+      the model errored); ``data`` carries ``{"error": ...}``.
+    """
+
+    TURN = "turn"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    FINAL = "final"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRunEvent:
+    """One observable progress event from a streaming run.
+
+    The seam's *event* contract for :meth:`AgentRun.stream_events` — the
+    richer stream the T1 :meth:`AgentRun.stream` deferred to T4 (#811).
+    ``kind`` selects the event; ``data`` is a JSON-serialisable payload
+    whose shape is fixed per kind (see :class:`AgentRunEventKind`). Kept
+    as a plain value object (not a framework type) so the SSE transport
+    serialises it without importing ``pydantic_ai`` — the seam-confinement
+    invariant the package docstring states.
+    """
+
+    kind: AgentRunEventKind
+    data: dict[str, Any]
+
+
 @dataclass(slots=True)
 class AgentRunHandle:
     """A reference to one in-flight or finished run.
@@ -254,6 +300,27 @@ class AgentRun(Protocol):
 
     def stream(self, handle: AgentRunHandle) -> AsyncIterator[str]:
         """Yield the loop's textual output events as they are produced."""
+        ...
+
+    def stream_events(
+        self,
+        definition: AgentDefinition,
+        operator: Operator,
+        inputs: str,
+        run_id: UUID,
+    ) -> AsyncIterator[AgentRunEvent]:
+        """Run the loop and yield structured progress events as they happen.
+
+        The richer streaming contract the T4 SSE surface (#811) consumes:
+        a turn / tool-call / tool-result / final / error sequence rather
+        than the single final chunk :meth:`stream` yields. Unlike the
+        :meth:`start`-then-:meth:`stream` flow, this drives the loop
+        *inline* in the calling coroutine so the consumer pulls events at
+        its own pace — the right shape for an SSE response whose lifetime
+        is the run's lifetime. ``run_id`` is supplied by the caller (the
+        T6 ``agent_run`` row id) so the streamed events share the run's
+        lineage key.
+        """
         ...
 
 
@@ -340,6 +407,77 @@ def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
         before searching for a specific operation to call.
         """
         return await list_operation_groups(ctx.deps, {"connector_id": connector_id})
+
+
+def _coerce_output(value: Any) -> Any:
+    """Reduce a loop output / tool content to a JSON-serialisable value.
+
+    The SSE transport (:mod:`meho_backplane.api.v1.agent_runs`) and the
+    durable run record (:mod:`meho_backplane.operations.agent_run`) both
+    need a JSON value. A Pydantic ``BaseModel`` (the structured-output
+    case) is dumped to a dict; everything else passes through, with a
+    ``str`` fallback so an exotic object never crashes the serializer.
+    """
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict | list | str | int | float | bool) or value is None:
+        return value
+    return str(value)
+
+
+def _tool_returns(message_history: Any) -> list[dict[str, Any]]:
+    """Collect every tool-return part in *message_history*, in order.
+
+    Returns a list of ``{"tool_name", "content"}`` dicts — the
+    :attr:`AgentRunEventKind.TOOL_RESULT` payload shape. The history is
+    append-only across the loop's turns, so the list length is a stable
+    cursor a streaming caller advances past as it emits each return.
+    """
+    returns: list[dict[str, Any]] = []
+    for message in message_history:
+        for part in message.parts:
+            if getattr(part, "part_kind", "") == "tool-return":
+                returns.append(
+                    {"tool_name": part.tool_name, "content": _coerce_output(part.content)}
+                )
+    return returns
+
+
+def _node_events(
+    node: Any,
+    run: Any,
+    emitted_tool_returns: int,
+) -> tuple[list[AgentRunEvent], int]:
+    """Map one framework node to its :class:`AgentRunEvent` list + new cursor.
+
+    Split out of :meth:`PydanticAgentRun.stream_events` so the generator's
+    body stays small. A model-request node is one ``turn``; a call-tools
+    node emits a ``tool_call`` per tool-call part on the response and a
+    ``tool_result`` per tool return that has appeared in the run's message
+    history since *emitted_tool_returns* (the history is append-only, so the
+    count is a stable cursor). Returns the events to yield and the updated
+    cursor.
+    """
+    if Agent.is_model_request_node(node):
+        return [AgentRunEvent(kind=AgentRunEventKind.TURN, data={})], emitted_tool_returns
+    if not Agent.is_call_tools_node(node):
+        return [], emitted_tool_returns
+
+    events: list[AgentRunEvent] = []
+    for part in node.model_response.parts:
+        if part.part_kind == "tool-call":
+            events.append(
+                AgentRunEvent(
+                    kind=AgentRunEventKind.TOOL_CALL,
+                    data={"tool_name": part.tool_name, "args": part.args},
+                )
+            )
+    # Tool returns land in the run's message history only after the
+    # call-tools node completes, so emit the ones not yet surfaced.
+    new_returns = _tool_returns(run.ctx.state.message_history)
+    for ret in new_returns[emitted_tool_returns:]:
+        events.append(AgentRunEvent(kind=AgentRunEventKind.TOOL_RESULT, data=ret))
+    return events, len(new_returns)
 
 
 @dataclass
@@ -605,10 +743,74 @@ class PydanticAgentRun:
         T1 ships a minimal stream — it awaits the run and yields the final
         answer as a single chunk — so the seam's four-method surface is
         complete and the T4 SSE surface has a contract to build against.
-        Token-by-token streaming (the framework's ``run_stream`` /
-        ``iter`` node events) is wired in T4 (#811) where the SSE transport
-        lives. Yielding only on success keeps the failure path on
+        The richer turn / tool-call / final stream is :meth:`stream_events`
+        (T4 #811). Yielding only on success keeps the failure path on
         :meth:`result`'s :class:`AgentRunError`.
         """
         result = await self.result(handle)
         yield str(result.output)
+
+    async def stream_events(
+        self,
+        definition: AgentDefinition,
+        operator: Operator,
+        inputs: str,
+        run_id: UUID,
+    ) -> AsyncIterator[AgentRunEvent]:
+        """Drive the loop inline and yield structured progress events.
+
+        Uses the framework's node graph (:meth:`~pydantic_ai.Agent.iter`)
+        to surface the loop's progress — one :class:`AgentRunEvent` per
+        turn, tool call, tool result, and the final output — without
+        leaking framework types across the seam. The loop runs inline in
+        the calling coroutine (the SSE response task), so the consumer
+        pulls events at its own pace and a client disconnect cancels the
+        underlying loop through the iterator's cleanup.
+
+        A tripped turn budget surfaces as a :attr:`AgentRunEventKind.ERROR`
+        event (then the generator ends) rather than a raised exception, so
+        an SSE consumer always sees a terminal frame regardless of how the
+        loop ended. Tool returns are read from the run's message history
+        after the call-tools node completes — the plain (non-streaming)
+        node-graph path the deterministic test model supports.
+        """
+        agent = self._build_agent(definition, operator)
+        limits = UsageLimits(request_limit=definition.request_limit)
+        emitted_tool_returns = 0
+        try:
+            async with agent.iter(inputs, deps=operator, usage_limits=limits) as run:
+                async for node in run:
+                    events, emitted_tool_returns = _node_events(node, run, emitted_tool_returns)
+                    for event in events:
+                        yield event
+                result = run.result
+                if result is None:  # pragma: no cover - iter always sets a result
+                    raise AgentRunError(f"agent run {run_id} produced no result")
+                yield AgentRunEvent(
+                    kind=AgentRunEventKind.FINAL,
+                    data={"output": _coerce_output(result.output)},
+                )
+        except UsageLimitExceeded as exc:
+            _log.warning(
+                "agent_run_stream_budget_exhausted",
+                run_id=str(run_id),
+                agent=definition.name,
+                request_limit=definition.request_limit,
+                operator_sub=operator.sub,
+            )
+            yield AgentRunEvent(
+                kind=AgentRunEventKind.ERROR,
+                data={"error": f"turn budget exhausted: {exc}"},
+            )
+        except Exception as exc:
+            _log.warning(
+                "agent_run_stream_failed",
+                run_id=str(run_id),
+                agent=definition.name,
+                error=str(exc),
+                operator_sub=operator.sub,
+            )
+            yield AgentRunEvent(
+                kind=AgentRunEventKind.ERROR,
+                data={"error": str(exc)},
+            )

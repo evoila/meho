@@ -25,6 +25,16 @@ const (
 	Standard AgentModelTier = "standard"
 )
 
+// Defines values for AgentRunStatus.
+const (
+	AwaitingApproval AgentRunStatus = "awaiting_approval"
+	Cancelled        AgentRunStatus = "cancelled"
+	Failed           AgentRunStatus = "failed"
+	Pending          AgentRunStatus = "pending"
+	Running          AgentRunStatus = "running"
+	Succeeded        AgentRunStatus = "succeeded"
+)
+
 // Defines values for AuthModel.
 const (
 	Impersonation        AuthModel = "impersonation"
@@ -350,6 +360,102 @@ type AgentDefinitionUpdate struct {
 // * “fast“ -- a cheaper / lower-latency tier for simple loops.
 // * “deep“ -- a more capable tier for harder reasoning.
 type AgentModelTier string
+
+// AgentRunRequest POST body for “/agents/{name}/run“.
+//
+// “extra="forbid"“ rejects unknown fields with 422 (catches a client
+// typo before it lands as a silent no-op). “async_“ is the async flag —
+// named with a trailing underscore because “async“ is a Python keyword;
+// its JSON alias is “async“ so the wire field reads naturally.
+type AgentRunRequest struct {
+	// Async Return a run handle immediately instead of blocking for the result.
+	Async *bool `json:"async,omitempty"`
+
+	// Input The user prompt to run the agent on.
+	Input string `json:"input"`
+}
+
+// AgentRunStatus Closed lifecycle status of an :class:`AgentRun`.
+//
+// Initiative #802 (G11.1 Agent runtime), Task #813 (T6). The runtime
+// hosts an LLM tool-use loop in MEHO's process; every invocation is
+// one “agent_run“ row whose “status“ walks an explicit, enforced
+// state machine. The legal transitions live in
+// :data:`meho_backplane.operations.agent_run.ALLOWED_TRANSITIONS`; the
+// service rejects any edge not on that map so an illegal jump (e.g.
+// “succeeded“ -> “running“) cannot land in the DB.
+//
+// Members:
+//
+//   - :attr:`PENDING` -- the row was created but the loop has not
+//     started executing yet (initial state on insert).
+//   - :attr:`RUNNING` -- the loop is executing tool-use turns.
+//   - :attr:`AWAITING_APPROVAL` -- the loop is paused on a
+//     policy-gated tool call whose verdict is “needs-approval“
+//     (G11.2 resolves the verdict; the runtime parks the run here in
+//     the meantime). Resumable back to “running“.
+//   - :attr:`SUCCEEDED` -- the loop completed and produced “output“
+//     (terminal).
+//   - :attr:`FAILED` -- the loop errored or exhausted its turn budget
+//     without producing a usable result (terminal).
+//   - :attr:`CANCELLED` -- an authorized operator cancelled a
+//     non-terminal run (terminal). The cancellation path is the
+//     “running“ / “pending“ / “awaiting_approval“ ->
+//     “cancelled“ edge.
+//
+// Mirrors the closed-enum + DB “CHECK“ discipline
+// :class:`GraphEdgeKind` / :class:`GraphHistoryChangeKind` set: the
+// enum and the “CHECK (status IN (...))“ constraint move in
+// lock-step via migration “0015“; the drift guard
+// :func:`tests.test_db_agent_run.test_status_check_matches_enum`
+// enforces the equality at unit-test time.
+type AgentRunStatus string
+
+// AgentRunStatusResponse Poll response for “GET /agents/runs/{handle}“.
+type AgentRunStatusResponse struct {
+	Error    *string                 `json:"error"`
+	Model    *string                 `json:"model"`
+	Output   *map[string]interface{} `json:"output"`
+	Provider *string                 `json:"provider"`
+	RunId    openapi_types.UUID      `json:"run_id"`
+
+	// Status Closed lifecycle status of an :class:`AgentRun`.
+	//
+	// Initiative #802 (G11.1 Agent runtime), Task #813 (T6). The runtime
+	// hosts an LLM tool-use loop in MEHO's process; every invocation is
+	// one ``agent_run`` row whose ``status`` walks an explicit, enforced
+	// state machine. The legal transitions live in
+	// :data:`meho_backplane.operations.agent_run.ALLOWED_TRANSITIONS`; the
+	// service rejects any edge not on that map so an illegal jump (e.g.
+	// ``succeeded`` -> ``running``) cannot land in the DB.
+	//
+	// Members:
+	//
+	// * :attr:`PENDING` -- the row was created but the loop has not
+	//   started executing yet (initial state on insert).
+	// * :attr:`RUNNING` -- the loop is executing tool-use turns.
+	// * :attr:`AWAITING_APPROVAL` -- the loop is paused on a
+	//   policy-gated tool call whose verdict is ``needs-approval``
+	//   (G11.2 resolves the verdict; the runtime parks the run here in
+	//   the meantime). Resumable back to ``running``.
+	// * :attr:`SUCCEEDED` -- the loop completed and produced ``output``
+	//   (terminal).
+	// * :attr:`FAILED` -- the loop errored or exhausted its turn budget
+	//   without producing a usable result (terminal).
+	// * :attr:`CANCELLED` -- an authorized operator cancelled a
+	//   non-terminal run (terminal). The cancellation path is the
+	//   ``running`` / ``pending`` / ``awaiting_approval`` ->
+	//   ``cancelled`` edge.
+	//
+	// Mirrors the closed-enum + DB ``CHECK`` discipline
+	// :class:`GraphEdgeKind` / :class:`GraphHistoryChangeKind` set: the
+	// enum and the ``CHECK (status IN (...))`` constraint move in
+	// lock-step via migration ``0015``; the drift guard
+	// :func:`tests.test_db_agent_run.test_status_check_matches_enum`
+	// enforces the equality at unit-test time.
+	Status AgentRunStatus `json:"status"`
+	Turns  int            `json:"turns"`
+}
 
 // AuditEntry One row of the audit query result.
 //
@@ -2562,6 +2668,11 @@ type CreateAgentApiV1AgentsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// GetRunStatusApiV1AgentsRunsHandleGetParams defines parameters for GetRunStatusApiV1AgentsRunsHandleGet.
+type GetRunStatusApiV1AgentsRunsHandleGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DeleteAgentApiV1AgentsNameDeleteParams defines parameters for DeleteAgentApiV1AgentsNameDelete.
 type DeleteAgentApiV1AgentsNameDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -2574,6 +2685,16 @@ type ShowAgentApiV1AgentsNameGetParams struct {
 
 // EditAgentApiV1AgentsNamePatchParams defines parameters for EditAgentApiV1AgentsNamePatch.
 type EditAgentApiV1AgentsNamePatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RunAgentApiV1AgentsNameRunPostParams defines parameters for RunAgentApiV1AgentsNameRunPost.
+type RunAgentApiV1AgentsNameRunPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RunAgentEventsApiV1AgentsNameRunEventsPostParams defines parameters for RunAgentEventsApiV1AgentsNameRunEventsPost.
+type RunAgentEventsApiV1AgentsNameRunEventsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -3025,6 +3146,12 @@ type CreateAgentApiV1AgentsPostJSONRequestBody = AgentDefinitionCreate
 // EditAgentApiV1AgentsNamePatchJSONRequestBody defines body for EditAgentApiV1AgentsNamePatch for application/json ContentType.
 type EditAgentApiV1AgentsNamePatchJSONRequestBody = AgentDefinitionUpdate
 
+// RunAgentApiV1AgentsNameRunPostJSONRequestBody defines body for RunAgentApiV1AgentsNameRunPost for application/json ContentType.
+type RunAgentApiV1AgentsNameRunPostJSONRequestBody = AgentRunRequest
+
+// RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody defines body for RunAgentEventsApiV1AgentsNameRunEventsPost for application/json ContentType.
+type RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody = AgentRunRequest
+
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
@@ -3231,6 +3358,9 @@ type ClientInterface interface {
 
 	CreateAgentApiV1AgentsPost(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetRunStatusApiV1AgentsRunsHandleGet request
+	GetRunStatusApiV1AgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteAgentApiV1AgentsNameDelete request
 	DeleteAgentApiV1AgentsNameDelete(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -3241,6 +3371,16 @@ type ClientInterface interface {
 	EditAgentApiV1AgentsNamePatchWithBody(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	EditAgentApiV1AgentsNamePatch(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunAgentApiV1AgentsNameRunPostWithBody request with any body
+	RunAgentApiV1AgentsNameRunPostWithBody(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunAgentApiV1AgentsNameRunPost(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, body RunAgentApiV1AgentsNameRunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunAgentEventsApiV1AgentsNameRunEventsPostWithBody request with any body
+	RunAgentEventsApiV1AgentsNameRunEventsPostWithBody(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunAgentEventsApiV1AgentsNameRunEventsPost(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// MyRecentApiV1AuditMyRecentGet request
 	MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3575,6 +3715,18 @@ func (c *Client) CreateAgentApiV1AgentsPost(ctx context.Context, params *CreateA
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetRunStatusApiV1AgentsRunsHandleGet(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRunStatusApiV1AgentsRunsHandleGetRequest(c.Server, handle, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) DeleteAgentApiV1AgentsNameDelete(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteAgentApiV1AgentsNameDeleteRequest(c.Server, name, params)
 	if err != nil {
@@ -3613,6 +3765,54 @@ func (c *Client) EditAgentApiV1AgentsNamePatchWithBody(ctx context.Context, name
 
 func (c *Client) EditAgentApiV1AgentsNamePatch(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewEditAgentApiV1AgentsNamePatchRequest(c.Server, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunAgentApiV1AgentsNameRunPostWithBody(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunAgentApiV1AgentsNameRunPostRequestWithBody(c.Server, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunAgentApiV1AgentsNameRunPost(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, body RunAgentApiV1AgentsNameRunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunAgentApiV1AgentsNameRunPostRequest(c.Server, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunAgentEventsApiV1AgentsNameRunEventsPostWithBody(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunAgentEventsApiV1AgentsNameRunEventsPostRequestWithBody(c.Server, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunAgentEventsApiV1AgentsNameRunEventsPost(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunAgentEventsApiV1AgentsNameRunEventsPostRequest(c.Server, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4976,6 +5176,55 @@ func NewCreateAgentApiV1AgentsPostRequestWithBody(server string, params *CreateA
 	return req, nil
 }
 
+// NewGetRunStatusApiV1AgentsRunsHandleGetRequest generates requests for GetRunStatusApiV1AgentsRunsHandleGet
+func NewGetRunStatusApiV1AgentsRunsHandleGetRequest(server string, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "handle", runtime.ParamLocationPath, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/runs/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewDeleteAgentApiV1AgentsNameDeleteRequest generates requests for DeleteAgentApiV1AgentsNameDelete
 func NewDeleteAgentApiV1AgentsNameDeleteRequest(server string, name string, params *DeleteAgentApiV1AgentsNameDeleteParams) (*http.Request, error) {
 	var err error
@@ -5112,6 +5361,130 @@ func NewEditAgentApiV1AgentsNamePatchRequestWithBody(server string, name string,
 	}
 
 	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRunAgentApiV1AgentsNameRunPostRequest calls the generic RunAgentApiV1AgentsNameRunPost builder with application/json body
+func NewRunAgentApiV1AgentsNameRunPostRequest(server string, name string, params *RunAgentApiV1AgentsNameRunPostParams, body RunAgentApiV1AgentsNameRunPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRunAgentApiV1AgentsNameRunPostRequestWithBody(server, name, params, "application/json", bodyReader)
+}
+
+// NewRunAgentApiV1AgentsNameRunPostRequestWithBody generates requests for RunAgentApiV1AgentsNameRunPost with any type of body
+func NewRunAgentApiV1AgentsNameRunPostRequestWithBody(server string, name string, params *RunAgentApiV1AgentsNameRunPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/%s/run", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRunAgentEventsApiV1AgentsNameRunEventsPostRequest calls the generic RunAgentEventsApiV1AgentsNameRunEventsPost builder with application/json body
+func NewRunAgentEventsApiV1AgentsNameRunEventsPostRequest(server string, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRunAgentEventsApiV1AgentsNameRunEventsPostRequestWithBody(server, name, params, "application/json", bodyReader)
+}
+
+// NewRunAgentEventsApiV1AgentsNameRunEventsPostRequestWithBody generates requests for RunAgentEventsApiV1AgentsNameRunEventsPost with any type of body
+func NewRunAgentEventsApiV1AgentsNameRunEventsPostRequestWithBody(server string, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/%s/run/events", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -10288,6 +10661,9 @@ type ClientWithResponsesInterface interface {
 
 	CreateAgentApiV1AgentsPostWithResponse(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentApiV1AgentsPostResponse, error)
 
+	// GetRunStatusApiV1AgentsRunsHandleGetWithResponse request
+	GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error)
+
 	// DeleteAgentApiV1AgentsNameDeleteWithResponse request
 	DeleteAgentApiV1AgentsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentApiV1AgentsNameDeleteResponse, error)
 
@@ -10298,6 +10674,16 @@ type ClientWithResponsesInterface interface {
 	EditAgentApiV1AgentsNamePatchWithBodyWithResponse(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditAgentApiV1AgentsNamePatchResponse, error)
 
 	EditAgentApiV1AgentsNamePatchWithResponse(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditAgentApiV1AgentsNamePatchResponse, error)
+
+	// RunAgentApiV1AgentsNameRunPostWithBodyWithResponse request with any body
+	RunAgentApiV1AgentsNameRunPostWithBodyWithResponse(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunAgentApiV1AgentsNameRunPostResponse, error)
+
+	RunAgentApiV1AgentsNameRunPostWithResponse(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, body RunAgentApiV1AgentsNameRunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RunAgentApiV1AgentsNameRunPostResponse, error)
+
+	// RunAgentEventsApiV1AgentsNameRunEventsPostWithBodyWithResponse request with any body
+	RunAgentEventsApiV1AgentsNameRunEventsPostWithBodyWithResponse(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunAgentEventsApiV1AgentsNameRunEventsPostResponse, error)
+
+	RunAgentEventsApiV1AgentsNameRunEventsPostWithResponse(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RunAgentEventsApiV1AgentsNameRunEventsPostResponse, error)
 
 	// MyRecentApiV1AuditMyRecentGetWithResponse request
 	MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error)
@@ -10662,6 +11048,29 @@ func (r CreateAgentApiV1AgentsPostResponse) StatusCode() int {
 	return 0
 }
 
+type GetRunStatusApiV1AgentsRunsHandleGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentRunStatusResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRunStatusApiV1AgentsRunsHandleGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRunStatusApiV1AgentsRunsHandleGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteAgentApiV1AgentsNameDeleteResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -10724,6 +11133,52 @@ func (r EditAgentApiV1AgentsNamePatchResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r EditAgentApiV1AgentsNamePatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunAgentApiV1AgentsNameRunPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunAgentApiV1AgentsNameRunPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunAgentApiV1AgentsNameRunPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunAgentEventsApiV1AgentsNameRunEventsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *interface{}
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunAgentEventsApiV1AgentsNameRunEventsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunAgentEventsApiV1AgentsNameRunEventsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -12559,6 +13014,15 @@ func (c *ClientWithResponses) CreateAgentApiV1AgentsPostWithResponse(ctx context
 	return ParseCreateAgentApiV1AgentsPostResponse(rsp)
 }
 
+// GetRunStatusApiV1AgentsRunsHandleGetWithResponse request returning *GetRunStatusApiV1AgentsRunsHandleGetResponse
+func (c *ClientWithResponses) GetRunStatusApiV1AgentsRunsHandleGetWithResponse(ctx context.Context, handle openapi_types.UUID, params *GetRunStatusApiV1AgentsRunsHandleGetParams, reqEditors ...RequestEditorFn) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error) {
+	rsp, err := c.GetRunStatusApiV1AgentsRunsHandleGet(ctx, handle, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRunStatusApiV1AgentsRunsHandleGetResponse(rsp)
+}
+
 // DeleteAgentApiV1AgentsNameDeleteWithResponse request returning *DeleteAgentApiV1AgentsNameDeleteResponse
 func (c *ClientWithResponses) DeleteAgentApiV1AgentsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentApiV1AgentsNameDeleteResponse, error) {
 	rsp, err := c.DeleteAgentApiV1AgentsNameDelete(ctx, name, params, reqEditors...)
@@ -12592,6 +13056,40 @@ func (c *ClientWithResponses) EditAgentApiV1AgentsNamePatchWithResponse(ctx cont
 		return nil, err
 	}
 	return ParseEditAgentApiV1AgentsNamePatchResponse(rsp)
+}
+
+// RunAgentApiV1AgentsNameRunPostWithBodyWithResponse request with arbitrary body returning *RunAgentApiV1AgentsNameRunPostResponse
+func (c *ClientWithResponses) RunAgentApiV1AgentsNameRunPostWithBodyWithResponse(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunAgentApiV1AgentsNameRunPostResponse, error) {
+	rsp, err := c.RunAgentApiV1AgentsNameRunPostWithBody(ctx, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunAgentApiV1AgentsNameRunPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunAgentApiV1AgentsNameRunPostWithResponse(ctx context.Context, name string, params *RunAgentApiV1AgentsNameRunPostParams, body RunAgentApiV1AgentsNameRunPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RunAgentApiV1AgentsNameRunPostResponse, error) {
+	rsp, err := c.RunAgentApiV1AgentsNameRunPost(ctx, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunAgentApiV1AgentsNameRunPostResponse(rsp)
+}
+
+// RunAgentEventsApiV1AgentsNameRunEventsPostWithBodyWithResponse request with arbitrary body returning *RunAgentEventsApiV1AgentsNameRunEventsPostResponse
+func (c *ClientWithResponses) RunAgentEventsApiV1AgentsNameRunEventsPostWithBodyWithResponse(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunAgentEventsApiV1AgentsNameRunEventsPostResponse, error) {
+	rsp, err := c.RunAgentEventsApiV1AgentsNameRunEventsPostWithBody(ctx, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunAgentEventsApiV1AgentsNameRunEventsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunAgentEventsApiV1AgentsNameRunEventsPostWithResponse(ctx context.Context, name string, params *RunAgentEventsApiV1AgentsNameRunEventsPostParams, body RunAgentEventsApiV1AgentsNameRunEventsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RunAgentEventsApiV1AgentsNameRunEventsPostResponse, error) {
+	rsp, err := c.RunAgentEventsApiV1AgentsNameRunEventsPost(ctx, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunAgentEventsApiV1AgentsNameRunEventsPostResponse(rsp)
 }
 
 // MyRecentApiV1AuditMyRecentGetWithResponse request returning *MyRecentApiV1AuditMyRecentGetResponse
@@ -13566,6 +14064,39 @@ func ParseCreateAgentApiV1AgentsPostResponse(rsp *http.Response) (*CreateAgentAp
 	return response, nil
 }
 
+// ParseGetRunStatusApiV1AgentsRunsHandleGetResponse parses an HTTP response from a GetRunStatusApiV1AgentsRunsHandleGetWithResponse call
+func ParseGetRunStatusApiV1AgentsRunsHandleGetResponse(rsp *http.Response) (*GetRunStatusApiV1AgentsRunsHandleGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRunStatusApiV1AgentsRunsHandleGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentRunStatusResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDeleteAgentApiV1AgentsNameDeleteResponse parses an HTTP response from a DeleteAgentApiV1AgentsNameDeleteWithResponse call
 func ParseDeleteAgentApiV1AgentsNameDeleteResponse(rsp *http.Response) (*DeleteAgentApiV1AgentsNameDeleteResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -13641,6 +14172,72 @@ func ParseEditAgentApiV1AgentsNamePatchResponse(rsp *http.Response) (*EditAgentA
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AgentDefinitionRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunAgentApiV1AgentsNameRunPostResponse parses an HTTP response from a RunAgentApiV1AgentsNameRunPostWithResponse call
+func ParseRunAgentApiV1AgentsNameRunPostResponse(rsp *http.Response) (*RunAgentApiV1AgentsNameRunPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunAgentApiV1AgentsNameRunPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunAgentEventsApiV1AgentsNameRunEventsPostResponse parses an HTTP response from a RunAgentEventsApiV1AgentsNameRunEventsPostWithResponse call
+func ParseRunAgentEventsApiV1AgentsNameRunEventsPostResponse(rsp *http.Response) (*RunAgentEventsApiV1AgentsNameRunEventsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunAgentEventsApiV1AgentsNameRunEventsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest interface{}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

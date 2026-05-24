@@ -1,0 +1,216 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""MCP tools for the agent invocation surface (G11.1-T4 / #811).
+
+Two ``meho.agents.*`` tools that mirror the REST invocation routes
+(:mod:`meho_backplane.api.v1.agent_runs`) onto the MCP transport:
+
+* ``meho.agents.run`` — run a named agent. Sync (default) blocks up to the
+  server-side timeout and returns the final output; ``async=true`` (or a
+  sync run that exceeds the timeout) returns a run handle. Role:
+  ``operator``.
+* ``meho.agents.run_status`` — poll a run's durable status by handle. Role:
+  ``operator``.
+
+SSE streaming is REST-only: the MCP request/response shape has no
+streaming-events transport here, so an MCP caller that wants progress polls
+``meho.agents.run_status`` after an async ``meho.agents.run``. Both tools
+drive the same :class:`~meho_backplane.agent.invocation.AgentInvoker`
+singleton the REST routes use, so a run started over MCP is poll-able over
+REST and vice versa — the durable ``agent_run`` row is the shared state.
+
+Error mapping
+-------------
+
+The invoker's typed errors map onto the MCP wire shape:
+:class:`~meho_backplane.agent.invocation.AgentNotFoundError`,
+:class:`~meho_backplane.agent.invocation.AgentDisabledError`, and
+:class:`~meho_backplane.agent.invocation.AgentRunNotFoundError` all surface
+as :class:`~meho_backplane.mcp.server.McpInvalidParamsError` (JSON-RPC
+``-32602``) — the closest spec-blessed shape for "not found" / "conflict",
+matching :mod:`meho_backplane.mcp.tools.agents`.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any, Final
+
+import structlog
+
+from meho_backplane.agent.invocation import (
+    AgentDisabledError,
+    AgentNotFoundError,
+    AgentRunNotFoundError,
+    get_agent_invoker,
+)
+from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
+from meho_backplane.mcp.server import McpInvalidParamsError
+
+_log = structlog.get_logger(__name__)
+
+#: Canonical op ids bound into ``audit_op_id`` per tool — the same ids the
+#: REST routes use, so a row's op_id is transport-independent.
+_RUN_OP_IDS: Final[dict[str, str]] = {
+    "run": "agent.run",
+    "status": "agent.run_status",
+}
+
+
+def _require_name(arguments: dict[str, Any]) -> str:
+    """Extract a required non-empty string ``name`` or raise invalid-params."""
+    name = arguments.get("name")
+    if not isinstance(name, str) or not name:
+        raise McpInvalidParamsError("name is required and must be a non-empty string")
+    return name
+
+
+def _require_input(arguments: dict[str, Any]) -> str:
+    """Extract a required non-empty string ``input`` or raise invalid-params."""
+    value = arguments.get("input")
+    if not isinstance(value, str) or not value:
+        raise McpInvalidParamsError("input is required and must be a non-empty string")
+    return value
+
+
+# ---------------------------------------------------------------------------
+# meho.agents.run
+# ---------------------------------------------------------------------------
+
+
+async def _run_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    name = _require_name(arguments)
+    user_input = _require_input(arguments)
+    async_mode = bool(arguments.get("async", False))
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_RUN_OP_IDS["run"],
+        audit_op_class="write",
+        audit_agent_name=name,
+    )
+    invoker = get_agent_invoker()
+    try:
+        outcome = await invoker.run(operator, name, user_input, async_mode=async_mode)
+    except AgentNotFoundError as exc:
+        raise McpInvalidParamsError("agent_not_found") from exc
+    except AgentDisabledError as exc:
+        raise McpInvalidParamsError("agent_disabled") from exc
+    return {
+        "run_id": str(outcome.run_id),
+        "status": outcome.status.value,
+        "output": outcome.output,
+        "error": outcome.error,
+        "converted_to_async": outcome.converted_to_async,
+    }
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="meho.agents.run",
+        description=(
+            "Run a named agent for the operator's tenant (Initiative #802). "
+            "Operator-level. Sync (default) blocks up to the server-side "
+            "timeout and returns {run_id, status, output, error}; set "
+            "async=true (or let a long sync run convert) to get a handle "
+            "back immediately ({run_id, status='running', "
+            "converted_to_async}). Poll progress with meho.agents.run_status. "
+            "A missing / cross-tenant name returns 'agent_not_found'; a "
+            "disabled definition returns 'agent_disabled'."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "description": "Agent definition name to run.",
+                },
+                "input": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The user prompt to run the agent on.",
+                },
+                "async": {
+                    "type": "boolean",
+                    "description": "Return a run handle immediately instead of blocking.",
+                },
+            },
+            "required": ["name", "input"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.OPERATOR,
+        op_class="write",
+    ),
+    handler=_run_handler,
+)
+
+
+# ---------------------------------------------------------------------------
+# meho.agents.run_status
+# ---------------------------------------------------------------------------
+
+
+async def _run_status_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    raw = arguments.get("handle")
+    if not isinstance(raw, str) or not raw:
+        raise McpInvalidParamsError("handle is required and must be a non-empty string")
+    try:
+        run_id = uuid.UUID(raw)
+    except ValueError as exc:
+        raise McpInvalidParamsError("handle must be a valid run id (UUID)") from exc
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_RUN_OP_IDS["status"],
+        audit_op_class="read",
+    )
+    invoker = get_agent_invoker()
+    try:
+        view = await invoker.poll(operator, run_id)
+    except AgentRunNotFoundError as exc:
+        raise McpInvalidParamsError("agent_run_not_found") from exc
+    return {
+        "run_id": str(view.run_id),
+        "status": view.status.value,
+        "turns": view.turns,
+        "provider": view.provider,
+        "model": view.model,
+        "output": view.output,
+        "error": view.error,
+    }
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="meho.agents.run_status",
+        description=(
+            "Poll an agent run's durable status by handle (Initiative "
+            "#802). Operator-level. Returns {run_id, status, turns, "
+            "provider, model, output, error}; output/error are set once the "
+            "run reaches a terminal state. Reads the durable run record, so "
+            "it works after the call that started the run returned. An "
+            "unknown / cross-tenant handle returns 'agent_run_not_found'."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The run handle (run id, a UUID) to poll.",
+                },
+            },
+            "required": ["handle"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.OPERATOR,
+        op_class="read",
+    ),
+    handler=_run_status_handler,
+)

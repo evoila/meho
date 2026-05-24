@@ -14,10 +14,11 @@ run-handle store, and audit wiring remain MEHO's. Nothing outside
 `meho_backplane.agent` imports `pydantic_ai`.
 
 This document describes the G11.1-T1 foundation (the seam + one bounded
-loop), the G11.1-T3 toolset resolution layered on it, and the G11.1-T5
-agent-invokes-agent composition. Other G11.1 tasks: agent-definition
-persistence (T2), the public sync/async invocation surface (T4), and durable
-run records (T6).
+loop), the G11.1-T3 toolset resolution layered on it, the G11.1-T4
+public invocation surface (sync + async handle/poll/SSE on REST + MCP +
+CLI) built on top, and the G11.1-T5 agent-invokes-agent composition.
+Other G11.1 tasks: agent-definition persistence (T2) and durable run
+records (T6 — whose `agent_run` row the T4 surface reads/writes).
 
 ## Key types
 
@@ -150,6 +151,93 @@ for *its* tool surface, parallel to the MCP front-end's `register_mcp_tool`
 registrations — both adapt the same `meta_tools` handlers; neither wraps the
 other.
 
+## Invocation surface (T4 #811)
+
+The public way to *run* a defined agent: synchronous block-and-return for
+short runs and asynchronous handle + poll + SSE for long ones, on all three
+fronts (REST + MCP + CLI). The surface is built on the T1 seam and the T6
+`agent_run` row.
+
+### Orchestration — `agent/invocation.py`
+
+`AgentInvoker` (singleton via `get_agent_invoker()`; tests inject a
+deterministic seam via `reset_agent_invoker_for_testing`) ties the seam, the
+persisted definition (T2 `AgentDefinitionService`), and the durable run row
+(T6 `operations/agent_run.py`) together:
+
+- **`run(operator, name, inputs, async_mode=False) -> AgentRunOutcome`** —
+  resolves the named *enabled* definition for the operator's tenant
+  (`AgentNotFoundError` / `AgentDisabledError` otherwise), creates the
+  durable `agent_run` row (`create_run` → `start_run`, committed before the
+  loop starts so the run is pollable immediately), and launches the loop as
+  a background `asyncio.Task` anchored in the invoker's **run store**. Sync
+  awaits the run up to `agent_sync_timeout_seconds`; on timeout the loop
+  keeps running and the call returns the still-running handle with
+  `converted_to_async=True`. Async returns the handle immediately.
+- **`poll(operator, run_id) -> AgentRunStatusView`** — reads the durable
+  `agent_run` row (the source of truth), so it works after the request that
+  started the run has returned, and even after the in-memory task is gone
+  (worker restart). Cross-tenant / unknown ids raise `AgentRunNotFoundError`.
+- **`stream_events(operator, name, inputs)`** — drives the seam's
+  `stream_events` inline (one connection = one run's lifetime), yielding
+  `(run_id, AgentRunEvent)` and recording the terminal outcome on the run
+  row so a streamed run is still poll-able afterward.
+
+**Why a run store.** The seam's `AgentRunHandle` wraps an in-memory
+`asyncio.Task`. A FastAPI request's task tree is torn down when the request
+returns, so a fire-and-forget async run would be cancelled the instant the
+call returns. The invoker keeps background tasks on the application event
+loop, anchored by a strong reference (asyncio only weakly references bare
+tasks), so they outlive the creating request; the durable `agent_run` row is
+the source of truth for status/output, so poll survives a worker restart.
+
+### Seam event stream — `AgentRun.stream_events`
+
+`AgentRun.stream_events(definition, operator, inputs, run_id)` is the richer
+stream T1's `stream` deferred to T4. It drives the framework node graph
+(`Agent.iter`) and yields `AgentRunEvent`s — `turn` / `tool_call` /
+`tool_result` / `final` / `error` — without leaking framework types across
+the seam (`AgentRunEvent` is a plain value object; `AgentRunEventKind` a
+closed enum). A tripped turn budget surfaces as a terminal `error` event,
+not a raised exception, so an SSE consumer always sees a terminal frame.
+
+### Fronts
+
+- **REST** (`api/v1/agent_runs.py`): `POST /api/v1/agents/{name}/run`
+  (200 with the result for a terminal sync run; 202 with a handle for async
+  / converted-to-async), `GET /api/v1/agents/runs/{handle}` (poll), and
+  `POST /api/v1/agents/{name}/run/events` (SSE — `text/event-stream`, the
+  G6 broadcast-feed transport shape). The poll/events sub-paths are two
+  segments deep so they never collide with the one-segment `/{name}`
+  definition-CRUD routes.
+- **MCP** (`mcp/tools/agent_runs.py`): `meho.agents.run` (sync/async via an
+  `async` arg) + `meho.agents.run_status` (poll). SSE is REST-only; an MCP
+  caller polls. Both drive the same `AgentInvoker` singleton, so a run
+  started over MCP is poll-able over REST and vice versa.
+- **CLI** (`cli/internal/cmd/agent/run.go`, `run_status.go`,
+  `run_events.go`): `meho agent run <name> --input … [--async]`,
+  `meho agent run-status <handle>`, `meho agent run-events <name> --input …`.
+
+All fronts require the `operator` role and are tenant-scoped via the JWT.
+
+### Why the SSE events route is a POST that starts a fresh run
+
+The issue's literal shape was `GET …/runs/{handle}/events`. SSE needs the
+run *input*, and the seam streams a fresh run per connection (the same
+fresh-stream-per-connection shape the G6 broadcast feed uses), so the route
+is `POST /agents/{name}/run/events` — the input arrives in the body and one
+connection drives one run's lifetime. The run is recorded on a durable
+`agent_run` row (every frame's `data:` carries the `run_id`), so the
+poll-after-stream contract the issue intends still holds.
+
+### Server-side sync timeout
+
+`agent_sync_timeout_seconds` (settings; default 30s, `AGENT_SYNC_TIMEOUT_SECONDS`)
+bounds how long a sync run holds the HTTP connection. `run` awaits
+`asyncio.wait_for(asyncio.shield(task), timeout)` — the shield means the
+timeout abandons the *wait*, not the run, so a long run degrades to a
+pollable async run rather than being cancelled.
+
 ## Composition — agent invokes agent (T5 #812)
 
 A running agent can invoke **another** agent definition in its tenant as a
@@ -268,21 +356,51 @@ Foundation) is G11.5.
   real-Anthropic loop (skipped unless `ANTHROPIC_API_KEY` is set; marked
   `slow`). Proves the seam drives a live model that calls a real operation
   end to end.
+- `backend/tests/test_agent_invocation.py` (T4) — the invoker + seam event
+  stream against a `FunctionModel`: sync blocks and returns, a long sync run
+  converts to async, async returns a handle then poll succeeds, poll reads
+  the durable row after store eviction, the event stream emits turn /
+  tool-call / tool-result / final, and the missing / cross-tenant / disabled
+  error paths.
+- `backend/tests/test_api_v1_agent_runs.py` (T4) — the REST surface end to
+  end (sync 200, async 202 + poll over an httpx ASGI loop for the durability
+  contract, SSE frames, RBAC 403, tenant-scoping 404s, disabled 409, durable
+  row persisted).
+- `backend/tests/test_mcp_tools_agent_runs.py` (T4) — `meho.agents.run` +
+  `meho.agents.run_status` round-trip, error mapping, and operator-role
+  visibility.
+- `cli/internal/cmd/agent/run_test.go` (T4) — the `run` / `run-status` /
+  `run-events` verbs against an `httptest` server (path builders, sync +
+  async rendering, SSE frame parsing with heartbeat skipping).
 
 ## Known issues / future work
 
-- `stream` ships a minimal single-chunk contract in T1 (it awaits the run
-  and yields the final answer). Token-by-token streaming via the framework's
-  `run_stream` / `iter` node events lands in T4 (#811), where the SSE
-  transport lives.
-- Run handles are in-memory `asyncio.Task`s. Durable `agent_run` records +
-  a session-id lineage key + cancellation are T6 (#813).
-- The `invoke_agent` composition tool (T5) takes an injected
-  `child_agent_resolver` / `child_run_recorder`; the T4 invocation surface
-  (#811) wires the concrete resolver (tenant-scoped `AgentDefinitionService`
-  lookup) and recorder (`agent_run` lifecycle service) at the edge. Until then
-  the bounds (depth + shared budget) hold and a recorder-less run simply does
-  not persist the lineage row.
+- `AgentRun.stream` (T1) ships a minimal single-chunk contract (it awaits the
+  run and yields the final answer). The richer turn / tool-call / final
+  stream is `AgentRun.stream_events` (T4), consumed by the SSE route. Pure
+  token-by-token (intra-turn) streaming via the framework's `run_stream`
+  per-part deltas is not surfaced — node-level events are the granularity.
+- The T4 invocation surface maps a definition's persisted `output_schema`
+  (JSON Schema) to a free-text run, not a validated structured output: the
+  invoker passes `output_type=None`, so a run with a stored output schema
+  returns its loop's free-text answer recorded as `{"text": ...}`.
+  Synthesising a runtime Pydantic model from JSON Schema is the seam's
+  `output_type` contract, deferred — see `AgentInvoker._to_agent_definition`.
+- The run store is per-worker in-memory: a background async run anchored in
+  one worker's store is not visible to (or pollable from a still-in-memory
+  task on) another worker, though the durable `agent_run` row makes poll
+  work cross-worker. Cancellation of an in-flight loop is the T6
+  `cancel_run` path (records durable intent); wiring the loop to observe it
+  at a turn boundary is future work.
+- The `invoke_agent` composition tool (T5 #812) is present but **not yet
+  wired into the live T4 invocation surface**: `AgentInvoker` does not inject
+  the `child_agent_resolver` / `ChildRunRecorder` at the edge (T4 #811 and T5
+  #812 were built in parallel), so agent-invokes-agent is reachable via direct
+  seam injection (the T5 tests) but not yet from a deployed run. Wiring the
+  tenant-scoped `AgentDefinitionService` resolver + the `agent_run` lifecycle
+  recorder into the invoker is a follow-up; until then the depth + shared-budget
+  bounds still hold and a recorder-less child run does not persist its lineage
+  row.
 - The identity-permission side of the intersection is the tenant role today.
   When the G11.2 per-op permission model lands, the resolver's role gate is
   the seam to extend (or replace) with the real per-op grant check — the
@@ -292,8 +410,9 @@ Foundation) is G11.5.
 ## References
 
 - Goal #800 (G11 agentic ops runtime); Initiative #802 (G11.1); Tasks #808
-  (T1 seam), #810 (T3 toolset resolution), #812 (T5 composition), #813 (T6 run
-  records).
+  (T1 seam), #809 (T2 agent_definition), #810 (T3 toolset resolution),
+  #811 (T4 invocation surface), #812 (T5 composition), #813 (T6 `agent_run`
+  record).
 - Pydantic AI: agent concepts (`UsageLimits`, `run`, `deps`/`RunContext`,
   `output_type`, budget-aware sub-runs via `usage=ctx.usage`), tool
   registration (`Tool.from_schema`, the `tools=` constructor arg, `ModelRetry`),

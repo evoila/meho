@@ -46,8 +46,8 @@ func seedXDGAndToken(t *testing.T, backplaneURL string) string {
 	return dir
 }
 
-// newRunCmd builds a fresh cobra.Command with stdout/stderr buffers.
-func newRunCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
+// newTestCmd builds a fresh cobra.Command with stdout/stderr buffers.
+func newTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	cmd := &cobra.Command{}
 	var stdout, stderr bytes.Buffer
@@ -59,18 +59,22 @@ func newRunCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	return cmd, &stdout, &stderr
 }
 
-// TestNewRootCmdRegistersAllFiveVerbs — every advertised verb has a
-// cobra subcommand. The CLI manifest is the contract operators build
-// muscle memory around; dropping a verb silently is the regression
-// class this catches at unit-time.
-func TestNewRootCmdRegistersAllFiveVerbs(t *testing.T) {
+// TestNewRootCmdRegistersAllVerbs — every advertised verb has a cobra
+// subcommand. The CLI manifest is the contract operators build muscle
+// memory around; dropping a verb silently is the regression class this
+// catches at unit-time. The five CRUD verbs (T2 #809) plus the three
+// invocation verbs (T4 #811) must all register.
+func TestNewRootCmdRegistersAllVerbs(t *testing.T) {
 	root := NewRootCmd()
 	want := map[string]bool{
-		"list":   false,
-		"show":   false,
-		"create": false,
-		"edit":   false,
-		"delete": false,
+		"list":       false,
+		"show":       false,
+		"create":     false,
+		"edit":       false,
+		"delete":     false,
+		"run":        false,
+		"run-status": false,
+		"run-events": false,
 	}
 	for _, sub := range root.Commands() {
 		name := strings.SplitN(sub.Use, " ", 2)[0]
@@ -87,7 +91,7 @@ func TestNewRootCmdRegistersAllFiveVerbs(t *testing.T) {
 
 // TestLoadJSONObjectFlagInline — inline JSON object parses.
 func TestLoadJSONObjectFlagInline(t *testing.T) {
-	cmd, _, _ := newRunCmd(t)
+	cmd, _, _ := newTestCmd(t)
 	got, err := loadJSONObjectFlag(cmd, `{"allow": ["call_operation"]}`, "--toolset")
 	if err != nil {
 		t.Fatalf("loadJSONObjectFlag: %v", err)
@@ -100,7 +104,7 @@ func TestLoadJSONObjectFlagInline(t *testing.T) {
 // TestLoadJSONObjectFlagEmptyIsNil — an empty value yields nil so the
 // caller omits the field from the request.
 func TestLoadJSONObjectFlagEmptyIsNil(t *testing.T) {
-	cmd, _, _ := newRunCmd(t)
+	cmd, _, _ := newTestCmd(t)
 	got, err := loadJSONObjectFlag(cmd, "  ", "--toolset")
 	if err != nil {
 		t.Fatalf("loadJSONObjectFlag: %v", err)
@@ -113,7 +117,7 @@ func TestLoadJSONObjectFlagEmptyIsNil(t *testing.T) {
 // TestLoadJSONObjectFlagRejectsNonObject — a JSON array / scalar is
 // rejected (the backend's fields are objects).
 func TestLoadJSONObjectFlagRejectsNonObject(t *testing.T) {
-	cmd, _, _ := newRunCmd(t)
+	cmd, _, _ := newTestCmd(t)
 	if _, err := loadJSONObjectFlag(cmd, `["a", "b"]`, "--toolset"); err == nil {
 		t.Errorf("expected error for non-object JSON")
 	}
@@ -121,7 +125,7 @@ func TestLoadJSONObjectFlagRejectsNonObject(t *testing.T) {
 
 // TestLoadJSONObjectFlagStdin — @- reads a JSON object from stdin.
 func TestLoadJSONObjectFlagStdin(t *testing.T) {
-	cmd, _, _ := newRunCmd(t)
+	cmd, _, _ := newTestCmd(t)
 	cmd.SetIn(strings.NewReader(`{"x": 1}`))
 	got, err := loadJSONObjectFlag(cmd, "@-", "--output-schema")
 	if err != nil {

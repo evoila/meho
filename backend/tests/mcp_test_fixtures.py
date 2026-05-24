@@ -145,6 +145,7 @@ def isolated_registry() -> Iterator[None]:
     from meho_backplane.mcp.resources import memory as memory_resource
     from meho_backplane.mcp.resources import tenant_feed, tenant_info
     from meho_backplane.mcp.tools import (
+        agent_runs,
         agents,
         audit,
         broadcast_overrides,
@@ -175,6 +176,9 @@ def isolated_registry() -> Iterator[None]:
     # unregistered in any test file that imports this fixture after the
     # first one runs in the process.
     importlib.reload(agents)
+    # G11.1-T4 (#811): the agent invocation MCP tools (meho.agents.run +
+    # meho.agents.run_status) join the reload list for the same reason.
+    importlib.reload(agent_runs)
     importlib.reload(tenant_info)
     importlib.reload(tenant_feed)
     importlib.reload(kb_resource)

@@ -479,6 +479,15 @@ class Settings(BaseModel):
         (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
         so a model swap is a deliberate config push. Set via
         ``AGENT_DEFAULT_MODEL``.
+    agent_sync_timeout_seconds:
+        Server-side timeout for a *synchronous* agent invocation
+        (G11.1-T4 #811). A sync ``POST /api/v1/agents/{name}/run`` blocks
+        up to this many seconds; a run still executing at the deadline
+        converts to async — the call returns the run handle, the loop keeps
+        running in the background, and the operator polls. Bounds how long
+        the surface holds an HTTP connection open for a short interactive
+        run before degrading to the pollable shape. Set via
+        ``AGENT_SYNC_TIMEOUT_SECONDS``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
@@ -578,6 +587,13 @@ class Settings(BaseModel):
     # not override it (full id in config, not a moving ``-latest`` tag).
     anthropic_api_key: str = ""
     agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
+    # G11.1-T4 #811 — server-side timeout for a *synchronous* agent run.
+    # A sync ``POST /api/v1/agents/{name}/run`` blocks up to this many
+    # seconds; a run still going at the deadline converts to async (the
+    # call returns the run handle, the loop keeps running, the operator
+    # polls). Bounds how long the surface holds an HTTP connection open
+    # for a short interactive run before degrading to the pollable shape.
+    agent_sync_timeout_seconds: float = Field(default=30.0, gt=0)
     mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
@@ -740,6 +756,9 @@ def get_settings() -> Settings:
         agent_default_model=os.environ.get(
             "AGENT_DEFAULT_MODEL",
             "anthropic:claude-sonnet-4-6",
+        ),
+        agent_sync_timeout_seconds=float(
+            os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),

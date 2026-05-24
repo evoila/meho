@@ -56,7 +56,7 @@ func TestRunListHappyPath(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, stdout, stderr := newRunCmd(t)
+	cmd, stdout, stderr := newTestCmd(t)
 	if err := runList(cmd, listOptions{BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runList: %v; stderr=%s", err, stderr.String())
 	}
@@ -92,7 +92,7 @@ func TestRunShowHappyPath(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, stdout, stderr := newRunCmd(t)
+	cmd, stdout, stderr := newTestCmd(t)
 	err := runShow(cmd, showOptions{Name: "incident-triage", BackplaneOverride: srv.URL})
 	if err != nil {
 		t.Fatalf("runShow: %v; stderr=%s", err, stderr.String())
@@ -112,7 +112,7 @@ func TestRunShow404SurfacesNotFound(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runShow(cmd, showOptions{Name: "nope", BackplaneOverride: srv.URL})
 	if err == nil {
 		t.Fatalf("expected error on 404")
@@ -142,7 +142,7 @@ func TestRunCreateHappyPath(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, stdout, stderr := newRunCmd(t)
+	cmd, stdout, stderr := newTestCmd(t)
 	err := runCreate(cmd, createOptions{
 		Name:              "incident-triage",
 		IdentityRef:       "agent:incident-triage",
@@ -160,7 +160,7 @@ func TestRunCreateHappyPath(t *testing.T) {
 }
 
 func TestRunCreateRejectsBadModelTier(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runCreate(cmd, createOptions{
 		Name: "x", IdentityRef: "a", ModelTier: "ultra", SystemPrompt: "p", TurnBudget: 5,
 	})
@@ -173,7 +173,7 @@ func TestRunCreateRejectsBadModelTier(t *testing.T) {
 }
 
 func TestRunCreateRejectsOutOfRangeBudget(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runCreate(cmd, createOptions{
 		Name: "x", IdentityRef: "a", ModelTier: "deep", SystemPrompt: "p", TurnBudget: 5000,
 	})
@@ -195,7 +195,7 @@ func TestRunCreate409SurfacesConflict(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runCreate(cmd, createOptions{
 		Name: "dup", IdentityRef: "a", ModelTier: "deep", SystemPrompt: "p", TurnBudget: 5,
 		BackplaneOverride: srv.URL,
@@ -218,7 +218,7 @@ func TestRunCreate403SurfacesInsufficientRole(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runCreate(cmd, createOptions{
 		Name: "x", IdentityRef: "a", ModelTier: "deep", SystemPrompt: "p", TurnBudget: 5,
 		BackplaneOverride: srv.URL,
@@ -234,7 +234,7 @@ func TestRunCreate403SurfacesInsufficientRole(t *testing.T) {
 // --- edit ---
 
 func TestBuildEditBodyOnlyChangedFields(t *testing.T) {
-	cmd, _, _ := newRunCmd(t)
+	cmd, _, _ := newTestCmd(t)
 	body, err := buildEditBody(cmd, editOptions{
 		TurnBudget: 50, turnBudgetSet: true,
 		disabledSet: true,
@@ -254,7 +254,7 @@ func TestBuildEditBodyOnlyChangedFields(t *testing.T) {
 }
 
 func TestBuildEditBodyRejectsBadTier(t *testing.T) {
-	cmd, _, _ := newRunCmd(t)
+	cmd, _, _ := newTestCmd(t)
 	_, err := buildEditBody(cmd, editOptions{ModelTier: "ultra", modelTierSet: true})
 	if err == nil {
 		t.Fatalf("expected error for bad model tier")
@@ -262,7 +262,7 @@ func TestBuildEditBodyRejectsBadTier(t *testing.T) {
 }
 
 func TestRunEditNoFieldsIsError(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runEdit(cmd, editOptions{Name: "x"})
 	if err == nil {
 		t.Fatalf("expected error when no field flags set")
@@ -273,7 +273,7 @@ func TestRunEditNoFieldsIsError(t *testing.T) {
 }
 
 func TestRunEditEnabledDisabledConflict(t *testing.T) {
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runEdit(cmd, editOptions{Name: "x", enabledSet: true, disabledSet: true})
 	if err == nil {
 		t.Fatalf("expected error when both --enabled and --disabled set")
@@ -301,7 +301,7 @@ func TestRunEditHappyPath(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, stdout, stderr := newRunCmd(t)
+	cmd, stdout, stderr := newTestCmd(t)
 	err := runEdit(cmd, editOptions{
 		Name: "incident-triage", TurnBudget: 50, turnBudgetSet: true,
 		BackplaneOverride: srv.URL,
@@ -328,7 +328,7 @@ func TestRunDeleteConfirmHappyPath(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, stdout, stderr := newRunCmd(t)
+	cmd, stdout, stderr := newTestCmd(t)
 	err := runDelete(cmd, deleteOptions{
 		Name: "incident-triage", Confirm: true, BackplaneOverride: srv.URL,
 	})
@@ -341,7 +341,7 @@ func TestRunDeleteConfirmHappyPath(t *testing.T) {
 }
 
 func TestRunDeleteDeclinedExitsZero(t *testing.T) {
-	cmd, stdout, _ := newRunCmd(t)
+	cmd, stdout, _ := newTestCmd(t)
 	cmd.SetIn(strings.NewReader("n\n"))
 	err := runDelete(cmd, deleteOptions{Name: "incident-triage"})
 	if err != nil {
@@ -362,7 +362,7 @@ func TestRunDelete404SurfacesNotFound(t *testing.T) {
 	defer srv.Close()
 	seedXDGAndToken(t, srv.URL)
 
-	cmd, _, stderr := newRunCmd(t)
+	cmd, _, stderr := newTestCmd(t)
 	err := runDelete(cmd, deleteOptions{Name: "nope", Confirm: true, BackplaneOverride: srv.URL})
 	if err == nil {
 		t.Fatalf("expected error on 404")

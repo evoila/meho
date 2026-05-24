@@ -440,7 +440,7 @@ the colour policy stays one auditable map.
 | `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
 | `broadcast/wall.html` | The no-chrome wall-monitor view (Task #869): a standalone document (not `extends base.html`) that drops the sidebar / navbar / filter bar and embeds `_feed.html` with `wall=True` (taller rows + auto-scroll). |
 | `broadcast/_history.html` | The Last-24h replay fragment (Task #869): seeds the shared `broadcastFeed` controller with the historical events the `/ui/broadcast/history` route pulled via `XRANGE`, so the rows render through `_event_row.html` and open the same drawer as the live feed. |
-| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.events` seed (for the history replay pane), and the `opts.autoScroll` wall-monitor behaviour. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap, gated to `#broadcast-feed` only), the `openDrawer` helper, the badge/timestamp/payload/aggregate-only helpers, the `opts.seedFrom` data-island seed (for the history replay pane — reads + `JSON.parse`s a `<script type="application/json">` block rather than receiving events through the `x-data` attribute, closing B1's stored-XSS hole), and the `opts.autoScroll` wall-monitor behaviour. |
 
 ### Performance + empty state
 
@@ -614,15 +614,33 @@ that millisecond to `+` (the live tail), bounded by `COUNT = 1000` (the
 same in-DOM row budget as the live feed). `XRANGE` returns oldest-first;
 the route reverses to newest-first to match the live feed.
 
-The route serialises the events as JSON and seeds the **same**
-`broadcastFeed` controller (`opts.events`) the live feed uses, so a
-history row renders through the same `_event_row.html` partial and opens
-the same T2 drawer on a click — a history row is byte-identical to a live
-row. The `init` op_id re-read is gated to `#broadcast-feed` (the live
-feed) so it never leaks the live filter onto the history pane, which
-keeps its own filter state. The history fetch is fail-soft: a transient
-Valkey error returns an empty list (the pane shows its empty state)
-rather than 500-ing the fragment.
+The route passes the events as the `history_events` list, which the
+fragment renders through Jinja's `| tojson` filter into a
+`<script type="application/json" id="broadcast-history-data">` data
+island. The **same** `broadcastFeed` controller the live feed uses reads
+that island on `init` (`opts.seedFrom` → `seedFromIsland`) and
+`JSON.parse`s its `textContent`, so a history row renders through the
+same `_event_row.html` partial and opens the same T2 drawer on a click —
+a history row is byte-identical to a live row. The `init` op_id re-read
+is gated to `#broadcast-feed` (the live feed) so it never leaks the live
+filter onto the history pane, which keeps its own filter state. The
+history fetch is fail-soft: a transient Valkey error returns an empty
+list (the pane shows its empty state) rather than 500-ing the fragment.
+
+**Why a data island, not an `x-data` attribute (B1, PR #1044).** Event
+fields (`op_id`, `target_name`, `principal_sub`, payload values) are
+operator-controlled within a tenant. Interpolating the serialised array
+straight into the double-quoted `x-data="…"` attribute — even via
+`| tojson` — is a stored DOM-XSS: `tojson` escapes `<` `>` `&` `'` and
+U+2028/U+2029 but **not** `"`, so a double-quote in any event field
+breaks out of the attribute and injects live event handlers (and is a
+plain render-corruption bug for any legitimate `"`-bearing value).
+Emitting the JSON as inert `<script type="application/json">` text and
+parsing it client-side keeps the untrusted data out of every attribute
+context; `tojson`'s `<`/`>` escaping prevents a `</script>` in a field
+from closing the element early. The same latent shape exists in the live
+`_feed.html` `opIdFilter: {{ op_id_filter | tojson }}` (a single scalar,
+self-XSS at most) — tracked as a follow-up, out of scope for B1.
 
 ### Cross-tenant isolation
 

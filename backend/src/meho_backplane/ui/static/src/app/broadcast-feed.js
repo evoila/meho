@@ -41,11 +41,17 @@
 // the route context (``opts``) so the policy stays server-side.
 //
 // Two later (T3 #869) opts let the SAME component back three surfaces:
-//   * ``opts.events`` -- a seed array. The live feed leaves it empty and
-//     fills it from the SSE stream; the Last-24h replay pane
-//     (``_history.html``) seeds it with the historical events the server
-//     pulled via XRANGE, so a history row renders + opens the drawer
-//     identically to a live row.
+//   * ``opts.seedFrom`` -- the id of a ``<script type="application/json">``
+//     data island holding the seed events array. The live feed omits it
+//     and fills ``events`` from the SSE stream; the Last-24h replay pane
+//     (``_history.html``) points it at ``#broadcast-history-data``, whose
+//     ``textContent`` the controller ``JSON.parse``s on init, so a history
+//     row renders + opens the drawer identically to a live row. The seed
+//     events ride in a script-block data island (NOT the ``x-data``
+//     attribute) so an event field containing ``"`` / ``'`` / ``<`` /
+//     ``>`` / ``&`` / ``</script>`` cannot break out of the attribute and
+//     inject markup -- Jinja's ``| tojson`` escapes all of those (plus
+//     U+2028/U+2029) for the script-element text context (B1, PR #1044).
 //   * ``opts.autoScroll`` -- when true (the wall-monitor feed), the
 //     controller keeps the newest event (the top row, since events
 //     ``unshift``) in view as the stream prepends, so a full-screen
@@ -54,11 +60,12 @@
 
 document.addEventListener("alpine:init", () => {
   Alpine.data("broadcastFeed", (opts) => ({
-    // Seed from ``opts.events`` when provided (history replay pane);
-    // default to empty for the live feed, which fills it from the SSE
-    // stream. A shallow copy guards against two component instances on
-    // one page sharing the same seed array reference.
-    events: Array.isArray(opts.events) ? opts.events.slice() : [],
+    // The live feed starts empty and fills ``events`` from the SSE
+    // stream. The Last-24h replay pane instead seeds these on ``init``
+    // from the ``opts.seedFrom`` data island (see ``seedFromIsland``);
+    // an array literal here is never passed through the ``x-data``
+    // attribute, so untrusted event fields can never break out of it.
+    events: [],
     connected: false,
     autoScroll: opts.autoScroll === true,
     cap: opts.cap,
@@ -83,10 +90,18 @@ document.addEventListener("alpine:init", () => {
     // ``$nextTick`` defers the read until Alpine has settled the swapped
     // node, guarding against any swap/init ordering edge.
     init() {
+      // Seed the replay pane from its ``<script type="application/json">``
+      // data island (the live feed omits ``seedFrom`` and stays empty
+      // until the SSE stream fills it). The events arrive as inert script
+      // text -- never as an ``x-data`` attribute -- so a ``"`` / ``<`` /
+      // ``</script>``-bearing event field cannot break out and inject
+      // markup (B1, PR #1044).
+      this.seedFromIsland();
+
       // The op_id input + its server-swap reconciliation belong to the
       // LIVE feed only (``#broadcast-feed``). The Last-24h replay pane
-      // (``#broadcast-history``) is a separate controller instance with
-      // no filter bar; re-reading the live feed's op_id input there
+      // (``#broadcast-history-pane``) is a separate controller instance
+      // with no filter bar; re-reading the live feed's op_id input there
       // would wrongly leak the live filter onto the history rows. Gate
       // the re-read on the live-feed element id so each surface keeps
       // its own filter state.
@@ -99,6 +114,31 @@ document.addEventListener("alpine:init", () => {
           this.opIdFilter = (input.value || "").toLowerCase();
         }
       });
+    },
+
+    // Seed ``events`` from a ``<script type="application/json">`` data
+    // island whose id is ``opts.seedFrom``. The island's ``textContent``
+    // is JSON the server emitted via Jinja ``| tojson`` (XSS-safe for the
+    // script-element text context). No-op when ``seedFrom`` is unset (the
+    // live feed) or the element / JSON is missing or malformed -- the
+    // pane then renders its empty state rather than tearing down.
+    seedFromIsland() {
+      if (!opts.seedFrom) {
+        return;
+      }
+      const el = document.getElementById(opts.seedFrom);
+      if (!el) {
+        return;
+      }
+      try {
+        const parsed = JSON.parse(el.textContent || "[]");
+        if (Array.isArray(parsed)) {
+          this.events = parsed;
+        }
+      } catch (e) {
+        // A malformed island leaves ``events`` empty (the pane shows its
+        // empty state) rather than throwing during component init.
+      }
     },
 
     // Re-apply the op_id filter when the filter bar's input changes. The

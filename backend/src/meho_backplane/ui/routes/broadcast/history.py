@@ -40,12 +40,16 @@ Why reuse the live feed's row + drawer
 
 The history rows render through the **same** ``broadcast/_event_row.html``
 partial and the **same** ``broadcastFeed`` Alpine controller the live
-feed uses. The controller is seeded with the historical events as JSON
-(``history_events_json``) instead of an SSE subscription, so the row
-markup, the op_class badge palette, the 🔒 aggregate-only marker, the
-timestamp formatting, and the click-to-open-drawer behaviour are all
-single-sourced -- a history row is byte-identical to a live row and
-opens the identical T2 drawer.
+feed uses. The controller is seeded with the historical events from a
+``<script type="application/json">`` data island (the template renders
+the ``history_events`` list through Jinja ``| tojson``) instead of an
+SSE subscription, so the row markup, the op_class badge palette, the 🔒
+aggregate-only marker, the timestamp formatting, and the
+click-to-open-drawer behaviour are all single-sourced -- a history row
+is byte-identical to a live row and opens the identical T2 drawer. The
+data-island shape (not an ``x-data`` attribute) keeps quote- and
+markup-bearing event fields from breaking out of the markup (B1, PR
+#1044).
 
 Tenant scoping
 ==============
@@ -216,9 +220,10 @@ def build_history_router() -> APIRouter:
         """``GET /ui/broadcast/history`` -- the Last-24h replay fragment.
 
         Pulls the session tenant's last-24h events via a finite
-        ``XRANGE``, serialises them as JSON the shared ``broadcastFeed``
-        controller renders through ``broadcast/_event_row.html``, and
-        returns the ``broadcast/_history.html`` fragment (no
+        ``XRANGE``, passes them as a list the template serialises with
+        Jinja ``| tojson`` into a ``<script type="application/json">``
+        data island the shared ``broadcastFeed`` controller seeds from,
+        and returns the ``broadcast/_history.html`` fragment (no
         ``base.html`` chrome -- the tab swaps it into the page's history
         container). The tenant comes from the validated session, never a
         query parameter.
@@ -227,7 +232,7 @@ def build_history_router() -> APIRouter:
         context: dict[str, object] = {
             "in_dom_row_cap": IN_DOM_ROW_CAP,
             "op_class_badge_json": _badge_palette_json(),
-            "history_events_json": _events_json(events),
+            "history_events": _events_payload(events),
             "history_count": len(events),
             "retention_hours": get_settings().broadcast_retention_hours,
         }
@@ -254,14 +259,23 @@ def _badge_palette_json() -> str:
     return json.dumps(OP_CLASS_BADGE_CLASSES)
 
 
-def _events_json(events: list[BroadcastEvent]) -> str:
-    """Serialise the historical events as a JSON array for the controller.
+def _events_payload(events: list[BroadcastEvent]) -> list[dict[str, object]]:
+    """Build the historical events as JSON-ready dicts for the controller.
 
-    Each event is dumped via :meth:`BroadcastEvent.model_dump_json` so
-    the client-side shape is byte-identical to a live SSE frame's
-    ``data:`` payload -- the ``broadcastFeed`` controller seeds these
-    into its ``events`` array and the rows render through the same
-    ``_event_row.html`` partial. The result is a JSON array string the
-    template embeds via ``| safe`` inside the Alpine ``x-data``.
+    Each event is dumped via ``model_dump(mode="json")`` -- the same
+    JSON-value shape :meth:`BroadcastEvent.model_dump_json` emits for a
+    live SSE frame's ``data:`` payload (UUIDs / datetimes rendered as
+    strings), so once the ``broadcastFeed`` controller ``JSON.parse``s
+    the seed it holds an event object byte-identical to a parsed live
+    frame and the rows render through the same ``_event_row.html``
+    partial.
+
+    The list is returned (not a pre-serialised string) so the template
+    can run it through Jinja's ``| tojson`` filter inside a
+    ``<script type="application/json">`` data island. ``tojson`` escapes
+    ``<`` / ``>`` / ``&`` / ``'`` and U+2028/U+2029 for that script-text
+    context, closing the stored-XSS / render-corruption hole that a
+    ``| safe`` interpolation into a double-quoted ``x-data`` attribute
+    opened on any quote- or markup-bearing event field (B1, PR #1044).
     """
-    return "[" + ",".join(event.model_dump_json() for event in events) + "]"
+    return [event.model_dump(mode="json") for event in events]

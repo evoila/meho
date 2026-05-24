@@ -468,6 +468,86 @@ class TestHistoryReplay:
         assert response.status_code == 200, response.text
         assert "vsphere.vm.list" in response.text
 
+    def test_history_event_fields_cannot_break_out_of_markup(self) -> None:
+        """A quote-/markup-bearing event field renders harmlessly (B1).
+
+        Regression for PR #1044 B1: the pane used to interpolate the
+        serialised event array into a double-quoted ``x-data="…"``
+        attribute via ``| safe`` (no escaping). Any event field carrying
+        a double-quote broke out of the attribute and injected live event
+        handlers, and a ``</script>`` could close the seed element early.
+
+        The fix emits the events as inert
+        ``<script type="application/json">`` text rendered through Jinja
+        ``| tojson``. This test seeds an event whose free-text fields
+        contain ``"`` ``'`` ``<`` ``>`` ``&`` AND a literal ``</script>``
+        and asserts:
+
+        * the injected markup never appears as raw HTML (no attribute or
+          script breakout, no live event handler),
+        * the literal ``</script>`` never appears unescaped (it cannot
+          close the seed element early), and
+        * the payload still round-trips into the controller seed (the
+          escaped form is present in the data island), so the rows still
+          render + open the drawer.
+
+        It fails on the pre-fix ``| safe``/double-quoted-attribute code
+        and passes after the data-island fix.
+        """
+        session_id = _seed_session_sync(tenant_id=_TENANT_A)
+        # Every breakout primitive in one string: attribute-breaking
+        # double-quote, an injected handler, single-quote, angle
+        # brackets, ampersand, and a literal closing script tag.
+        injection = (
+            "</script><img src=x onerror=alert(1)>\" autofocus onfocus=alert(2) ' < > & done"
+        )
+        event = _make_event(
+            tenant_id=_TENANT_A,
+            op_id=injection,
+            target_name=injection,
+            principal_sub=injection,
+        )
+        mock = _xrange_returning([event])
+        broadcast_client = get_broadcast_client()
+        with (
+            respx.mock(assert_all_called=False),
+            patch.object(broadcast_client, "xrange", new=mock),
+        ):
+            client = _authenticated_client(session_id)
+            response = client.get("/ui/broadcast/history")
+        assert response.status_code == 200, response.text
+        body = response.text
+
+        # --- No breakout: the raw injection must never reach the DOM as
+        #     markup. ``| tojson`` escapes ``<`` ``>`` ``&`` ``'`` (and
+        #     keeps ``"`` JSON-escaped as ``\"``) for the script-text
+        #     context, so the field stays inert JSON data -- the injected
+        #     tag/element-closer sequences cannot appear verbatim.
+        #
+        #     On the pre-fix ``| safe`` / double-quoted-``x-data`` code
+        #     each of these assertions fails: the raw ``<img>`` tag, the
+        #     raw ``</script><img`` element-closer-then-injection, and
+        #     two extra raw ``</script>`` (one per injected field) all
+        #     reach the DOM. ---
+        # The injected raw markup tag must never materialise.
+        assert "<img src=x onerror=" not in body
+        # The field's literal closing-script sequence must be escaped --
+        # a raw close-then-inject sequence would terminate the seed
+        # element early and start live markup.
+        assert "</script><img" not in body
+        # The ONLY raw "</script>" allowed is the data island's own
+        # closer; the three injected fields contributing raw closers is
+        # exactly the pre-fix breakout this test guards against.
+        assert body.count("</script>") == 1
+
+        # --- Round-trip: the field still seeds the controller, just in
+        #     its tojson-escaped form. Confirm the escaped markers are in
+        #     the data island so the rows render. ---
+        assert 'id="broadcast-history-data"' in body
+        assert "\\u003c/script\\u003e" in body  # escaped </script>
+        assert "\\u003cimg" in body  # escaped <img
+        assert "seedFrom: 'broadcast-history-data'" in body
+
     def test_history_unauthenticated_redirects_to_login(self) -> None:
         """The history fragment is gated by the session middleware."""
         with respx.mock(assert_all_called=False):

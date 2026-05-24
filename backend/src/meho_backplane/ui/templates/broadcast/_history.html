@@ -6,10 +6,12 @@
   item #6). The "Last 24h" tab ``hx-get``s ``/ui/broadcast/history`` and
   swaps this fragment into ``#broadcast-history`` (``innerHTML``). The
   server has already pulled the tenant's last-24h events via a finite
-  ``XRANGE`` and serialised them as ``history_events_json``; this
-  fragment seeds the SAME ``broadcastFeed`` Alpine controller with those
-  events (instead of an SSE subscription) so the rows render through the
-  SAME ``broadcast/_event_row.html`` partial and open the SAME T2
+  ``XRANGE`` and passed them as the ``history_events`` list; this fragment
+  emits them through Jinja ``| tojson`` into a
+  ``<script type="application/json">`` data island and seeds the SAME
+  ``broadcastFeed`` Alpine controller from it (instead of an SSE
+  subscription) so the rows render through the SAME
+  ``broadcast/_event_row.html`` partial and open the SAME T2
   event-detail drawer on a click.
 
   Why reuse ``broadcastFeed`` instead of server-rendering each row
@@ -31,13 +33,25 @@
   feed uses. The history pane lives inside the same page, so a clicked
   history row opens the identical drawer beside the feed.
 -#}
+{# ---------- Seed data island (B1, PR #1044) ----------
+   The historical events are emitted here as inert ``application/json``
+   script text, NOT interpolated into the ``x-data`` attribute. Jinja's
+   ``| tojson`` escapes ``<`` / ``>`` / ``&`` / ``'`` and U+2028/U+2029
+   for this script-element text context, and the events never touch an
+   HTML attribute, so an event field containing a double-quote, a
+   single-quote, an angle bracket, an ampersand, or a literal closing
+   script tag renders harmlessly -- it cannot break out of an attribute
+   or close the script element early.
+   The ``broadcastFeed`` controller reads + ``JSON.parse``s this island's
+   ``textContent`` on init (``seedFrom`` -> ``seedFromIsland``). -#}
+<script type="application/json" id="broadcast-history-data">{{ history_events | tojson }}</script>
 <div
   id="broadcast-history-pane"
   x-data="broadcastFeed({
     cap: {{ in_dom_row_cap }},
     badgeClasses: {{ op_class_badge_json }},
     opIdFilter: '',
-    events: {{ history_events_json | safe }}
+    seedFrom: 'broadcast-history-data'
   })"
 >
   {# ---------- Status bar -- count + window ---------- #}

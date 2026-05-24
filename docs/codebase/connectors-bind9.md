@@ -146,6 +146,13 @@ both share one connection):
 (`/etc/bind/named.conf`); RHEL-family detection lands in a follow-up
 once T2 ships `bind9.config.show`.
 
+The `_run_command` calls are wrapped in a `(OSError, asyncssh.Error)`
+guard so a connection drop, an `asyncssh.Error`, or a timeout
+mid-fingerprint returns `reachable=False` + `extras["error"]` rather than
+propagating (mirrors the pfsense sibling). This is what lets the shared
+`SshConnector._assert_reachable` guard surface the failure consistently
+from `about` (#986).
+
 ## `probe(target)`
 
 Five distinct failure-reason values:
@@ -157,6 +164,19 @@ Five distinct failure-reason values:
 | `auth_failed` | `asyncssh.PermissionDenied` (credentials rejected) |
 | `named_not_running` | `pgrep -x named` exited non-zero |
 | `named_config_invalid` | `named-checkconf -p > /dev/null` exited non-zero |
+| `command_failed` | a post-connect command (`pgrep` / `named-checkconf`) raised after a successful connect (drop / `asyncssh.Error` / timeout) |
+
+The post-connect commands are wrapped in a `(OSError, asyncssh.Error)`
+guard so a mid-probe failure maps to `command_failed` rather than escaping
+`probe()` as an unhandled exception (#986). `TimeoutError` is an `OSError`
+subclass, so the command-timeout case is covered by the same tuple.
+
+`about` reuses `fingerprint` and calls the shared
+`SshConnector._assert_reachable(result)` guard, which raises
+`ConnectorUnreachableError` when the fingerprint is not reachable; the
+dispatcher maps it to a `connector_error` `OperationResult`
+(`status="error"`) rather than reporting empty identity fields as a
+successful op (#986).
 
 The probe is read-only and does not require a writable filesystem.
 `named-checkconf -p` parses the active config and emits its

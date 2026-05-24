@@ -427,24 +427,49 @@ class Bind9Connector(SshConnector):
 
         ``probe_method="ssh: named -v"`` matches the parent
         Initiative #367's WI2 specification.
-        """
-        named_proc = await self._run_command(target, "named -v", raw_jwt="")
-        banner_raw = (named_proc.stdout or "") if hasattr(named_proc, "stdout") else ""
-        banner = banner_raw.strip() if isinstance(banner_raw, str) else ""
-        version_triple = parse_named_version(banner)
 
-        os_proc = await self._run_command(target, "cat /etc/os-release", raw_jwt="")
-        os_raw = (os_proc.stdout or "") if hasattr(os_proc, "stdout") else ""
-        os_content = os_raw if isinstance(os_raw, str) else ""
-        os_identifier: str | None = None
-        if os_proc.exit_status == 0 and os_content.strip():
-            os_identifier = parse_os_release(os_content)
-        if os_identifier is None:
-            debian_proc = await self._run_command(target, "cat /etc/debian_version", raw_jwt="")
-            debian_raw = (debian_proc.stdout or "") if hasattr(debian_proc, "stdout") else ""
-            debian_content = debian_raw.strip() if isinstance(debian_raw, str) else ""
-            if debian_proc.exit_status == 0 and debian_content:
-                os_identifier = f"debian {debian_content}"
+        Unreachable or auth-failure mid-fingerprint (a connection drop,
+        an :exc:`asyncssh.Error`, or an :exc:`asyncio.TimeoutError` from a
+        command timeout) → ``reachable=False`` + ``extras["error"]`` with
+        the exception message, rather than propagating. This mirrors the
+        pfsense sibling and lets the shared
+        :meth:`~meho_backplane.connectors.adapters.ssh.SshConnector._assert_reachable`
+        guard surface the failure consistently from ``about`` (#986).
+        """
+        probed_at = datetime.now(UTC)
+
+        try:
+            named_proc = await self._run_command(target, "named -v", raw_jwt="")
+            banner_raw = (named_proc.stdout or "") if hasattr(named_proc, "stdout") else ""
+            banner = banner_raw.strip() if isinstance(banner_raw, str) else ""
+            version_triple = parse_named_version(banner)
+
+            os_proc = await self._run_command(target, "cat /etc/os-release", raw_jwt="")
+            os_raw = (os_proc.stdout or "") if hasattr(os_proc, "stdout") else ""
+            os_content = os_raw if isinstance(os_raw, str) else ""
+            os_identifier: str | None = None
+            if os_proc.exit_status == 0 and os_content.strip():
+                os_identifier = parse_os_release(os_content)
+            if os_identifier is None:
+                debian_proc = await self._run_command(target, "cat /etc/debian_version", raw_jwt="")
+                debian_raw = (debian_proc.stdout or "") if hasattr(debian_proc, "stdout") else ""
+                debian_content = debian_raw.strip() if isinstance(debian_raw, str) else ""
+                if debian_proc.exit_status == 0 and debian_content:
+                    os_identifier = f"debian {debian_content}"
+        except (OSError, asyncssh.Error) as exc:
+            _log.warning(
+                "bind9_fingerprint_unreachable",
+                target=getattr(target, "name", None),
+                error=str(exc),
+            )
+            return FingerprintResult(
+                vendor="isc",
+                product="bind9",
+                reachable=False,
+                probed_at=probed_at,
+                probe_method="ssh: named -v",
+                extras={"error": str(exc)},
+            )
 
         # ``named.conf`` lives at ``/etc/bind/named.conf`` on every
         # Debian-family distro and at ``/etc/named.conf`` on
@@ -460,7 +485,7 @@ class Bind9Connector(SshConnector):
             version=version_triple,
             build=banner or None,
             reachable=True,
-            probed_at=datetime.now(UTC),
+            probed_at=probed_at,
             probe_method="ssh: named -v",
             extras={
                 "os": os_identifier,
@@ -491,6 +516,14 @@ class Bind9Connector(SshConnector):
         * ``named_config_invalid`` -- named is running but
           ``named-checkconf -p`` exited non-zero (the active
           config does not parse).
+        * ``command_failed`` -- the SSH handshake succeeded but a
+          post-connect command (``pgrep -x named`` /
+          ``named-checkconf -p``) raised (connection dropped mid-probe,
+          an :exc:`asyncssh.Error`, or an :exc:`asyncio.TimeoutError`
+          from the command timeout). Caught here so a mid-probe failure
+          maps to a non-ok
+          :class:`~meho_backplane.connectors.schemas.ProbeResult` rather
+          than escaping ``probe`` as an unhandled exception (#986).
 
         The probe does not mutate state and does not require a
         writable filesystem -- ``named-checkconf -p`` is read-only
@@ -522,23 +555,33 @@ class Bind9Connector(SshConnector):
         except OSError:
             return _result(False, "tcp_unreachable")
 
-        # ``pgrep -x named`` exits 0 iff a process named exactly
-        # ``named`` exists in the process table. ``-x`` requires an
-        # exact match so a different binary that happens to contain
-        # ``named`` in its argv (``named.conf`` editor, etc.) does
-        # not produce a false positive.
-        pgrep_proc = await self._run_command(target, "pgrep -x named", raw_jwt="")
-        if pgrep_proc.exit_status != 0:
-            return _result(False, "named_not_running")
+        # Post-connect commands are guarded: a connection drop, an
+        # ``asyncssh.Error``, or a timeout after a successful handshake
+        # must map to ``command_failed`` rather than propagating an
+        # unhandled exception out of ``probe`` (#986). ``(OSError,
+        # asyncssh.Error)`` mirrors ``fingerprint``'s catch tuple;
+        # ``TimeoutError`` is an ``OSError`` subclass so ``_run_command``'s
+        # ``asyncio.wait_for`` expiry is covered.
+        try:
+            # ``pgrep -x named`` exits 0 iff a process named exactly
+            # ``named`` exists in the process table. ``-x`` requires an
+            # exact match so a different binary that happens to contain
+            # ``named`` in its argv (``named.conf`` editor, etc.) does
+            # not produce a false positive.
+            pgrep_proc = await self._run_command(target, "pgrep -x named", raw_jwt="")
+            if pgrep_proc.exit_status != 0:
+                return _result(False, "named_not_running")
 
-        # ``named-checkconf -p`` parses the running config and emits
-        # the canonicalised form on stdout (which we discard). A
-        # non-zero exit means the config does not parse, which is the
-        # "named is running but the config it would load on reload is
-        # broken" failure mode operators most care about.
-        checkconf_proc = await self._run_command(
-            target, "named-checkconf -p > /dev/null", raw_jwt=""
-        )
+            # ``named-checkconf -p`` parses the running config and emits
+            # the canonicalised form on stdout (which we discard). A
+            # non-zero exit means the config does not parse, which is the
+            # "named is running but the config it would load on reload is
+            # broken" failure mode operators most care about.
+            checkconf_proc = await self._run_command(
+                target, "named-checkconf -p > /dev/null", raw_jwt=""
+            )
+        except (OSError, asyncssh.Error):
+            return _result(False, "command_failed")
         if checkconf_proc.exit_status != 0:
             return _result(False, "named_config_invalid")
 
@@ -566,9 +609,17 @@ class Bind9Connector(SshConnector):
         into ``OperationResult.result`` with a ``None`` handle; only
         set-shaped responses above the threshold are materialized into a
         :class:`~meho_backplane.connectors.schemas.ResultHandle`.
+
+        When the target is unreachable, :meth:`fingerprint` returns
+        ``reachable=False`` rather than raising. ``_assert_reachable``
+        re-raises that as a
+        :exc:`~meho_backplane.connectors.adapters.ssh.ConnectorUnreachableError`
+        so the dispatcher reports a non-ok op instead of a successful op
+        carrying empty/None identity fields (#986).
         """
         del params  # declared empty in schema; intentionally ignored
         result = await self.fingerprint(target)
+        self._assert_reachable(result)
         return {
             "vendor": result.vendor,
             "product": result.product,

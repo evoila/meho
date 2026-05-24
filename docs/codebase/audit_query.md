@@ -157,12 +157,13 @@ Two-step shape:
 query, not a filtered list. It reuses `query._build_audit_entry` so a replay
 node and a `query_audit` row for the same audit id agree field-for-field.
 
-## REST surface (G8.1-T2 #466)
+## REST surface (G8.1-T2 #466, G8.2-T4 #1012)
 
-The four routes under `backend/src/meho_backplane/api/v1/audit.py` are the
-operator-facing entry into the substrate. All four dispatch through
-`query_audit` with `tenant_id=operator.tenant_id` (from the JWT) — the
-substrate's tenant-scoping invariant is enforced one layer up.
+The five routes under `backend/src/meho_backplane/api/v1/audit.py` are the
+operator-facing entry into the substrate. The first four dispatch through
+`query_audit`; the fifth (replay) dispatches through `replay_session`. All
+pass `tenant_id=operator.tenant_id` (from the JWT) — the substrate's
+tenant-scoping invariant is enforced one layer up.
 
 | Route | Filter shape | Notes |
 |---|---|---|
@@ -170,15 +171,29 @@ substrate's tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
+| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. | Per-session replay (G8.2-T4). |
+
+The replay route's **413 cap** is a cheap tenant-scoped
+`SELECT count(*) WHERE agent_session_id = :id AND tenant_id = :tid` (the
+`_count_session_rows` helper, hitting `audit_log_agent_session_id_idx`),
+evaluated before `replay_session` runs — a runaway session is rejected on
+the count alone, never materializing a 10k-deep tree. The same count is
+the `row_count` echoed in the 200 body, so a 200 reports the same number
+its over-cap sibling would report at 413. NULL-session lineage children
+pulled into `root` by the closure CTE are present in the tree but are not
+counted — "session rows" are defined by the `agent_session_id` anchor.
 
 Every route binds two audit-override contextvars **before** the substrate
-call — `audit_op_id="meho.audit.query"` and `audit_op_class="audit_query"`
-— so the audit row written by `AuditMiddleware` carries the canonical
-op_id and the broadcast event ships as aggregate-only (`{op_id,
-result_status, row_count}` only, never the request filter). The
-`audit_row_count` contextvar is bound after the substrate returns so the
-broadcast event's `row_count` field reflects the actual returned
-cardinality. The shape mirrors `api/v1/retrieve_usage.py`.
+call — `audit_op_class="audit_query"` (always) plus an `audit_op_id`:
+`"meho.audit.query"` for the four query routes and `"meho.audit.replay"`
+for the replay route (so operators can tell replay usage apart from
+flat-query usage in `audit_log`). The shared `audit_query` op_class flips
+the broadcast event to aggregate-only (`{op_id, result_status,
+row_count}` only, never the request filter or the replayed `ReplayNode`
+tree). The `audit_row_count` contextvar is bound after the substrate
+returns — and on the 413 path before raising — so the broadcast event's
+`row_count` field reflects the actual cardinality. The shape mirrors
+`api/v1/retrieve_usage.py`.
 
 RBAC: `operator` role minimum. `read_only` → 403; `tenant_admin` → 200.
 

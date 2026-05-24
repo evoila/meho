@@ -284,6 +284,40 @@ type AuditQueryResult struct {
 	Rows       []AuditEntry `json:"rows"`
 }
 
+// AuditReplayResult 200 body for “GET /api/v1/audit/sessions/{session_id}/replay“.
+//
+// Wraps the substrate's :class:`ReplayNode` forest with the echoed
+// request identity. “tenant_id“ is always the operator's tenant
+// (lifted from the JWT by the route), never client-supplied, so the
+// echo is a confirmation of the boundary the query ran under — not a
+// value the caller chose.
+//
+// “row_count“ is the count of *anchor* rows in the session — rows
+// whose “agent_session_id“ equals “session_id“ within the
+// operator's tenant. It is the same number the route's count-first
+// 413 guard evaluates, so a session that returns 200 reports a
+// “row_count“ identical to what its over-cap sibling would report
+// at 413. NULL-session lineage children pulled into “root“ by the
+// replay closure (a composite “dispatch_child“ whose own
+// “agent_session_id“ is NULL but whose “parent_audit_id“ links
+// into the session) are present in the tree but are not counted —
+// "session rows" are defined by the “agent_session_id“ anchor, not
+// by tree membership.
+//
+// An unknown session id, or one belonging to another tenant, yields
+// “root=[]“ / “row_count=0“ — never a 404 — so a foreign session
+// is indistinguishable from an empty one and existence never leaks
+// across tenants (the same non-leakage posture
+// “GET /show/{audit_id}“ takes).
+//
+// Frozen like the substrate models it carries.
+type AuditReplayResult struct {
+	Root      []ReplayNode       `json:"root"`
+	RowCount  int                `json:"row_count"`
+	SessionId openapi_types.UUID `json:"session_id"`
+	TenantId  openapi_types.UUID `json:"tenant_id"`
+}
+
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
 //
 // Field names match the CLI's expected JSON keys (“keycloak_issuer“,
@@ -1216,6 +1250,45 @@ type RememberBody struct {
 	Scope      MemoryScope `json:"scope"`
 	Slug       *string     `json:"slug"`
 	TargetName *string     `json:"target_name"`
+}
+
+// ReplayNode One node of a per-session audit-replay tree (G8.2-T3).
+//
+// Subclasses :class:`AuditEntry` so it carries every audit field verbatim —
+// forward-compatible with the v0.2.next compliance-export contract, which
+// treats a replay node as an audit row plus its position in the session
+// graph. Two structural fields are added:
+//
+//   - “depth“ — distance from the session root. “0“ for roots; assigned
+//     during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.
+//   - “children“ — the node's direct children, ordered by “(occurred_at,
+//     id)“. Self-referential — the forward reference is resolved by the
+//     module-level :func:`ReplayNode.model_rebuild` call below.
+//
+// Frozen like its parent: a node handed to a caller cannot mutate after the
+// tree is built.
+type ReplayNode struct {
+	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
+	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	Children         *[]ReplayNode          `json:"children,omitempty"`
+	Depth            int                    `json:"depth"`
+	DurationMs       *string                `json:"duration_ms"`
+	Id               openapi_types.UUID     `json:"id"`
+	Method           string                 `json:"method"`
+	OpClass          string                 `json:"op_class"`
+	OpId             string                 `json:"op_id"`
+	ParentAuditId    *openapi_types.UUID    `json:"parent_audit_id"`
+	Path             string                 `json:"path"`
+	Payload          map[string]interface{} `json:"payload"`
+	PrincipalName    *string                `json:"principal_name"`
+	PrincipalSub     string                 `json:"principal_sub"`
+	RequestId        *openapi_types.UUID    `json:"request_id"`
+	ResultStatus     string                 `json:"result_status"`
+	StatusCode       int                    `json:"status_code"`
+	TargetId         *openapi_types.UUID    `json:"target_id"`
+	TargetName       *string                `json:"target_name"`
+	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	Ts               time.Time              `json:"ts"`
 }
 
 // RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
@@ -2180,6 +2253,11 @@ type QueryApiV1AuditQueryPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ReplayApiV1AuditSessionsSessionIdReplayGetParams defines parameters for ReplayApiV1AuditSessionsSessionIdReplayGet.
+type ReplayApiV1AuditSessionsSessionIdReplayGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ShowApiV1AuditShowAuditIdGetParams defines parameters for ShowApiV1AuditShowAuditIdGet.
 type ShowApiV1AuditShowAuditIdGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -2741,6 +2819,9 @@ type ClientInterface interface {
 
 	QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ReplayApiV1AuditSessionsSessionIdReplayGet request
+	ReplayApiV1AuditSessionsSessionIdReplayGet(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ShowApiV1AuditShowAuditIdGet request
 	ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -3022,6 +3103,18 @@ func (c *Client) QueryApiV1AuditQueryPostWithBody(ctx context.Context, params *Q
 
 func (c *Client) QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewQueryApiV1AuditQueryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReplayApiV1AuditSessionsSessionIdReplayGet(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReplayApiV1AuditSessionsSessionIdReplayGetRequest(c.Server, sessionId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4186,6 +4279,55 @@ func NewQueryApiV1AuditQueryPostRequestWithBody(server string, params *QueryApiV
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReplayApiV1AuditSessionsSessionIdReplayGetRequest generates requests for ReplayApiV1AuditSessionsSessionIdReplayGet
+func NewReplayApiV1AuditSessionsSessionIdReplayGetRequest(server string, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/sessions/%s/replay", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -8525,6 +8667,9 @@ type ClientWithResponsesInterface interface {
 
 	QueryApiV1AuditQueryPostWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error)
 
+	// ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse request
+	ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error)
+
 	// ShowApiV1AuditShowAuditIdGetWithResponse request
 	ShowApiV1AuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*ShowApiV1AuditShowAuditIdGetResponse, error)
 
@@ -8840,6 +8985,29 @@ func (r QueryApiV1AuditQueryPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r QueryApiV1AuditQueryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReplayApiV1AuditSessionsSessionIdReplayGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditReplayResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ReplayApiV1AuditSessionsSessionIdReplayGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReplayApiV1AuditSessionsSessionIdReplayGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -10402,6 +10570,15 @@ func (c *ClientWithResponses) QueryApiV1AuditQueryPostWithResponse(ctx context.C
 	return ParseQueryApiV1AuditQueryPostResponse(rsp)
 }
 
+// ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse request returning *ReplayApiV1AuditSessionsSessionIdReplayGetResponse
+func (c *ClientWithResponses) ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error) {
+	rsp, err := c.ReplayApiV1AuditSessionsSessionIdReplayGet(ctx, sessionId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReplayApiV1AuditSessionsSessionIdReplayGetResponse(rsp)
+}
+
 // ShowApiV1AuditShowAuditIdGetWithResponse request returning *ShowApiV1AuditShowAuditIdGetResponse
 func (c *ClientWithResponses) ShowApiV1AuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*ShowApiV1AuditShowAuditIdGetResponse, error) {
 	rsp, err := c.ShowApiV1AuditShowAuditIdGet(ctx, auditId, params, reqEditors...)
@@ -11225,6 +11402,39 @@ func ParseQueryApiV1AuditQueryPostResponse(rsp *http.Response) (*QueryApiV1Audit
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReplayApiV1AuditSessionsSessionIdReplayGetResponse parses an HTTP response from a ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse call
+func ParseReplayApiV1AuditSessionsSessionIdReplayGetResponse(rsp *http.Response) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReplayApiV1AuditSessionsSessionIdReplayGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditReplayResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

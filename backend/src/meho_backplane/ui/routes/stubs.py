@@ -18,12 +18,13 @@ shell renders end-to-end before the per-surface Initiatives
   has the double-submit chain in place from request one.
 
 The remaining stub paths are kept consistent with the chassis
-``base.html`` sidebar -- ``/ui/broadcast``, ``/ui/knowledge``,
-``/ui/connectors``, ``/ui/memory``. ``/ui/topology`` is intentionally
-NOT stubbed here: its real table view ships in G10.5-T1 (#880) and owns
-that path; registering a stub for it would shadow the real route in the
-generated OpenAPI schema. The Goal #336 done-when and Initiative #337
-work-item #5 reference these exact URLs.
+``base.html`` sidebar -- ``/ui/knowledge``, ``/ui/connectors``,
+``/ui/memory``. ``/ui/topology`` and ``/ui/broadcast`` are intentionally
+NOT stubbed here: topology's real table view ships in G10.5-T1 (#880)
+and broadcast's real live-feed view ships in G10.1-T1 (#867), each
+owning its path; registering a stub for either would shadow the real
+route in the generated OpenAPI schema. The Goal #336 done-when and
+Initiative #337 work-item #5 reference these exact URLs.
 
 Why one shared template
 -----------------------
@@ -73,12 +74,6 @@ class _SurfaceStub:
 
 
 _SURFACE_STUBS: Final[tuple[_SurfaceStub, ...]] = (
-    _SurfaceStub(
-        slug="broadcast",
-        title="Broadcast",
-        initiative_number=338,
-        summary="Live activity feed: SSE timeline + per-event drawer + wall-monitor mode.",
-    ),
     _SurfaceStub(
         slug="knowledge",
         title="Knowledge",

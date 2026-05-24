@@ -24,6 +24,11 @@
     * HTMX partial responses bypass this base entirely (render only
       the fragment template).
 -#}
+{#- ``active_surface`` highlights the matching sidebar link. Routes
+    that render a surface pass it (e.g. ``"broadcast"``); the dashboard
+    and stubs don't, so default to ``""`` here so the ``StrictUndefined``
+    env does not raise when a route omits it. -#}
+{% set active_surface = active_surface | default("") %}
 <!doctype html>
 <html lang="en" data-theme="corporate" class="h-full">
   <head>
@@ -35,11 +40,19 @@
        static/src/styles.css. Cache-busted by image rebuild
        (immutable per backplane version). #}
     <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
-    {# Vendored HTMX 2 + Alpine 3 -- pinned SHA256 in
-       static/src/vendor/VENDOR.md. Alpine's ``defer`` is
-       load-bearing: x-data initialisation must run after the DOM is
-       parsed (Alpine docs, "Manually starting Alpine"). #}
+    {# Vendored HTMX 2 + the SSE extension + Alpine 3 -- pinned SHA256
+       in static/src/vendor/VENDOR.md. Script order is load-bearing:
+       ``sse.min.js`` calls ``htmx.defineExtension`` at load, so it
+       must execute after ``htmx.min.js``; ``defer`` preserves
+       document order across all three. HTMX 2 split the SSE extension
+       out of core (HTMX 1 bundled it), so the dashboard recent-
+       activity snippet and the broadcast live feed both depend on
+       this separate plugin -- without it every ``hx-ext="sse"``
+       wrapper is inert. Alpine's ``defer`` is also load-bearing:
+       x-data initialisation must run after the DOM is parsed (Alpine
+       docs, "Manually starting Alpine"). #}
     <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
+    <script src="/ui/static/src/vendor/sse.min.js" defer></script>
     <script src="/ui/static/src/vendor/alpine.min.js" defer></script>
   </head>
   <body class="min-h-full bg-base-200 text-base-content">
@@ -169,33 +182,58 @@
           <div class="mb-4 px-2 text-xs font-semibold tracking-wider uppercase opacity-60">
             Surfaces
           </div>
+          {#- Sidebar links. DaisyUI's ``menu-active`` class marks the
+              current surface; ``aria-current="page"`` carries the same
+              signal to assistive tech. ``active_surface`` is set by the
+              rendering route (e.g. the broadcast view passes
+              ``"broadcast"``). -#}
           <ul class="menu-vertical w-full gap-1">
             <li>
-              <a href="/ui/broadcast" class="flex items-center gap-2">
+              <a
+                href="/ui/broadcast"
+                class="flex items-center gap-2{% if active_surface == 'broadcast' %} menu-active{% endif %}"
+                {% if active_surface == 'broadcast' %}aria-current="page"{% endif %}
+              >
                 <span aria-hidden="true">&#x1F4E1;</span>
                 <span>Broadcast</span>
               </a>
             </li>
             <li>
-              <a href="/ui/knowledge" class="flex items-center gap-2">
+              <a
+                href="/ui/knowledge"
+                class="flex items-center gap-2{% if active_surface == 'knowledge' %} menu-active{% endif %}"
+                {% if active_surface == 'knowledge' %}aria-current="page"{% endif %}
+              >
                 <span aria-hidden="true">&#x1F4DA;</span>
                 <span>Knowledge</span>
               </a>
             </li>
             <li>
-              <a href="/ui/topology" class="flex items-center gap-2">
+              <a
+                href="/ui/topology"
+                class="flex items-center gap-2{% if active_surface == 'topology' %} menu-active{% endif %}"
+                {% if active_surface == 'topology' %}aria-current="page"{% endif %}
+              >
                 <span aria-hidden="true">&#x1F578;</span>
                 <span>Topology</span>
               </a>
             </li>
             <li>
-              <a href="/ui/connectors" class="flex items-center gap-2">
+              <a
+                href="/ui/connectors"
+                class="flex items-center gap-2{% if active_surface == 'connectors' %} menu-active{% endif %}"
+                {% if active_surface == 'connectors' %}aria-current="page"{% endif %}
+              >
                 <span aria-hidden="true">&#x1F50C;</span>
                 <span>Connectors</span>
               </a>
             </li>
             <li>
-              <a href="/ui/memory" class="flex items-center gap-2">
+              <a
+                href="/ui/memory"
+                class="flex items-center gap-2{% if active_surface == 'memory' %} menu-active{% endif %}"
+                {% if active_surface == 'memory' %}aria-current="page"{% endif %}
+              >
                 <span aria-hidden="true">&#x1F9E0;</span>
                 <span>Memory</span>
               </a>
@@ -204,5 +242,10 @@
         </nav>
       </aside>
     </div>
+    {# Per-surface deferred JS. Surfaces that ship a static app script
+       (e.g. the broadcast feed's Alpine controller) inject a
+       ``<script src=... defer>`` here -- external src, not inline, so a
+       future nonce-based CSP needs no special-casing. Empty by default. #}
+    {% block scripts %}{% endblock %}
   </body>
 </html>

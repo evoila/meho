@@ -84,6 +84,10 @@ def test_static_src_carries_vendored_assets() -> None:
     """
     vendor = static_src_dir() / "vendor"
     assert (vendor / "htmx.min.js").is_file()
+    # The SSE extension HTMX 2 split out of core; the dashboard
+    # recent-activity snippet (G10.0) + the broadcast live feed (G10.1)
+    # both need it, so it's a required vendored asset.
+    assert (vendor / "sse.min.js").is_file()
     assert (vendor / "alpine.min.js").is_file()
     assert (vendor / "cytoscape.min.js").is_file()
     assert (vendor / "daisyui.js").is_file()

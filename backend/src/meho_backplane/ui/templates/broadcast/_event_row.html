@@ -1,0 +1,87 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Broadcast event-row partial (Initiative #338 Task #867, work item #2).
+
+  This is the server-authored Jinja2 markup for one feed row. It is
+  emitted inside an Alpine ``<template x-for="ev in events">`` in
+  ``feed.html`` so the column structure, the DaisyUI badge palette, and
+  the aggregate-only placeholder are all authored here (server-side, one
+  reviewable template) while the per-event data binding is Alpine
+  client-side.
+
+  Why client-side data binding: the shared ``/api/v1/feed`` substrate
+  (G6.1-T4) streams ``BroadcastEvent`` JSON -- consumed identically by
+  ``meho status --watch`` and the MCP resource -- and is out of scope to
+  reshape into per-event HTML frames. The HTMX ``sse`` extension would
+  swap that JSON in as raw text; instead the feed controller parses each
+  frame and this template renders it.
+
+  Columns (reverse-chronological list; newest prepended):
+    timestamp · principal@tenant badge · op_id · op_class badge
+    (colour-coded) · result_status icon · target · payload summary
+    (``(aggregate-only)`` when the redacted payload carries no params).
+
+  Bound fields on ``ev`` (a parsed ``BroadcastEvent``):
+    ev.ts, ev.principal_sub, ev.principal_name, ev.op_id, ev.op_class,
+    ev.result_status, ev.target_name, ev.payload.
+-#}
+<li
+  class="grid grid-cols-12 items-center gap-2 px-3 py-2 text-sm"
+  role="listitem"
+  :data-event-id="ev.event_id"
+>
+  {# ---------- timestamp ---------- #}
+  <span class="col-span-2 font-mono text-xs opacity-70">
+    <time :datetime="ev.ts" x-text="formatTs(ev.ts)"></time>
+  </span>
+
+  {# ---------- principal ---------- #}
+  <span class="col-span-2 truncate">
+    <span class="badge badge-outline badge-sm" x-text="ev.principal_name || ev.principal_sub"></span>
+  </span>
+
+  {# ---------- op_id ---------- #}
+  <span class="col-span-3 truncate font-mono text-xs" x-text="ev.op_id" :title="ev.op_id"></span>
+
+  {# ---------- op_class (colour-coded) ---------- #}
+  <span class="col-span-1">
+    <span class="badge badge-sm" :class="badgeClass(ev.op_class)" x-text="ev.op_class"></span>
+  </span>
+
+  {# ---------- result_status icon ---------- #}
+  <span class="col-span-1" :title="ev.result_status">
+    <span
+      x-show="ev.result_status === 'ok'"
+      class="text-success"
+      aria-label="ok"
+    >&#x2714;</span>
+    <span
+      x-show="ev.result_status === 'error'"
+      class="text-error"
+      aria-label="error"
+    >&#x2716;</span>
+    <span
+      x-show="ev.result_status === 'denied'"
+      class="text-warning"
+      aria-label="denied"
+    >&#x26D4;</span>
+    <span
+      x-show="!['ok','error','denied'].includes(ev.result_status)"
+      class="opacity-50"
+      :aria-label="ev.result_status"
+      x-text="ev.result_status"
+    ></span>
+  </span>
+
+  {# ---------- target ---------- #}
+  <span class="col-span-1 truncate text-xs opacity-80">
+    <span x-text="ev.target_name || '—'"></span>
+  </span>
+
+  {# ---------- payload summary ---------- #}
+  <span class="col-span-2 truncate text-xs opacity-60" :title="payloadSummary(ev)">
+    <span x-text="payloadSummary(ev)"></span>
+  </span>
+</li>

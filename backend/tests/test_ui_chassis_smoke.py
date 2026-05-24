@@ -108,11 +108,13 @@ _SURFACE_ROUTES = ("/ui/broadcast", "/ui/knowledge", "/ui/topology", "/ui/connec
 #: Subset of :data:`_SURFACE_ROUTES` that still render the chassis
 #: "Coming soon" stub. ``/ui/topology`` is omitted because Initiative
 #: #342 Task #880 (G10.5-T1) replaced the stub with the real table
-#: view; G10.1-G10.4 will trim this tuple further as their surface
-#: Initiatives land. The chassis smoke test still pins the sidebar
-#: links via :data:`_SURFACE_ROUTES` so a sidebar-vs-route divergence
-#: surfaces explicitly.
-_STUB_SURFACE_ROUTES = ("/ui/broadcast", "/ui/knowledge", "/ui/connectors", "/ui/memory")
+#: view; ``/ui/broadcast`` is omitted because Initiative #338 Task #867
+#: (G10.1-T1) replaced the stub with the real live-feed view. G10.2-G10.4
+#: will trim this tuple further as their surface Initiatives land. The
+#: chassis smoke test still pins the sidebar links via
+#: :data:`_SURFACE_ROUTES` so a sidebar-vs-route divergence surfaces
+#: explicitly.
+_STUB_SURFACE_ROUTES = ("/ui/knowledge", "/ui/connectors", "/ui/memory")
 
 
 @pytest.fixture(autouse=True)
@@ -614,7 +616,7 @@ def test_middleware_redirects_ui_routes_without_session() -> None:
 
 
 def test_middleware_lets_authenticated_ui_request_through() -> None:
-    """Positive control: a valid session unblocks a surface stub route."""
+    """Positive control: a valid session unblocks a ``/ui/`` surface route."""
     session_id = _seed_session_sync()
     with respx.mock(assert_all_called=False):
         client = TestClient(_build_app(), follow_redirects=False)

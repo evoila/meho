@@ -139,7 +139,7 @@ $ meho kb search "test"            # Knowledge base reachable.
 $ meho memory list                 # Memory reachable.
 $ meho targets list --limit 1      # Target inventory reachable.
 $ meho audit recent --limit 1      # Audit log reachable.
-$ meho status --watch --filter op=meho.status  &  WATCH_PID=$!
+$ meho status --watch --op-class read  &  WATCH_PID=$!
 $ sleep 2 && meho status > /dev/null    # produces one broadcast event
 $ sleep 2 && kill $WATCH_PID            # close the subscriber
 ```
@@ -292,8 +292,8 @@ discipline maps onto:
 * Step 1 (check before starting) — `meho audit recent --since 30m
   --target <name>` for "who's been here recently".
 * Step 2 (announce intent) — explicit Slack/chat post.
-* Step 3 (check in mid-flight) — `meho status --watch --filter
-  target=<name>` running in a background terminal.
+* Step 3 (check in mid-flight) — `meho status --watch --target
+  <name>` running in a background terminal.
 * Step 4 (report on completion) — explicit Slack/chat post + the
   audit row id from your operation's CLI output.
 

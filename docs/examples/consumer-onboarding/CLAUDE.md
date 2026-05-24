@@ -148,9 +148,11 @@ invokes it. Same auth, audit, policy as the alias verbs.
   feed is per-tenant, served as Server-Sent Events at
   `GET $MEHO_INSTANCE/api/v1/feed`, with the CLI subscriber as the
   default consumer.
-* `meho status --watch [--filter op=<pat>] [--filter principal=<sub>] [--filter target=<name>]`
+* `meho status --watch [--op-class <class>] [--principal <sub>] [--target <name>]`
   streams structured one-line events as they arrive; reconnect-with-replay
-  via SSE `Last-Event-Id` is automatic.
+  via SSE `Last-Event-Id` is automatic. `--op-class` accepts one of
+  `read | write | credential_read | audit_query` (no op-id-pattern filter
+  on the watch surface today).
 * The MCP resource `meho://tenant/<tenant_id>/feed` returns the
   most recent ~50 events as a snapshot for LLM clients that poll
   rather than maintain a live socket.

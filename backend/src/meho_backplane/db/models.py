@@ -232,6 +232,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 __all__ = [
+    "AgentRun",
+    "AgentRunStatus",
+    "AgentRunTrigger",
     "AuditLog",
     "Base",
     "BroadcastOverride",
@@ -2479,5 +2482,323 @@ class AgentDefinition(Base):
             "name",
             unique=True,
             postgresql_using="btree",
+        ),
+    )
+
+
+class AgentRunStatus(StrEnum):
+    """Closed lifecycle status of an :class:`AgentRun`.
+
+    Initiative #802 (G11.1 Agent runtime), Task #813 (T6). The runtime
+    hosts an LLM tool-use loop in MEHO's process; every invocation is
+    one ``agent_run`` row whose ``status`` walks an explicit, enforced
+    state machine. The legal transitions live in
+    :data:`meho_backplane.operations.agent_run.ALLOWED_TRANSITIONS`; the
+    service rejects any edge not on that map so an illegal jump (e.g.
+    ``succeeded`` -> ``running``) cannot land in the DB.
+
+    Members:
+
+    * :attr:`PENDING` -- the row was created but the loop has not
+      started executing yet (initial state on insert).
+    * :attr:`RUNNING` -- the loop is executing tool-use turns.
+    * :attr:`AWAITING_APPROVAL` -- the loop is paused on a
+      policy-gated tool call whose verdict is ``needs-approval``
+      (G11.2 resolves the verdict; the runtime parks the run here in
+      the meantime). Resumable back to ``running``.
+    * :attr:`SUCCEEDED` -- the loop completed and produced ``output``
+      (terminal).
+    * :attr:`FAILED` -- the loop errored or exhausted its turn budget
+      without producing a usable result (terminal).
+    * :attr:`CANCELLED` -- an authorized operator cancelled a
+      non-terminal run (terminal). The cancellation path is the
+      ``running`` / ``pending`` / ``awaiting_approval`` ->
+      ``cancelled`` edge.
+
+    Mirrors the closed-enum + DB ``CHECK`` discipline
+    :class:`GraphEdgeKind` / :class:`GraphHistoryChangeKind` set: the
+    enum and the ``CHECK (status IN (...))`` constraint move in
+    lock-step via migration ``0015``; the drift guard
+    :func:`tests.test_db_agent_run.test_status_check_matches_enum`
+    enforces the equality at unit-test time.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AgentRunTrigger(StrEnum):
+    """Closed enum of what initiated an :class:`AgentRun`.
+
+    Initiative #802 (G11.1 Agent runtime), Task #813 (T6). Records the
+    provenance of a run so audit / replay (G11.4/C2) can answer "why did
+    this agent run". The vocabulary is closed; widening it is a
+    coordinated DB + model change (new migration, new member, new
+    ``CHECK`` body) so the enum and the constraint never drift.
+
+    Members:
+
+    * :attr:`DIRECT` -- an operator invoked the run synchronously or via
+      the async handle surface (G11.1-T4).
+    * :attr:`SCHEDULED` -- the scheduler (G11.3) fired the run off a
+      cron / one-off trigger.
+    * :attr:`EVENT` -- an event trigger (G11.3 transactional outbox)
+      fired the run.
+    * :attr:`AGENT_INVOKED` -- another agent invoked this run as a child
+      (G11.1-T5 agent-invokes-agent composition); the parent run's id is
+      carried on :attr:`AgentRun.parent_run_id`.
+    """
+
+    DIRECT = "direct"
+    SCHEDULED = "scheduled"
+    EVENT = "event"
+    AGENT_INVOKED = "agent-invoked"
+
+
+#: Closed enum of :attr:`AgentRun.status` -- the v0.2 six-state
+#: lifecycle vocabulary. Derived from :class:`AgentRunStatus` so the enum
+#: and the DB-layer ``CHECK`` constraint cannot drift; the drift guard in
+#: :mod:`tests.test_db_agent_run` enforces the equality at unit-test time.
+_AGENT_RUN_STATUSES: tuple[str, ...] = tuple(s.value for s in AgentRunStatus)
+
+#: Closed enum of :attr:`AgentRun.trigger` -- the four provenance kinds.
+#: Derived from :class:`AgentRunTrigger`; same lock-step / drift-guard
+#: discipline as :data:`_AGENT_RUN_STATUSES`.
+_AGENT_RUN_TRIGGERS: tuple[str, ...] = tuple(t.value for t in AgentRunTrigger)
+
+
+class AgentRun(Base):
+    """One row per LLM-agent invocation hosted in MEHO's process.
+
+    Initiative #802 (G11.1 Agent runtime), Task #813 (T6). The runtime
+    executes an agent's tool-use loop in-process (G11.1-T1); each
+    invocation is one durable ``agent_run`` row that ties a session's
+    tool calls together, makes the run inspectable + cancellable, and
+    seeds the audit/replay lineage. The row's :attr:`id` **is** the
+    ``agent_session_id`` lineage key that G11.4/C2 binds into every
+    per-tool-call audit row (mirroring :attr:`AuditLog.agent_session_id`,
+    migration ``0014``).
+
+    The lifecycle (``status``) is an explicit, enforced state machine --
+    illegal transitions are rejected by
+    :mod:`meho_backplane.operations.agent_run`, not silently written.
+    This model is **storage-only**: no helper / transition logic lives on
+    the class (the discipline :class:`AuditLog` / :class:`WebSession`
+    follow); the lifecycle service owns every mutation.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. PG production gets
+      ``gen_random_uuid()`` via migration ``0015``; :func:`uuid.uuid4`
+      is the ORM default for the SQLite dev/test path and out-of-band
+      inserts. This id doubles as the ``agent_session_id`` lineage key,
+      so it must be globally unique without a central allocator -- UUID
+      is the chassis-wide answer (``audit_log.id``, ``web_session.id``).
+
+    * ``agent_definition_id`` -- UUID nullable, **soft-FK**. Points at
+      the ``agent_definition`` row (G11.1-T2 / #809) the run executed.
+      No FK clause in v0.2: the ``agent_definition`` table lands in a
+      sibling task in parallel, so a hard FK here would couple the two
+      migrations' ordering; the soft-FK discipline
+      (:attr:`AuditLog.target_id`) keeps this migration independently
+      reversible. Nullable because an ad-hoc run (no stored definition)
+      is a legitimate early-runtime shape.
+
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES
+      tenant(id)`` FK. ``agent_run`` is a brand-new clean-slate
+      substrate (no chassis-era rows), so the FK is enforced at the DB
+      layer -- same discipline :class:`GraphNode` / :class:`Document`
+      follow. No ``ondelete``: tenant deletion is a major operation that
+      must clear the tenant's runs first (default ``NO ACTION`` blocks
+      the cascade).
+
+    * ``identity_sub`` / ``identity_act`` -- Text. The RFC 8693
+      delegation pair: ``sub`` is the principal the agent acts *for*
+      (the human / service operator), ``act`` is the agent principal
+      acting on their behalf. ``act`` is nullable because a run invoked
+      directly by a human (no delegation) leaves it NULL; ``sub`` is
+      NOT NULL because every run has a responsible principal. Mirrors
+      :attr:`AuditLog.operator_sub` (the chassis has no ``operator``
+      table; the Keycloak ``sub`` is the stable identifier end-to-end).
+
+    * ``trigger`` -- Text NOT NULL with a DB-layer ``CHECK trigger IN
+      (...)`` constraint (see :data:`_AGENT_RUN_TRIGGERS`). Closed enum
+      (:class:`AgentRunTrigger`).
+
+    * ``model_tier`` -- Text NOT NULL. The *logical* tier the operator
+      requested (e.g. ``cheap`` / ``deep``); the multi-provider resolver
+      (G11.5) maps it to a concrete provider + model. Free-text, not a
+      closed enum: the tier vocabulary is consumer-defined (the harness
+      names its own tiers) and MEHO does not enumerate it.
+
+    * ``provider`` / ``model`` -- Text nullable. The *resolved*
+      provider (e.g. ``anthropic``) and model id (e.g.
+      ``claude-...``) the run actually executed against. Nullable
+      because they are unknown until the resolver runs (a ``pending``
+      run has not resolved them yet); the runtime populates them at
+      ``start`` time.
+
+    * ``status`` -- Text NOT NULL with a DB-layer ``CHECK status IN
+      (...)`` constraint (see :data:`_AGENT_RUN_STATUSES`). Closed enum
+      (:class:`AgentRunStatus`). Defaults to ``pending`` on insert.
+
+    * ``turns`` -- Integer NOT NULL, default 0. The count of tool-use
+      turns the loop has executed. The runtime increments it per turn;
+      the turn budget (``UsageLimits.request_limit`` in G11.1-T1) is
+      enforced by the loop, not this column -- ``turns`` is the
+      observable counter.
+
+    * ``cost`` -- ``Numeric(12, 6)`` nullable. **Stub until G11.5/C3**:
+      the column is recorded here so C3 can populate per-identity cost
+      attribution without a follow-up migration, but the runtime writes
+      NULL in v0.2 (cost computation is explicitly out of scope for this
+      Task). ``Numeric`` (not float) because cost is money-shaped --
+      exact decimal arithmetic, no binary-float rounding drift. Six
+      fractional digits cover sub-cent token pricing.
+
+    * ``output`` -- portable JSON nullable. The run's final result
+      (structured output when the agent declared an ``output_type``, or
+      a ``{"text": ...}`` projection otherwise). NULL until the run
+      reaches a terminal state with a result.
+
+    * ``error`` -- Text nullable. A human-readable failure reason on a
+      ``failed`` run (the exception class + message the loop surfaced);
+      NULL otherwise. Kept distinct from ``output`` so a failed run's
+      diagnostics do not masquerade as a result.
+
+    * ``parent_run_id`` -- UUID nullable, soft-FK to this table's own
+      ``id``. Populated when this run was invoked by another agent
+      (``trigger='agent-invoked'``, G11.1-T5): the child row points at
+      the parent run's id, so the composition tree is walkable. Soft-FK
+      (no clause) -- same self-referential discipline
+      :attr:`AuditLog.parent_audit_id` follows.
+
+    * ``created_at`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
+      server default; ORM ``default=lambda: datetime.now(UTC)`` for
+      SQLite.
+
+    * ``started_at`` / ``ended_at`` -- ``timestamptz`` nullable.
+      ``started_at`` is set when the run transitions ``pending`` ->
+      ``running``; ``ended_at`` when it reaches any terminal state.
+      Both NULL until those transitions fire -- the lifecycle service
+      stamps them.
+
+    Indexes
+    -------
+
+    * ``agent_run_tenant_created_at_idx`` -- composite b-tree on
+      ``(tenant_id, created_at)``. Drives the "list runs for tenant X,
+      newest first" inspection surface (G11.1-T4).
+    * ``agent_run_status_idx`` -- b-tree on ``status``. Drives the
+      "find all running / awaiting-approval runs" query an operator
+      needs to inspect / cancel in-flight work.
+    * ``agent_run_parent_run_id_idx`` -- b-tree on ``parent_run_id``.
+      Drives the composition-tree walk (children of a parent run,
+      G11.1-T5).
+    """
+
+    __tablename__ = "agent_run"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Soft-FK to agent_definition.id (table lands in parallel #809) --
+    # see class docstring for why no FK clause in v0.2.
+    agent_definition_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # RFC 8693 delegation pair. ``sub`` = principal acted for (required);
+    # ``act`` = agent principal acting (NULL when a human invokes
+    # directly with no delegation).
+    identity_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    identity_act: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    model_tier: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=AgentRunStatus.PENDING.value,
+    )
+    turns: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Stub until G11.5/C3 -- recorded NULL in v0.2 (cost compute is out
+    # of scope for #813). Numeric (not float) -- cost is money-shaped.
+    cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 6),
+        nullable=True,
+        default=None,
+    )
+    output: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Self-referential soft-FK -- set on agent-invoked child runs
+    # (G11.1-T5). Same discipline as audit_log.parent_audit_id.
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_run_tenant_created_at_idx",
+            "tenant_id",
+            "created_at",
+            postgresql_using="btree",
+        ),
+        Index(
+            "agent_run_status_idx",
+            "status",
+            postgresql_using="btree",
+        ),
+        Index(
+            "agent_run_parent_run_id_idx",
+            "parent_run_id",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _AGENT_RUN_STATUSES),
+            name="ck_agent_run_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("trigger", _AGENT_RUN_TRIGGERS),
+            name="ck_agent_run_trigger",
         ),
     )

@@ -27,13 +27,13 @@ pieces:
   across the five tests in :mod:`tests.integration.test_tenant_isolation`
   so the suite still finishes well inside the issue's "< 10s wall clock"
   acceptance criterion. Migrations land once, not five times; the
-  per-test ``TRUNCATE TABLE audit_log, documents, graph_edge, graph_node,
-  broadcast_override, tenant`` in ``pg_engine`` keeps test isolation
-  honest even though the DB is shared (non-cascading multi-table
-  TRUNCATE is required because every table with a ``REFERENCES
-  tenant(id)`` FK must be listed in the same statement, otherwise PG
-  rejects with ``cannot truncate a table referenced in a foreign key
-  constraint``).
+  per-test ``TRUNCATE TABLE agent_run, audit_log, documents, graph_edge,
+  graph_edge_history, graph_node, graph_node_history, broadcast_override,
+  tenant`` in ``pg_engine`` keeps test isolation honest even though the
+  DB is shared (non-cascading multi-table TRUNCATE is required because
+  every table with a ``REFERENCES tenant(id)`` FK must be listed in the
+  same statement, otherwise PG rejects with ``cannot truncate a table
+  referenced in a foreign key constraint``).
 * ``integration_env`` — autouse fixture that pins every Settings env
   var the chassis needs at construction time, then yields. The
   conftest in ``tests/conftest.py`` already pins ``DATABASE_URL`` to a
@@ -363,7 +363,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   migration 0012 (G9.3-T1 topology history).
         # * ``graph_edge_history.tenant_id`` + FK to ``graph_edge`` —
         #   migration 0012 (G9.3-T1 topology history).
-        # * ``agent_definition.tenant_id`` — migration 0015 (G11.1-T2
+        # * ``agent_definition.tenant_id`` — migration 0016 (G11.1-T2
         #   #809 agent-definition CRUD).
         #
         # ``audit_log`` has no FK to ``tenant`` (the soft column shape
@@ -375,9 +375,15 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         # non-cascading regardless of FK order. The history tables
         # likewise carry FKs to their live counterparts; PG requires
         # them in the same TRUNCATE statement (or CASCADE).
+        #
+        # * ``agent_run.tenant_id`` — migration 0017 (G11.1-T6 #813) is a
+        #   real ``REFERENCES tenant(id)`` FK, so ``agent_run`` must be
+        #   truncated in the same statement as ``tenant`` or PG raises
+        #   ``cannot truncate a table referenced in a foreign key
+        #   constraint``.
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, documents, graph_edge, "
+                "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
             ),
@@ -431,12 +437,13 @@ async def pg_engine_empty_tenant(
 
     async with eng.connect() as conn:
         # Same single non-cascading TRUNCATE as ``pg_engine`` (see that
-        # fixture for why every real ``REFERENCES tenant(id)`` table
-        # must be listed here). Deliberately no follow-up INSERT —
+        # fixture for why every real ``REFERENCES tenant(id)`` table —
+        # including ``agent_run`` from migration 0017 — must be listed
+        # here). Deliberately no follow-up INSERT —
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, documents, graph_edge, "
+                "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
                 "broadcast_override, agent_definition, tenant",
             ),

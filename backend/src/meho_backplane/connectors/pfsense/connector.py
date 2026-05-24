@@ -430,8 +430,9 @@ class PfSenseConnector(SshConnector):
         Delegates to
         :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_firewall_state`.
         The state table can contain thousands of rows on busy firewalls;
-        the future JSONFlux reducer spills to the HandleStore
-        (key ``pfsense_firewall_state``) when ``total`` exceeds its
+        the dispatcher's default
+        :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+        wraps the result in a ``ResultHandle`` when ``total`` exceeds its
         configured threshold.
         """
         from meho_backplane.connectors.pfsense.ops_read import (

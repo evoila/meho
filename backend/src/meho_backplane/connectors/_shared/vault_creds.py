@@ -18,9 +18,9 @@ The exact read already exists inside the Vault connector op
 ``vault/ops.py:294``): ``async with vault_client_for_operator(operator)
 as client: client.secrets.kv.v2.read_secret_version(...)`` then a
 structural unwrap of ``data["data"]``. That handler is coupled to the
-op-dispatch surface — it returns ``{"data", "version"}`` shaped for the
-``PassThroughReducer`` and is registered as a typed op with a JSON
-schema. A connector *loader* needs something narrower: a plain
+op-dispatch surface — it returns ``{"data", "version"}``, a scalar shape
+the dispatcher's default reducer passes through verbatim, and is
+registered as a typed op with a JSON schema. A connector *loader* needs something narrower: a plain
 ``dict[str, str]`` of named fields and an error contract distinct from
 the dispatcher's ``connector_error`` branch. So this helper reuses the
 lower-level primitive (:func:`vault_client_for_operator` +

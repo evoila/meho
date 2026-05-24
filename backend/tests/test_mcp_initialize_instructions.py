@@ -212,9 +212,7 @@ async def test_initialize_logs_warning_on_dropped_slugs(
     # leak sweep already proves capfd is the correct surface for
     # structlog output in this project.
     warning_text = "\n".join(
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno >= logging.WARNING
+        record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING
     )
     captured_stdout = capfd.readouterr().out
     haystack = warning_text + "\n" + captured_stdout

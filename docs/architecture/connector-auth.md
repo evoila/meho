@@ -153,6 +153,80 @@ credential-read leaf of the chain.
   (templated ACL policy recipe + Keycloak→Vault identity prerequisite +
   verification).
 
+## Cache scoping under `shared_service_account`
+
+Each connector that holds Vault-sourced credentials or session tokens caches
+them per target — keyed on `target.name` alone, with no operator dimension.
+This is intentional under the only auth model State 2 supports
+(`shared_service_account`) and load-bearing in the docstrings of every cache
+site. Restating it here so future review (human and bot) doesn't relitigate
+it as a cross-operator leak.
+
+### The contract
+
+For a target tagged `shared_service_account`:
+
+- The KV-v2 secret at `target.secret_ref` is **the** service-account
+  credential pair the connector authenticates with. The same `(username,
+  password)` is used for every operator who dispatches against the target —
+  by design, because the service account itself is shared.
+- The vendor-session token (vRLI bearer, vSphere `vmware-api-session-id`,
+  vcf-automation provider JWT, vcf-automation tenant token) is minted from
+  that shared credential pair. A token returned to operator *A* would be
+  byte-identical to the token minted for operator *B* on the very next call
+  — caching it once is the right shape, not a leak.
+- Per-operator attribution still lands in MEHO's own audit log (the
+  `dispatch` row) and in Vault's audit log on the **first** read per
+  `(target, connector-instance)` lifetime — every subsequent cache hit
+  skips Vault entirely, which is the cache's whole point.
+
+### The four cache implementations
+
+| Connector | File | Cache | Notes |
+| --- | --- | --- | --- |
+| Shared VCF helper (vROps, vRLI, Fleet) | `backend/src/meho_backplane/connectors/_shared/vcf_auth.py` | `CredentialsCache` | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic by vROps/Fleet and via session-establish by vRLI. |
+| vRLI | `backend/src/meho_backplane/connectors/vcf_logs/connector.py` | `_session_tokens` (in `_session_token`) | Bearer-token cache; the session id from `POST /api/v2/sessions`. |
+| vcf-automation (provider plane) | `backend/src/meho_backplane/connectors/vcf_automation/connector.py` | `_provider_tokens` (in `_provider_session_token`) | `X-VMWARE-VCLOUD-ACCESS-TOKEN` JWT cache. |
+| vcf-automation (tenant plane) | `backend/src/meho_backplane/connectors/vcf_automation/connector.py` | `_tenant_tokens` (in `_tenant_session_token`) | `{"token": ...}` body-value cache. |
+| vmware-rest | `backend/src/meho_backplane/connectors/vmware_rest/connector.py` | `_session_tokens` (in `_session_token`) | `vmware-api-session-id` cache; the G3.9 precedent every other cache here copied. |
+
+All five cache sites apply the same fail-closed guard before the cache
+lookup: an empty `operator.raw_jwt` raises `VaultCredentialsReadError`
+without touching the cache. The **primary** fail-closed gate against empty
+`raw_jwt` lives one layer deeper, in the credential loader's
+`_resolve_secret_ref` helper at
+[`vault_creds.py:188`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L188);
+the cache guards exist as the **second** layer — defense-in-depth so a
+cache hit can never short-circuit past the loader and return a
+previously-primed token to a caller without an operator JWT. (Each
+consuming connector's `auth_headers` enforces a separate constraint —
+the `auth_model == "shared_service_account"` boundary — and does not
+itself reject empty `raw_jwt`; the loader and the cache guards do.)
+
+### Why not key the cache on the operator too
+
+Under `shared_service_account` the underlying credential is shared. A
+`(target.name, operator.sub)` cache key would multiply the cache by every
+operator who has ever dispatched against the target, all entries holding
+byte-identical credentials. Storage waste, identical wire traffic, no
+extra audit fidelity (Vault still attributes only the first read per
+operator-cache-entry).
+
+### When this changes — `per_user` / `impersonation`
+
+Both of those auth models are explicitly out of scope for State 2 (see
+`Goal #214` and the boundary checks in each connector's `auth_headers`).
+When either lands, the cache key MUST extend to `(target.name,
+operator.sub)` because the credential pair (or kubeconfig user, or
+impersonation chain) becomes per-operator. Until then, threading
+`operator.sub` into the key is speculative complexity — the cache shape
+should match the credential reality.
+
+The fail-closed guard at the top of each cache method already enforces
+the half of the contract that survives the auth-model transition (the
+operator must be authenticated); only the key composition changes when
+the auth-model boundary widens.
+
 ## Open question for the human (approval gate)
 
 Confirm **Option A (operator-context)**. If per-operator Vault policy

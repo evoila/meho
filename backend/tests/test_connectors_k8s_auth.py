@@ -43,7 +43,6 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import Connector
-from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.kubernetes import (
     KubernetesConnector,
@@ -146,8 +145,11 @@ def _make_operator(*, raw_jwt: str = "op.test.jwt") -> Operator:
     """Build a non-system operator with a non-empty ``raw_jwt``.
 
     The empty-``raw_jwt`` case is the fail-closed system-call carve-out;
-    tests that exercise it pass ``raw_jwt=""`` (or call
-    :func:`synthesise_system_operator`).
+    tests that exercise it pass ``raw_jwt=""`` explicitly.
+    :func:`synthesise_system_operator` now carries a non-empty placeholder
+    JWT (per G3.10 hygiene -- the cache fast-path's defense-in-depth
+    empty-jwt guard) so it is not a substitute for an explicit empty
+    ``raw_jwt`` operator.
     """
     return Operator(
         sub="op-test",
@@ -203,11 +205,18 @@ def test_default_loader_fails_closed_on_empty_operator_jwt() -> None:
     boundary :func:`load_basic_credentials` enforces. The Vault leaf is
     never reached on this path; the guard runs before
     :func:`vault_client_for_operator` is touched.
+
+    Uses an explicit empty-``raw_jwt`` operator rather than
+    :func:`synthesise_system_operator` (which now carries a non-empty
+    placeholder JWT per G3.10 hygiene -- the cache fast-path's
+    defense-in-depth empty-jwt guard would otherwise short-circuit every
+    probe path). The empty-``raw_jwt`` constructor here is the precise
+    contract under test.
     """
 
     async def _check() -> None:
         with pytest.raises(VaultCredentialsReadError, match="no operator JWT"):
-            await load_kubeconfig_from_vault(_TARGET_A, synthesise_system_operator())
+            await load_kubeconfig_from_vault(_TARGET_A, _make_operator(raw_jwt=""))
 
     asyncio.run(_check())
 

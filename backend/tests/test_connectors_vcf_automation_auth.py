@@ -52,8 +52,15 @@ from meho_backplane.connectors.vcf_automation import (
 )
 
 
-def _make_operator(raw_jwt: str = "") -> Operator:
-    """Return a minimal :class:`Operator` for threading through the auth surface."""
+def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
+    """Return a minimal :class:`Operator` for threading through the auth surface.
+
+    Defaults ``raw_jwt`` to a non-empty placeholder so the cache fast-path's
+    defense-in-depth fail-closed guard (``VaultCredentialsReadError`` on
+    empty ``operator.raw_jwt``, mirroring the loader-path guard) doesn't
+    fire on tests that don't care about the value. Tests that exercise the
+    empty-jwt rejection pass ``raw_jwt=""`` explicitly.
+    """
     return Operator(
         sub="test-operator",
         name=None,

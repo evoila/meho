@@ -94,6 +94,16 @@ Schema decisions for :class:`AuditLog`:
   Drives the recursive-CTE traversal at audit-replay time (G8.1 /
   G8.2). No FK to ``audit_log.id`` in v0.2 by the same soft-FK
   discipline established for ``tenant_id`` / ``target_id``.
+* ``agent_session_id`` — UUID, nullable. Added by migration ``0014``;
+  the MCP-session correlation id. Populated only on MCP audit rows,
+  sourced from the inbound ``Mcp-Session-Id`` header (wired by
+  G8.2-T2). Chassis HTTP-side audit rows are not agent sessions by
+  design and leave it NULL; pre-G8.2 rows stay NULL too (no backfill).
+  Drives the per-session audit-replay query (``meho audit replay
+  <session-id>``, G8.2-T6). No FK in v0.2 by the same soft-FK
+  discipline as ``tenant_id`` / ``target_id`` / ``parent_audit_id`` —
+  the session id is an opaque transport-header correlation key, not a
+  row identifier in this schema.
 
 Indexes on :class:`AuditLog`:
 
@@ -112,6 +122,10 @@ Indexes on :class:`AuditLog`:
 * ``audit_log_parent_audit_id_idx`` — b-tree on ``parent_audit_id``
   so the recursive-CTE traversal at audit-replay time hits the index.
   Added by migration ``0006``.
+* ``audit_log_agent_session_id_idx`` — b-tree on ``agent_session_id``
+  so the per-session ``WHERE agent_session_id = ?`` probe (the
+  ``meho audit replay <session-id>`` query shape) hits the index.
+  Added by migration ``0014``.
 
 Schema decisions for :class:`Target`:
 
@@ -397,6 +411,19 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Nullable on purpose — the MCP-session correlation id. Populated
+    # only on MCP audit rows, sourced from the inbound ``Mcp-Session-Id``
+    # header (wired by G8.2-T2). Chassis HTTP-side audit rows are not
+    # agent sessions by design and leave this NULL; pre-G8.2 rows stay
+    # NULL too (no backfill). Drives the per-session audit-replay query
+    # (``meho audit replay <session-id>``, G8.2-T6). No FK in v0.2 --
+    # the session id is an opaque transport-header correlation key, not
+    # a row identifier in this schema. Added by migration ``0014``.
+    agent_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -422,6 +449,11 @@ class AuditLog(Base):
         Index(
             "audit_log_parent_audit_id_idx",
             "parent_audit_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_agent_session_id_idx",
+            "agent_session_id",
             postgresql_using="btree",
         ),
     )

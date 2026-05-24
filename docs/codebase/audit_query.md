@@ -27,7 +27,7 @@ this package never inserts, updates, or deletes.
 | `since` / `until` | `datetime \| None` | `audit_log.occurred_at` bracket. **Absolute datetimes only** — `"24h"` / `"7d"` shorthand is parsed in the T2 / T3 router. |
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
 | `parent_audit_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** in v0.2 — column lands with G0.6-T7 (#398). |
-| `agent_session_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** in v0.2 — column not on any current roadmap. |
+| `agent_session_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** in v0.2 — column lands with G8.2-T1 (#1009); the filter is un-gated by G8.2-T3. |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 
@@ -54,7 +54,7 @@ Field-to-source mapping:
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
 | `principal_name` | **None in v0.2** — JWT `name` claim is not captured by either write path. |
 | `parent_audit_id` | **None in v0.2** — column lands with G0.6-T7 (#398). |
-| `agent_session_id` | **None in v0.2** — no roadmap column. |
+| `agent_session_id` | **None in v0.2** — column lands with G8.2-T1 (#1009); populated by G8.2-T2, surfaced by G8.2-T3. |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules
@@ -231,9 +231,12 @@ Reverse dependencies:
   `WHERE parent_audit_id = :parent_audit_id` clause. `AuditEntry` already
   exposes the field — only the column read needs to wire up.
 
-* **`agent_session_id` has no roadmap column.** Field is on `AuditEntry`
-  as None and the filter raises. If consumer demand crystallises, the
-  follow-up is a column + write-path binding + the same one-line filter add.
+* **`agent_session_id` waits on G8.2 (#377).** The column lands with
+  G8.2-T1 (#1009 — nullable + indexed, no write path); G8.2-T2 writes it
+  from the MCP `Mcp-Session-Id` header, and G8.2-T3 drops the
+  `UnsupportedFilterError` arm and adds the `WHERE agent_session_id =
+  :agent_session_id` clause. `AuditEntry` already exposes the field as
+  None — only the column read needs to wire up.
 
 * **`op_id` / `op_class` glob filtering is JSON-path-based.** On PostgreSQL
   the `payload->>'op_id'` lookup runs over the JSONB column without an index

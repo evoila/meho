@@ -108,6 +108,8 @@ async def seed_audit_row(
     status_code: int = 200,
     payload: dict[str, Any] | None = None,
     audit_id: uuid.UUID | None = None,
+    agent_session_id: uuid.UUID | None = None,
+    parent_audit_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Insert one fully-specified ``audit_log`` row.
 
@@ -119,8 +121,18 @@ async def seed_audit_row(
     the substrate's OR-shaped predicate via a non-HTTP op-id need
     them present.
 
+    ``agent_session_id`` / ``parent_audit_id`` are the G8.2 replay
+    lineage columns. They default to ``None`` so the G8.1 cursor /
+    boundary callers are unaffected; the G8.2-T7 replay-acceptance
+    suite passes them to build a multi-level session tree (root →
+    child → grandchild + sibling root, all sharing one
+    ``agent_session_id``, linked by ``parent_audit_id``). Pass
+    ``audit_id`` explicitly when a row must be referenced as a
+    ``parent_audit_id`` by a later seed (or to build a self-/mutual
+    cycle), since the closure walk keys on the audit-row id.
+
     Returns the inserted ``audit_log.id`` so the caller can build
-    cursor / show-by-id assertions against a known row.
+    cursor / show-by-id / replay assertions against a known row.
     """
     row_id = audit_id if audit_id is not None else uuid.uuid4()
     resolved_payload: dict[str, Any] = (
@@ -139,6 +151,8 @@ async def seed_audit_row(
             payload=resolved_payload,
             tenant_id=tenant_id,
             target_id=target_id,
+            agent_session_id=agent_session_id,
+            parent_audit_id=parent_audit_id,
         )
     )
     await session.flush()

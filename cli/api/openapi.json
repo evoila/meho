@@ -3478,6 +3478,60 @@
         }
       }
     },
+    "/api/v1/audit/sessions/{session_id}/replay": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Replay",
+        "description": "Replay one agent session as a tenant-scoped parent/child tree.\n\nDispatches through\n:func:`~meho_backplane.audit_query.replay_session`. ``tenant_id``\nis always ``operator.tenant_id`` from the JWT, never client input,\nso a session belonging to another tenant \u2014 or one that does not\nexist \u2014 yields ``root=[]`` / ``row_count=0`` (never 404; a foreign\nsession is indistinguishable from an empty one, the same\nnon-leakage posture :func:`show` takes).\n\nA session larger than :data:`_REPLAY_ROW_CAP` anchor rows returns\n413 from a count-first guard. The count runs *before*\n:func:`replay_session`, so a runaway session never materializes its\ntree just to be rejected \u2014 the recursive build is skipped entirely.",
+        "operationId": "replay_api_v1_audit_sessions__session_id__replay_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditReplayResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/broadcast/overrides": {
       "get": {
         "tags": [
@@ -4345,6 +4399,40 @@
         ],
         "title": "AuditQueryResult",
         "description": "Page of audit rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows were\navailable (the query reached the end of the matching set). Consumers\niterate by re-issuing the same filter with ``cursor = next_cursor``\nuntil ``next_cursor`` is None."
+      },
+      "AuditReplayResult": {
+        "properties": {
+          "root": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayNode"
+            },
+            "type": "array",
+            "title": "Root"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Session Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "root",
+          "session_id",
+          "tenant_id",
+          "row_count"
+        ],
+        "title": "AuditReplayResult",
+        "description": "200 body for ``GET /api/v1/audit/sessions/{session_id}/replay``.\n\nWraps the substrate's :class:`ReplayNode` forest with the echoed\nrequest identity. ``tenant_id`` is always the operator's tenant\n(lifted from the JWT by the route), never client-supplied, so the\necho is a confirmation of the boundary the query ran under \u2014 not a\nvalue the caller chose.\n\n``row_count`` is the count of *anchor* rows in the session \u2014 rows\nwhose ``agent_session_id`` equals ``session_id`` within the\noperator's tenant. It is the same number the route's count-first\n413 guard evaluates, so a session that returns 200 reports a\n``row_count`` identical to what its over-cap sibling would report\nat 413. NULL-session lineage children pulled into ``root`` by the\nreplay closure (a composite ``dispatch_child`` whose own\n``agent_session_id`` is NULL but whose ``parent_audit_id`` links\ninto the session) are present in the tree but are not counted \u2014\n\"session rows\" are defined by the ``agent_session_id`` anchor, not\nby tree membership.\n\nAn unknown session id, or one belonging to another tenant, yields\n``root=[]`` / ``row_count=0`` \u2014 never a 404 \u2014 so a foreign session\nis indistinguishable from an empty one and existence never leaks\nacross tenants (the same non-leakage posture\n``GET /show/{audit_id}`` takes).\n\nFrozen like the substrate models it carries."
       },
       "AuthConfigResponse": {
         "properties": {
@@ -5948,6 +6036,141 @@
         ],
         "title": "RememberBody",
         "description": "POST body for ``/api/v1/memory`` -- create one memory.\n\n``slug`` is constrained to :data:`SLUG_PATTERN` at the model\nboundary; the service-layer\n:func:`~meho_backplane.memory.schemas.validate_slug` is the\nparallel gate for non-Pydantic callers. ``frozen=True`` matches\nthe rest of the memory + kb schemas (a handler accidentally\nmutating a parsed request body surfaces as a pydantic error\ninstead of a confused-deputy bug). ``extra=\"forbid\"`` rejects\nunknown fields at 422 so a typo (``\"bodytext\"``) doesn't\nsilently become a no-op.\n\n``target_name`` is required when ``scope`` is ``user-target`` or\n``target``; the service-level\n:meth:`MemoryService._require_target_name` raises ``ValueError``\nwhen missing, which this route maps to 422 (parity with\npydantic's own missing-field shape)."
+      },
+      "ReplayNode": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Name"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "status_code": {
+            "type": "integer",
+            "title": "Status Code"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          },
+          "duration_ms": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "nullable": true,
+            "title": "Duration Ms"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "title": "Result Status"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "broadcast_event_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Broadcast Event Id"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayNode"
+            },
+            "type": "array",
+            "title": "Children"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "tenant_id",
+          "principal_sub",
+          "principal_name",
+          "target_id",
+          "target_name",
+          "method",
+          "path",
+          "status_code",
+          "request_id",
+          "duration_ms",
+          "payload",
+          "op_id",
+          "op_class",
+          "result_status",
+          "parent_audit_id",
+          "agent_session_id",
+          "broadcast_event_id",
+          "depth"
+        ],
+        "title": "ReplayNode",
+        "description": "One node of a per-session audit-replay tree (G8.2-T3).\n\nSubclasses :class:`AuditEntry` so it carries every audit field verbatim \u2014\nforward-compatible with the v0.2.next compliance-export contract, which\ntreats a replay node as an audit row plus its position in the session\ngraph. Two structural fields are added:\n\n* ``depth`` \u2014 distance from the session root. ``0`` for roots; assigned\n  during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.\n* ``children`` \u2014 the node's direct children, ordered by ``(occurred_at,\n  id)``. Self-referential \u2014 the forward reference is resolved by the\n  module-level :func:`ReplayNode.model_rebuild` call below.\n\nFrozen like its parent: a node handed to a caller cannot mutate after the\ntree is built."
       },
       "RetireChecklistReport": {
         "properties": {

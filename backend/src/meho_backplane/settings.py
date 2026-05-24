@@ -439,6 +439,21 @@ class Settings(BaseModel):
         retention is policy-driven); ``enabled=False`` skips starting
         the loop entirely (no audit-row noise, no log line). Read once
         at lifespan startup; toggling post-start requires a pod restart.
+    anthropic_api_key:
+        Anthropic API key the G11.1 agent runtime's bounded tool-use loop
+        authenticates with. Empty (the default) is fail-closed: the seam's
+        model factory (:func:`meho_backplane.agent.run.default_model_factory`)
+        raises rather than starting a loop with no credentials, so a
+        misconfigured deploy surfaces at first agent invocation rather than
+        mid-loop. Set via ``ANTHROPIC_API_KEY``. The G11 initiative runs
+        against Anthropic only; multi-provider routing (Bedrock, on-prem
+        OpenAI-compatible, VCF Private AI Foundation) is G11.5.
+    agent_default_model:
+        Pinned Anthropic model id the agent loop uses when an
+        ``AgentDefinition`` does not override it. A full id
+        (``anthropic:claude-sonnet-4-6``), never a moving ``-latest`` tag,
+        so a model swap is a deliberate config push. Set via
+        ``AGENT_DEFAULT_MODEL``.
     mcp_require_session_id:
         Whether ``POST /mcp`` rejects requests that omit the
         ``Mcp-Session-Id`` header (G8.2-T2 #1010). Default ``False``:
@@ -528,6 +543,15 @@ class Settings(BaseModel):
     topology_history_retention_days: int = Field(default=90, ge=0, le=3650)
     topology_history_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     topology_history_prune_enabled: bool = True
+    # G11.1-T1 #808 — agent runtime LLM access. The bounded tool-use loop
+    # (``meho_backplane.agent``) runs against Anthropic for the G11
+    # initiative; multi-provider routing is G11.5. ``anthropic_api_key``
+    # empty is the fail-closed default — the seam's model factory raises
+    # rather than starting a loop with no credentials. ``agent_default_model``
+    # is the pinned model id the loop uses when an ``AgentDefinition`` does
+    # not override it (full id in config, not a moving ``-latest`` tag).
+    anthropic_api_key: str = ""
+    agent_default_model: str = Field(default="anthropic:claude-sonnet-4-6", min_length=1)
     mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
@@ -682,6 +706,11 @@ def get_settings() -> Settings:
         ),
         topology_history_prune_enabled=parse_bool_env(
             os.environ.get("TOPOLOGY_HISTORY_PRUNE_ENABLED", "true"),
+        ),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+        agent_default_model=os.environ.get(
+            "AGENT_DEFAULT_MODEL",
+            "anthropic:claude-sonnet-4-6",
         ),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),

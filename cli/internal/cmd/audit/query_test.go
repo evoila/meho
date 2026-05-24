@@ -46,6 +46,7 @@ func TestBuildQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 		Until:         "1h",
 		AuditID:       "00000000-0000-0000-0000-000000000001",
 		ParentAuditID: "00000000-0000-0000-0000-000000000002",
+		SessionID:     "00000000-0000-0000-0000-000000000003",
 		Limit:         50,
 		Cursor:        "opaque-cursor-bytes",
 	}
@@ -65,6 +66,7 @@ func TestBuildQueryRequestEveryFlagLandsOnWire(t *testing.T) {
 		`"until":"1h"`,
 		`"audit_id":"00000000-0000-0000-0000-000000000001"`,
 		`"parent_audit_id":"00000000-0000-0000-0000-000000000002"`,
+		`"agent_session_id":"00000000-0000-0000-0000-000000000003"`,
 		`"limit":50`,
 		`"cursor":"opaque-cursor-bytes"`,
 	} {
@@ -238,6 +240,47 @@ func TestRunQueryUnreachableSurfacesAsTransport(t *testing.T) {
 	// generic call-error wrapper. Both go through Unreachable.
 	if !strings.Contains(stderr.String(), "call ") {
 		t.Errorf("stderr does not look like Unreachable: %s", stderr.String())
+	}
+}
+
+// TestRunQuerySessionIDRejectsNonUUID — AC: a non-UUID --session-id
+// is rejected client-side with a clear message, before any network
+// round-trip (the backend would otherwise emit a 422 validation
+// envelope). The check runs in runQuery so the empty-flag case stays
+// unaffected.
+func TestRunQuerySessionIDRejectsNonUUID(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runQuery(cmd, queryOptions{SessionID: "not-a-uuid"})
+	if err == nil {
+		t.Fatalf("expected error for non-UUID --session-id")
+	}
+	if !strings.Contains(stderr.String(), "must be a valid UUID") {
+		t.Errorf("stderr missing UUID-rejection hint: %s", stderr.String())
+	}
+}
+
+// TestRunQuerySessionIDLandsInBody — a valid --session-id sets
+// agent_session_id on the wire so the backend narrows to that session.
+// This is the flat companion to `meho audit replay`.
+func TestRunQuerySessionIDLandsInBody(t *testing.T) {
+	sessionID := "11111111-1111-1111-1111-111111111111"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/audit/query", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"agent_session_id":"`+sessionID+`"`) {
+			t.Errorf("body missing agent_session_id filter: %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"rows":[],"next_cursor":null}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, _, stderr := newRunCmd(t)
+	err := runQuery(cmd, queryOptions{SessionID: sessionID, BackplaneOverride: srv.URL})
+	if err != nil {
+		t.Fatalf("runQuery --session-id: %v; stderr=%s", err, stderr.String())
 	}
 }
 

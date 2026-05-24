@@ -66,11 +66,11 @@ func newRunCmd(t *testing.T) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	return cmd, &stdout, &stderr
 }
 
-// TestNewRootCmdRegistersAllFiveVerbs — AC1: every advertised verb
-// has a cobra subcommand. The CLI manifest is the contract operators
-// build muscle memory around; dropping a verb silently is the
-// regression class we want to catch at unit-time.
-func TestNewRootCmdRegistersAllFiveVerbs(t *testing.T) {
+// TestNewRootCmdRegistersAllVerbs — AC1: every advertised verb has a
+// cobra subcommand. The CLI manifest is the contract operators build
+// muscle memory around; dropping a verb silently is the regression
+// class we want to catch at unit-time. G8.2-T5 (#1013) added `replay`.
+func TestNewRootCmdRegistersAllVerbs(t *testing.T) {
 	root := NewRootCmd()
 	want := map[string]bool{
 		"query":       false,
@@ -78,6 +78,7 @@ func TestNewRootCmdRegistersAllFiveVerbs(t *testing.T) {
 		"show":        false,
 		"who-touched": false,
 		"my-recent":   false,
+		"replay":      false,
 	}
 	for _, sub := range root.Commands() {
 		// cobra splits `Use` on the first space to render <args>

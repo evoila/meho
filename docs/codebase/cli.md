@@ -38,7 +38,11 @@ names.
   `enable`, `disable`).
 - `meho audit ...` (G8.1-T3 #467) — audit-log query surface
   (`query`, `recent`, `show`, `who-touched`, `my-recent`) wrapping
-  the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466).
+  the four `/api/v1/audit/*` routes shipped by G8.1-T2 (#466). G8.2-T5
+  (#1013) adds `replay <session-id>` — an ASCII parent/child session
+  tree over `GET /api/v1/audit/sessions/{id}/replay` (`--json`,
+  `--max-depth`; a 413 `session_too_large` redirects to
+  `query --session-id`) — plus a `--session-id` filter on `query`.
 - `meho kb ...` (G4.1-T4 #418) — knowledge-base operator surface
   (`ingest`, `search`, `list`, `show`, `add`, `delete`) wrapping
   the five `/api/v1/kb*` routes shipped by G4.1-T2 (#416) plus the
@@ -109,9 +113,11 @@ cli/
     │   │   ├── show.go           # `meho audit show <audit-id>` (GET /api/v1/audit/show/{id}).
     │   │   ├── who_touched.go    # `meho audit who-touched <target>` (GET /api/v1/audit/who-touched/{target}).
     │   │   ├── my_recent.go      # `meho audit my-recent` (GET /api/v1/audit/my-recent).
+    │   │   ├── replay.go         # `meho audit replay <session-id>` (GET /api/v1/audit/sessions/{id}/replay) — ASCII tree + 413 redirect.
     │   │   ├── audit_test.go     # helper + URL-normalisation + register-all-verbs tests.
-    │   │   ├── query_test.go     # body-marshal + render + 400-passthrough tests.
+    │   │   ├── query_test.go     # body-marshal + render + 400-passthrough + --session-id tests.
     │   │   ├── show_test.go      # path-escape + 404 / 422 surface + summary render tests.
+    │   │   ├── replay_test.go    # tree render + --json + --max-depth fold + 413 redirect tests.
     │   │   ├── who_touched_test.go # query-param emit + table render tests.
     │   │   ├── my_recent_test.go # JWT-only-principal contract tests.
     │   │   └── recent_test.go    # since=24h binding + --json passthrough tests.

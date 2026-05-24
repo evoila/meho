@@ -363,6 +363,8 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   migration 0012 (G9.3-T1 topology history).
         # * ``graph_edge_history.tenant_id`` + FK to ``graph_edge`` —
         #   migration 0012 (G9.3-T1 topology history).
+        # * ``agent_definition.tenant_id`` — migration 0015 (G11.1-T2
+        #   #809 agent-definition CRUD).
         #
         # ``audit_log`` has no FK to ``tenant`` (the soft column shape
         # from 0002) but stays in the list so the per-test reset is
@@ -377,7 +379,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
             text(
                 "TRUNCATE TABLE audit_log, documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, tenant",
+                "broadcast_override, agent_definition, tenant",
             ),
         )
         # Re-seed two pinned tenant rows so the integration suite
@@ -436,7 +438,7 @@ async def pg_engine_empty_tenant(
             text(
                 "TRUNCATE TABLE audit_log, documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, tenant",
+                "broadcast_override, agent_definition, tenant",
             ),
         )
         await conn.commit()

@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for :mod:`meho_backplane.api.v1.audit` (G8.1-T2).
+"""Behavioural tests for :mod:`meho_backplane.api.v1.audit` (G8.1-T2, G8.2-T4).
 
 Coverage matrix (#466 acceptance criteria):
 
-* AC1 — All 4 routes mount + respond. Exercised implicitly by every
+* AC1 — All routes mount + respond. Exercised implicitly by every
   happy-path test below; the OpenAPI schema check
-  (:func:`test_openapi_schema_lists_all_four_routes`) is the explicit
+  (:func:`test_openapi_schema_lists_all_routes`) is the explicit
   AC9 surface.
 * AC2 — POST /query with empty body returns all tenant's rows up to
   ``limit=100``. Verified via the dispatched filter object on the
@@ -30,14 +30,23 @@ Coverage matrix (#466 acceptance criteria):
   ``audit_op_class="audit_query"`` contextvars before the substrate
   call, so the audit row written by :class:`AuditMiddleware` carries
   the canonical op_id and the broadcast event ships as aggregate-only.
-* AC9 — OpenAPI schema lists all four routes under the audit tag.
+* AC9 — OpenAPI schema lists all routes under the audit tag.
 * AC10 — ruff + mypy clean: Phase 7 of the implement-issue-slim
   skill, not a test here.
 
-The substrate (:func:`query_audit`) is patched at the route's import
-site so the route tests don't depend on PG/SQLite-seeded audit rows —
-the substrate has its own coverage in
-``tests/test_audit_query_handler.py``.
+G8.2-T4 replay (#1012) adds the
+``GET /api/v1/audit/sessions/{session_id}/replay`` route. Its tests
+seed real ``audit_log`` rows via ``get_sessionmaker()`` (the autouse
+SQLite-on-disk DB from ``conftest._default_database_url``) for the
+happy-path / tenant-isolation cases so the full route → ``replay_session``
+wiring is exercised end-to-end, and patch ``_count_session_rows`` /
+``replay_session`` for the 413-cap and RBAC cases so the count-first
+short-circuit is provable (the tree builder is asserted *not* awaited).
+
+The query substrate (:func:`query_audit`) is patched at the route's
+import site so the four query-route tests don't depend on seeded audit
+rows — the substrate has its own coverage in
+``tests/test_audit_query_handler.py`` / ``tests/test_audit_replay.py``.
 """
 
 from __future__ import annotations
@@ -45,8 +54,10 @@ from __future__ import annotations
 import io
 import json
 import logging
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
@@ -56,6 +67,7 @@ import respx
 import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit import router as audit_router
 from meho_backplane.audit import AuditMiddleware
@@ -67,6 +79,8 @@ from meho_backplane.audit_query import (
 )
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 
@@ -572,14 +586,15 @@ def test_tenant_admin_role_returns_200(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_openapi_schema_lists_all_four_routes(client: TestClient) -> None:
-    """AC9: ``/openapi.json`` advertises all four audit routes under the audit tag."""
+def test_openapi_schema_lists_all_routes(client: TestClient) -> None:
+    """AC9: ``/openapi.json`` advertises every audit route under the audit tag."""
     schema = client.get("/openapi.json").json()
     paths = schema["paths"]
     assert "/api/v1/audit/query" in paths
     assert "/api/v1/audit/who-touched/{target}" in paths
     assert "/api/v1/audit/my-recent" in paths
     assert "/api/v1/audit/show/{audit_id}" in paths
+    assert "/api/v1/audit/sessions/{session_id}/replay" in paths
     # Every route is tagged "audit" so operators filtering /docs by tag
     # find them grouped under one section.
     assert "post" in paths["/api/v1/audit/query"]
@@ -587,3 +602,249 @@ def test_openapi_schema_lists_all_four_routes(client: TestClient) -> None:
     assert "audit" in paths["/api/v1/audit/who-touched/{target}"]["get"]["tags"]
     assert "audit" in paths["/api/v1/audit/my-recent"]["get"]["tags"]
     assert "audit" in paths["/api/v1/audit/show/{audit_id}"]["get"]["tags"]
+    assert "audit" in paths["/api/v1/audit/sessions/{session_id}/replay"]["get"]["tags"]
+    # The replay 200 body is the dedicated envelope, not the query result.
+    replay_get = paths["/api/v1/audit/sessions/{session_id}/replay"]["get"]
+    ok_schema = replay_get["responses"]["200"]["content"]["application/json"]["schema"]
+    assert ok_schema["$ref"].endswith("/AuditReplayResult")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/audit/sessions/{session_id}/replay (G8.2-T4)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_audit_row(
+    s: AsyncSession,
+    *,
+    tenant_id: UUID,
+    second: int,
+    agent_session_id: UUID | None = None,
+    parent_audit_id: UUID | None = None,
+    row_id: UUID | None = None,
+) -> UUID:
+    """Insert one :class:`AuditLog` row at a fixed base + ``second`` offset."""
+    row_id = row_id or uuid.uuid4()
+    base = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
+    s.add(
+        AuditLog(
+            id=row_id,
+            occurred_at=base + timedelta(seconds=second),
+            operator_sub="op-1",
+            tenant_id=tenant_id,
+            method="POST",
+            path="/mcp",
+            status_code=200,
+            duration_ms=Decimal("1.0"),
+            payload={"op_id": "vsphere.vm.list", "op_class": "read"},
+            agent_session_id=agent_session_id,
+            parent_audit_id=parent_audit_id,
+        ),
+    )
+    return row_id
+
+
+async def _seed_session_tree(tenant_id: UUID, session_id: UUID) -> tuple[UUID, UUID, UUID]:
+    """Seed a root → child → grandchild tree under ``session_id``; return ids."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        root = await _seed_audit_row(s, tenant_id=tenant_id, second=0, agent_session_id=session_id)
+        child = await _seed_audit_row(
+            s, tenant_id=tenant_id, second=1, agent_session_id=session_id, parent_audit_id=root
+        )
+        grandchild = await _seed_audit_row(
+            s, tenant_id=tenant_id, second=2, agent_session_id=session_id, parent_audit_id=child
+        )
+        await s.commit()
+    return root, child, grandchild
+
+
+@pytest.mark.asyncio
+async def test_replay_returns_seeded_multi_level_tree(client: TestClient) -> None:
+    """AC1: a seeded multi-level session replays to its tree; ids echo correctly."""
+    session_id = uuid.uuid4()
+    root, child, grandchild = await _seed_session_tree(_TENANT_A, session_id)
+
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, tenant_id=_TENANT_A)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{session_id}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["session_id"] == str(session_id)
+    assert body["tenant_id"] == str(_TENANT_A)
+    assert body["row_count"] == 3  # three anchor rows in the session
+    assert len(body["root"]) == 1
+    node = body["root"][0]
+    assert node["id"] == str(root)
+    assert node["depth"] == 0
+    assert [c["id"] for c in node["children"]] == [str(child)]
+    assert node["children"][0]["depth"] == 1
+    assert [g["id"] for g in node["children"][0]["children"]] == [str(grandchild)]
+
+
+@pytest.mark.asyncio
+async def test_replay_tenant_isolation_foreign_session_is_empty(client: TestClient) -> None:
+    """AC2: tenant B requesting tenant A's session id gets empty — never A's rows."""
+    session_id = uuid.uuid4()
+    await _seed_session_tree(_TENANT_A, session_id)
+
+    key = make_rsa_keypair("kid-A")
+    # Caller is tenant B requesting the session id seeded under tenant A.
+    token = _token(key, tenant_id=_TENANT_B)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{session_id}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200  # not 404 — foreign == empty, existence never leaks
+    body = resp.json()
+    assert body["root"] == []
+    assert body["row_count"] == 0
+    assert body["tenant_id"] == str(_TENANT_B)
+
+
+@pytest.mark.asyncio
+async def test_replay_unknown_session_returns_empty_not_404(client: TestClient) -> None:
+    """An unknown session id yields ``root=[]`` / ``row_count=0`` — not 404."""
+    session_id = uuid.uuid4()
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, tenant_id=_TENANT_A)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{session_id}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "root": [],
+        "session_id": str(session_id),
+        "tenant_id": str(_TENANT_A),
+        "row_count": 0,
+    }
+
+
+def test_replay_over_cap_returns_413_without_building_tree(client: TestClient) -> None:
+    """AC3: > 10k rows → 413; the recursive tree build is never reached.
+
+    The count-first guard is proven by patching ``replay_session`` as a
+    spy and asserting it was never awaited — the route rejected on the
+    count alone, before materializing the tree.
+    """
+    session_id = uuid.uuid4()
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, tenant_id=_TENANT_A)
+    spy_replay = AsyncMock(return_value=[])
+    over_cap_count = AsyncMock(return_value=10_001)
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.replay_session", new=spy_replay),
+        patch("meho_backplane.api.v1.audit._count_session_rows", new=over_cap_count),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{session_id}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == {"detail": "session_too_large", "row_count": 10_001}
+    spy_replay.assert_not_awaited()  # count-first: tree never built
+
+
+def test_replay_at_cap_boundary_returns_200(client: TestClient) -> None:
+    """A session of exactly 10k rows is allowed — the cap is strictly ``>``."""
+    session_id = uuid.uuid4()
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, tenant_id=_TENANT_A)
+    spy_replay = AsyncMock(return_value=[])
+    at_cap_count = AsyncMock(return_value=10_000)
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.replay_session", new=spy_replay),
+        patch("meho_backplane.api.v1.audit._count_session_rows", new=at_cap_count),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{session_id}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["row_count"] == 10_000
+    spy_replay.assert_awaited_once()
+
+
+def test_replay_read_only_role_returns_403(client: TestClient) -> None:
+    """AC4: ``read_only`` is below the operator gate — 403; substrate untouched."""
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, role=TenantRole.READ_ONLY)
+    spy_replay = AsyncMock(return_value=[])
+    with (
+        respx.mock as r,
+        patch("meho_backplane.api.v1.audit.replay_session", new=spy_replay),
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{uuid.uuid4()}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 403
+    spy_replay.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replay_operator_and_tenant_admin_roles_return_200(client: TestClient) -> None:
+    """AC4: both ``operator`` and ``tenant_admin`` clear the gate."""
+    key = make_rsa_keypair("kid-A")
+    for role in (TenantRole.OPERATOR, TenantRole.TENANT_ADMIN):
+        token = _token(key, role=role, tenant_id=_TENANT_A)
+        with respx.mock as r:
+            mock_discovery_and_jwks(r, public_jwks(key))
+            resp = client.get(
+                f"/api/v1/audit/sessions/{uuid.uuid4()}/replay",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert resp.status_code == 200, role
+
+
+def test_replay_binds_replay_op_id_and_aggregate_only_class(
+    client: TestClient,
+    log_buffer: io.StringIO,
+) -> None:
+    """AC5: replay binds ``audit_op_id='meho.audit.replay'`` + aggregate-only class.
+
+    The route's own audit-on-replay broadcast must be aggregate-only
+    (``op_class='audit_query'``) and tagged with the distinct replay
+    op_id. We assert the contextvars are bound by checking the captured
+    structlog lines (full aggregate-only payload assertion is T7).
+    """
+    key = make_rsa_keypair("kid-A")
+    token = _token(key, tenant_id=_TENANT_A)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{uuid.uuid4()}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+
+    lines = _read_log_lines(log_buffer)
+    observed = [
+        line
+        for line in lines
+        if line.get("audit_op_id") == "meho.audit.replay"
+        and line.get("audit_op_class") == "audit_query"
+    ]
+    assert observed, (
+        "expected a structlog line carrying audit_op_id='meho.audit.replay' "
+        "+ audit_op_class='audit_query' bound by the replay route"
+    )

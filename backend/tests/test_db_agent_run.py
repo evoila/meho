@@ -293,10 +293,10 @@ def test_trigger_kinds_match_enum() -> None:
     assert set(_AGENT_RUN_TRIGGERS) == {t.value for t in AgentRunTrigger}
 
 
-def _load_migration_0015() -> object:
-    """Load migration ``0015`` as a module via its file path.
+def _load_migration_0017() -> object:
+    """Load migration ``0017`` as a module via its file path.
 
-    Alembic version files are digit-prefixed (``0015_create_agent_run``)
+    Alembic version files are digit-prefixed (``0017_create_agent_run``)
     and so are not importable as normal dotted modules. Loading by file
     path with :mod:`importlib.util` is the robust way to reach the
     migration's recorded literal tuples for the drift guard below.
@@ -305,9 +305,9 @@ def _load_migration_0015() -> object:
     from pathlib import Path
 
     path = (
-        Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0015_create_agent_run.py"
+        Path(__file__).resolve().parent.parent / "alembic" / "versions" / "0017_create_agent_run.py"
     )
-    spec = importlib.util.spec_from_file_location("_migration_0015", path)
+    spec = importlib.util.spec_from_file_location("_migration_0017", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -317,19 +317,19 @@ def _load_migration_0015() -> object:
 def test_migration_status_literals_match_model_enum() -> None:
     """The migration's frozen status tuple matches the model enum.
 
-    Migration ``0015`` records the status vocabulary as a self-contained
+    Migration ``0017`` records the status vocabulary as a self-contained
     literal tuple (not an import) so its DDL is a frozen snapshot. This
     guard fails if the model enum is widened without updating the
     migration's recorded ``CHECK`` body -- the exact drift the lock-step
     discipline exists to catch.
     """
-    migration = _load_migration_0015()
+    migration = _load_migration_0017()
 
     assert set(migration._AGENT_RUN_STATUSES) == {s.value for s in AgentRunStatus}  # type: ignore[attr-defined]
 
 
 def test_migration_trigger_literals_match_model_enum() -> None:
     """The migration's frozen trigger tuple matches the model enum."""
-    migration = _load_migration_0015()
+    migration = _load_migration_0017()
 
     assert set(migration._AGENT_RUN_TRIGGERS) == {t.value for t in AgentRunTrigger}  # type: ignore[attr-defined]

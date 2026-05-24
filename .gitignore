@@ -11,6 +11,12 @@
 .cursor
 .vscode
 CLAUDE.md
+# The Layer-2 starter template (G7.1-T6 #318) ships as a verbatim
+# example consumers copy into their own repos as CLAUDE.md; this
+# negation tracks the example file even though every other CLAUDE.md
+# stays ignored. Pinned to the exact path so the global rule still
+# catches any CLAUDE.md that gets dropped anywhere else.
+!docs/examples/consumer-onboarding/CLAUDE.md
 
 # =============================================================================
 # Secrets / env

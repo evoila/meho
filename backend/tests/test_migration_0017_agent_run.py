@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0015_create_agent_run``.
+"""Behavioural tests for Alembic migration ``0017_create_agent_run``.
 
 Initiative #802 (G11.1 Agent runtime), Task #813 (T6). The migration
 adds the ``agent_run`` table -- one row per LLM-agent invocation hosted
@@ -14,10 +14,10 @@ Test matrix
 * **Upgrade creates the table + columns + indexes.** ``upgrade head``
   from a clean DB leaves ``agent_run`` present with every documented
   column and its three named indexes.
-* **Reversibility round-trip.** ``downgrade "0014"`` (0015's
+* **Reversibility round-trip.** ``downgrade "0016"`` (0017's
   ``down_revision``) drops the table; a subsequent ``upgrade head``
   re-creates it. The target is the explicit revision rather than
-  head-relative ``"-1"`` so the test keeps reverting *0015* even once a
+  head-relative ``"-1"`` so the test keeps reverting *0017* even once a
   later migration becomes head.
 * **audit_log untouched.** The migration must not disturb the
   pre-existing ``audit_log`` table (it only adds a new table); the 0014
@@ -65,7 +65,7 @@ def alembic_cfg(
     isolated SQLite database; engine + settings caches are reset before
     and after so the alembic env reads *this* DATABASE_URL.
     """
-    db_path = tmp_path / "migration_0015.db"
+    db_path = tmp_path / "migration_0017.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -174,7 +174,7 @@ def test_upgrade_creates_agent_run_table_columns_indexes(
     command.upgrade(cfg, "head")
 
     assert "agent_run" in _table_names(sync_url), (
-        "migration 0015 must create the agent_run table on upgrade head"
+        "migration 0017 must create the agent_run table on upgrade head"
     )
 
     columns = _table_columns(sync_url, "agent_run")
@@ -185,7 +185,7 @@ def test_upgrade_creates_agent_run_table_columns_indexes(
 
     indexes = _table_indexes(sync_url, "agent_run")
     for expected in _EXPECTED_INDEXES:
-        assert expected in indexes, f"migration 0015 must create index {expected!r}"
+        assert expected in indexes, f"migration 0017 must create index {expected!r}"
 
 
 def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
@@ -224,14 +224,14 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade "0014"`` drops the table; ``upgrade head`` restores it.
+    """``downgrade "0016"`` drops the table; ``upgrade head`` restores it.
 
-    The reversibility contract migration 0015 inherits from 0007 / 0012 /
-    0013. The downgrade target is the explicit revision ``"0014"``
-    (0015's ``down_revision``) rather than head-relative ``"-1"``, so the
-    moment a later migration (0016+) lands it would not silently stop
-    exercising 0015's reverse -- anchoring to ``"0014"`` keeps this test
-    pinned to 0015.
+    The reversibility contract migration 0017 inherits from 0007 / 0012 /
+    0013. The downgrade target is the explicit revision ``"0016"``
+    (0017's ``down_revision``) rather than head-relative ``"-1"``, so the
+    moment a later migration (0018+) lands it would not silently stop
+    exercising 0017's reverse -- anchoring to ``"0016"`` keeps this test
+    pinned to 0017.
     """
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
@@ -239,7 +239,7 @@ def test_downgrade_then_upgrade_round_trips(
     # Sanity -- the upgrade landed the table before we reverse it.
     assert "agent_run" in _table_names(sync_url)
 
-    command.downgrade(cfg, "0014")
+    command.downgrade(cfg, "0016")
     assert "agent_run" not in _table_names(sync_url), "downgrade must drop the agent_run table"
 
     # Re-upgrade -- the table comes back, proving the round-trip.
@@ -249,9 +249,9 @@ def test_downgrade_then_upgrade_round_trips(
 
 
 def test_audit_log_untouched(alembic_cfg: tuple[Config, str]) -> None:
-    """The pre-existing ``audit_log`` table + its 0014 column survive 0015.
+    """The pre-existing ``audit_log`` table + its 0014 column survive 0017.
 
-    0015 adds a new table only; it must not disturb ``audit_log``. Guards
+    0017 adds a new table only; it must not disturb ``audit_log``. Guards
     against an accidental edit to the wrong table.
     """
     cfg, sync_url = alembic_cfg
@@ -259,7 +259,7 @@ def test_audit_log_untouched(alembic_cfg: tuple[Config, str]) -> None:
 
     audit_columns = _table_columns(sync_url, "audit_log")
     assert "agent_session_id" in audit_columns, (
-        "0014's agent_session_id on audit_log must survive 0015"
+        "0014's agent_session_id on audit_log must survive 0017"
     )
     # The new lineage-key table and the audit table coexist.
     tables = _table_names(sync_url)

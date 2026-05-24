@@ -220,8 +220,14 @@ def classify_op(op_id: str) -> str:
        freshly-minted secret in their response payload (e.g.
        ``harbor.robot.create``). Checked before the ``.create`` suffix
        so the allowlist wins over the mutation-suffix branch.
-    3. ``audit_query`` — every op-id with the ``audit.`` prefix
-       classifies as audit_query regardless of the verb suffix.
+    3. ``audit_query`` — every op-id with the ``audit.`` or
+       ``meho.audit.`` prefix classifies as audit_query regardless of
+       the verb suffix. The ``meho.audit.`` arm catches the admin
+       replay meta-tool (``meho.audit.replay``, G8.2-T6 #1014): the
+       MCP broadcast path classifies via ``classify_op(op_id)`` with
+       the tool name verbatim, so without this arm the replay tool
+       would fall through to ``other`` and broadcast its full
+       ``ReplayNode`` payload instead of the aggregate-only view.
     4. ``read`` / ``write`` — HTTP-method-prefixed ingested op IDs
        (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
        map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
@@ -243,6 +249,8 @@ def classify_op(op_id: str) -> str:
     'credential_mint'
     >>> classify_op("audit.query")
     'audit_query'
+    >>> classify_op("meho.audit.replay")
+    'audit_query'
     >>> classify_op("GET:/api/v2.0/systeminfo")
     'read'
     >>> classify_op("DELETE:/api/v2.0/projects/myproj/repositories/myrepo")
@@ -258,7 +266,7 @@ def classify_op(op_id: str) -> str:
         return "credential_read"
     if op_id in _CREDENTIAL_MINT_OPS:
         return "credential_mint"
-    if op_id.startswith("audit."):
+    if op_id.startswith(("audit.", "meho.audit.")):
         return "audit_query"
     # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo").
     # GET/HEAD are safe reads by HTTP semantics; all mutation methods are writes.

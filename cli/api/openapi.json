@@ -3478,6 +3478,60 @@
         }
       }
     },
+    "/api/v1/audit/sessions/{session_id}/replay": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Replay",
+        "description": "Replay one agent session as a tenant-scoped parent/child tree.\n\nDispatches through\n:func:`~meho_backplane.audit_query.replay_session`. ``tenant_id``\nis always ``operator.tenant_id`` from the JWT, never client input,\nso a session belonging to another tenant \u2014 or one that does not\nexist \u2014 yields ``root=[]`` / ``row_count=0`` (never 404; a foreign\nsession is indistinguishable from an empty one, the same\nnon-leakage posture :func:`show` takes).\n\nA session larger than :data:`_REPLAY_ROW_CAP` anchor rows returns\n413 from a count-first guard. The count runs *before*\n:func:`replay_session`, so a runaway session never materializes its\ntree just to be rejected \u2014 the recursive build is skipped entirely.",
+        "operationId": "replay_api_v1_audit_sessions__session_id__replay_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditReplayResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/broadcast/overrides": {
       "get": {
         "tags": [
@@ -3608,6 +3662,286 @@
               "type": "string",
               "format": "uuid",
               "title": "Override Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "List Agents",
+        "description": "List agent definitions for the operator's tenant, name-sorted.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``operator`` and ``tenant_admin``\nboth pass; ``read_only`` is rejected by :func:`require_role`.",
+        "operationId": "list_agents_api_v1_agents_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Create Agent",
+        "description": "Create one agent definition under the operator's tenant.\n\n``tenant_admin`` only. A duplicate ``(tenant, name)`` returns 409\n``agent_already_exists`` (the per-tenant name natural-key contract\nthe ``agent_definition_tenant_name_idx`` unique index enforces).\nThe system prompt / toolset content is never bound to the audit row;\nonly the agent name is.",
+        "operationId": "create_agent_api_v1_agents_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{name}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Show Agent",
+        "description": "Return one agent definition by name.\n\nCross-tenant name probes surface as 404 ``agent_not_found`` (not\n403) -- the conflation prevents enumerating another tenant's agents\nvia a status-code differential.",
+        "operationId": "show_agent_api_v1_agents__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Edit Agent",
+        "description": "Apply a partial update to one agent definition by name.\n\n``tenant_admin`` only. Only the fields the caller set are applied\n(``exclude_unset``), so a PATCH can change a single field. ``name``\nis not updatable -- renaming is a delete + recreate. A cross-tenant\n/ absent name returns 404 ``agent_not_found``.",
+        "operationId": "edit_agent_api_v1_agents__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentDefinitionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentDefinitionRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "Delete Agent",
+        "description": "Delete one agent definition by name.\n\n``tenant_admin`` only. A cross-tenant / absent name returns 404\n``agent_not_found`` -- never 403, so the existence of a definition\nis not leaked across the tenant boundary.",
+        "operationId": "delete_agent_api_v1_agents__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
             }
           },
           {
@@ -4119,6 +4453,221 @@
   },
   "components": {
     "schemas": {
+      "AgentDefinitionCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_\\-\\.]+$",
+            "title": "Name"
+          },
+          "identity_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Identity Ref"
+          },
+          "model_tier": {
+            "$ref": "#/components/schemas/AgentModelTier"
+          },
+          "system_prompt": {
+            "type": "string",
+            "minLength": 1,
+            "title": "System Prompt"
+          },
+          "toolset": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Toolset"
+          },
+          "turn_budget": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Turn Budget"
+          },
+          "output_schema": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Output Schema"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "identity_ref",
+          "model_tier",
+          "system_prompt",
+          "turn_budget"
+        ],
+        "title": "AgentDefinitionCreate",
+        "description": "POST body -- the inputs ``create`` consumes. Pydantic v2 strict.\n\n``extra=\"forbid\"`` rejects unknown fields with 422 (catches a client\ntypo like ``\"system-prompt\"`` before it lands as a silent no-op).\n``name`` is constrained to :data:`NAME_PATTERN` at construction time;\nthe service-layer :func:`validate_name` is the parallel gate for\nnon-Pydantic call paths.\n\n``toolset`` and ``output_schema`` are free-shaped JSON objects --\nT3 (#810) owns the toolset-resolution contract and the runtime\n(T1 #808) owns the output-schema contract; T2 only stores them."
+      },
+      "AgentDefinitionListResponse": {
+        "properties": {
+          "agents": {
+            "items": {
+              "$ref": "#/components/schemas/AgentDefinitionRead"
+            },
+            "type": "array",
+            "title": "Agents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agents"
+        ],
+        "title": "AgentDefinitionListResponse",
+        "description": "Response envelope for ``GET /api/v1/agents``.\n\nWrapped in ``{\"agents\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape\n:mod:`meho_backplane.api.v1.kb` adopted for its list response."
+      },
+      "AgentDefinitionRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "identity_ref": {
+            "type": "string",
+            "title": "Identity Ref"
+          },
+          "model_tier": {
+            "type": "string",
+            "title": "Model Tier"
+          },
+          "system_prompt": {
+            "type": "string",
+            "title": "System Prompt"
+          },
+          "toolset": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Toolset"
+          },
+          "turn_budget": {
+            "type": "integer",
+            "title": "Turn Budget"
+          },
+          "output_schema": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Output Schema"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "identity_ref",
+          "model_tier",
+          "system_prompt",
+          "toolset",
+          "turn_budget",
+          "output_schema",
+          "enabled",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentDefinitionRead",
+        "description": "Row representation every accessor returns.\n\n``from_attributes=True`` lets the route / service hand back the\nSQLAlchemy ORM row directly; Pydantic serialises via this model\nrather than the ORM's ``__dict__``. The model is the single source\nof truth for which columns the REST + MCP surfaces expose, so a\nfuture column addition is opt-in (it must be declared here to leak)."
+      },
+      "AgentDefinitionUpdate": {
+        "properties": {
+          "identity_ref": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "nullable": true,
+            "title": "Identity Ref"
+          },
+          "model_tier": {
+            "$ref": "#/components/schemas/AgentModelTier",
+            "nullable": true
+          },
+          "system_prompt": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true,
+            "title": "System Prompt"
+          },
+          "toolset": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Toolset"
+          },
+          "turn_budget": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "nullable": true,
+            "title": "Turn Budget"
+          },
+          "output_schema": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Output Schema"
+          },
+          "enabled": {
+            "type": "boolean",
+            "nullable": true,
+            "title": "Enabled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AgentDefinitionUpdate",
+        "description": "PATCH body -- every field optional; only supplied fields change.\n\n``extra=\"forbid\"`` for the same reason as\n:class:`AgentDefinitionCreate`. A field left ``None`` (its default)\nis *not* applied -- the service distinguishes \"field omitted\" from\n\"field set to a value\" via :meth:`pydantic.BaseModel.model_dump`\nwith ``exclude_unset=True``, so a PATCH can change a single field\nwithout clobbering the rest.\n\n``name`` is *not* updatable here: it is the per-tenant natural key\n(the URL path segment + unique index). Renaming an agent is a\ndelete + recreate, which keeps the natural-key invariant simple and\navoids a name-collision race inside the update path.\n\n``output_schema`` cannot be cleared through this shape (``None`` is\nindistinguishable from \"omitted\" under ``exclude_unset``); clearing\na structured-output schema is a delete + recreate in v0.2. This is\nan accepted v0.2 limitation, not a silent bug -- documented so a\nfuture shape (a sentinel / ``JsonValue`` discriminator) can lift it."
+      },
+      "AgentModelTier": {
+        "type": "string",
+        "enum": [
+          "standard",
+          "fast",
+          "deep"
+        ],
+        "title": "AgentModelTier",
+        "description": "Logical model tier an agent definition runs against.\n\nThe tier is *logical* -- G11.5's multi-provider resolver maps it to\na concrete model backend at run time. T2 stores the tier verbatim;\nit does not resolve it. ``StrEnum`` (PEP 663, stdlib 3.11+) gives\nthe members ``str`` semantics so ``f\"tier={AgentModelTier.STANDARD}\"``\nrenders as ``\"tier=standard\"``, matching the\n:class:`~meho_backplane.auth.operator.TenantRole` /\n:class:`~meho_backplane.memory.schemas.MemoryScope` convention.\n\nThree tiers in v0.2:\n\n* ``standard`` -- the default general-purpose tier.\n* ``fast`` -- a cheaper / lower-latency tier for simple loops.\n* ``deep`` -- a more capable tier for harder reasoning."
+      },
       "AuditEntry": {
         "properties": {
           "id": {
@@ -4240,7 +4789,7 @@
           "broadcast_event_id"
         ],
         "title": "AuditEntry",
-        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``principal_name`` / ``parent_audit_id`` / ``agent_session_id`` /\n  ``broadcast_event_id`` \u2014 v0.2 placeholders, always None"
+        "description": "One row of the audit query result.\n\nField-to-column mapping (see module docstring for the substrate\nreconciliation):\n\n* ``id`` \u2190 ``audit_log.id``\n* ``ts`` \u2190 ``audit_log.occurred_at``\n* ``tenant_id`` \u2190 ``audit_log.tenant_id``\n* ``principal_sub`` \u2190 ``audit_log.operator_sub``\n* ``target_id`` \u2190 ``audit_log.target_id``\n* ``target_name`` \u2190 LEFT JOIN ``targets.name`` ON ``audit_log.target_id``\n* ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``\n  / ``payload`` \u2190 columns of the same name\n* ``op_id`` / ``op_class`` / ``result_status`` \u2014 computed at query time\n* ``parent_audit_id`` \u2190 ``audit_log.parent_audit_id`` (lineage; #398)\n* ``agent_session_id`` \u2190 ``audit_log.agent_session_id`` (MCP session; #1009)\n* ``principal_name`` / ``broadcast_event_id`` \u2014 v0.2 placeholders, always\n  None"
       },
       "AuditQueryRequest": {
         "properties": {
@@ -4345,6 +4894,40 @@
         ],
         "title": "AuditQueryResult",
         "description": "Page of audit rows plus the forward-only continuation cursor.\n\n``next_cursor`` is :data:`None` when fewer than ``limit`` rows were\navailable (the query reached the end of the matching set). Consumers\niterate by re-issuing the same filter with ``cursor = next_cursor``\nuntil ``next_cursor`` is None."
+      },
+      "AuditReplayResult": {
+        "properties": {
+          "root": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayNode"
+            },
+            "type": "array",
+            "title": "Root"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Session Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "row_count": {
+            "type": "integer",
+            "title": "Row Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "root",
+          "session_id",
+          "tenant_id",
+          "row_count"
+        ],
+        "title": "AuditReplayResult",
+        "description": "200 body for ``GET /api/v1/audit/sessions/{session_id}/replay``.\n\nWraps the substrate's :class:`ReplayNode` forest with the echoed\nrequest identity. ``tenant_id`` is always the operator's tenant\n(lifted from the JWT by the route), never client-supplied, so the\necho is a confirmation of the boundary the query ran under \u2014 not a\nvalue the caller chose.\n\n``row_count`` is the count of *anchor* rows in the session \u2014 rows\nwhose ``agent_session_id`` equals ``session_id`` within the\noperator's tenant. It is the same number the route's count-first\n413 guard evaluates, so a session that returns 200 reports a\n``row_count`` identical to what its over-cap sibling would report\nat 413. NULL-session lineage children pulled into ``root`` by the\nreplay closure (a composite ``dispatch_child`` whose own\n``agent_session_id`` is NULL but whose ``parent_audit_id`` links\ninto the session) are present in the tree but are not counted \u2014\n\"session rows\" are defined by the ``agent_session_id`` anchor, not\nby tree membership.\n\nAn unknown session id, or one belonging to another tenant, yields\n``root=[]`` / ``row_count=0`` \u2014 never a 404 \u2014 so a foreign session\nis indistinguishable from an empty one and existence never leaks\nacross tenants (the same non-leakage posture\n``GET /show/{audit_id}`` takes).\n\nFrozen like the substrate models it carries."
       },
       "AuthConfigResponse": {
         "properties": {
@@ -5948,6 +6531,141 @@
         ],
         "title": "RememberBody",
         "description": "POST body for ``/api/v1/memory`` -- create one memory.\n\n``slug`` is constrained to :data:`SLUG_PATTERN` at the model\nboundary; the service-layer\n:func:`~meho_backplane.memory.schemas.validate_slug` is the\nparallel gate for non-Pydantic callers. ``frozen=True`` matches\nthe rest of the memory + kb schemas (a handler accidentally\nmutating a parsed request body surfaces as a pydantic error\ninstead of a confused-deputy bug). ``extra=\"forbid\"`` rejects\nunknown fields at 422 so a typo (``\"bodytext\"``) doesn't\nsilently become a no-op.\n\n``target_name`` is required when ``scope`` is ``user-target`` or\n``target``; the service-level\n:meth:`MemoryService._require_target_name` raises ``ValueError``\nwhen missing, which this route maps to 422 (parity with\npydantic's own missing-field shape)."
+      },
+      "ReplayNode": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ts"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "principal_sub": {
+            "type": "string",
+            "title": "Principal Sub"
+          },
+          "principal_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Principal Name"
+          },
+          "target_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Target Id"
+          },
+          "target_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Target Name"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "status_code": {
+            "type": "integer",
+            "title": "Status Code"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Request Id"
+          },
+          "duration_ms": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "nullable": true,
+            "title": "Duration Ms"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "op_class": {
+            "type": "string",
+            "title": "Op Class"
+          },
+          "result_status": {
+            "type": "string",
+            "title": "Result Status"
+          },
+          "parent_audit_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Audit Id"
+          },
+          "agent_session_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Session Id"
+          },
+          "broadcast_event_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Broadcast Event Id"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/ReplayNode"
+            },
+            "type": "array",
+            "title": "Children"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "tenant_id",
+          "principal_sub",
+          "principal_name",
+          "target_id",
+          "target_name",
+          "method",
+          "path",
+          "status_code",
+          "request_id",
+          "duration_ms",
+          "payload",
+          "op_id",
+          "op_class",
+          "result_status",
+          "parent_audit_id",
+          "agent_session_id",
+          "broadcast_event_id",
+          "depth"
+        ],
+        "title": "ReplayNode",
+        "description": "One node of a per-session audit-replay tree (G8.2-T3).\n\nSubclasses :class:`AuditEntry` so it carries every audit field verbatim \u2014\nforward-compatible with the v0.2.next compliance-export contract, which\ntreats a replay node as an audit row plus its position in the session\ngraph. Two structural fields are added:\n\n* ``depth`` \u2014 distance from the session root. ``0`` for roots; assigned\n  during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.\n* ``children`` \u2014 the node's direct children, ordered by ``(occurred_at,\n  id)``. Self-referential \u2014 the forward reference is resolved by the\n  module-level :func:`ReplayNode.model_rebuild` call below.\n\nFrozen like its parent: a node handed to a caller cannot mutate after the\ntree is built."
       },
       "RetireChecklistReport": {
         "properties": {

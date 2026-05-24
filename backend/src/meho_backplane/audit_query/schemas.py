@@ -26,12 +26,15 @@ tasks land the schema additions:
   the MCP path (``mcp/handlers.py``), and the audit row itself never carries
   it. Always None in v0.2; a future small task on the write path closes this.
 * ``parent_audit_id`` — composite-operation lineage column landed by
-  G0.6-T7 (#398, OPEN). Until that task ships the column + populates it
-  from the dispatcher's recursion, this field stays None and the filter
-  on ``parent_audit_id`` raises :class:`UnsupportedFilterError`.
-* ``agent_session_id`` — referenced in the Task body but absent from any
-  current or planned schema work. Always None until a Goal proposes the
-  column. Filter raises :class:`UnsupportedFilterError`.
+  G0.6-T7 (#398) via migration ``0006``. Populated on the returned row from
+  ``audit_log.parent_audit_id`` (G8.2-T3 #1011); the *flat filter* on
+  ``parent_audit_id`` still raises :class:`UnsupportedFilterError` (un-gating
+  it is out of scope for #377).
+* ``agent_session_id`` — the MCP-session correlation column landed by
+  G8.2-T1 (#1009) via migration ``0014``. Populated on the returned row from
+  ``audit_log.agent_session_id``; the filter is un-gated (G8.2-T3 #1011) and
+  drives the per-session replay query
+  (:func:`~meho_backplane.audit_query.replay.replay_session`).
 * ``broadcast_event_id`` — the FK direction is the reverse of what the
   Task body implies: :class:`BroadcastEvent.audit_id` points at the audit
   row, not vice versa. Always None.
@@ -59,6 +62,7 @@ __all__ = [
     "AuditEntry",
     "AuditQueryFilters",
     "AuditQueryResult",
+    "ReplayNode",
 ]
 
 
@@ -112,8 +116,10 @@ class AuditEntry(BaseModel):
     * ``method`` / ``path`` / ``status_code`` / ``request_id`` / ``duration_ms``
       / ``payload`` ← columns of the same name
     * ``op_id`` / ``op_class`` / ``result_status`` — computed at query time
-    * ``principal_name`` / ``parent_audit_id`` / ``agent_session_id`` /
-      ``broadcast_event_id`` — v0.2 placeholders, always None
+    * ``parent_audit_id`` ← ``audit_log.parent_audit_id`` (lineage; #398)
+    * ``agent_session_id`` ← ``audit_log.agent_session_id`` (MCP session; #1009)
+    * ``principal_name`` / ``broadcast_event_id`` — v0.2 placeholders, always
+      None
     """
 
     model_config = ConfigDict(frozen=True)
@@ -137,6 +143,34 @@ class AuditEntry(BaseModel):
     parent_audit_id: uuid.UUID | None
     agent_session_id: uuid.UUID | None
     broadcast_event_id: uuid.UUID | None
+
+
+class ReplayNode(AuditEntry):
+    """One node of a per-session audit-replay tree (G8.2-T3).
+
+    Subclasses :class:`AuditEntry` so it carries every audit field verbatim —
+    forward-compatible with the v0.2.next compliance-export contract, which
+    treats a replay node as an audit row plus its position in the session
+    graph. Two structural fields are added:
+
+    * ``depth`` — distance from the session root. ``0`` for roots; assigned
+      during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.
+    * ``children`` — the node's direct children, ordered by ``(occurred_at,
+      id)``. Self-referential — the forward reference is resolved by the
+      module-level :func:`ReplayNode.model_rebuild` call below.
+
+    Frozen like its parent: a node handed to a caller cannot mutate after the
+    tree is built.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    depth: int
+    children: list[ReplayNode] = Field(default_factory=list)
+
+
+# Resolve the ``list[ReplayNode]`` self-reference now that the class exists.
+ReplayNode.model_rebuild()
 
 
 class AuditQueryResult(BaseModel):

@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: single Alembic ``target_metadata`` aggregation point.
-# Every ORM model intentionally lives here so ``Base.metadata`` (imported by
-# ``alembic/env.py``) sees the whole graph for autogenerate; splitting the
-# module would scatter the metadata registry and break that single-import
-# contract. The file was already ~2.1k lines before this change.
 
 """SQLAlchemy 2.x ORM models for the backplane database.
 
@@ -226,6 +221,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     Numeric,
+    SmallInteger,
     Text,
     Uuid,
 )
@@ -253,6 +249,8 @@ __all__ = [
     "OperationGroup",
     "Target",
     "Tenant",
+    "TenantConvention",
+    "TenantConventionHistory",
     "WebSession",
 ]
 
@@ -2096,6 +2094,393 @@ class WebSession(Base):
         Index(
             "web_session_expires_at_idx",
             "expires_at",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class TenantConvention(Base):
+    """A tenant-scoped operational / workflow / reference rule.
+
+    Initiative #229 (G7.1 Tenant conventions + Layer 2 starter), Task
+    #313 (T1). Schema foundation only -- T2 (#314) lands the API
+    routes, T3 (#315) the CLI verbs, T4 (#316) the session-preamble
+    assembler that reads the ``kind='operational'`` subset ordered by
+    ``priority DESC, created_at ASC``, T5 (#317) seeds rows for the
+    ``rdc-internal`` tenant.
+
+    Every row carries a per-tenant ``slug`` (operator-visible
+    identifier; ``rbac-canonical``, ``secret-handling``, etc.), a
+    ``title`` (display label), a free-form Markdown ``body``, a
+    ``kind`` discriminator (``operational`` | ``workflow`` |
+    ``reference``, enforced at the Pydantic layer in T2 -- not at the
+    DB layer per the issue's Out of scope), and a SMALLINT
+    ``priority`` (T4's preamble-packing ranking key, ``DEFAULT 0``).
+    The ``(tenant_id, slug)`` pair is unique within the table -- two
+    tenants can declare the same slug independently, but one tenant
+    cannot have two conventions with the same slug.
+
+    Soft-FK discipline
+    ------------------
+
+    ``tenant_id`` is NOT NULL with no ``REFERENCES tenant(id)``
+    clause per the issue body's explicit choice (#229 body: "Soft FKs
+    everywhere matches the chassis convention -- column types match
+    the referenced tables but no REFERENCES ... clauses. Simplifies
+    migration reversibility; v0.2.next can tighten."). The application
+    layer (T2's CRUD) enforces referential integrity at insert time
+    until a v0.2.next tightening migration adds the FK clauses.
+
+    Why ``priority`` is :class:`SmallInteger`
+    -----------------------------------------
+
+    T4's preamble assembler packs operational conventions
+    **highest-priority-first** and drops lowest-priority entries
+    whole when over the token budget (never mid-entry truncation of
+    an operational rule). The column is fundamentally a ranking key,
+    not a real-number similarity score, so SMALLINT (-32768..32767)
+    is more than enough range -- mirrors MCP 2025-06-18's own
+    resource ``priority`` annotation semantic, on the integer column
+    instead of the floating-point annotation, to avoid wasting a
+    real-number comparison on what is fundamentally an ordering
+    decision. ``NOT NULL DEFAULT 0`` so T2's ``ConventionCreate``
+    contract stays backward-compatible (priority optional).
+
+    Indexes
+    -------
+
+    * ``tenant_conventions_tenant_slug_idx`` -- unique composite btree
+      on ``(tenant_id, slug)``. Single source of uniqueness enforcement
+      and the natural-key probe for T2's ``GET /{slug}`` / ``PATCH /{slug}``
+      / ``DELETE /{slug}`` routes. Same single-named-index discipline
+      :class:`Tenant.slug` follows -- we deliberately omit ``unique=True``
+      on the ``slug`` column so PG does not auto-create a redundant
+      duplicate index alongside the named one.
+
+    The model deliberately ships with no helper methods; convention
+    rows are CRUD-shaped (read-mostly via the preamble assembler,
+    write-rarely via the API/CLI) and the query patterns are simple
+    enough to live at the call site in T2's CRUD module.
+    """
+
+    __tablename__ = "tenant_conventions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NOT NULL -- every convention belongs to exactly one tenant.
+    # No FK clause in v0.2 per the issue body (soft-FK discipline);
+    # the application layer enforces referential integrity at insert
+    # time until a v0.2.next tightening migration adds the FK.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        nullable=False,
+    )
+    # Uniqueness enforced by the named composite
+    # ``tenant_conventions_tenant_slug_idx`` below (declared
+    # ``unique=True``). The column itself omits ``unique=True`` -- PG
+    # would otherwise auto-create a second unique index alongside the
+    # named one for zero benefit (same discipline as
+    # :class:`Tenant.slug`).
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Free-form text. Pydantic at the API layer (T2) bounds it to
+    # ``operational`` | ``workflow`` | ``reference``; DB-level enum
+    # deferred per the issue's Out of scope (Pydantic + application
+    # validation is enough).
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # ``priority`` -- T4's preamble-packing ranking key. SMALLINT
+    # because the value is fundamentally an ordering key, not a
+    # real-number score. NOT NULL DEFAULT 0 so T2's
+    # ``ConventionCreate`` contract stays backward-compatible
+    # (priority optional, defaults to 0).
+    priority: Mapped[int] = mapped_column(
+        SmallInteger,
+        nullable=False,
+        default=0,
+    )
+    # ``created_by_sub`` -- JWT ``sub`` of the convention's creator.
+    # Nullable for migration-seeded rows (T5's seed migration has no
+    # operator context); T2's POST route populates it from the
+    # authenticated principal.
+    created_by_sub: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "tenant_conventions_tenant_slug_idx",
+            "tenant_id",
+            "slug",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
+class TenantConventionHistory(Base):
+    """One row per edit to a :class:`TenantConvention`.
+
+    Initiative #229, Task #313. Companion table to
+    :class:`TenantConvention`; T2's CRUD routes insert a history row
+    in the same DB transaction as every convention write (CREATE,
+    UPDATE, DELETE) so the diff trail stays causally consistent with
+    the current state. T3's ``meho conventions history <slug>`` verb
+    reads from this table chronologically and cross-references the
+    audit log via the ``audit_id`` soft-FK.
+
+    The ``body_before`` column is nullable -- the first history row
+    (the CREATE event) has no prior state. Subsequent PATCHes shift
+    the previous body into ``body_before`` and the new body into
+    ``body_after``. DELETE events get ``body_after=<final body>`` (a
+    legible last-known state for audit forensics) rather than a
+    sentinel marker; the lifecycle distinction lives in the audit
+    row, not in this table.
+
+    Soft-FK discipline
+    ------------------
+
+    Both ``convention_id`` and ``audit_id`` are soft FKs (column
+    types match the referenced tables, no ``REFERENCES`` clause) per
+    the issue body's explicit choice. ``convention_id`` is NOT NULL
+    because a history row without a parent convention has no semantic
+    meaning; ``audit_id`` is nullable to allow migration-seeded rows
+    (T5's seed migration has no audit_log row to point at). T2's
+    CRUD writes pull ``audit_id`` from the audit middleware's
+    contextvar so G8's audit-query path can join history back to the
+    originating request.
+
+    Indexes
+    -------
+
+    * ``tenant_convention_history_convention_idx`` -- composite btree
+      on ``(convention_id, ts)``. Drives ``meho conventions history
+      <slug>`` (per-convention chronological scan) and "last N edits
+      for this convention" probes without an extra ORDER BY sort.
+
+    The model deliberately ships with no helper methods; history rows
+    are write-once + read-mostly (T3's CLI is the only consumer in
+    v0.2) and the query patterns live at the call site.
+    """
+
+    __tablename__ = "tenant_convention_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NOT NULL -- every history row attaches to exactly one
+    # convention. Soft FK (no REFERENCES clause) per the issue body's
+    # explicit choice; T2's CRUD enforces referential integrity at
+    # insert time.
+    convention_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        nullable=False,
+    )
+    # Nullable -- the first history row (CREATE) has no prior state.
+    # T2's PATCH route copies the existing ``body`` into this column
+    # before writing the new ``body_after``.
+    body_before: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_after: Mapped[str] = mapped_column(Text, nullable=False)
+    # NOT NULL -- every history row must record who made the change.
+    # T5's seed migration uses a synthetic sub (``"system:seed"``) for
+    # the initial seed rows.
+    actor_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    # Nullable -- migration-seeded rows have no audit_log row to point
+    # at. T2's CRUD writes populate ``audit_id`` from the audit
+    # middleware's contextvar so G8's audit-query path can join
+    # history back to the originating request.
+    audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "tenant_convention_history_convention_idx",
+            "convention_id",
+            "ts",
+            postgresql_using="btree",
+        ),
+    )
+
+
+class AgentDefinition(Base):
+    """A first-class, tenant-scoped definition of an LLM agent MEHO can run.
+
+    G11.1-T2 (#809) under Initiative #802 (the P1 agent runtime). The
+    runtime (T1 #808) executes a tool-use loop in MEHO's process; this
+    table is what that loop loads to know *which* agent it is running:
+    the identity it runs as, the logical model tier, the system prompt,
+    the toolset spec, the turn budget, and an optional structured-output
+    schema. Storing the definition as a typed row (not an ad-hoc API
+    payload) makes agents listable, versionable, and auditable objects.
+
+    Dedicated-table choice
+    ----------------------
+
+    Unlike kb / memory (which wrap the shared ``documents`` retrieval
+    substrate), an agent definition is a *structured* record with typed
+    columns -- an integer turn budget, a bounded model tier, a JSON
+    toolset spec -- not a retrievable text blob. The
+    :class:`BroadcastOverride` precedent (a dedicated tenant-scoped
+    CRUD table with a real FK to ``tenant.id``) is the load-bearing
+    shape this model copies.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. Same portable :class:`Uuid` shape
+      every other model uses; PG gets ``gen_random_uuid()`` via the
+      migration, the ORM falls back to ``default=uuid.uuid4`` on
+      SQLite.
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES
+      tenant(id)`` FK. Same precedent as :class:`Document` /
+      :class:`BroadcastOverride`: a brand-new table with no chassis-era
+      rows and a clean downgrade that drops the whole table can enforce
+      the FK at the substrate boundary without a backfill/cascade
+      trade-off. An orphan row for a typo'd / deleted / replayed tenant
+      id surfaces as :class:`IntegrityError` at insert time rather than
+      as a never-resolving definition at run time.
+    * ``name`` -- Text NOT NULL. The operator-facing slug
+      (``incident-triage``, ``vm-inventory-bot``). Validated against the
+      safe-URL alphabet at the API / service layer (it is a URL path
+      segment for the REST surface). Unique per tenant via the named
+      ``agent_definition_tenant_name_idx``.
+    * ``identity_ref`` -- Text NOT NULL. A *reference* to the agent
+      principal whose permissions the toolset is intersected with at run
+      time (G11.2). Stored as opaque text (a soft reference, no FK) --
+      the agent-identity table itself is G11.2-T1's scope, and this
+      Task deliberately stores only the reference, not the identity.
+    * ``model_tier`` -- Text NOT NULL. A *logical* tier
+      (``standard`` / ``fast`` / ``deep``) that G11.5's multi-provider
+      resolver maps to a concrete backend at run time. The bounded set
+      is enforced at the Pydantic layer (a ``Literal``), not via a DB
+      ``CHECK``, so a future tier lands without a migration -- the same
+      forward-compat argument :class:`BroadcastOverride.scope_field`
+      makes.
+    * ``system_prompt`` -- Text NOT NULL. The agent's system prompt.
+      Stored as-is; the runtime feeds it to the model verbatim.
+    * ``toolset`` -- Portable :class:`JSON` -> :class:`JSONB`, NOT NULL
+      DEFAULT ``{}``. The allowed meta-tools / connector-ops spec.
+      T3 (#810) resolves it and intersects it with the identity's
+      permissions; T2 only stores it. JSON-shaped so the spec can grow
+      (allow-lists, glob patterns, per-op arg constraints) without a
+      migration.
+    * ``turn_budget`` -- Integer NOT NULL. The maximum number of
+      model turns the runtime allows before stopping the loop (maps to
+      Pydantic AI's ``UsageLimits(request_limit=...)`` in T1). A
+      positive-integer floor is enforced at the Pydantic layer.
+    * ``output_schema`` -- Portable JSON, *nullable*. An optional JSON
+      Schema the runtime uses for structured output (Pydantic AI's
+      ``output_type``); ``NULL`` means free-form text output.
+    * ``enabled`` -- Boolean NOT NULL DEFAULT ``True``. A soft on/off
+      switch so an operator can park a definition without deleting it
+      (and the run surface T4 can refuse to start a disabled agent).
+    * ``created_by_sub`` -- Text NOT NULL. JWT ``sub`` of the
+      tenant-admin who created the definition -- captures authorship
+      for the audit trail, mirroring
+      :attr:`BroadcastOverride.created_by_sub`.
+    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL.
+      PG-side ``now()`` server defaults via the migration; the ORM also
+      declares ``default=lambda: datetime.now(UTC)`` plus
+      ``onupdate=lambda: datetime.now(UTC)`` on ``updated_at`` so
+      ORM-side edits bump the timestamp.
+
+    Index
+    -----
+
+    * ``agent_definition_tenant_name_idx`` -- unique composite b-tree
+      on ``(tenant_id, name)``. Enforces per-tenant name uniqueness
+      (the natural key for the CRUD upsert / lookup) and drives the
+      tenant-scoped list query. Uniqueness is declared exclusively via
+      the named index (no per-column ``unique=True``) so PG does not
+      auto-create a redundant duplicate -- the
+      :class:`Tenant` / :class:`Target` / :class:`BroadcastOverride`
+      convention.
+
+    The model deliberately ships with no helper methods -- read / write
+    paths live in :mod:`meho_backplane.agents.service`. The ORM class is
+    a pure data shape.
+    """
+
+    __tablename__ = "agent_definition"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # NOT NULL with a real REFERENCES tenant(id) FK -- see class
+    # docstring for the Document / BroadcastOverride precedent rationale.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Soft reference to the G11.2 agent principal -- no FK (that table is
+    # G11.2-T1's scope; this Task stores only the reference).
+    identity_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    # Logical tier ("standard" | "fast" | "deep"); bounded at the
+    # Pydantic layer, not via a DB CHECK (forward-compat -- see docstring).
+    model_tier: Mapped[str] = mapped_column(Text, nullable=False)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    toolset: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    turn_budget: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Optional JSON Schema for structured output; NULL = free-form text.
+    output_schema: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    enabled: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=True,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_definition_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
             postgresql_using="btree",
         ),
     )

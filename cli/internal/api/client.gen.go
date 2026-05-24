@@ -18,6 +18,13 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for AgentModelTier.
+const (
+	Deep     AgentModelTier = "deep"
+	Fast     AgentModelTier = "fast"
+	Standard AgentModelTier = "standard"
+)
+
 // Defines values for AuthModel.
 const (
 	Impersonation        AuthModel = "impersonation"
@@ -205,6 +212,138 @@ const (
 	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
 )
 
+// AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
+//
+// “extra="forbid"“ rejects unknown fields with 422 (catches a client
+// typo like “"system-prompt"“ before it lands as a silent no-op).
+// “name“ is constrained to :data:`NAME_PATTERN` at construction time;
+// the service-layer :func:`validate_name` is the parallel gate for
+// non-Pydantic call paths.
+//
+// “toolset“ and “output_schema“ are free-shaped JSON objects --
+// T3 (#810) owns the toolset-resolution contract and the runtime
+// (T1 #808) owns the output-schema contract; T2 only stores them.
+type AgentDefinitionCreate struct {
+	Enabled     *bool  `json:"enabled,omitempty"`
+	IdentityRef string `json:"identity_ref"`
+
+	// ModelTier Logical model tier an agent definition runs against.
+	//
+	// The tier is *logical* -- G11.5's multi-provider resolver maps it to
+	// a concrete model backend at run time. T2 stores the tier verbatim;
+	// it does not resolve it. ``StrEnum`` (PEP 663, stdlib 3.11+) gives
+	// the members ``str`` semantics so ``f"tier={AgentModelTier.STANDARD}"``
+	// renders as ``"tier=standard"``, matching the
+	// :class:`~meho_backplane.auth.operator.TenantRole` /
+	// :class:`~meho_backplane.memory.schemas.MemoryScope` convention.
+	//
+	// Three tiers in v0.2:
+	//
+	// * ``standard`` -- the default general-purpose tier.
+	// * ``fast`` -- a cheaper / lower-latency tier for simple loops.
+	// * ``deep`` -- a more capable tier for harder reasoning.
+	ModelTier    AgentModelTier          `json:"model_tier"`
+	Name         string                  `json:"name"`
+	OutputSchema *map[string]interface{} `json:"output_schema"`
+	SystemPrompt string                  `json:"system_prompt"`
+	Toolset      *map[string]interface{} `json:"toolset,omitempty"`
+	TurnBudget   int                     `json:"turn_budget"`
+}
+
+// AgentDefinitionListResponse Response envelope for “GET /api/v1/agents“.
+//
+// Wrapped in “{"agents": [...]}“ so a future paging / cursor field
+// can land non-breakingly -- the same shape
+// :mod:`meho_backplane.api.v1.kb` adopted for its list response.
+type AgentDefinitionListResponse struct {
+	Agents []AgentDefinitionRead `json:"agents"`
+}
+
+// AgentDefinitionRead Row representation every accessor returns.
+//
+// “from_attributes=True“ lets the route / service hand back the
+// SQLAlchemy ORM row directly; Pydantic serialises via this model
+// rather than the ORM's “__dict__“. The model is the single source
+// of truth for which columns the REST + MCP surfaces expose, so a
+// future column addition is opt-in (it must be declared here to leak).
+type AgentDefinitionRead struct {
+	CreatedAt    time.Time               `json:"created_at"`
+	CreatedBySub string                  `json:"created_by_sub"`
+	Enabled      bool                    `json:"enabled"`
+	Id           openapi_types.UUID      `json:"id"`
+	IdentityRef  string                  `json:"identity_ref"`
+	ModelTier    string                  `json:"model_tier"`
+	Name         string                  `json:"name"`
+	OutputSchema *map[string]interface{} `json:"output_schema"`
+	SystemPrompt string                  `json:"system_prompt"`
+	TenantId     openapi_types.UUID      `json:"tenant_id"`
+	Toolset      map[string]interface{}  `json:"toolset"`
+	TurnBudget   int                     `json:"turn_budget"`
+	UpdatedAt    time.Time               `json:"updated_at"`
+}
+
+// AgentDefinitionUpdate PATCH body -- every field optional; only supplied fields change.
+//
+// “extra="forbid"“ for the same reason as
+// :class:`AgentDefinitionCreate`. A field left “None“ (its default)
+// is *not* applied -- the service distinguishes "field omitted" from
+// "field set to a value" via :meth:`pydantic.BaseModel.model_dump`
+// with “exclude_unset=True“, so a PATCH can change a single field
+// without clobbering the rest.
+//
+// “name“ is *not* updatable here: it is the per-tenant natural key
+// (the URL path segment + unique index). Renaming an agent is a
+// delete + recreate, which keeps the natural-key invariant simple and
+// avoids a name-collision race inside the update path.
+//
+// “output_schema“ cannot be cleared through this shape (“None“ is
+// indistinguishable from "omitted" under “exclude_unset“); clearing
+// a structured-output schema is a delete + recreate in v0.2. This is
+// an accepted v0.2 limitation, not a silent bug -- documented so a
+// future shape (a sentinel / “JsonValue“ discriminator) can lift it.
+type AgentDefinitionUpdate struct {
+	Enabled     *bool   `json:"enabled"`
+	IdentityRef *string `json:"identity_ref"`
+
+	// ModelTier Logical model tier an agent definition runs against.
+	//
+	// The tier is *logical* -- G11.5's multi-provider resolver maps it to
+	// a concrete model backend at run time. T2 stores the tier verbatim;
+	// it does not resolve it. ``StrEnum`` (PEP 663, stdlib 3.11+) gives
+	// the members ``str`` semantics so ``f"tier={AgentModelTier.STANDARD}"``
+	// renders as ``"tier=standard"``, matching the
+	// :class:`~meho_backplane.auth.operator.TenantRole` /
+	// :class:`~meho_backplane.memory.schemas.MemoryScope` convention.
+	//
+	// Three tiers in v0.2:
+	//
+	// * ``standard`` -- the default general-purpose tier.
+	// * ``fast`` -- a cheaper / lower-latency tier for simple loops.
+	// * ``deep`` -- a more capable tier for harder reasoning.
+	ModelTier    *AgentModelTier         `json:"model_tier,omitempty"`
+	OutputSchema *map[string]interface{} `json:"output_schema"`
+	SystemPrompt *string                 `json:"system_prompt"`
+	Toolset      *map[string]interface{} `json:"toolset"`
+	TurnBudget   *int                    `json:"turn_budget"`
+}
+
+// AgentModelTier Logical model tier an agent definition runs against.
+//
+// The tier is *logical* -- G11.5's multi-provider resolver maps it to
+// a concrete model backend at run time. T2 stores the tier verbatim;
+// it does not resolve it. “StrEnum“ (PEP 663, stdlib 3.11+) gives
+// the members “str“ semantics so “f"tier={AgentModelTier.STANDARD}"“
+// renders as “"tier=standard"“, matching the
+// :class:`~meho_backplane.auth.operator.TenantRole` /
+// :class:`~meho_backplane.memory.schemas.MemoryScope` convention.
+//
+// Three tiers in v0.2:
+//
+// * “standard“ -- the default general-purpose tier.
+// * “fast“ -- a cheaper / lower-latency tier for simple loops.
+// * “deep“ -- a more capable tier for harder reasoning.
+type AgentModelTier string
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -219,8 +358,10 @@ const (
 //   - “method“ / “path“ / “status_code“ / “request_id“ / “duration_ms“
 //     / “payload“ ← columns of the same name
 //   - “op_id“ / “op_class“ / “result_status“ — computed at query time
-//   - “principal_name“ / “parent_audit_id“ / “agent_session_id“ /
-//     “broadcast_event_id“ — v0.2 placeholders, always None
+//   - “parent_audit_id“ ← “audit_log.parent_audit_id“ (lineage; #398)
+//   - “agent_session_id“ ← “audit_log.agent_session_id“ (MCP session; #1009)
+//   - “principal_name“ / “broadcast_event_id“ — v0.2 placeholders, always
+//     None
 type AuditEntry struct {
 	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
 	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
@@ -280,6 +421,40 @@ type AuditQueryRequest struct {
 type AuditQueryResult struct {
 	NextCursor *string      `json:"next_cursor"`
 	Rows       []AuditEntry `json:"rows"`
+}
+
+// AuditReplayResult 200 body for “GET /api/v1/audit/sessions/{session_id}/replay“.
+//
+// Wraps the substrate's :class:`ReplayNode` forest with the echoed
+// request identity. “tenant_id“ is always the operator's tenant
+// (lifted from the JWT by the route), never client-supplied, so the
+// echo is a confirmation of the boundary the query ran under — not a
+// value the caller chose.
+//
+// “row_count“ is the count of *anchor* rows in the session — rows
+// whose “agent_session_id“ equals “session_id“ within the
+// operator's tenant. It is the same number the route's count-first
+// 413 guard evaluates, so a session that returns 200 reports a
+// “row_count“ identical to what its over-cap sibling would report
+// at 413. NULL-session lineage children pulled into “root“ by the
+// replay closure (a composite “dispatch_child“ whose own
+// “agent_session_id“ is NULL but whose “parent_audit_id“ links
+// into the session) are present in the tree but are not counted —
+// "session rows" are defined by the “agent_session_id“ anchor, not
+// by tree membership.
+//
+// An unknown session id, or one belonging to another tenant, yields
+// “root=[]“ / “row_count=0“ — never a 404 — so a foreign session
+// is indistinguishable from an empty one and existence never leaks
+// across tenants (the same non-leakage posture
+// “GET /show/{audit_id}“ takes).
+//
+// Frozen like the substrate models it carries.
+type AuditReplayResult struct {
+	Root      []ReplayNode       `json:"root"`
+	RowCount  int                `json:"row_count"`
+	SessionId openapi_types.UUID `json:"session_id"`
+	TenantId  openapi_types.UUID `json:"tenant_id"`
 }
 
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
@@ -1214,6 +1389,45 @@ type RememberBody struct {
 	Scope      MemoryScope `json:"scope"`
 	Slug       *string     `json:"slug"`
 	TargetName *string     `json:"target_name"`
+}
+
+// ReplayNode One node of a per-session audit-replay tree (G8.2-T3).
+//
+// Subclasses :class:`AuditEntry` so it carries every audit field verbatim —
+// forward-compatible with the v0.2.next compliance-export contract, which
+// treats a replay node as an audit row plus its position in the session
+// graph. Two structural fields are added:
+//
+//   - “depth“ — distance from the session root. “0“ for roots; assigned
+//     during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.
+//   - “children“ — the node's direct children, ordered by “(occurred_at,
+//     id)“. Self-referential — the forward reference is resolved by the
+//     module-level :func:`ReplayNode.model_rebuild` call below.
+//
+// Frozen like its parent: a node handed to a caller cannot mutate after the
+// tree is built.
+type ReplayNode struct {
+	AgentSessionId   *openapi_types.UUID    `json:"agent_session_id"`
+	BroadcastEventId *openapi_types.UUID    `json:"broadcast_event_id"`
+	Children         *[]ReplayNode          `json:"children,omitempty"`
+	Depth            int                    `json:"depth"`
+	DurationMs       *string                `json:"duration_ms"`
+	Id               openapi_types.UUID     `json:"id"`
+	Method           string                 `json:"method"`
+	OpClass          string                 `json:"op_class"`
+	OpId             string                 `json:"op_id"`
+	ParentAuditId    *openapi_types.UUID    `json:"parent_audit_id"`
+	Path             string                 `json:"path"`
+	Payload          map[string]interface{} `json:"payload"`
+	PrincipalName    *string                `json:"principal_name"`
+	PrincipalSub     string                 `json:"principal_sub"`
+	RequestId        *openapi_types.UUID    `json:"request_id"`
+	ResultStatus     string                 `json:"result_status"`
+	StatusCode       int                    `json:"status_code"`
+	TargetId         *openapi_types.UUID    `json:"target_id"`
+	TargetName       *string                `json:"target_name"`
+	TenantId         *openapi_types.UUID    `json:"tenant_id"`
+	Ts               time.Time              `json:"ts"`
 }
 
 // RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
@@ -2166,6 +2380,33 @@ type UnderscoreSortColumn string
 // UnderscoreSortDirection Sort direction enum -- “asc“ (default) or “desc“.
 type UnderscoreSortDirection string
 
+// ListAgentsApiV1AgentsGetParams defines parameters for ListAgentsApiV1AgentsGet.
+type ListAgentsApiV1AgentsGetParams struct {
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// CreateAgentApiV1AgentsPostParams defines parameters for CreateAgentApiV1AgentsPost.
+type CreateAgentApiV1AgentsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteAgentApiV1AgentsNameDeleteParams defines parameters for DeleteAgentApiV1AgentsNameDelete.
+type DeleteAgentApiV1AgentsNameDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowAgentApiV1AgentsNameGetParams defines parameters for ShowAgentApiV1AgentsNameGet.
+type ShowAgentApiV1AgentsNameGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// EditAgentApiV1AgentsNamePatchParams defines parameters for EditAgentApiV1AgentsNamePatch.
+type EditAgentApiV1AgentsNamePatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
@@ -2175,6 +2416,11 @@ type MyRecentApiV1AuditMyRecentGetParams struct {
 
 // QueryApiV1AuditQueryPostParams defines parameters for QueryApiV1AuditQueryPost.
 type QueryApiV1AuditQueryPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ReplayApiV1AuditSessionsSessionIdReplayGetParams defines parameters for ReplayApiV1AuditSessionsSessionIdReplayGet.
+type ReplayApiV1AuditSessionsSessionIdReplayGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -2539,6 +2785,12 @@ type UiTopologyTableUiTopologyGetParams struct {
 	View      *string                  `form:"view,omitempty" json:"view,omitempty"`
 }
 
+// CreateAgentApiV1AgentsPostJSONRequestBody defines body for CreateAgentApiV1AgentsPost for application/json ContentType.
+type CreateAgentApiV1AgentsPostJSONRequestBody = AgentDefinitionCreate
+
+// EditAgentApiV1AgentsNamePatchJSONRequestBody defines body for EditAgentApiV1AgentsNamePatch for application/json ContentType.
+type EditAgentApiV1AgentsNamePatchJSONRequestBody = AgentDefinitionUpdate
+
 // QueryApiV1AuditQueryPostJSONRequestBody defines body for QueryApiV1AuditQueryPost for application/json ContentType.
 type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
@@ -2731,6 +2983,25 @@ type ClientInterface interface {
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGet request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListAgentsApiV1AgentsGet request
+	ListAgentsApiV1AgentsGet(ctx context.Context, params *ListAgentsApiV1AgentsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateAgentApiV1AgentsPostWithBody request with any body
+	CreateAgentApiV1AgentsPostWithBody(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateAgentApiV1AgentsPost(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteAgentApiV1AgentsNameDelete request
+	DeleteAgentApiV1AgentsNameDelete(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowAgentApiV1AgentsNameGet request
+	ShowAgentApiV1AgentsNameGet(ctx context.Context, name string, params *ShowAgentApiV1AgentsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// EditAgentApiV1AgentsNamePatchWithBody request with any body
+	EditAgentApiV1AgentsNamePatchWithBody(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	EditAgentApiV1AgentsNamePatch(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// MyRecentApiV1AuditMyRecentGet request
 	MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2738,6 +3009,9 @@ type ClientInterface interface {
 	QueryApiV1AuditQueryPostWithBody(ctx context.Context, params *QueryApiV1AuditQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReplayApiV1AuditSessionsSessionIdReplayGet request
+	ReplayApiV1AuditSessionsSessionIdReplayGet(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ShowApiV1AuditShowAuditIdGet request
 	ShowApiV1AuditShowAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2994,6 +3268,90 @@ func (c *Client) ProtectedResourceMetadataWellKnownOauthProtectedResourceGet(ctx
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListAgentsApiV1AgentsGet(ctx context.Context, params *ListAgentsApiV1AgentsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListAgentsApiV1AgentsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateAgentApiV1AgentsPostWithBody(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateAgentApiV1AgentsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateAgentApiV1AgentsPost(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateAgentApiV1AgentsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteAgentApiV1AgentsNameDelete(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteAgentApiV1AgentsNameDeleteRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowAgentApiV1AgentsNameGet(ctx context.Context, name string, params *ShowAgentApiV1AgentsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowAgentApiV1AgentsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditAgentApiV1AgentsNamePatchWithBody(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditAgentApiV1AgentsNamePatchRequestWithBody(c.Server, name, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) EditAgentApiV1AgentsNamePatch(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEditAgentApiV1AgentsNamePatchRequest(c.Server, name, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) MyRecentApiV1AuditMyRecentGet(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewMyRecentApiV1AuditMyRecentGetRequest(c.Server, params)
 	if err != nil {
@@ -3020,6 +3378,18 @@ func (c *Client) QueryApiV1AuditQueryPostWithBody(ctx context.Context, params *Q
 
 func (c *Client) QueryApiV1AuditQueryPost(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewQueryApiV1AuditQueryPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReplayApiV1AuditSessionsSessionIdReplayGet(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReplayApiV1AuditSessionsSessionIdReplayGetRequest(c.Server, sessionId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4068,6 +4438,301 @@ func NewProtectedResourceMetadataWellKnownOauthProtectedResourceGetRequest(serve
 	return req, nil
 }
 
+// NewListAgentsApiV1AgentsGetRequest generates requests for ListAgentsApiV1AgentsGet
+func NewListAgentsApiV1AgentsGetRequest(server string, params *ListAgentsApiV1AgentsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateAgentApiV1AgentsPostRequest calls the generic CreateAgentApiV1AgentsPost builder with application/json body
+func NewCreateAgentApiV1AgentsPostRequest(server string, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateAgentApiV1AgentsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateAgentApiV1AgentsPostRequestWithBody generates requests for CreateAgentApiV1AgentsPost with any type of body
+func NewCreateAgentApiV1AgentsPostRequestWithBody(server string, params *CreateAgentApiV1AgentsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteAgentApiV1AgentsNameDeleteRequest generates requests for DeleteAgentApiV1AgentsNameDelete
+func NewDeleteAgentApiV1AgentsNameDeleteRequest(server string, name string, params *DeleteAgentApiV1AgentsNameDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowAgentApiV1AgentsNameGetRequest generates requests for ShowAgentApiV1AgentsNameGet
+func NewShowAgentApiV1AgentsNameGetRequest(server string, name string, params *ShowAgentApiV1AgentsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewEditAgentApiV1AgentsNamePatchRequest calls the generic EditAgentApiV1AgentsNamePatch builder with application/json body
+func NewEditAgentApiV1AgentsNamePatchRequest(server string, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewEditAgentApiV1AgentsNamePatchRequestWithBody(server, name, params, "application/json", bodyReader)
+}
+
+// NewEditAgentApiV1AgentsNamePatchRequestWithBody generates requests for EditAgentApiV1AgentsNamePatch with any type of body
+func NewEditAgentApiV1AgentsNamePatchRequestWithBody(server string, name string, params *EditAgentApiV1AgentsNamePatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/agents/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewMyRecentApiV1AuditMyRecentGetRequest generates requests for MyRecentApiV1AuditMyRecentGet
 func NewMyRecentApiV1AuditMyRecentGetRequest(server string, params *MyRecentApiV1AuditMyRecentGetParams) (*http.Request, error) {
 	var err error
@@ -4184,6 +4849,55 @@ func NewQueryApiV1AuditQueryPostRequestWithBody(server string, params *QueryApiV
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReplayApiV1AuditSessionsSessionIdReplayGetRequest generates requests for ReplayApiV1AuditSessionsSessionIdReplayGet
+func NewReplayApiV1AuditSessionsSessionIdReplayGetRequest(server string, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "session_id", runtime.ParamLocationPath, sessionId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/audit/sessions/%s/replay", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -8515,6 +9229,25 @@ type ClientWithResponsesInterface interface {
 	// ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse request
 	ProtectedResourceMetadataWellKnownOauthProtectedResourceGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse, error)
 
+	// ListAgentsApiV1AgentsGetWithResponse request
+	ListAgentsApiV1AgentsGetWithResponse(ctx context.Context, params *ListAgentsApiV1AgentsGetParams, reqEditors ...RequestEditorFn) (*ListAgentsApiV1AgentsGetResponse, error)
+
+	// CreateAgentApiV1AgentsPostWithBodyWithResponse request with any body
+	CreateAgentApiV1AgentsPostWithBodyWithResponse(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentApiV1AgentsPostResponse, error)
+
+	CreateAgentApiV1AgentsPostWithResponse(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentApiV1AgentsPostResponse, error)
+
+	// DeleteAgentApiV1AgentsNameDeleteWithResponse request
+	DeleteAgentApiV1AgentsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentApiV1AgentsNameDeleteResponse, error)
+
+	// ShowAgentApiV1AgentsNameGetWithResponse request
+	ShowAgentApiV1AgentsNameGetWithResponse(ctx context.Context, name string, params *ShowAgentApiV1AgentsNameGetParams, reqEditors ...RequestEditorFn) (*ShowAgentApiV1AgentsNameGetResponse, error)
+
+	// EditAgentApiV1AgentsNamePatchWithBodyWithResponse request with any body
+	EditAgentApiV1AgentsNamePatchWithBodyWithResponse(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditAgentApiV1AgentsNamePatchResponse, error)
+
+	EditAgentApiV1AgentsNamePatchWithResponse(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditAgentApiV1AgentsNamePatchResponse, error)
+
 	// MyRecentApiV1AuditMyRecentGetWithResponse request
 	MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error)
 
@@ -8522,6 +9255,9 @@ type ClientWithResponsesInterface interface {
 	QueryApiV1AuditQueryPostWithBodyWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error)
 
 	QueryApiV1AuditQueryPostWithResponse(ctx context.Context, params *QueryApiV1AuditQueryPostParams, body QueryApiV1AuditQueryPostJSONRequestBody, reqEditors ...RequestEditorFn) (*QueryApiV1AuditQueryPostResponse, error)
+
+	// ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse request
+	ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error)
 
 	// ShowApiV1AuditShowAuditIdGetWithResponse request
 	ShowApiV1AuditShowAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *ShowApiV1AuditShowAuditIdGetParams, reqEditors ...RequestEditorFn) (*ShowApiV1AuditShowAuditIdGetResponse, error)
@@ -8798,6 +9534,120 @@ func (r ProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse) Sta
 	return 0
 }
 
+type ListAgentsApiV1AgentsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentDefinitionListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListAgentsApiV1AgentsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListAgentsApiV1AgentsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateAgentApiV1AgentsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *AgentDefinitionRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateAgentApiV1AgentsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateAgentApiV1AgentsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteAgentApiV1AgentsNameDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteAgentApiV1AgentsNameDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteAgentApiV1AgentsNameDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowAgentApiV1AgentsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentDefinitionRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowAgentApiV1AgentsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowAgentApiV1AgentsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type EditAgentApiV1AgentsNamePatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AgentDefinitionRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r EditAgentApiV1AgentsNamePatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r EditAgentApiV1AgentsNamePatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type MyRecentApiV1AuditMyRecentGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -8838,6 +9688,29 @@ func (r QueryApiV1AuditQueryPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r QueryApiV1AuditQueryPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReplayApiV1AuditSessionsSessionIdReplayGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AuditReplayResult
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ReplayApiV1AuditSessionsSessionIdReplayGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReplayApiV1AuditSessionsSessionIdReplayGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -10374,6 +11247,67 @@ func (c *ClientWithResponses) ProtectedResourceMetadataWellKnownOauthProtectedRe
 	return ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rsp)
 }
 
+// ListAgentsApiV1AgentsGetWithResponse request returning *ListAgentsApiV1AgentsGetResponse
+func (c *ClientWithResponses) ListAgentsApiV1AgentsGetWithResponse(ctx context.Context, params *ListAgentsApiV1AgentsGetParams, reqEditors ...RequestEditorFn) (*ListAgentsApiV1AgentsGetResponse, error) {
+	rsp, err := c.ListAgentsApiV1AgentsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListAgentsApiV1AgentsGetResponse(rsp)
+}
+
+// CreateAgentApiV1AgentsPostWithBodyWithResponse request with arbitrary body returning *CreateAgentApiV1AgentsPostResponse
+func (c *ClientWithResponses) CreateAgentApiV1AgentsPostWithBodyWithResponse(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentApiV1AgentsPostResponse, error) {
+	rsp, err := c.CreateAgentApiV1AgentsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateAgentApiV1AgentsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateAgentApiV1AgentsPostWithResponse(ctx context.Context, params *CreateAgentApiV1AgentsPostParams, body CreateAgentApiV1AgentsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentApiV1AgentsPostResponse, error) {
+	rsp, err := c.CreateAgentApiV1AgentsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateAgentApiV1AgentsPostResponse(rsp)
+}
+
+// DeleteAgentApiV1AgentsNameDeleteWithResponse request returning *DeleteAgentApiV1AgentsNameDeleteResponse
+func (c *ClientWithResponses) DeleteAgentApiV1AgentsNameDeleteWithResponse(ctx context.Context, name string, params *DeleteAgentApiV1AgentsNameDeleteParams, reqEditors ...RequestEditorFn) (*DeleteAgentApiV1AgentsNameDeleteResponse, error) {
+	rsp, err := c.DeleteAgentApiV1AgentsNameDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteAgentApiV1AgentsNameDeleteResponse(rsp)
+}
+
+// ShowAgentApiV1AgentsNameGetWithResponse request returning *ShowAgentApiV1AgentsNameGetResponse
+func (c *ClientWithResponses) ShowAgentApiV1AgentsNameGetWithResponse(ctx context.Context, name string, params *ShowAgentApiV1AgentsNameGetParams, reqEditors ...RequestEditorFn) (*ShowAgentApiV1AgentsNameGetResponse, error) {
+	rsp, err := c.ShowAgentApiV1AgentsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowAgentApiV1AgentsNameGetResponse(rsp)
+}
+
+// EditAgentApiV1AgentsNamePatchWithBodyWithResponse request with arbitrary body returning *EditAgentApiV1AgentsNamePatchResponse
+func (c *ClientWithResponses) EditAgentApiV1AgentsNamePatchWithBodyWithResponse(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EditAgentApiV1AgentsNamePatchResponse, error) {
+	rsp, err := c.EditAgentApiV1AgentsNamePatchWithBody(ctx, name, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditAgentApiV1AgentsNamePatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) EditAgentApiV1AgentsNamePatchWithResponse(ctx context.Context, name string, params *EditAgentApiV1AgentsNamePatchParams, body EditAgentApiV1AgentsNamePatchJSONRequestBody, reqEditors ...RequestEditorFn) (*EditAgentApiV1AgentsNamePatchResponse, error) {
+	rsp, err := c.EditAgentApiV1AgentsNamePatch(ctx, name, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseEditAgentApiV1AgentsNamePatchResponse(rsp)
+}
+
 // MyRecentApiV1AuditMyRecentGetWithResponse request returning *MyRecentApiV1AuditMyRecentGetResponse
 func (c *ClientWithResponses) MyRecentApiV1AuditMyRecentGetWithResponse(ctx context.Context, params *MyRecentApiV1AuditMyRecentGetParams, reqEditors ...RequestEditorFn) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	rsp, err := c.MyRecentApiV1AuditMyRecentGet(ctx, params, reqEditors...)
@@ -10398,6 +11332,15 @@ func (c *ClientWithResponses) QueryApiV1AuditQueryPostWithResponse(ctx context.C
 		return nil, err
 	}
 	return ParseQueryApiV1AuditQueryPostResponse(rsp)
+}
+
+// ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse request returning *ReplayApiV1AuditSessionsSessionIdReplayGetResponse
+func (c *ClientWithResponses) ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse(ctx context.Context, sessionId openapi_types.UUID, params *ReplayApiV1AuditSessionsSessionIdReplayGetParams, reqEditors ...RequestEditorFn) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error) {
+	rsp, err := c.ReplayApiV1AuditSessionsSessionIdReplayGet(ctx, sessionId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReplayApiV1AuditSessionsSessionIdReplayGetResponse(rsp)
 }
 
 // ShowApiV1AuditShowAuditIdGetWithResponse request returning *ShowApiV1AuditShowAuditIdGetResponse
@@ -11174,6 +12117,164 @@ func ParseProtectedResourceMetadataWellKnownOauthProtectedResourceGetResponse(rs
 	return response, nil
 }
 
+// ParseListAgentsApiV1AgentsGetResponse parses an HTTP response from a ListAgentsApiV1AgentsGetWithResponse call
+func ParseListAgentsApiV1AgentsGetResponse(rsp *http.Response) (*ListAgentsApiV1AgentsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListAgentsApiV1AgentsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentDefinitionListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateAgentApiV1AgentsPostResponse parses an HTTP response from a CreateAgentApiV1AgentsPostWithResponse call
+func ParseCreateAgentApiV1AgentsPostResponse(rsp *http.Response) (*CreateAgentApiV1AgentsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateAgentApiV1AgentsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest AgentDefinitionRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteAgentApiV1AgentsNameDeleteResponse parses an HTTP response from a DeleteAgentApiV1AgentsNameDeleteWithResponse call
+func ParseDeleteAgentApiV1AgentsNameDeleteResponse(rsp *http.Response) (*DeleteAgentApiV1AgentsNameDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteAgentApiV1AgentsNameDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowAgentApiV1AgentsNameGetResponse parses an HTTP response from a ShowAgentApiV1AgentsNameGetWithResponse call
+func ParseShowAgentApiV1AgentsNameGetResponse(rsp *http.Response) (*ShowAgentApiV1AgentsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowAgentApiV1AgentsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentDefinitionRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseEditAgentApiV1AgentsNamePatchResponse parses an HTTP response from a EditAgentApiV1AgentsNamePatchWithResponse call
+func ParseEditAgentApiV1AgentsNamePatchResponse(rsp *http.Response) (*EditAgentApiV1AgentsNamePatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &EditAgentApiV1AgentsNamePatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AgentDefinitionRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseMyRecentApiV1AuditMyRecentGetResponse parses an HTTP response from a MyRecentApiV1AuditMyRecentGetWithResponse call
 func ParseMyRecentApiV1AuditMyRecentGetResponse(rsp *http.Response) (*MyRecentApiV1AuditMyRecentGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -11223,6 +12324,39 @@ func ParseQueryApiV1AuditQueryPostResponse(rsp *http.Response) (*QueryApiV1Audit
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AuditQueryResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReplayApiV1AuditSessionsSessionIdReplayGetResponse parses an HTTP response from a ReplayApiV1AuditSessionsSessionIdReplayGetWithResponse call
+func ParseReplayApiV1AuditSessionsSessionIdReplayGetResponse(rsp *http.Response) (*ReplayApiV1AuditSessionsSessionIdReplayGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReplayApiV1AuditSessionsSessionIdReplayGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AuditReplayResult
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

@@ -72,7 +72,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
+from meho_backplane.connectors._shared.vault_creds import (
+    VaultCredentialsReadError,
+    load_basic_credentials,
+)
 from meho_backplane.connectors.schemas import AuthModel
 
 __all__ = [
@@ -291,11 +294,30 @@ class CredentialsCache:
         token. ``per_user`` / ``impersonation`` are explicitly out of
         scope for State 2 (the auth-model boundary in each connector's
         :meth:`auth_headers` rejects them before this method is reached).
+        See ``docs/architecture/connector-auth.md`` § "Cache scoping under
+        ``shared_service_account``" for the contract.
+
+        Raises :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
+        when ``operator.raw_jwt`` is empty -- defense-in-depth fail-closed
+        check that mirrors the loader path's pre-Vault guard at
+        :func:`~meho_backplane.connectors._shared.vault_creds._resolve_secret_ref`.
+        The primary gate is each consuming connector's :meth:`auth_headers`
+        rejecting system-initiated calls (no operator JWT) at the boundary;
+        the cache fast-path enforces the same invariant so a future
+        regression in the boundary check cannot open a silent cache-hit
+        path. Raised before the cache lookup so a primed entry from an
+        authenticated caller cannot leak to a system-initiated caller.
 
         Raises :exc:`RuntimeError` if the loader returns a dict missing
         ``"username"`` or ``"password"``. The error message names both the
         target and the missing key.
         """
+        if not operator.raw_jwt:
+            raise VaultCredentialsReadError(
+                "operator-context credential read requires an authenticated operator; "
+                f"target={target.name!r} has no operator JWT (system-initiated calls "
+                "cannot read per-target vendor credentials)"
+            )
         async with self._lock:
             cached = self._cache.get(target.name)
             if cached is not None:

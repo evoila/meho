@@ -66,6 +66,7 @@ from structlog.testing import capture_logs
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.db.engine import get_sessionmaker
@@ -351,3 +352,53 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     events_blob = repr(captured_events)
     assert _CANARY_PASSWORD not in events_blob
     assert _CANARY_USERNAME not in events_blob
+
+
+@pytest.mark.asyncio
+async def test_session_token_fast_path_fails_closed_on_empty_raw_jwt() -> None:
+    """VmwareRestConnector._session_token rejects empty raw_jwt before cache lookup.
+
+    Exercises the defense-in-depth guard the session-token cache
+    enforces in addition to auth_headers' boundary check. Primes the
+    cache via a normal first session-establish under an authenticated
+    operator (respx mocks POST /api/session and an injected loader
+    returns canned creds — no Vault round-trip), then invokes
+    _session_token again with raw_jwt="" against the SAME target and
+    asserts VaultCredentialsReadError without returning the cached
+    session id. This is the G3.9 precedent every sibling cache copied
+    — the guard here closes the same hole on the original site. See
+    docs/architecture/connector-auth.md § "Cache scoping under
+    shared_service_account".
+    """
+
+    async def _stub_loader(target: Any, operator: Operator) -> dict[str, str]:
+        return {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    target = _CredReadTarget()
+
+    async with respx.mock(base_url=_VCENTER_BASE_URL, assert_all_called=False) as mock:
+        mock.post("/api/session").respond(200, json=_SESSION_TOKEN)
+        mock.delete("/api/session").respond(204)
+        primed = await connector._session_token(target, _make_operator())
+    assert primed == _SESSION_TOKEN
+    assert connector._session_tokens[target.name] == _SESSION_TOKEN
+
+    system_operator = Operator(
+        sub="system",
+        name="System",
+        email=None,
+        raw_jwt="",
+        tenant_id=UUID("00000000-0000-0000-0000-00000000a0a0"),
+        tenant_role=TenantRole.OPERATOR,
+    )
+    with pytest.raises(VaultCredentialsReadError) as exc_info:
+        await connector._session_token(target, system_operator)
+
+    assert target.name in str(exc_info.value)
+    assert "operator" in str(exc_info.value).lower()
+    # The cache still holds the primed token; the guard ran ahead of
+    # any cache mutation.
+    assert connector._session_tokens[target.name] == _SESSION_TOKEN
+
+    await connector.aclose()

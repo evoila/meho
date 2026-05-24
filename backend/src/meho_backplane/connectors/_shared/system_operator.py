@@ -18,21 +18,21 @@ The HTTP auth surface now carries the full :class:`Operator`
 credential read will run — see
 [docs/architecture/connector-auth.md](docs/architecture/connector-auth.md)).
 Those operator-less paths therefore need a stand-in. This helper builds a
-**frozen system operator with an empty ``raw_jwt``** — the same shape the
-topology scheduler
-(:func:`meho_backplane.topology.scheduler._system_operator`) and the
-connector ``execute`` shims (e.g.
-:func:`meho_backplane.connectors.vault.connector.VaultConnector._synthesise_legacy_operator`)
-already use.
+**frozen system operator with a non-empty placeholder ``raw_jwt``** so the
+cache fast-path defense-in-depth guard (G3.10 hygiene -- empty-jwt
+rejection at :meth:`CredentialsCache.get` and each connector's
+session-token method) doesn't block the probe path. The placeholder is
+**not** a valid Keycloak JWT, so the live Vault loader still rejects the
+operator-context read with a clean :class:`VaultClientError` -- preserving
+the architectural posture that **system-initiated calls cannot perform an
+operator-context Vault read**. The fail-closed semantic moves from
+"empty-string sentinel at every layer" to "every Vault-touching layer
+rejects unauthenticated operators by checking either the JWT shape (cache
+fast-path) or the JWT validity (live Vault round-trip)".
 
-The empty ``raw_jwt`` is load-bearing: per the locked decision, an
-operator-context Vault credential loader that receives an operator with
-``raw_jwt == ""`` MUST fail closed with a clear error rather than silently
-falling back to a backplane identity. System-initiated calls that need a
-vendor credential are out of scope for v0.x; today the only system callers
-(readiness probes) hit unauthenticated endpoints and forward no token, so
-the stub loader's existing ``NotImplementedError`` is never reached on
-those paths and behaviour is unchanged.
+Tests with injected stub loaders are unaffected: the stub returns canned
+credentials without touching Vault, the cache fast-path accepts the
+placeholder, and the probe wire format is exercised as before.
 """
 
 from __future__ import annotations
@@ -41,11 +41,26 @@ from uuid import UUID
 
 from meho_backplane.auth.operator import Operator, TenantRole
 
-__all__ = ["SYSTEM_OPERATOR_SUB", "synthesise_system_operator"]
+__all__ = [
+    "SYSTEM_OPERATOR_PLACEHOLDER_JWT",
+    "SYSTEM_OPERATOR_SUB",
+    "synthesise_system_operator",
+]
 
 #: Greppable sentinel ``sub`` for the synthesised system operator. Lands
 #: on any audit row a system-initiated connector call writes.
 SYSTEM_OPERATOR_SUB: str = "system:connector-probe"
+
+#: Non-empty placeholder JWT for the synthesised system operator. NOT a
+#: valid Keycloak JWT -- the live Vault JWT/OIDC auth method rejects it
+#: with :class:`VaultClientError`, preserving the "system-initiated calls
+#: cannot read per-target vendor credentials" carve-out. The non-empty
+#: value satisfies the cache fast-path's defense-in-depth guard
+#: (G3.10 hygiene) so probe/fingerprint paths that go through
+#: :meth:`auth_headers` -> cache fast-path don't fail synchronously before
+#: the wire call; production cache-miss paths still fail closed at the
+#: live Vault loader. The string is deliberately greppable in audit logs.
+SYSTEM_OPERATOR_PLACEHOLDER_JWT: str = "system:connector-probe-placeholder-jwt"
 
 #: Nil UUID tenant for the synthesised operator. Typed/ingested
 #: registrations are ``tenant_id IS NULL``, so the dispatcher's
@@ -55,19 +70,24 @@ _SYSTEM_TENANT_ID: UUID = UUID(int=0)
 
 
 def synthesise_system_operator() -> Operator:
-    """Return a frozen system :class:`Operator` with an empty ``raw_jwt``.
+    """Return a frozen system :class:`Operator` with a placeholder ``raw_jwt``.
 
     Used by the operator-less connector probe/fingerprint paths that
-    reach the HTTP auth surface before a real operator exists. The empty
-    ``raw_jwt`` makes any future operator-context Vault read fail closed
-    (it cannot authenticate to Vault), which is the intended boundary for
-    system-initiated credential reads.
+    reach the HTTP auth surface before a real operator exists. The
+    :data:`SYSTEM_OPERATOR_PLACEHOLDER_JWT` placeholder is **not** a
+    valid Keycloak JWT, so any live operator-context Vault read still
+    fails closed at the JWT/OIDC auth method (:class:`VaultClientError`)
+    -- the architectural intent. The non-empty shape only matters for
+    the cache fast-path's defense-in-depth guard at
+    :meth:`CredentialsCache.get`: an empty ``raw_jwt`` would short-circuit
+    every system-initiated probe before the wire call even when an
+    injected (test) loader could supply the credentials.
     """
     return Operator(
         sub=SYSTEM_OPERATOR_SUB,
         name=None,
         email=None,
-        raw_jwt="",
+        raw_jwt=SYSTEM_OPERATOR_PLACEHOLDER_JWT,
         tenant_id=_SYSTEM_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
     )

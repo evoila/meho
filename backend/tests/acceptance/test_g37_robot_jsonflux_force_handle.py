@@ -3,19 +3,20 @@
 
 """G3.7-T8 JSONFlux force-mode acceptance for the Hetzner Robot connector.
 
-v0.2 ships only :class:`~meho_backplane.operations.reducer.PassThroughReducer`
-— the production reducer never produces a :class:`ResultHandle`. This test
-mirrors :mod:`tests.acceptance.test_g35_harbor_jsonflux_force_handle` verbatim,
-swapping in Hetzner Robot as the dispatched connector: it installs a test-only
-:class:`ForceHandleReducer` that wraps every payload in a synthetic handle,
-dispatches ``GET:/server`` against the seeded Robot core, and asserts
-the :class:`~meho_backplane.connectors.schemas.OperationResult`'s ``handle``
-field carries a populated :class:`ResultHandle`.
+Drives the **real**
+:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+(G0.6.1-T3 #753) in force mode (``row_threshold=0``) as the dispatcher
+default. Mirrors :mod:`tests.acceptance.test_g36_vrops_jsonflux_force_handle`,
+swapping in Hetzner Robot as the dispatched connector: it dispatches
+``GET:/server`` against the seeded Robot core and asserts the
+:class:`~meho_backplane.connectors.schemas.OperationResult`'s ``handle``
+field carries a populated :class:`ResultHandle` with the real
+materialized shape.
 
-Hetzner Robot's ``GET:/server`` returns a JSON array of server wrapper
-objects (``[{"server": {...}}, ...]``). The
-:class:`ForceHandleReducer` handles this shape via its ``list`` branch so the
-dispatcher-seam test doesn't depend on the specific list-key name.
+Hetzner Robot's ``GET:/server`` returns a top-level JSON array of server
+wrapper objects (``[{"server": {...}}, ...]``). The reducer's collection
+detection hits its bare-top-level-list branch, so the dispatcher-seam
+test doesn't depend on a vendor-specific envelope key.
 
 Proves AC4 of G3.7-T8 #849: ``server.list`` returns a JSONFlux handle;
 ``result_describe`` / ``result_query`` resolve against it (the seam
@@ -30,9 +31,9 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._robot_canary_fixtures import (
@@ -43,59 +44,16 @@ from tests.acceptance._robot_canary_fixtures import (
 )
 
 
-class ForceHandleReducer:
-    """Test-only reducer that always produces a :class:`ResultHandle`.
-
-    Recognises four payload shapes Robot and sibling connectors use:
-
-    * ``list`` → total = ``len(payload)``.
-    * ``dict`` with ``"elements"`` key (SDDC Manager paginated envelope).
-    * ``dict`` with ``"results"`` key (NSX policy/manager API list shape).
-    * ``dict`` with ``"value"`` key (vCenter REST list shape).
-    * Anything else → total = 1, sample = ().
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        """Always return ``(summary_dict, ResultHandle)``."""
-        del schema, context
-        if isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        elif isinstance(payload, dict):
-            for key in ("elements", "results", "value"):
-                rows = payload.get(key)
-                if isinstance(rows, list):
-                    total = len(rows)
-                    sample = tuple(rows[:5]) if rows else ()
-                    break
-            else:
-                total = 1
-                sample = ()
-        else:
-            total = 1
-            sample = ()
-
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample if sample else None,
-            ttl_seconds=3600,
-        )
-        summary = {"row_count": total, "sample": list(sample)}
-        return summary, handle
-
-
 @pytest.fixture
 def force_handle_reducer() -> Any:
-    """Install :class:`ForceHandleReducer` as the dispatcher's default."""
-    set_default_reducer(ForceHandleReducer())
+    """Install :class:`JsonFluxReducer` in force mode as the dispatcher default.
+
+    ``row_threshold=0`` forces every non-empty set to materialize, so
+    the seeded server list (below the default 50-row threshold) produces
+    a handle. Teardown restores :class:`PassThroughReducer` so a
+    follow-on test in the same session sees the v0.2 default.
+    """
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         yield
     finally:
@@ -124,10 +82,10 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_robot(
     * ``result['row_count']`` matches the handle's total.
 
     The server list response is a JSON array of ``{"server": {...}}``
-    wrapper objects (not a pagination envelope), so the
-    :class:`ForceHandleReducer`'s ``list`` branch is exercised here —
-    different from the NSX and SDDC tests which hit the ``results[]``
-    and ``elements[]`` branches respectively.
+    wrapper objects (not a pagination envelope), so the reducer's
+    bare-top-level-list branch is exercised here — different from the
+    NSX and SDDC tests which hit the ``results[]`` and ``elements[]``
+    branches respectively.
 
     Proves AC4 of #849 (G3.7-T8): ``server.list`` returns a JSONFlux
     handle; the dispatcher seam is wired and ready for the production
@@ -151,8 +109,8 @@ async def test_force_handle_reducer_populates_operation_result_handle_for_robot(
 
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        f"expected OperationResult.handle to be populated by ForceHandleReducer; "
-        f"got handle=None on envelope={result_envelope!r}"
+        f"expected OperationResult.handle to be populated by "
+        f"JsonFluxReducer; got handle=None on envelope={result_envelope!r}"
     )
     uuid.UUID(handle["handle_id"])
     assert handle["total_rows"] == expected_rows, (

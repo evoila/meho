@@ -8,7 +8,9 @@ Proves the acceptance criteria for issue #852:
 * AC1: every enabled op dispatches via the agent's ``call_operation``
   meta-tool and returns ``status='ok'`` against a respx-mocked Webservice.
 * AC2: ``hetzner-robot.server.list`` (``GET:/server``) also exercises the
-  JSONFlux handle path via a test-only :class:`ForceHandleReducer`.
+  JSONFlux handle path via the real
+  :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+  in force mode (``row_threshold=0``).
 * AC3: every dispatch writes an audit row (``op_id`` + ``target_id`` +
   ``params_hash``) — asserted by checking the backplane's audit log
   after each call.
@@ -51,11 +53,11 @@ import pytest
 from sqlalchemy import select
 
 from meho_backplane.connectors.hetzner_robot import ROBOT_CORE_OPS
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._robot_canary_fixtures import (
@@ -176,54 +178,16 @@ async def test_dispatch_smoke_robot_core_op_returns_ok(
 # ---------------------------------------------------------------------------
 
 
-class ForceHandleReducer:
-    """Test-only reducer that always produces a :class:`ResultHandle`.
-
-    Used by AC2 to verify the JSONFlux seam is wired for server list without
-    depending on the production reducer (which ships as PassThrough in v0.2).
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        """Always return ``(summary_dict, ResultHandle)``."""
-        del schema, context
-        if isinstance(payload, list):
-            total = len(payload)
-            sample = tuple(payload[:5]) if payload else ()
-        elif isinstance(payload, dict):
-            for key in ("elements", "results", "value", "server"):
-                rows = payload.get(key)
-                if isinstance(rows, list):
-                    total = len(rows)
-                    sample = tuple(rows[:5]) if rows else ()
-                    break
-            else:
-                total = 1
-                sample = ()
-        else:
-            total = 1
-            sample = ()
-
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"force-mode handle ({total} rows)",
-            schema_={"type": "array", "items": {"type": "object"}},
-            total_rows=total,
-            sample_rows=sample if sample else None,
-            ttl_seconds=3600,
-        )
-        summary = {"row_count": total, "sample": list(sample)}
-        return summary, handle
-
-
 @pytest.fixture
 def force_handle_reducer() -> Any:
-    """Install :class:`ForceHandleReducer` as the dispatcher's default."""
-    set_default_reducer(ForceHandleReducer())
+    """Install :class:`JsonFluxReducer` in force mode as the dispatcher default.
+
+    ``row_threshold=0`` forces every non-empty set to materialize, so the
+    seeded server list (below the default 50-row threshold) produces a
+    handle. Teardown restores :class:`PassThroughReducer` so a follow-on
+    test in the same session sees the v0.2 default.
+    """
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
         yield
     finally:
@@ -235,11 +199,14 @@ async def test_server_list_returns_jsonflux_handle(
     force_handle_reducer: None,
     ingested_robot_canary: IngestedRobotCanary,
 ) -> None:
-    """AC2: server list (GET:/server) populates OperationResult.handle via ForceHandleReducer.
+    """AC2: server list (GET:/server) populates OperationResult.handle via JsonFluxReducer.
 
-    Proves that the JSONFlux dispatcher seam is wired for Hetzner Robot's
-    server-list op — the most common inventory call and the one most
-    likely to produce large result sets in production.
+    Drives the real
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    in force mode (``row_threshold=0``) to prove the JSONFlux dispatcher
+    seam is wired for Hetzner Robot's server-list op — the most common
+    inventory call and the one most likely to produce large result sets
+    in production.
 
     Proves AC2 of #852: server.list E2E asserts the JSONFlux handle path.
     """
@@ -260,7 +227,7 @@ async def test_server_list_returns_jsonflux_handle(
     )
     handle = result_envelope.get("handle")
     assert handle is not None, (
-        "expected OperationResult.handle to be populated by ForceHandleReducer; "
+        "expected OperationResult.handle to be populated by JsonFluxReducer; "
         f"got handle=None on envelope={result_envelope!r}"
     )
     uuid.UUID(handle["handle_id"])
@@ -268,6 +235,13 @@ async def test_server_list_returns_jsonflux_handle(
         f"expected {expected_rows} servers; got handle.total_rows={handle['total_rows']}"
     )
     assert handle["summary_md"], "handle.summary_md must be non-empty"
+    assert str(expected_rows) in handle["summary_md"], (
+        f"expected summary_md to mention the row count; got {handle['summary_md']!r}"
+    )
+    sample_rows = handle.get("sample_rows")
+    assert sample_rows, (
+        f"expected ≥1 sample row from the seeded server list; got sample_rows={sample_rows!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

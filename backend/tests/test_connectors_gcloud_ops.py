@@ -32,10 +32,17 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.gcloud import GcloudConnector
 from meho_backplane.connectors.gcloud.ops import GCLOUD_OPS, GcloudOp
 from meho_backplane.connectors.gcloud.session import GcloudTargetLike
 from meho_backplane.connectors.schemas import AuthModel
+
+# Operator threaded to typed-op handlers. The mock credentials loaders ignore
+# it; it satisfies the dispatcher's ``(operator, target, params)`` handler
+# signature (the operator authenticates the gate's Vault read, not the GCP
+# request).
+_OPERATOR: Operator = synthesise_system_operator()
 
 # ---------------------------------------------------------------------------
 # Target stub
@@ -179,7 +186,7 @@ async def test_gcloud_about_returns_identity_fields() -> None:
                 "parent": {"type": "organization", "id": "112233445566"},
             },
         )
-        result = await connector.gcloud_about(_TARGET, params={})
+        result = await connector.gcloud_about(_OPERATOR, _TARGET, params={})
 
     assert result["project_id"] == "my-project-123"
     assert result["project_number"] == "987654321"
@@ -207,7 +214,7 @@ async def test_gcloud_about_no_org_when_parent_is_folder() -> None:
                 "parent": {"type": "folder", "id": "folder-42"},
             },
         )
-        result = await connector.gcloud_about(_TARGET, params={})
+        result = await connector.gcloud_about(_OPERATOR, _TARGET, params={})
 
     assert result["organization"] is None
     await connector.aclose()
@@ -240,7 +247,7 @@ async def test_gcloud_project_describe_returns_raw_crm_resource() -> None:
         mock.get("https://cloudresourcemanager.googleapis.com/v1/projects/my-project-123").respond(
             200, json=raw_project
         )
-        result = await connector.gcloud_project_describe(_TARGET, params={})
+        result = await connector.gcloud_project_describe(_OPERATOR, _TARGET, params={})
 
     assert result == raw_project
     await connector.aclose()
@@ -283,7 +290,7 @@ async def test_gcloud_services_list_enabled_only_default() -> None:
         mock.get("https://serviceusage.googleapis.com/v1/projects/my-project-123/services").mock(
             side_effect=_side_effect
         )
-        result = await connector.gcloud_services_list(_TARGET, params={})
+        result = await connector.gcloud_services_list(_OPERATOR, _TARGET, params={})
 
     assert result["total"] == 1
     assert result["rows"][0]["name"] == "compute.googleapis.com"
@@ -313,7 +320,9 @@ async def test_gcloud_services_list_disabled_skips_filter() -> None:
         mock.get("https://serviceusage.googleapis.com/v1/projects/my-project-123/services").mock(
             side_effect=_side_effect
         )
-        result = await connector.gcloud_services_list(_TARGET, params={"enabled_only": False})
+        result = await connector.gcloud_services_list(
+            _OPERATOR, _TARGET, params={"enabled_only": False}
+        )
 
     assert "filter" not in captured_params[0]
     assert result["total"] == 0
@@ -367,7 +376,7 @@ async def test_gcloud_services_list_follows_next_page_token() -> None:
         mock.get("https://serviceusage.googleapis.com/v1/projects/my-project-123/services").mock(
             side_effect=_side_effect
         )
-        result = await connector.gcloud_services_list(_TARGET, params={})
+        result = await connector.gcloud_services_list(_OPERATOR, _TARGET, params={})
 
     assert call_count == 2
     assert result["total"] == 2
@@ -412,7 +421,7 @@ async def test_gcloud_iam_service_accounts_list_returns_sa_rows() -> None:
                 ]
             },
         )
-        result = await connector.gcloud_iam_service_accounts_list(_TARGET, params={})
+        result = await connector.gcloud_iam_service_accounts_list(_OPERATOR, _TARGET, params={})
 
     assert result["total"] == 2
     assert result["rows"][0]["email"] == "svc@my-project-123.iam.gserviceaccount.com"
@@ -468,7 +477,7 @@ async def test_gcloud_iam_service_accounts_list_follows_pagination() -> None:
         mock.get("https://iam.googleapis.com/v1/projects/my-project-123/serviceAccounts").mock(
             side_effect=_side_effect
         )
-        result = await connector.gcloud_iam_service_accounts_list(_TARGET, params={})
+        result = await connector.gcloud_iam_service_accounts_list(_OPERATOR, _TARGET, params={})
 
     assert call_count == 2
     assert result["total"] == 2
@@ -516,7 +525,7 @@ async def test_gcloud_compute_instances_list_aggregated() -> None:
                 }
             },
         )
-        result = await connector.gcloud_compute_instances_list(_TARGET, params={})
+        result = await connector.gcloud_compute_instances_list(_OPERATOR, _TARGET, params={})
 
     assert result["total"] == 1
     row = result["rows"][0]
@@ -555,7 +564,7 @@ async def test_gcloud_compute_instances_list_per_zone() -> None:
             },
         )
         result = await connector.gcloud_compute_instances_list(
-            _TARGET, params={"zone": "europe-west3-a"}
+            _OPERATOR, _TARGET, params={"zone": "europe-west3-a"}
         )
 
     assert result["total"] == 1
@@ -624,7 +633,7 @@ async def test_gcloud_compute_instances_list_follows_pagination() -> None:
         mock.get(
             "https://compute.googleapis.com/compute/v1/projects/my-project-123/aggregated/instances"
         ).mock(side_effect=_side_effect)
-        result = await connector.gcloud_compute_instances_list(_TARGET, params={})
+        result = await connector.gcloud_compute_instances_list(_OPERATOR, _TARGET, params={})
 
     assert call_count == 2
     assert result["total"] == 2
@@ -647,7 +656,7 @@ async def test_gcloud_compute_instances_list_jsonflux_compatible_envelope() -> N
         mock.get(
             "https://compute.googleapis.com/compute/v1/projects/my-project-123/aggregated/instances"
         ).respond(200, json={"items": {}})
-        result = await connector.gcloud_compute_instances_list(_TARGET, params={})
+        result = await connector.gcloud_compute_instances_list(_OPERATOR, _TARGET, params={})
 
     # JSONFlux-compatible envelope: must have 'rows' list and 'total' int
     assert "rows" in result
@@ -694,7 +703,7 @@ async def test_gcloud_compute_networks_list_returns_network_rows() -> None:
                 ]
             },
         )
-        result = await connector.gcloud_compute_networks_list(_TARGET, params={})
+        result = await connector.gcloud_compute_networks_list(_OPERATOR, _TARGET, params={})
 
     assert result["total"] == 2
     assert result["rows"][0]["name"] == "default"
@@ -737,7 +746,7 @@ async def test_gcloud_compute_networks_list_follows_pagination() -> None:
         mock.get(
             "https://compute.googleapis.com/compute/v1/projects/my-project-123/global/networks"
         ).mock(side_effect=_side_effect)
-        result = await connector.gcloud_compute_networks_list(_TARGET, params={})
+        result = await connector.gcloud_compute_networks_list(_OPERATOR, _TARGET, params={})
 
     assert call_count == 2
     assert result["total"] == 2
@@ -780,7 +789,7 @@ async def test_gcloud_compute_subnetworks_list_aggregated() -> None:
                 }
             },
         )
-        result = await connector.gcloud_compute_subnetworks_list(_TARGET, params={})
+        result = await connector.gcloud_compute_subnetworks_list(_OPERATOR, _TARGET, params={})
 
     assert result["total"] == 1
     row = result["rows"][0]
@@ -818,7 +827,7 @@ async def test_gcloud_compute_subnetworks_list_per_region() -> None:
             },
         )
         result = await connector.gcloud_compute_subnetworks_list(
-            _TARGET, params={"region": "europe-west3"}
+            _OPERATOR, _TARGET, params={"region": "europe-west3"}
         )
 
     assert result["total"] == 1
@@ -882,7 +891,7 @@ async def test_gcloud_compute_subnetworks_list_follows_pagination() -> None:
         mock.get(
             "https://compute.googleapis.com/compute/v1/projects/my-project-123/aggregated/subnetworks"
         ).mock(side_effect=_side_effect)
-        result = await connector.gcloud_compute_subnetworks_list(_TARGET, params={})
+        result = await connector.gcloud_compute_subnetworks_list(_OPERATOR, _TARGET, params={})
 
     assert call_count == 2
     assert result["total"] == 2
@@ -934,7 +943,7 @@ async def test_gcloud_iam_policy_read_correct_url_and_method() -> None:
         mock.post(
             "https://cloudresourcemanager.googleapis.com/v1/projects/my-project-123:getIamPolicy"
         ).mock(side_effect=_side_effect)
-        result = await connector.gcloud_iam_policy_read(_TARGET, params={})
+        result = await connector.gcloud_iam_policy_read(_OPERATOR, _TARGET, params={})
 
     assert captured_method == ["POST"]
     assert result["version"] == 1
@@ -970,7 +979,7 @@ async def test_gcloud_iam_policy_read_bearer_auth_sent() -> None:
         mock.post(
             "https://cloudresourcemanager.googleapis.com/v1/projects/my-project-123:getIamPolicy"
         ).mock(side_effect=_side_effect)
-        await connector.gcloud_iam_policy_read(_TARGET, params={})
+        await connector.gcloud_iam_policy_read(_OPERATOR, _TARGET, params={})
 
     assert seen_headers[0] == "Bearer policy-token"
     await connector.aclose()

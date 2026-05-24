@@ -36,12 +36,16 @@ SA-JSON-key refusal
 -------------------
 
 Org policy ``constraints/iam.disableServiceAccountKeyCreation`` is in force
-on the consumer's GCP organization. :meth:`auth_headers` inspects the Vault
+on the consumer's GCP organization. :meth:`_ensure_token` — the single
+token-acquisition chokepoint every operation, :meth:`fingerprint`,
+:meth:`probe`, and :meth:`auth_headers` flow through — inspects the Vault
 ``secret_ref`` payload for SA-JSON-key field names (``private_key``,
 ``private_key_id``, ``client_email``, etc.) and raises a :exc:`ValueError`
 with a clear message before building any token. The error names the target
 and the offending fields so operators can identify and remove the misdirected
-key material.
+key material. Routing the gate through :meth:`_ensure_token` (rather than only
+:meth:`auth_headers`, which no live path calls) makes the refusal fire on the
+operation / fingerprint / probe paths too (#985).
 
 Target conventions
 ------------------
@@ -90,6 +94,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.gcloud.session import (
     GcloudCredentialsLoader,
@@ -300,20 +305,27 @@ class GcloudConnector(HttpConnector):
            ``IMPERSONATION`` or ``None`` (pre-G0.3 sentinel). Any other
            value raises :exc:`NotImplementedError`.
 
-        2. **SA-JSON-key refusal**: loads the Vault ``secret_ref`` payload
-           and checks for SA-JSON-key field names. If any are found, raises
+        2. **SA-JSON-key refusal**: :meth:`_ensure_token` loads the Vault
+           ``secret_ref`` payload and checks for SA-JSON-key field names
+           before building any token. If any are found, it raises
            :exc:`ValueError` naming the target and the offending fields.
            No token is built.
 
-        3. **Token fetch / cache**: calls :meth:`_ensure_token` which
-           builds impersonated credentials via ADC + impersonation if the
-           cache is empty, then returns the bearer token.
+        3. **Token fetch / cache**: :meth:`_ensure_token` builds
+           impersonated credentials via ADC + impersonation if the cache
+           is empty, then returns the bearer token.
 
-        The ``operator`` is forwarded to :meth:`_gate_sa_key_refusal` so the
-        credentials loader reads the per-target Vault secret under the
-        operator's identity. It is NOT forwarded to GCP — ``IMPERSONATION``
-        auth drives all GCP calls through the google-auth impersonation
-        chain, not the operator's OIDC JWT.
+        The ``operator`` is forwarded to :meth:`_ensure_token` (and from
+        there to :meth:`_gate_sa_key_refusal`) so the credentials loader
+        reads the per-target Vault secret under the operator's identity. It
+        is NOT forwarded to GCP — ``IMPERSONATION`` auth drives all GCP
+        calls through the google-auth impersonation chain, not the
+        operator's OIDC JWT.
+
+        ``auth_headers`` is no longer the only entry point that enforces the
+        SA-JSON-key refusal: the gate now lives inside :meth:`_ensure_token`,
+        the single token-acquisition chokepoint every operation,
+        :meth:`fingerprint`, and :meth:`probe` flow through. See #985.
         """
         auth_model = getattr(target, "auth_model", None)
         if not _is_acceptable_auth_model(auth_model):
@@ -322,8 +334,7 @@ class GcloudConnector(HttpConnector):
                 f"{AuthModel.IMPERSONATION.value!r}; target "
                 f"{target.name!r} requested auth_model={auth_model!r}"
             )
-        await self._gate_sa_key_refusal(target, operator)
-        token = await self._ensure_token(target)
+        token = await self._ensure_token(target, operator)
         return {"Authorization": f"Bearer {token}"}
 
     # ------------------------------------------------------------------
@@ -333,13 +344,16 @@ class GcloudConnector(HttpConnector):
     async def _gate_sa_key_refusal(self, target: GcloudTargetLike, operator: Operator) -> None:
         """Raise :exc:`ValueError` if the Vault secret carries SA-JSON-key fields.
 
-        The check runs on every :meth:`auth_headers` call (not just the
+        The check runs on every :meth:`_ensure_token` call (not just the
         first) so a Vault secret rotation that introduces key material is
-        caught on the next request rather than silently ignored due to
-        caching. The credentials_loader is responsible for cache behaviour;
-        this method only validates the shape. ``operator`` is forwarded to the
-        loader so the per-target Vault read happens under the operator's
-        identity.
+        caught on the next request rather than silently ignored due to token
+        caching. Because every operation, :meth:`fingerprint`, and
+        :meth:`probe` acquire their token through :meth:`_ensure_token`, the
+        refusal fires on all of those paths — not only on a direct
+        :meth:`auth_headers` call (#985). The credentials_loader is
+        responsible for cache behaviour; this method only validates the
+        shape. ``operator`` is forwarded to the loader so the per-target
+        Vault read happens under the operator's identity.
 
         Raises
         ------
@@ -366,7 +380,7 @@ class GcloudConnector(HttpConnector):
     # Token management
     # ------------------------------------------------------------------
 
-    async def _ensure_token(self, target: GcloudTargetLike) -> str:
+    async def _ensure_token(self, target: GcloudTargetLike, operator: Operator) -> str:
         """Return a valid bearer token for *target*, fetching if needed.
 
         Builds impersonated credentials on first use via
@@ -377,7 +391,19 @@ class GcloudConnector(HttpConnector):
         first-use callers for the same target without blocking callers for
         different targets (M1 fix). Subsequent calls take the fast path
         (cached token still valid) without acquiring any lock.
+
+        The SA-JSON-key refusal gate runs on **every** call — before the
+        cache fast path — so a Vault secret rotation that introduces key
+        material is refused on the next request regardless of a still-valid
+        cached token. This is the single token-acquisition chokepoint every
+        operation, :meth:`fingerprint`, :meth:`probe`, and
+        :meth:`auth_headers` flow through, so threading the gate here makes
+        the refusal fire on all of those paths (#985). ``operator`` is
+        forwarded to the gate so the per-target Vault read happens under the
+        operator's identity.
         """
+        await self._gate_sa_key_refusal(target, operator)
+
         # Fast path: cached and valid
         cached_token = self._token_cache.get(target.name)
         if cached_token is not None:
@@ -483,6 +509,7 @@ class GcloudConnector(HttpConnector):
         target: GcloudTargetLike,
         abs_url: str,
         *,
+        operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """GET an absolute GCP API URL, handle 401 with one token refresh.
@@ -492,10 +519,14 @@ class GcloudConnector(HttpConnector):
         The ``httpx.AsyncClient`` base_url is a placeholder; ``abs_url``
         overrides it fully.
 
+        ``operator`` is required and forwarded to :meth:`_ensure_token` so
+        the SA-JSON-key refusal gate runs (under the operator's identity)
+        before any token is built or GCP request issued (#985).
+
         On a 401 response, the token is refreshed once and the request
         retried. Any subsequent non-2xx raises ``httpx.HTTPStatusError``.
         """
-        token = await self._ensure_token(target)
+        token = await self._ensure_token(target, operator)
         client = await self._http_client(target)
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -523,14 +554,24 @@ class GcloudConnector(HttpConnector):
         ``product="gcp-project"`` — this fingerprints the project resource
         itself, not the GCP API surface.
 
-        On any transport, auth, or status failure, returns a non-reachable
-        :class:`FingerprintResult` whose ``extras["error"]`` carries the
-        exception class + message.
+        The SA-JSON-key refusal gate runs at token acquisition (inside
+        :meth:`_get_json_abs` → :meth:`_ensure_token`). ``fingerprint`` and
+        :meth:`probe` are operator-less ABC entry points, so they synthesise
+        a frozen system operator (empty ``raw_jwt``) for the gate's Vault
+        read — the same stand-in the other operator-less probe paths use. A
+        target whose ``secret_ref`` carries SA-JSON-key fields therefore
+        raises :exc:`ValueError` from the gate, which is caught below and
+        surfaced as ``reachable=False`` rather than silently proceeding to a
+        GCP call (#985).
+
+        On any transport, auth, or status failure (including the SA-JSON-key
+        refusal), returns a non-reachable :class:`FingerprintResult` whose
+        ``extras["error"]`` carries the exception class + message.
         """
         probed_at = datetime.now(UTC)
         url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
         try:
-            payload = await self._get_json_abs(target, url)
+            payload = await self._get_json_abs(target, url, operator=synthesise_system_operator())
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
             return FingerprintResult(
                 vendor="google",
@@ -573,14 +614,23 @@ class GcloudConnector(HttpConnector):
         4. The project exists and the impersonated SA has at minimum
            ``resourcemanager.projects.get`` permission.
 
+        The SA-JSON-key refusal gate runs at token acquisition (inside
+        :meth:`_get_json_abs` → :meth:`_ensure_token`). ``probe`` is an
+        operator-less ABC entry point, so it synthesises a frozen system
+        operator (empty ``raw_jwt``) for the gate's Vault read. A target
+        whose ``secret_ref`` carries SA-JSON-key fields raises
+        :exc:`ValueError` from the gate, which is caught below and surfaced
+        as ``ok=False`` + ``reason`` rather than silently proceeding (#985).
+
         Returns ``ok=True`` when the response is HTTP 200 with a
         ``projectId`` field matching ``target.gcp_project``.
-        Returns ``ok=False`` + ``reason`` on any failure.
+        Returns ``ok=False`` + ``reason`` on any failure (including the
+        SA-JSON-key refusal).
         """
         probed_at = datetime.now(UTC)
         url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
         try:
-            payload = await self._get_json_abs(target, url)
+            payload = await self._get_json_abs(target, url, operator=synthesise_system_operator())
         except (httpx.HTTPError, OSError, RuntimeError, ValueError) as exc:
             return ProbeResult(
                 ok=False,
@@ -643,16 +693,22 @@ class GcloudConnector(HttpConnector):
         target: GcloudTargetLike,
         abs_url: str,
         *,
+        operator: Operator,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """POST to an absolute GCP API URL, handle 401 with one token refresh.
 
         Used by ops that call GCP APIs with POST semantics (e.g.
         ``cloudresourcemanager.googleapis.com/v1/projects/<id>:getIamPolicy``).
+
+        ``operator`` is required and forwarded to :meth:`_ensure_token` so
+        the SA-JSON-key refusal gate runs (under the operator's identity)
+        before any token is built or GCP request issued (#985).
+
         On a 401 response, the token is refreshed once and the request retried.
         Any subsequent non-2xx raises ``httpx.HTTPStatusError``.
         """
-        token = await self._ensure_token(target)
+        token = await self._ensure_token(target, operator)
         client = await self._http_client(target)
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -758,25 +814,38 @@ class GcloudConnector(HttpConnector):
 
     async def gcloud_about(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
         """Return GCP project identity summary.
 
-        Op-id: ``gcloud.about``. Wraps :meth:`fingerprint` to expose the same
-        project-identity data through the typed-op dispatcher as a flat dict.
+        Op-id: ``gcloud.about``. Exposes the same project-identity data as
+        :meth:`fingerprint` through the typed-op dispatcher as a flat dict,
+        but fetches the CRM project resource directly with the real
+        ``operator`` so the SA-JSON-key refusal gate runs under the
+        operator's identity (the dispatcher threads ``operator`` because the
+        handler signature names it — #985). Delegating to :meth:`fingerprint`
+        would instead run the gate under a synthesised system operator,
+        losing the operation's identity context.
         """
         del params
-        result = await self.fingerprint(target)
+        url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
+        payload = await self._get_json_abs(target, url, operator=operator)
+        organization: str | None = None
+        parent = payload.get("parent") or {}
+        if parent.get("type") == "organization":
+            organization = parent.get("id")
         return {
-            "project_id": result.extras.get("project_id"),
-            "project_number": result.extras.get("project_number"),
-            "lifecycle_state": result.extras.get("lifecycle_state"),
-            "organization": result.extras.get("organization"),
+            "project_id": payload.get("projectId"),
+            "project_number": payload.get("projectNumber"),
+            "lifecycle_state": payload.get("lifecycleState"),
+            "organization": organization,
         }
 
     async def gcloud_project_describe(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -787,10 +856,11 @@ class GcloudConnector(HttpConnector):
         """
         del params
         url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}"
-        return await self._get_json_abs(target, url)
+        return await self._get_json_abs(target, url, operator=operator)
 
     async def gcloud_services_list(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -812,7 +882,9 @@ class GcloudConnector(HttpConnector):
         while True:
             if page_token:
                 query_params["pageToken"] = page_token
-            payload = await self._get_json_abs(target, base_url, params=query_params)
+            payload = await self._get_json_abs(
+                target, base_url, operator=operator, params=query_params
+            )
             for svc in payload.get("services") or []:
                 config = svc.get("config") or {}
                 rows.append(
@@ -830,6 +902,7 @@ class GcloudConnector(HttpConnector):
 
     async def gcloud_iam_service_accounts_list(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -847,7 +920,9 @@ class GcloudConnector(HttpConnector):
             query_params: dict[str, Any] = {}
             if page_token:
                 query_params["pageToken"] = page_token
-            payload = await self._get_json_abs(target, base_url, params=query_params or None)
+            payload = await self._get_json_abs(
+                target, base_url, operator=operator, params=query_params or None
+            )
             for sa in payload.get("accounts") or []:
                 rows.append(
                     {
@@ -864,8 +939,13 @@ class GcloudConnector(HttpConnector):
 
         return {"rows": rows, "total": len(rows)}
 
+    # C901 pre-existing (11>10): the zone/aggregated branch + paginated
+    # while-loops predate this Task. #985 only threads `operator` for the
+    # SA-key gate; complexity is unchanged from main. Refactoring the
+    # pagination shape is a separate concern.  # code-quality-allow: C901
     async def gcloud_compute_instances_list(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -890,7 +970,9 @@ class GcloudConnector(HttpConnector):
                 query_params: dict[str, Any] = {}
                 if page_token:
                     query_params["pageToken"] = page_token
-                payload = await self._get_json_abs(target, base_url, params=query_params or None)
+                payload = await self._get_json_abs(
+                    target, base_url, operator=operator, params=query_params or None
+                )
                 for inst in payload.get("items") or []:
                     rows.append(_instance_row(inst, zone=zone))
                 page_token = payload.get("nextPageToken")
@@ -905,7 +987,9 @@ class GcloudConnector(HttpConnector):
                 query_params = {}
                 if page_token:
                     query_params["pageToken"] = page_token
-                payload = await self._get_json_abs(target, base_url, params=query_params or None)
+                payload = await self._get_json_abs(
+                    target, base_url, operator=operator, params=query_params or None
+                )
                 for zone_key, zone_data in (payload.get("items") or {}).items():
                     zone_name = zone_key.removeprefix("zones/")
                     for inst in zone_data.get("instances") or []:
@@ -918,6 +1002,7 @@ class GcloudConnector(HttpConnector):
 
     async def gcloud_compute_networks_list(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -938,7 +1023,9 @@ class GcloudConnector(HttpConnector):
             query_params: dict[str, Any] = {}
             if page_token:
                 query_params["pageToken"] = page_token
-            payload = await self._get_json_abs(target, base_url, params=query_params or None)
+            payload = await self._get_json_abs(
+                target, base_url, operator=operator, params=query_params or None
+            )
             for net in payload.get("items") or []:
                 routing_config = net.get("routingConfig") or {}
                 rows.append(
@@ -956,8 +1043,13 @@ class GcloudConnector(HttpConnector):
 
         return {"rows": rows, "total": len(rows)}
 
+    # C901 pre-existing (11>10): the region/aggregated branch + paginated
+    # while-loops predate this Task. #985 only threads `operator` for the
+    # SA-key gate; complexity is unchanged from main. Refactoring the
+    # pagination shape is a separate concern.  # code-quality-allow: C901
     async def gcloud_compute_subnetworks_list(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -980,7 +1072,9 @@ class GcloudConnector(HttpConnector):
                 query_params: dict[str, Any] = {}
                 if page_token:
                     query_params["pageToken"] = page_token
-                payload = await self._get_json_abs(target, base_url, params=query_params or None)
+                payload = await self._get_json_abs(
+                    target, base_url, operator=operator, params=query_params or None
+                )
                 for sn in payload.get("items") or []:
                     rows.append(_subnet_row(sn, region=region))
                 page_token = payload.get("nextPageToken")
@@ -995,7 +1089,9 @@ class GcloudConnector(HttpConnector):
                 query_params = {}
                 if page_token:
                     query_params["pageToken"] = page_token
-                payload = await self._get_json_abs(target, base_url, params=query_params or None)
+                payload = await self._get_json_abs(
+                    target, base_url, operator=operator, params=query_params or None
+                )
                 for region_key, region_data in (payload.get("items") or {}).items():
                     region_name = region_key.removeprefix("regions/")
                     for sn in region_data.get("subnetworks") or []:
@@ -1008,6 +1104,7 @@ class GcloudConnector(HttpConnector):
 
     async def gcloud_iam_policy_read(
         self,
+        operator: Operator,
         target: GcloudTargetLike,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -1019,7 +1116,7 @@ class GcloudConnector(HttpConnector):
         """
         del params
         url = f"{_CRM_API_BASE}/v1/projects/{target.gcp_project}:getIamPolicy"
-        payload = await self._post_json_abs(target, url)
+        payload = await self._post_json_abs(target, url, operator=operator)
         return {
             "version": payload.get("version"),
             "etag": payload.get("etag"),

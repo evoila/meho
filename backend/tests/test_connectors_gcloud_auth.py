@@ -488,7 +488,7 @@ async def test_401_triggers_token_refresh_and_retry() -> None:
 
         route.side_effect = _side_effect
 
-        result = await connector._get_json_abs(_TARGET_A, url)
+        result = await connector._get_json_abs(_TARGET_A, url, operator=_OPERATOR)
 
     assert result == {"projectId": "my-project-123"}
     assert call_count == 2  # initial + retry after refresh
@@ -707,3 +707,143 @@ async def test_aclose_with_empty_cache_is_noop() -> None:
     await connector.aclose()
     assert connector._token_cache == {}
     assert connector._clients == {}
+
+
+# ---------------------------------------------------------------------------
+# SA-JSON-key refusal fires on the operation / fingerprint / probe paths (#985)
+#
+# The gate used to be invoked only from auth_headers(); no live path calls
+# auth_headers(). These tests drive the real entry points — typed-op handlers
+# (which the dispatcher reaches), fingerprint(), and probe() — and assert the
+# refusal fires there, that no token is built, and that no GCP request is
+# issued.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_op_handler_get_path_refuses_sa_json_key() -> None:
+    """A GET-based typed op (gcloud.about) refuses an SA-JSON-key secret.
+
+    Drives the op-handler entry point the dispatcher invokes (signature
+    ``(operator, target, params)``) rather than ``auth_headers()`` directly.
+    Asserts the gate raises, no token is built, and — via respx with no routes
+    registered — that no GCP request was issued (respx raises on any unmocked
+    request, so reaching the wire would surface as a different error).
+    """
+    connector = GcloudConnector(credentials_loader=_sa_key_loader)
+    with respx.mock(assert_all_called=False), pytest.raises(ValueError) as exc_info:
+        await connector.gcloud_about(operator=_OPERATOR, target=_TARGET_A, params={})
+    msg = str(exc_info.value)
+    assert "gcloud-a" in msg
+    assert "private_key" in msg
+    assert "disableServiceAccountKeyCreation" in msg
+    assert _TARGET_A.name not in connector._token_cache
+    assert not connector._creds_cache
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_op_handler_post_path_refuses_sa_json_key() -> None:
+    """A POST-based typed op (gcloud.iam.policy.read) refuses an SA-JSON-key secret.
+
+    Exercises the ``_post_json_abs`` → ``_ensure_token`` path so the gate is
+    proven reachable from the POST entry point too, not only the GET one.
+    """
+    connector = GcloudConnector(credentials_loader=_sa_key_loader)
+    with respx.mock(assert_all_called=False), pytest.raises(ValueError) as exc_info:
+        await connector.gcloud_iam_policy_read(operator=_OPERATOR, target=_TARGET_A, params={})
+    msg = str(exc_info.value)
+    assert "gcloud-a" in msg
+    assert "private_key" in msg
+    assert _TARGET_A.name not in connector._token_cache
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_op_handler_compliant_secret_does_not_refuse() -> None:
+    """A compliant (empty) secret lets the op proceed to the GCP call.
+
+    Guards against the gate over-firing: the refusal must trigger only on
+    SA-JSON-key material, not on every call.
+    """
+    mock_creds = _make_mock_creds("tok")
+    adc_loader, _pf, _ = _make_adc_loader("tok")
+    connector = GcloudConnector(credentials_loader=_empty_loader, adc_loader=adc_loader)
+
+    url = "https://cloudresourcemanager.googleapis.com/v1/projects/my-project-123"
+    with (
+        patch("google.auth.impersonated_credentials.Credentials", return_value=mock_creds),
+        respx.mock() as mock,
+    ):
+        mock.get(url).respond(
+            200,
+            json={
+                "projectId": "my-project-123",
+                "projectNumber": "987654321",
+                "lifecycleState": "ACTIVE",
+                "parent": {"type": "organization", "id": "112233445566"},
+            },
+        )
+        result = await connector.gcloud_about(operator=_OPERATOR, target=_TARGET_A, params={})
+
+    assert result["project_id"] == "my-project-123"
+    assert result["project_number"] == "987654321"
+    assert result["organization"] == "112233445566"
+    assert connector._token_cache.get("gcloud-a") == "tok"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_refuses_sa_json_key_returns_unreachable() -> None:
+    """fingerprint() surfaces the SA-JSON-key refusal as reachable=False.
+
+    fingerprint() has no operator in its ABC signature, so it synthesises a
+    system operator for the gate. The refusal ValueError is caught and turned
+    into a non-reachable result rather than silently proceeding to a GCP call.
+    """
+    connector = GcloudConnector(credentials_loader=_sa_key_loader)
+    with respx.mock(assert_all_called=False):
+        fp = await connector.fingerprint(_TARGET_A)
+    assert fp.reachable is False
+    assert "error" in fp.extras
+    assert "ValueError" in fp.extras["error"]
+    assert "private_key" in fp.extras["error"]
+    assert _TARGET_A.name not in connector._token_cache
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_probe_refuses_sa_json_key_returns_ok_false() -> None:
+    """probe() surfaces the SA-JSON-key refusal as ok=False + reason."""
+    connector = GcloudConnector(credentials_loader=_sa_key_loader)
+    with respx.mock(assert_all_called=False):
+        result = await connector.probe(_TARGET_A)
+    assert result.ok is False
+    assert result.reason is not None
+    assert "ValueError" in result.reason
+    assert "private_key" in result.reason
+    assert _TARGET_A.name not in connector._token_cache
+    await connector.aclose()
+
+
+def test_typed_op_handlers_name_operator_for_dispatcher_threading() -> None:
+    """Every gcloud typed-op handler names ``operator`` in its signature.
+
+    The dispatcher's ``dispatch_typed`` branch threads the operator to a
+    handler only when ``"operator"`` appears in the handler's parameter names
+    (see meho_backplane.operations._branches.dispatch_typed). This test pins
+    that contract for every registered gcloud op so the gate's Vault read runs
+    under the real operator's identity on the operation path (#985), and so a
+    future refactor that drops the parameter is caught.
+    """
+    import inspect
+
+    from meho_backplane.connectors.gcloud.ops import GCLOUD_OPS
+
+    for op in GCLOUD_OPS:
+        handler = getattr(GcloudConnector, op.handler_attr)
+        param_names = list(inspect.signature(handler).parameters.keys())
+        assert "operator" in param_names, (
+            f"gcloud op {op.op_id!r} handler {op.handler_attr!r} must name "
+            f"'operator' so the dispatcher threads it; got {param_names!r}"
+        )

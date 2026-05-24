@@ -45,10 +45,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 import respx
 
+from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors.gcloud import GcloudConnector
 from meho_backplane.connectors.gcloud.ops import GCLOUD_OPS
 from meho_backplane.connectors.gcloud.session import GcloudTargetLike
 from meho_backplane.connectors.schemas import AuthModel
+
+# Operator threaded to typed-op handlers (signature ``(operator, target,
+# params)``). The mock credentials loader ignores it; it satisfies the
+# operator-context signature the gate's Vault read requires.
+_OPERATOR: Operator = synthesise_system_operator()
 
 # ---------------------------------------------------------------------------
 # Module-level constants
@@ -141,7 +148,7 @@ def _make_connector(token: str = "e2e-bearer-token") -> GcloudConnector:
     """Return a GcloudConnector wired with a no-Vault credentials_loader."""
     adc_loader, _patch_fn, _mc = _make_adc_loader(token)
 
-    async def _empty_loader(_target: GcloudTargetLike) -> dict[str, Any]:
+    async def _empty_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
         return {}
 
     return GcloudConnector(
@@ -193,7 +200,7 @@ async def test_gcloud_e2e_about_returns_identity_fields() -> None:
                 "parent": {"type": "organization", "id": "112233445566"},
             },
         )
-        result = await connector.gcloud_about(_E2E_TARGET, params={})
+        result = await connector.gcloud_about(_OPERATOR, _E2E_TARGET, params={})
 
     assert result["project_id"] == _GCP_PROJECT
     assert result["project_number"] == "987654321"
@@ -224,7 +231,7 @@ async def test_gcloud_e2e_project_describe_returns_full_resource() -> None:
         mock.get(f"https://cloudresourcemanager.googleapis.com/v1/projects/{_GCP_PROJECT}").respond(
             200, json=raw_project
         )
-        result = await connector.gcloud_project_describe(_E2E_TARGET, params={})
+        result = await connector.gcloud_project_describe(_OPERATOR, _E2E_TARGET, params={})
 
     assert result == raw_project
     await connector.aclose()
@@ -259,7 +266,7 @@ async def test_gcloud_e2e_services_list_returns_enabled_services() -> None:
                 ]
             },
         )
-        result = await connector.gcloud_services_list(_E2E_TARGET, params={})
+        result = await connector.gcloud_services_list(_OPERATOR, _E2E_TARGET, params={})
 
     assert result["total"] == 2
     names = {r["name"] for r in result["rows"]}
@@ -299,7 +306,7 @@ async def test_gcloud_e2e_iam_service_accounts_list_returns_sa_rows() -> None:
                 ]
             },
         )
-        result = await connector.gcloud_iam_service_accounts_list(_E2E_TARGET, params={})
+        result = await connector.gcloud_iam_service_accounts_list(_OPERATOR, _E2E_TARGET, params={})
 
     assert result["total"] == 2
     emails = {r["email"] for r in result["rows"]}
@@ -361,7 +368,7 @@ async def test_gcloud_e2e_compute_instances_list_jsonflux_envelope() -> None:
                 }
             },
         )
-        result = await connector.gcloud_compute_instances_list(_E2E_TARGET, params={})
+        result = await connector.gcloud_compute_instances_list(_OPERATOR, _E2E_TARGET, params={})
 
     # JSONFlux-compatible envelope — must have 'rows' list and 'total' int
     assert "rows" in result, "result must have 'rows' key (JSONFlux envelope)"
@@ -416,7 +423,7 @@ async def test_gcloud_e2e_compute_networks_list_returns_network_rows() -> None:
                 ]
             },
         )
-        result = await connector.gcloud_compute_networks_list(_E2E_TARGET, params={})
+        result = await connector.gcloud_compute_networks_list(_OPERATOR, _E2E_TARGET, params={})
 
     assert result["total"] == 2
     names = {r["name"] for r in result["rows"]}
@@ -459,7 +466,7 @@ async def test_gcloud_e2e_compute_subnetworks_list_returns_subnet_rows() -> None
                 }
             },
         )
-        result = await connector.gcloud_compute_subnetworks_list(_E2E_TARGET, params={})
+        result = await connector.gcloud_compute_subnetworks_list(_OPERATOR, _E2E_TARGET, params={})
 
     assert result["total"] == 1
     assert result["rows"][0]["name"] == "default"
@@ -498,7 +505,7 @@ async def test_gcloud_e2e_iam_policy_read_returns_bindings() -> None:
                 ],
             },
         )
-        result = await connector.gcloud_iam_policy_read(_E2E_TARGET, params={})
+        result = await connector.gcloud_iam_policy_read(_OPERATOR, _E2E_TARGET, params={})
 
     assert result["version"] == 1
     assert result["etag"] == "BwXe2eABC"
@@ -581,7 +588,7 @@ async def test_gcloud_e2e_audit_params_hash_field_present_in_all_ops() -> None:
         }
         for op_id, (method_name, params) in handler_method_map.items():
             handler = getattr(connector, method_name)
-            result = await handler(_E2E_TARGET, params=params)
+            result = await handler(_OPERATOR, _E2E_TARGET, params=params)
             assert result is not None, (
                 f"{op_id}: handler returned None — dispatch audit would fail "
                 f"(dispatcher needs a non-None result to write the audit row)"
@@ -647,7 +654,7 @@ async def test_gcloud_e2e_instances_list_empty_project_returns_empty_envelope() 
         mock.get(
             f"https://compute.googleapis.com/compute/v1/projects/{_GCP_PROJECT}/aggregated/instances"
         ).respond(200, json={"items": {}})
-        result = await connector.gcloud_compute_instances_list(_E2E_TARGET, params={})
+        result = await connector.gcloud_compute_instances_list(_OPERATOR, _E2E_TARGET, params={})
 
     assert result == {"rows": [], "total": 0}, (
         f"Empty project must return empty JSONFlux envelope; got {result!r}"
@@ -687,7 +694,9 @@ async def test_gcloud_e2e_instances_list_zone_filter_uses_per_zone_api() -> None
                 ]
             },
         )
-        result = await connector.gcloud_compute_instances_list(_E2E_TARGET, params={"zone": zone})
+        result = await connector.gcloud_compute_instances_list(
+            _OPERATOR, _E2E_TARGET, params={"zone": zone}
+        )
 
     assert result["total"] == 1
     assert result["rows"][0]["name"] == "zone-specific-vm"
@@ -734,14 +743,14 @@ async def test_gcloud_live_integration_about() -> None:
         auth_model=AuthModel.IMPERSONATION.value,
     )
 
-    async def _no_key_loader(_target: GcloudTargetLike) -> dict[str, Any]:
+    async def _no_key_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
         # Real impersonation — no SA JSON key in secret_ref.
         return {}
 
     # Construct connector WITHOUT adc_loader override → uses google.auth.default()
     connector = GcloudConnector(credentials_loader=_no_key_loader)
     try:
-        result = await connector.gcloud_about(live_target, params={})
+        result = await connector.gcloud_about(_OPERATOR, live_target, params={})
         assert result["project_id"] == project, (
             f"Live gcloud.about project_id mismatch: got {result['project_id']!r} "
             f"expected {project!r}"
@@ -781,7 +790,7 @@ async def test_gcloud_live_integration_all_8_ops_return_ok_status() -> None:
         auth_model=AuthModel.IMPERSONATION.value,
     )
 
-    async def _no_key_loader(_target: GcloudTargetLike) -> dict[str, Any]:
+    async def _no_key_loader(_target: GcloudTargetLike, _operator: Operator) -> dict[str, Any]:
         return {}
 
     connector = GcloudConnector(credentials_loader=_no_key_loader)
@@ -798,7 +807,7 @@ async def test_gcloud_live_integration_all_8_ops_return_ok_status() -> None:
         ]
         for op_id, method_name, params in handler_method_map:
             handler = getattr(connector, method_name)
-            result = await handler(live_target, params=params)
+            result = await handler(_OPERATOR, live_target, params=params)
             assert result is not None, (
                 f"Live {op_id}: handler returned None — expected a non-None result dict"
             )

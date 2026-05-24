@@ -33,7 +33,7 @@ under `connector_id="gcloud-rest-1.0"`.
 
 | Op ID | API surface | HTTP verb | Notes |
 |---|---|---|---|
-| `gcloud.about` | CRM v1 `projects.get` | GET | Identity summary; wraps `fingerprint()` |
+| `gcloud.about` | CRM v1 `projects.get` | GET | Identity summary; fetches CRM directly with the real operator so the SA-key gate runs under the operator's identity (#985) |
 | `gcloud.project.describe` | CRM v1 `projects.get` | GET | Full CRM resource dict |
 | `gcloud.services.list` | Service Usage v1 | GET | Follows `nextPageToken`; `enabled_only` param |
 | `gcloud.iam.service_accounts.list` | IAM v1 | GET | Follows `nextPageToken` |
@@ -85,7 +85,8 @@ and return a `ResultHandle` without any connector-side changes.
 - **`_SA_KEY_FIELDS`** (`session.py`) — `frozenset` of field names that
   identify a service-account JSON key file. The connector's
   `_gate_sa_key_refusal()` intersects the Vault record's keys against
-  this set on every `auth_headers()` call.
+  this set on every `_ensure_token()` call — i.e. on every operation,
+  `fingerprint()`, `probe()`, and `auth_headers()` call (#985).
 - **`_contains_sa_key_fields(record)`** (`session.py`) — pure function
   returning `True` if `record` contains any SA key field names.
 
@@ -103,12 +104,25 @@ and return a `ResultHandle` without any connector-side changes.
 
 ### Auth flow per request
 
+The single token-acquisition chokepoint is `_ensure_token(target, operator)`.
+Every operation (`_get_json_abs` / `_post_json_abs`), `fingerprint()`,
+`probe()`, and `auth_headers()` flow through it — so the SA-JSON-key refusal
+gate lives there, not only in `auth_headers()` (#985). Previously the gate
+was invoked only from `auth_headers()`, which no live path calls, so the
+control never fired for real usage.
+
 1. **auth_model gate** — `auth_headers()` checks `target.auth_model` is
    `IMPERSONATION` or `None`. Any other value → `NotImplementedError`.
-2. **SA-JSON-key refusal gate** — loads the Vault `secret_ref` payload
-   via the injectable `credentials_loader`; checks for SA key field names.
-   Any present → `ValueError` naming the target + fields.
-3. **Token resolution** — calls `_ensure_token(target)`:
+   (Operations skip this gate; the dispatcher resolved the connector by
+   product, and the impersonation model is the only one gcloud supports.)
+2. **SA-JSON-key refusal gate** — `_ensure_token(target, operator)` calls
+   `_gate_sa_key_refusal(target, operator)` **first, before the cache fast
+   path**, so a Vault rotation that introduces key material is refused on
+   the next request even with a still-valid cached token. The gate loads the
+   Vault `secret_ref` payload via the injectable `credentials_loader` (under
+   the operator's identity), checks for SA key field names; any present →
+   `ValueError` naming the target + fields. No token is built.
+3. **Token resolution** — `_ensure_token(target, operator)` continues:
    - Fast path: cached token + `creds.valid` → return cached.
    - Slow path (under per-target lock): calls `_fetch_token(target)` which:
      - Runs `_fetch_token_sync(target)` in a thread pool executor.
@@ -116,12 +130,25 @@ and return a `ResultHandle` without any connector-side changes.
        credentials, wraps with `impersonated_credentials.Credentials`,
        calls `creds.refresh(Request())`, returns `(token, creds)`.
      - Stores token + creds in `_token_cache` / `_creds_cache`.
-4. Returns `{"Authorization": "Bearer <token>"}`.
+4. `auth_headers()` returns `{"Authorization": "Bearer <token>"}`; operations
+   build the header inline from the same token.
+
+**Operator threading.** Typed-op handlers have signature
+`(self, operator, target, params)`; the dispatcher's `dispatch_typed`
+threads `operator` to a handler only when the parameter name appears in the
+signature (`meho_backplane.operations._branches.dispatch_typed`). Handlers
+forward `operator` to `_get_json_abs` / `_post_json_abs` → `_ensure_token`.
+`fingerprint()` and `probe()` are operator-less ABC entry points, so they
+synthesise a frozen system operator (empty `raw_jwt`,
+`synthesise_system_operator()`) for the gate's Vault read — the same stand-in
+the other operator-less probe paths use. A target whose `secret_ref` carries
+SA-JSON-key fields therefore surfaces `reachable=False` (fingerprint) /
+`ok=False` (probe) rather than silently proceeding.
 
 ### 401 auto-refresh
 
 GCP REST APIs return HTTP 401 when a bearer token has expired.
-`_get_json_abs(target, abs_url)`:
+`_get_json_abs(target, abs_url, *, operator)`:
 - Issues the GET with the current bearer token.
 - On 401: calls `refresh_token(target)` (acquires per-target lock, calls
   `creds.refresh()` in executor, updates cache) and retries once.
@@ -130,22 +157,26 @@ GCP REST APIs return HTTP 401 when a bearer token has expired.
 ### fingerprint()
 
 `GET https://cloudresourcemanager.googleapis.com/v1/projects/<gcp_project>`
-via `_get_json_abs`. Returns:
+via `_get_json_abs` (with a synthesised system operator for the gate).
+Returns:
 - `vendor="google"`, `product="gcp-project"`, `version=None`.
 - `extras["project_number"]`, `extras["lifecycle_state"]`,
   `extras["organization"]` (from `parent.id` when `parent.type="organization"`),
   `extras["project_id"]`.
-- On failure: `reachable=False`, `extras["error"]`.
+- On failure (including an SA-JSON-key refusal): `reachable=False`,
+  `extras["error"]`.
 
 ### probe()
 
-Same endpoint as `fingerprint()`. Verifies:
+Same endpoint as `fingerprint()` (also via the synthesised system operator).
+Verifies:
 - ADC source credentials are present and valid.
 - Impersonation chain succeeds (Token Creator role granted).
 - Cloud Resource Manager API reachable.
 - Response `projectId` matches `target.gcp_project`.
 
-Returns `ok=True` on success, `ok=False + reason` on failure.
+Returns `ok=True` on success, `ok=False + reason` on failure (an SA-JSON-key
+refusal surfaces as `ok=False`).
 
 ### execute()
 
@@ -162,10 +193,11 @@ pod restarts. Raises `AttributeError` if a `handler_attr` is missing (deploy
 bug, not a runtime degradation). Raises `ValueError` if a `group_key` has no
 entry in `_WHEN_TO_USE_BY_GROUP`.
 
-### _post_json_abs(target, abs_url, json_body)
+### _post_json_abs(target, abs_url, *, operator, json_body)
 
 POST variant of `_get_json_abs` for ops that call GCP APIs with POST
-semantics (e.g. `getIamPolicy`). Same 401-refresh-retry pattern.
+semantics (e.g. `getIamPolicy`). Same 401-refresh-retry pattern; `operator`
+is required and threaded to `_ensure_token` for the SA-JSON-key gate.
 
 ## Dependencies
 
@@ -234,6 +266,15 @@ real `GcloudConnector` against a live project.
 - `load_credentials_from_vault` is a stub until Goal #214 (Connector
   parity) wires the live Vault read. Inject `credentials_loader` on
   construction to test or run pre-production.
+- `fingerprint()` and `probe()` run the SA-JSON-key gate under a synthesised
+  system operator (empty `raw_jwt`), because their ABC signatures carry no
+  operator. Once the live `load_credentials_from_vault` lands (Goal #214),
+  the system operator's empty `raw_jwt` will fail closed on the Vault read —
+  which is the intended boundary for system-initiated credential reads, but
+  means probe/fingerprint on a target with a live Vault secret will need a
+  follow-up to thread a real operator (or an unauthenticated reachability
+  variant). Today, with the stub/injected loader, the gate runs and refuses
+  SA-key material correctly on these paths (#985).
 - `_fetch_token_sync` and `refresh_token` run synchronous
   `google.auth.transport.requests.Request()` calls in a thread pool
   executor. The executor is the event loop's default (unbounded); a

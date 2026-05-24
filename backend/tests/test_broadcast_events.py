@@ -197,6 +197,33 @@ class TestClassifyOp:
         assert classify_op(op_id) == "audit_query"
 
     @pytest.mark.parametrize(
+        "op_id",
+        [
+            "meho.audit.replay",
+            "meho.audit.query",
+        ],
+    )
+    def test_meho_audit_prefix_maps_to_audit_query(self, op_id: str) -> None:
+        """``meho.audit.*`` admin meta-tools classify as audit_query (G8.2-T6 #1014).
+
+        The MCP broadcast path derives op_class from ``classify_op(op_id)``
+        with the tool name verbatim — it does not honor the
+        ``ToolDefinition.op_class``. Without the ``meho.audit.`` prefix arm,
+        ``meho.audit.replay`` would fall through to ``other`` and broadcast
+        its full ``ReplayNode`` payload instead of the aggregate-only view.
+        """
+        assert classify_op(op_id) == "audit_query"
+
+    def test_meho_broadcast_prefix_is_not_audit_query(self) -> None:
+        """Only ``meho.audit.`` opts into audit_query — sibling meho.* tools don't.
+
+        Guards against the prefix arm being widened to a bare ``meho.``
+        match, which would mis-redact unrelated admin meta-tools like
+        ``meho.broadcast.overrides.set``.
+        """
+        assert classify_op("meho.broadcast.overrides.set") == "other"
+
+    @pytest.mark.parametrize(
         ("op_id", "expected"),
         [
             ("vsphere.vm.list", "read"),
@@ -345,6 +372,36 @@ class TestRedactPayload:
         """A malformed count never poisons the broadcast — fail-closed to None."""
         result = redact_payload("audit_query", {"row_count": "not-a-number"}, "error")
         assert result["row_count"] is None
+
+    def test_meho_audit_replay_broadcast_is_aggregate_only(self) -> None:
+        """``meho.audit.replay`` broadcasts aggregate-only — no ReplayNode tree (G8.2-T6 #1014).
+
+        The MCP broadcast path classifies via ``classify_op(op_id)`` and
+        redacts via ``redact_payload(op_class, raw_params, status)``. This
+        chains both with the replay tool's name + a representative
+        result-params dict to prove the SSE event carries only
+        ``{op_class, result_status, row_count}`` — never the ``root``
+        ReplayNode forest (full aggregate-only integration assertion is
+        T7).
+        """
+        op_class = classify_op("meho.audit.replay")
+        assert op_class == "audit_query"
+        result = redact_payload(
+            op_class,
+            {
+                "session_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "root": [{"id": "secret-node", "payload": {"vm": "prod-db"}}],
+                "row_count": 12,
+            },
+            "ok",
+        )
+        assert result == {
+            "op_class": "audit_query",
+            "result_status": "ok",
+            "row_count": 12,
+        }
+        assert "root" not in result
+        assert "session_id" not in result
 
     def test_read_keeps_full_params(self) -> None:
         """AC #8 — generic read ops broadcast in full."""

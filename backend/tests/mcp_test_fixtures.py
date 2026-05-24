@@ -236,6 +236,16 @@ async def seeded_operator_tenant() -> None:
         )
 
 
-def post_mcp(client: TestClient, body: Any) -> Any:
-    """POST a JSON-RPC envelope to ``/mcp`` and return the ``Response``."""
-    return client.post("/mcp", json=body)
+def post_mcp(
+    client: TestClient,
+    body: Any,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """POST a JSON-RPC envelope to ``/mcp`` and return the ``Response``.
+
+    ``headers`` lets a test exercise transport-level header handling
+    (e.g. ``Mcp-Session-Id`` capture, G8.2-T2 #1010) without bypassing
+    the shared helper.
+    """
+    return client.post("/mcp", json=body, headers=headers)

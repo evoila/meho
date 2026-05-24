@@ -729,7 +729,21 @@ declared by migration 0012 (G9.3-T1 #856):
   mirror for the edge side.
 
 Both are sub-millisecond on the test fixture and indexed under
-realistic load.
+realistic load. The cross-Initiative integration suite
+`backend/tests/test_topology_history_integration.py` (G9.3-T7 #862)
+proves the envelope at 1M-row scale: it seeds a million-row
+`graph_node_history` table (via a recursive-CTE bulk insert) and
+asserts `EXPLAIN QUERY PLAN` for the single-node walk picks the
+`(tenant_id, node_id, valid_from DESC)` composite index as an
+index-only ("COVERING INDEX") scan with no full table scan. The plan
+assertion is the load-bearing gate (a hard `<10ms` wall-clock bound
+flakes under xdist + coverage); a generous wall-clock bound rides
+along as a secondary regression smoke signal. The same suite proves
+the full refresh → annotate → refresh chronology round-trips through
+`query_history` with correctly-paired `audit_id`s, the `audit_id` →
+`audit_log` soft-FK joins on `(tenant_id, principal)`, the
+cross-tenant boundary on all three verbs, and the diff 1000-row hard
+cap on a high-churn week.
 
 ### Pagination
 

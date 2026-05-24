@@ -76,6 +76,7 @@ References
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -102,6 +103,7 @@ from meho_backplane.mcp.schemas import (
     JsonRpcResponse,
     ServerCapabilities,
 )
+from meho_backplane.settings import get_settings
 
 __all__ = ["McpInvalidParamsError", "register_method", "router"]
 
@@ -441,6 +443,77 @@ def _validate_protocol_version_header(
     )
 
 
+def _bind_mcp_session_id(
+    request: Request,
+    payload: dict[str, Any],
+) -> JSONResponse | None:
+    """Capture the ``Mcp-Session-Id`` header into a structlog contextvar.
+
+    Per the MCP 2025-06-18 Streamable HTTP transport §"Session
+    Management", a server MAY assign a session id at ``initialize`` time
+    that the client echoes in the ``Mcp-Session-Id`` header on every
+    later request. MEHO runs no stateful session store in v0.2 — it
+    only needs the id for **audit correlation** so per-session replay
+    (``meho audit replay <session-id>``, G8.2) can reconstruct one
+    agent's full operation trace. The header is bound as a structlog
+    contextvar (stored as the canonical UUID string, mirroring how
+    :func:`~meho_backplane.targets.resolver.resolve_target` binds
+    ``target_id``); :func:`~meho_backplane.mcp.audit.write_mcp_audit_row`
+    reads it back and writes ``audit_log.agent_session_id``. The
+    contextvar propagates down the request's async call chain, so the
+    write picks it up without threading the value through every handler
+    signature.
+
+    Resolution rules (issue #1010):
+
+    * Present and a parseable UUID → bind that id.
+    * Present but not a UUID → treated as absent. A non-UUID id can't
+      go in a ``uuid`` column, and a malformed *client* header must not
+      500 the call (the client is in the wrong, not the server).
+    * Absent / empty → generate a fresh :func:`uuid.uuid4` for the
+      single-call duration so the row still carries a stable, non-NULL
+      session id (the spec explicitly permits servers to not require
+      sessions; single-call sessions are valid).
+
+    When :attr:`~meho_backplane.settings.Settings.mcp_require_session_id`
+    is ``True`` (``MCP_REQUIRE_SESSION_ID`` env), a missing/empty header
+    short-circuits to a JSON-RPC ``-32600`` Invalid Request **before**
+    dispatch, mirroring the early-return shape of
+    :func:`_validate_protocol_version_header`. A present-but-malformed
+    header is *not* a rejection in require-mode: the client did send a
+    session id, so the require-a-session contract is satisfied; the
+    malformed value just falls back to a fresh uuid4 the same way it
+    does in the default mode.
+
+    Returns ``None`` on the OK path (contextvar bound); a
+    :class:`JSONResponse` (HTTP 200 + JSON-RPC ``-32600`` envelope) on
+    the require-mode rejection so the caller can early-return it before
+    any audit row is written.
+    """
+    session_header = request.headers.get("mcp-session-id")
+    has_header = session_header is not None and session_header != ""
+
+    if not has_header and get_settings().mcp_require_session_id:
+        _log.warning("mcp_session_id_required_but_missing")
+        return _error_response(
+            _coerce_request_id(payload),
+            INVALID_REQUEST,
+            "invalid request: Mcp-Session-Id header is required",
+        )
+
+    session_id: uuid.UUID | None = None
+    if has_header:
+        try:
+            session_id = uuid.UUID(session_header)
+        except ValueError:
+            _log.warning("mcp_malformed_session_id", header=session_header)
+    if session_id is None:
+        session_id = uuid.uuid4()
+
+    structlog.contextvars.bind_contextvars(mcp_session_id=str(session_id))
+    return None
+
+
 def _build_success_response(
     request_id: JsonRpcId,
     result: _McpHandlerResult,
@@ -600,6 +673,15 @@ async def mcp_dispatch(
     protocol_error = _validate_protocol_version_header(request, jrpc.method, payload)
     if protocol_error is not None:
         return protocol_error
+
+    # Capture the Mcp-Session-Id header (G8.2-T2 #1010) so the audit
+    # writer can correlate every row of this call to one agent session.
+    # Bound for both requests and notifications — notifications still
+    # write audit rows downstream. In MCP_REQUIRE_SESSION_ID mode a
+    # missing header short-circuits to -32600 before any dispatch.
+    session_error = _bind_mcp_session_id(request, payload)
+    if session_error is not None:
+        return session_error
 
     # Notification detection: JSON-RPC §4.1.2 says a notification is a
     # request without an ``id`` member. Pydantic-side, ``jrpc.id``

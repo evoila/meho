@@ -26,8 +26,8 @@ this package never inserts, updates, or deletes.
 | `result_status` | `str \| None` | One of `"ok"` / `"error"` / `"denied"`. Maps to status-code ranges. |
 | `since` / `until` | `datetime \| None` | `audit_log.occurred_at` bracket. **Absolute datetimes only** — `"24h"` / `"7d"` shorthand is parsed in the T2 / T3 router. |
 | `audit_id` | `UUID \| None` | Exact-id lookup. |
-| `parent_audit_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** in v0.2 — column lands with G0.6-T7 (#398). |
-| `agent_session_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** in v0.2 — column lands with G8.2-T1 (#1009); the filter is un-gated by G8.2-T3. |
+| `parent_audit_id` | `UUID \| None` | **Raises `UnsupportedFilterError`** — the flat filter stays gated (un-gating is out of scope for #377). The column itself (#398) *is* read onto the returned row and is walked by the replay CTE. |
+| `agent_session_id` | `UUID \| None` | `audit_log.agent_session_id = :value`. Un-gated by G8.2-T3 (#1011); the column landed with G8.2-T1 (#1009). |
 | `limit` | `int` (1-1000) | Default 100. |
 | `cursor` | `str \| None` | Opaque forward-only cursor produced by a prior page. |
 
@@ -53,8 +53,8 @@ Field-to-source mapping:
 | `op_class` | `payload['op_class']` if a string, else `classify_op(op_id)` from `broadcast.events`. |
 | `result_status` | Derived from `status_code` — 401/403 → `"denied"`, 4xx/5xx else → `"error"`, otherwise `"ok"`. |
 | `principal_name` | **None in v0.2** — JWT `name` claim is not captured by either write path. |
-| `parent_audit_id` | **None in v0.2** — column lands with G0.6-T7 (#398). |
-| `agent_session_id` | **None in v0.2** — column lands with G8.2-T1 (#1009); populated by G8.2-T2, surfaced by G8.2-T3. |
+| `parent_audit_id` | `audit_log.parent_audit_id` — composite-operation lineage column (G0.6-T7 #398, migration `0006`). Surfaced on the row since G8.2-T3 (#1011); the flat *filter* on it stays gated. |
+| `agent_session_id` | `audit_log.agent_session_id` — MCP-session correlation column (G8.2-T1 #1009, migration `0014`). Surfaced + filterable since G8.2-T3 (#1011). |
 | `broadcast_event_id` | **None in v0.2** — FK direction is reversed: `BroadcastEvent.audit_id` points at the audit row. |
 
 The three computed fields use exactly the same rules
@@ -74,13 +74,15 @@ end of the matching set under the current filter).
 ```text
 query_audit(filters, tenant_id, session)
   │
-  ├─ Validate filters: parent_audit_id / agent_session_id → UnsupportedFilterError
+  ├─ Validate filters: parent_audit_id → UnsupportedFilterError (flat filter
+  │                     stays gated; agent_session_id is now a usable filter)
   │
   ├─ Build SELECT audit_log, targets.name
   │     OUTER JOIN targets ON audit_log.target_id = targets.id
   │                       AND targets.tenant_id   = :tenant_id   ← JOIN-scope defence
   │     WHERE audit_log.tenant_id = :tenant_id      ← always first
   │       [+ audit_id = :audit_id]
+  │       [+ agent_session_id = :agent_session_id]
   │       [+ operator_sub ILIKE :principal]
   │       [+ occurred_at >= :since]
   │       [+ occurred_at <= :until]
@@ -101,19 +103,67 @@ query_audit(filters, tenant_id, session)
   │   ├─ op_class = payload['op_class'] if str else classify_op(op_id)
   │   ├─ result_status = _derive_result_status(status_code)
   │   └─ AuditEntry(... real cols ..., op_id, op_class, result_status,
-  │                 principal_name=None, parent_audit_id=None,
-  │                 agent_session_id=None, broadcast_event_id=None)
+  │                 parent_audit_id=row.parent_audit_id,
+  │                 agent_session_id=row.agent_session_id,
+  │                 principal_name=None, broadcast_event_id=None)
   │
   └─ next_cursor = encode_cursor(CursorPosition(ts=last.ts, id=last.id))
                    if has_more else None
 ```
 
-## REST surface (G8.1-T2 #466)
+## Per-session replay (G8.2-T3 #1011)
 
-The four routes under `backend/src/meho_backplane/api/v1/audit.py` are the
-operator-facing entry into the substrate. All four dispatch through
-`query_audit` with `tenant_id=operator.tenant_id` (from the JWT) — the
-substrate's tenant-scoping invariant is enforced one layer up.
+`replay.py` adds `replay_session(session_id, *, tenant_id, session,
+max_depth=20) -> list[ReplayNode]` — the read brain behind `meho audit
+replay <session-id>` (T5 CLI), the REST replay route (T4), and the MCP
+replay surface (T6). It reconstructs one agent session as a chronologically
+ordered parent/child forest.
+
+`ReplayNode` subclasses `AuditEntry` (so it carries every audit field
+verbatim — forward-compatible with the v0.2.next compliance-export contract)
+and adds two structural fields: `depth` (0 for roots) and
+`children: list[ReplayNode]`. The self-reference is resolved with a
+module-level `ReplayNode.model_rebuild()`; both models stay `frozen=True`.
+
+Two-step shape:
+
+1. **Fetch the closure (recursive CTE — the first in the codebase).** The
+   non-recursive arm seeds on `agent_session_id = :session_id AND tenant_id =
+   :tenant_id`; the recursive arm joins child rows on
+   `child.parent_audit_id = closure.id` *and* re-asserts `child.tenant_id =
+   :tenant_id`. The tenant predicate on the recursive arm is load-bearing —
+   without it a forged cross-tenant `parent_audit_id` would widen the closure
+   into another tenant's rows. The CTE carries only ids; the full `AuditLog`
+   rows + denormalized `target_name` are fetched in one follow-up
+   `WHERE id IN (SELECT DISTINCT id FROM closure)`. `DISTINCT` collapses ids
+   the CTE re-emits along more than one path (an anchor row that is also a
+   descendant; a node in a cycle).
+
+   The recursive CTE is belt-and-suspenders over a flat
+   `WHERE agent_session_id = :id`: in v0.2 contextvars propagate the session id
+   down nested `dispatch_child` calls, so session rows generally all carry the
+   id — but a child whose id didn't propagate (NULL `agent_session_id`) is
+   still pulled in via its `parent_audit_id` link to an anchored parent.
+
+2. **Assemble the tree (Python).** Rows bucket by `parent_audit_id`; a row is a
+   *root* when its parent is NULL, points outside the fetched set, or equals
+   its own id (self-loop). Each bucket — and the root list — is ordered by
+   `(occurred_at, id)`. A depth-first walk assigns `depth`, drops back-edges
+   via a root-to-node path set, and caps at `max_depth` (a node at the cap
+   keeps its row but `children` is truncated). A self-referential row or a
+   multi-row cycle therefore terminates instead of recursing forever.
+
+`replay_session` never raises `UnsupportedFilterError` — it is a positive
+query, not a filtered list. It reuses `query._build_audit_entry` so a replay
+node and a `query_audit` row for the same audit id agree field-for-field.
+
+## REST surface (G8.1-T2 #466, G8.2-T4 #1012)
+
+The five routes under `backend/src/meho_backplane/api/v1/audit.py` are the
+operator-facing entry into the substrate. The first four dispatch through
+`query_audit`; the fifth (replay) dispatches through `replay_session`. All
+pass `tenant_id=operator.tenant_id` (from the JWT) — the substrate's
+tenant-scoping invariant is enforced one layer up.
 
 | Route | Filter shape | Notes |
 |---|---|---|
@@ -121,15 +171,29 @@ substrate's tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/who-touched/{target}` | Path param becomes `filters.target`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
+| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. | Per-session replay (G8.2-T4). |
+
+The replay route's **413 cap** is a cheap tenant-scoped
+`SELECT count(*) WHERE agent_session_id = :id AND tenant_id = :tid` (the
+`_count_session_rows` helper, hitting `audit_log_agent_session_id_idx`),
+evaluated before `replay_session` runs — a runaway session is rejected on
+the count alone, never materializing a 10k-deep tree. The same count is
+the `row_count` echoed in the 200 body, so a 200 reports the same number
+its over-cap sibling would report at 413. NULL-session lineage children
+pulled into `root` by the closure CTE are present in the tree but are not
+counted — "session rows" are defined by the `agent_session_id` anchor.
 
 Every route binds two audit-override contextvars **before** the substrate
-call — `audit_op_id="meho.audit.query"` and `audit_op_class="audit_query"`
-— so the audit row written by `AuditMiddleware` carries the canonical
-op_id and the broadcast event ships as aggregate-only (`{op_id,
-result_status, row_count}` only, never the request filter). The
-`audit_row_count` contextvar is bound after the substrate returns so the
-broadcast event's `row_count` field reflects the actual returned
-cardinality. The shape mirrors `api/v1/retrieve_usage.py`.
+call — `audit_op_class="audit_query"` (always) plus an `audit_op_id`:
+`"meho.audit.query"` for the four query routes and `"meho.audit.replay"`
+for the replay route (so operators can tell replay usage apart from
+flat-query usage in `audit_log`). The shared `audit_query` op_class flips
+the broadcast event to aggregate-only (`{op_id, result_status,
+row_count}` only, never the request filter or the replayed `ReplayNode`
+tree). The `audit_row_count` contextvar is bound after the substrate
+returns — and on the 413 path before raising — so the broadcast event's
+`row_count` field reflects the actual cardinality. The shape mirrors
+`api/v1/retrieve_usage.py`.
 
 RBAC: `operator` role minimum. `read_only` → 403; `tenant_admin` → 200.
 
@@ -186,9 +250,10 @@ Error mapping at the tool boundary:
 * `pydantic.ValidationError` (post-jsonschema, e.g. malformed UUID
   slipping past `format: uuid`) — same mapping.
 * `InvalidCursorError` (substrate, tampered cursor) — same mapping.
-* `UnsupportedFilterError` (substrate, `parent_audit_id` /
-  `agent_session_id` in v0.2) — same mapping with the column-name
-  message.
+* `UnsupportedFilterError` (substrate, the flat `parent_audit_id`
+  filter, still gated in v0.2) — same mapping with the column-name
+  message. The `agent_session_id` filter is **un-gated** (G8.2-T3
+  #1011) and no longer raises.
 * Anything else propagates; the dispatcher's outer try/except turns
   it into JSON-RPC `-32603` Internal Error.
 
@@ -196,6 +261,71 @@ RBAC: `operator` role minimum. `read_only` callers find the tool
 absent from `tools/list` and get `-32602` on a direct `tools/call`
 attempt (the dispatcher's per-call RBAC re-check, not a transport
 401 — JSON-RPC has no 403 analogue).
+
+### `shape="tree"` self-session replay (G8.2-T6 #1014)
+
+`query_audit` grows a `shape` enum (`"flat"` default / `"tree"`). With
+`shape="tree"` the handler short-circuits the flat filter path and
+reconstructs the caller's session as a `ReplayNode` forest via
+`replay_session`, returning `{root, session_id, tenant_id, row_count}`
+(same envelope as the admin tool below).
+
+The tree path is **self-session only** and intentionally stricter than
+the flat path (which already returns other in-tenant principals' rows):
+`agent_session_id` must be present **and** equal to the caller's own
+bound MCP session id — the `mcp_session_id` structlog contextvar the
+transport binds from the inbound `Mcp-Session-Id` header (G8.2-T2
+#1010). Any mismatch — a different session id, an absent
+`agent_session_id`, or no session header at all (the transport then
+binds a fresh uuid4 the client can't predict) — is rejected with
+`-32602`. Cross-session forensic replay is the `tenant_admin`-gated
+`meho.audit.replay` tool, not this path.
+
+## `meho.audit.replay` admin tool (G8.2-T6 #1014)
+
+A dedicated `tenant_admin` meta-tool in the `meho.*` admin namespace
+(alongside `meho.broadcast.overrides.*`), registered in the same
+`mcp/tools/audit.py` module. It is the cross-session escalation: an
+admin replays *another* agent's session, where `query_audit`'s
+`shape="tree"` path replays only *your own*.
+
+* `inputSchema`: `{session_id: uuid (required), max_depth: int
+  (1–100, default 20)}`, `additionalProperties: false`.
+* Handler: count-first 10k guard (see below), then
+  `replay_session(session_id, tenant_id=operator.tenant_id,
+  session=…, max_depth=…)`. Tenant scope is the JWT's — never an
+  argument — so an admin cannot replay another tenant's session (a
+  foreign session id yields an empty `root`).
+* Returns `{root: [ReplayNode…], session_id, tenant_id, row_count}`
+  via `model_dump(mode="json")`; `row_count` is the total node count
+  in the returned tree.
+* `op_class="audit_query"`, so — via the matching `meho.audit.` arm
+  in `classify_op` — the MCP broadcast event is aggregate-only
+  (`{op_class, result_status, row_count}`), never the `ReplayNode`
+  payload.
+
+**Count-first 10k guard.** Both replay surfaces share
+`_build_replay_response`, which counts the tenant-scoped anchor rows
+(`agent_session_id = :id`) *before* the recursive walk + tree
+assembly. The anchor count is a sound lower bound on the closure size
+(the CTE only adds lineage descendants), so an over-cap session is
+rejected with `-32602` carrying the `session_too_large` token — the
+MCP analogue of T4's REST 413, since the JSON-RPC transport has no
+streaming body for a partial response. The cap (`_REPLAY_MAX_ROWS =
+10_000`) matches T4 so operators see the same boundary on both
+surfaces.
+
+### `meho.audit.` broadcast-classifier arm
+
+The MCP broadcast path derives `op_class` from `classify_op(op_id)`
+with the **tool name verbatim** — it does not honor
+`ToolDefinition.op_class`. `classify_op` therefore grew a
+`meho.audit.` prefix arm next to the existing `audit.` arm: without
+it, `meho.audit.replay` (prefix `meho.audit.`) would fall through to
+`other` and broadcast its full `ReplayNode` tree instead of the
+aggregate-only view. (The literal tool name `query_audit` has the same
+MCP-path classification gap today — a pre-existing G8.1 concern, out
+of scope for #377.)
 
 ## Dependencies
 
@@ -209,9 +339,10 @@ Reverse dependencies:
 
 * `meho_backplane.api.v1.audit` (T2 #466) — REST router for the four
   consumer-facing routes; dispatches every call through `query_audit`.
-* `meho_backplane.mcp.tools.audit` (T4 #468) — single MCP meta-tool
-  registered against the G0.5 registry; dispatches every call through
-  `query_audit`.
+* `meho_backplane.mcp.tools.audit` (T4 #468, extended G8.2-T6 #1014) —
+  the `query_audit` MCP meta-tool plus the `meho.audit.replay` admin
+  tool; dispatches flat queries through `query_audit` and replay
+  (admin tool + `shape="tree"`) through `replay_session`.
 * T3 #467 (CLI) follows.
 
 ## Known issues / v0.2 gaps
@@ -225,18 +356,18 @@ Reverse dependencies:
   let the `_AUDIT_PAYLOAD_PREFIX` machinery push it into `payload`. The
   audit-query handler then reads it out and stops returning None.
 
-* **`parent_audit_id` waits on G0.6-T7 (#398).** Once the column lands and the
-  composite-operation dispatcher (Initiative #388) populates it, the
-  audit-query handler drops the `UnsupportedFilterError` arm and adds a
-  `WHERE parent_audit_id = :parent_audit_id` clause. `AuditEntry` already
-  exposes the field — only the column read needs to wire up.
+* **`parent_audit_id` flat filter stays gated.** The column is real (#398,
+  migration `0006`) and is now read onto the returned row + walked by the
+  replay CTE, but the *flat* `query_audit(parent_audit_id=...)` filter still
+  raises `UnsupportedFilterError` — un-gating it was deliberately out of scope
+  for G8.2 (#377) to keep the diff surgical. A future task can drop the arm and
+  add a `WHERE parent_audit_id = :parent_audit_id` clause; the column read is
+  already wired.
 
-* **`agent_session_id` waits on G8.2 (#377).** The column lands with
-  G8.2-T1 (#1009 — nullable + indexed, no write path); G8.2-T2 writes it
-  from the MCP `Mcp-Session-Id` header, and G8.2-T3 drops the
-  `UnsupportedFilterError` arm and adds the `WHERE agent_session_id =
-  :agent_session_id` clause. `AuditEntry` already exposes the field as
-  None — only the column read needs to wire up.
+* **`agent_session_id` is live.** The column landed with G8.2-T1 (#1009 —
+  nullable + indexed); G8.2-T2 writes it from the MCP `Mcp-Session-Id`
+  header; G8.2-T3 (#1011) un-gated the filter, surfaced the column on the
+  returned row, and added `replay.py` for the per-session tree query.
 
 * **`op_id` / `op_class` glob filtering is JSON-path-based.** On PostgreSQL
   the `payload->>'op_id'` lookup runs over the JSONB column without an index

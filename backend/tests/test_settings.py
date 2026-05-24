@@ -163,3 +163,59 @@ def test_get_settings_preserves_empty_string_default_for_unset_ui_env_vars(
         assert settings.ui_session_encryption_key == ""
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# G8.2-T2 (#1010) — MCP_REQUIRE_SESSION_ID env knob
+# ---------------------------------------------------------------------------
+
+
+def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the chassis-required env vars so ``get_settings()`` constructs."""
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+
+def test_mcp_require_session_id_defaults_false_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``MCP_REQUIRE_SESSION_ID`` → ``False`` (sessions optional)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("MCP_REQUIRE_SESSION_ID", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().mcp_require_session_id is False
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "yes", "on", "TRUE", "On"])
+def test_mcp_require_session_id_truthy_spellings(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """Canonical truthy spellings flip the knob to ``True`` via ``parse_bool_env``."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", raw)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().mcp_require_session_id is True
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "disabled", ""])
+def test_mcp_require_session_id_non_truthy_stays_false(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """Anything outside the accept-list (incl. typos / empty) stays ``False``."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("MCP_REQUIRE_SESSION_ID", raw)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().mcp_require_session_id is False
+    finally:
+        get_settings.cache_clear()

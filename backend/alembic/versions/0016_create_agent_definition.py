@@ -3,8 +3,8 @@
 
 """Create the agent_definition table for the G11.1 agent runtime.
 
-Revision ID: 0015
-Revises: 0014
+Revision ID: 0016
+Revises: 0015
 Create Date: 2026-05-24
 
 This migration is the schema substrate of Task #809 (G11.1-T2) under
@@ -93,8 +93,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0015"
-down_revision: str | None = "0014"
+revision: str = "0016"
+down_revision: str | None = "0015"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

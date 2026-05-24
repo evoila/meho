@@ -15,6 +15,7 @@ surfaces over per-machine fallbacks.
 
 | File | Purpose |
 |---|---|
+| `README.md` | This file. Directory pointer — explains the Layer 1 vs Layer 2 framing and when to add files here versus `docs/cross-repo/`. |
 | [`CLAUDE.md`](./CLAUDE.md) | The template itself. ~180 lines of routing rules a local Claude session reads on session start, telling it to prefer `meho` CLI verbs over local scripts. Copy into your consumer repo's root (or merge with an existing `CLAUDE.md`). |
 | [`ONBOARDING.md`](./ONBOARDING.md) | How to install the template, how to verify a local session is routing through MEHO, how to add tenant-specific overrides, and how to refresh the template when MEHO ships a new minor version. |
 

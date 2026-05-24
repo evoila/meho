@@ -385,3 +385,127 @@ async def test_default_model_factory_fail_closed_without_key(
             default_model_factory()
     finally:
         get_settings.cache_clear()
+
+
+async def test_toolset_definition_drives_resolved_call_operation(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A definition with a toolset spec runs the resolved ``call_operation`` end to end.
+
+    Proves T3 (#810) integrates into the live seam: the loop registers the
+    toolset-resolved tools (here just ``call_operation``) and dispatches a
+    seeded op under the run's operator — the same dispatch path REST + MCP
+    use (#810 ACs 1 + 2).
+    """
+    await _seed_echo_op(stub_embedding_service)
+    _seen_operator_subs.clear()
+
+    # The resolved meta-tool is named ``call_operation`` (matching the MCP
+    # surface), not the T1 hand-wired ``call_operation_tool``; call it once
+    # then finish.
+    def call_op_then_done(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        has_tool_return = any(
+            part.part_kind == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not has_tool_return:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "call_operation",
+                        {
+                            "connector_id": "vault-1.x",
+                            "op_id": "vault.kv.read",
+                            "params": {"path": "secret/foo"},
+                        },
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart("done via toolset")])
+
+    model = FunctionModel(call_op_then_done)
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(
+        name="scoped-reader",
+        system_prompt="read via the scoped toolset",
+        request_limit=5,
+        toolset={"meta_tools": ["call_operation"], "connectors": ["vault-1.x"]},
+    )
+
+    operator = _make_operator(sub="op-toolset-principal")
+    handle = runtime.start(definition, operator, "read secret/foo")
+    result = await runtime.result(handle)
+
+    assert runtime.poll(handle) is AgentRunStatus.SUCCEEDED
+    assert result.output == "done via toolset"
+    assert result.tool_call_count == 1
+    # The operator threaded through the resolved tool to the dispatch handler.
+    assert _seen_operator_subs == ["op-toolset-principal"]
+
+
+async def test_toolset_omitting_call_operation_makes_it_absent_from_surface(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A meta-tool omitted from the toolset spec is not on the model's surface.
+
+    The intersection means the model literally cannot see / call a tool the
+    spec excluded. The ``FunctionModel`` callback inspects ``info.function_tools``
+    to assert ``call_operation`` is absent when the spec lists only
+    ``list_operation_groups`` (#810 AC 1: disallowed ops are absent).
+    """
+    await _seed_echo_op(stub_embedding_service)
+    captured: dict[str, list[str]] = {}
+
+    def inspect_surface(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        captured["tool_names"] = sorted(td.name for td in info.function_tools)
+        return ModelResponse(parts=[TextPart("inspected")])
+
+    model = FunctionModel(inspect_surface)
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(
+        name="discovery-only",
+        system_prompt="discover only",
+        request_limit=3,
+        toolset={"meta_tools": ["list_operation_groups"]},
+    )
+
+    handle = runtime.start(definition, _make_operator(), "what groups exist?")
+    await runtime.result(handle)
+
+    assert captured["tool_names"] == ["list_operation_groups"]
+    assert "call_operation" not in captured["tool_names"]
+
+
+async def test_read_only_identity_gets_no_tools_in_loop(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A read_only identity ranks below every meta-tool floor -> empty surface.
+
+    The seam-level mirror of the unit intersection test: even with all
+    meta-tools listed in the spec, a ``read_only`` operator's loop registers
+    no tools, so the agent cannot dispatch anything (#810 AC: an op outside
+    the identity's perms is not callable).
+    """
+    await _seed_echo_op(stub_embedding_service)
+    captured: dict[str, list[str]] = {}
+
+    def inspect_surface(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        captured["tool_names"] = sorted(td.name for td in info.function_tools)
+        return ModelResponse(parts=[TextPart("no tools for me")])
+
+    model = FunctionModel(inspect_surface)
+    runtime = PydanticAgentRun(model_factory=lambda: model)
+    definition = AgentDefinition(
+        name="read-only-agent",
+        system_prompt="read only",
+        request_limit=3,
+        toolset={"meta_tools": ["list_operation_groups", "search_operations", "call_operation"]},
+    )
+
+    read_only = _make_operator(role=TenantRole.READ_ONLY, sub="op-ro")
+    handle = runtime.start(definition, read_only, "do something")
+    await runtime.result(handle)
+
+    assert captured["tool_names"] == []

@@ -32,15 +32,20 @@ an in-process :class:`asyncio.Task`:
 Tools
 =====
 
-For T1 the loop is wired with two existing MEHO meta-tools —
-:func:`~meho_backplane.operations.meta_tools.list_operation_groups`
-(discovery) and
-:func:`~meho_backplane.operations.meta_tools.call_operation` (execution) —
-adapted from their ``(operator, arguments) -> dict`` handler shape onto the
-framework's tool interface via :func:`_register_meta_tools`. The handler
-*is* the dispatch path REST + MCP use; the agent gets no special surface.
-Full toolset resolution (the toolset ∩ identity-permissions intersection)
-is T3 (#810); this Task proves the one path end to end.
+The loop's tools are MEHO's own meta-tools, adapted from their
+``(operator, arguments) -> dict`` handler shape onto the framework's tool
+interface. The handler *is* the dispatch path REST + MCP use; the agent gets
+no special surface (CLAUDE.md postulate 5).
+
+Which meta-tools register is decided by T3's toolset resolver
+(:func:`~meho_backplane.agent.toolset.resolve_agent_tools`): given the
+definition's :attr:`AgentDefinition.toolset` spec and the run's operator, it
+returns exactly the meta-tools that are in the **intersection** of (the
+spec's allow-list) ∩ (the meta-tools the operator's role admits). A tool the
+identity may not call is not registered. When :attr:`AgentDefinition.toolset`
+is ``None`` the seam falls back to the original two hand-wired meta-tools
+(:func:`_register_default_meta_tools`) — the T1 path, kept so a definition
+constructed without a toolset (and the T1 test corpus) still runs.
 
 Why a model factory, not the ``LlmClient`` seam
 ===============================================
@@ -73,6 +78,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent, RunContext, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 
+from meho_backplane.agent.toolset import resolve_agent_tools
 from meho_backplane.auth.operator import Operator
 from meho_backplane.operations.meta_tools import call_operation, list_operation_groups
 
@@ -156,6 +162,15 @@ class AgentDefinition(BaseModel):
     model: str | None = None
     #: Optional structured-output schema (a Pydantic ``BaseModel`` subclass).
     output_type: type[BaseModel] | None = Field(default=None, exclude=True)
+    #: Optional toolset spec — the allowed meta-tools / connectors, resolved
+    #: against the run's identity by
+    #: :func:`~meho_backplane.agent.toolset.resolve_agent_tools` (T3 #810).
+    #: ``None`` selects the T1 default surface (the two hand-wired meta-tools
+    #: in :func:`_register_default_meta_tools`); a dict (even ``{}``) routes
+    #: through the resolver. See :mod:`meho_backplane.agent.toolset` for the
+    #: shape. Persisted definitions (T2 #809) materialise their stored
+    #: ``toolset`` JSON into this field.
+    toolset: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,8 +279,8 @@ def default_model_factory() -> Model:
     return AnthropicModel(settings.agent_default_model, provider=provider)
 
 
-def _register_meta_tools(agent: Agent[Operator, Any]) -> None:
-    """Wire the MEHO meta-tools onto *agent* as framework tools.
+def _register_default_meta_tools(agent: Agent[Operator, Any]) -> None:
+    """Wire the T1 default two-meta-tool surface onto *agent*.
 
     Adapts the existing ``(operator, arguments) -> dict`` handler shape
     onto the framework's ``RunContext``-first tool signature: the operator
@@ -275,9 +290,12 @@ def _register_meta_tools(agent: Agent[Operator, Any]) -> None:
     descriptions, so the agent picks tools from the same prose operators
     read.
 
-    Only two tools are wired for T1 — enough to prove discovery + execution
-    end to end. T3 (#810) replaces this hand-wiring with toolset resolution
-    that registers the agent identity's full permitted surface.
+    This is the fallback path used when an :class:`AgentDefinition` carries
+    no ``toolset`` spec (``toolset is None``): exactly the two meta-tools T1
+    hand-wired (discovery + execution), enough to run a definition that never
+    asked for a specific surface. A definition *with* a toolset routes
+    through :func:`~meho_backplane.agent.toolset.resolve_agent_tools`
+    instead, which enforces the spec ∩ identity-permissions intersection.
     """
 
     @agent.tool
@@ -333,16 +351,38 @@ class PydanticAgentRun:
 
     model_factory: ModelFactory = field(default=default_model_factory)
 
-    def _build_agent(self, definition: AgentDefinition) -> Agent[Operator, Any]:
-        """Construct the framework agent for *definition*."""
+    def _build_agent(
+        self,
+        definition: AgentDefinition,
+        operator: Operator,
+    ) -> Agent[Operator, Any]:
+        """Construct the framework agent for *definition* under *operator*.
+
+        When *definition* carries a ``toolset`` spec, the tools registered
+        are the intersection of (spec) ∩ (operator's permissions), resolved
+        by :func:`~meho_backplane.agent.toolset.resolve_agent_tools` and
+        passed to the framework via the ``tools=`` constructor argument. A
+        definition with no toolset (``toolset is None``) falls back to the T1
+        default two-meta-tool surface.
+        """
         model = self.model_factory()
-        agent: Agent[Operator, Any] = Agent(
+        if definition.toolset is not None:
+            tools = resolve_agent_tools(definition.toolset, operator)
+            agent: Agent[Operator, Any] = Agent(
+                model,
+                deps_type=Operator,
+                system_prompt=definition.system_prompt,
+                output_type=definition.output_type if definition.output_type is not None else str,
+                tools=tools,
+            )
+            return agent
+        agent = Agent(
             model,
             deps_type=Operator,
             system_prompt=definition.system_prompt,
             output_type=definition.output_type if definition.output_type is not None else str,
         )
-        _register_meta_tools(agent)
+        _register_default_meta_tools(agent)
         return agent
 
     async def _run_loop(
@@ -412,7 +452,7 @@ class PydanticAgentRun:
                 "AgentRun.start requires a running event loop; "
                 "the sync invocation surface (T4) bridges at the edge",
             ) from exc
-        agent = self._build_agent(definition)
+        agent = self._build_agent(definition, operator)
         run_id = uuid4()
         task = asyncio.create_task(
             self._run_loop(agent, definition, operator, inputs, run_id),

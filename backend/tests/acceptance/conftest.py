@@ -163,6 +163,10 @@ __all__ = [
 #: all the FK checks together. Keeping the list alphabetical so a
 #: diff reads cleanly.
 _TRUNCATE_TABLES: tuple[str, ...] = (
+    # ``agent_definition`` carries a real FK ``tenant(id)`` per migration
+    # ``0015`` (#809 G11.1-T2). Listed here so the per-test TRUNCATE stays
+    # non-cascading once that table exists.
+    "agent_definition",
     "audit_log",
     "broadcast_override",
     "documents",

@@ -50,6 +50,7 @@ from fastapi import FastAPI, Response
 from fastapi.staticfiles import StaticFiles
 
 from meho_backplane import __version__
+from meho_backplane.api.v1.agents import router as api_v1_agents_router
 from meho_backplane.api.v1.audit import router as api_v1_audit_router
 from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_router
 from meho_backplane.api.v1.broadcast_overrides import (
@@ -550,6 +551,13 @@ app.include_router(api_v1_audit_router)
 # boundaries. Every mutation writes an audit row and broadcasts
 # under op_class=write.
 app.include_router(api_v1_broadcast_overrides_router)
+# G11.1-T2 (#809) -- agent-definition CRUD verbs (list / show / create
+# / edit / delete) over the AgentDefinition ORM model. Reads gated to
+# operator-level, writes to tenant_admin. Tenant-scoped via the JWT's
+# tenant_id claim; cross-tenant probes return 404 (never 403) so
+# existence is not leaked across tenant boundaries. Every mutation
+# writes an audit row and broadcasts under op_class=write.
+app.include_router(api_v1_agents_router)
 # MCP Streamable HTTP transport entrypoint (G0.5-T1, #246) and the
 # RFC 9728 protected-resource metadata document (G0.5-T2, #247).
 #

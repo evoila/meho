@@ -173,21 +173,29 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   (`;`, `&&`, `||`, `|`, `$(...)`, backticks, `>`, `<`, newline):
 
   1. *Schema layer.* The `command` parameter has a `pattern` regex
-     anchored `\Akubectl ... \Z`. The verb alternation accepts the
-     nine read-only verbs (`get|describe|logs|top|explain|api-resources|
-     api-versions|cluster-info|version`); arguments are restricted to
-     `[A-Za-z0-9._/=:,@-]` so shell metacharacters can't survive
-     validator-layer rejection. Whitespace between tokens is constrained
-     to `[ \t]` (space or tab) so a newline can't smuggle a second
-     command line through the `\s` class. The dispatcher's
-     `validate_params` rejects bad shapes before reaching the handler.
+     anchored `\Akubectl ... \Z`. The verb alternation accepts both
+     the nine single-word read verbs (`get|describe|logs|top|explain|
+     api-resources|api-versions|cluster-info|version`) and a
+     fixed set of multi-word inspection verbs (`config view`,
+     `config get-contexts`, `config get-clusters`, `config get-users`,
+     `config current-context`, `auth can-i`, `auth whoami`).
+     Multi-word literals appear FIRST in the alternation so the regex
+     engine commits to the longer match when both could apply;
+     arguments are restricted to `[A-Za-z0-9._/=:,@-]` so shell
+     metacharacters can't survive validator-layer rejection. Whitespace
+     between tokens is constrained to `[ \t]` (space or tab) so a
+     newline can't smuggle a second command line through the `\s`
+     class. The dispatcher's `validate_params` rejects bad shapes
+     before reaching the handler.
   2. *Handler layer (authoritative).* `parse_kubectl_command`
      (a) scans the raw command against `_SHELL_METACHARS_RE`
      (`[;&|<>` + backtick + `$()\\` + newline + carriage return]`) and
      refuses on hit, (b) tokenises via `shlex.split`, (c) walks past
      leading global flags (`--flag=value` and `--flag value` forms),
-     and (d) confirms the verb is in `_K8S_READ_VERBS`. Any rejected
-     step raises `KubectlSafetyError`; the handler returns
+     (d) checks the 2-token (parent, sub-verb) prefix against
+     `_K8S_MULTIWORD_READ_VERBS` first, and (e) falls through to the
+     single-word `_K8S_READ_VERBS`. Any rejected step raises
+     `KubectlSafetyError`; the handler returns
      `{stdout, stderr, exit_status, error}` with `error` set to the
      safety-check message. The metacharacter reject is **load-bearing**:
      `shlex.split` in POSIX mode does not treat shell separators as
@@ -200,6 +208,16 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
      back in the error message — only the rejected verb / metachar
      category — so operator-supplied resource names don't bleed into
      structured error envelopes.
+
+  The multi-word allowlist (added per G3.8 follow-up #1020) pins
+  parent + sub-verb pairs together because the parent token
+  (`config` / `auth`) is a shared namespace where both read and
+  write sub-verbs live — e.g. `kubectl config view` is a read but
+  `kubectl config set-context` is a mutation. The check refuses
+  ``kubectl config`` / ``kubectl auth`` with no sub-verb, and
+  refuses any sub-verb not in the per-parent frozenset, so
+  adjacent mutating sub-verbs (`config set-context`,
+  `config unset`, `auth reconcile`, ...) fail closed.
 
   Stderr from the appliance is truncated at 4096 chars, matching the
   `PwshRunError` convention.

@@ -9,7 +9,10 @@ Coverage matrix (per Task #854 acceptance criteria):
   into ``(verb, args)``; rejects mutating verbs with
   :exc:`KubectlSafetyError`; handles leading global flags (both
   ``--flag=value`` and ``--flag value`` forms); rejects non-kubectl
-  shells.
+  shells. Accepts multi-word inspection verbs (``config view``,
+  ``auth can-i``, ...) via the parent + sub-verb allowlist; rejects
+  adjacent mutating sub-verbs (``config set-context``,
+  ``auth reconcile``) under the same parents (G3.8 follow-up #1020).
 * :func:`parse_logs_tail_output` -- splits multi-file GNU ``tail``
   output by ``==> path <==`` header; single-file tail yields
   ``path=None``; empty / whitespace stdout returns ``files=[]``.
@@ -249,6 +252,116 @@ def test_parse_kubectl_command_safelist_includes_top_explain() -> None:
 
 def test_parse_kubectl_command_safelist_includes_cluster_info() -> None:
     assert parse_kubectl_command("kubectl cluster-info")[0] == "cluster-info"
+
+
+# ---------------------------------------------------------------------------
+# parse_kubectl_command -- multi-word verb safelist (G3.8 follow-up #1020)
+#
+# Multi-word inspection verbs (`kubectl config view`,
+# `kubectl auth can-i`, etc.) get their own (parent, sub-verb)
+# allowlist because the parent token is a shared namespace where
+# mutating sub-verbs (`config set-context`, `auth reconcile`) also
+# live. Adjacent-reject coverage: every accept-path has a paired
+# reject-test for an adjacent mutating sub-verb under the same parent.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_kubectl_command_multiword_config_view() -> None:
+    """``kubectl config view`` -- the canonical kubeconfig dump command."""
+    verb, args = parse_kubectl_command("kubectl config view")
+    assert verb == "config view"
+    assert args == []
+
+
+def test_parse_kubectl_command_multiword_config_get_contexts() -> None:
+    verb, args = parse_kubectl_command("kubectl config get-contexts")
+    assert verb == "config get-contexts"
+    assert args == []
+
+
+def test_parse_kubectl_command_multiword_config_current_context() -> None:
+    verb, _ = parse_kubectl_command("kubectl config current-context")
+    assert verb == "config current-context"
+
+
+def test_parse_kubectl_command_multiword_auth_can_i_with_args() -> None:
+    """``kubectl auth can-i list pods`` -- the canonical access-check shape."""
+    verb, args = parse_kubectl_command("kubectl auth can-i list pods")
+    assert verb == "auth can-i"
+    assert args == ["list", "pods"]
+
+
+def test_parse_kubectl_command_multiword_auth_whoami() -> None:
+    verb, args = parse_kubectl_command("kubectl auth whoami")
+    assert verb == "auth whoami"
+    assert args == []
+
+
+def test_parse_kubectl_command_multiword_with_global_flag() -> None:
+    """Global flags before a multi-word verb don't break the 2-token prefix walk."""
+    verb, _ = parse_kubectl_command("kubectl --context=foo config view")
+    assert verb == "config view"
+
+
+@pytest.mark.parametrize(
+    ("parent", "sub_verb"),
+    [
+        # Mutating ``config`` sub-verbs -- every adjacent reject path
+        # under the safelisted ``config`` parent verb.
+        ("config", "set-context"),
+        ("config", "set-cluster"),
+        ("config", "set-credentials"),
+        ("config", "unset"),
+        ("config", "use-context"),
+        ("config", "delete-context"),
+        ("config", "delete-cluster"),
+        ("config", "delete-user"),
+        ("config", "rename-context"),
+        # Mutating ``auth`` sub-verb -- the adjacent reject path under
+        # the safelisted ``auth`` parent verb.
+        ("auth", "reconcile"),
+    ],
+)
+def test_parse_kubectl_command_multiword_rejects_mutating_sub_verb(
+    parent: str, sub_verb: str
+) -> None:
+    """Adjacent-reject coverage: mutating sub-verbs fail closed.
+
+    The parent token (``config`` / ``auth``) is on the multi-word
+    safelist, but the sub-verb is not. The check pins both tokens
+    together; absence is rejection. This is the load-bearing
+    distinction that the single-word fallthrough would have lost --
+    a flat ``frozenset({"config", "auth", ...})`` would have approved
+    every sub-verb under either parent.
+    """
+    with pytest.raises(KubectlSafetyError) as excinfo:
+        parse_kubectl_command(f"kubectl {parent} {sub_verb}")
+    msg = str(excinfo.value)
+    assert sub_verb in msg
+    assert parent in msg
+
+
+def test_parse_kubectl_command_multiword_rejects_bare_parent() -> None:
+    """``kubectl config`` / ``kubectl auth`` with no sub-verb is rejected.
+
+    The parent token is never a legal stand-alone read verb -- it
+    requires a sub-verb to carry meaning. Reject the bare parent so
+    a future bug can't silently approve through the single-word
+    fallthrough.
+    """
+    for parent in ("config", "auth"):
+        with pytest.raises(KubectlSafetyError) as excinfo:
+            parse_kubectl_command(f"kubectl {parent}")
+        assert parent in str(excinfo.value)
+        assert "sub-verb" in str(excinfo.value)
+
+
+def test_parse_kubectl_command_multiword_rejects_unknown_sub_verb_under_safelisted_parent() -> None:
+    """Unknown / typo sub-verbs under a safelisted parent fail closed."""
+    with pytest.raises(KubectlSafetyError):
+        parse_kubectl_command("kubectl config get-something-new")
+    with pytest.raises(KubectlSafetyError):
+        parse_kubectl_command("kubectl auth garbage")
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +700,73 @@ async def test_k8s_exec_schema_pattern_accepts_read_verbs() -> None:
         "version",
     ):
         jsonschema.validate({"command": f"kubectl {verb} pods"}, schema)
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_schema_pattern_accepts_multiword_read_verbs() -> None:
+    """The schema must accept every multi-word read verb on the safelist.
+
+    Pairs with the handler-layer accept tests above
+    (``test_parse_kubectl_command_multiword_*``) -- both layers
+    independently approve the same multi-word verb set so a future
+    schema widening or narrowing cannot silently drift away from the
+    handler's authoritative gate.
+    """
+    k8s_op = next(op for op in READ_OPS if op.op_id == "holodeck.k8s.exec")
+    schema = k8s_op.parameter_schema
+    accepted = [
+        "kubectl config view",
+        "kubectl config get-contexts",
+        "kubectl config get-clusters",
+        "kubectl config get-users",
+        "kubectl config current-context",
+        "kubectl auth can-i list pods",
+        "kubectl auth can-i create deployments --namespace=holodeck",
+        "kubectl auth whoami",
+    ]
+    for command in accepted:
+        jsonschema.validate({"command": command}, schema)
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_schema_pattern_rejects_mutating_sub_verbs() -> None:
+    """Adjacent-reject: mutating sub-verbs fail the schema pattern too.
+
+    Same pairing as the accept test above: the schema layer rejects
+    the same mutating sub-verbs the handler-layer fails closed on, so
+    the dispatcher's ``validate_params`` catches the obvious bad shape
+    before reaching :func:`parse_kubectl_command`.
+    """
+    k8s_op = next(op for op in READ_OPS if op.op_id == "holodeck.k8s.exec")
+    schema = k8s_op.parameter_schema
+    rejected = [
+        "kubectl config set-context my-ctx",
+        "kubectl config set-cluster my-cluster",
+        "kubectl config set-credentials me",
+        "kubectl config unset users.me",
+        "kubectl config use-context my-ctx",
+        "kubectl config delete-context my-ctx",
+        "kubectl config delete-cluster my-cluster",
+        "kubectl config rename-context old new",
+        "kubectl auth reconcile",
+    ]
+    for command in rejected:
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({"command": command}, schema)
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_schema_pattern_rejects_bare_config_or_auth() -> None:
+    """The schema must reject ``kubectl config`` / ``kubectl auth`` with no sub-verb.
+
+    The parent token alone is never a legal read verb; the regex
+    alternation requires the multi-word sub-verb to be present.
+    """
+    k8s_op = next(op for op in READ_OPS if op.op_id == "holodeck.k8s.exec")
+    schema = k8s_op.parameter_schema
+    for command in ("kubectl config", "kubectl auth"):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({"command": command}, schema)
 
 
 @pytest.mark.asyncio

@@ -18,11 +18,13 @@ Adds the following typed ops onto :class:`HolodeckConnector`:
   -like 'Holo*' } | Select-Object Name,Status,DisplayName |
   ConvertTo-Json``; returns ``{rows, total}``.
 * ``holodeck.k8s.exec`` -- in-appliance ``kubectl <verb> ...``
-  passthrough. **Read-only**: the handler fails closed when the first
-  non-flag token after ``kubectl`` is not in
-  :data:`_K8S_READ_VERBS`. Schema also pins ``kubectl <verb> ...``
-  with a ``pattern`` so the dispatcher's validator catches the bad
-  shape before reaching the handler.
+  passthrough. **Read-only**: the handler fails closed when the verb
+  token after ``kubectl`` is neither in :data:`_K8S_READ_VERBS`
+  (single-word reads) nor a (parent, sub-verb) pair in
+  :data:`_K8S_MULTIWORD_READ_VERBS` (``config view`` / ``auth can-i``
+  / ...). Schema also pins ``kubectl <verb> ...`` with a ``pattern``
+  so the dispatcher's validator catches the bad shape before reaching
+  the handler.
 * ``holodeck.logs.tail`` -- ``tail -<lines> /holodeck-runtime/logs/
   <component>*.log`` over plain SSH (no ``pwsh`` indirection — the
   cmd is a stock POSIX shell pipeline). Returns the tail text plus
@@ -86,13 +88,15 @@ allowlist layers:
    re-parses the command via :func:`parse_kubectl_command`, which
    (a) scans the raw command for any character in
    :data:`_SHELL_METACHARS_RE` and refuses on hit, then (b) tokenises
-   via :func:`shlex.split` and (c) compares the verb to
-   :data:`_K8S_READ_VERBS`. Any rejected step raises
-   :exc:`KubectlSafetyError`, which the dispatcher's exception path
-   turns into a ``result_connector_error`` envelope. The metacharacter
-   reject is **load-bearing**: ``shlex.split`` in POSIX mode does not
-   treat shell separators as token boundaries, so a chained payload
-   like ``kubectl get pods; rm -rf /`` would otherwise tokenise to
+   via :func:`shlex.split`, (c) checks for a 2-token verb prefix
+   against :data:`_K8S_MULTIWORD_READ_VERBS` first, and (d) falls
+   through to the single-word :data:`_K8S_READ_VERBS` safelist. Any
+   rejected step raises :exc:`KubectlSafetyError`, which the
+   dispatcher's exception path turns into a
+   ``result_connector_error`` envelope. The metacharacter reject is
+   **load-bearing**: ``shlex.split`` in POSIX mode does not treat
+   shell separators as token boundaries, so a chained payload like
+   ``kubectl get pods; rm -rf /`` would otherwise tokenise to
    ``['kubectl', 'get', 'pods;', ...]`` -- the verb-safelist check
    on ``tokens[idx]`` would see ``'get'`` and approve, and the
    handler would then forward the **raw string** to
@@ -149,9 +153,9 @@ __all__ = [
 # Read-only kubectl guard
 # ---------------------------------------------------------------------------
 
-#: Whitelist of ``kubectl`` verbs the handler considers read-only.
-#: ``get`` / ``describe`` / ``logs`` are the three primary read verbs
-#: the Initiative #371 body calls out. ``top`` (metrics) and
+#: Whitelist of single-word ``kubectl`` verbs the handler considers
+#: read-only. ``get`` / ``describe`` / ``logs`` are the three primary
+#: read verbs the Initiative #371 body calls out. ``top`` (metrics) and
 #: ``explain`` (schema) are pure reads. ``api-resources`` /
 #: ``api-versions`` / ``cluster-info`` / ``version`` cover the
 #: inspection surface without mutating cluster state. Any verb absent
@@ -159,13 +163,14 @@ __all__ = [
 #: ``edit`` / ``replace`` / ``patch`` / ``scale`` / ``rollout``
 #: (``restart``) / ``label`` (``--overwrite``) / ``annotate`` /
 #: ``cp`` / ``exec`` / ``port-forward`` / ``proxy`` / ``drain`` /
-#: ``cordon`` -- fails closed. Multi-word inspection verbs
-#: (``config view``, ``auth can-i``) are intentionally **not**
-#: surfaced today: the safelist matches on the single verb token, so
-#: ``kubectl config get-contexts`` would be approved through the
-#: ``config`` parent verb. Surfacing them safely requires a verb +
-#: sub-verb safelist, which is deferred -- callers that need them
-#: should file a follow-up.
+#: ``cordon`` -- fails closed.
+#:
+#: Multi-word inspection verbs (``config view``, ``auth can-i``,
+#: ``config get-contexts``, ``auth whoami``) are handled separately
+#: through :data:`_K8S_MULTIWORD_READ_VERBS`: the parent token
+#: (``config`` / ``auth``) is a shared namespace where both reads and
+#: writes live, so the verb-safelist check must pin both the parent
+#: and the sub-verb together.
 _K8S_READ_VERBS: frozenset[str] = frozenset(
     {
         "get",
@@ -179,6 +184,46 @@ _K8S_READ_VERBS: frozenset[str] = frozenset(
         "version",
     }
 )
+
+#: Whitelist of multi-word ``kubectl <parent> <sub>`` read-only verb
+#: pairs. The single-word safelist (:data:`_K8S_READ_VERBS`) cannot
+#: cover these: the parent verb (``config`` / ``auth``) is a shared
+#: namespace where both read and write sub-verbs live -- e.g.
+#: ``kubectl config view`` is a read but ``kubectl config set-context``
+#: is a mutation. The check therefore matches on the verb + sub-verb
+#: pair, with both tokens looked up in this allowlist.
+#:
+#: Per the kubectl reference docs (Kubernetes 1.x current generated
+#: docs, see https://kubernetes.io/docs/reference/kubectl/generated/
+#: kubectl_config/ and https://kubernetes.io/docs/reference/access-
+#: authn-authz/authorization/#checking-api-access), the read-only
+#: ``config`` sub-verbs are ``view`` / ``get-contexts`` /
+#: ``get-clusters`` / ``get-users`` / ``current-context``; the
+#: read-only ``auth`` sub-verbs are ``can-i`` / ``whoami``. Adjacent
+#: mutating sub-verbs (``set-context``, ``set-cluster``,
+#: ``set-credentials``, ``unset``, ``use-context``, ``delete-context``,
+#: ``delete-cluster``, ``delete-user``, ``rename-context`` under
+#: ``config``; ``reconcile`` under ``auth``) are deliberately **not**
+#: present and fail closed -- a 2-token verb prefix walks this dict,
+#: hits the parent, then checks the sub-verb against the frozenset;
+#: absence is rejection.
+_K8S_MULTIWORD_READ_VERBS: dict[str, frozenset[str]] = {
+    "config": frozenset(
+        {
+            "view",
+            "get-contexts",
+            "get-clusters",
+            "get-users",
+            "current-context",
+        }
+    ),
+    "auth": frozenset(
+        {
+            "can-i",
+            "whoami",
+        }
+    ),
+}
 
 #: Shell metacharacters banned anywhere in a ``kubectl`` command line.
 #: ``shlex.split`` in POSIX mode does **not** treat these as token
@@ -218,43 +263,99 @@ class KubectlSafetyError(ValueError):
     """
 
 
+def _skip_global_flags(tokens: list[str]) -> int:
+    """Return the index of the first non-flag token after ``kubectl``.
+
+    Walks past leading flag tokens. Attached-value flags
+    (``--context=foo``) consume one token; separated-value flags
+    (``--context foo``) consume two. The returned index points at the
+    verb -- or off the end of ``tokens`` when there is no verb.
+    """
+    idx = 1
+    while idx < len(tokens) and tokens[idx].startswith("-"):
+        token = tokens[idx]
+        idx += 1
+        if "=" not in token and idx < len(tokens) and not tokens[idx].startswith("-"):
+            # Separated flag value (``--context foo``); consume.
+            idx += 1
+    return idx
+
+
+def _check_multiword_verb(tokens: list[str], idx: int, verb: str) -> tuple[str, list[str]]:
+    """Validate the 2-token ``(parent, sub-verb)`` prefix; return ``(canonical, args)``.
+
+    Pre-condition: ``verb == tokens[idx]`` AND ``verb in
+    _K8S_MULTIWORD_READ_VERBS``. Raises :exc:`KubectlSafetyError`
+    when the sub-verb is missing or not on the per-parent
+    frozenset. The canonical form returned is the space-joined
+    ``"<parent> <sub>"`` so callers can re-serialise; ``args`` is
+    every token after the sub-verb.
+    """
+    allowed_subs = _K8S_MULTIWORD_READ_VERBS[verb]
+    if idx + 1 >= len(tokens):
+        raise KubectlSafetyError(
+            f"kubectl multi-word verb {verb!r} requires a sub-verb; allowed: {sorted(allowed_subs)}"
+        )
+    sub_verb = tokens[idx + 1]
+    if sub_verb not in allowed_subs:
+        raise KubectlSafetyError(
+            f"kubectl sub-verb {sub_verb!r} under {verb!r} is not on "
+            f"the read-only safelist; allowed: {sorted(allowed_subs)}"
+        )
+    return f"{verb} {sub_verb}", tokens[idx + 2 :]
+
+
 def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
     """Parse ``command`` into ``(verb, args)``; enforce the read-only safelist.
 
-    The first whitespace-separated token must be ``kubectl``. The
-    second non-flag token is the verb; the verb must appear in
-    :data:`_K8S_READ_VERBS`. Returns the verb and the remaining args
-    so callers can re-serialise the command for SSH.
+    The first whitespace-separated token must be ``kubectl``. After
+    walking past any global flags via :func:`_skip_global_flags`, the
+    verb is matched against two safelists in order:
+
+    1. **Multi-word prefix first** (:func:`_check_multiword_verb`).
+       If ``tokens[idx]`` is a key in :data:`_K8S_MULTIWORD_READ_VERBS`
+       (``config`` / ``auth``) AND ``tokens[idx + 1]`` is in the
+       corresponding sub-verb frozenset, the command is accepted; the
+       canonical verb returned is the space-joined ``"<parent> <sub>"``
+       form and ``args`` is everything after the sub-verb. A parent
+       with no sub-verb, or a sub-verb not on the per-parent
+       frozenset (``config set-context``, ``auth reconcile``), is
+       rejected -- the parent-only fallthrough is intentionally NOT
+       attempted, because the parent token is never a legal read verb
+       on its own.
+    2. **Single-word fallback.** Otherwise the verb is matched against
+       :data:`_K8S_READ_VERBS` (``get`` / ``describe`` / ``logs`` …).
+
+    Returns ``(verb, args)`` so callers can re-serialise the command
+    for SSH; for multi-word verbs ``verb`` is the space-joined form
+    (``"config view"``).
 
     Tokenisation runs via :func:`shlex.split` so quoted resource names
-    (``"my pod"``) survive the parse; the safety check operates on the
-    verb token, which is unquoted in every legal ``kubectl`` invocation.
+    (``"my pod"``) survive the parse. Before tokenisation the function
+    scans for POSIX-shell metacharacters (:data:`_SHELL_METACHARS_RE`)
+    and refuses the call if any are found. This is **load-bearing**:
+    ``shlex.split`` in POSIX mode does not treat ``;`` / ``&&`` /
+    ``|`` / ``$(...)`` / backticks / ``>`` / ``<`` / newlines as token
+    boundaries, so a chained payload like ``kubectl get pods; rm -rf /``
+    would tokenise to ``['kubectl', 'get', 'pods;', ...]``, the verb
+    check would approve ``get``, and the handler would forward the
+    **raw string** verbatim to ``asyncssh.SSHClientConnection.run`` --
+    which delegates to the remote login shell where the metacharacters
+    are interpreted. The metachar reject closes that hole before
+    tokenisation runs.
 
-    Before tokenisation the function scans for POSIX-shell
-    metacharacters (:data:`_SHELL_METACHARS_RE`) and refuses the call
-    if any are found. This is **load-bearing**: ``shlex.split`` in
-    POSIX mode does not treat ``;`` / ``&&`` / ``|`` / ``$(...)`` /
-    backticks / ``>`` / ``<`` as token boundaries, so a chained payload
-    like ``kubectl get pods; rm -rf /`` would tokenise to
-    ``['kubectl', 'get', 'pods;', 'rm', '-rf', '/']``, the verb check
-    on ``tokens[idx]`` would see ``'get'`` and approve, and the
-    handler would then forward the **raw string** verbatim to
-    ``asyncssh.SSHClientConnection.run`` -- which delegates to the
-    remote login shell where the metacharacters are interpreted. The
-    metachar reject closes that hole before tokenisation runs.
-
-    Empty command, or command containing shell metacharacters, or
-    command not starting with ``kubectl``, or verb not in
-    :data:`_K8S_READ_VERBS` -> :exc:`KubectlSafetyError`. The handler
-    raises before any SSH traffic happens.
+    Empty / metachar-bearing / non-``kubectl`` / safelist-misses raise
+    :exc:`KubectlSafetyError` before any SSH traffic happens.
 
     Examples
     --------
 
     >>> parse_kubectl_command("kubectl get pods -n holodeck")
     ('get', ['pods', '-n', 'holodeck'])
-    >>> parse_kubectl_command("kubectl describe pod my-pod")
-    ('describe', ['pod', 'my-pod'])
+    >>> parse_kubectl_command("kubectl config view")
+    ('config view', [])
+    >>> parse_kubectl_command("kubectl auth can-i list pods")
+    ('auth can-i', ['list', 'pods'])
     """
     if not command or not command.strip():
         raise KubectlSafetyError("kubectl command is empty")
@@ -278,22 +379,20 @@ def parse_kubectl_command(command: str) -> tuple[str, list[str]]:
         raise KubectlSafetyError("kubectl command tokenises to nothing")
     if tokens[0] != "kubectl":
         raise KubectlSafetyError(f"kubectl command must start with 'kubectl' (got {tokens[0]!r})")
-    # The verb is the first non-flag token after ``kubectl``. A handful
-    # of legal invocations open with a global flag (``kubectl
-    # --context=foo get pods``); we walk past leading flag tokens but
-    # only consume their *attached* values (``--context=foo``). When a
-    # flag is in the separated form (``--context foo``) the next token
-    # is the flag's value, not a verb -- we skip it too.
-    idx = 1
-    while idx < len(tokens) and tokens[idx].startswith("-"):
-        token = tokens[idx]
-        idx += 1
-        if "=" not in token and idx < len(tokens) and not tokens[idx].startswith("-"):
-            # Separated flag value (``--context foo``); consume.
-            idx += 1
+    idx = _skip_global_flags(tokens)
     if idx >= len(tokens):
         raise KubectlSafetyError("kubectl command has no verb after global flags")
     verb = tokens[idx]
+    # Multi-word prefix path checked first. The parent token
+    # (``config`` / ``auth``) is a shared namespace where both read
+    # and write sub-verbs live, so we MUST pin the (parent, sub)
+    # pair together -- a fallthrough to the single-word check on the
+    # parent alone would silently approve ``kubectl config set-context``
+    # by way of the ``config`` parent being legible. The single-word
+    # safelist does NOT include the multi-word parents, so a missing
+    # sub-verb fails closed via ``_check_multiword_verb``.
+    if verb in _K8S_MULTIWORD_READ_VERBS:
+        return _check_multiword_verb(tokens, idx, verb)
     if verb not in _K8S_READ_VERBS:
         raise KubectlSafetyError(
             f"kubectl verb {verb!r} is not on the read-only safelist; "
@@ -1035,13 +1134,17 @@ READ_OPS: tuple[HolodeckOp, ...] = (
             "Forwards a **read-only** ``kubectl`` command to the K8s "
             "cluster bundled on the HoloRouter appliance. The handler "
             "fails closed when the supplied command's verb is not on "
-            "the read-only safelist (allowed: ``get``, ``describe``, "
-            "``logs``, ``top``, ``explain``, ``api-resources``, "
-            "``api-versions``, ``cluster-info``, ``version``). Use to "
-            "inspect cluster state without mutating it. The schema "
-            "pattern enforces the ``kubectl <read-verb> ...`` shape at "
-            "the validator layer; the handler re-checks the verb as a "
-            "belt-and-braces safety gate."
+            "the read-only safelist. Allowed single-word verbs: "
+            "``get``, ``describe``, ``logs``, ``top``, ``explain``, "
+            "``api-resources``, ``api-versions``, ``cluster-info``, "
+            "``version``. Allowed multi-word verbs: ``config view``, "
+            "``config get-contexts``, ``config get-clusters``, "
+            "``config get-users``, ``config current-context``, "
+            "``auth can-i``, ``auth whoami``. Use to inspect cluster "
+            "state without mutating it. The schema pattern enforces "
+            "the ``kubectl <read-verb> ...`` shape at the validator "
+            "layer; the handler re-checks the verb as a belt-and-braces "
+            "safety gate."
         ),
         parameter_schema={
             "type": "object",
@@ -1069,9 +1172,29 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                         # Verb alternation is followed by ``(?=[ \\t]
                         # |\\Z)`` so verb prefixes (``getfoo``) don't
                         # sneak through.
+                        #
+                        # Multi-word verb literals (``config view`` /
+                        # ``auth can-i`` / ...) appear FIRST in the
+                        # alternation. The regex engine tries
+                        # alternations left-to-right, so listing the
+                        # longer multi-word literal before the
+                        # single-word ``config`` / ``auth`` ensures
+                        # the engine commits to the multi-word match
+                        # when both could apply -- this matches the
+                        # handler-layer ordering in
+                        # :func:`parse_kubectl_command`. The
+                        # single-word safelist does NOT include
+                        # ``config`` or ``auth``, so a misshapen
+                        # ``kubectl config set-context`` falls through
+                        # both alternation branches and is rejected
+                        # at the schema layer too.
                         r"\Akubectl"
                         r"([ \t]+--?[A-Za-z0-9_-]+(=[A-Za-z0-9._/=:,@-]+)?)*"
-                        r"[ \t]+(get|describe|logs|top|explain|"
+                        r"[ \t]+("
+                        r"config[ \t]+(view|get-contexts|get-clusters|"
+                        r"get-users|current-context)|"
+                        r"auth[ \t]+(can-i|whoami)|"
+                        r"get|describe|logs|top|explain|"
                         r"api-resources|api-versions|cluster-info|"
                         r"version)(?=[ \t]|\Z)"
                         r"([ \t]+[A-Za-z0-9._/=:,@-]+)*"
@@ -1080,12 +1203,18 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                     "description": (
                         "Full kubectl command line starting with "
                         "``kubectl`` and a read-only verb. Allowed "
-                        "verbs: get, describe, logs, top, explain, "
-                        "api-resources, api-versions, cluster-info, "
-                        "version. Mutating verbs (create, apply, "
+                        "single-word verbs: get, describe, logs, top, "
+                        "explain, api-resources, api-versions, "
+                        "cluster-info, version. Allowed multi-word "
+                        "verbs: config view, config get-contexts, "
+                        "config get-clusters, config get-users, "
+                        "config current-context, auth can-i, "
+                        "auth whoami. Mutating verbs (create, apply, "
                         "delete, edit, replace, patch, scale, "
                         "rollout, label, annotate, cp, exec, "
-                        "port-forward, proxy, drain, cordon) are "
+                        "port-forward, proxy, drain, cordon) and "
+                        "mutating sub-verbs (config set-context, "
+                        "config unset, auth reconcile, ...) are "
                         "rejected at the schema layer. Arguments are "
                         "restricted to ``[A-Za-z0-9._/=:,@-]`` -- shell "
                         "metacharacters (``;``, ``&``, ``|``, ``$``, "
@@ -1115,17 +1244,26 @@ READ_OPS: tuple[HolodeckOp, ...] = (
             "when_to_use": (
                 "Call when the operator wants to inspect the K8s "
                 "cluster bundled on the HoloRouter appliance via "
-                "``kubectl``. Only read-only verbs are allowed: ``get``, "
-                "``describe``, ``logs``, ``top``, ``explain``, "
-                "``api-resources``, ``api-versions``, ``cluster-info``, "
-                "``version``. Mutating verbs fail closed. " + _SSH_TRANSPORT_NOTE
+                "``kubectl``. Only read-only verbs are allowed. "
+                "Single-word: ``get``, ``describe``, ``logs``, "
+                "``top``, ``explain``, ``api-resources``, "
+                "``api-versions``, ``cluster-info``, ``version``. "
+                "Multi-word inspection: ``kubectl config view`` / "
+                "``config get-contexts`` / ``config get-clusters`` / "
+                "``config get-users`` / ``config current-context`` "
+                "for kubeconfig inspection; ``kubectl auth can-i "
+                "<verb> <resource>`` / ``kubectl auth whoami`` for "
+                "authorization inspection. Mutating verbs and "
+                "mutating sub-verbs (``config set-context``, "
+                "``auth reconcile``, etc.) fail closed. " + _SSH_TRANSPORT_NOTE
             ),
             "parameter_hints": {
                 "command": (
                     "Full kubectl invocation, e.g. ``kubectl get pods "
-                    "-n holodeck`` or ``kubectl describe service "
-                    "<name>``. Single-line; arguments tokenised via "
-                    "shlex."
+                    "-n holodeck``, ``kubectl describe service "
+                    "<name>``, ``kubectl config view``, or "
+                    "``kubectl auth can-i list pods``. Single-line; "
+                    "arguments tokenised via shlex."
                 ),
             },
             "output_shape": (

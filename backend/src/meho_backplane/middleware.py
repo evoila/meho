@@ -405,7 +405,9 @@ async def verify_jwt_and_bind(
     than depending on the per-route ``get_session``), committed before
     the route runs so the row is visible to the route's own
     transaction. ``ensure_tenant`` is a single
-    ``INSERT ... ON CONFLICT (id) DO NOTHING`` — cheap and idempotent,
+    ``INSERT ... ON CONFLICT DO NOTHING`` (arbitrated against every
+    unique index, not just ``id`` — see :func:`ensure_tenant` for the
+    #983 concurrent-race rationale) — cheap and idempotent,
     so issuing it on every authenticated request (reads included) is
     acceptable for the v0.2 minimal scope; a process-level cache would
     be speculative and would risk masking a real empty-table state

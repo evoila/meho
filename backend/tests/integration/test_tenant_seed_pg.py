@@ -203,10 +203,19 @@ async def test_concurrent_first_writes_seed_exactly_one_tenant_row(
 ) -> None:
     """Idempotency under the real race: N concurrent first writes → one row.
 
-    ``ON CONFLICT (id) DO NOTHING`` is what makes the concurrent
+    ``ON CONFLICT DO NOTHING`` arbitrated against *every* unique index
+    (no named ``index_elements``) is what makes the concurrent
     first-write safe. Fire several real ingests for the same fresh
-    ``tenant_id`` at once; every one must return 200 and the
-    ``tenant`` table must hold exactly one matching row afterwards.
+    ``tenant_id`` at once; every one must return 200 and the ``tenant``
+    table must hold exactly one matching row afterwards.
+
+    Regression guard for #983: when the arbiter named only ``id``,
+    concurrent same-tenant inserts intermittently raised a
+    ``unique_violation`` on the non-arbiter ``tenant_slug_idx`` (the
+    slug-index conflict bypassed the ``id`` arbiter's
+    speculative-insertion wait), turning one of the 8 ingests into a
+    500 and failing the all-200 assertion. The bare arbiter closes
+    that window.
     """
     from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
 

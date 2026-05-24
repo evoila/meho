@@ -38,8 +38,12 @@ from structlog.testing import capture_logs
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op, redact_payload
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    VaultCredentialsReadError,
+    load_basic_credentials,
+)
 from meho_backplane.connectors.harbor import HarborConnector
+from meho_backplane.connectors.harbor.session import load_credentials_from_vault
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import AuthModel
 from meho_backplane.operations._branches import dispatch_typed
@@ -314,24 +318,81 @@ async def test_robot_create_system_operator_fails_closed(
     The credential read raises before any Harbor request is issued, so the
     fail-closed boundary the synthesised system operator enforces holds for
     the mint op.
+
+    The assertion is **isolation-robust** (#984 PR #998 CI fix): the read
+    must raise AND the in-process Vault fake must never be touched
+    (``login_calls``/``read_calls`` stay empty). Under CI's
+    ``pytest -n 6 --dist loadscope`` a ``pytest.raises``-only check could
+    pass vacuously if cross-test state ever satisfied the call without the
+    guard firing; asserting the fake was never reached makes a leaked
+    successful read fail loudly here instead of silently passing. Mirrors
+    the loader-boundary precedent in
+    ``test_connectors_vcf_shared_auth.test_default_credentials_loader_rejects_empty_operator_jwt``.
     """
-    install_fake_client(
+    fake = install_fake_client(
         monkeypatch,
         secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
     )
     connector = _make_connector()
+    system_operator = synthesise_system_operator()
     with respx.mock(assert_all_called=False) as mock:
         route = mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(
             return_value=respx.MockResponse(201, json={"id": 1, "name": "x", "secret": "s"})
         )
         with pytest.raises(VaultCredentialsReadError):
             await connector.robot_create(
-                synthesise_system_operator(),
+                system_operator,
                 _TARGET,
                 {"name": "ci-push", "project": "myproject", "duration": -1},
             )
+    # Fail-closed: the guard raises BEFORE Vault is touched and before the
+    # Harbor request is issued. A leaked successful read would have logged
+    # in to the fake and read the secret — assert neither happened so the
+    # boundary cannot be satisfied by cross-test state.
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
     assert not route.called
     await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_system_operator_credential_read_fails_closed_at_loader_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fail-closed guard holds at the credential-read boundary itself (AC3).
+
+    This is the **isolation-robust** anchor for AC3 (#984 PR #998 CI fix).
+    It exercises the guard at its true unit — the shared
+    :func:`load_basic_credentials` and the harbor default loader
+    :func:`load_credentials_from_vault` — with no connector instance, no
+    ``_creds_cache``, and no respx route in scope. Because nothing
+    cross-test (a leaked connector singleton, a populated credential
+    cache, a stale HTTP route) participates in this path, a leak that
+    short-circuits the handler-level test cannot satisfy this one: the
+    empty-``raw_jwt`` operator must raise ``VaultCredentialsReadError``
+    before Vault is touched, every time, on every worker. Mirrors the
+    loader-boundary precedent in
+    ``test_connectors_vcf_shared_auth.test_default_credentials_loader_rejects_empty_operator_jwt``.
+    """
+    fake = install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+    system_operator = synthesise_system_operator()
+
+    # The shared helper raises directly — the guard precedes any Vault call.
+    with pytest.raises(VaultCredentialsReadError):
+        await load_basic_credentials(_TARGET, system_operator)
+
+    # The harbor default loader (what the live connector uses) delegates to
+    # the helper, so it fails closed identically.
+    with pytest.raises(VaultCredentialsReadError):
+        await load_credentials_from_vault(_TARGET, system_operator)
+
+    # Neither path logged in to Vault or read a secret — the guard ran
+    # before the in-process fake was ever reached.
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -437,20 +498,27 @@ async def test_robot_delete_raises_on_http_error(
 async def test_robot_delete_system_operator_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A system operator (empty raw_jwt) cannot read the credential — fail closed."""
-    install_fake_client(
+    """A system operator (empty raw_jwt) cannot read the credential — fail closed.
+
+    Isolation-robust (#984 PR #998 CI fix): same shape as the create twin —
+    the read must raise AND the in-process Vault fake must never be touched,
+    so a leaked successful read fails loudly here instead of passing
+    vacuously under CI's ``pytest -n 6 --dist loadscope``.
+    """
+    fake = install_fake_client(
         monkeypatch,
         secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
     )
     connector = _make_connector()
+    system_operator = synthesise_system_operator()
     with respx.mock(assert_all_called=False) as mock:
         route = mock.delete("https://harbor.test.invalid/api/v2.0/robots/7").mock(
             return_value=respx.MockResponse(200)
         )
         with pytest.raises(VaultCredentialsReadError):
-            await connector.robot_delete(
-                synthesise_system_operator(), _TARGET, {"project": "proj", "id": 7}
-            )
+            await connector.robot_delete(system_operator, _TARGET, {"project": "proj", "id": 7})
+    assert fake.auth.jwt.login_calls == []
+    assert fake.secrets.kv.v2.read_calls == []
     assert not route.called
     await connector.aclose()
 

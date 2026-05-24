@@ -638,9 +638,29 @@ plain render-corruption bug for any legitimate `"`-bearing value).
 Emitting the JSON as inert `<script type="application/json">` text and
 parsing it client-side keeps the untrusted data out of every attribute
 context; `tojson`'s `<`/`>` escaping prevents a `</script>` in a field
-from closing the element early. The same latent shape exists in the live
-`_feed.html` `opIdFilter: {{ op_id_filter | tojson }}` (a single scalar,
-self-XSS at most) — tracked as a follow-up, out of scope for B1.
+from closing the element early.
+
+**The `op_id` scalar sinks (follow-up to B1, same PR #1044).** The same
+`tojson`-in-a-double-quoted-`x-data` class shipped on the live feed too:
+`_feed.html`'s `opIdFilter: {{ op_id_filter | tojson }}` and
+`_filter_bar.html`'s `x-data="{ opId: {{ op_id_filter | tojson }} }"`.
+Both echo the reflected `op_id` query param (`GET /ui/broadcast` and
+`GET /ui/broadcast/feed`), so a crafted link
+(`/ui/broadcast?op_id=" autofocus onfocus=…`) is a **reflected** XSS in
+the victim operator's session — not merely self-XSS. Because the seed
+here is a flat options object (not the events array the history island
+carries), the fix switches the `x-data` **attribute delimiter to single
+quotes** rather than adding a second data island: `tojson` escapes `'` to
+`'` (it never emits a raw single-quote) and escapes `<`/`>`/`&`, so a
+single-quoted attribute is breakout-proof for any scalar while the
+value's `"` bytes ride harmlessly inside it. The static config has no raw
+`'` (`op_class_badge_json` is `json.dumps` output, double-quoted only), so
+the delimiter is unambiguous, and behaviour is byte-identical. The
+sibling `value="{{ op_id_filter }}"` is in an autoescaped attribute
+(Jinja escapes `"` to `&#34;`) and was already safe. Regression tests in
+`test_ui_broadcast_filters.py` drive both routes with a breakout `op_id`
+and parse the response to assert no handler grafts onto an `x-data`
+element.
 
 ### Cross-tenant isolation
 

@@ -33,15 +33,33 @@
   passes it) renders exactly as before.
 -#}
 {% set wall = wall | default(false) %}
+{#-
+  XSS hardening (review finding on PR #1044, same class as the B1
+  history fix). ``opIdFilter`` echoes the reflected ``op_id`` query
+  param. Jinja's ``| tojson`` escapes ``<`` / ``>`` / ``&`` / ``'`` and
+  U+2028/U+2029 but NOT the double-quote ``"`` -- it keeps the JSON
+  string's own ``"`` delimiters and renders an inner ``"`` as a literal
+  ``\"`` byte. Inside a DOUBLE-quoted ``x-data="..."`` those raw ``"``
+  bytes terminate the attribute early, letting a crafted ``op_id`` (e.g.
+  ``" autofocus onfocus=alert(1) x="``) inject live event handlers ->
+  reflected XSS. The ``x-data`` attribute is therefore SINGLE-quoted:
+  ``tojson`` never emits a raw ``'`` (it escapes it to ``\u0027``), so
+  single-quoted attribute cannot be broken out of by any scalar, and the
+  ``"`` bytes ride harmlessly inside it. The static config has no raw
+  ``'`` (``op_class_badge_json`` is ``json.dumps`` output -- only ``"``),
+  so the single-quote delimiter is unambiguous. Behaviour is identical:
+  the controller still receives the same ``opIdFilter`` / ``cap`` /
+  ``badgeClasses`` / ``autoScroll`` values.
+-#}
 <div
   id="broadcast-feed"
   class="rounded-box border border-base-300 bg-base-100 {% if wall %}flex h-full flex-col overflow-hidden{% else %}overflow-hidden{% endif %}"
-  x-data="broadcastFeed({
+  x-data='broadcastFeed({
     cap: {{ in_dom_row_cap }},
     badgeClasses: {{ op_class_badge_json }},
     opIdFilter: {{ op_id_filter | tojson }},
     autoScroll: {{ wall | tojson }}
-  })"
+  })'
   x-on:broadcast-op-id-changed.window="onOpIdChanged($event)"
 >
   {# ---------- SSE sink ----------

@@ -24,11 +24,24 @@ rename them out of band (``slug`` carries no FK and the get-or-create
 never overwrites an existing row).
 
 The statement is a single dialect-native
-``INSERT ... ON CONFLICT (id) DO NOTHING``. ``ON CONFLICT DO NOTHING``
-makes concurrent first-writes safe: N requests racing on the same
-fresh ``tenant_id`` all attempt the insert, exactly one row lands, the
-losers no-op without raising. No ``SELECT``-then-``INSERT`` race
-window, no advisory lock, no application-level dedupe.
+``INSERT ... ON CONFLICT DO NOTHING`` with **no named arbiter**, so
+``DO NOTHING`` covers every unique index on ``tenant`` — the ``id``
+primary key *and* the ``tenant_slug_idx`` unique index. ``ON CONFLICT
+DO NOTHING`` makes concurrent first-writes safe: N requests racing on
+the same fresh ``tenant_id`` all attempt the insert, exactly one row
+lands, the losers no-op without raising. No ``SELECT``-then-``INSERT``
+race window, no advisory lock, no application-level dedupe.
+
+Naming only ``id`` as the arbiter (the original shape) was **not**
+race-safe: PostgreSQL raised a ``unique_violation`` on the non-arbiter
+``tenant_slug_idx`` when concurrent transactions inserted the same
+``(id, slug)`` row, because that index's conflict was checked outside
+the ``id`` arbiter's speculative-insertion wait path. Dropping the
+``index_elements`` so the arbiter is *all* unique indexes closes that
+window (#983). The slug is bijective with the ``id`` (see
+:func:`_derive_slug`), so a slug conflict always implies the same
+``id`` row already exists — arbitrating against both indexes is exactly
+the intended idempotent no-op, never a wrong suppression.
 
 JIT provisioning from a verified IdP claim is the standard
 multi-tenant pattern — an Auth0/Keycloak-fronted backend provisions
@@ -61,18 +74,23 @@ def _derive_slug(tenant_id: UUID) -> str:
 
     ``tenant-<full-uuid>`` — the canonical hyphenated UUID form, so
     the slug is bijective with the ``id`` primary key. ``tenant.slug``
-    has its own ``UNIQUE`` index (``tenant_slug_idx``) which the
-    ``ON CONFLICT (id) DO NOTHING`` clause does **not** guard;
-    truncating to a prefix would let two distinct tenant UUIDs share a
-    slug and raise an ``IntegrityError`` on the slug index, 500-ing
+    has its own ``UNIQUE`` index (``tenant_slug_idx``) separate from the
+    ``id`` primary key. The full-UUID form makes the slug exactly as
+    unique as the ``id``: a slug conflict can only arise for a row that
+    already shares the ``id``, never for two genuinely-distinct tenants.
+    That bijection is what lets :func:`ensure_tenant` arbitrate
+    ``ON CONFLICT DO NOTHING`` against *both* unique indexes safely (a
+    slug conflict ⟺ an ``id`` conflict, so DO-NOTHING on either is the
+    same idempotent no-op). Truncating to a prefix would break the
+    bijection — two distinct tenant UUIDs sharing the prefix would share
+    a slug and raise an ``IntegrityError`` on the slug index, 500-ing
     every authenticated request for the colliding tenant forever
-    (``ensure_tenant`` runs on every authenticated request). The full
-    UUID makes the slug exactly as unique as the conflict target.
-    Still deterministic (re-deriving for the same ``tenant_id`` is
-    stable) and namespaced under ``tenant-`` so a future v0.3
-    provisioning API can tell auto-seeded rows from operator-named
-    ones at a glance. The slug carries no FK, so a later rename is a
-    single ``UPDATE`` with no cascade.
+    (``ensure_tenant`` runs on every authenticated request). Still
+    deterministic (re-deriving for the same ``tenant_id`` is stable) and
+    namespaced under ``tenant-`` so a future v0.3 provisioning API can
+    tell auto-seeded rows from operator-named ones at a glance. The slug
+    carries no FK, so a later rename is a single ``UPDATE`` with no
+    cascade.
     """
     return f"tenant-{tenant_id}"
 
@@ -114,27 +132,34 @@ async def ensure_tenant(tenant_id: UUID, session: AsyncSession) -> None:
     # The PG and SQLite dialect ``Insert`` types are distinct concrete
     # classes; annotate against their shared ``sqlalchemy.sql.dml.Insert``
     # base so both branches assign to the same statically-typed name.
+    #
+    # No ``index_elements`` is passed, so the ``DO NOTHING`` arbiter is
+    # *every* unique index on ``tenant`` — the ``id`` primary key **and**
+    # the separate ``tenant_slug_idx`` unique index. Naming only ``id``
+    # as the arbiter (the previous shape) does **not** suppress a
+    # violation on a non-arbiter unique index: PostgreSQL raises a
+    # ``unique_violation`` on ``tenant_slug_idx`` when concurrent
+    # transactions insert the *same* ``(id, slug)`` row, because the
+    # slug-index conflict is checked outside the ``id`` arbiter's
+    # speculative-insertion wait path and surfaces before the winner's
+    # row is visible (PG docs, INSERT ... ON CONFLICT — a named
+    # ``conflict_target`` only handles conflicts on that target;
+    # ``DO NOTHING`` carries weaker concurrency guarantees than
+    # ``DO UPDATE``). Since ``_derive_slug`` makes the slug bijective
+    # with the ``id``, a slug conflict always implies the same-``id``
+    # row already exists (or is mid-insert by a concurrent winner), so
+    # arbitrating against both indexes is exactly the intended
+    # idempotent no-op — and it is the form that survives the
+    # concurrent same-tenant first-write race (#983).
     stmt: Insert
     if conn.dialect.name == "postgresql":
-        stmt = (
-            pg_insert(Tenant)
-            .values(**values)
-            .on_conflict_do_nothing(
-                index_elements=["id"],
-            )
-        )
+        stmt = pg_insert(Tenant).values(**values).on_conflict_do_nothing()
     else:
-        # SQLite (dev/test via aiosqlite) — the sqlite dialect's
-        # on_conflict_do_nothing has no `constraint` kwarg but
-        # accepts `index_elements`; targeting `id` matches the PG
-        # path's conflict target exactly.
-        stmt = (
-            sqlite_insert(Tenant)
-            .values(**values)
-            .on_conflict_do_nothing(
-                index_elements=["id"],
-            )
-        )
+        # SQLite (dev/test via aiosqlite). The bare form arbitrates
+        # against both unique indexes here too; SQLite serialises
+        # writes so it never exercised the PG race, but keeping the two
+        # branches symmetric avoids a dialect-divergent conflict target.
+        stmt = sqlite_insert(Tenant).values(**values).on_conflict_do_nothing()
 
     result = await session.execute(stmt)
     # SQLAlchemy 2.x types DML execute() as ``Result[Any]`` whose

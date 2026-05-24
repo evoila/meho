@@ -44,6 +44,7 @@ import asyncssh
 import structlog
 
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.schemas import FingerprintResult
 
 logger = structlog.get_logger()
 
@@ -52,6 +53,21 @@ logger = structlog.get_logger()
 type Target = Any
 
 _POOL_TTL_S: float = 300.0  # 5-minute idle eviction window
+
+
+class ConnectorUnreachableError(RuntimeError):
+    """An ``about``-style op ran against an unreachable target.
+
+    Raised by :meth:`SshConnector._assert_reachable` when a connector's
+    :meth:`fingerprint` returned ``reachable=False`` (connection drop,
+    auth failure, command failure mid-fingerprint). The G0.6 dispatcher
+    shim (``execute``) catches every handler exception and maps it to a
+    ``connector_error`` :class:`~meho_backplane.connectors.schemas.OperationResult`
+    (``status="error"``). Raising here is what stops an unreachable
+    target from being reported as a successful (``status="ok"``)
+    operation carrying a dict of empty/None identity fields — the
+    failure mode #986 fixes.
+    """
 
 
 class SshConnector(Connector):
@@ -163,6 +179,28 @@ class SshConnector(Connector):
             exit_code=result.exit_status,
         )
         return result
+
+    def _assert_reachable(self, result: FingerprintResult) -> None:
+        """Raise :exc:`ConnectorUnreachableError` when ``result`` is unreachable.
+
+        Shared guard for typed-SSH ``about``-style ops that delegate to
+        :meth:`fingerprint`. A subclass ``fingerprint`` that catches a
+        mid-call SSH failure returns ``FingerprintResult(reachable=False,
+        extras["error"]=...)`` rather than raising; without this check the
+        ``about`` op would map those empty/None identity fields into a
+        successful (``status="ok"``) :class:`~meho_backplane.connectors.schemas.OperationResult`,
+        masking the failure. Calling this immediately after ``fingerprint``
+        re-raises the failure as a connector error the dispatcher maps to
+        a non-ok result (#986). The original error message, when present,
+        is included so the operator sees the underlying cause.
+        """
+        if result.reachable:
+            return
+        cause = result.extras.get("error")
+        detail = f": {cause}" if cause else ""
+        raise ConnectorUnreachableError(
+            f"target unreachable for {result.product!r} via {result.probe_method!r}{detail}"
+        )
 
     async def aclose(self) -> None:
         """Close all pooled connections. Called by lifespan or cleanup."""

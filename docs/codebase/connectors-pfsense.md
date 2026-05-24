@@ -85,14 +85,32 @@ Unreachable targets (OSError or asyncssh.Error from `_run_command`) return
 | SSH handshake failed (protocol error) | `False` | `ssh_handshake_failed` |
 | SSH auth rejected | `False` | `auth_failed` |
 | `ValueError` from `_auth_config` (missing key) | `False` | `auth_failed` |
+| `cat /etc/version` raises after a successful connect (drop / `asyncssh.Error` / timeout) | `False` | `command_failed` |
 | `cat /etc/version` stdout empty or non-zero exit | `False` | `no_shell_access` |
 | SSH connects + `/etc/version` returns content | `True` | `None` |
+
+The post-connect `cat /etc/version` is wrapped in a `(OSError,
+asyncssh.Error)` guard so a connection drop, an `asyncssh.Error`, or a
+timeout after the handshake maps to `command_failed` rather than escaping
+`probe()` as an unhandled exception (#986). `TimeoutError` is an `OSError`
+subclass, so the command-timeout case is covered by the same tuple.
 
 The `no_shell_access` reason targets the console-menu trap: pfSense's
 default `admin` SSH session may land in the pfSense console menu (a PHP REPL)
 rather than a POSIX shell if the account is not configured with a forced
 command or if SSH key auth is not properly wired. In that scenario, `cat`
 returns no output; the probe correctly reports the shell is inaccessible.
+
+### About (`pfsense.about`) — unreachability surfacing
+
+`about()` reuses `fingerprint()`, which returns `reachable=False` (rather
+than raising) on a connection failure. `about()` calls the shared
+`SshConnector._assert_reachable(result)` guard immediately after, which
+raises `ConnectorUnreachableError` when the fingerprint is not reachable.
+Without this check `about()` would return a dict of empty/None identity
+fields that the dispatcher reports as a successful (`status="ok"`) op,
+masking the failure (#986). The raised error is caught by the dispatcher
+shim and mapped to a `connector_error` `OperationResult` (`status="error"`).
 
 ### Dispatcher shim (`execute`)
 

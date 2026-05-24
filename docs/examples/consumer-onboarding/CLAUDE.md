@@ -187,7 +187,7 @@ this contract:
 > codebase — `tools/list` does not include them today. Until they
 > land, follow the same four-step discipline using the surfaces that
 > exist now: `meho status --watch` for the read side (steps 1 and
-> 3), `meho audit recent --since 30m --target <name>` for "who's
+> 3), `meho audit who-touched <name> --since 30m` for "who's
 > been here recently" (step 1), and an explicit Slack/chat
 > announcement for intent + completion (steps 2 and 4). The G6.1
 > dispatcher already auto-emits a broadcast event before and after

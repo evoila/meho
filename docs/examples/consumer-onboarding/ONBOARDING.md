@@ -289,8 +289,8 @@ underlying SSE feed and CLI subscriber ship via
 named meta-tools are a follow-up. Until they land, the four-step
 discipline maps onto:
 
-* Step 1 (check before starting) — `meho audit recent --since 30m
-  --target <name>` for "who's been here recently".
+* Step 1 (check before starting) — `meho audit who-touched <name>
+  --since 30m` for "who's been here recently".
 * Step 2 (announce intent) — explicit Slack/chat post.
 * Step 3 (check in mid-flight) — `meho status --watch --target
   <name>` running in a background terminal.

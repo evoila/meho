@@ -180,7 +180,7 @@ For a target tagged `shared_service_account`:
   `(target, connector-instance)` lifetime — every subsequent cache hit
   skips Vault entirely, which is the cache's whole point.
 
-### The four cache implementations
+### The cache implementations
 
 | Connector | File | Cache | Notes |
 | --- | --- | --- | --- |
@@ -189,19 +189,34 @@ For a target tagged `shared_service_account`:
 | vcf-automation (provider plane) | `backend/src/meho_backplane/connectors/vcf_automation/connector.py` | `_provider_tokens` (in `_provider_session_token`) | `X-VMWARE-VCLOUD-ACCESS-TOKEN` JWT cache. |
 | vcf-automation (tenant plane) | `backend/src/meho_backplane/connectors/vcf_automation/connector.py` | `_tenant_tokens` (in `_tenant_session_token`) | `{"token": ...}` body-value cache. |
 | vmware-rest | `backend/src/meho_backplane/connectors/vmware_rest/connector.py` | `_session_tokens` (in `_session_token`) | `vmware-api-session-id` cache; the G3.9 precedent every other cache here copied. |
+| harbor | `backend/src/meho_backplane/connectors/harbor/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic. |
+| sddc-manager | `backend/src/meho_backplane/connectors/sddc_manager/connector.py` | `_creds_cache` (in `_load_credentials`) | Credential dict cache; per-target `{username, password}` consumed via HTTP Basic (username suffixed with `@sso_realm`). |
 
-All five cache sites apply the same fail-closed guard before the cache
-lookup: an empty `operator.raw_jwt` raises `VaultCredentialsReadError`
-without touching the cache. The **primary** fail-closed gate against empty
-`raw_jwt` lives one layer deeper, in the credential loader's
-`_resolve_secret_ref` helper at
+Every cache site applies a fail-closed guard before the cache lookup so a
+cache hit can never short-circuit past the loader and return
+previously-primed credentials to a caller that could not itself resolve
+them. The **primary** fail-closed gate lives one layer deeper, in the
+credential loader's `_resolve_secret_ref` helper at
 [`vault_creds.py:188`](../../backend/src/meho_backplane/connectors/_shared/vault_creds.py#L188);
-the cache guards exist as the **second** layer — defense-in-depth so a
-cache hit can never short-circuit past the loader and return a
-previously-primed token to a caller without an operator JWT. (Each
-consuming connector's `auth_headers` enforces a separate constraint —
-the `auth_model == "shared_service_account"` boundary — and does not
-itself reject empty `raw_jwt`; the loader and the cache guards do.)
+the cache guards are the **second** layer — defense-in-depth.
+
+The guards split on *how* they identify a system/operator-less caller:
+
+- The five session-token / VCF caches reject an **empty** `operator.raw_jwt`
+  at the cache method (`VaultCredentialsReadError` without touching the
+  cache).
+- The two HTTP-Basic credential caches (`harbor`, `sddc-manager`) instead
+  key off the `SYSTEM_OPERATOR_SUB` sentinel via
+  `is_system_operator(operator)` (#1008). Since #980 the synthesised
+  system operator carries a **non-empty placeholder** `raw_jwt`, so an
+  empty-`raw_jwt` check no longer identifies it. On a system-operator call
+  these connectors skip the cache fast-path and run the loader, which fails
+  closed (the placeholder JWT is not a valid Keycloak JWT). A real
+  operator's cold-load → cache → reuse path is unchanged.
+
+(Each consuming connector's `auth_headers` enforces a separate constraint —
+the `auth_model == "shared_service_account"` boundary — and does not itself
+reject the system caller; the loader and the cache guards do.)
 
 ### Why not key the cache on the operator too
 

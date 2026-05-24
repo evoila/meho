@@ -24,6 +24,11 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.system_operator import (
+    SYSTEM_OPERATOR_SUB,
+    synthesise_system_operator,
+)
+from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.harbor import (
     HarborConnector,
@@ -221,6 +226,88 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
 
     assert h1 == h2
     assert call_count == 1
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# System-operator cache-bypass (fail-closed; #1008)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_warm_cache_not_served_to_system_operator_runs_loader() -> None:
+    """A warm cache primed by a real operator is NOT served to the system operator.
+
+    The system/operator-less caller (``synthesise_system_operator``) must
+    re-run the loader so its fail-closed behaviour applies — it can never
+    borrow warm credentials a real operator resolved (#1008). Keyed off
+    ``SYSTEM_OPERATOR_SUB``, not ``raw_jwt`` (the system operator carries a
+    non-empty placeholder JWT since #980).
+    """
+    call_log: list[str] = []
+
+    async def _counting_loader(_target: HarborTargetLike, operator: Operator) -> dict[str, str]:
+        call_log.append(operator.sub)
+        return {"username": "admin", "password": "stub-password"}
+
+    connector = HarborConnector(credentials_loader=_counting_loader)
+    # Real operator warms the cache (cold load).
+    await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    # System operator must re-run the loader rather than reuse the warm cache.
+    await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())
+
+    assert call_log == ["test-operator", SYSTEM_OPERATOR_SUB]
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_system_operator_fails_closed_against_warm_cache() -> None:
+    """With a warm cache, a system-operator load runs the loader and fails closed.
+
+    Proves the bypass is closed end to end: even though a real operator
+    primed the cache, the system caller hits the loader, which fails closed
+    per its contract (a system-initiated read cannot resolve per-target
+    credentials).
+    """
+
+    async def _failing_for_system_loader(
+        _target: HarborTargetLike, operator: Operator
+    ) -> dict[str, str]:
+        if operator.sub == SYSTEM_OPERATOR_SUB:
+            raise VaultCredentialsReadError(
+                "system-initiated calls cannot read per-target vendor credentials"
+            )
+        return {"username": "admin", "password": "stub-password"}
+
+    connector = HarborConnector(credentials_loader=_failing_for_system_loader)
+    await connector.auth_headers(_TARGET_A, operator=_make_operator())  # warm the cache
+    with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
+        await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_operator_reuse_unchanged_after_system_operator_call() -> None:
+    """Real-operator reuse is unaffected by the system-operator cache bypass.
+
+    A second real-operator call still reuses the warm cache (loader called
+    once for the real operator); only the interleaved system-operator call
+    re-runs the loader.
+    """
+    real_calls = 0
+
+    async def _counting_loader(_target: HarborTargetLike, operator: Operator) -> dict[str, str]:
+        nonlocal real_calls
+        if operator.sub != SYSTEM_OPERATOR_SUB:
+            real_calls += 1
+        return {"username": "admin", "password": "stub-password"}
+
+    connector = HarborConnector(credentials_loader=_counting_loader)
+    await connector.auth_headers(_TARGET_A, operator=_make_operator())  # cold real load
+    await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())  # bypass
+    await connector.auth_headers(_TARGET_A, operator=_make_operator())  # warm real reuse
+
+    assert real_calls == 1
     await connector.aclose()
 
 

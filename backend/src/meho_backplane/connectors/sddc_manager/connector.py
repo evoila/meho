@@ -75,7 +75,10 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.system_operator import (
+    is_system_operator,
+    synthesise_system_operator,
+)
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -200,10 +203,17 @@ class SddcManagerConnector(HttpConnector):
         sddc-manager-specific entry point to the shared
         operator-context Vault read; injected test loaders accept the
         same ``(target, operator)`` pair.
+
+        The cache fast-path is closed to the synthesised system operator
+        (``is_system_operator``): a system/operator-less caller always
+        runs the loader so its fail-closed guard applies, and can never be
+        served warm credentials a real operator primed but it could not
+        resolve itself (#1008). Real-operator behaviour is unchanged —
+        cold load → cache → reuse.
         """
         async with self._creds_lock:
             cached = self._creds_cache.get(target.name)
-            if cached is not None:
+            if cached is not None and not is_system_operator(operator):
                 return cached
             raw = await self._credentials_loader(target, operator)
             try:

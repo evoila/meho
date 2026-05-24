@@ -44,6 +44,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 __all__ = [
     "SYSTEM_OPERATOR_PLACEHOLDER_JWT",
     "SYSTEM_OPERATOR_SUB",
+    "is_system_operator",
     "synthesise_system_operator",
 ]
 
@@ -91,3 +92,17 @@ def synthesise_system_operator() -> Operator:
         tenant_id=_SYSTEM_TENANT_ID,
         tenant_role=TenantRole.OPERATOR,
     )
+
+
+def is_system_operator(operator: Operator) -> bool:
+    """Return ``True`` iff *operator* is the synthesised system operator.
+
+    Identity is the :data:`SYSTEM_OPERATOR_SUB` sentinel ``sub`` (since
+    #980 the system operator carries a non-empty placeholder ``raw_jwt``,
+    so an empty-``raw_jwt`` check no longer identifies it). Connectors that
+    keep a per-target credential cache use this to keep the cache fast-path
+    closed to a system/operator-less caller: such a caller must run the
+    fail-closed loader rather than be served warm credentials it could not
+    itself resolve.
+    """
+    return operator.sub == SYSTEM_OPERATOR_SUB

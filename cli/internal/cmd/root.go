@@ -20,6 +20,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/bind9"
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
+	"github.com/evoila/meho/cli/internal/cmd/conventions"
 	"github.com/evoila/meho/cli/internal/cmd/gcloud"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
 	hetznerrobot "github.com/evoila/meho/cli/internal/cmd/hetzner-robot"
@@ -152,6 +153,16 @@ func newRootCmd() *cobra.Command {
 	// registerDynamicSubcommands so the backplane manifest cannot
 	// shadow the built-in `kb` parent.
 	root.AddCommand(kb.NewRootCmd())
+
+	// G7.1-T3 (#315) -- conventions verbs (list / show / create / edit /
+	// delete / history) for Initiative #229 (tenant conventions). Wraps
+	// the six /api/v1/conventions routes shipped by G7.1-T2 (#314).
+	// Read verbs are operator-level; write verbs require tenant_admin.
+	// The `edit` verb supports two modes — flag-driven PATCH (scripting)
+	// and $EDITOR interactive (operator conversational edit). Registered
+	// before registerDynamicSubcommands so the backplane manifest cannot
+	// shadow the built-in `conventions` parent.
+	root.AddCommand(conventions.NewRootCmd())
 
 	// G5.1-T4 (#424) -- top-level memory verbs (remember / recall /
 	// forget / list) for Initiative #332. Each verb is registered

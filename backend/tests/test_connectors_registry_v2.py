@@ -447,3 +447,25 @@ def test_hetzner_robot_connector_registered_under_v2_triple() -> None:
     key = ("hetzner-robot", "2026.04", "hetzner-rest")
     assert key in snapshot
     assert snapshot[key] is HetznerRobotConnector
+
+
+def test_holodeck_connector_registered_under_v2_triple() -> None:
+    """HolodeckConnector package registers under (holodeck, 9.0, holodeck-ssh).
+
+    G3.8-T1 (#853) skeleton. The autouse _clean_registry fixture clears the
+    registry before this test, so we manually re-register using the class
+    attributes to assert the triple resolves correctly. Same pattern as
+    the SDDC Manager / Harbor / pfSense tests above.
+    """
+    from meho_backplane.connectors.holodeck import HolodeckConnector
+
+    register_connector_v2(
+        product=HolodeckConnector.product,
+        version=HolodeckConnector.version,
+        impl_id=HolodeckConnector.impl_id,
+        cls=HolodeckConnector,
+    )
+    snapshot = all_connectors_v2()
+    key = ("holodeck", "9.0", "holodeck-ssh")
+    assert key in snapshot
+    assert snapshot[key] is HolodeckConnector

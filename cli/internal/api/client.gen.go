@@ -61,6 +61,13 @@ const (
 	Medium CandidateHintConfidence = "medium"
 )
 
+// Defines values for ConventionKind.
+const (
+	Operational ConventionKind = "operational"
+	Reference   ConventionKind = "reference"
+	Workflow    ConventionKind = "workflow"
+)
+
 // Defines values for CriterionResultName.
 const (
 	DailyUseDuration CriterionResultName = "daily_use_duration"
@@ -796,6 +803,169 @@ type ConnectorSpecEntry struct {
 	SpecInfoVersion        *string   `json:"spec_info_version"`
 	Upstream               *[]string `json:"upstream"`
 	Version                string    `json:"version"`
+}
+
+// Convention Full-row representation returned by GET-single / POST / PATCH.
+//
+// Carries the entire “body“ text -- the natural shape for
+// “GET /{slug}“ and the return value of POST/PATCH where the
+// caller wants to confirm what they wrote landed verbatim.
+// “kind“ is exposed as the raw string from the DB rather than
+// as :class:`ConventionKind`; the API layer's pydantic models
+// bound writes to the enum but read paths surface whatever the
+// DB stored (a future “kind“ value introduced by a migration
+// would otherwise blow up the JSON encoder on every read).
+type Convention struct {
+	Body         string             `json:"body"`
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub *string            `json:"created_by_sub"`
+	Id           openapi_types.UUID `json:"id"`
+	Kind         string             `json:"kind"`
+	Priority     int                `json:"priority"`
+	Slug         string             `json:"slug"`
+	TenantId     openapi_types.UUID `json:"tenant_id"`
+	Title        string             `json:"title"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+}
+
+// ConventionCreate POST body for “/api/v1/conventions“.
+//
+// “slug“ is the operator-visible identifier the URL / CLI / audit
+// log all reference; it is the natural key within a tenant (the
+// composite-unique index in T1's migration enforces uniqueness).
+// Bounded at 128 characters and constrained to a URL-safe shape
+// (lowercase ASCII, digits, hyphen) so audit log paths stay
+// grep-friendly and no operator can sneak a slash through. The
+// title and body are bounded only by a generous upper limit; the
+// real budget gate is the over-budget 422 in the route handler,
+// which runs :func:`estimate_tokens` against “body“ before
+// insert and rejects any single “operational“ entry exceeding
+// :data:`DEFAULT_MAX_PREAMBLE_TOKENS`.
+//
+// “priority“ is optional with a default of 0; the SmallInteger
+// column on :class:`TenantConvention` bounds the range to
+// -32768..32767. Per the issue body, “priority“ is the ranking
+// key T4's preamble packer uses to drop low-priority entries
+// whole on budget overflow -- higher value wins. The default of
+// 0 matches the column's “server_default“ so omitting the field
+// round-trips identically through create + show.
+type ConventionCreate struct {
+	Body string `json:"body"`
+
+	// Kind Closed vocabulary for ``TenantConvention.kind``.
+	//
+	// The DB column itself is free-form ``TEXT`` per the issue body's
+	// Out of scope ("DB-level enum on ``kind``" deferred); this enum
+	// is the API-layer single line of defence. A request with
+	// ``kind="garbage"`` trips 422 at pydantic parse time before the
+	// handler runs -- the same surface shape pydantic raises for
+	// every other validation failure, so callers can branch on 4xx
+	// uniformly. Per the issue body, only ``operational`` conventions
+	// are packed into the session preamble; ``workflow`` /
+	// ``reference`` are reference material the operator surfaces on
+	// demand and are exempt from the over-budget 422 rejection.
+	Kind     ConventionKind `json:"kind"`
+	Priority *int           `json:"priority,omitempty"`
+	Slug     string         `json:"slug"`
+	Title    string         `json:"title"`
+}
+
+// ConventionHistoryEntry One row from “GET /api/v1/conventions/{slug}/history“.
+//
+// Per the issue's acceptance criterion, history returns newest
+// first ("pick newest first for v0.2; documented"); the route's
+// ORDER BY “ts DESC“ enforces this. “audit_id“ is the soft-FK
+// that G8's audit-query path joins on; it is nullable because
+// T5's seed migration inserts history rows with no audit_log row
+// (seeded rows pre-date any HTTP request).
+//
+// “body_before“ is nullable -- the first history row (the
+// CREATE event) has no prior state. DELETE history rows get
+// “body_after=<final body>“ (a legible last-known state for
+// audit forensics) rather than an empty-string sentinel; the
+// lifecycle distinction (create / update / delete) lives in the
+// audit log row's “method“ / “path“ columns, not on the
+// history row itself.
+type ConventionHistoryEntry struct {
+	ActorSub     string              `json:"actor_sub"`
+	AuditId      *openapi_types.UUID `json:"audit_id"`
+	BodyAfter    string              `json:"body_after"`
+	BodyBefore   *string             `json:"body_before"`
+	ConventionId openapi_types.UUID  `json:"convention_id"`
+	Id           openapi_types.UUID  `json:"id"`
+	Ts           time.Time           `json:"ts"`
+}
+
+// ConventionKind Closed vocabulary for “TenantConvention.kind“.
+//
+// The DB column itself is free-form “TEXT“ per the issue body's
+// Out of scope ("DB-level enum on “kind“" deferred); this enum
+// is the API-layer single line of defence. A request with
+// “kind="garbage"“ trips 422 at pydantic parse time before the
+// handler runs -- the same surface shape pydantic raises for
+// every other validation failure, so callers can branch on 4xx
+// uniformly. Per the issue body, only “operational“ conventions
+// are packed into the session preamble; “workflow“ /
+// “reference“ are reference material the operator surfaces on
+// demand and are exempt from the over-budget 422 rejection.
+type ConventionKind string
+
+// ConventionListResponse Response envelope for “GET /api/v1/conventions“.
+//
+// Wrapped in “{"entries": [...]}“ so a future cursor / total
+// field can land non-breakingly. Same shape the kb + memory list
+// surfaces adopted; consistency across the v0.2 read APIs keeps
+// the CLI's list renderer one switch statement, not three.
+type ConventionListResponse struct {
+	Entries []ConventionSummary `json:"entries"`
+}
+
+// ConventionSummary List-row representation returned by “GET /api/v1/conventions“.
+//
+// Lighter than :class:`Convention` -- omits the full “body“ so
+// a list of 20 conventions doesn't materialise 20 KB of rule
+// text on every list call. The CLI's “meho conventions list“
+// uses this shape to render a one-line-per-convention table;
+// “meho conventions show <slug>“ reaches for the full
+// :class:`Convention` shape via the per-slug GET route.
+// “from_attributes=True“ lets the handler return the SQLAlchemy
+// ORM object directly.
+type ConventionSummary struct {
+	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBySub *string            `json:"created_by_sub"`
+	Id           openapi_types.UUID `json:"id"`
+	Kind         string             `json:"kind"`
+	Priority     int                `json:"priority"`
+	Slug         string             `json:"slug"`
+	TenantId     openapi_types.UUID `json:"tenant_id"`
+	Title        string             `json:"title"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+}
+
+// ConventionUpdate PATCH body for “/api/v1/conventions/{slug}“.
+//
+// All fields optional -- PATCH semantics means "update only what's
+// provided". Pydantic v2's :attr:`BaseModel.model_fields_set`
+// distinguishes "field absent from JSON" from "field present with
+// null", and the route handler uses that view to apply only the
+// explicitly-set keys to the ORM row. The kind discriminator is
+// excluded from the PATCH surface: changing a convention's kind
+// in-place would silently change its preamble-inclusion behaviour
+// (an “operational“ rule becoming “reference“ would disappear
+// from every future preamble without an audit signal); operators
+// delete + recreate to switch kind, which produces a clean two-
+// row history trail.
+//
+// “priority“ is included because reranking is the most common
+// edit shape (a rule that became more / less urgent without its
+// text changing). “slug“ is not in the PATCH surface either --
+// renaming a convention is a delete + recreate as well, since
+// the audit log and history rows reference the old slug by
+// natural key.
+type ConventionUpdate struct {
+	Body     *string `json:"body"`
+	Priority *int    `json:"priority"`
+	Title    *string `json:"title"`
 }
 
 // CriterionResult One row of the per-surface checklist.
@@ -2618,6 +2788,38 @@ type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListConventionsApiV1ConventionsGetParams defines parameters for ListConventionsApiV1ConventionsGet.
+type ListConventionsApiV1ConventionsGetParams struct {
+	// Kind Filter by kind (operational / workflow / reference).
+	Kind          *ConventionKind `form:"kind,omitempty" json:"kind,omitempty"`
+	Authorization *string         `json:"authorization,omitempty"`
+}
+
+// CreateConventionApiV1ConventionsPostParams defines parameters for CreateConventionApiV1ConventionsPost.
+type CreateConventionApiV1ConventionsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteConventionApiV1ConventionsSlugDeleteParams defines parameters for DeleteConventionApiV1ConventionsSlugDelete.
+type DeleteConventionApiV1ConventionsSlugDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowConventionApiV1ConventionsSlugGetParams defines parameters for ShowConventionApiV1ConventionsSlugGet.
+type ShowConventionApiV1ConventionsSlugGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// UpdateConventionApiV1ConventionsSlugPatchParams defines parameters for UpdateConventionApiV1ConventionsSlugPatch.
+type UpdateConventionApiV1ConventionsSlugPatchParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListHistoryApiV1ConventionsSlugHistoryGetParams defines parameters for ListHistoryApiV1ConventionsSlugHistoryGet.
+type ListHistoryApiV1ConventionsSlugHistoryGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // FeedEndpointApiV1FeedGetParams defines parameters for FeedEndpointApiV1FeedGet.
 type FeedEndpointApiV1FeedGetParams struct {
 	// OpClass Filter by event op_class.
@@ -2896,6 +3098,28 @@ type UiAuthLoginUiAuthLoginGetParams struct {
 	ReturnTo *string `form:"return_to,omitempty" json:"return_to,omitempty"`
 }
 
+// UiBroadcastFeedUiBroadcastGetParams defines parameters for UiBroadcastFeedUiBroadcastGet.
+type UiBroadcastFeedUiBroadcastGetParams struct {
+	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
+	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
+	Target    *string `form:"target,omitempty" json:"target,omitempty"`
+	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+}
+
+// UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams defines parameters for UiBroadcastEventDetailUiBroadcastEventAuditIdGet.
+type UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams struct {
+	// EventId Broadcast (Valkey-stream) event id, for display only.
+	EventId *string `form:"event_id,omitempty" json:"event_id,omitempty"`
+}
+
+// UiBroadcastFeedFragmentUiBroadcastFeedGetParams defines parameters for UiBroadcastFeedFragmentUiBroadcastFeedGet.
+type UiBroadcastFeedFragmentUiBroadcastFeedGetParams struct {
+	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
+	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
+	Target    *string `form:"target,omitempty" json:"target,omitempty"`
+	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+}
+
 // UiBroadcastStreamUiBroadcastStreamGetParams defines parameters for UiBroadcastStreamUiBroadcastStreamGet.
 type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 	OpClass   *string `form:"op_class,omitempty" json:"op_class,omitempty"`
@@ -2942,6 +3166,12 @@ type EditGroupEndpointApiV1ConnectorsConnectorIdGroupsGroupKeyPatchJSONRequestBo
 
 // EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody defines body for EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch for application/json ContentType.
 type EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatchJSONRequestBody = EditOpBody
+
+// CreateConventionApiV1ConventionsPostJSONRequestBody defines body for CreateConventionApiV1ConventionsPost for application/json ContentType.
+type CreateConventionApiV1ConventionsPostJSONRequestBody = ConventionCreate
+
+// UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody defines body for UpdateConventionApiV1ConventionsSlugPatch for application/json ContentType.
+type UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody = ConventionUpdate
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
@@ -3213,6 +3443,28 @@ type ClientInterface interface {
 	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet request
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListConventionsApiV1ConventionsGet request
+	ListConventionsApiV1ConventionsGet(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateConventionApiV1ConventionsPostWithBody request with any body
+	CreateConventionApiV1ConventionsPostWithBody(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateConventionApiV1ConventionsPost(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, body CreateConventionApiV1ConventionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteConventionApiV1ConventionsSlugDelete request
+	DeleteConventionApiV1ConventionsSlugDelete(ctx context.Context, slug string, params *DeleteConventionApiV1ConventionsSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowConventionApiV1ConventionsSlugGet request
+	ShowConventionApiV1ConventionsSlugGet(ctx context.Context, slug string, params *ShowConventionApiV1ConventionsSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UpdateConventionApiV1ConventionsSlugPatchWithBody request with any body
+	UpdateConventionApiV1ConventionsSlugPatchWithBody(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	UpdateConventionApiV1ConventionsSlugPatch(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, body UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListHistoryApiV1ConventionsSlugHistoryGet request
+	ListHistoryApiV1ConventionsSlugHistoryGet(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -3373,7 +3625,13 @@ type ClientInterface interface {
 	UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastFeedUiBroadcastGet request
-	UiBroadcastFeedUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiBroadcastFeedUiBroadcastGet(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiBroadcastEventDetailUiBroadcastEventAuditIdGet request
+	UiBroadcastEventDetailUiBroadcastEventAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiBroadcastFeedFragmentUiBroadcastFeedGet request
+	UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastStreamUiBroadcastStreamGet request
 	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3819,6 +4077,102 @@ func (c *Client) EditOpEndpointApiV1ConnectorsConnectorIdOperationsOpIdPatch(ctx
 
 func (c *Client) GetReviewEndpointApiV1ConnectorsConnectorIdReviewGet(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(c.Server, connectorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListConventionsApiV1ConventionsGet(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListConventionsApiV1ConventionsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateConventionApiV1ConventionsPostWithBody(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateConventionApiV1ConventionsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateConventionApiV1ConventionsPost(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, body CreateConventionApiV1ConventionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateConventionApiV1ConventionsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteConventionApiV1ConventionsSlugDelete(ctx context.Context, slug string, params *DeleteConventionApiV1ConventionsSlugDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteConventionApiV1ConventionsSlugDeleteRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowConventionApiV1ConventionsSlugGet(ctx context.Context, slug string, params *ShowConventionApiV1ConventionsSlugGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowConventionApiV1ConventionsSlugGetRequest(c.Server, slug, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateConventionApiV1ConventionsSlugPatchWithBody(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateConventionApiV1ConventionsSlugPatchRequestWithBody(c.Server, slug, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UpdateConventionApiV1ConventionsSlugPatch(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, body UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUpdateConventionApiV1ConventionsSlugPatchRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListHistoryApiV1ConventionsSlugHistoryGet(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListHistoryApiV1ConventionsSlugHistoryGetRequest(c.Server, slug, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4513,8 +4867,32 @@ func (c *Client) UiAuthLogoutUiAuthLogoutGet(ctx context.Context, reqEditors ...
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiBroadcastFeedUiBroadcastGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiBroadcastFeedUiBroadcastGetRequest(c.Server)
+func (c *Client) UiBroadcastFeedUiBroadcastGet(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastFeedUiBroadcastGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastEventDetailUiBroadcastEventAuditIdGet(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastEventDetailUiBroadcastEventAuditIdGetRequest(c.Server, auditId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6060,6 +6438,334 @@ func NewGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetRequest(server strin
 	}
 
 	operationPath := fmt.Sprintf("/api/v1/connectors/%s/review", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListConventionsApiV1ConventionsGetRequest generates requests for ListConventionsApiV1ConventionsGet
+func NewListConventionsApiV1ConventionsGetRequest(server string, params *ListConventionsApiV1ConventionsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/conventions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateConventionApiV1ConventionsPostRequest calls the generic CreateConventionApiV1ConventionsPost builder with application/json body
+func NewCreateConventionApiV1ConventionsPostRequest(server string, params *CreateConventionApiV1ConventionsPostParams, body CreateConventionApiV1ConventionsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateConventionApiV1ConventionsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateConventionApiV1ConventionsPostRequestWithBody generates requests for CreateConventionApiV1ConventionsPost with any type of body
+func NewCreateConventionApiV1ConventionsPostRequestWithBody(server string, params *CreateConventionApiV1ConventionsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/conventions")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteConventionApiV1ConventionsSlugDeleteRequest generates requests for DeleteConventionApiV1ConventionsSlugDelete
+func NewDeleteConventionApiV1ConventionsSlugDeleteRequest(server string, slug string, params *DeleteConventionApiV1ConventionsSlugDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/conventions/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowConventionApiV1ConventionsSlugGetRequest generates requests for ShowConventionApiV1ConventionsSlugGet
+func NewShowConventionApiV1ConventionsSlugGetRequest(server string, slug string, params *ShowConventionApiV1ConventionsSlugGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/conventions/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewUpdateConventionApiV1ConventionsSlugPatchRequest calls the generic UpdateConventionApiV1ConventionsSlugPatch builder with application/json body
+func NewUpdateConventionApiV1ConventionsSlugPatchRequest(server string, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, body UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewUpdateConventionApiV1ConventionsSlugPatchRequestWithBody(server, slug, params, "application/json", bodyReader)
+}
+
+// NewUpdateConventionApiV1ConventionsSlugPatchRequestWithBody generates requests for UpdateConventionApiV1ConventionsSlugPatch with any type of body
+func NewUpdateConventionApiV1ConventionsSlugPatchRequestWithBody(server string, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/conventions/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListHistoryApiV1ConventionsSlugHistoryGetRequest generates requests for ListHistoryApiV1ConventionsSlugHistoryGet
+func NewListHistoryApiV1ConventionsSlugHistoryGetRequest(server string, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/conventions/%s/history", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -9281,7 +9987,7 @@ func NewUiAuthLogoutUiAuthLogoutGetRequest(server string) (*http.Request, error)
 }
 
 // NewUiBroadcastFeedUiBroadcastGetRequest generates requests for UiBroadcastFeedUiBroadcastGet
-func NewUiBroadcastFeedUiBroadcastGetRequest(server string) (*http.Request, error) {
+func NewUiBroadcastFeedUiBroadcastGetRequest(server string, params *UiBroadcastFeedUiBroadcastGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -9297,6 +10003,229 @@ func NewUiBroadcastFeedUiBroadcastGetRequest(server string) (*http.Request, erro
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.OpClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Principal != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.OpId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiBroadcastEventDetailUiBroadcastEventAuditIdGetRequest generates requests for UiBroadcastEventDetailUiBroadcastEventAuditIdGet
+func NewUiBroadcastEventDetailUiBroadcastEventAuditIdGetRequest(server string, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "audit_id", runtime.ParamLocationPath, auditId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast/event/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.EventId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "event_id", runtime.ParamLocationQuery, *params.EventId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest generates requests for UiBroadcastFeedFragmentUiBroadcastFeedGet
+func NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(server string, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/broadcast/feed")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.OpClass != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_class", runtime.ParamLocationQuery, *params.OpClass); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Principal != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "principal", runtime.ParamLocationQuery, *params.Principal); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Target != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "target", runtime.ParamLocationQuery, *params.Target); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.OpId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "op_id", runtime.ParamLocationQuery, *params.OpId); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -9817,6 +10746,28 @@ type ClientWithResponsesInterface interface {
 	// GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse request
 	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetWithResponse(ctx context.Context, connectorId string, params *GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParams, reqEditors ...RequestEditorFn) (*GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse, error)
 
+	// ListConventionsApiV1ConventionsGetWithResponse request
+	ListConventionsApiV1ConventionsGetWithResponse(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*ListConventionsApiV1ConventionsGetResponse, error)
+
+	// CreateConventionApiV1ConventionsPostWithBodyWithResponse request with any body
+	CreateConventionApiV1ConventionsPostWithBodyWithResponse(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConventionApiV1ConventionsPostResponse, error)
+
+	CreateConventionApiV1ConventionsPostWithResponse(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, body CreateConventionApiV1ConventionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConventionApiV1ConventionsPostResponse, error)
+
+	// DeleteConventionApiV1ConventionsSlugDeleteWithResponse request
+	DeleteConventionApiV1ConventionsSlugDeleteWithResponse(ctx context.Context, slug string, params *DeleteConventionApiV1ConventionsSlugDeleteParams, reqEditors ...RequestEditorFn) (*DeleteConventionApiV1ConventionsSlugDeleteResponse, error)
+
+	// ShowConventionApiV1ConventionsSlugGetWithResponse request
+	ShowConventionApiV1ConventionsSlugGetWithResponse(ctx context.Context, slug string, params *ShowConventionApiV1ConventionsSlugGetParams, reqEditors ...RequestEditorFn) (*ShowConventionApiV1ConventionsSlugGetResponse, error)
+
+	// UpdateConventionApiV1ConventionsSlugPatchWithBodyWithResponse request with any body
+	UpdateConventionApiV1ConventionsSlugPatchWithBodyWithResponse(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateConventionApiV1ConventionsSlugPatchResponse, error)
+
+	UpdateConventionApiV1ConventionsSlugPatchWithResponse(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, body UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateConventionApiV1ConventionsSlugPatchResponse, error)
+
+	// ListHistoryApiV1ConventionsSlugHistoryGetWithResponse request
+	ListHistoryApiV1ConventionsSlugHistoryGetWithResponse(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*ListHistoryApiV1ConventionsSlugHistoryGetResponse, error)
+
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
@@ -9977,7 +10928,13 @@ type ClientWithResponsesInterface interface {
 	UiAuthLogoutUiAuthLogoutGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiAuthLogoutUiAuthLogoutGetResponse, error)
 
 	// UiBroadcastFeedUiBroadcastGetWithResponse request
-	UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error)
+	UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error)
+
+	// UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse request
+	UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse, error)
+
+	// UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse request
+	UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error)
 
 	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
 	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
@@ -10607,6 +11564,143 @@ func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListConventionsApiV1ConventionsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ConventionListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListConventionsApiV1ConventionsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListConventionsApiV1ConventionsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateConventionApiV1ConventionsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *Convention
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateConventionApiV1ConventionsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateConventionApiV1ConventionsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteConventionApiV1ConventionsSlugDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteConventionApiV1ConventionsSlugDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteConventionApiV1ConventionsSlugDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowConventionApiV1ConventionsSlugGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Convention
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowConventionApiV1ConventionsSlugGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowConventionApiV1ConventionsSlugGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UpdateConventionApiV1ConventionsSlugPatchResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Convention
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UpdateConventionApiV1ConventionsSlugPatchResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UpdateConventionApiV1ConventionsSlugPatchResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListHistoryApiV1ConventionsSlugHistoryGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *[]ConventionHistoryEntry
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListHistoryApiV1ConventionsSlugHistoryGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListHistoryApiV1ConventionsSlugHistoryGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -11662,6 +12756,7 @@ func (r UiAuthLogoutUiAuthLogoutGetResponse) StatusCode() int {
 type UiBroadcastFeedUiBroadcastGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -11674,6 +12769,50 @@ func (r UiBroadcastFeedUiBroadcastGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiBroadcastFeedUiBroadcastGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiBroadcastFeedFragmentUiBroadcastFeedGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiBroadcastFeedFragmentUiBroadcastFeedGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiBroadcastFeedFragmentUiBroadcastFeedGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -12144,6 +13283,76 @@ func (c *ClientWithResponses) GetReviewEndpointApiV1ConnectorsConnectorIdReviewG
 		return nil, err
 	}
 	return ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp)
+}
+
+// ListConventionsApiV1ConventionsGetWithResponse request returning *ListConventionsApiV1ConventionsGetResponse
+func (c *ClientWithResponses) ListConventionsApiV1ConventionsGetWithResponse(ctx context.Context, params *ListConventionsApiV1ConventionsGetParams, reqEditors ...RequestEditorFn) (*ListConventionsApiV1ConventionsGetResponse, error) {
+	rsp, err := c.ListConventionsApiV1ConventionsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListConventionsApiV1ConventionsGetResponse(rsp)
+}
+
+// CreateConventionApiV1ConventionsPostWithBodyWithResponse request with arbitrary body returning *CreateConventionApiV1ConventionsPostResponse
+func (c *ClientWithResponses) CreateConventionApiV1ConventionsPostWithBodyWithResponse(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConventionApiV1ConventionsPostResponse, error) {
+	rsp, err := c.CreateConventionApiV1ConventionsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateConventionApiV1ConventionsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateConventionApiV1ConventionsPostWithResponse(ctx context.Context, params *CreateConventionApiV1ConventionsPostParams, body CreateConventionApiV1ConventionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConventionApiV1ConventionsPostResponse, error) {
+	rsp, err := c.CreateConventionApiV1ConventionsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateConventionApiV1ConventionsPostResponse(rsp)
+}
+
+// DeleteConventionApiV1ConventionsSlugDeleteWithResponse request returning *DeleteConventionApiV1ConventionsSlugDeleteResponse
+func (c *ClientWithResponses) DeleteConventionApiV1ConventionsSlugDeleteWithResponse(ctx context.Context, slug string, params *DeleteConventionApiV1ConventionsSlugDeleteParams, reqEditors ...RequestEditorFn) (*DeleteConventionApiV1ConventionsSlugDeleteResponse, error) {
+	rsp, err := c.DeleteConventionApiV1ConventionsSlugDelete(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteConventionApiV1ConventionsSlugDeleteResponse(rsp)
+}
+
+// ShowConventionApiV1ConventionsSlugGetWithResponse request returning *ShowConventionApiV1ConventionsSlugGetResponse
+func (c *ClientWithResponses) ShowConventionApiV1ConventionsSlugGetWithResponse(ctx context.Context, slug string, params *ShowConventionApiV1ConventionsSlugGetParams, reqEditors ...RequestEditorFn) (*ShowConventionApiV1ConventionsSlugGetResponse, error) {
+	rsp, err := c.ShowConventionApiV1ConventionsSlugGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowConventionApiV1ConventionsSlugGetResponse(rsp)
+}
+
+// UpdateConventionApiV1ConventionsSlugPatchWithBodyWithResponse request with arbitrary body returning *UpdateConventionApiV1ConventionsSlugPatchResponse
+func (c *ClientWithResponses) UpdateConventionApiV1ConventionsSlugPatchWithBodyWithResponse(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UpdateConventionApiV1ConventionsSlugPatchResponse, error) {
+	rsp, err := c.UpdateConventionApiV1ConventionsSlugPatchWithBody(ctx, slug, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateConventionApiV1ConventionsSlugPatchResponse(rsp)
+}
+
+func (c *ClientWithResponses) UpdateConventionApiV1ConventionsSlugPatchWithResponse(ctx context.Context, slug string, params *UpdateConventionApiV1ConventionsSlugPatchParams, body UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody, reqEditors ...RequestEditorFn) (*UpdateConventionApiV1ConventionsSlugPatchResponse, error) {
+	rsp, err := c.UpdateConventionApiV1ConventionsSlugPatch(ctx, slug, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUpdateConventionApiV1ConventionsSlugPatchResponse(rsp)
+}
+
+// ListHistoryApiV1ConventionsSlugHistoryGetWithResponse request returning *ListHistoryApiV1ConventionsSlugHistoryGetResponse
+func (c *ClientWithResponses) ListHistoryApiV1ConventionsSlugHistoryGetWithResponse(ctx context.Context, slug string, params *ListHistoryApiV1ConventionsSlugHistoryGetParams, reqEditors ...RequestEditorFn) (*ListHistoryApiV1ConventionsSlugHistoryGetResponse, error) {
+	rsp, err := c.ListHistoryApiV1ConventionsSlugHistoryGet(ctx, slug, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListHistoryApiV1ConventionsSlugHistoryGetResponse(rsp)
 }
 
 // FeedEndpointApiV1FeedGetWithResponse request returning *FeedEndpointApiV1FeedGetResponse
@@ -12648,12 +13857,30 @@ func (c *ClientWithResponses) UiAuthLogoutUiAuthLogoutGetWithResponse(ctx contex
 }
 
 // UiBroadcastFeedUiBroadcastGetWithResponse request returning *UiBroadcastFeedUiBroadcastGetResponse
-func (c *ClientWithResponses) UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error) {
-	rsp, err := c.UiBroadcastFeedUiBroadcastGet(ctx, reqEditors...)
+func (c *ClientWithResponses) UiBroadcastFeedUiBroadcastGetWithResponse(ctx context.Context, params *UiBroadcastFeedUiBroadcastGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedUiBroadcastGetResponse, error) {
+	rsp, err := c.UiBroadcastFeedUiBroadcastGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseUiBroadcastFeedUiBroadcastGetResponse(rsp)
+}
+
+// UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse request returning *UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse
+func (c *ClientWithResponses) UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse(ctx context.Context, auditId openapi_types.UUID, params *UiBroadcastEventDetailUiBroadcastEventAuditIdGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse, error) {
+	rsp, err := c.UiBroadcastEventDetailUiBroadcastEventAuditIdGet(ctx, auditId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse(rsp)
+}
+
+// UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse request returning *UiBroadcastFeedFragmentUiBroadcastFeedGetResponse
+func (c *ClientWithResponses) UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error) {
+	rsp, err := c.UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiBroadcastFeedFragmentUiBroadcastFeedGetResponse(rsp)
 }
 
 // UiBroadcastStreamUiBroadcastStreamGetWithResponse request returning *UiBroadcastStreamUiBroadcastStreamGetResponse
@@ -13530,6 +14757,197 @@ func ParseGetReviewEndpointApiV1ConnectorsConnectorIdReviewGetResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest ConnectorReviewPayload
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListConventionsApiV1ConventionsGetResponse parses an HTTP response from a ListConventionsApiV1ConventionsGetWithResponse call
+func ParseListConventionsApiV1ConventionsGetResponse(rsp *http.Response) (*ListConventionsApiV1ConventionsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListConventionsApiV1ConventionsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConventionListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateConventionApiV1ConventionsPostResponse parses an HTTP response from a CreateConventionApiV1ConventionsPostWithResponse call
+func ParseCreateConventionApiV1ConventionsPostResponse(rsp *http.Response) (*CreateConventionApiV1ConventionsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateConventionApiV1ConventionsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest Convention
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteConventionApiV1ConventionsSlugDeleteResponse parses an HTTP response from a DeleteConventionApiV1ConventionsSlugDeleteWithResponse call
+func ParseDeleteConventionApiV1ConventionsSlugDeleteResponse(rsp *http.Response) (*DeleteConventionApiV1ConventionsSlugDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteConventionApiV1ConventionsSlugDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowConventionApiV1ConventionsSlugGetResponse parses an HTTP response from a ShowConventionApiV1ConventionsSlugGetWithResponse call
+func ParseShowConventionApiV1ConventionsSlugGetResponse(rsp *http.Response) (*ShowConventionApiV1ConventionsSlugGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowConventionApiV1ConventionsSlugGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Convention
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUpdateConventionApiV1ConventionsSlugPatchResponse parses an HTTP response from a UpdateConventionApiV1ConventionsSlugPatchWithResponse call
+func ParseUpdateConventionApiV1ConventionsSlugPatchResponse(rsp *http.Response) (*UpdateConventionApiV1ConventionsSlugPatchResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UpdateConventionApiV1ConventionsSlugPatchResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Convention
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListHistoryApiV1ConventionsSlugHistoryGetResponse parses an HTTP response from a ListHistoryApiV1ConventionsSlugHistoryGetWithResponse call
+func ParseListHistoryApiV1ConventionsSlugHistoryGetResponse(rsp *http.Response) (*ListHistoryApiV1ConventionsSlugHistoryGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListHistoryApiV1ConventionsSlugHistoryGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest []ConventionHistoryEntry
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -14991,6 +16409,68 @@ func ParseUiBroadcastFeedUiBroadcastGetResponse(rsp *http.Response) (*UiBroadcas
 	response := &UiBroadcastFeedUiBroadcastGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse parses an HTTP response from a UiBroadcastEventDetailUiBroadcastEventAuditIdGetWithResponse call
+func ParseUiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse(rsp *http.Response) (*UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiBroadcastEventDetailUiBroadcastEventAuditIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiBroadcastFeedFragmentUiBroadcastFeedGetResponse parses an HTTP response from a UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse call
+func ParseUiBroadcastFeedFragmentUiBroadcastFeedGetResponse(rsp *http.Response) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiBroadcastFeedFragmentUiBroadcastFeedGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

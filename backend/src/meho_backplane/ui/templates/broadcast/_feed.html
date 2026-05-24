@@ -1,0 +1,110 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Broadcast feed fragment (Task #868 work items #3/#4). This is BOTH the
+  feed body included by ``feed.html`` on initial page load AND the
+  standalone fragment ``GET /ui/broadcast/feed`` returns on a filter
+  submit. The filter bar ``hx-get``s the fragment route and swaps it
+  into ``#broadcast-feed`` with ``hx-swap="outerHTML"``; HTMX
+  auto-processes the swapped content, so the ``sse`` extension tears
+  down the prior subscription (the replaced node) and opens the new one
+  pointed at ``stream_endpoint`` -- the bridge URL carrying the active
+  server-side filters (op_class/principal/target).
+
+  The ``broadcastFeed`` Alpine controller wraps the WHOLE fragment so a
+  filter re-render replaces the SSE subscription AND resets the in-DOM
+  ``events`` array (the prior filter's rows must not linger). ``opIdFilter``
+  is the client-side op_id substring narrowing -- the stream has no op_id
+  param, so the controller filters the streamed events by ``op_id``
+  in-browser as the operator types (the filter bar mirrors the input
+  into the controller via an ``x-model``-bound hidden field; see
+  ``_filter_bar.html``).
+-#}
+<div
+  id="broadcast-feed"
+  class="overflow-hidden rounded-box border border-base-300 bg-base-100"
+  x-data="broadcastFeed({
+    cap: {{ in_dom_row_cap }},
+    badgeClasses: {{ op_class_badge_json }},
+    opIdFilter: {{ op_id_filter | tojson }}
+  })"
+  x-on:broadcast-op-id-changed.window="onOpIdChanged($event)"
+>
+  {# ---------- SSE sink ----------
+     Hidden element the sse extension binds the EventSource listener to.
+     ``sse-connect`` points at the bridge with the active server-side
+     filters embedded; ``sse-swap="broadcast"`` subscribes to the feed's
+     ``event: broadcast`` frames. We cancel the default swap in
+     ``htmx:sse-before-message`` and route the data through Alpine.
+  -#}
+  <div
+    hx-ext="sse"
+    sse-connect="{{ stream_endpoint }}"
+    sse-swap="broadcast"
+    class="hidden"
+    aria-hidden="true"
+    x-on:htmx:sse-before-message="onSseMessage($event)"
+    x-on:htmx:sse-open="connected = true"
+    x-on:htmx:sse-error="connected = false"
+  ></div>
+
+  {# ---------- Status bar -- connection + visible/cap row counts ---------- #}
+  <div
+    class="flex items-center justify-end gap-3 border-b border-base-300 px-3 py-1.5 text-xs opacity-70"
+  >
+    <span class="flex items-center gap-1" aria-live="polite">
+      <span
+        class="inline-block h-2 w-2 rounded-full"
+        :class="connected ? 'bg-success' : 'bg-warning'"
+        aria-hidden="true"
+      ></span>
+      <span x-text="connected ? 'live' : 'connecting…'"></span>
+    </span>
+    <span aria-live="polite" x-text="visibleEvents.length + ' / {{ in_dom_row_cap }} rows'"></span>
+  </div>
+
+  {# ---------- Column header row -- mirrors the grid in _event_row.html. ---------- #}
+  <div
+    class="grid grid-cols-12 gap-2 border-b border-base-300 px-3 py-2 text-xs font-semibold uppercase tracking-wide opacity-60"
+  >
+    <span class="col-span-2">Time</span>
+    <span class="col-span-2">Principal</span>
+    <span class="col-span-3">Operation</span>
+    <span class="col-span-1">Class</span>
+    <span class="col-span-1">Status</span>
+    <span class="col-span-1">Target</span>
+    <span class="col-span-2">Payload</span>
+  </div>
+
+  {# ---------- Empty state (work item #8) ----------
+     Shown until the first matching event lands or when the op_id filter
+     narrows everything out. ``visibleEvents`` is the op_id-filtered
+     view; an empty view (whether nothing streamed or the op_id filter
+     excluded all) renders this copy. -#}
+  <div
+    x-show="visibleEvents.length === 0"
+    class="px-3 py-10 text-center text-sm opacity-70"
+    id="broadcast-empty-state"
+  >
+    No activity matching your filters. Try adjusting the op_class or
+    target filter, or wait for new events.
+  </div>
+
+  {# ---------- Live list -- newest first ----------
+     Each event renders via the server-authored row partial. ``:key``
+     keeps Alpine's DOM diff stable as rows prepend + trim. A click
+     opens the detail drawer via the row's ``hx-get`` (wired in the row
+     partial). -#}
+  <ul
+    x-show="visibleEvents.length > 0"
+    class="divide-y divide-base-300"
+    role="list"
+    aria-label="Live broadcast events"
+    aria-live="polite"
+  >
+    <template x-for="ev in visibleEvents" :key="ev.event_id">
+      {% include "broadcast/_event_row.html" %}
+    </template>
+  </ul>
+</div>

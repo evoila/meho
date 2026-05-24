@@ -16,11 +16,13 @@ SSH-only typed connector in the inventory and the tier-4 closer for G3.
 
 The connector replaces the operator's `scripts/holodeck.sh` wrapper in the
 `claude-rdc-hetzner-dc` consumer repository. The G3.8-T1 (#853) skeleton
-ships only the `holodeck.about` canary op, the password-default + key-fallback
+ships the `holodeck.about` canary op, the password-default + key-fallback
 auth via the inherited `SshConnector._auth_config`, the fingerprint, the
 probe, and the `_pwsh.py` PowerShell-over-SSH helper. G3.8-T2 (#854) adds
-the 8 read ops; G3.8-T3 (#855) ships the CLI verbs + E2E acceptance suite +
-onboarding doc.
+the 7 read ops (`config.show`, `pod.list`, `pod.info`, `service.list`,
+`k8s.exec`, `logs.tail`, `networking.show`) for a final total of 8 ops
+registered under `connector_id="holodeck-ssh-9.0"`. G3.8-T3 (#855) ships
+the CLI verbs + E2E acceptance suite + onboarding doc.
 
 Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
@@ -29,8 +31,19 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
 - **`HolodeckConnector`** (`connector.py`) — `SshConnector` subclass. Class
   attributes: `product="holodeck"`, `version="9.0"`, `impl_id="holodeck-ssh"`.
   Inherits the per-target asyncssh connection pool, `_auth_config`,
-  `_run_command`, and `aclose()` from the adapter. T1 ships `fingerprint`,
-  `probe`, `execute`, `about`. T2 will add the 8 read-op bound-method shims.
+  `_run_command`, and `aclose()` from the adapter. T1 shipped `fingerprint`,
+  `probe`, `execute`, `about`. T2 (#854) adds the 7 read-op bound-method
+  shims: `config_show`, `pod_list`, `pod_info`, `service_list`, `k8s_exec`,
+  `logs_tail`, `networking_show`.
+
+- **Read-op handlers + parsers** (`ops_read.py`) — `holodeck_config_show`,
+  `holodeck_pod_list`, `holodeck_pod_info`, `holodeck_service_list`,
+  `holodeck_k8s_exec`, `holodeck_logs_tail`, `holodeck_networking_show`.
+  Pure parsers: `parse_kubectl_command` (verb-safelist enforcement),
+  `parse_logs_tail_output` (GNU `tail` `==> path <==` header split),
+  `parse_networking_payload` (four-section composer). `KubectlSafetyError`
+  is the `ValueError` subclass the dispatcher's error envelope picks up
+  when a mutating verb slips through.
 
 - **`_pwsh.py` — the novel primitive.** Houses `encode_pwsh_command(script)`
   (UTF-16LE-base64 per the `-EncodedCommand` convention), `pwsh_run(connector,
@@ -50,9 +63,10 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
   original design.
 
 - **Op metadata** (`ops.py`) — the `HolodeckOp` dataclass and the
-  `HOLODECK_OPS` tuple. T1 ships the single `holodeck.about` canary; T2
-  will append the 8 read ops by extending the tuple from an `ops_read`-style
-  module, mirroring bind9's `_bind9_ops()` and pfSense's `_pfsense_ops()`.
+  `HOLODECK_OPS` tuple. T1 shipped the single `holodeck.about` canary; T2
+  (#854) extends the tuple via `_holodeck_ops()` which splats `READ_OPS`
+  (the 7 read ops defined in `ops_read.py`) onto the canary. The pattern
+  mirrors bind9's `_bind9_ops()` and pfSense's `_pfsense_ops()`.
 
 - **`parse_photon_version`** (`connector.py`) — pure parser for
   `/etc/photon-release` output; recovers the `<major>.<minor>(.<patch>)?`
@@ -123,6 +137,90 @@ Four-stage health check; each stage maps to a distinct
 4. All checks pass → `ok=True`, `reason=None`.
 
 The probe does not mutate state. `Get-Service` is read-only on Photon.
+
+### Read ops (T2 surface)
+
+The seven T2 read ops route through the dispatcher's standard
+`call_operation` path. Each registers via `register_typed_operation()` with
+`safety_level="safe"`, `requires_approval=False`, and an
+`llm_instructions.when_to_use` blob that includes the SSH-only transport
+disclosure (CLAUDE.md postulate 5 + Initiative #371).
+
+- **`holodeck.config.show`** (group `config`). Runs `Get-HoloDeckConfig |
+  ConvertTo-Json -Depth 4 -Compress` via `pwsh_run`. Returns
+  `{config: <parsed dict>}` or `{config: None, error: "<reason>"}` on
+  cmdlet failure.
+- **`holodeck.pod.list`** (group `pod`, JSONFlux-shaped). Runs
+  `Get-HoloDeckPod | ConvertTo-Json -Depth 4` via `pwsh_run`. Returns
+  `{rows: [...], total: N}`. JSONFlux handle creation is the reducer's
+  job — not the connector's — matching the pfSense / bind9 precedent
+  (`PassThroughReducer` passes the inline payload through today; a future
+  JSONFlux reducer will key on the `holodeck_pod_list` HandleStore slot
+  when `total` exceeds its threshold). The handler normalises
+  `ConvertTo-Json`'s single-element flat-dict shape and the empty-pipeline
+  `null` shape into a uniform list.
+- **`holodeck.pod.info`** (group `pod`). Runs `Get-HoloDeckPod -Id '<id>' |
+  ConvertTo-Json -Depth 4` via `pwsh_run`. `pod_id` parameter is required;
+  the handler PowerShell-quotes single quotes via doubling. Returns
+  `{pod: <dict>}` or `{pod: None, error}` on cmdlet / missing-id failure.
+- **`holodeck.service.list`** (group `service`, JSONFlux-shaped). Runs
+  `Get-Service | Where-Object { $_.Name -like 'Holo*' } | Select-Object
+  Name,Status,DisplayName | ConvertTo-Json -Depth 4`. Same `{rows, total}`
+  envelope and the same single-dict / `null` normalisation as `pod.list`.
+- **`holodeck.k8s.exec`** (group `k8s`, **read-only**). Forwards a
+  ``kubectl`` command to the in-appliance K8s cluster. Two complementary
+  allowlist layers reject both mutating verbs and shell-injection shapes
+  (`;`, `&&`, `||`, `|`, `$(...)`, backticks, `>`, `<`, newline):
+
+  1. *Schema layer.* The `command` parameter has a `pattern` regex
+     anchored `\Akubectl ... \Z`. The verb alternation accepts the
+     nine read-only verbs (`get|describe|logs|top|explain|api-resources|
+     api-versions|cluster-info|version`); arguments are restricted to
+     `[A-Za-z0-9._/=:,@-]` so shell metacharacters can't survive
+     validator-layer rejection. Whitespace between tokens is constrained
+     to `[ \t]` (space or tab) so a newline can't smuggle a second
+     command line through the `\s` class. The dispatcher's
+     `validate_params` rejects bad shapes before reaching the handler.
+  2. *Handler layer (authoritative).* `parse_kubectl_command`
+     (a) scans the raw command against `_SHELL_METACHARS_RE`
+     (`[;&|<>` + backtick + `$()\\` + newline + carriage return]`) and
+     refuses on hit, (b) tokenises via `shlex.split`, (c) walks past
+     leading global flags (`--flag=value` and `--flag value` forms),
+     and (d) confirms the verb is in `_K8S_READ_VERBS`. Any rejected
+     step raises `KubectlSafetyError`; the handler returns
+     `{stdout, stderr, exit_status, error}` with `error` set to the
+     safety-check message. The metacharacter reject is **load-bearing**:
+     `shlex.split` in POSIX mode does not treat shell separators as
+     token boundaries, so without it `kubectl get pods; rm -rf /`
+     would tokenise to `['kubectl', 'get', 'pods;', ...]`, the verb
+     check would approve `get`, and the handler would forward the raw
+     string to `asyncssh.SSHClientConnection.run`, which delegates to
+     the remote login shell. The reject runs **before** any SSH
+     transport is touched. The full command body is **not** echoed
+     back in the error message — only the rejected verb / metachar
+     category — so operator-supplied resource names don't bleed into
+     structured error envelopes.
+
+  Stderr from the appliance is truncated at 4096 chars, matching the
+  `PwshRunError` convention.
+
+- **`holodeck.logs.tail`** (group `logs`). Runs `tail -n <lines>
+  /holodeck-runtime/logs/<component>*.log` over **plain SSH** (no pwsh
+  indirection — the cmd is a stock POSIX pipeline). `component` is
+  restricted to `[A-Za-z0-9._-]+` at both the schema and handler layers
+  so shell metacharacters and directory traversal can't slip through;
+  `lines` is clamped to `[1, 5000]`. Returns `{files: [{path, lines}],
+  raw, lines_requested}` parsed via the GNU `tail` `==> path <==` header
+  convention; single-file matches surface as `path=None`.
+
+- **`holodeck.networking.show`** (group `networking`). Composes four
+  sub-commands: `vtysh -c 'show bgp summary'`, `vtysh -c 'show ip
+  route'`, `pwsh` of `Get-DnsServerZone | ... | ConvertTo-Json`, and
+  `cat /var/lib/dhcp/dhcpd.leases`. Returns
+  `{bgp: {summary_text, ok}, routes: {text, ok}, dns: {zones, total,
+  ok}, dhcp: {leases_text, ok}}`. Each sub-section's `ok` flips false
+  when its sub-command failed or produced empty output, so a single-
+  component failure doesn't blank the whole response.
 
 ### `execute(target, op_id, params)`
 

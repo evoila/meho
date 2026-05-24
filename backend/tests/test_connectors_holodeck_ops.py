@@ -1,0 +1,1103 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""Tests for the Holodeck read op group (G3.8-T2 #854).
+
+Coverage matrix (per Task #854 acceptance criteria):
+
+* :func:`parse_kubectl_command` -- parses ``kubectl`` invocations
+  into ``(verb, args)``; rejects mutating verbs with
+  :exc:`KubectlSafetyError`; handles leading global flags (both
+  ``--flag=value`` and ``--flag value`` forms); rejects non-kubectl
+  shells.
+* :func:`parse_logs_tail_output` -- splits multi-file GNU ``tail``
+  output by ``==> path <==`` header; single-file tail yields
+  ``path=None``; empty / whitespace stdout returns ``files=[]``.
+* :func:`parse_networking_payload` -- composes the four-section
+  envelope; per-sub-section ``ok`` flips false on empty / wrong-typed
+  input; ``ConvertTo-Json`` single-dict result normalised to a
+  ``[{...}]`` zone list.
+* Bound-method shims on :class:`HolodeckConnector` -- ``config_show``,
+  ``pod_list``, ``pod_info``, ``service_list``, ``k8s_exec``,
+  ``logs_tail``, ``networking_show`` -- each runs the correct
+  PowerShell / SSH commands, passes payloads through the parser,
+  and returns the expected envelope shape.
+* JSONFlux-shaped ``{rows, total}`` envelopes on ``pod_list`` and
+  ``service_list``; single-dict ``ConvertTo-Json`` result normalised
+  to a 1-row list (``Get-HoloDeckPod`` with one pod) and ``null``
+  result normalised to an empty list.
+* ``holodeck.k8s.exec`` rejects mutating verbs (``create``, ``apply``,
+  ``delete``, ``edit``, ``replace``, ``patch``, ``scale``,
+  ``rollout``) at the handler layer with a structured error envelope;
+  the parameter-schema pattern rejects them at the validator layer.
+* ``holodeck.logs.tail`` rejects components carrying shell
+  metacharacters; lines clamped to [1, 5000].
+* ``HOLODECK_OPS`` registration shape -- 8 ops total, all carry
+  ``safety_level='safe'``, ``additionalProperties=False`` on the
+  parameter schema, non-empty ``llm_instructions.when_to_use``, the
+  SSH-only transport note, and ``holodeck.`` namespace op_ids.
+* Secret/SSH-key leak canaries -- the connector's ``target.secret_ref``
+  password and the operator-supplied k8s command never appear in
+  returned result envelopes, captured stderr in error envelopes, or
+  log capture under failure-path runs.
+* k8s.exec stderr is truncated at 4096 chars.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import jsonschema
+import pytest
+
+import meho_backplane.connectors.holodeck  # noqa: F401 -- import for registry side-effects
+from meho_backplane.connectors.holodeck import HOLODECK_OPS, HolodeckConnector
+from meho_backplane.connectors.holodeck.ops_read import (
+    READ_OPS,
+    KubectlSafetyError,
+    parse_kubectl_command,
+    parse_logs_tail_output,
+    parse_networking_payload,
+)
+from meho_backplane.settings import get_settings
+
+# ---------------------------------------------------------------------------
+# Environment fixture (settings cache requires the env vars to resolve)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Stubs
+# ---------------------------------------------------------------------------
+
+
+_CANARY_PASSWORD = "holodeck-canary-pw-xyz-554"  # NOSONAR -- canary not a real cred
+# Synthetic canary that *resembles* a key footprint without tripping the
+# ``detect-private-key`` pre-commit hook -- the regex keys on the literal
+# ``BEGIN ... PRIVATE KEY`` opener. Substring-canary tests for the absence
+# of this exact 36-char marker in repr/log surfaces.
+_CANARY_SSH_KEY = "HOLODECK-CANARY-KEY-MARKER-ABCD1234XY"
+
+
+@dataclass
+class _StubTarget:
+    name: str
+    host: str
+    port: int | None
+    secret_ref: dict[str, Any]
+
+
+_TARGET = _StubTarget(
+    name="holorouter-test",
+    host="holorouter.test.invalid",
+    port=22,
+    secret_ref={
+        "username": "root",
+        "password": _CANARY_PASSWORD,
+        "ssh_private_key": _CANARY_SSH_KEY,
+    },
+)
+
+
+def _proc(*, stdout: str = "", stderr: str = "", exit_status: int = 0) -> Any:
+    """Construct an ``SSHCompletedProcess``-shaped stub."""
+    proc = MagicMock()
+    proc.stdout = stdout
+    proc.stderr = stderr
+    proc.exit_status = exit_status
+    return proc
+
+
+def _serialise_for_leak_check(envelope: Any) -> str:
+    """Render an envelope to a single string for canary-substring scanning.
+
+    Uses ``repr`` so nested dicts / lists / tuples / exception messages
+    all surface. The leak invariant is that **no** secret material
+    bleeds into the envelope under any code path; ``repr`` is the
+    paranoid superset of every operator-visible serialisation.
+    """
+    return repr(envelope)
+
+
+# ---------------------------------------------------------------------------
+# parse_kubectl_command
+# ---------------------------------------------------------------------------
+
+
+def test_parse_kubectl_command_simple_get() -> None:
+    verb, args = parse_kubectl_command("kubectl get pods")
+    assert verb == "get"
+    assert args == ["pods"]
+
+
+def test_parse_kubectl_command_with_namespace_flag() -> None:
+    verb, args = parse_kubectl_command("kubectl get pods -n holodeck")
+    assert verb == "get"
+    assert args == ["pods", "-n", "holodeck"]
+
+
+def test_parse_kubectl_command_describe_pod() -> None:
+    verb, args = parse_kubectl_command('kubectl describe pod "my-pod-01"')
+    assert verb == "describe"
+    assert args == ["pod", "my-pod-01"]
+
+
+def test_parse_kubectl_command_logs() -> None:
+    verb, _ = parse_kubectl_command("kubectl logs my-pod -c my-container")
+    assert verb == "logs"
+
+
+def test_parse_kubectl_command_global_flag_separated() -> None:
+    """``kubectl --context foo get pods`` -- the verb is past the separated flag."""
+    verb, args = parse_kubectl_command("kubectl --context foo get pods")
+    assert verb == "get"
+    assert args == ["pods"]
+
+
+def test_parse_kubectl_command_global_flag_attached() -> None:
+    """``kubectl --context=foo get pods`` -- attached-value flag form."""
+    verb, args = parse_kubectl_command("kubectl --context=foo get pods")
+    assert verb == "get"
+    assert args == ["pods"]
+
+
+def test_parse_kubectl_command_multiple_global_flags() -> None:
+    verb, _ = parse_kubectl_command(
+        "kubectl --kubeconfig=/tmp/x.yaml --namespace=holodeck get pods"
+    )
+    assert verb == "get"
+
+
+def test_parse_kubectl_command_short_flag_attached() -> None:
+    verb, _ = parse_kubectl_command("kubectl -n holodeck get pods")
+    assert verb == "get"
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        "create",
+        "apply",
+        "delete",
+        "edit",
+        "replace",
+        "patch",
+        "scale",
+        "rollout",
+        "label",
+        "annotate",
+        "cp",
+        "exec",
+        "port-forward",
+        "proxy",
+        "drain",
+        "cordon",
+        "uncordon",
+        "taint",
+        "set",
+        "expose",
+        "run",
+    ],
+)
+def test_parse_kubectl_command_rejects_mutating_verb(verb: str) -> None:
+    """Every mutating kubectl verb must be rejected by the safelist."""
+    with pytest.raises(KubectlSafetyError) as excinfo:
+        parse_kubectl_command(f"kubectl {verb} pods")
+    assert verb in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "",
+        "   ",
+        "rm -rf /",
+        "echo kubectl get pods",  # not starting with kubectl
+        "kubectl",  # no verb
+        "kubectl --context=foo",  # no verb after global flags
+    ],
+)
+def test_parse_kubectl_command_rejects_malformed(command: str) -> None:
+    with pytest.raises(KubectlSafetyError):
+        parse_kubectl_command(command)
+
+
+def test_parse_kubectl_command_rejects_unbalanced_quoting() -> None:
+    """``shlex.split`` raises on an unbalanced quote; the parser refuses."""
+    with pytest.raises(KubectlSafetyError):
+        parse_kubectl_command("kubectl get 'pods")
+
+
+def test_parse_kubectl_command_safelist_includes_top_explain() -> None:
+    """Verify ``top`` and ``explain`` are accepted (read-only inspection verbs)."""
+    assert parse_kubectl_command("kubectl top pods")[0] == "top"
+    assert parse_kubectl_command("kubectl explain pods")[0] == "explain"
+
+
+def test_parse_kubectl_command_safelist_includes_cluster_info() -> None:
+    assert parse_kubectl_command("kubectl cluster-info")[0] == "cluster-info"
+
+
+# ---------------------------------------------------------------------------
+# parse_logs_tail_output
+# ---------------------------------------------------------------------------
+
+
+def test_parse_logs_tail_output_multi_file_with_headers() -> None:
+    output = (
+        "==> /holodeck-runtime/logs/dhcp.log <==\n"
+        "dhcp evt 1\n"
+        "dhcp evt 2\n"
+        "==> /holodeck-runtime/logs/dns.log <==\n"
+        "dns evt 1\n"
+    )
+    parsed = parse_logs_tail_output(output)
+    assert len(parsed["files"]) == 2
+    assert parsed["files"][0]["path"] == "/holodeck-runtime/logs/dhcp.log"
+    assert "dhcp evt 1" in parsed["files"][0]["lines"]
+    assert parsed["files"][1]["path"] == "/holodeck-runtime/logs/dns.log"
+    assert parsed["raw"] == output
+
+
+def test_parse_logs_tail_output_single_file_no_header() -> None:
+    """Single-file tail emits no ``==>`` header; ``path`` is None."""
+    output = "log line a\nlog line b\n"
+    parsed = parse_logs_tail_output(output)
+    assert len(parsed["files"]) == 1
+    assert parsed["files"][0]["path"] is None
+    assert parsed["files"][0]["lines"] == output
+
+
+def test_parse_logs_tail_output_empty_input_returns_empty_files() -> None:
+    assert parse_logs_tail_output("")["files"] == []
+    assert parse_logs_tail_output("   \n")["files"] == []
+
+
+def test_parse_logs_tail_output_carries_raw_stdout() -> None:
+    output = "==> /a.log <==\nfoo\n"
+    assert parse_logs_tail_output(output)["raw"] == output
+
+
+# ---------------------------------------------------------------------------
+# parse_networking_payload
+# ---------------------------------------------------------------------------
+
+
+def test_parse_networking_payload_all_ok() -> None:
+    payload = parse_networking_payload(
+        bgp_text="BGP summary\n",
+        routes_text="Routes\n",
+        dns_zones_json=[{"ZoneName": "lab.test"}],
+        dhcp_leases_text="lease 10.0.0.1\n",
+    )
+    assert payload["bgp"]["ok"] is True
+    assert payload["routes"]["ok"] is True
+    assert payload["dns"]["ok"] is True
+    assert payload["dns"]["total"] == 1
+    assert payload["dhcp"]["ok"] is True
+
+
+def test_parse_networking_payload_dns_single_dict_normalised_to_list() -> None:
+    """ConvertTo-Json on a single zone returns a dict, not a 1-element list."""
+    payload = parse_networking_payload(
+        bgp_text="",
+        routes_text="",
+        dns_zones_json={"ZoneName": "single.lab"},
+        dhcp_leases_text="",
+    )
+    assert isinstance(payload["dns"]["zones"], list)
+    assert len(payload["dns"]["zones"]) == 1
+    assert payload["dns"]["zones"][0]["ZoneName"] == "single.lab"
+
+
+def test_parse_networking_payload_per_section_ok_flips_false_on_empty() -> None:
+    payload = parse_networking_payload(
+        bgp_text="",
+        routes_text="   \n",
+        dns_zones_json=None,
+        dhcp_leases_text="",
+    )
+    assert payload["bgp"]["ok"] is False
+    assert payload["routes"]["ok"] is False
+    assert payload["dns"]["ok"] is False
+    assert payload["dns"]["zones"] == []
+    assert payload["dhcp"]["ok"] is False
+
+
+def test_parse_networking_payload_dns_ok_false_on_non_json_payload() -> None:
+    """A non-list, non-dict DNS payload (e.g. ``None`` from PwshRunError) -> ok=False."""
+    payload = parse_networking_payload(
+        bgp_text="x",
+        routes_text="y",
+        dns_zones_json="garbage",  # type: ignore[arg-type]
+        dhcp_leases_text="z",
+    )
+    assert payload["dns"]["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shims -- config_show
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_config_show_returns_parsed_dict() -> None:
+    connector = HolodeckConnector()
+    payload = {"Version": "9.0.3", "PodId": "HoloPod-001", "Services": []}
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        # pwsh_run hits ``_run_command`` -- the cmd ends ``pwsh -EncodedCommand ...``
+        import json as _stdlib_json
+
+        mock_cmd.return_value = _proc(stdout=_stdlib_json.dumps(payload))
+        result = await connector.config_show(_TARGET, {})
+    assert result["config"] == payload
+    # Verify the cmd was the expected encoded pwsh shape.
+    cmd = mock_cmd.await_args.args[1]
+    assert cmd.startswith("pwsh -NoProfile -NonInteractive -EncodedCommand ")
+
+
+@pytest.mark.asyncio
+async def test_config_show_returns_error_on_pwsh_failure() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr="cmdlet broke", exit_status=1)
+        result = await connector.config_show(_TARGET, {})
+    assert result["config"] is None
+    assert "error" in result
+    assert isinstance(result["error"], str)
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shims -- pod_list / pod_info / service_list (JSONFlux envelope)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pod_list_returns_rows_and_total_for_multi_pod_json_array() -> None:
+    connector = HolodeckConnector()
+    pods = [
+        {"PodId": "HoloPod-001", "Name": "lab-a", "State": "Running"},
+        {"PodId": "HoloPod-002", "Name": "lab-b", "State": "Stopped"},
+    ]
+    import json as _stdlib_json
+
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_stdlib_json.dumps(pods))
+        result = await connector.pod_list(_TARGET, {})
+    assert result["total"] == 2
+    assert len(result["rows"]) == 2
+    assert result["rows"][0]["PodId"] == "HoloPod-001"
+
+
+@pytest.mark.asyncio
+async def test_pod_list_normalises_single_pod_dict_to_1_row_list() -> None:
+    """``ConvertTo-Json`` on a single-pod result returns a dict, not a list."""
+    connector = HolodeckConnector()
+    single_pod = {"PodId": "HoloPod-001"}
+    import json as _stdlib_json
+
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_stdlib_json.dumps(single_pod))
+        result = await connector.pod_list(_TARGET, {})
+    assert result["total"] == 1
+    assert result["rows"] == [single_pod]
+
+
+@pytest.mark.asyncio
+async def test_pod_list_normalises_null_to_empty_rows() -> None:
+    """Empty pipeline -> ``null`` -> empty rows."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="null")
+        result = await connector.pod_list(_TARGET, {})
+    assert result["rows"] == []
+    assert result["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pod_list_error_envelope_on_pwsh_failure() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr="cmdlet failed", exit_status=2)
+        result = await connector.pod_list(_TARGET, {})
+    assert result["rows"] == []
+    assert result["total"] == 0
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_pod_info_requires_pod_id() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.pod_info(_TARGET, {})
+        # No SSH call when pod_id is missing.
+        mock_cmd.assert_not_awaited()
+    assert result["pod"] is None
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_pod_info_returns_parsed_pod() -> None:
+    connector = HolodeckConnector()
+    detail = {"PodId": "HoloPod-001", "State": "Running", "VMs": []}
+    import json as _stdlib_json
+
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_stdlib_json.dumps(detail))
+        result = await connector.pod_info(_TARGET, {"pod_id": "HoloPod-001"})
+    assert result["pod"] == detail
+
+
+@pytest.mark.asyncio
+async def test_pod_info_quotes_pod_id_safely() -> None:
+    """A pod_id with a single quote must round-trip safely via PowerShell ''-escaping."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout='{"PodId": "x"}')
+        await connector.pod_info(_TARGET, {"pod_id": "Pod-O'Reilly"})
+    cmd = mock_cmd.await_args.args[1]
+    # The encoded base64 isn't trivial to decode here, but we can assert
+    # the request shape and trust the round-trip test for the encoding.
+    assert cmd.startswith("pwsh -NoProfile -NonInteractive -EncodedCommand ")
+
+
+@pytest.mark.asyncio
+async def test_service_list_returns_rows_for_multi_service_array() -> None:
+    connector = HolodeckConnector()
+    services = [
+        {"Name": "HoloDNS", "Status": "Running", "DisplayName": "Holodeck DNS"},
+        {"Name": "HoloDHCP", "Status": "Stopped", "DisplayName": "Holodeck DHCP"},
+    ]
+    import json as _stdlib_json
+
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_stdlib_json.dumps(services))
+        result = await connector.service_list(_TARGET, {})
+    assert result["total"] == 2
+    assert result["rows"][0]["Name"] == "HoloDNS"
+
+
+@pytest.mark.asyncio
+async def test_service_list_normalises_single_service_dict() -> None:
+    """``Where-Object`` filtering to a single match returns a flat dict."""
+    connector = HolodeckConnector()
+    single = {"Name": "HoloDNS", "Status": "Running", "DisplayName": "Holodeck DNS"}
+    import json as _stdlib_json
+
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_stdlib_json.dumps(single))
+        result = await connector.service_list(_TARGET, {})
+    assert result["total"] == 1
+    assert result["rows"] == [single]
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shims -- k8s_exec (read-only enforcement)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_runs_read_only_kubectl_get() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="NAME READY STATUS\npod-1 1/1 Running\n")
+        result = await connector.k8s_exec(_TARGET, {"command": "kubectl get pods"})
+    mock_cmd.assert_awaited_once()
+    cmd = mock_cmd.await_args.args[1]
+    assert cmd == "kubectl get pods"
+    assert result["exit_status"] == 0
+    assert "pod-1" in result["stdout"]
+    assert "error" not in result or result.get("error") is None
+
+
+@pytest.mark.parametrize(
+    "verb",
+    ["create", "apply", "delete", "edit", "replace", "patch", "scale", "rollout"],
+)
+@pytest.mark.asyncio
+async def test_k8s_exec_handler_rejects_mutating_verb(verb: str) -> None:
+    """The handler is the authoritative gate; mutating verbs fail closed.
+
+    The schema's pattern catches it at the validator layer too, but the
+    handler re-checks so a future schema widening can't slip writes
+    through.
+    """
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.k8s_exec(_TARGET, {"command": f"kubectl {verb} pods"})
+        # The handler refuses **before** any SSH traffic.
+        mock_cmd.assert_not_awaited()
+    assert result["exit_status"] is None
+    assert "error" in result
+    assert "safety check" in result["error"]
+    assert verb in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_handler_rejects_non_kubectl_shell() -> None:
+    """``rm -rf /`` or other shell escapes must be rejected by the handler."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.k8s_exec(_TARGET, {"command": "rm -rf /"})
+        mock_cmd.assert_not_awaited()
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_schema_pattern_rejects_mutating_verb() -> None:
+    """The parameter_schema's pattern catches mutating verbs at validator layer."""
+    k8s_op = next(op for op in READ_OPS if op.op_id == "holodeck.k8s.exec")
+    schema = k8s_op.parameter_schema
+    # Apply / delete / patch must all fail the pattern.
+    for verb in ("apply", "delete", "patch", "scale", "create", "exec"):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(
+                {"command": f"kubectl {verb} pods"},
+                schema,
+            )
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_schema_pattern_accepts_read_verbs() -> None:
+    """The schema must accept every read-only verb on the safelist."""
+    k8s_op = next(op for op in READ_OPS if op.op_id == "holodeck.k8s.exec")
+    schema = k8s_op.parameter_schema
+    for verb in (
+        "get",
+        "describe",
+        "logs",
+        "top",
+        "explain",
+        "api-resources",
+        "api-versions",
+        "cluster-info",
+        "version",
+    ):
+        jsonschema.validate({"command": f"kubectl {verb} pods"}, schema)
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_truncates_long_stderr_at_4096_chars() -> None:
+    """Cap stderr at the documented 4096-char limit for bounded operator surfaces."""
+    connector = HolodeckConnector()
+    huge_stderr = "x" * 10000
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stderr=huge_stderr, exit_status=1)
+        result = await connector.k8s_exec(_TARGET, {"command": "kubectl get pods"})
+    assert len(result["stderr"]) == 4096
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_returns_envelope_on_ssh_failure() -> None:
+    """SSH connect/run exceptions land in the ``error`` field, not propagated."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = OSError("connection refused")
+        result = await connector.k8s_exec(_TARGET, {"command": "kubectl get pods"})
+    assert result["exit_status"] is None
+    assert "connection refused" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Shell-injection rejection (B1 -- review iter 1).
+#
+# These tests are the regression guard for the chained-shell exploit
+# the iter-1 review demonstrated: ``shlex.split`` in POSIX mode does
+# not treat ``;`` / ``&&`` / ``|`` / ``$(...)`` / backticks / ``>`` /
+# ``<`` / newline as token boundaries, so the verb-safelist check on
+# ``tokens[idx]`` would otherwise approve the leading ``kubectl get``
+# and the **raw** command would flow to
+# ``asyncssh.SSHClientConnection.run`` -- which delegates to the
+# remote login shell. The reject must fire **before** any SSH
+# transport is touched, so each test ALSO asserts that
+# ``_run_command`` is never awaited.
+# ---------------------------------------------------------------------------
+
+
+#: Injection payloads the iter-1 review demonstrated, plus their
+#: complement set: every POSIX shell control operator that can chain
+#: a command, expand to a subshell, or redirect IO. Test IDs name the
+#: metacharacter category for readable parametrise output.
+_K8S_INJECTION_PAYLOADS: tuple[tuple[str, str], ...] = (
+    ("semicolon", "kubectl get pods; rm -rf /"),
+    ("and-and", "kubectl get pods && rm -rf /"),
+    ("or-or", "kubectl get pods || rm -rf /"),
+    ("pipe", "kubectl get pods | xargs rm"),
+    ("dollar-paren", "kubectl get pods$(whoami)"),
+    ("backtick", "kubectl get `whoami`"),
+    ("gt-redirect", "kubectl get > /etc/passwd"),
+    ("lt-redirect", "kubectl get < /etc/passwd"),
+    ("newline", "kubectl get pods\nrm -rf /"),
+    ("carriage-return", "kubectl get pods\rrm -rf /"),
+    ("background-amp", "kubectl get pods & curl evil.com"),
+    ("escape-backslash", "kubectl get pods\\\nrm -rf /"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "command"),
+    _K8S_INJECTION_PAYLOADS,
+    ids=[label for label, _ in _K8S_INJECTION_PAYLOADS],
+)
+def test_parse_kubectl_command_rejects_shell_injection(label: str, command: str) -> None:
+    """Handler-layer: ``parse_kubectl_command`` refuses metacharacters.
+
+    The exception message names the rejection category ('shell
+    metacharacter detected') without echoing the offending command
+    body back -- avoids leaking operator-supplied payload material
+    into operator-visible surfaces.
+    """
+    del label  # only used for parametrise IDs
+    with pytest.raises(KubectlSafetyError) as excinfo:
+        parse_kubectl_command(command)
+    msg = str(excinfo.value)
+    assert "shell metacharacter" in msg
+    # The full raw command must never appear in the error message --
+    # operator-supplied payload material doesn't belong in user-
+    # visible error envelopes.
+    assert "rm -rf" not in msg
+    assert "whoami" not in msg
+    assert "evil.com" not in msg
+
+
+@pytest.mark.parametrize(
+    ("label", "command"),
+    _K8S_INJECTION_PAYLOADS,
+    ids=[label for label, _ in _K8S_INJECTION_PAYLOADS],
+)
+@pytest.mark.asyncio
+async def test_k8s_exec_handler_rejects_shell_injection_before_ssh(
+    label: str, command: str
+) -> None:
+    """The k8s.exec handler refuses chained-shell payloads BEFORE any SSH call.
+
+    Mocks ``_run_command`` and asserts ``await_count == 0`` -- the
+    rejection must fire before the SSH transport is even touched, so
+    a future bug in the transport layer can't paper over a missing
+    safety check.
+    """
+    del label
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.k8s_exec(_TARGET, {"command": command})
+        mock_cmd.assert_not_awaited()
+        assert mock_cmd.await_count == 0
+    # Structured-error envelope, not a raised exception.
+    assert result["exit_status"] is None
+    assert result["stdout"] == ""
+    assert result["stderr"] == ""
+    assert "safety check" in result["error"]
+    assert "shell metacharacter" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("label", "command"),
+    _K8S_INJECTION_PAYLOADS,
+    ids=[label for label, _ in _K8S_INJECTION_PAYLOADS],
+)
+def test_k8s_exec_schema_pattern_rejects_shell_injection(label: str, command: str) -> None:
+    """Schema-layer guardrail: the dispatcher's validator catches the same shapes.
+
+    Belt-and-braces redundancy with the handler-layer reject -- a
+    future widening on either side must not silently re-open the
+    hole. This test pins the **schema pattern** (the dispatcher's
+    validator front-end) against the same injection corpus.
+    """
+    del label
+    k8s_op = next(op for op in READ_OPS if op.op_id == "holodeck.k8s.exec")
+    schema = k8s_op.parameter_schema
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"command": command}, schema)
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        "get",
+        "describe",
+        "logs",
+        "top",
+        "explain",
+        "api-resources",
+        "api-versions",
+        "cluster-info",
+        "version",
+    ],
+)
+@pytest.mark.asyncio
+async def test_k8s_exec_handler_accepts_every_safelist_verb(verb: str) -> None:
+    """Allowlist regression guard -- the tightened metachar/regex pair must
+    not break any verb on :data:`_K8S_READ_VERBS`.
+
+    Sibling to ``test_k8s_exec_schema_pattern_accepts_read_verbs``;
+    this one drives the **handler** path end-to-end with a mocked
+    SSH transport so the parser + metachar scan + verb-safelist
+    sequence is exercised together.
+    """
+    connector = HolodeckConnector()
+    # The ``cluster-info`` / ``version`` verbs take no positional arg
+    # so call them naked; everything else accepts ``pods`` as a
+    # placeholder resource name.
+    command = f"kubectl {verb}" if verb in {"cluster-info", "version"} else (f"kubectl {verb} pods")
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="(ok)\n")
+        result = await connector.k8s_exec(_TARGET, {"command": command})
+    mock_cmd.assert_awaited_once()
+    assert result["exit_status"] == 0
+    # No error envelope -- the safelist verb passed both safety
+    # checks and the SSH path was reached.
+    assert "error" not in result or result.get("error") is None
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shims -- logs_tail
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_logs_tail_runs_tail_with_default_lines() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="log line a\nlog line b\n")
+        result = await connector.logs_tail(_TARGET, {"component": "dhcp"})
+    cmd = mock_cmd.await_args.args[1]
+    assert cmd == "tail -n 200 /holodeck-runtime/logs/dhcp*.log"
+    assert result["lines_requested"] == 200
+    assert "log line a" in result["raw"]
+
+
+@pytest.mark.asyncio
+async def test_logs_tail_runs_tail_with_explicit_lines() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="...")
+        await connector.logs_tail(_TARGET, {"component": "dns", "lines": 50})
+    cmd = mock_cmd.await_args.args[1]
+    assert cmd == "tail -n 50 /holodeck-runtime/logs/dns*.log"
+
+
+@pytest.mark.asyncio
+async def test_logs_tail_rejects_component_with_shell_metacharacters() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.logs_tail(_TARGET, {"component": "../etc/passwd; cat"})
+        mock_cmd.assert_not_awaited()
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_logs_tail_rejects_empty_component() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.logs_tail(_TARGET, {"component": ""})
+        mock_cmd.assert_not_awaited()
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_logs_tail_rejects_out_of_range_lines() -> None:
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await connector.logs_tail(_TARGET, {"component": "dhcp", "lines": 0})
+        mock_cmd.assert_not_awaited()
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_logs_tail_parses_multi_file_output() -> None:
+    connector = HolodeckConnector()
+    output = (
+        "==> /holodeck-runtime/logs/frr.log <==\n"
+        "frr peer up\n"
+        "==> /holodeck-runtime/logs/frr-bgp.log <==\n"
+        "bgp peer up\n"
+    )
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=output)
+        result = await connector.logs_tail(_TARGET, {"component": "frr"})
+    assert len(result["files"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Bound-method shims -- networking_show
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_networking_show_composes_four_sub_sections() -> None:
+    connector = HolodeckConnector()
+    # The handler runs four sub-commands; mock side_effect emits a
+    # different stdout per call. Order: vtysh bgp, vtysh routes,
+    # pwsh dns, cat dhcp.
+    import json as _stdlib_json
+
+    dns_json = _stdlib_json.dumps([{"ZoneName": "lab.test", "ZoneType": "Primary"}])
+    sequence = [
+        _proc(stdout="BGP summary text\n"),
+        _proc(stdout="Routes text\n"),
+        _proc(stdout=dns_json),
+        _proc(stdout="lease 10.0.0.1\n"),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.networking_show(_TARGET, {})
+    assert result["bgp"]["ok"] is True
+    assert result["routes"]["ok"] is True
+    assert result["dns"]["ok"] is True
+    assert result["dns"]["total"] == 1
+    assert result["dhcp"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_networking_show_isolates_sub_command_failures() -> None:
+    """One failing sub-command must not blank the others -- each has its own ok flag."""
+    connector = HolodeckConnector()
+    sequence = [
+        _proc(stdout="BGP fine\n"),
+        OSError("vtysh missing"),  # routes path fails
+        # DNS pwsh fails too (non-zero exit).
+        _proc(stdout="", stderr="dns pwsh broke", exit_status=1),
+        _proc(stdout="leases ok\n"),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.networking_show(_TARGET, {})
+    assert result["bgp"]["ok"] is True
+    assert result["routes"]["ok"] is False
+    assert result["dns"]["ok"] is False
+    assert result["dhcp"]["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# HOLODECK_OPS registration shape
+# ---------------------------------------------------------------------------
+
+
+def test_holodeck_ops_has_eight_entries() -> None:
+    """T1 canary (about) + 7 T2 read ops = 8 total."""
+    assert len(HOLODECK_OPS) == 8
+
+
+def test_holodeck_ops_about_remains_at_index_zero() -> None:
+    assert HOLODECK_OPS[0].op_id == "holodeck.about"
+
+
+def test_holodeck_ops_covers_expected_op_ids() -> None:
+    op_ids = {op.op_id for op in HOLODECK_OPS}
+    expected = {
+        "holodeck.about",
+        "holodeck.config.show",
+        "holodeck.pod.list",
+        "holodeck.pod.info",
+        "holodeck.service.list",
+        "holodeck.k8s.exec",
+        "holodeck.logs.tail",
+        "holodeck.networking.show",
+    }
+    assert op_ids == expected
+
+
+def test_holodeck_ops_all_have_holodeck_namespace() -> None:
+    for op in HOLODECK_OPS:
+        assert op.op_id.startswith("holodeck."), f"{op.op_id!r} lacks holodeck. prefix"
+
+
+def test_holodeck_ops_all_safe() -> None:
+    """Every T2 read op is read-only -- safety_level='safe' is mandatory."""
+    for op in HOLODECK_OPS:
+        assert op.safety_level == "safe", (
+            f"{op.op_id!r} has safety_level={op.safety_level!r}; every T2 op must be safe"
+        )
+
+
+def test_holodeck_ops_all_no_approval_required() -> None:
+    for op in HOLODECK_OPS:
+        assert op.requires_approval is False, (
+            f"{op.op_id!r} should not require approval -- reads only"
+        )
+
+
+def test_holodeck_ops_all_parameter_schemas_have_additional_properties_false() -> None:
+    for op in HOLODECK_OPS:
+        assert op.parameter_schema.get("additionalProperties") is False, (
+            f"{op.op_id!r} parameter_schema missing additionalProperties=False"
+        )
+
+
+def test_holodeck_ops_all_have_llm_instructions() -> None:
+    for op in HOLODECK_OPS:
+        assert op.llm_instructions, f"{op.op_id!r} missing llm_instructions"
+        when_to_use = op.llm_instructions.get("when_to_use")
+        assert when_to_use, f"{op.op_id!r} missing llm_instructions.when_to_use"
+        assert isinstance(when_to_use, str) and when_to_use.strip()
+
+
+def test_holodeck_ops_llm_instructions_mention_ssh_transport() -> None:
+    """Every op's ``when_to_use`` must include the SSH-only transport note.
+
+    CLAUDE.md postulate 5 + Initiative #371 require agent-facing
+    descriptions to call out the PowerShell-over-SSH transport so an
+    LLM doesn't compose against a non-existent REST surface.
+    """
+    for op in HOLODECK_OPS:
+        when_to_use = op.llm_instructions.get("when_to_use", "")
+        assert "SSH" in when_to_use or "ssh" in when_to_use, (
+            f"{op.op_id!r} when_to_use lacks SSH transport mention"
+        )
+
+
+def test_holodeck_ops_group_keys_include_new_groups() -> None:
+    """T2 introduces the config / pod / service / k8s / logs / networking groups."""
+    group_keys = {op.group_key for op in HOLODECK_OPS if op.group_key}
+    assert {
+        "identity",
+        "config",
+        "pod",
+        "service",
+        "k8s",
+        "logs",
+        "networking",
+    } == group_keys
+
+
+def test_holodeck_ops_handler_attrs_exist_on_connector() -> None:
+    """Every ``handler_attr`` in HOLODECK_OPS resolves to a method on HolodeckConnector."""
+    for op in HOLODECK_OPS:
+        assert hasattr(HolodeckConnector, op.handler_attr), (
+            f"{op.op_id!r}: HolodeckConnector has no attr {op.handler_attr!r}"
+        )
+
+
+def test_holodeck_ops_jsonflux_list_ops_have_rows_and_total_in_response_schema() -> None:
+    """JSONFlux precedent: list ops emit ``{rows, total}`` envelopes."""
+    for op_id in ("holodeck.pod.list", "holodeck.service.list"):
+        op = next(o for o in HOLODECK_OPS if o.op_id == op_id)
+        assert op.response_schema is not None
+        properties = op.response_schema.get("properties", {})
+        assert "rows" in properties, f"{op_id!r} response missing 'rows'"
+        assert "total" in properties, f"{op_id!r} response missing 'total'"
+
+
+# ---------------------------------------------------------------------------
+# Secret-leak canary -- no credential bleed into envelopes / logs / repr
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pod_list_envelope_does_not_leak_target_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``target.secret_ref`` password/key must not surface anywhere in the envelope or logs."""
+    connector = HolodeckConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout='[{"PodId":"x"}]')
+        with caplog.at_level("DEBUG"):
+            result = await connector.pod_list(_TARGET, {})
+    rendered = _serialise_for_leak_check(result)
+    assert _CANARY_PASSWORD not in rendered
+    assert _CANARY_SSH_KEY not in rendered
+    log_text = caplog.text
+    assert _CANARY_PASSWORD not in log_text
+    assert _CANARY_SSH_KEY not in log_text
+
+
+@pytest.mark.asyncio
+async def test_config_show_pwsh_error_envelope_does_not_leak_stderr_canary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When pwsh fails, the stderr fragment must not carry secret-shaped substrings.
+
+    PwshRunError truncates stderr at 4096 chars but does **not** scrub
+    its content. The contract is: callers must not pass secret material
+    in the cmd; the connector's handlers never interpolate
+    ``target.secret_ref`` fields into pwsh scripts. We assert that
+    invariant here.
+    """
+    connector = HolodeckConnector()
+    # The stderr the connector emits cannot contain ``_CANARY_PASSWORD``
+    # because the connector never interpolates it into the script body.
+    # We assert this by exercising the PwshRunError envelope and
+    # confirming the canary is absent.
+    stderr_with_noise = "some pwsh failure stderr that does not include the secret"
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr=stderr_with_noise, exit_status=2)
+        with caplog.at_level("DEBUG"):
+            result = await connector.config_show(_TARGET, {})
+    rendered = _serialise_for_leak_check(result)
+    assert _CANARY_PASSWORD not in rendered
+    assert _CANARY_SSH_KEY not in rendered
+    assert _CANARY_PASSWORD not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_envelope_does_not_leak_target_secret() -> None:
+    """The k8s.exec envelope must not surface ``target.secret_ref`` data.
+
+    The handler never inlines credential material into the command; we
+    assert the invariant under both happy-path and rejection paths.
+    """
+    connector = HolodeckConnector()
+    # Happy path: read-only kubectl.
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="pod info\n")
+        ok_result = await connector.k8s_exec(_TARGET, {"command": "kubectl get pods"})
+    # Rejected path: mutating verb.
+    with patch.object(connector, "_run_command", new_callable=AsyncMock):
+        rejected_result = await connector.k8s_exec(_TARGET, {"command": "kubectl delete pod foo"})
+    for result in (ok_result, rejected_result):
+        rendered = _serialise_for_leak_check(result)
+        assert _CANARY_PASSWORD not in rendered
+        assert _CANARY_SSH_KEY not in rendered
+
+
+@pytest.mark.asyncio
+async def test_k8s_exec_envelope_does_not_leak_full_command_on_safety_rejection() -> None:
+    """The rejection envelope names the verb but **not** the full command line.
+
+    The full command may contain operator-supplied resource names; we
+    keep the operator-visible error surface narrow to the verb token
+    so a noisy command body doesn't bleed into structured error
+    payloads. The verb itself is part of the audit_log row's hashed
+    params anyway.
+    """
+    connector = HolodeckConnector()
+    full_command = "kubectl delete pod sensitive-internal-name-12345"
+    result = await connector.k8s_exec(_TARGET, {"command": full_command})
+    assert "error" in result
+    # The verb is allowed to appear; the resource name should not.
+    assert "delete" in result["error"]
+    assert "sensitive-internal-name-12345" not in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Connector method existence (handler_attr -> bound method roundtrip)
+# ---------------------------------------------------------------------------
+
+
+def test_connector_has_all_t2_handler_methods() -> None:
+    expected_attrs = (
+        "config_show",
+        "pod_list",
+        "pod_info",
+        "service_list",
+        "k8s_exec",
+        "logs_tail",
+        "networking_show",
+    )
+    for attr in expected_attrs:
+        assert callable(getattr(HolodeckConnector, attr, None)), (
+            f"HolodeckConnector lacks the T2 handler {attr!r}"
+        )

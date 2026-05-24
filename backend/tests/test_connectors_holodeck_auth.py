@@ -190,11 +190,14 @@ def test_package_import_registers_v2_entry_only() -> None:
     assert ("holodeck", "", "") not in v2
 
 
-def test_t1_ships_only_the_about_canary_op() -> None:
-    """T1 ships ``holodeck.about`` alone; T2 (#854) appends the 8 read ops."""
-    assert len(HOLODECK_OPS) == 1
+def test_about_canary_op_remains_at_index_zero() -> None:
+    """``holodeck.about`` is the T1 canary; T2 (#854) appends the 7 read ops
+    onto the same tuple while preserving the canary at index 0. The full T2
+    registration shape lives in ``test_connectors_holodeck_ops.py``.
+    """
     assert HOLODECK_OPS[0].op_id == "holodeck.about"
     assert HOLODECK_OPS[0].handler_attr == "about"
+    assert len(HOLODECK_OPS) == 8
 
 
 # ---------------------------------------------------------------------------

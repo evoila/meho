@@ -20,9 +20,9 @@ is threaded into ``robot_create`` / ``robot_delete`` (the dispatcher passes
 which resolves the per-target service-account credential via the
 operator-context Vault read. These tests exercise that real path against the
 in-process Vault fake (``install_fake_client``) — a non-empty ``raw_jwt``
-resolves credentials, an empty ``raw_jwt`` (the synthesised system operator)
-fails closed with :class:`VaultCredentialsReadError`. No credentials_loader
-stub masks the read.
+resolves credentials, an explicit empty ``raw_jwt`` operator fails closed
+with :class:`VaultCredentialsReadError` at the loader's empty-JWT guard. No
+credentials_loader stub masks the read.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ from structlog.testing import capture_logs
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast.events import classify_op, redact_payload
-from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
@@ -123,13 +122,21 @@ _TARGET = _StubTarget(
 )
 
 
-def _make_operator() -> Operator:
-    """Operator carrying a non-empty raw_jwt (the fail-closed gate passes)."""
+def _make_operator(raw_jwt: str = "op.robot.harbor.jwt") -> Operator:
+    """Operator for the harbor robot suite.
+
+    Defaults to a non-empty ``raw_jwt`` so the loader's fail-closed gate
+    passes. Pass ``raw_jwt=""`` to exercise the empty-JWT fail-closed
+    contract (AC3) at the loader boundary — the same explicit-empty-JWT
+    pattern the sibling connectors adopted in #980 once
+    :func:`synthesise_system_operator` began carrying a non-empty
+    placeholder JWT.
+    """
     return Operator(
         sub="op-robot-harbor",
         name="Harbor Robot Operator",
         email=None,
-        raw_jwt="op.robot.harbor.jwt",
+        raw_jwt=raw_jwt,
         tenant_id=UUID("00000000-0000-0000-0000-00000000a0a3"),
         tenant_role=TenantRole.OPERATOR,
     )
@@ -313,11 +320,15 @@ async def test_robot_create_raises_on_http_error(
 async def test_robot_create_system_operator_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A system operator (empty raw_jwt) cannot read the credential — fail closed.
+    """An empty-``raw_jwt`` operator cannot read the credential — fail closed.
 
     The credential read raises before any Harbor request is issued, so the
-    fail-closed boundary the synthesised system operator enforces holds for
-    the mint op.
+    fail-closed boundary holds for the mint op. The operator carries an
+    explicit ``raw_jwt=""`` (the contract under test) rather than the
+    synthesised system operator: post-#980 the system operator carries a
+    non-empty placeholder JWT and no longer trips the loader's empty-JWT
+    guard, so the sibling connectors moved their empty-JWT assertions to an
+    explicit ``raw_jwt=""`` operator. This test follows that precedent.
 
     The assertion is **isolation-robust** (#984 PR #998 CI fix): the read
     must raise AND the in-process Vault fake must never be touched
@@ -334,14 +345,14 @@ async def test_robot_create_system_operator_fails_closed(
         secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
     )
     connector = _make_connector()
-    system_operator = synthesise_system_operator()
+    empty_jwt_operator = _make_operator(raw_jwt="")
     with respx.mock(assert_all_called=False) as mock:
         route = mock.post("https://harbor.test.invalid/api/v2.0/robots").mock(
             return_value=respx.MockResponse(201, json={"id": 1, "name": "x", "secret": "s"})
         )
         with pytest.raises(VaultCredentialsReadError):
             await connector.robot_create(
-                system_operator,
+                empty_jwt_operator,
                 _TARGET,
                 {"name": "ci-push", "project": "myproject", "duration": -1},
             )
@@ -370,24 +381,28 @@ async def test_system_operator_credential_read_fails_closed_at_loader_boundary(
     cache, a stale HTTP route) participates in this path, a leak that
     short-circuits the handler-level test cannot satisfy this one: the
     empty-``raw_jwt`` operator must raise ``VaultCredentialsReadError``
-    before Vault is touched, every time, on every worker. Mirrors the
-    loader-boundary precedent in
+    before Vault is touched, every time, on every worker. The operator
+    carries an explicit ``raw_jwt=""`` (the empty-JWT contract under
+    test); post-#980 the synthesised system operator carries a non-empty
+    placeholder JWT, so the sibling connectors moved this assertion to an
+    explicit ``raw_jwt=""`` operator. Mirrors the loader-boundary
+    precedent in
     ``test_connectors_vcf_shared_auth.test_default_credentials_loader_rejects_empty_operator_jwt``.
     """
     fake = install_fake_client(
         monkeypatch,
         secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
     )
-    system_operator = synthesise_system_operator()
+    empty_jwt_operator = _make_operator(raw_jwt="")
 
     # The shared helper raises directly — the guard precedes any Vault call.
     with pytest.raises(VaultCredentialsReadError):
-        await load_basic_credentials(_TARGET, system_operator)
+        await load_basic_credentials(_TARGET, empty_jwt_operator)
 
     # The harbor default loader (what the live connector uses) delegates to
     # the helper, so it fails closed identically.
     with pytest.raises(VaultCredentialsReadError):
-        await load_credentials_from_vault(_TARGET, system_operator)
+        await load_credentials_from_vault(_TARGET, empty_jwt_operator)
 
     # Neither path logged in to Vault or read a secret — the guard ran
     # before the in-process fake was ever reached.
@@ -498,25 +513,27 @@ async def test_robot_delete_raises_on_http_error(
 async def test_robot_delete_system_operator_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A system operator (empty raw_jwt) cannot read the credential — fail closed.
+    """An empty-``raw_jwt`` operator cannot read the credential — fail closed.
 
     Isolation-robust (#984 PR #998 CI fix): same shape as the create twin —
     the read must raise AND the in-process Vault fake must never be touched,
     so a leaked successful read fails loudly here instead of passing
-    vacuously under CI's ``pytest -n 6 --dist loadscope``.
+    vacuously under CI's ``pytest -n 6 --dist loadscope``. The operator
+    carries an explicit ``raw_jwt=""`` (the empty-JWT contract under test),
+    following the sibling-connector precedent adopted in #980.
     """
     fake = install_fake_client(
         monkeypatch,
         secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
     )
     connector = _make_connector()
-    system_operator = synthesise_system_operator()
+    empty_jwt_operator = _make_operator(raw_jwt="")
     with respx.mock(assert_all_called=False) as mock:
         route = mock.delete("https://harbor.test.invalid/api/v2.0/robots/7").mock(
             return_value=respx.MockResponse(200)
         )
         with pytest.raises(VaultCredentialsReadError):
-            await connector.robot_delete(system_operator, _TARGET, {"project": "proj", "id": 7})
+            await connector.robot_delete(empty_jwt_operator, _TARGET, {"project": "proj", "id": 7})
     assert fake.auth.jwt.login_calls == []
     assert fake.secrets.kv.v2.read_calls == []
     assert not route.called

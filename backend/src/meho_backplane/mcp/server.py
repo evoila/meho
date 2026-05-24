@@ -491,7 +491,7 @@ def _bind_mcp_session_id(
     any audit row is written.
     """
     session_header = request.headers.get("mcp-session-id")
-    has_header = bool(session_header)
+    has_header = session_header is not None and session_header != ""
 
     if not has_header and get_settings().mcp_require_session_id:
         _log.warning("mcp_session_id_required_but_missing")

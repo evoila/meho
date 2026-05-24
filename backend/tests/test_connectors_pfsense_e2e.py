@@ -16,7 +16,8 @@ Acceptance criteria verified (Issue #850)
     dependency (asyncssh in-process server; SQLite via the autouse
     ``_default_database_url`` conftest fixture).
 (c) ``pfsense.firewall.state`` E2E asserts the JSONFlux handle path
-    (handle → ``result_query`` drills in) via a ``_ForceHandleReducer``.
+    (handle → ``result_query`` drills in) via the real
+    ``JsonFluxReducer`` in force mode (``row_threshold=0``).
 (d) All enabled ops write an audit row carrying ``op_id`` +
     ``target_id`` + ``params_hash``.
 (e) ``docs/cross-repo/pfsense-onboarding.md`` exists — not asserted
@@ -62,12 +63,12 @@ import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.registry import all_connectors_v2
-from meho_backplane.connectors.schemas import ResultHandle
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
+from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 
@@ -265,47 +266,6 @@ EXPECTED_OP_IDS: tuple[str, ...] = (
     "pfsense.gateway.list",
     "pfsense.config.show",
 )
-
-# ---------------------------------------------------------------------------
-# _ForceHandleReducer for acceptance criterion (c)
-# ---------------------------------------------------------------------------
-
-
-class _ForceHandleReducer:
-    """Test-only reducer that wraps any ``{rows, total}`` payload in a ResultHandle.
-
-    Used exclusively to prove the acceptance criterion that
-    ``pfsense.firewall.state`` can produce a JSONFlux handle when a
-    handle-producing reducer is active.  Production uses the
-    PassThroughReducer (or the real JSONFlux reducer once it ships);
-    this test-only variant forces the handle path unconditionally so the
-    assertion doesn't depend on a row-count threshold.
-    """
-
-    async def reduce(
-        self,
-        payload: Any,
-        schema: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[Any, ResultHandle | None]:
-        del schema, context
-        # pfsense.firewall.state returns {"rows": [...], "total": N}
-        rows: list[Any] = []
-        total = 0
-        if isinstance(payload, dict):
-            rows = payload.get("rows") or []
-            total = int(payload.get("total", len(rows)))
-        sample = tuple(rows[:5]) if rows else ()
-        handle = ResultHandle(
-            handle_id=uuid.uuid4(),
-            summary_md=f"pfsense-e2e force-handle ({total} rows)",
-            schema_={"type": "object"},
-            total_rows=total,
-            sample_rows=sample or None,
-            ttl_seconds=3600,
-        )
-        return {"row_count": total, "sample": list(sample)}, handle
-
 
 # ---------------------------------------------------------------------------
 # Target + connector seeding helpers
@@ -670,12 +630,13 @@ async def test_pfsense_e2e_firewall_state_jsonflux_handle(
     pfsense_e2e: _PfsenseE2EBundle,
     captured_events: list[Any],
 ) -> None:
-    """pfsense.firewall.state with _ForceHandleReducer produces a ResultHandle.
+    """pfsense.firewall.state with the real JsonFluxReducer produces a ResultHandle.
 
     Exercises acceptance criterion (c): the firewall state table supports
-    the JSONFlux handle path.  The test injects a ``_ForceHandleReducer``
-    that unconditionally wraps the ``{rows, total}`` payload in a
-    ``ResultHandle``, then asserts:
+    the JSONFlux handle path.  The test installs the real
+    :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+    in force mode (``row_threshold=0``) so the seeded 3-row state table
+    materializes into a handle, then asserts:
 
     * The ``OperationResult.handle`` (top-level ``result["handle"]``) is
       present and non-None.
@@ -683,35 +644,41 @@ async def test_pfsense_e2e_firewall_state_jsonflux_handle(
     * The handle's ``sample_rows`` contains up to 5 rows.
     * ``result.result["row_count"]`` is the summary payload the reducer
       returns alongside the handle.
+
+    Teardown restores :class:`PassThroughReducer` so a follow-on test in
+    the same session sees the v0.2 default.
     """
-    set_default_reducer(_ForceHandleReducer())
+    set_default_reducer(JsonFluxReducer(row_threshold=0))
+    try:
+        result = await call_operation(
+            _OPERATOR,
+            {
+                "connector_id": "pfsense-ssh-2.7",
+                "op_id": "pfsense.firewall.state",
+                "target": {"name": _TARGET_NAME},
+                "params": {},
+            },
+        )
+        assert result["status"] == "ok", (
+            f"pfsense.firewall.state (force-handle) failed: {result.get('error')}"
+        )
 
-    result = await call_operation(
-        _OPERATOR,
-        {
-            "connector_id": "pfsense-ssh-2.7",
-            "op_id": "pfsense.firewall.state",
-            "target": {"name": _TARGET_NAME},
-            "params": {},
-        },
-    )
-    assert result["status"] == "ok", (
-        f"pfsense.firewall.state (force-handle) failed: {result.get('error')}"
-    )
+        # The result payload is the reducer's summary (not the raw rows).
+        assert result.get("result") is not None
+        assert "row_count" in result["result"]
+        assert result["result"]["row_count"] == 3
 
-    # The result payload is the reducer's summary (not the raw rows).
-    assert result.get("result") is not None
-    assert "row_count" in result["result"]
-    assert result["result"]["row_count"] == 3
-
-    # The top-level "handle" key must carry the ResultHandle
-    # (OperationResult serialises handle as a top-level field, not inside extras).
-    handle = result.get("handle")
-    assert handle is not None, (
-        f"Expected result['handle'] from _ForceHandleReducer; got result={result!r}"
-    )
-    assert handle["total_rows"] == 3
-    assert handle["sample_rows"] is not None
+        # The top-level "handle" key must carry the ResultHandle
+        # (OperationResult serialises handle as a top-level field, not inside extras).
+        handle = result.get("handle")
+        assert handle is not None, (
+            f"Expected result['handle'] from JsonFluxReducer; got result={result!r}"
+        )
+        assert handle["total_rows"] == 3
+        assert handle["sample_rows"] is not None
+    finally:
+        set_default_reducer(PassThroughReducer())
+        reset_dispatcher_caches()
 
 
 # ---------------------------------------------------------------------------

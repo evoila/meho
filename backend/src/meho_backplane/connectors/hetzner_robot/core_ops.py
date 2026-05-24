@@ -97,8 +97,10 @@ server.list JSONFlux note
 force-handle case dispatches. Hetzner Robot returns a top-level JSON
 array (or a ``{"server": [...]}`` envelope depending on the endpoint
 version normalised in :meth:`HetznerRobotConnector.fingerprint`). The
-:func:`~tests.acceptance._robot_canary_fixtures.ForceHandleReducer`
-handles the list shape; real JSONFlux reduction (MinIO/S3 spill,
+acceptance test drives the real
+:class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+in force mode (``row_threshold=0``); its collection detection handles
+the list shape. Production-grade JSONFlux reduction (MinIO/S3 spill,
 ``result_query`` meta-tool) is out of scope for v0.2 per Goal #214.
 
 auth_failed invariant

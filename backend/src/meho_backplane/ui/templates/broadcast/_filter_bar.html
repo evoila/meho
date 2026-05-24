@@ -19,12 +19,20 @@
 
   op_id has no stream parameter (layering it on would diverge the bridge
   from ``/api/v1/feed``), so it narrows the already-streamed events
-  CLIENT-side. The op_id input lives OUTSIDE the swapped fragment so a
-  filter re-render does not reset it; on each keystroke it dispatches a
-  ``broadcast-op-id-changed`` event on ``window`` that the feed
-  fragment's ``broadcastFeed`` controller listens for
-  (``x-on:broadcast-op-id-changed.window``) and re-applies its
-  client-side filter -- without tearing down the live SSE subscription.
+  CLIENT-side. The op_id input lives OUTSIDE the swapped ``#broadcast-feed``
+  fragment, so the input ELEMENT (and the operator's typed value) survives
+  a server-side filter re-render. The ACTIVE filtering, though, lives in
+  the ``broadcastFeed`` controller INSIDE the swapped fragment: a server
+  re-render re-mounts that controller with a fresh, empty ``opIdFilter``
+  (op_id is excluded from ``hx-include`` below, so the server fragment
+  route never receives it and seeds the controller empty). The controller
+  closes that gap in its ``init`` -- on every mount, including each swap,
+  it re-reads this input's value as the single source of truth, so the
+  client-side narrowing keeps applying after a server re-render. On each
+  keystroke the input also dispatches a ``broadcast-op-id-changed`` event
+  on ``window`` that the controller listens for
+  (``x-on:broadcast-op-id-changed.window``) and re-applies live -- without
+  tearing down the SSE subscription.
 
   The form deliberately does NOT include the op_id field in its
   ``hx-include`` (``hx-include="[name=op_class],[name=principal],[name=target]"``)

@@ -394,6 +394,54 @@ def test_fragment_op_id_filter_seed_reaches_controller() -> None:
     assert "opIdFilter" in body
 
 
+def test_op_id_filter_survives_server_side_filter_re_render() -> None:
+    """op_id client filtering must survive an op_class/principal/target swap.
+
+    Regression guard for review finding B1 on PR #1041. A server-side
+    filter change (op_class/principal/target) ``hx-get``s the fragment
+    route -- WITHOUT op_id (it is excluded from the form's
+    ``hx-include``) -- and swaps ``#broadcast-feed``. The fresh fragment
+    therefore seeds ``opIdFilter`` empty, and the re-mounted Alpine
+    controller would drop the operator's active op_id filter even though
+    the op_id input (outside the swapped fragment) still shows the typed
+    value.
+
+    The fix: the controller's ``init`` re-reads the live op_id input on
+    every mount (initial load AND every swap), making the input the
+    single source of truth so the client-side narrowing keeps applying.
+    This test proves the two halves of that contract at the surface this
+    repo exposes (no headless browser harness):
+
+    1. The swap fragment for an op_class change (op_id absent) still
+       mounts the ``broadcastFeed`` controller -- so Alpine re-runs
+       ``init`` on the swapped-in node.
+    2. The served controller JS re-reads ``input[name="op_id"]`` in
+       ``init`` rather than relying solely on the server ``opIdFilter``
+       seed (which is empty on a server re-render).
+    """
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        # The exact swap that triggered B1: a server-side filter changes,
+        # op_id is NOT carried (excluded from hx-include).
+        fragment = client.get("/ui/broadcast/feed", params={"op_class": "write"})
+        controller_js = client.get("/ui/static/src/app/broadcast-feed.js")
+    assert fragment.status_code == 200, fragment.text
+    # 1. The swapped fragment re-mounts the controller (so Alpine re-runs
+    #    init on the swapped node).
+    assert "broadcastFeed(" in fragment.text
+    # op_id was not part of this server re-render, so the server seed is
+    # empty -- the survival cannot come from the server context.
+    assert "op_id=write" not in fragment.text
+
+    assert controller_js.status_code == 200, controller_js.text
+    js = controller_js.text
+    # 2. init re-reads the live op_id input -- the source of truth that
+    #    survives the swap -- rather than trusting only the server seed.
+    assert "init()" in js
+    assert "document.querySelector('input[name=\"op_id\"]')" in js
+
+
 def test_fragment_filter_values_echoed_for_selection_preservation() -> None:
     """The fragment echoes filter values so a re-render keeps the selection."""
     session_id = _seed_session_sync(tenant_id=_TENANT_A)

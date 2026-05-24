@@ -434,7 +434,7 @@ the colour policy stays one auditable map.
 | `broadcast/_event_row.html` | Server-authored row markup (timestamp · principal badge · op_id · op_class badge · result_status icon · target · payload summary). Click opens the drawer; aggregate-only events render the 🔒 marker + placeholder. |
 | `broadcast/_event_drawer.html` | Event detail drawer: op identity, operation metadata, identifiers (audit_id / request_id / broadcast event_id), full payload (or the 🔒 placeholder for sensitive ops). Alpine `click.outside` / Escape / Close dismiss. |
 | `broadcast/_event_drawer_not_found.html` | The 404 drawer fragment for a missing / cross-tenant audit id. |
-| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `openDrawer` helper, and the badge/timestamp/payload/aggregate-only helpers. |
+| `static/src/app/broadcast-feed.js` | The `broadcastFeed` Alpine component (registered on `alpine:init`). External deferred script, not inline, to stay CSP-ready. Holds the parse + prepend + 1000-row trim, the `visibleEvents` op_id client filter, the `init` re-read of the live op_id input (so the filter survives a server-side fragment swap), the `openDrawer` helper, and the badge/timestamp/payload/aggregate-only helpers. |
 
 ### Performance + empty state
 
@@ -464,14 +464,25 @@ The filter bar exposes four controls but they split across two layers:
 * **op_id — client-side.** The stream exposes no op_id parameter, and
   adding one would diverge the bridge from `/api/v1/feed` (out of
   scope). Instead the op_id input lives **outside** the swapped
-  fragment (so a server-filter re-render does not reset it) and, on each
-  debounced keystroke, dispatches a `broadcast-op-id-changed` window
-  event. The `broadcastFeed` controller listens
+  fragment, so the input **element** (and the operator's typed value)
+  survives a server-filter re-render. The **active filtering**, though,
+  lives in the `broadcastFeed` controller **inside** the swapped
+  fragment: a server-side op_class/principal/target change `hx-get`s the
+  fragment route **without** op_id (it is excluded from `hx-include`),
+  re-mounts the controller, and seeds `opIdFilter` empty — so without
+  more, the op_id filter would silently stop applying after every server
+  re-render even though the input still shows the text. The controller
+  closes that gap in its `init`: on every mount (initial load **and**
+  each swap) it re-reads the live op_id input as the single source of
+  truth, so the client-side narrowing keeps applying. On each debounced
+  keystroke the input also dispatches a `broadcast-op-id-changed` window
+  event the controller listens for
   (`x-on:broadcast-op-id-changed.window`) and recomputes `visibleEvents`
   — a case-insensitive substring filter over the already-streamed
   `events` — without touching the live SSE subscription. The op_id seed
   is also passed into the controller on render so a copy-pasted
-  `?op_id=` URL narrows the view on first paint.
+  `?op_id=` URL narrows the view on first paint (the `init` read then
+  reconciles it with the live input value).
 
 The target dropdown is populated from the `targets` table scoped to the
 session tenant (`feed._target_names`, capped at 500) — a tenant-A

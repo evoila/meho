@@ -23,6 +23,13 @@
 //     no op_id parameter, so op_id narrows the streamed events in-browser
 //     via ``visibleEvents``. The filter bar's op_id input dispatches a
 //     ``broadcast-op-id-changed`` window event this controller listens for.
+//     On a server-side filter re-render (op_class/principal/target change)
+//     HTMX swaps ``#broadcast-feed`` and this controller re-initialises
+//     with a fresh, empty ``opIdFilter`` -- so ``init`` re-reads the live
+//     op_id input (which lives OUTSIDE the swapped fragment and keeps the
+//     operator's typed value) and re-seeds the filter. Without that read
+//     the op_id input would still show the typed text but active filtering
+//     would silently stop after every server re-render.
 //   * Open the event-detail drawer on a row click (work item #4):
 //     ``htmx.ajax`` GET ``/ui/broadcast/event/{audit_id}?event_id=...``
 //     into ``#event-drawer``.
@@ -42,7 +49,30 @@ document.addEventListener("alpine:init", () => {
     // Lower-cased once; the op_id filter is a case-insensitive substring
     // match against ``ev.op_id``. Seeded from the server context so a
     // copy-pasted filtered URL renders the narrowed view on first paint.
+    // ``init`` (below) then overrides this from the live op_id input so a
+    // server re-render -- which omits op_id and therefore seeds an empty
+    // ``opts.opIdFilter`` -- does not drop the operator's active filter.
     opIdFilter: (opts.opIdFilter || "").toLowerCase(),
+
+    // Alpine invokes ``init`` automatically when the component mounts --
+    // on the initial page load AND on every HTMX swap of the
+    // ``#broadcast-feed`` fragment (a server-side op_class/principal/target
+    // re-render). The op_id ``<input>`` lives outside the swapped fragment,
+    // so it survives the swap with the operator's typed value intact; the
+    // server fragment route, however, never receives op_id (it is excluded
+    // from the form's ``hx-include``) and so re-seeds ``opIdFilter`` empty.
+    // Reading the input here makes that input the single source of truth so
+    // the client-side narrowing keeps applying across server re-renders.
+    // ``$nextTick`` defers the read until Alpine has settled the swapped
+    // node, guarding against any swap/init ordering edge.
+    init() {
+      this.$nextTick(() => {
+        const input = document.querySelector('input[name="op_id"]');
+        if (input) {
+          this.opIdFilter = (input.value || "").toLowerCase();
+        }
+      });
+    },
 
     // Re-apply the op_id filter when the filter bar's input changes. The
     // ``.window`` listener is declared in the template; this handler

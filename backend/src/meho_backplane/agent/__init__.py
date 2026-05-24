@@ -33,15 +33,23 @@ from meho_backplane.agent.run import (
     PydanticAgentRun,
     default_model_factory,
 )
+from meho_backplane.agent.toolset import (
+    META_TOOL_NAMES,
+    MetaToolSpec,
+    resolve_agent_tools,
+)
 
 __all__ = [
+    "META_TOOL_NAMES",
     "AgentDefinition",
     "AgentRun",
     "AgentRunError",
     "AgentRunHandle",
     "AgentRunResult",
     "AgentRunStatus",
+    "MetaToolSpec",
     "ModelFactory",
     "PydanticAgentRun",
     "default_model_factory",
+    "resolve_agent_tools",
 ]

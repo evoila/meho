@@ -3,12 +3,16 @@
 
 """Typed operations exposed by :class:`HolodeckConnector`.
 
-G3.8-T1 (#853) skeleton ships ``holodeck.about`` -- the canary op
+G3.8-T1 (#853) skeleton shipped ``holodeck.about`` -- the canary op
 that proves the ``register_typed_operation()`` -> dispatcher ->
 PowerShell-over-SSH -> JSON-parse pipeline end-to-end on the
-Holodeck connector. G3.8-T2 (#854) appends the 8 read ops via
-``_holodeck_ops()`` exactly as the bind9 / pfSense siblings layered
-their read groups onto the T1 canary.
+Holodeck connector. G3.8-T2 (#854) appends 7 read ops
+(``holodeck.config.show`` / ``holodeck.pod.list`` /
+``holodeck.pod.info`` / ``holodeck.service.list`` /
+``holodeck.k8s.exec`` / ``holodeck.logs.tail`` /
+``holodeck.networking.show``) via :func:`_holodeck_ops`, exactly as
+the bind9 / pfSense siblings layered their read groups onto the
+T1 canary -- 8 ops total under ``connector_id="holodeck-ssh-9.0"``.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.bind9.ops` and
@@ -21,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-__all__ = ["HOLODECK_OPS", "HolodeckOp"]
+__all__ = ["HOLODECK_OPS", "HolodeckOp", "_holodeck_ops"]
 
 
 @dataclass(frozen=True)
@@ -115,13 +119,36 @@ _HOLODECK_ABOUT_OP = HolodeckOp(
 )
 
 
+def _holodeck_ops() -> tuple[HolodeckOp, ...]:
+    """Return the merged registration tuple.
+
+    Composition: ``holodeck.about`` (T1 canary) + ``READ_OPS`` (T2
+    read ops: ``holodeck.config.show``, ``holodeck.pod.list``,
+    ``holodeck.pod.info``, ``holodeck.service.list``,
+    ``holodeck.k8s.exec``, ``holodeck.logs.tail``,
+    ``holodeck.networking.show``). Eight ops total -- the full G3.8-T2
+    read surface.
+
+    Implemented as a function call rather than a literal-and-splat at
+    module level so the import order stays linear: ``ops.py`` defines
+    :class:`HolodeckOp` + ``_HOLODECK_ABOUT_OP``, then imports the T2
+    read ops from :mod:`meho_backplane.connectors.holodeck.ops_read`.
+    Mirrors :func:`meho_backplane.connectors.pfsense.ops._pfsense_ops`
+    and :func:`meho_backplane.connectors.bind9.ops._bind9_ops`.
+    """
+    from meho_backplane.connectors.holodeck.ops_read import READ_OPS
+
+    return (_HOLODECK_ABOUT_OP, *READ_OPS)
+
+
 #: The ops :class:`HolodeckConnector` registers at lifespan startup.
 #:
-#: T1 ships ``holodeck.about``; T2 (#854) appends the 8 read ops
+#: T1 shipped ``holodeck.about``; T2 (#854) adds the 7 read ops
 #: (``holodeck.config.show``, ``holodeck.pod.list``,
 #: ``holodeck.pod.info``, ``holodeck.service.list``,
 #: ``holodeck.k8s.exec``, ``holodeck.logs.tail``,
-#: ``holodeck.networking.show``) onto this tuple via an ``ops_read``
-#: composition module -- the registration walk in
-#: :meth:`HolodeckConnector.register_operations` does not change.
-HOLODECK_OPS: tuple[HolodeckOp, ...] = (_HOLODECK_ABOUT_OP,)
+#: ``holodeck.networking.show``) -- 8 ops total. The registration
+#: walk in :meth:`HolodeckConnector.register_operations` does not
+#: need to change between T1 and T2; only :func:`_holodeck_ops`
+#: composes the merged tuple.
+HOLODECK_OPS: tuple[HolodeckOp, ...] = _holodeck_ops()

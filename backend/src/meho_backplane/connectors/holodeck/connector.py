@@ -125,6 +125,54 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "this op also confirms the PowerShell-over-SSH transport "
         "is functional."
     ),
+    "config": (
+        "Use for Holodeck appliance configuration questions: "
+        "``holodeck.config.show`` returns the full Get-HoloDeckConfig "
+        "dict (vendor + product + pod ID + services block). For just "
+        "the identifying fields, ``holodeck.about`` is faster. "
+        "Transport: pwsh-over-SSH (no REST surface)."
+    ),
+    "pod": (
+        "Use for Holodeck nested-pod operations: list the active "
+        "pods (``holodeck.pod.list``) or pull per-pod detail "
+        "(``holodeck.pod.info <pod_id>``). Pod lists carry state, "
+        "primary networking, and VM count; per-pod info adds the VM "
+        "list and FRR/BGP attachment. Transport: pwsh-over-SSH."
+    ),
+    "service": (
+        "Use for Holodeck Photon service health: "
+        "``holodeck.service.list`` returns the bundled services "
+        "(DHCP, DNS, NTP, FRR-BGP, Webtop, K8s-in-appliance) and "
+        "their Status. Pair with ``holodeck.logs.tail`` for "
+        "drill-in. Transport: pwsh-over-SSH."
+    ),
+    "k8s": (
+        "Use for read-only inspection of the K8s cluster bundled on "
+        "the HoloRouter appliance via ``holodeck.k8s.exec`` "
+        "(``kubectl get``/``describe``/``logs``/``top``/``explain``/"
+        "``api-resources``/``api-versions``/``cluster-info``/"
+        "``version``). Mutating verbs are rejected fail-closed at "
+        "the schema layer and re-checked by the handler. Transport: "
+        "plain SSH to the appliance (no pwsh wrapper); the in-"
+        "appliance ``kubectl`` reaches the cluster directly."
+    ),
+    "logs": (
+        "Use for Holodeck runtime log inspection: "
+        "``holodeck.logs.tail component=<slug> [lines=N]`` runs "
+        "``tail`` over ``/holodeck-runtime/logs/<component>*.log``. "
+        "Slugs map to bundled services (``dhcp``, ``dns``, ``frr``, "
+        "``webtop``, ``k8s``); lines defaults to 200, clamped at "
+        "[1, 5000]. Transport: plain SSH."
+    ),
+    "networking": (
+        "Use for the HoloRouter's networking-surface snapshot: "
+        "``holodeck.networking.show`` composes FRR/BGP summary + "
+        "kernel routes + DNS zone summary + DHCP leases into a "
+        "single envelope with per-sub-section ``ok`` flags. "
+        "Pair with ``holodeck.logs.tail component=frr`` for FRR log "
+        "drill-in. Transport: plain SSH for vtysh + dhcpd.leases; "
+        "pwsh-over-SSH for the DNS zone summary."
+    ),
 }
 
 
@@ -396,6 +444,125 @@ class HolodeckConnector(SshConnector):
             "photon_version": result.extras.get("photon_version"),
             "pod_id": result.extras.get("pod_id"),
         }
+
+    async def config_show(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.config.show`` (G3.8-T2 #854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_config_show`.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_config_show as _holodeck_config_show,
+        )
+
+        return await _holodeck_config_show(self, target, params)
+
+    async def pod_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.pod.list`` (G3.8-T2 #854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_pod_list`.
+        Large pod lists are paged via the future JSONFlux reducer
+        (HandleStore key ``holodeck_pod_list``); the handler emits the
+        ``{rows, total}`` envelope today so the reducer can switch
+        without a connector change.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_pod_list as _holodeck_pod_list,
+        )
+
+        return await _holodeck_pod_list(self, target, params)
+
+    async def pod_info(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.pod.info`` (G3.8-T2 #854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_pod_info`.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_pod_info as _holodeck_pod_info,
+        )
+
+        return await _holodeck_pod_info(self, target, params)
+
+    async def service_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.service.list`` (G3.8-T2 #854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_service_list`.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_service_list as _holodeck_service_list,
+        )
+
+        return await _holodeck_service_list(self, target, params)
+
+    async def k8s_exec(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.k8s.exec`` (G3.8-T2 #854).
+
+        **Read-only**. Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_k8s_exec`,
+        which re-validates the verb against the read-only safelist
+        (belt-and-braces over the schema's pattern check) before
+        forwarding the command to the in-appliance K8s cluster.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_k8s_exec as _holodeck_k8s_exec,
+        )
+
+        return await _holodeck_k8s_exec(self, target, params)
+
+    async def logs_tail(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.logs.tail`` (G3.8-T2 #854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_logs_tail`.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_logs_tail as _holodeck_logs_tail,
+        )
+
+        return await _holodeck_logs_tail(self, target, params)
+
+    async def networking_show(
+        self,
+        target: Target,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``holodeck.networking.show`` (G3.8-T2 #854).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.holodeck.ops_read.holodeck_networking_show`.
+        """
+        from meho_backplane.connectors.holodeck.ops_read import (
+            holodeck_networking_show as _holodeck_networking_show,
+        )
+
+        return await _holodeck_networking_show(self, target, params)
 
     @classmethod
     async def register_operations(cls) -> None:

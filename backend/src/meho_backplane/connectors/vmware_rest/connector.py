@@ -345,13 +345,17 @@ class VmwareRestConnector(HttpConnector):
 
         Raises :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
         when ``operator.raw_jwt`` is empty -- defense-in-depth fail-closed
-        check that mirrors the loader path's pre-Vault guard. The primary
-        gate is :meth:`auth_headers` rejecting system-initiated calls
-        before :meth:`_session_token` is invoked; this cache fast-path
-        enforces the same invariant so a future regression in the
-        boundary check cannot return a cached vSphere session token to
-        an unauthenticated caller. Raised before the cache lookup so a
-        primed token from an authenticated caller cannot leak to a
+        check mirroring the loader path's pre-Vault guard at
+        :func:`~meho_backplane.connectors._shared.vault_creds._resolve_secret_ref`.
+        The primary fail-closed gate against empty ``raw_jwt`` is the
+        loader's ``vault_client_for_operator`` / ``load_basic_credentials``
+        call chain; this cache fast-path enforces the same invariant so a
+        future regression in the loader cannot return a cached vSphere
+        session token to an unauthenticated caller via a cache hit.
+        :meth:`auth_headers` enforces only the ``auth_model`` boundary
+        (rejects ``per_user`` / ``impersonation`` under
+        ``shared_service_account`` scoping). Raised before the cache lookup
+        so a primed token from an authenticated caller cannot leak to a
         system-initiated caller. See ``docs/architecture/connector-auth.md``
         § "Cache scoping under ``shared_service_account``" for the contract.
         """

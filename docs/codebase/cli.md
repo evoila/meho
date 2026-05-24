@@ -663,6 +663,14 @@ redaction stance applies, and the unit tests pin the marker.
   batch). The handler holds the connection open via
   `<-r.Context().Done()` after the scripted frames so the client's
   scanner sits in `Scan()` until the test cancels.
+- Tests that assert on recorded requests run `runWatch` in a
+  background goroutine and synchronise on `fakeFeed.waitForRequests`
+  (block until N requests have landed, bounded by a generous
+  timeout) before cancelling — never on a fixed `time.Sleep`. Gating
+  on the observable event instead of wall-clock scheduling is what
+  keeps the Go job green on slow CI runners; the joined `done`
+  channel also gives the happens-before that lets the assertions read
+  the captured `stdout`/`stderr` without racing the writer.
 - A `fastBackoff` schedule (five 1 ms slots) collapses the
   production 1/2/5/10/30 s schedule so the suite runs in
   milliseconds.

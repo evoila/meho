@@ -102,6 +102,7 @@ References
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import UTC, datetime
@@ -784,4 +785,371 @@ register_mcp_tool(
 
 # ===========================================================================
 # === end meho.broadcast.announce ===
+# ===========================================================================
+
+# ===========================================================================
+# === meho.broadcast.watch ===
+# ===========================================================================
+
+#: Default ``XREAD BLOCK`` window when the caller omits ``timeout_ms``. 10s
+#: balances "wait long enough that the average operator pause produces a
+#: hit" against "release the chassis worker before any HTTP intermediary
+#: idles the connection". Half the maximum so a default-shaped client has
+#: room for a per-call override without bumping into the cap.
+_WATCH_DEFAULT_TIMEOUT_MS: Final[int] = 10_000
+
+#: Lower bound on ``timeout_ms``. 100ms is the floor below which the
+#: long-poll degenerates into a non-blocking poll plus syscall overhead;
+#: clients that want strictly-non-blocking semantics should be using
+#: :func:`_handler_recent` instead.
+_WATCH_MIN_TIMEOUT_MS: Final[int] = 100
+
+#: Upper bound on ``timeout_ms``. 30s matches the SSE bridge's
+#: ``_XREAD_BLOCK_MS`` (:mod:`~meho_backplane.api.v1.feed`) and the
+#: common HTTP-intermediary keep-alive ceiling (nginx default
+#: ``proxy_read_timeout`` 60s; AWS ALB idle 60s). Allowing infinite-block
+#: (``block=0``) here would let a single misbehaving caller tie up a
+#: chassis worker for the lifetime of the process; the cap is a hard
+#: backpressure boundary, not a hint.
+_WATCH_MAX_TIMEOUT_MS: Final[int] = 30_000
+
+#: Upper bound on entries returned in one ``XREAD`` call. Mirrors
+#: :data:`meho_backplane.api.v1.feed._XREAD_COUNT` so a busy tenant
+#: doesn't surface a 10,000-event burst in a single tool response that
+#: would blow the agent's token budget. The caller paginates by calling
+#: again with the returned ``next_cursor``.
+_WATCH_XREAD_COUNT: Final[int] = 100
+
+
+def _validate_timeout_ms(raw: Any) -> int:
+    """Coerce *raw* into the ``timeout_ms`` integer and enforce the bounds.
+
+    ``raw`` may be absent (None) -- the default :data:`_WATCH_DEFAULT_TIMEOUT_MS`
+    applies. Anything other than a plain ``int`` (including ``bool``, which
+    Python's ``isinstance(..., int)`` would accept, and ``float``, which
+    would silently truncate via ``int(...)``) rejects with
+    :class:`McpInvalidParamsError`. Out-of-range integers reject for the
+    same reason -- the cap is non-negotiable; a caller cannot opt past it.
+
+    Surface area defence: even though :func:`_handler_watch`'s
+    ``inputSchema`` declares ``"type": "integer"`` plus
+    ``minimum`` / ``maximum``, the per-field re-check here is the
+    handler-side guarantee. A future schema relaxation or a registration
+    bug wouldn't quietly widen the contract; the handler would still
+    reject the bad input as ``-32602``.
+    """
+    if raw is None:
+        return _WATCH_DEFAULT_TIMEOUT_MS
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise McpInvalidParamsError(
+            f"timeout_ms: must be an integer in [{_WATCH_MIN_TIMEOUT_MS}, {_WATCH_MAX_TIMEOUT_MS}]",
+        )
+    if raw < _WATCH_MIN_TIMEOUT_MS or raw > _WATCH_MAX_TIMEOUT_MS:
+        raise McpInvalidParamsError(
+            f"timeout_ms: must be in [{_WATCH_MIN_TIMEOUT_MS}, {_WATCH_MAX_TIMEOUT_MS}]",
+        )
+    return raw
+
+
+async def _xread_or_cancelled(
+    operator: Operator,
+    *,
+    stream_key: str,
+    since_cursor: str,
+    timeout_ms: int,
+) -> Any:
+    """Await ``XREAD BLOCK`` for *operator*'s stream; re-raise cancellation cleanly.
+
+    Wraps the single ``xread`` call so the ``except asyncio.CancelledError``
+    arm stays self-contained -- which both bounds the cancellation
+    contract to one shape (xread is the only awaitable in this leg of
+    :func:`_watch_events_impl`) and keeps the parent function under the
+    code-quality function-size ceiling.
+
+    Cancellation contract: when Starlette cancels the JSON-RPC request
+    mid-block (client hung up, transport closed, MCP dispatcher tore the
+    call down), the pending ``xread`` raises
+    :class:`asyncio.CancelledError`. We log the structured disconnect and
+    re-raise -- swallowing ``CancelledError`` breaks the task tree's
+    unwind invariants per the asyncio contract (Sonar S7497; Python 3.13+
+    re-issues cancellation if it goes unpropagated). The chassis worker
+    is released the moment the re-raise lands.
+
+    *since_cursor* is passed to ``xread`` verbatim; XREAD reads entries
+    strictly past the cursor (its "last id seen" semantics are
+    exclusive, unlike XRANGE's inclusive ``min``).
+    """
+    client = get_broadcast_client()
+    try:
+        return await client.xread(
+            {stream_key: since_cursor},
+            block=timeout_ms,
+            count=_WATCH_XREAD_COUNT,
+        )
+    except asyncio.CancelledError:
+        _log.info(
+            "broadcast_watch_cancelled",
+            stream_key=stream_key,
+            operator_sub=operator.sub,
+            since_cursor=since_cursor,
+        )
+        raise
+
+
+def _xread_items_or_none(
+    raw_response: Any,
+) -> list[tuple[str, dict[str, str]]] | None:
+    """Unwrap the redis-py ``XREAD`` envelope to the entry list, or ``None``.
+
+    XREAD's two distinguishable result shapes:
+
+    * ``None`` (timeout-with-no-entries) or an empty outer list -- the
+      "nothing for us" branch. The truthiness check collapses both into
+      the same return ``None`` here; the SSE bridge's
+      ``_feed_generator`` uses the same idiom.
+    * ``[[stream_key, [(entry_id, fields), ...]]]`` -- one outer tuple
+      per stream queried. We query exactly one stream (the operator's
+      tenant feed), so ``raw_response[0][1]`` is the
+      ``[(entry_id, fields_dict), ...]`` list. A defensive third branch
+      catches an outer tuple with an empty inner list (never observed
+      with redis-py 7.x in practice -- the client collapses to ``None``
+      -- but the branch keeps the response safe under a future redis-py
+      shape change).
+
+    Returning the inner list (or ``None``) collapses three branches in
+    the caller to one ``if items is None`` check.
+    """
+    if not raw_response:
+        return None
+    entries = cast(
+        "list[tuple[str, list[tuple[str, dict[str, str]]]]]",
+        raw_response,
+    )
+    _key, items = entries[0]
+    if not items:
+        return None
+    return items
+
+
+def _filter_xread_items(
+    items: list[tuple[str, dict[str, str]]],
+    *,
+    stream_key: str,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+) -> list[dict[str, Any]]:
+    """Parse + filter the XREAD batch into the wire-shape events list.
+
+    Each surviving entry carries ``id`` (the Valkey stream cursor, the
+    round-trip handle) plus every :class:`BroadcastEvent` field
+    (including the durable ``event_id`` UUID and the ``audit_id`` for
+    audit-log correlation). Entries that fail :func:`_parse_entry` (bad
+    field shape, malformed JSON) are logged + skipped inside the helper
+    so the watch handler never raises on a single bad entry.
+    """
+    matched: list[dict[str, Any]] = []
+    for entry_id, fields in items:
+        event = _parse_entry(entry_id, fields, stream_key=stream_key)
+        if event is None:
+            continue
+        if not _event_matches(
+            event,
+            op_class=op_class,
+            principal=principal,
+            target=target,
+        ):
+            continue
+        matched.append({"id": entry_id, **event.model_dump(mode="json")})
+    return matched
+
+
+async def _watch_events_impl(
+    operator: Operator,
+    *,
+    since_cursor: str,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+    timeout_ms: int,
+) -> dict[str, Any]:
+    """Long-poll the operator's tenant stream for entries strictly past *since_cursor*.
+
+    Issues a single ``XREAD BLOCK`` against ``meho:feed:{operator.tenant_id}``
+    with ``timeout_ms`` as the block window; the caller's chassis worker
+    is tied up for up to that long. When entries arrive, advances the
+    cursor to the **last fetched** entry id (NOT the last *matched* one --
+    same invariant as :func:`_list_recent_events_impl`) so a filter-heavy
+    page where every entry was dropped still advances the cursor and the
+    next call doesn't re-read the same batch.
+
+    No-events shape: returns ``{events: [], next_cursor: since_cursor}``.
+    The unchanged cursor signals "I waited; nothing landed" -- the caller
+    re-polls with the same cursor.
+
+    Implementation split across three helpers:
+
+    * :func:`_xread_or_cancelled` owns the ``xread`` await and the
+      :class:`asyncio.CancelledError` re-raise contract.
+    * :func:`_xread_items_or_none` unwraps the redis-py envelope.
+    * :func:`_filter_xread_items` parses + filters the batch.
+
+    The caller obtains an initial cursor from :func:`_handler_recent`'s
+    ``next_cursor`` field; from that point forward each watch call's
+    ``next_cursor`` feeds the next call's ``since_cursor``.
+    """
+    stream_key = _stream_key(operator.tenant_id)
+    raw_response = await _xread_or_cancelled(
+        operator,
+        stream_key=stream_key,
+        since_cursor=since_cursor,
+        timeout_ms=timeout_ms,
+    )
+    items = _xread_items_or_none(raw_response)
+    if items is None:
+        return {"events": [], "next_cursor": since_cursor}
+    # Advance to the LAST FETCHED entry id BEFORE filtering, mirroring
+    # the M2 fix on the SSE generator: a page where every entry is
+    # filtered out still moves the cursor forward so a busy-but-filtered
+    # tenant doesn't deliver the same batch on every poll. The cursor
+    # is the canonical "last id seen" -- the filter is the caller's
+    # post-fetch concern.
+    next_cursor = items[-1][0]
+    matched = _filter_xread_items(
+        items,
+        stream_key=stream_key,
+        op_class=op_class,
+        principal=principal,
+        target=target,
+    )
+    return {"events": matched, "next_cursor": next_cursor}
+
+
+async def _handler_watch(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """``meho.broadcast.watch`` handler.
+
+    Parses the wire arguments, then delegates to :func:`_watch_events_impl`.
+    The dispatcher's JSON-Schema validator catches the coarse shape errors
+    (missing ``since_cursor``, ``timeout_ms`` outside the integer range,
+    extra top-level keys); the per-field re-checks here are the typed
+    contract for the handler itself -- a future schema change wouldn't
+    silently widen what the handler accepts.
+
+    Tenant scoping is structural: ``arguments`` has no ``tenant_id`` field,
+    so the stream key is always ``meho:feed:{operator.tenant_id}``.
+    """
+    since_cursor = arguments.get("since_cursor")
+    if not isinstance(since_cursor, str) or not since_cursor:
+        raise McpInvalidParamsError(
+            "since_cursor: required, must be a non-empty Valkey stream cursor",
+        )
+    op_class, principal, target = _extract_filter(arguments)
+    timeout_ms = _validate_timeout_ms(arguments.get("timeout_ms"))
+    return await _watch_events_impl(
+        operator,
+        since_cursor=since_cursor,
+        op_class=op_class,
+        principal=principal,
+        target=target,
+        timeout_ms=timeout_ms,
+    )
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        name="meho.broadcast.watch",
+        description=(
+            "Long-poll the operator's tenant broadcast stream for new "
+            "events past 'since_cursor' (Initiative #1090, Task #1093). "
+            "Issues XREAD BLOCK against meho:feed:{tenant_id} with "
+            "'timeout_ms' as the block window (default 10000, cap "
+            "30000 -- the chassis worker is tied up for up to that long, "
+            "so the cap is a hard backpressure boundary, not a hint). "
+            "Returns {events, next_cursor}. When no events arrive within "
+            "the window: returns {events: [], next_cursor: <unchanged>} -- "
+            "re-poll with the same cursor. When events arrive: "
+            "'next_cursor' advances to the last *fetched* entry id (NOT "
+            "the last matched one) so a busy-but-filtered tenant still "
+            "progresses. Designed for the agent-side discipline loop: "
+            "'broadcast_watch -> process -> broadcast_watch with new "
+            "cursor'. Obtain the initial 'since_cursor' from "
+            "'meho.broadcast.recent's 'next_cursor'. The 'filter' object "
+            "narrows by exact-match op_class / principal (JWT 'sub') / "
+            "target (target_name). Tenant scoping is structural -- every "
+            "watch targets the operator's own tenant stream; there is no "
+            "input that could request another tenant's stream. Payloads "
+            "inherit the publisher-side redaction (credential_read + "
+            "audit_query events are already aggregate-only on the stream). "
+            "MCP 'resources/subscribe' (server-push) remains advertised "
+            "as 'false' per backend/src/meho_backplane/mcp/resources/kb.py; "
+            "this long-poll is the v0.2 pragmatic shape."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "since_cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": (
+                        "Valkey stream cursor ('1747800000000-0'). "
+                        "Required. Obtain initial value from "
+                        "meho.broadcast.recent's 'next_cursor'. "
+                        "XREAD reads entries strictly past this cursor."
+                    ),
+                },
+                "filter": {
+                    "type": "object",
+                    "properties": {
+                        "op_class": {
+                            "type": "string",
+                            "enum": list(_OP_CLASS_ENUM),
+                            "description": ("Exact-match filter on event op_class."),
+                        },
+                        "principal": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": ("Exact-match filter on JWT 'sub' claim."),
+                        },
+                        "target": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": ("Exact-match filter on event target_name."),
+                        },
+                    },
+                    "additionalProperties": False,
+                    "description": (
+                        "Filter narrows the result; all sub-keys "
+                        "optional. Each non-null sub-key is exact-match."
+                    ),
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": _WATCH_MIN_TIMEOUT_MS,
+                    "maximum": _WATCH_MAX_TIMEOUT_MS,
+                    "default": _WATCH_DEFAULT_TIMEOUT_MS,
+                    "description": (
+                        "XREAD BLOCK window in milliseconds. Cap at "
+                        f"{_WATCH_MAX_TIMEOUT_MS} (long-poll, not "
+                        "infinite-block) to bound chassis worker tie-up."
+                    ),
+                },
+            },
+            "required": ["since_cursor"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.OPERATOR,
+        op_class="read",
+    ),
+    handler=_handler_watch,
+)
+
+
+# ===========================================================================
+# === end meho.broadcast.watch ===
 # ===========================================================================

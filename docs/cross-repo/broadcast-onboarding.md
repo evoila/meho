@@ -38,6 +38,7 @@ Every transport reads the same per-tenant stream. Pick by use case:
 | `meho://tenant/{tenant_id}/feed` MCP resource | LLM clients (Claude, MCP-aware agents) that poll a snapshot | G6.1-T6 (this task) |
 | `meho.broadcast.recent` MCP tool | LLM clients that need filter / since / cursor pagination over the same stream | G6.4-T1 (#1091) |
 | `meho.broadcast.announce` MCP tool | Agents publishing intent / progress / completion narratives that other operators can read | G6.4-T2 (#1092) |
+| `meho.broadcast.watch` MCP tool | LLM clients that need long-poll "wait for the next batch" without an SSE socket | G6.4-T3 (#1093) |
 
 The Slack mirror (G6.2 #333) and any future web admin UI subscribe
 the same way — XREAD against the per-tenant stream key.
@@ -297,6 +298,110 @@ saw it.
 Tenant scoping is **structural**: the input schema has no `tenant_id`
 argument; the announcement always writes to the operator's own tenant
 stream. RBAC: `operator` role minimum.
+
+## MCP tool: `meho.broadcast.watch`
+
+The long-poll equivalent of "subscribe to the feed" for clients that
+don't speak SSE. Where `meho.broadcast.recent` returns whatever's
+already on the stream past `since`, `meho.broadcast.watch` uses Valkey
+`XREAD BLOCK <timeout_ms>` to **wait** for new entries past
+`since_cursor` and returns them as soon as they arrive — or returns
+empty when the block window expires.
+
+```json
+{
+  "name": "meho.broadcast.watch",
+  "arguments": {
+    "since_cursor": "1747800099000-0",
+    "filter": {"op_class": "write"},
+    "timeout_ms": 10000
+  }
+}
+```
+
+Response shape (events arrived):
+
+```json
+{
+  "events": [
+    {
+      "id": "1747800100200-0",
+      "event_id": "...",
+      "op_id": "vsphere.vm.create",
+      "principal_sub": "op-alice",
+      "result_status": "ok",
+      "ts": "2026-05-25T10:01:40Z",
+      "payload": {...},
+      "audit_id": "..."
+    }
+  ],
+  "next_cursor": "1747800100200-0"
+}
+```
+
+Response shape (window expired with no events):
+
+```json
+{
+  "events": [],
+  "next_cursor": "1747800099000-0"
+}
+```
+
+The **unchanged `next_cursor` is the "I waited; nothing landed" signal**.
+The caller re-polls with the same cursor.
+
+Arguments:
+
+* `since_cursor` (**required**) — Valkey stream cursor (`1747800000000-0`).
+  Obtain the initial value from `meho.broadcast.recent`'s `next_cursor`;
+  from that point forward the watch loop feeds itself.
+* `filter.op_class` / `filter.principal` / `filter.target` — same
+  semantics as `meho.broadcast.recent`. Filtered-out entries still
+  advance the cursor so the walk progresses even on busy-but-filtered
+  tenants.
+* `timeout_ms` — integer in `[100, 30000]`, default `10000` (10s).
+  The 30s cap is a **hard backpressure boundary**, not a hint: each
+  watch call ties up one chassis worker for the block window, so an
+  infinite-block call would let one bad actor exhaust the worker pool.
+  Values outside the range return JSON-RPC `INVALID_PARAMS` (-32602).
+
+Pagination contract — the watch loop is the agent-side broadcast
+discipline:
+
+```javascript
+let {events: initial, next_cursor: cursor} = await callTool(
+  "meho.broadcast.recent", {limit: 100}
+);
+for (const e of initial) handle(e);
+
+while (running) {
+  const {events, next_cursor} = await callTool(
+    "meho.broadcast.watch",
+    {since_cursor: cursor, timeout_ms: 10000}
+  );
+  for (const e of events) handle(e);
+  cursor = next_cursor;  // advances on hit; stays the same on timeout
+}
+```
+
+Tenant scoping is **structural** (identical to `meho.broadcast.recent`):
+the input schema has no `tenant_id` argument; the stream key is
+derived exclusively from `operator.tenant_id`. RBAC: `operator` role
+minimum.
+
+**Why long-poll, not MCP `resources/subscribe`:** the MCP server's
+`initialize` response advertises `subscribe: false` (per
+[`backend/src/meho_backplane/mcp/resources/kb.py`](../../backend/src/meho_backplane/mcp/resources/kb.py)),
+deferring server-push to v0.2.next. Long-poll is the pragmatic v0.2
+shape — same caller pattern as a subscribe-loop, same per-tenant
+isolation, no extra capability on the wire.
+
+Cancellation: when the MCP client closes the transport mid-block (or
+the dispatcher tears the call down), Starlette propagates
+`asyncio.CancelledError` into the pending `xread` and the handler
+re-raises it after logging — the chassis worker is released on the
+next event-loop tick.
 
 ## PII defaults (decision #3)
 

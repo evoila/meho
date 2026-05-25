@@ -444,7 +444,6 @@ class AgentInvoker:
         definition = self._to_agent_definition(entry)
         settings = get_settings()
         provider, model = _split_model_id(settings.agent_default_model)
-        run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
         # Resource-server delegation (G11.2-T2 #816): a human triggered this
         # run, so bind the acting agent's principal as the RFC 8693 actor
         # while the loop task is created. ``asyncio.create_task`` snapshots
@@ -452,7 +451,12 @@ class AgentInvoker:
         # whole life; every audit row its in-process tool calls produce records
         # operator_sub=human + actor_sub=agent. Keycloak has no delegation
         # token exchange, so MEHO synthesises the sub+act binding here.
+        #
+        # Persist the durable run row *inside* the binding so a fail-closed
+        # actor_delegation (empty identity_ref) raises before the row is
+        # committed — never a ``running`` row with no backing task.
         with actor_delegation(entry.identity_ref):
+            run_id = await self._create_run_row(operator, entry, provider=provider, model=model)
             task = self._launch_run(run_id, definition, operator, inputs)
 
         _log.info(
@@ -525,16 +529,31 @@ class AgentInvoker:
                 named *name* in the agent's tenant.
         """
         settings = get_settings()
+        # Request the audience we then verify, so the token carries it even on
+        # realms without a default audience mapper.
         token = await get_client_credentials_token(
             issuer_url=str(settings.keycloak_issuer_url),
             client_id=agent_client_id,
             client_secret=agent_client_secret,
+            audience=settings.keycloak_audience,
         )
         operator = await verify_jwt_for_audience(
             f"Bearer {token}",
             expected_audience=settings.keycloak_audience,
         )
         entry = await self._load_definition(operator, name)
+        # Bind the run to the authenticating agent: the definition's
+        # ``identity_ref`` must be the agent principal's own sub. Without this,
+        # agent A's credentials could launch agent B's definition (any enabled
+        # one in the tenant) and misattribute the audit trail. The contract —
+        # ``identity_ref`` == the agent principal's Keycloak sub — also keeps a
+        # user-initiated run's ``actor_sub`` (= ``identity_ref``) in the same
+        # identifier space as an autonomous run's ``operator_sub``.
+        if entry.identity_ref != operator.sub:
+            raise AgentInvocationError(
+                f"scheduled run rejected: agent credentials (sub={operator.sub!r}) "
+                f"do not own definition {name!r} (identity_ref={entry.identity_ref!r})"
+            )
         definition = self._to_agent_definition(entry)
         provider, model = _split_model_id(settings.agent_default_model)
         run_id = await self._create_run_row(

@@ -100,6 +100,18 @@ async def test_missing_access_token_raises_typed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_json_body_raises_typed() -> None:
+    """A 2xx with a non-JSON body surfaces as a typed error, not a raw decode error."""
+    with respx.mock as r:
+        r.post(_TOKEN_URL).mock(return_value=httpx.Response(200, text="<html>not json</html>"))
+        with pytest.raises(AgentTokenError) as exc:
+            await get_client_credentials_token(
+                issuer_url=_ISSUER, client_id="agent:bot", client_secret=_SECRET
+            )
+    assert exc.value.code == "missing_access_token"
+
+
+@pytest.mark.asyncio
 async def test_client_secret_never_logged() -> None:
     """The agent client secret must not appear in any structlog event."""
     with structlog.testing.capture_logs() as logs, respx.mock as r:

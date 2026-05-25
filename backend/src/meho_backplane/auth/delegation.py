@@ -53,11 +53,11 @@ def actor_delegation(actor_sub: str) -> Iterator[None]:
     the block, since the run executes in a single asyncio task whose context
     is this one).
 
-    Fails closed: an empty *actor_sub* raises :class:`ValueError` rather than
-    silently running with no actor recorded — a delegated run must always
-    attribute the agent.
+    Fails closed: an empty or whitespace-only *actor_sub* raises
+    :class:`ValueError` rather than silently running with no usable actor
+    recorded — a delegated run must always attribute the agent.
     """
-    if not actor_sub:
+    if not actor_sub or not actor_sub.strip():
         raise ValueError(
             "actor_sub must be a non-empty agent principal reference; "
             "a delegated agent run cannot silently drop the actor"

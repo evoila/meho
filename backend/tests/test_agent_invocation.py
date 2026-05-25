@@ -42,6 +42,7 @@ from sqlalchemy import select
 
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
+    AgentInvocationError,
     AgentInvoker,
     AgentNotFoundError,
     AgentRunNotFoundError,
@@ -725,3 +726,50 @@ async def test_finalize_child_run_swallows_illegal_transition() -> None:
         # The cancel's terminal state stands; the finalizer did not overwrite it.
         assert row.status == AgentRunStatus.CANCELLED.value
         assert row.output is None
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T2 (#816): autonomous run_scheduled binds the run to the authenticating
+# agent — agent A's credentials must not launch agent B's definition.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_rejects_cross_agent_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled run fails closed when the definition's identity_ref does not
+    match the authenticated agent's sub (no DB run row is created)."""
+    from types import SimpleNamespace
+
+    # The runtime is never reached — the identity guard raises first.
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _final_text("ok")))
+
+    # The agent authenticated as "agent-A" ...
+    agent_op = _make_operator(sub="agent-A")
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=agent_op),
+    )
+    # ... but the named definition belongs to "agent-B".
+    monkeypatch.setattr(
+        invoker,
+        "_load_definition",
+        AsyncMock(return_value=SimpleNamespace(name="other-bot", identity_ref="agent-B")),
+    )
+    create_spy = AsyncMock()
+    monkeypatch.setattr(invoker, "_create_run_row", create_spy)
+
+    with pytest.raises(AgentInvocationError, match="do not own definition"):
+        await invoker.run_scheduled(
+            "other-bot",
+            "do the thing",
+            agent_client_id="agent:a",
+            agent_client_secret="s3cr3t",
+        )
+    # Fail-closed before persisting anything.
+    create_spy.assert_not_awaited()

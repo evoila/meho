@@ -54,6 +54,12 @@ def test_actor_delegation_fails_closed_on_empty() -> None:
         pass  # pragma: no cover - body never runs
 
 
+def test_actor_delegation_fails_closed_on_whitespace() -> None:
+    """A whitespace-only ref is not a usable actor principal."""
+    with pytest.raises(ValueError, match="non-empty agent principal"), actor_delegation("   "):
+        pass  # pragma: no cover - body never runs
+
+
 def test_resolve_normalises_blank_to_none() -> None:
     # A blank contextvar value (defensive: only reachable via direct bind)
     # normalises to None rather than an empty actor attribution.

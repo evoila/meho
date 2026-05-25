@@ -97,7 +97,15 @@ async def get_client_credentials_token(
             f"http_{resp.status_code}",
             f"agent client_credentials grant failed: HTTP {resp.status_code}",
         )
-    body: Any = resp.json()
+    try:
+        body: Any = resp.json()
+    except ValueError as exc:
+        # A 2xx with a non-JSON body is malformed — surface it as a typed
+        # error rather than leaking a raw JSONDecodeError to the caller.
+        raise AgentTokenError(
+            "missing_access_token",
+            "agent client_credentials grant returned a non-JSON body",
+        ) from exc
     token = body.get("access_token") if isinstance(body, dict) else None
     if not isinstance(token, str) or not token:
         raise AgentTokenError(

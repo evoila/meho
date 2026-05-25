@@ -99,8 +99,9 @@ async def test_grant_create_list_get_revoke() -> None:
         tenant_id = await _seed_tenant(session, "grant-cycle")
     service = AgentGrantService()
 
-    body = _grant_body(principal_sub="agent-abc", op_pattern="vault.kv.*",
-                       verdict=GrantVerdict.AUTO_EXECUTE)
+    body = _grant_body(
+        principal_sub="agent-abc", op_pattern="vault.kv.*", verdict=GrantVerdict.AUTO_EXECUTE
+    )
     created = await service.grant(tenant_id, "admin-op", body)
 
     assert created.principal_sub == "agent-abc"
@@ -148,8 +149,10 @@ async def test_elevation_visible_when_active() -> None:
 
     future = datetime.now(UTC) + timedelta(hours=2)
     body = _grant_body(
-        principal_sub="agent-elev", op_pattern="*",
-        verdict=GrantVerdict.AUTO_EXECUTE, expires_at=future
+        principal_sub="agent-elev",
+        op_pattern="*",
+        verdict=GrantVerdict.AUTO_EXECUTE,
+        expires_at=future,
     )
     created = await service.grant(tenant_id, "admin", body)
     assert created.expires_at is not None
@@ -190,9 +193,7 @@ async def test_elevation_excluded_when_expired() -> None:
     assert active == [], "expired elevation must not appear in active list"
 
     # include_expired=True shows it.
-    all_grants = await service.list_(
-        tenant_id, principal_sub="agent-exp", include_expired=True
-    )
+    all_grants = await service.list_(tenant_id, principal_sub="agent-exp", include_expired=True)
     assert len(all_grants) == 1, "expired elevation must appear with include_expired=True"
 
 

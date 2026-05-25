@@ -112,6 +112,7 @@ from meho_backplane.operations import run_typed_op_registrars, set_default_reduc
 from meho_backplane.operations.ingest import load_catalog
 from meho_backplane.operations.jsonflux_reducer import JsonFluxReducer
 from meho_backplane.retrieval.embedding import get_embedding_service
+from meho_backplane.scheduler import start_scheduler, stop_scheduler
 from meho_backplane.settings import get_settings, parse_bool_env
 from meho_backplane.topology import (
     start_topology_history_retention_sweeper,
@@ -302,6 +303,7 @@ class _BackgroundTasks:
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
+    scheduler: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -335,11 +337,18 @@ def _start_background_tasks() -> _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None = None
     if settings.grant_expiry_enabled:
         grant_expiry = start_grant_expiry_sweeper()
+    # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
+    # SCHEDULER_ENABLED so operators using an external orchestrator
+    # (or running the test path without a scheduler) can opt out.
+    scheduler: asyncio.Task[None] | None = None
+    if settings.scheduler_enabled:
+        scheduler = start_scheduler()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         grant_expiry=grant_expiry,
+        scheduler=scheduler,
     )
 
 
@@ -351,6 +360,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.scheduler is not None:
+        await stop_scheduler(tasks.scheduler)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.topology_history is not None:

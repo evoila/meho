@@ -960,8 +960,17 @@ MCP surfaces.
 Every UI BFS module mirrors the substrate's edge-traversal
 predicates so the same closure is reported on both surfaces:
 
-* **Soft-delete exclusion** -- `GraphEdge.last_seen IS NOT NULL`
-  on every edge query, matching the substrate's `_TRAVERSAL_SQL`.
+* **Soft-delete (not filtered)** -- the BFS modules do *not* filter
+  `last_seen`, matching the substrate's `_TRAVERSAL_SQL` (which also
+  does not): a soft-deleted node stays reachable on both surfaces
+  (last-refresh-wins; point-in-time visibility is the separate G9.3
+  history/diff/timeline verbs, not a traversal filter). Regression
+  test: `test_dependents_overlay_includes_soft_deleted_node`. (The BFS
+  previously applied `last_seen IS NOT NULL` on the mistaken belief the
+  substrate did too; #584 removed it to restore real parity. Note the
+  *full-inventory* graph/table/drawer queries still exclude
+  soft-deleted rows -- those mirror `list_nodes` / `list_edges`, which
+  do filter, not the traversal verbs.)
 * **Superseded-edge exclusion** -- edges carrying
   `properties->>'superseded_by' IS NOT NULL` are dropped from
   both the dependents/dependencies BFS and the bidirectional

@@ -226,7 +226,10 @@ async def resolve_anchor(
       :class:`NodeNotFoundError`; 1 row returns it; >1 rows raises
       :class:`AmbiguousNodeError` with the candidate kinds.
 
-    Soft-deleted nodes (``last_seen IS NULL``) are excluded.
+    Soft-deleted nodes (``last_seen IS NULL``) are included -- the
+    overlay mirrors the substrate traversal verbs, which do not filter
+    ``last_seen`` (a soft-deleted node stays reachable, last-refresh-
+    wins; #584).
 
     Exposed (not name-mangled with a leading underscore) because the
     sibling :mod:`...path_queries` module needs to resolve both
@@ -235,7 +238,6 @@ async def resolve_anchor(
     stmt = select(GraphNode).where(
         GraphNode.tenant_id == tenant_id,
         GraphNode.name == name,
-        GraphNode.last_seen.is_not(None),
     )
     if kind is not None:
         stmt = stmt.where(GraphNode.kind == kind)
@@ -264,7 +266,9 @@ async def _bfs_neighbours(
     returns the destination endpoint -- the "dependencies" semantic.
 
     The triple tenant-scoping (edge + both endpoints) is the
-    defense-in-depth posture. Soft-deleted edges excluded.
+    defense-in-depth posture. Soft-deleted edges (``last_seen IS
+    NULL``) are included -- the overlay mirrors the substrate traversal
+    verbs, which do not filter ``last_seen`` (last-refresh-wins; #584).
 
     Superseded edges (``properties->>'superseded_by' IS NOT NULL``) are
     excluded to mirror the G9.1 substrate traversal verbs
@@ -288,7 +292,6 @@ async def _bfs_neighbours(
             GraphEdge.tenant_id == tenant_id,
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
-            GraphEdge.last_seen.is_not(None),
             # Mirror the substrate's superseded-edge exclusion -- the
             # PG raw-SQL ``e.properties->>'superseded_by' IS NULL``
             # idiom translated to dialect-portable ORM. PG returns SQL

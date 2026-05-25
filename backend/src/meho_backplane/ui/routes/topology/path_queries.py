@@ -92,7 +92,6 @@ async def _bidirectional_neighbours(
             GraphEdge.tenant_id == tenant_id,
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
-            GraphEdge.last_seen.is_not(None),
             # Substrate parity: drop edges curated as superseded so the
             # UI path overlay's reachability matches what the CLI/REST
             # find_path verb returns. The ``or_(.is_(None), ==

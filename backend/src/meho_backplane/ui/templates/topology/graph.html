@@ -1,0 +1,241 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Topology Cytoscape.js graph view (Initiative #342 Task #881).
+  Extends ``base.html`` so the chrome (navbar, sidebar, footer) matches
+  the rest of the console; the tabular surface (table.html, T1 / #880)
+  is the sibling render the user toggles between.
+
+  Layout (top-down):
+    * Header -- title + view toggle (table | graph) + filter chips
+      surfaced as Alpine state. ``selected`` rides into the toggle's
+      table href so a graph -> table click preserves the active node.
+    * Filter bar -- kind <select> + free-text name search. Server
+      round-trips the filter (full-page reload, NOT an HTMX fragment),
+      because the graph re-render needs to re-emit the data island AND
+      the init script -- a tbody fragment swap would not refresh the
+      Cytoscape instance. ``hx-push-url`` keeps copy/paste reproducing
+      the filtered view.
+    * Graph container -- ``<div id="cy">`` Cytoscape mounts into.
+      Sized via Tailwind so it dominates the page; ``min-h`` keeps
+      it tall enough for an organic layout to breathe even on the
+      Cytoscape-default empty inventory state.
+    * Layout switcher -- Alpine ``<select>`` calls
+      ``cy.layout({name}).run()`` on change. Three options:
+      ``cose-bilkent`` (default, organic), ``dagre`` (DAG-tidy),
+      ``circle`` (built-in fallback).
+    * Drawer slot -- ``#node-drawer`` the node-tap HTMX swap fills.
+      Same id as the table view so the drawer fragment URL contract
+      stays identical across surfaces.
+    * Data island -- ``<script type="application/json"
+      id="topology-graph-data">`` carries the Cytoscape elements
+      JSON. ``| tojson`` escapes ``<`` / ``>`` / ``&`` / ``'`` /
+      U+2028/U+2029 (XSS-safe for the script-element text context).
+
+  HTMX wiring:
+    * Filter <select>/<input>: full-page navigation on submit so the
+      graph re-renders with a fresh data island. (HTMX fragment swap
+      would leave the existing Cytoscape instance running against
+      stale data.)
+    * Node tap (in topology-graph.js): ``htmx.ajax`` GET
+      ``/ui/topology/node/<id>`` into ``#node-drawer``.
+    * "Show in table" cross-link: plain ``<a href>`` to
+      ``/ui/topology?view=table&selected=<id>``. The table page's
+      inline script scrolls the matching row into view.
+
+  Script load order is load-bearing (see static/src/vendor/VENDOR.md):
+    1. ``cytoscape.min.js`` (chassis-provided, already in base via
+       ``{% block scripts %}`` extension only -- NOT base.html. The
+       block here loads all five graph-related JS files in order.)
+    2. ``layout-base.js`` -- exposes ``window.layoutBase``.
+    3. ``cose-base.js`` -- consumes ``layoutBase``, exposes
+       ``window.coseBase``.
+    4. ``cytoscape-cose-bilkent.js`` -- consumes ``coseBase``, exposes
+       ``window.cytoscapeCoseBilkent``.
+    5. ``cytoscape-dagre.js`` (3.0.0 bundles dagre internally so no
+       separate dagre vendored file is needed) -- exposes
+       ``window.cytoscapeDagre``.
+    6. ``topology-graph.js`` -- the app controller that registers the
+       extensions and initialises Cytoscape from the data island.
+
+  All scripts carry ``defer`` so they execute in document order after
+  HTML parse -- the chassis CSP posture (zero inline JS) remains
+  unchanged.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section
+  class="space-y-4"
+  hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+>
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Topology</h1>
+      <p class="text-sm opacity-70">
+        Interactive graph view: pan, zoom, click a node to inspect.
+      </p>
+    </div>
+    {# ---------- View toggle (table | graph) ----------
+       Plain anchor links -- a full-page nav re-renders the matching
+       view from scratch. The current view ('graph') is rendered as a
+       button-active style and the other view as a clickable link.
+       Active filters + the cross-link selection ride along so a
+       toggle preserves operator state.
+    -#}
+    <div class="join" role="tablist" aria-label="View mode">
+      <a
+        class="btn btn-sm join-item"
+        role="tab"
+        aria-selected="false"
+        href="/ui/topology?view=table{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
+      >
+        Table
+      </a>
+      <button
+        type="button"
+        class="btn btn-sm btn-active join-item"
+        role="tab"
+        aria-selected="true"
+        disabled
+      >
+        Graph
+      </button>
+    </div>
+  </header>
+
+  {# ---------- Filter bar ----------
+     Server round-trip on submit; the graph needs the full server-side
+     re-render to refresh the elements data island. ``hx-push-url`` is
+     replaced by the form's natural ``action`` since this is a full
+     page reload. -#}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    method="get"
+    action="/ui/topology"
+    role="search"
+    aria-label="Filter topology nodes"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-4">
+      <input type="hidden" name="view" value="graph" />
+      <label class="form-control md:col-span-2">
+        <span class="label-text">Search by name</span>
+        <input
+          type="search"
+          name="q"
+          value="{{ name_filter }}"
+          placeholder="Substring match (case-insensitive)"
+          class="input input-bordered input-sm"
+          aria-label="Filter nodes by name"
+        />
+      </label>
+      <label class="form-control">
+        <span class="label-text">Kind</span>
+        <select
+          name="kind"
+          class="select select-bordered select-sm"
+          aria-label="Filter nodes by kind"
+        >
+          <option value="">All kinds</option>
+          {# ``node_kind_options`` is the closed enum
+             (``_GRAPH_NODE_KINDS``) the route handler ships -- single
+             source of truth shared with the T1 tabular surface. -#}
+          {% for option in node_kind_options %}
+            <option value="{{ option }}" {% if option == kind_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <div class="form-control">
+        <span class="label-text">&nbsp;</span>
+        <button type="submit" class="btn btn-sm btn-primary">Apply</button>
+      </div>
+    </div>
+  </form>
+
+  {# ---------- Status + layout switcher ----------
+     ``node_count`` / ``edge_count`` give the operator the rendered
+     size at a glance; ``truncated`` flashes the cap-reached banner. -#}
+  <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
+    <div class="opacity-70">
+      Rendering <span class="font-mono">{{ node_count }}</span> nodes /
+      <span class="font-mono">{{ edge_count }}</span> edges
+      {%- if truncated %}
+        <span class="badge badge-warning badge-sm ml-2">
+          Capped at {{ graph_node_cap }} -- narrow the filter or use the dependents query (T3) for larger sets.
+        </span>
+      {%- endif %}
+    </div>
+    <label class="form-control flex flex-row items-center gap-2">
+      <span class="label-text whitespace-nowrap">Layout</span>
+      <select
+        id="topology-graph-layout"
+        class="select select-bordered select-sm"
+        aria-label="Graph layout algorithm"
+      >
+        <option value="cose-bilkent" selected>cose-bilkent (organic)</option>
+        <option value="dagre">dagre (hierarchical)</option>
+        <option value="circle">circle</option>
+      </select>
+    </label>
+  </div>
+
+  {# ---------- Cytoscape mount ----------
+     Fixed-ish height so the layout has room. The ``aria-label`` is
+     the screen-reader hint; Cytoscape itself is canvas-rendered so
+     the graph is not directly keyboard-accessible (operators use the
+     table view for that). -#}
+  <div
+    id="cy"
+    class="rounded-box border border-base-300 bg-base-100"
+    style="height: 600px; min-height: 480px;"
+    role="img"
+    aria-label="Topology graph -- click a node to open its detail drawer"
+  ></div>
+
+  {# ---------- Drawer slot ----------
+     Same id as the table view so the drawer fragment URL contract
+     stays identical across surfaces; the node-tap handler in
+     topology-graph.js issues ``htmx.ajax`` GET
+     ``/ui/topology/node/<id>`` into this slot. -#}
+  <aside
+    id="node-drawer"
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    aria-live="polite"
+    aria-label="Node detail drawer"
+  >
+    <div class="card-body text-sm opacity-70">
+      Click a node in the graph to inspect it.
+    </div>
+  </aside>
+
+  {# ---------- Data island ----------
+     The elements bag the init script ingests. ``| tojson`` escapes
+     for the script-element text context so a connector-populated
+     node name containing ``"`` / ``<`` / ``</script>`` cannot break
+     out (same posture as broadcast/_history.html PR #1044 B1).
+     ``selected_id`` rides on a second island so the init script can
+     pick up the cross-link target without re-parsing the URL. -#}
+  <script type="application/json" id="topology-graph-data">{{ elements | tojson }}</script>
+  <script type="application/json" id="topology-graph-selected">{{ selected_id | tojson }}</script>
+</section>
+{% endblock %}
+
+{# Surface JS -- vendored Cytoscape layout plugins (load order load-bearing,
+   see static/src/vendor/VENDOR.md "Cytoscape layout plugins" section) plus
+   the per-page controller. All ``defer`` so they run after HTML parse in
+   document order; the controller (``topology-graph.js``) waits for
+   ``DOMContentLoaded`` before reading the data island so every
+   plugin is registered before ``cytoscape({...})`` is called. #}
+{% block scripts %}
+  <script src="/ui/static/src/vendor/cytoscape.min.js" defer></script>
+  <script src="/ui/static/src/vendor/layout-base.js" defer></script>
+  <script src="/ui/static/src/vendor/cose-base.js" defer></script>
+  <script src="/ui/static/src/vendor/cytoscape-cose-bilkent.js" defer></script>
+  <script src="/ui/static/src/vendor/cytoscape-dagre.js" defer></script>
+  <script src="/ui/static/src/app/topology-graph.js" defer></script>
+{% endblock %}

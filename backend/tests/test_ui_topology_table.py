@@ -655,6 +655,48 @@ def test_table_filter_href_percent_encodes_filters_with_reserved_chars() -> None
 
 
 # ---------------------------------------------------------------------------
+# Filter form preserves the cross-link selection (?selected=) across keystrokes
+# ---------------------------------------------------------------------------
+
+
+def test_filter_form_preserves_selected_id_across_filter_keystrokes() -> None:
+    """The filter form carries ``selected`` as a hidden input.
+
+    Cross-link AC (issue #881): a graph -> table click sets
+    ``?selected=<id>``; the table page highlights + scrolls the
+    matching row. The filter form is HTMX-wired with
+    ``hx-include="closest form"`` + ``hx-push-url="true"``, so on
+    the first filter keystroke HTMX collects only the inputs that
+    live inside the form. Without an explicit ``selected`` hidden
+    input the cross-link payload is dropped from the rebuilt URL
+    and the row highlight is lost on the very first keystroke,
+    directly subverting the cross-link AC.
+
+    This test seeds a node, requests the table with the matching
+    ``?selected=`` payload, and asserts the rendered filter form
+    carries the id as a hidden input alongside ``sort`` / ``direction``
+    so HTMX picks it up on every swap.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    target_id = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-keep-selected")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get(f"/ui/topology?selected={target_id}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The selected hidden input rides inside the filter form. The
+    # exact tag shape mirrors the existing sort/direction hidden
+    # inputs so HTMX collects it on every swap.
+    expected = f'<input type="hidden" name="selected" value="{target_id}" />'
+    assert expected in body, (
+        "filter form is missing the selected hidden input -- "
+        "cross-link will be dropped on first keystroke"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Kind-filter dropdown -- sourced from the closed enum, not the current page
 # ---------------------------------------------------------------------------
 

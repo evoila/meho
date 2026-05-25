@@ -213,6 +213,12 @@ const (
 	Desc UnderscoreSortDirection = "desc"
 )
 
+// Defines values for UnderscoreViewMode.
+const (
+	Graph UnderscoreViewMode = "graph"
+	Table UnderscoreViewMode = "table"
+)
+
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
 	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
@@ -2656,6 +2662,16 @@ type UnderscoreSortColumn string
 // UnderscoreSortDirection Sort direction enum -- “asc“ (default) or “desc“.
 type UnderscoreSortDirection string
 
+// UnderscoreViewMode Closed enum of view modes exposed on “GET /ui/topology“.
+//
+// “table“ is the default (T1 / #880); “graph“ switches to the
+// Cytoscape.js surface (T2 / #881). The enum's “str“ mixin keeps
+// template URL building stable -- “str(_ViewMode.GRAPH)“ is
+// “"graph"“ (not “"_ViewMode.GRAPH"“). An out-of-range value
+// fails Pydantic validation (422) at the HTTP boundary so the route
+// body never sees an unknown mode.
+type UnderscoreViewMode string
+
 // ListAgentsApiV1AgentsGetParams defines parameters for ListAgentsApiV1AgentsGet.
 type ListAgentsApiV1AgentsGetParams struct {
 	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
@@ -3140,7 +3156,8 @@ type UiTopologyTableUiTopologyGetParams struct {
 	Kind      *string                  `form:"kind,omitempty" json:"kind,omitempty"`
 	Q         *string                  `form:"q,omitempty" json:"q,omitempty"`
 	Limit     *int                     `form:"limit,omitempty" json:"limit,omitempty"`
-	View      *string                  `form:"view,omitempty" json:"view,omitempty"`
+	View      *UnderscoreViewMode      `form:"view,omitempty" json:"view,omitempty"`
+	Selected  *openapi_types.UUID      `form:"selected,omitempty" json:"selected,omitempty"`
 }
 
 // CreateAgentApiV1AgentsPostJSONRequestBody defines body for CreateAgentApiV1AgentsPost for application/json ContentType.
@@ -10580,6 +10597,22 @@ func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTab
 		if params.View != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "view", runtime.ParamLocationQuery, *params.View); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Selected != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "selected", runtime.ParamLocationQuery, *params.Selected); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

@@ -10,12 +10,11 @@ principal lifecycle service needs:
 
 * :meth:`create_client` — POST a new Keycloak client with
   ``kind=agent`` in its attributes and return the Keycloak-assigned id.
-* :meth:`list_clients` — GET the clients matching a query string (by
-  ``client_id`` prefix or attribute filter). Returns raw Keycloak
-  client representations.
-* :meth:`disable_client` — PATCH the client's ``enabled=false``
-  (kill switch). Tokens already issued remain valid until their ``exp``;
-  ``enabled=false`` blocks *new* token grants immediately.
+* :meth:`disable_client` — GET-then-PUT the client's ``enabled=false``
+  (kill switch): the full representation is round-tripped so the PUT
+  does not wipe collection fields like ``attributes`` (see the method
+  docstring; keycloak#24920). Tokens already issued remain valid until
+  their ``exp``; ``enabled=false`` blocks *new* token grants immediately.
 * :meth:`delete_client` — DELETE the client outright. Used to roll back
   a created client when the DB row that records it cannot be written, so
   register never leaves an orphaned, unrevocable token-issuing identity.
@@ -287,49 +286,6 @@ class KeycloakAdminClient:
                 "Keycloak create_client succeeded but returned no Location header"
             )
         return internal_id
-
-    async def list_clients(
-        self,
-        *,
-        q: str | None = None,
-        first: int = 0,
-        max_results: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Return Keycloak client representations matching *q*.
-
-        *q* is a Keycloak Admin API search string matched against
-        ``clientId``. Passing ``q=agent:`` returns all agent-registered
-        clients (the naming convention ``agent:<name>`` enforced by the
-        service layer).
-
-        The caller is responsible for filtering further if needed; the
-        raw Keycloak representation is returned so the service layer can
-        project only the fields it needs without a round-trip.
-        """
-        assert self._http is not None
-        assert self._token
-        params: dict[str, str | int] = {"first": first, "max": max_results}
-        if q:
-            params["search"] = q
-        try:
-            resp = await self._http.get(
-                f"{self._admin_url}/clients",
-                params=params,
-                headers=self._auth_headers(),
-            )
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise KeycloakAdminError(
-                f"Keycloak list_clients failed: HTTP {exc.response.status_code}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise KeycloakAdminError(
-                f"Keycloak list_clients network error: {type(exc).__name__}"
-            ) from exc
-        result: Any = resp.json()
-        if not isinstance(result, list):
-            raise KeycloakAdminError("Keycloak list_clients returned unexpected JSON shape")
-        return result
 
     async def disable_client(self, keycloak_internal_id: str) -> None:
         """Disable the Keycloak client identified by *keycloak_internal_id*.

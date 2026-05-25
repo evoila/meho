@@ -3972,6 +3972,243 @@
         }
       }
     },
+    "/api/v1/agent-principals": {
+      "get": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "List Agent Principals",
+        "description": "List agent principals for the operator's tenant.",
+        "operationId": "list_agent_principals_api_v1_agent_principals_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Register Agent Principal",
+        "description": "Register a new agent principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. Returns 409 on duplicate ``(tenant, name)``.\nReturns 503 when Keycloak admin is not configured.",
+        "operationId": "register_agent_principal_api_v1_agent_principals_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentPrincipalCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-principals/{name}": {
+      "get": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Show Agent Principal",
+        "description": "Return one agent principal by name.",
+        "operationId": "show_agent_principal_api_v1_agent_principals__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent-principals/{name}/revoke": {
+      "delete": {
+        "tags": [
+          "agent-principals"
+        ],
+        "summary": "Revoke Agent Principal",
+        "description": "Revoke an agent principal (kill switch).\n\nDisables the Keycloak client (blocks new token grants) and marks\nthe DB row ``revoked=true``. Returns the updated row.\n``tenant_admin`` only. Returns 404 when absent or already revoked.",
+        "operationId": "revoke_agent_principal_api_v1_agent_principals__name__revoke_delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{name}/run": {
       "post": {
         "tags": [
@@ -5476,6 +5713,106 @@
         ],
         "title": "AgentModelTier",
         "description": "Logical model tier an agent definition runs against.\n\nThe tier is *logical* -- G11.5's multi-provider resolver maps it to\na concrete model backend at run time. T2 stores the tier verbatim;\nit does not resolve it. ``StrEnum`` (PEP 663, stdlib 3.11+) gives\nthe members ``str`` semantics so ``f\"tier={AgentModelTier.STANDARD}\"``\nrenders as ``\"tier=standard\"``, matching the\n:class:`~meho_backplane.auth.operator.TenantRole` /\n:class:`~meho_backplane.memory.schemas.MemoryScope` convention.\n\nThree tiers in v0.2:\n\n* ``standard`` -- the default general-purpose tier.\n* ``fast`` -- a cheaper / lower-latency tier for simple loops.\n* ``deep`` -- a more capable tier for harder reasoning."
+      },
+      "AgentPrincipalCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "owner_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Owner Sub"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "AgentPrincipalCreate",
+        "description": "Input shape for :meth:`AgentPrincipalService.register`."
+      },
+      "AgentPrincipalListResponse": {
+        "properties": {
+          "principals": {
+            "items": {
+              "$ref": "#/components/schemas/AgentPrincipalRead"
+            },
+            "type": "array",
+            "title": "Principals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "principals"
+        ],
+        "title": "AgentPrincipalListResponse",
+        "description": "Response envelope for ``GET /api/v1/agent-principals``."
+      },
+      "AgentPrincipalRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AgentPrincipalRead",
+        "description": "Row representation returned by every accessor."
       },
       "AgentRunRequest": {
         "properties": {

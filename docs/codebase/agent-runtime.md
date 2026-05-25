@@ -249,9 +249,13 @@ escalate a cheap-tier agent to a deep-tier agent, but MEHO sees one agent run
 invoking another.
 
 `invoke_agent` is **off by default**. It is appended to a built agent only when
-the `PydanticAgentRun` carries a `child_agent_resolver` (injected at the edge by
-the T4 invocation surface, which owns the tenant-scoped definition lookup). With
-no resolver, the T1/T3 surface is unchanged.
+the `PydanticAgentRun` carries a `child_agent_resolver`. The live `AgentInvoker`
+(T7 #1067) wires it: its default runtime injects `_resolve_child_definition`
+(the tenant-scoped `AgentDefinitionService` lookup) and `_record_child_run` (the
+`agent_run` lineage recorder), and binds `current_agent_run_id_var` to each run's
+id, so a run started from the deployed REST/MCP/CLI surface can invoke another
+agent and the child is recorded against its parent. A runtime built without a
+resolver (the T1/T3 surface, and tests that don't opt in) is unchanged.
 
 ### Two independent bounds keep a cascade from escaping
 
@@ -392,15 +396,13 @@ Foundation) is G11.5.
   work cross-worker. Cancellation of an in-flight loop is the T6
   `cancel_run` path (records durable intent); wiring the loop to observe it
   at a turn boundary is future work.
-- The `invoke_agent` composition tool (T5 #812) is present but **not yet
-  wired into the live T4 invocation surface**: `AgentInvoker` does not inject
-  the `child_agent_resolver` / `ChildRunRecorder` at the edge (T4 #811 and T5
-  #812 were built in parallel), so agent-invokes-agent is reachable via direct
-  seam injection (the T5 tests) but not yet from a deployed run. Wiring the
-  tenant-scoped `AgentDefinitionService` resolver + the `agent_run` lifecycle
-  recorder into the invoker is a follow-up; until then the depth + shared-budget
-  bounds still hold and a recorder-less child run does not persist its lineage
-  row.
+- The child `agent_run` rows the recorder writes (T7 #1067) are created +
+  transitioned to `running` but **not finalized** (`succeeded` / `failed`):
+  the `ChildRunRecorder` protocol returns only the new id, and the child
+  loop's outcome surfaces through the parent run. Finalizing child rows needs
+  a protocol extension (a finalizer hook) — a follow-up. The lineage
+  (`parent_run_id` + `trigger=agent-invoked`) is recorded, so the cascade tree
+  is reconstructable regardless.
 - The identity-permission side of the intersection is the tenant role today.
   When the G11.2 per-op permission model lands, the resolver's role gate is
   the seam to extend (or replace) with the real per-op grant check — the

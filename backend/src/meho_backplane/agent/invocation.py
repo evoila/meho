@@ -61,6 +61,13 @@ the operator's tenant owns (cross-tenant run ids surface as
 :class:`AgentRunNotFoundError`).
 """
 
+# code-quality-allow: file-size — this is the agent-runtime orchestration
+# module. The T7 #1067 composition wiring (_resolve_child_definition /
+# _record_child_run) reuses the invoker's _to_agent_definition + the module's
+# _split_model_id, so it belongs here; pulling it (or the pre-existing error
+# classes / dataclasses) into a separate file fragments a cohesive unit or
+# introduces an import cycle with no readability gain.
+
 from __future__ import annotations
 
 import asyncio
@@ -71,6 +78,7 @@ from typing import Final
 
 import structlog
 
+from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.agent.run import (
     AgentDefinition,
     AgentRun,
@@ -231,7 +239,18 @@ class AgentInvoker:
     """
 
     def __init__(self, *, runtime: AgentRun | None = None) -> None:
-        self._runtime: AgentRun = runtime if runtime is not None else PydanticAgentRun()
+        # The default runtime wires agent-invokes-agent composition (G11.1-T7
+        # #1067): the live surface owns the tenant-scoped child resolver + the
+        # child-run recorder, so a run started here can invoke another agent.
+        # An injected runtime (tests) controls its own wiring.
+        self._runtime: AgentRun = (
+            runtime
+            if runtime is not None
+            else PydanticAgentRun(
+                child_agent_resolver=_resolve_child_definition,
+                child_run_recorder=_record_child_run,
+            )
+        )
         self._store: dict[uuid.UUID, _RunState] = {}
 
     # -- definition resolution -------------------------------------------
@@ -361,21 +380,31 @@ class AgentInvoker:
         re-raises — a failed run is a recorded ``failed`` row, not a crashed
         background task (an unhandled task exception would surface only as a
         log warning at GC time).
+
+        Binds :data:`~meho_backplane.agent.invoke.current_agent_run_id_var` to
+        this run's id for the loop's duration, so the first ``invoke_agent``
+        call records its child with this run as the parent (the lineage key).
+        The task carries its own contextvar copy (``asyncio.create_task``
+        snapshots the context), so the bind is isolated to this run.
         """
+        run_token = current_agent_run_id_var.set(run_id)
         try:
-            handle = self._runtime.start(definition, operator, inputs)
-            result = await self._runtime.result(handle)
-        except AgentRunError as exc:
-            await self._finalize_run(run_id, output=None, error=str(exc))
-            return
-        except asyncio.CancelledError:
-            # A cancel writes its own terminal row via cancel_run; leave it.
-            raise
-        except Exception as exc:
-            _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
-            await self._finalize_run(run_id, output=None, error=str(exc))
-            return
-        await self._finalize_run(run_id, output=_project_output(result.output), error=None)
+            try:
+                handle = self._runtime.start(definition, operator, inputs)
+                result = await self._runtime.result(handle)
+            except AgentRunError as exc:
+                await self._finalize_run(run_id, output=None, error=str(exc))
+                return
+            except asyncio.CancelledError:
+                # A cancel writes its own terminal row via cancel_run; leave it.
+                raise
+            except Exception as exc:
+                _log.warning("agent_invoke_unexpected_failure", run_id=str(run_id), error=str(exc))
+                await self._finalize_run(run_id, output=None, error=str(exc))
+                return
+            await self._finalize_run(run_id, output=_project_output(result.output), error=None)
+        finally:
+            current_agent_run_id_var.reset(run_token)
 
     # -- public surface ---------------------------------------------------
 
@@ -517,6 +546,11 @@ class AgentInvoker:
 
         terminal_output: dict[str, object] | None = None
         terminal_error: str | None = None
+        # Bind the lineage contextvar so an ``invoke_agent`` call inside the
+        # streamed run records its child against this run (G11.1-T7 #1067). The
+        # stream runs inline in the SSE response coroutine, so the token reset
+        # in ``finally`` keeps the bind from leaking past the stream.
+        run_token = current_agent_run_id_var.set(run_id)
         try:
             async for event in self._runtime.stream_events(definition, operator, inputs, run_id):
                 if event.kind is AgentRunEventKind.FINAL:
@@ -525,7 +559,79 @@ class AgentInvoker:
                     terminal_error = str(event.data.get("error"))
                 yield run_id, event
         finally:
+            current_agent_run_id_var.reset(run_token)
             await self._finalize_run(run_id, output=terminal_output, error=terminal_error)
+
+
+async def _resolve_child_definition(
+    operator: Operator,
+    agent_name: str,
+) -> AgentDefinition | None:
+    """Resolve a child agent name to a runnable seam definition, or ``None``.
+
+    The :class:`~meho_backplane.agent.invoke.ChildAgentResolver` the live
+    invoker injects into the seam (G11.1-T7 #1067). Looks the definition up
+    scoped to the operator's tenant via :class:`AgentDefinitionService`, so a
+    cross-tenant or unknown name simply does not resolve; a ``enabled=False``
+    definition also returns ``None``. ``invoke_agent`` surfaces a ``None`` as a
+    structured :class:`~pydantic_ai.ModelRetry`. Mirrors
+    :meth:`AgentInvoker._load_definition` but returns ``None`` instead of
+    raising, per the resolver protocol.
+    """
+    service = AgentDefinitionService()
+    entry = await service.get(operator.tenant_id, agent_name)
+    if entry is None or not entry.enabled:
+        return None
+    return AgentInvoker._to_agent_definition(entry)
+
+
+async def _record_child_run(
+    *,
+    operator: Operator,
+    definition: AgentDefinition,
+    parent_run_id: uuid.UUID | None,
+) -> uuid.UUID:
+    """Persist a child ``agent_run`` row linked to its parent; return its id.
+
+    The :class:`~meho_backplane.agent.invoke.ChildRunRecorder` the live invoker
+    injects (G11.1-T7 #1067). The seam value object carries neither the
+    persisted ``agent_definition_id`` nor the ``model_tier`` the run row
+    records, so the definition is re-resolved by ``(tenant, name)`` to recover
+    them; the row is then created with ``trigger=agent-invoked`` + the parent
+    linkage and transitioned to ``running``, committed in its own transaction
+    so the child run is inspectable while it executes (mirrors
+    :meth:`AgentInvoker._create_run_row`).
+
+    The row's *terminal* state is deliberately not written here: the
+    ``ChildRunRecorder`` protocol returns only the new id, and the child loop's
+    success/failure surfaces through the parent run. Finalizing child rows to
+    ``succeeded`` / ``failed`` is a follow-up — it needs a protocol extension
+    (a finalizer hook), out of #1067's "wire the existing mechanism" scope. A
+    definition deleted between resolution and recording raises
+    :class:`~meho_backplane.agent.run.AgentRunError`, surfaced by
+    ``invoke_agent`` as a ``ModelRetry``.
+    """
+    service = AgentDefinitionService()
+    entry = await service.get(operator.tenant_id, definition.name)
+    if entry is None:
+        raise AgentRunError(f"agent definition {definition.name!r} no longer exists")
+    settings = get_settings()
+    provider, model = _split_model_id(settings.agent_default_model)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await run_lifecycle.create_run(
+            session,
+            tenant_id=operator.tenant_id,
+            identity_sub=operator.sub,
+            trigger=AgentRunTrigger.AGENT_INVOKED,
+            model_tier=entry.model_tier,
+            agent_definition_id=entry.id,
+            parent_run_id=parent_run_id,
+        )
+        await run_lifecycle.start_run(session, row, provider=provider, model=model)
+        child_run_id = row.id
+        await session.commit()
+    return child_run_id
 
 
 def _row_to_view(row: AgentRunRow) -> AgentRunStatusView:

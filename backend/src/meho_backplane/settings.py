@@ -603,6 +603,14 @@ class Settings(BaseModel):
     memory_user_default_ttl_days: int = Field(default=7, ge=1, le=365)
     memory_expiry_tick_interval_seconds: int = Field(default=86400, ge=60, le=86400)
     memory_expiry_enabled: bool = True
+    # G11.2-T6 #819 — grant-expiry sweeper knobs. ``GRANT_EXPIRY_ENABLED``
+    # follows the same opt-out shape as ``MEMORY_EXPIRY_ENABLED``.
+    # ``GRANT_EXPIRY_TICK_INTERVAL_SECONDS`` defaults to 300 (5 minutes)
+    # so a change-window elevation expires within one tick of its nominal
+    # end time — much tighter than the 24-hour memory-expiry cadence because
+    # elevation windows are typically hours, not days.
+    grant_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
+    grant_expiry_enabled: bool = True
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -785,6 +793,12 @@ def get_settings() -> Settings:
         ),
         memory_expiry_enabled=parse_bool_env(
             os.environ.get("MEMORY_EXPIRY_ENABLED", "true"),
+        ),
+        grant_expiry_tick_interval_seconds=int(
+            os.environ.get("GRANT_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
+        ),
+        grant_expiry_enabled=parse_bool_env(
+            os.environ.get("GRANT_EXPIRY_ENABLED", "true"),
         ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),

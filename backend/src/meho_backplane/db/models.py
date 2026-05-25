@@ -232,6 +232,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 __all__ = [
+    "AgentPermission",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
@@ -247,6 +248,7 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "OperationGroup",
+    "PermissionVerdict",
     "Target",
     "Tenant",
     "TenantConvention",
@@ -2800,5 +2802,136 @@ class AgentRun(Base):
         sa.CheckConstraint(
             _ck_in("trigger", _AGENT_RUN_TRIGGERS),
             name="ck_agent_run_trigger",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T6 — per-(principal, op, target) permission grant model
+# ---------------------------------------------------------------------------
+
+
+class PermissionVerdict(StrEnum):
+    """Three-state verdict for per-agent permission grants.
+
+    :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+    :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+    decision; the approval queue (G11.2-T4) handles the resume path.
+    :attr:`DENY` — the op is refused immediately with a structured,
+    agent-reasonable error.
+
+    The vocabulary is intentionally closed: a fourth verdict requires
+    a code + migration change, preventing drift between the DB layer
+    and the policy engine.
+    """
+
+    AUTO_EXECUTE = "auto-execute"
+    NEEDS_APPROVAL = "needs-approval"
+    DENY = "deny"
+
+
+#: Closed tuple mirrored in the migration CHECK constraint.
+_PERMISSION_VERDICTS: tuple[str, ...] = tuple(v.value for v in PermissionVerdict)
+
+
+class AgentPermission(Base):
+    """Per-(principal, op-pattern, target-scope) permission grant row.
+
+    G11.2-T6 (#819) under Initiative #803 (the P3 agent identity +
+    RBAC + approval gate). One row grants a *principal* (identified by
+    their JWT ``sub``) a specific *verdict* for dispatches matching an
+    *op_pattern* on an optional *target_scope*. A non-null *expires_at*
+    marks a time-bounded elevation: the grant sweeper removes expired
+    rows automatically, reverting the agent to its baseline permissions.
+
+    Design decisions
+    ----------------
+
+    **Principal is ``sub``, not a dedicated table row.** T1 (#815)
+    will add Keycloak-registered agent principals; permission rows
+    keyed on ``sub`` work for both human and agent principals until
+    that lands. Soft-FK discipline mirrors
+    :attr:`AgentDefinition.identity_ref`.
+
+    **op_pattern is a fnmatch glob string.** ``"*"`` is a valid
+    catch-all grant. The grant service validates the pattern format
+    at write boundaries.
+
+    **target_scope is nullable** — ``NULL`` means "any target". A
+    non-null value is a UUID string (exactly one target) or ``"*"``
+    (explicit any-target, equivalent to ``NULL`` but operator-legible).
+
+    **expires_at drives time-bounded elevation.** ``NULL`` = permanent
+    grant. Non-null = expires at that UTC timestamp and is removed by
+    the grant-expiry sweeper (analogous to the memory-expiry sweeper in
+    :mod:`meho_backplane.memory.expiry`). The sweep is a periodic
+    DELETE tick; there is no background cron per tenant — one global
+    sweep covers all tenants.
+
+    **verdict drives the policy gate.** ``auto-execute`` / ``needs-approval``
+    / ``deny`` (closed vocabulary, CHECK-constrained at the DB layer).
+    """
+
+    __tablename__ = "agent_permission"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # JWT ``sub`` of the principal being granted the permission.
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # fnmatch-compatible glob string. "*" = every op.
+    op_pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL or "*" = any target; UUID string = exactly one target.
+    target_scope: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # "auto-execute" | "needs-approval" | "deny" (CHECK-constrained).
+    verdict: Mapped[str] = mapped_column(Text, nullable=False)
+    # JWT ``sub`` of the tenant_admin who created the row.
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL = permanent grant; non-null = elevation that expires at this UTC
+    # timestamp. The grant-expiry sweeper deletes rows past this point.
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_permission_tenant_principal_idx",
+            "tenant_id",
+            "principal_sub",
+            postgresql_using="btree",
+        ),
+        Index(
+            "agent_permission_expires_at_idx",
+            "expires_at",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("verdict", _PERMISSION_VERDICTS),
+            name="ck_agent_permission_verdict",
         ),
     )

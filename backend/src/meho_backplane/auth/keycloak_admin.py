@@ -163,7 +163,15 @@ class KeycloakAdminClient:
 
     async def __aenter__(self) -> KeycloakAdminClient:
         self._http = httpx.AsyncClient(timeout=_ADMIN_HTTP_TIMEOUT_SECONDS)
-        await self._authenticate()
+        try:
+            await self._authenticate()
+        except BaseException:
+            # __aexit__ never runs when __aenter__ raises, so close the
+            # just-opened client here or every failed auth leaks a socket.
+            await self._http.aclose()
+            self._http = None
+            self._token = None
+            raise
         return self
 
     async def __aexit__(self, *_: object) -> None:

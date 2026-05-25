@@ -41,6 +41,18 @@ def _mock_token(r: respx.MockRouter) -> None:
 
 
 @pytest.mark.asyncio
+async def test_aenter_auth_failure_closes_client() -> None:
+    """A failed auth in ``__aenter__`` must not leak the open AsyncClient."""
+    with respx.mock as r:
+        r.post(_TOKEN_URL).mock(return_value=httpx.Response(401))
+        kc = _client()
+        with pytest.raises(KeycloakAdminError):
+            await kc.__aenter__()
+        assert kc._http is None
+        assert kc._token is None
+
+
+@pytest.mark.asyncio
 async def test_create_client_parses_internal_id_from_location() -> None:
     with respx.mock as r:
         _mock_token(r)

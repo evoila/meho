@@ -232,6 +232,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 __all__ = [
+    "AgentPermission",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
@@ -247,6 +248,7 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "OperationGroup",
+    "PermissionVerdict",
     "Target",
     "Tenant",
     "TenantConvention",
@@ -2800,5 +2802,165 @@ class AgentRun(Base):
         sa.CheckConstraint(
             _ck_in("trigger", _AGENT_RUN_TRIGGERS),
             name="ck_agent_run_trigger",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T3 — per-(principal, op, target) permission model
+# ---------------------------------------------------------------------------
+
+
+class PermissionVerdict(StrEnum):
+    """Three-state verdict returned by the permission resolver.
+
+    :attr:`AUTO_EXECUTE` — the op proceeds without human review.
+    :attr:`NEEDS_APPROVAL` — the op is parked pending an operator
+    decision; the approval queue (G11.2-T4) handles the resume path.
+    :attr:`DENY` — the op is refused immediately with a structured,
+    agent-reasonable error.
+
+    The vocabulary is intentionally closed: a fourth verdict would
+    require a code + migration change, which is the cheapest way to
+    prevent drift between the DB layer and the policy engine.
+    """
+
+    AUTO_EXECUTE = "auto-execute"
+    NEEDS_APPROVAL = "needs-approval"
+    DENY = "deny"
+
+
+#: Closed tuple mirrored in the migration's CHECK constraint.
+_PERMISSION_VERDICTS: tuple[str, ...] = tuple(v.value for v in PermissionVerdict)
+
+
+class AgentPermission(Base):
+    """Per-(principal, op-pattern, target-scope) permission grant row.
+
+    G11.2-T3 (#820) under Initiative #803 (the P3 agent identity +
+    RBAC + approval gate). One row grants a *principal* (identified by
+    their JWT ``sub``) a specific *verdict* for dispatches that match
+    an *op_pattern* on an optional *target_scope*.
+
+    Design decisions
+    ----------------
+
+    **Principal is ``sub``, not a dedicated table row.** T1 (#815)
+    will add Keycloak-registered agent principals. Until that lands,
+    every MEHO operator (human or agent) already has a stable ``sub``
+    claim in their JWT; permission rows keyed on ``sub`` work for both.
+    No FK to a principal/agent table in v0.2 (that table is T1's
+    scope), consistent with the soft-FK discipline on
+    :attr:`AgentDefinition.identity_ref`.
+
+    **op_pattern is a fnmatch glob string.** Examples:
+    ``"*"`` (every op), ``"GET:/api/vcenter/*"`` (all vCenter GET ops),
+    ``"vault.kv.*"`` (all vault kv ops). The resolver evaluates patterns
+    in specificity order (longer patterns first) so a narrow grant can
+    override a broad default without OR-logic complexity. ``"*"`` is the
+    fallback (matches every op_id).
+
+    **target_scope is nullable** — ``NULL`` means "any target". A
+    non-null value is either a UUID string (exactly one target) or the
+    special value ``"*"`` (explicit any-target, same as ``NULL`` but
+    operator-legible). The resolver treats ``NULL`` and ``"*"``
+    identically.
+
+    **verdict drives the policy engine.** The resolver returns the
+    most-specific matching row's :class:`PermissionVerdict`. When no
+    row matches, the default verdict comes from the op's
+    ``safety_level`` (``safe`` → ``auto-execute``; ``caution`` →
+    ``needs-approval``; ``dangerous`` → ``deny``). Tenant/operator
+    config can *tighten* the default (e.g. mark ``caution`` as
+    ``deny``) but cannot *loosen* it (cannot mark ``dangerous`` as
+    ``auto-execute``).
+
+    **Tenant scoping.** Every row is owned by a tenant; the resolver
+    only matches rows for the requesting operator's tenant.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key. Same portable :class:`Uuid` shape.
+    * ``tenant_id`` — UUID NOT NULL with a real ``REFERENCES
+      tenant.id`` FK. Clean-slate table; no pre-existing rows; no
+      cascade trade-off. Same rationale as :class:`AgentDefinition`.
+    * ``principal_sub`` — Text NOT NULL. JWT ``sub`` of the principal
+      being granted the permission.
+    * ``op_pattern`` — Text NOT NULL. fnmatch-compatible glob. ``"*"``
+      is a valid catch-all grant.
+    * ``target_scope`` — Text nullable. UUID string or ``"*"`` or
+      ``NULL`` (= any target).
+    * ``verdict`` — Text NOT NULL, DB-layer ``CHECK`` against the three
+      closed values. ``"auto-execute"`` / ``"needs-approval"`` /
+      ``"deny"``.
+    * ``created_by_sub`` — Text NOT NULL. JWT ``sub`` of the
+      tenant-admin who created the row.
+    * ``created_at`` / ``updated_at`` — ``timestamptz`` NOT NULL, PG
+      server defaults + ORM defaults on both dialects.
+
+    Indexes
+    -------
+
+    * ``agent_permission_tenant_principal_idx`` — b-tree on
+      ``(tenant_id, principal_sub)`` — the dominant query: "all
+      grants for principal P in tenant T." The resolver loads all
+      matching rows into memory and then runs the in-process pattern
+      evaluation; the index makes the DB query fast.
+
+    The model ships no helper methods — the resolver logic lives in
+    :mod:`meho_backplane.auth.permissions`.
+    """
+
+    __tablename__ = "agent_permission"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK -- same rationale as AgentDefinition.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # JWT ``sub`` of the principal being granted the permission.
+    # Soft reference — no FK to any principal/agent table (that table
+    # is G11.2-T1's scope).
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    # fnmatch-compatible glob string. "*" = every op.
+    op_pattern: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL or "*" = any target; UUID string = exactly one target.
+    target_scope: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # Three-state verdict: "auto-execute" | "needs-approval" | "deny".
+    verdict: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "agent_permission_tenant_principal_idx",
+            "tenant_id",
+            "principal_sub",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("verdict", _PERMISSION_VERDICTS),
+            name="ck_agent_permission_verdict",
         ),
     )

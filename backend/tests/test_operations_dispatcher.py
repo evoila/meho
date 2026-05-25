@@ -1106,11 +1106,15 @@ async def test_dispatch_returns_connector_error_when_handler_raises(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_denies_when_requires_approval_set(
+async def test_dispatch_denies_dangerous_op_by_safety_level(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``requires_approval=True`` -> ``denied`` under the v0.2 default-allow policy."""
+    """``safety_level='dangerous'`` → ``denied`` under G11.2-T3 policy gate.
+
+    No AgentPermission rows exist for the principal, so the resolver
+    uses the ``safety_level`` default: ``dangerous`` → ``deny``.
+    """
     register_connector_v2(
         product="vault",
         version="",
@@ -1124,9 +1128,9 @@ async def test_dispatch_denies_when_requires_approval_set(
         op_id="vault.kv.danger",
         handler=_module_handler_returning_dict,
         summary="Dangerous op.",
-        description="Requires approval.",
+        description="Destructive operation requiring explicit permission grant.",
         parameter_schema={"type": "object"},
-        requires_approval=True,
+        safety_level="dangerous",
         when_to_use=None,
         embedding_service=stub_embedding_service,
     )
@@ -1158,6 +1162,67 @@ async def test_dispatch_denies_when_requires_approval_set(
 
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_pending_caution_op_no_permission_row(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """``safety_level='caution'`` + no permission row → ``pending`` result.
+
+    G11.2-T3: ``caution`` default is ``needs-approval``; the dispatcher
+    writes an audit row with ``result_status='pending'`` and returns
+    :func:`result_pending` (HTTP 202). The durable approval-queue
+    mechanics (G11.2-T4, #817) will act on this pending state.
+    """
+    register_connector_v2(
+        product="vault",
+        version="",
+        impl_id="",
+        cls=_NoOpVaultConnector,
+    )
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.caution",
+        handler=_module_handler_returning_dict,
+        summary="Caution op.",
+        description="Operation that requires approval by default.",
+        parameter_schema={"type": "object"},
+        safety_level="caution",
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator()
+    target = _FakeTarget(product="vault")
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.caution",
+        target=target,
+        params={},
+    )
+    assert result.status == "pending"
+    assert result.error is not None
+    assert result.error.startswith("pending:")
+    assert result.extras["error_code"] == "pending"
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "vault.kv.caution")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "pending"
+    assert rows[0].status_code == 202
+
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "pending"
 
 
 # ---------------------------------------------------------------------------

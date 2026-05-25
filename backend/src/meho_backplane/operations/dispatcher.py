@@ -103,7 +103,7 @@ from meho_backplane.connectors import (
     resolve_connector,
 )
 from meho_backplane.connectors.base import Connector
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
     parent_audit_id_var,
@@ -119,6 +119,7 @@ from meho_backplane.operations._errors import (
     result_handler_unreachable,
     result_invalid_params,
     result_no_connector,
+    result_pending,
     result_unknown_op,
     wrap_ok_result,
 )
@@ -509,8 +510,13 @@ async def dispatch(
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 
     # --- Step 4: policy gate ---------------------------------------------
-    allowed, deny_reason = policy_gate(operator=operator, descriptor=descriptor, target=target)
-    if not allowed:
+    # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
+    # / deny). The call site signature is unchanged; the function now
+    # awaits a DB read to load the principal's AgentPermission rows.
+    verdict, gate_reason = await policy_gate(
+        operator=operator, descriptor=descriptor, target=target
+    )
+    if verdict == PermissionVerdict.DENY:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(
             audit_id=uuid.uuid4(),
@@ -522,7 +528,20 @@ async def dispatch(
             result_status="denied",
             duration_ms=duration_ms,
         )
-        return result_denied(op_id, deny_reason or "policy denied", duration_ms)
+        return result_denied(op_id, gate_reason or "policy denied", duration_ms)
+    if verdict == PermissionVerdict.NEEDS_APPROVAL:
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=uuid.uuid4(),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="pending",
+            duration_ms=duration_ms,
+        )
+        return result_pending(op_id, gate_reason or "needs approval", duration_ms)
 
     # --- Step 5: connector resolution -------------------------------------
     connector_instance, resolution_error = await _resolve_connector_instance(descriptor, target)

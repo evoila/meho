@@ -11,8 +11,8 @@ dispatcher's :func:`dispatch` body stay focused on control flow.
 Each builder owns one ``error_code`` from the contract documented in
 :mod:`meho_backplane.operations.dispatcher`'s module docstring:
 ``unknown_op`` / ``invalid_params`` / ``no_connector`` /
-``handler_unreachable`` / ``denied`` / ``connector_error``. The
-``status`` field maps to ``OperationResult.status``; the ``error_code``
+``handler_unreachable`` / ``denied`` / ``pending`` / ``connector_error``.
+The ``status`` field maps to ``OperationResult.status``; the ``error_code``
 lives in ``extras`` so callers can both string-match the ``error``
 field (``error.startswith("unknown_op:")``) and parse the code for
 structured handling.
@@ -30,6 +30,7 @@ __all__ = [
     "result_handler_unreachable",
     "result_invalid_params",
     "result_no_connector",
+    "result_pending",
     "result_unknown_op",
     "status_code_for_result",
     "wrap_ok_result",
@@ -102,13 +103,50 @@ def result_handler_unreachable(
 
 
 def result_denied(op_id: str, reason: str, duration_ms: float) -> OperationResult:
-    """Policy gate denied the call (``requires_approval`` in v0.2)."""
+    """Policy gate denied the call.
+
+    Returned when the effective verdict is
+    :attr:`~meho_backplane.db.models.PermissionVerdict.DENY` — either
+    because the op is ``dangerous`` and no explicit grant overrides it,
+    or because an explicit ``deny`` row was found, or because the
+    principal's role ceiling forced the verdict to ``deny``.
+
+    The ``reason`` string is agent-readable: it names the verdict
+    source and any ceilings that were applied so an agent can diagnose
+    the refusal without human intervention.
+    """
     return OperationResult(
         status="denied",
         op_id=op_id,
         error=f"denied: {reason}",
         duration_ms=duration_ms,
         extras={"error_code": "denied", "reason": reason},
+    )
+
+
+def result_pending(op_id: str, reason: str, duration_ms: float) -> OperationResult:
+    """Policy gate returned ``needs-approval``; op is pending human review.
+
+    Returned when the effective verdict is
+    :attr:`~meho_backplane.db.models.PermissionVerdict.NEEDS_APPROVAL`.
+    The op is *not* executed; instead a ``pending`` status is recorded
+    in the audit log and the caller receives this structured result.
+
+    The ``reason`` string carries the verdict source + any ceilings so
+    the agent can surface a meaningful "awaiting approval" message to
+    the user.
+
+    The durable approval-queue mechanics (G11.2-T4, #817) will replace
+    this stub with a real pending row + resume path. Until T4 lands,
+    the pending result tells the agent to stop and wait for human
+    confirmation rather than silently failing.
+    """
+    return OperationResult(
+        status="pending",
+        op_id=op_id,
+        error=f"pending: {reason}",
+        duration_ms=duration_ms,
+        extras={"error_code": "pending", "reason": reason},
     )
 
 
@@ -165,12 +203,15 @@ def status_code_for_result(result_status: str) -> int:
     The ``audit_log.status_code`` column is NOT NULL :class:`int` --
     optimised for the HTTP middleware path. The dispatcher contract is
     not HTTP, so the dispatcher synthesises one: ``200`` for ok,
-    ``500`` for error, ``403`` for denied. The synthetic values are
-    not surfaced to operators; the canonical signal lives in
-    ``payload["result_status"]`` on the audit row.
+    ``500`` for error, ``403`` for denied, ``202`` for pending (the op
+    was accepted but requires human approval before execution). The
+    synthetic values are not surfaced to operators; the canonical signal
+    lives in ``payload["result_status"]`` on the audit row.
     """
     if result_status == "ok":
         return 200
     if result_status == "denied":
         return 403
+    if result_status == "pending":
+        return 202
     return 500

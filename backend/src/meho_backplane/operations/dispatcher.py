@@ -17,9 +17,14 @@ phases the parent Initiative names:
    :class:`Draft202012Validator` (JSON Schema 2020-12, OpenAPI 3.1
    compatible) -- :func:`~meho_backplane.operations._validate.validate_params`.
    Invalid -> structured ``invalid_params`` error.
-4. Policy gate (v0.2 default-allow;
-   :func:`~meho_backplane.operations._validate.policy_gate`) --
-   ``requires_approval=True`` -> ``denied``.
+4. Policy gate (G11.2-T3;
+   :func:`~meho_backplane.operations._validate.policy_gate`). **Agent**
+   principals resolve a three-state verdict (``auto-execute`` /
+   ``needs-approval`` -> ``pending`` (202) / ``deny`` -> ``denied``) via
+   the per-(principal, op, target) permission model; **human / service**
+   principals keep the v0.2 contract (default-allow except
+   ``requires_approval=True`` -> ``denied``). Only ``auto-execute``
+   proceeds; any other verdict fails closed.
 5. Resolve the connector class via
    :func:`~meho_backplane.connectors.resolver.resolve_connector` and
    instantiate it (cached at module level). Resolver miss ->
@@ -103,7 +108,7 @@ from meho_backplane.connectors import (
     resolve_connector,
 )
 from meho_backplane.connectors.base import Connector
-from meho_backplane.db.models import EndpointDescriptor
+from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
     parent_audit_id_var,
@@ -119,6 +124,7 @@ from meho_backplane.operations._errors import (
     result_handler_unreachable,
     result_invalid_params,
     result_no_connector,
+    result_pending,
     result_unknown_op,
     wrap_ok_result,
 )
@@ -509,8 +515,13 @@ async def dispatch(
         return result_invalid_params(op_id, validation_errors, _elapsed_ms(started))
 
     # --- Step 4: policy gate ---------------------------------------------
-    allowed, deny_reason = policy_gate(operator=operator, descriptor=descriptor, target=target)
-    if not allowed:
+    # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
+    # / deny). The call site signature is unchanged; the function now
+    # awaits a DB read to load the principal's AgentPermission rows.
+    verdict, gate_reason = await policy_gate(
+        operator=operator, descriptor=descriptor, target=target
+    )
+    if verdict == PermissionVerdict.DENY:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(
             audit_id=uuid.uuid4(),
@@ -522,7 +533,40 @@ async def dispatch(
             result_status="denied",
             duration_ms=duration_ms,
         )
-        return result_denied(op_id, deny_reason or "policy denied", duration_ms)
+        return result_denied(op_id, gate_reason or "policy denied", duration_ms)
+    if verdict == PermissionVerdict.NEEDS_APPROVAL:
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=uuid.uuid4(),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="pending",
+            duration_ms=duration_ms,
+        )
+        return result_pending(op_id, gate_reason or "needs approval", duration_ms)
+    if verdict is not PermissionVerdict.AUTO_EXECUTE:
+        # Defensive fail-closed: only an explicit AUTO_EXECUTE proceeds to
+        # execution. Any unexpected verdict (a future enum member, a bug
+        # in the resolver) denies rather than silently executing.
+        duration_ms = _elapsed_ms(started)
+        await audit_and_broadcast_safe(
+            audit_id=uuid.uuid4(),
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            result_status="denied",
+            duration_ms=duration_ms,
+        )
+        return result_denied(
+            op_id,
+            gate_reason or f"unexpected policy verdict {verdict!r}; denied",
+            duration_ms,
+        )
 
     # --- Step 5: connector resolution -------------------------------------
     connector_instance, resolution_error = await _resolve_connector_instance(descriptor, target)

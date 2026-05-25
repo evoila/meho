@@ -4,7 +4,7 @@
 """Create the ``approval_request`` table for the durable approval queue.
 
 Revision ID: 0020
-Revises: 0017
+Revises: 0018
 Create Date: 2026-05-25
 
 This migration is the schema substrate of Initiative #803 (G11.2 Agent
@@ -158,7 +158,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "0020"
-down_revision: str | None = "0017"
+down_revision: str | None = "0018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

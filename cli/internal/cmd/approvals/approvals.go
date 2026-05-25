@@ -40,7 +40,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
-	"github.com/evoila/meho/cli/internal/backplane"
 	"github.com/evoila/meho/cli/internal/output"
 )
 
@@ -291,7 +290,3 @@ func renderHTTPError(
 	}
 }
 
-// backplaneClassifyError is a thin wrapper so tests can override resolution.
-func resolveBackplaneURL(override string) (string, error) {
-	return backplane.Resolve(override)
-}

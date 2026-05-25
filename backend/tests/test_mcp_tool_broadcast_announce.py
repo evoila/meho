@@ -621,13 +621,9 @@ def test_published_event_carries_agent_announcement_kind(
     # itself). Pick the announcement-side payload explicitly by
     # event_kind so the assertion stays robust to the call ordering.
     decoded_payloads = [
-        json.loads(call.args[1]["event"])
-        for call in xa.await_args_list
-        if "event" in call.args[1]
+        json.loads(call.args[1]["event"]) for call in xa.await_args_list if "event" in call.args[1]
     ]
-    announce_payloads = [
-        p for p in decoded_payloads if p.get("event_kind") == "agent_announcement"
-    ]
+    announce_payloads = [p for p in decoded_payloads if p.get("event_kind") == "agent_announcement"]
     assert len(announce_payloads) == 1, "expected exactly one announcement xadd"
     decoded = announce_payloads[0]
     assert decoded["tenant_id"] == str(op.tenant_id)

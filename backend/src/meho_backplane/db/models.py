@@ -235,6 +235,8 @@ __all__ = [
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
+    "ApprovalRequest",
+    "ApprovalStatus",
     "AuditLog",
     "Base",
     "BroadcastOverride",
@@ -2800,5 +2802,169 @@ class AgentRun(Base):
         sa.CheckConstraint(
             _ck_in("trigger", _AGENT_RUN_TRIGGERS),
             name="ck_agent_run_trigger",
+        ),
+    )
+
+
+class ApprovalStatus(StrEnum):
+    """Closed lifecycle status of an :class:`ApprovalRequest`.
+
+    Initiative #803 (G11.2 Agent identity + RBAC + approval), Task #818
+    (T5 — approval surfacing channel). Four terminal/non-terminal states:
+
+    * :attr:`PENDING` — the request was created and is awaiting a
+      human decision. Initial state on insert.
+    * :attr:`APPROVED` — an authorised operator approved the request.
+      The T4 resume API has been called (or will be called); the
+      paused agent run continues.
+    * :attr:`REJECTED` — an authorised operator rejected the request.
+      The T4 resume API has been called with ``reject=true``; the
+      paused run aborts.
+    * :attr:`EXPIRED` — the request was not acted on before
+      ``expires_at`` and the expiry sweep closed it. The paused run
+      is also aborted by the sweep.
+
+    The enum and the DB ``CHECK (status IN (...))`` constraint move in
+    lock-step via migration ``0021``; a drift guard in
+    :mod:`tests.test_db_approval_request` enforces equality at test time.
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+#: Closed ``approval_request.status`` vocabulary — derived from
+#: :class:`ApprovalStatus` so the enum and the DB-layer ``CHECK``
+#: constraint cannot drift. Same lock-step / drift-guard discipline as
+#: :data:`_AGENT_RUN_STATUSES`.
+_APPROVAL_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalStatus)
+
+
+class ApprovalRequest(Base):
+    """One durable row per approval gate pause.
+
+    Initiative #803 (G11.2), Task #818 (T5 — approval surfacing channel).
+    When the policy gate issues a ``needs-approval`` verdict the dispatcher
+    writes one of these rows instead of executing the operation. The T5
+    surfacing layer (REST + MCP + CLI) presents pending rows to operators
+    and accepts approve / reject decisions; on decision the T4 resume API
+    is called to continue or abort the paused agent run.
+
+    The lifecycle is explicit and enforced: only
+    :class:`~meho_backplane.approvals.service.ApprovalRequestService`
+    mutates ``status``; direct writes bypass the enforcement checks.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` — UUID primary key; PG gets ``gen_random_uuid()`` via
+      migration ``0021``; ORM ``default=uuid.uuid4`` covers SQLite.
+    * ``tenant_id`` — real FK to ``tenant.id`` (NO ACTION delete).
+    * ``agent_run_id`` — soft-FK to ``agent_run.id`` (no clause); NULL
+      when created outside an in-flight run.
+    * ``principal_sub`` / ``principal_act`` — RFC 8693 delegation pair
+      mirroring ``agent_run.identity_{sub,act}``.
+    * ``connector_id`` / ``op_id`` / ``target_id`` / ``params_hash`` —
+      identify the proposed operation without storing raw params.
+    * ``proposed_effect`` — JSONB on PG; JSON on SQLite. Human-readable
+      operation preview for the operator's decision UI.
+    * ``status`` — closed enum, CHECK-constrained; default ``pending``.
+    * ``reviewed_by`` / ``decided_at`` — stamped on approve / reject.
+    * ``expires_at`` — optional deadline; the expiry sweep closes stale
+      pending rows.
+    * ``request_audit_id`` / ``decision_audit_id`` — soft-FKs to
+      ``audit_log.id``; the two synchronous audit rows the T4 approval
+      invariant requires.
+    """
+
+    __tablename__ = "approval_request"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        nullable=False,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Soft-FK to agent_run.id.
+    agent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(), nullable=True, default=None
+    )
+    # RFC 8693 delegation pair.
+    principal_sub: Mapped[str] = mapped_column(Text(), nullable=False)
+    principal_act: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, default=None
+    )
+    # Proposed operation.
+    connector_id: Mapped[str] = mapped_column(Text(), nullable=False)
+    op_id: Mapped[str] = mapped_column(Text(), nullable=False)
+    target_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(), nullable=True, default=None
+    )
+    params_hash: Mapped[str] = mapped_column(Text(), nullable=False)
+    proposed_effect: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON, nullable=True, default=None
+    )
+    # Lifecycle.
+    status: Mapped[str] = mapped_column(
+        Text(),
+        nullable=False,
+        default=ApprovalStatus.PENDING.value,
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(
+        Text(), nullable=True, default=None
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    # Soft-FKs to audit_log.id.
+    request_audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(), nullable=True, default=None
+    )
+    decision_audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(), nullable=True, default=None
+    )
+
+    __table_args__ = (
+        Index(
+            "approval_request_tenant_status_idx",
+            "tenant_id",
+            "status",
+            postgresql_using="btree",
+        ),
+        Index(
+            "approval_request_tenant_created_at_idx",
+            "tenant_id",
+            "created_at",
+            postgresql_using="btree",
+        ),
+        Index(
+            "approval_request_agent_run_id_idx",
+            "agent_run_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "approval_request_expires_at_idx",
+            "expires_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'pending'"),
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _APPROVAL_STATUSES),
+            name="ck_approval_request_status",
         ),
     )

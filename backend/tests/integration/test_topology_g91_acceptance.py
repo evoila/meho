@@ -511,8 +511,8 @@ async def test_scenario4_soft_delete_retains_row(stable_connector: None) -> None
     flipped to stop reporting the ``vm`` + ``host`` nodes; a second
     refresh must soft-delete (not hard-delete) them: the rows stay in
     ``graph_node`` with ``last_seen IS NULL``, and the refresh diff
-    counts them as ``removed`` exactly once. G9.3 ships the history
-    surface that queries those retained rows; T8 asserts the row
+    counts them as ``removed`` exactly once. G9.3 (now shipped) provides
+    the history surface that queries those retained rows; T8 asserts the row
     survives soft-delete and that a *re-discovery* revives it (clears
     ``last_seen`` back to a timestamp on the same row, no re-insert).
 
@@ -566,7 +566,7 @@ async def test_scenario4_soft_delete_retains_row(stable_connector: None) -> None
     assert by_name["host-sd-target"] is None
     assert by_name["sd-target"] is not None  # still discovered
 
-    # Actual G9.1 contract: the traversal CTE does not yet filter
+    # Actual G9.1 contract: the traversal CTE does not filter
     # soft-deleted rows, so the dropped nodes are still reachable. The
     # load-bearing acceptance fact is that the rows were *retained*
     # (asserted above) for G9.3 to query — not that they vanish from

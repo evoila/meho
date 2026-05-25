@@ -138,8 +138,9 @@ SQLite (dev/test via aiosqlite).
   nullable with no default on either dialect -- the refresh service
   (T3) populates it on every observation, and *sets it back to NULL*
   once a node has been absent past the configured threshold (the
-  spec's soft-delete signal, kept queryable by G9.3 history replay
-  but invisible to default queries).
+  spec's soft-delete signal, kept queryable by the G9.3 history surface
+  and still reachable by the traversal verbs, though excluded by
+  default from the list verbs ``list_nodes`` / ``list_edges``).
 * ``properties`` -- portable JSON -> JSONB via
   :func:`sqlalchemy.JSON.with_variant`. Server default ``'{}'::jsonb``
   on PG matches the ORM ``default=dict`` so out-of-band PG inserts

@@ -20,11 +20,14 @@ Design
   :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient`.
   The DB commit and the Keycloak call are *not* in the same ACID
   transaction (Keycloak has no XA participant). The consistency
-  strategy is: Keycloak-first on register (create Keycloak client →
-  insert DB row; on Keycloak failure the row is never written),
-  DB-first on revoke (mark revoked in DB → disable Keycloak client;
-  on Keycloak failure the row is already revoked so no new tokens
-  can be linked to an active MEHO principal).
+  strategy is **Keycloak-first on both paths**: register creates the
+  Keycloak client then inserts the DB row (on Keycloak failure the row
+  is never written; on a DB failure the just-created client is rolled
+  back); revoke disables the Keycloak client then commits
+  ``revoked=true`` (on a non-404 Keycloak failure the revoke surfaces an
+  error and the row is *not* marked revoked, so MEHO never reports a
+  still-live, token-issuing principal as revoked). Keycloak's
+  ``enabled=false`` is the authoritative kill switch.
 * **``keycloak_client_id`` convention** — the OAuth client id for a
   registered agent is ``agent:<name>`` (forward-slash forbidden in
   Keycloak client ids). This convention lets operators distinguish
@@ -327,13 +330,18 @@ class AgentPrincipalService:
     ) -> AgentPrincipalRead:
         """Revoke an agent principal (kill switch).
 
-        Phase 1: mark ``revoked=true`` in the DB.
-        Phase 2: disable the Keycloak client (``enabled=false``).
+        Phase 1: look up the principal (must exist and not already be
+        revoked) to obtain its ``keycloak_internal_id``.
+        Phase 2: disable the Keycloak client (``enabled=false``) — the
+        authoritative kill switch.
+        Phase 3: commit ``revoked=true`` in the DB.
 
-        The DB is written first so even a Keycloak failure leaves the
-        principal marked revoked (no new tokens can be issued under an
-        active MEHO principal). A Keycloak-not-found is logged and
-        swallowed — the client may have been cleaned up out of band.
+        Keycloak is disabled *before* the DB row is marked so a Keycloak
+        failure aborts the revoke without falsely reporting a principal
+        as revoked while it can still mint tokens. A Keycloak *not-found*
+        is treated as success (the client was cleaned up out of band) and
+        the DB row is still marked revoked. No DB transaction is held
+        open across the Keycloak network call.
 
         Raises
         ------
@@ -343,9 +351,12 @@ class AgentPrincipalService:
         KeycloakAdminNotConfiguredError
             When Keycloak admin credentials are not configured.
         KeycloakAdminError
-            On a non-404 Keycloak Admin API failure.
+            On a non-404 Keycloak Admin API failure — the DB row is left
+            unchanged, so the principal stays active and the operator can
+            retry.
         """
         sessionmaker = get_sessionmaker()
+        # Phase 1: validate + fetch the Keycloak internal id (read-only).
         async with sessionmaker() as session:
             result = await session.execute(
                 select(AgentPrincipal).where(
@@ -357,15 +368,11 @@ class AgentPrincipalService:
             row = result.scalar_one_or_none()
             if row is None:
                 raise AgentPrincipalNotFoundError(name)
-            row.revoked = True
-            row.updated_at = datetime.now(UTC)
-            await session.flush()
-            await session.refresh(row)
-            entry = AgentPrincipalRead.model_validate(row)
             keycloak_internal_id = row.keycloak_internal_id
-            await session.commit()
 
-        # Phase 2: disable Keycloak client (best-effort; 404 is swallowed).
+        # Phase 2: disable the Keycloak client FIRST (authoritative kill
+        # switch). A non-404 failure propagates before any DB write, so a
+        # principal is never marked revoked while it can still mint tokens.
         kc_client = KeycloakAdminClient.from_settings()
         try:
             async with kc_client:
@@ -377,6 +384,27 @@ class AgentPrincipalService:
                 name=name,
                 keycloak_internal_id=keycloak_internal_id,
             )
+
+        # Phase 3: persist revoked=true now that the client is disabled.
+        async with sessionmaker() as session:
+            result = await session.execute(
+                select(AgentPrincipal).where(
+                    AgentPrincipal.tenant_id == tenant_id,
+                    AgentPrincipal.name == name,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                # Raced deletion between Phase 1 and Phase 3.
+                raise AgentPrincipalNotFoundError(name)
+            if not row.revoked:
+                row.revoked = True
+                row.updated_at = datetime.now(UTC)
+                await session.flush()
+            await session.refresh(row)
+            entry = AgentPrincipalRead.model_validate(row)
+            await session.commit()
+
         self._log.info(
             "agent_principal_revoke",
             tenant_id=str(tenant_id),

@@ -229,10 +229,9 @@ A refresh that no longer sees a previously-discovered node or edge
   G9.3 ([#365](https://github.com/evoila/meho/issues/365)) did not add
   `last_seen` filtering to the traversal CTE. Soft-delete is purely a
   *retention* mechanism, not an immediate visibility change for the
-  traversal verbs. Operators
-  reading blast radius in v0.2 should treat the graph as
-  last-refresh-wins; a stale edge persists until the next successful
-  refresh of its owning target re-derives the snapshot.
+  traversal verbs. Operators reading blast radius in v0.2 should treat
+  the graph as last-refresh-wins; a stale edge persists until the next
+  successful refresh of its owning target re-derives the snapshot.
 
 ## Performance expectations
 

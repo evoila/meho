@@ -90,12 +90,25 @@ async def _enable_sqlite_foreign_keys(session: AsyncSession) -> None:
 
 
 async def _seed_tenant(session: AsyncSession, *, slug: str = "rdc-internal") -> uuid.UUID:
-    """Insert a tenant row and return its UUID.
+    """Return the tenant row's id, inserting it on the first call.
 
     ``agent_run.tenant_id`` carries a real FK to :class:`Tenant`, so the
     per-test setup needs a parent tenant to avoid spurious
     ``IntegrityError`` under PRAGMA foreign_keys=ON.
+
+    The look-up-then-insert shape is load-bearing: migration ``0018``
+    seeds the ``rdc-internal`` tenant into the per-worker schema
+    template (:func:`tests.conftest._schema_template_db`), so a plain
+    ``session.add(Tenant(slug='rdc-internal', ...))`` would trip
+    ``UNIQUE constraint failed: tenant.slug``. Returning the seeded
+    row's id when the slug pre-exists keeps every existing caller
+    working without invasive per-test slug rewrites.
     """
+    existing: uuid.UUID | None = await session.scalar(
+        select(Tenant.id).where(Tenant.slug == slug),
+    )
+    if existing is not None:
+        return existing
     tenant_id = uuid.uuid4()
     session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
     await session.commit()

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0018_create_scheduled_trigger``.
+"""Behavioural tests for Alembic migration ``0020_create_scheduled_trigger``.
 
 Initiative #804 (G11.3 Scheduler), Task #822 (T1). The migration adds
 the ``scheduled_trigger`` table -- the storage substrate for the
@@ -22,10 +22,10 @@ Test matrix
   the discriminated-field columns (``cron_expr`` / ``fire_at`` /
   ``event_filter``) and the dispatcher-managed columns
   (``next_fire_at`` / ``last_fired_at``) permit NULL.
-* **Reversibility round-trip.** ``downgrade "0017"`` (0018's
+* **Reversibility round-trip.** ``downgrade "0019"`` (0020's
   ``down_revision``) drops the table; a subsequent ``upgrade head``
   re-creates it. The target is the explicit revision rather than
-  head-relative ``"-1"`` so the test keeps reverting *0018* even once
+  head-relative ``"-1"`` so the test keeps reverting *0020* even once
   a later migration becomes head.
 * **agent_run + agent_definition untouched.** The migration must not
   disturb the pre-existing tables shipped by ``0016`` / ``0017``; the
@@ -70,7 +70,7 @@ def alembic_cfg(
     isolated SQLite database; engine + settings caches are reset before
     and after so the alembic env reads *this* DATABASE_URL.
     """
-    db_path = tmp_path / "migration_0018.db"
+    db_path = tmp_path / "migration_0020.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -174,7 +174,7 @@ def test_upgrade_creates_scheduled_trigger_table_columns_indexes(
     command.upgrade(cfg, "head")
 
     assert "scheduled_trigger" in _table_names(sync_url), (
-        "migration 0018 must create the scheduled_trigger table on upgrade head"
+        "migration 0020 must create the scheduled_trigger table on upgrade head"
     )
 
     columns = _table_columns(sync_url, "scheduled_trigger")
@@ -185,7 +185,7 @@ def test_upgrade_creates_scheduled_trigger_table_columns_indexes(
 
     indexes = _table_indexes(sync_url, "scheduled_trigger")
     for expected in _EXPECTED_INDEXES:
-        assert expected in indexes, f"migration 0018 must create index {expected!r}"
+        assert expected in indexes, f"migration 0020 must create index {expected!r}"
 
 
 def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
@@ -222,14 +222,14 @@ def test_column_nullability(alembic_cfg: tuple[Config, str]) -> None:
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade "0017"`` drops the table; ``upgrade head`` restores it.
+    """``downgrade "0019"`` drops the table; ``upgrade head`` restores it.
 
-    The reversibility contract migration 0018 inherits from 0007 / 0012
+    The reversibility contract migration 0020 inherits from 0007 / 0012
     / 0013 / 0017. The downgrade target is the explicit revision
-    ``"0017"`` (0018's ``down_revision``) rather than head-relative
-    ``"-1"``, so the moment a later migration (0019+) lands it would
-    not silently stop exercising 0018's reverse -- anchoring to
-    ``"0017"`` keeps this test pinned to 0018.
+    ``"0019"`` (0020's ``down_revision``) rather than head-relative
+    ``"-1"``, so the moment a later migration (0021+) lands it would
+    not silently stop exercising 0020's reverse -- anchoring to
+    ``"0019"`` keeps this test pinned to 0020.
     """
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, "head")
@@ -237,7 +237,7 @@ def test_downgrade_then_upgrade_round_trips(
     # Sanity -- the upgrade landed the table before we reverse it.
     assert "scheduled_trigger" in _table_names(sync_url)
 
-    command.downgrade(cfg, "0017")
+    command.downgrade(cfg, "0019")
     assert "scheduled_trigger" not in _table_names(sync_url), (
         "downgrade must drop the scheduled_trigger table"
     )
@@ -249,9 +249,9 @@ def test_downgrade_then_upgrade_round_trips(
 
 
 def test_sibling_tables_untouched(alembic_cfg: tuple[Config, str]) -> None:
-    """The pre-existing ``agent_run`` + ``agent_definition`` tables survive 0018.
+    """The pre-existing ``agent_run`` + ``agent_definition`` tables survive 0020.
 
-    0018 adds a new table only; it must not disturb the
+    0020 adds a new table only; it must not disturb the
     agent-runtime tables shipped by 0016 / 0017. Guards against an
     accidental edit to the wrong table.
     """

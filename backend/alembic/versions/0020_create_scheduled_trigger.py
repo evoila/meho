@@ -3,8 +3,8 @@
 
 """Create the ``scheduled_trigger`` table for the G11.3 scheduler substrate.
 
-Revision ID: 0018
-Revises: 0017
+Revision ID: 0020
+Revises: 0019
 Create Date: 2026-05-25
 
 This migration is the schema substrate of Task #822 (G11.3-T1) under
@@ -126,8 +126,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0018"
-down_revision: str | None = "0017"
+revision: str = "0020"
+down_revision: str | None = "0019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

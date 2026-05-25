@@ -78,7 +78,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, Request
@@ -105,13 +105,48 @@ from meho_backplane.mcp.schemas import (
 )
 from meho_backplane.settings import get_settings
 
-__all__ = ["McpInvalidParamsError", "register_method", "router"]
+__all__ = [
+    "RESOURCES_SUBSCRIBE_ENABLED",
+    "McpInvalidParamsError",
+    "register_method",
+    "router",
+]
 
 
 #: Stable ``serverInfo.name`` returned on every ``initialize``. Matches
 #: the FastAPI app title in :mod:`meho_backplane.main` so MCP clients
 #: and the HTTP API's OpenAPI document agree on the server's identity.
 _SERVER_NAME: str = "meho-backplane"
+
+
+#: Single source of truth for whether the server advertises
+#: ``capabilities.resources.subscribe`` and emits
+#: ``notifications/resources/updated`` on resource state changes.
+#:
+#: v0.2 ships ``False`` -- the server has no per-session subscriber
+#: state and the long-poll / SSE bridge that would carry the
+#: notifications is deferred to v0.2.next. Any write path that wants
+#: to publish a ``notifications/resources/updated`` event (G7.1-T4
+#: convention edits, future kb / memory invalidation) MUST gate the
+#: emit on this constant -- emitting unconditionally would tell a
+#: spec-conforming client "you can subscribe", which our
+#: ``capabilities.resources.subscribe: False`` simultaneously denies.
+#:
+#: The constant is read by :func:`_initialize` (to declare the
+#: capability) AND by every emit-side caller (to gate the notification).
+#: Flipping it to ``True`` in v0.2.next lands the subscribe-channel
+#: wiring in one place; the conditional-emit code paths already exist
+#: and become live. See
+#: ``docs/codebase/tenant_conventions.md`` for the conditional-emit
+#: contract specifically as it lands in G7.1-T4 (#316).
+RESOURCES_SUBSCRIBE_ENABLED: Final[bool] = False
+
+
+#: Module-level structlog logger. Defined up here (rather than next to
+#: the router in the dispatch section below) because
+#: :func:`_initialize` references it for the over-budget warning the
+#: preamble assembler emits on dropped slugs.
+_log = structlog.get_logger()
 
 
 # A handler receives the validated :class:`Operator` (so it can apply
@@ -193,17 +228,27 @@ class McpInvalidParamsError(Exception):
 
 
 async def _initialize(
-    _operator: Operator,
+    operator: Operator,
     params: dict[str, Any] | None,
 ) -> InitializeResponse:
     """Handle the ``initialize`` method per MCP 2025-06-18 §Initialization.
 
-    Returns a server-info + capabilities envelope. The spec requires the
-    server to echo the client's ``protocolVersion`` when it supports it,
-    or respond with another supported version otherwise; T1 supports
-    only :data:`PROTOCOL_VERSION` and always responds with that.
-    Negotiation past v0.2 (e.g. supporting an older revision for
-    legacy clients) is a v0.3 concern.
+    Returns a server-info + capabilities envelope, plus -- when the
+    operator's tenant has any ``kind='operational'`` conventions -- the
+    assembled session preamble in the spec-optional ``instructions``
+    field (G7.1-T4 #316). The preamble is built by
+    :func:`meho_backplane.conventions.preamble.assemble_preamble`:
+    deterministic highest-``priority``-first packing wrapped in a
+    delimited lower-trust block; when the packer drops entries to fit
+    the token budget, the dropped slugs are logged at WARNING so the
+    omission is loud (silent truncation of an operational rule is a
+    safety bug per the issue body).
+
+    The spec requires the server to echo the client's ``protocolVersion``
+    when it supports it, or respond with another supported version
+    otherwise; T1 supports only :data:`PROTOCOL_VERSION` and always
+    responds with that. Negotiation past v0.2 (e.g. supporting an older
+    revision for legacy clients) is a v0.3 concern.
     """
     # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
     # aligned: a missing ``params`` field on the JSON-RPC request and an
@@ -218,19 +263,51 @@ async def _initialize(
             f"initialize: {exc.error_count()} validation error(s)",
         ) from exc
 
+    # G7.1-T4 (#316): assemble the operator's tenant session preamble
+    # from ``kind='operational'`` conventions and ship it as
+    # ``instructions`` per MCP 2025-06-18 §Initialization. An empty
+    # tenant returns ``("", [])``; the empty-string text falls through
+    # to ``None`` below so the wire serializer drops the field rather
+    # than emitting a literal empty string (which would still count as
+    # a non-null ``instructions`` value to a spec-conforming client).
+    # Imported inside the function to break the import cycle (mcp.server
+    # → conventions.preamble → db → ... → mcp.server). The cost of one
+    # function-local import per ``initialize`` call is negligible (the
+    # module is already loaded by the time any handshake arrives).
+    from meho_backplane.conventions.preamble import assemble_preamble
+
+    preamble = await assemble_preamble(operator.tenant_id)
+    if preamble.dropped_slugs:
+        # Loud, not silent -- the dropped-slug list is part of the
+        # contract per the issue body's acceptance criterion. WARNING
+        # rather than ERROR because the preamble still degrades
+        # gracefully (the *highest*-priority entries are the ones
+        # kept; the operator-facing surface that flags the overflow
+        # is the CLI's ``meho conventions list`` non-zero exit, T3).
+        _log.warning(
+            "mcp_preamble_over_budget",
+            tenant_id=str(operator.tenant_id),
+            dropped_slugs=preamble.dropped_slugs,
+        )
+
     # T3 (#248) registers tools/list, tools/call, resources/list,
     # resources/templates/list, resources/read — so the capabilities
-    # envelope now safely advertises both surfaces. ``listChanged: false``
+    # envelope safely advertises both surfaces. ``listChanged: false``
     # because v0.2 doesn't emit notifications/tools/list_changed
     # (registry is populated at startup and never mutates at runtime).
-    # ``subscribe: false`` on resources because v0.2 doesn't implement
-    # resources/subscribe.
+    # ``subscribe`` is read from :data:`RESOURCES_SUBSCRIBE_ENABLED` so
+    # the capability declaration and the conditional-emit gate on the
+    # write paths (G7.1-T4 conventions edits) share one source of truth.
     return InitializeResponse(
         capabilities=ServerCapabilities(
             tools={"listChanged": False},
-            resources={"listChanged": False, "subscribe": False},
+            resources={
+                "listChanged": False,
+                "subscribe": RESOURCES_SUBSCRIBE_ENABLED,
+            },
         ),
         serverInfo={"name": _SERVER_NAME, "version": __version__},
+        instructions=preamble.text or None,
     )
 
 
@@ -340,8 +417,6 @@ def _error_response(
 
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
-
-_log = structlog.get_logger()
 
 
 def _coerce_request_id(payload: dict[str, Any]) -> JsonRpcId:

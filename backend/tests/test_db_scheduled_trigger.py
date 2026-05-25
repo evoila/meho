@@ -104,13 +104,17 @@ async def _enable_sqlite_foreign_keys(session: AsyncSession) -> None:
 async def _seed_tenant_and_definition(
     session: AsyncSession,
     *,
-    tenant_slug: str = "rdc-internal",
+    tenant_slug: str = "scheduler-test-tenant",
 ) -> tuple[uuid.UUID, uuid.UUID]:
     """Insert a tenant + agent_definition row, return their UUIDs.
 
     ``scheduled_trigger`` carries real FKs to both tables, so the
     per-test setup needs both rows to avoid spurious
     :class:`IntegrityError` under PRAGMA foreign_keys=ON.
+
+    The slug must not be ``rdc-internal``: migration 0018 (G7.1-T5 #317)
+    seeds a real tenant with that slug into the migrated test DB, so
+    reusing it collides on the unique ``tenant.slug`` constraint.
     """
     tenant_id = uuid.uuid4()
     definition_id = uuid.uuid4()
@@ -513,10 +517,10 @@ def test_in_flight_policies_match_enum() -> None:
     }
 
 
-def _load_migration_0018() -> object:
-    """Load migration ``0018`` as a module via its file path.
+def _load_migration_0020() -> object:
+    """Load migration ``0020`` as a module via its file path.
 
-    Alembic version files are digit-prefixed (``0018_create_scheduled_trigger``)
+    Alembic version files are digit-prefixed (``0020_create_scheduled_trigger``)
     and so are not importable as normal dotted modules. Loading by file
     path with :mod:`importlib.util` is the robust way to reach the
     migration's recorded literal tuples for the drift guards below.
@@ -528,9 +532,9 @@ def _load_migration_0018() -> object:
         Path(__file__).resolve().parent.parent
         / "alembic"
         / "versions"
-        / "0018_create_scheduled_trigger.py"
+        / "0020_create_scheduled_trigger.py"
     )
-    spec = importlib.util.spec_from_file_location("_migration_0018", path)
+    spec = importlib.util.spec_from_file_location("_migration_0020", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -539,7 +543,7 @@ def _load_migration_0018() -> object:
 
 def test_migration_kind_literals_match_model_enum() -> None:
     """The migration's frozen kind tuple matches the model enum."""
-    migration = _load_migration_0018()
+    migration = _load_migration_0020()
     assert set(migration._SCHEDULED_TRIGGER_KINDS) == {  # type: ignore[attr-defined]
         k.value for k in ScheduledTriggerKind
     }
@@ -547,7 +551,7 @@ def test_migration_kind_literals_match_model_enum() -> None:
 
 def test_migration_status_literals_match_model_enum() -> None:
     """The migration's frozen status tuple matches the model enum."""
-    migration = _load_migration_0018()
+    migration = _load_migration_0020()
     assert set(migration._SCHEDULED_TRIGGER_STATUSES) == {  # type: ignore[attr-defined]
         s.value for s in ScheduledTriggerStatus
     }
@@ -555,7 +559,7 @@ def test_migration_status_literals_match_model_enum() -> None:
 
 def test_migration_in_flight_policy_literals_match_model_enum() -> None:
     """The migration's frozen in_flight_policy tuple matches the model enum."""
-    migration = _load_migration_0018()
+    migration = _load_migration_0020()
     assert set(migration._SCHEDULED_TRIGGER_IN_FLIGHT_POLICIES) == {  # type: ignore[attr-defined]
         p.value for p in ScheduledTriggerInFlightPolicy
     }

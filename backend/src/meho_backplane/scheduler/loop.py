@@ -72,12 +72,32 @@ replica sleeps a tick. Even if the advisory-lock claim were removed,
 the ``SELECT ... FOR UPDATE SKIP LOCKED`` row claim plus the
 conditional-UPDATE advance/mark-fired step guarantees single-fire
 across all in-flight claimers.
+
+Delivery semantics
+==================
+
+The dispatcher is **at-most-once** per scheduled instant, *not*
+exactly-once. The advance/mark-fired conditional UPDATE commits
+*before* the agent invoke (see :func:`_advance_cron_in_txn` /
+:func:`_mark_one_off_fired_in_txn`) so an invoke that crashes /
+times out leaves the trigger advanced (cron) or terminal (one-off)
+with no ``agent_run`` row recorded. This is the conservative
+direction the consumer doc (G11.3-T4) accepts: a missed fire is
+visible in audit (the advance/fired transition is logged) and the
+operator can manually re-fire via the admin surface. The opposite
+choice (commit *after* invoke) would risk double-fire under
+crash-during-commit and is rejected for that reason.
+
+Operators wanting at-least-once semantics on a per-trigger basis set
+``in_flight_policy = 'resume'`` (T4 #825 owns the resume mechanics).
+The default ``fail_into_audit`` keeps the at-most-once contract.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -248,17 +268,20 @@ async def _park_trigger(
     )
 
 
-def _coerce_inputs(inputs: dict[str, object]) -> str:
+def _coerce_inputs(inputs: dict[str, object] | None) -> str:
     """Render a trigger's ``inputs`` JSON into the str the invoker wants.
 
     The invocation surface's :meth:`AgentInvoker.run` takes ``inputs:
     str`` (the loop's user-prompt string). A scheduled trigger's
     payload is JSON-shaped for future extensibility, so the runtime
     contract is: prefer the conventional ``"prompt"`` key when present
-    (the common shape), else dump the dict as JSON.
+    (the common shape), else dump the dict as JSON. ``None`` (the
+    trigger inherited the agent definition's default prompt) renders
+    as an empty string so the invoker reads the definition's
+    ``system_prompt`` unaffected.
     """
-    import json
-
+    if inputs is None:
+        return ""
     if "prompt" in inputs and isinstance(inputs["prompt"], str):
         return inputs["prompt"]
     return json.dumps(inputs, sort_keys=True, default=str)

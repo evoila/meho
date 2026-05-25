@@ -484,8 +484,8 @@ async def test_corrupt_cron_expression_parks_the_row() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _load_migration_0018() -> ModuleType:
-    """Load migration ``0018`` by file path (digit-prefixed -- not a dotted mod).
+def _load_migration_0020() -> ModuleType:
+    """Load migration ``0020`` by file path (digit-prefixed -- not a dotted mod).
 
     Mirrors :func:`tests.test_db_agent_run._load_migration_0017`.
     """
@@ -496,9 +496,9 @@ def _load_migration_0018() -> ModuleType:
         Path(__file__).resolve().parent.parent
         / "alembic"
         / "versions"
-        / "0018_create_scheduled_trigger.py"
+        / "0020_create_scheduled_trigger.py"
     )
-    spec = importlib.util.spec_from_file_location("_migration_0018", path)
+    spec = importlib.util.spec_from_file_location("_migration_0020", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -509,7 +509,7 @@ def test_scheduled_trigger_kind_check_matches_enum() -> None:
     """``ScheduledTriggerKind`` values agree with the migration's CHECK list."""
     from meho_backplane.db.models import _SCHEDULED_TRIGGER_KINDS
 
-    migration = _load_migration_0018()
+    migration = _load_migration_0020()
     assert set(_SCHEDULED_TRIGGER_KINDS) == {k.value for k in ScheduledTriggerKind}
     assert set(_SCHEDULED_TRIGGER_KINDS) == set(migration._SCHEDULED_TRIGGER_KINDS)
 
@@ -518,7 +518,7 @@ def test_scheduled_trigger_status_check_matches_enum() -> None:
     """``ScheduledTriggerStatus`` values agree with the migration's CHECK list."""
     from meho_backplane.db.models import _SCHEDULED_TRIGGER_STATUSES
 
-    migration = _load_migration_0018()
+    migration = _load_migration_0020()
     assert set(_SCHEDULED_TRIGGER_STATUSES) == {s.value for s in ScheduledTriggerStatus}
     assert set(_SCHEDULED_TRIGGER_STATUSES) == set(migration._SCHEDULED_TRIGGER_STATUSES)
 

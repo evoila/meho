@@ -511,8 +511,8 @@ type AgentRunStatusResponse struct {
 //     decision audit row. Terminal.
 //
 // The enum and the “CHECK (status IN (...))“ constraint on the DB
-// table move in lock-step (migration “0020“); the drift guard
-// :func:`tests.test_migration_0020_approval_request.test_status_check_matches_enum`
+// table move in lock-step (migration “0023“); the drift guard
+// :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
 // asserts equality at unit-test time.
 type ApprovalRequestStatus string
 
@@ -552,8 +552,8 @@ type ApprovalRequestView struct {
 	//   decision audit row. Terminal.
 	//
 	// The enum and the ``CHECK (status IN (...))`` constraint on the DB
-	// table move in lock-step (migration ``0020``); the drift guard
-	// :func:`tests.test_migration_0020_approval_request.test_status_check_matches_enum`
+	// table move in lock-step (migration ``0023``); the drift guard
+	// :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
 	// asserts equality at unit-test time.
 	Status   ApprovalRequestStatus `json:"status"`
 	TargetId *openapi_types.UUID   `json:"target_id"`

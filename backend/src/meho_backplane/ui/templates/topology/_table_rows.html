@@ -13,7 +13,19 @@
 <tbody id="topology-table-body">
   {% if nodes %}
     {% for node in nodes %}
-      <tr data-node-id="{{ node.id }}" data-node-kind="{{ node.kind }}">
+      {#- ``selected_id`` is the cross-link payload from the graph
+          view (T2 / #881): a graph node-tap navigates back to the
+          table with ``?selected=<id>``; the matching row gets a
+          ``data-selected="true"`` marker the page-level scroll-into-view
+          script picks up + a visual highlight class. Empty string =
+          no selection (the StrictUndefined-safe default the route
+          renders). -#}
+      {%- set is_selected = (selected_id and (node.id | string) == selected_id) -%}
+      <tr
+        data-node-id="{{ node.id }}"
+        data-node-kind="{{ node.kind }}"
+        {% if is_selected %}data-selected="true" class="bg-base-300/40"{% endif %}
+      >
         <td>
           <input
             type="checkbox"
@@ -58,7 +70,7 @@
           <span class="text-xs opacity-50">—</span>
         </td>
         <td class="text-right tabular-nums">{{ node.children_count }}</td>
-        <td>
+        <td class="flex items-center gap-1">
           <button
             type="button"
             class="btn btn-ghost btn-xs"
@@ -69,6 +81,18 @@
           >
             View
           </button>
+          {#- "Show in graph" cross-link -- plain anchor so a full-page
+              nav to the graph view re-renders Cytoscape with this node
+              selected (T2 / #881 cross-link). The graph view's init
+              script reads ``?selected=<id>`` and centers + selects
+              the matching node. -#}
+          <a
+            class="btn btn-ghost btn-xs"
+            href="/ui/topology?view=graph&selected={{ node.id }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}"
+            aria-label="Show {{ node.name }} in graph view"
+          >
+            Graph
+          </a>
         </td>
       </tr>
     {% endfor %}

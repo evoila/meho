@@ -785,9 +785,114 @@ pin both invariants.
 * **Multi-row select is client-side only** — Alpine.js holds the
   selection set. T1 doesn't ship a bulk-action endpoint; the selection
   state is exposed for a future button to consume.
-* **No graph view yet** — `view=table` is the only mode T1 honours.
-  T2 (#881) adds `view=graph` and switches routing on the query
-  parameter.
+
+## Topology graph view (Task #881)
+
+Initiative [#342](https://github.com/evoila/meho/issues/342) (G10.5
+Topology UI), Task [#881](https://github.com/evoila/meho/issues/881)
+(G10.5-T2) layers an interactive Cytoscape.js graph view on top of the
+same `/ui/topology` path via the `?view=graph` branch. The same
+`GET /ui/topology` handler serves both surfaces; one of three response
+shapes is selected per request:
+
+| Query | Header | Response |
+| ----- | ------ | -------- |
+| `view=table` (default) | _none_ | `topology/table.html` full page |
+| `view=table` (default) | `HX-Request: true` | `topology/_table_rows.html` fragment |
+| `view=graph` | _none_ | `topology/graph.html` full page (Cytoscape island) |
+
+The graph view does not have an HTMX-fragment variant — layout
+switches happen client-side via `cy.layout({name}).run()`, and filter
+changes round-trip to the server as a full-page navigation so the URL
+captures the active mode for copy/paste.
+
+### Module layout
+
+| Module | Purpose |
+| ------ | ------- |
+| `meho_backplane.ui.routes.topology.table` | `GET /ui/topology` handler. Branches on `view=` and delegates the `graph` branch to `topology.graph.render_graph`; the `table` branch keeps the T1 tabular rendering. |
+| `meho_backplane.ui.routes.topology.graph` | The `?view=graph` render. Pulls nodes via the substrate `list_nodes` capped at 500 (`GRAPH_NODE_CAP`) and edges via a local SQLite-portable ORM query (the substrate `list_edges` relies on PG `jsonb_typeof` for its conflict predicate; the graph view does not need conflict info, so the local helper is the right factoring). Emits node + edge JSON as a `<script type="application/json">` data island the `topology-graph.js` controller reads on init. |
+
+### Vendored JS
+
+The graph view adds four vendored files alongside the chassis bundle
+(`htmx`, `sse`, `alpine`, `cytoscape`, `daisyui`). All four are
+SHA256-pinned in
+[`backend/src/meho_backplane/ui/static/src/vendor/VENDOR.md`](../../backend/src/meho_backplane/ui/static/src/vendor/VENDOR.md).
+
+| File | Library | Version | Notes |
+| ---- | ------- | ------- | ----- |
+| `layout-base.js` | layout-base | 2.0.1 | Shared layout primitive; exposes `window.layoutBase`. |
+| `cose-base.js` | cose-base | 2.2.0 | Consumes `layoutBase`, exposes `window.coseBase`. |
+| `cytoscape-cose-bilkent.js` | cytoscape-cose-bilkent | 4.1.0 | Default organic layout. Consumes `coseBase`; exposes `window.cytoscapeCoseBilkent`. |
+| `cytoscape-dagre.js` | cytoscape-dagre | 3.0.0 | Hierarchical layout; bundles dagre internally (the 2.x line required a separate `dagre` vendored file). |
+
+Script load order in `graph.html` is **load-bearing** (the UMD
+wrappers consume globals exposed by their predecessors):
+
+```
+cytoscape.min.js → layout-base.js → cose-base.js
+                → cytoscape-cose-bilkent.js
+                → cytoscape-dagre.js
+                → topology-graph.js   (the per-page controller)
+```
+
+All carry `defer` so they execute in document order after the HTML is
+parsed — the chassis CSP posture (zero inline JS) is unchanged.
+
+### Controllers
+
+| File | Purpose |
+| ---- | ------- |
+| `static/src/app/topology-graph.js` | Cytoscape init for the graph view. Registers the two layout plugins once (`cytoscape.use(...)`), reads the elements + selected-id data islands, mounts `<div id="cy">`, wires node-tap → HTMX drawer swap + URL sync, and drives the `cy.layout(...).run()` switcher off the `<select id="topology-graph-layout">` change event. |
+| `static/src/app/topology-table.js` | Cross-link helper for the tabular view. On `DOMContentLoaded` it finds any `<tr data-selected="true">` row (rendered by `_table_rows.html` when the route received `?selected=<id>`), scrolls it into view, and applies a brief outline pulse so the operator's eye catches it. No-op when no row matches. |
+
+### Cross-link contract (table ↔ graph)
+
+The `?selected=<uuid>` query param round-trips selection between the
+two surfaces.
+
+* **Graph → table**: `cy.on('tap', 'node', ...)` opens the drawer
+  (HTMX swap of `/ui/topology/node/<id>` into `#node-drawer`),
+  `history.replaceState`s `?selected=<id>` into the URL, and updates
+  the header's "Show in table" link `href` so a click takes the
+  operator to `/ui/topology?view=table&selected=<id>`. The table page
+  marks the matching row `data-selected="true"`, and
+  `topology-table.js` scrolls + highlights it.
+* **Table → graph**: each row carries a "Graph" link to
+  `/ui/topology?view=graph&selected=<id>`. The graph route emits the
+  id into `#topology-graph-selected`; `topology-graph.js` reads it,
+  centers the matching node on the first `layoutstop`, selects it,
+  and opens the same drawer.
+
+Both directions preserve active filters (`kind`, `q`) so the toggle
+keeps operator state.
+
+### 500-node render cap
+
+Per Initiative #342 work item #6 ("Performance discipline.
+Cytoscape handles ~1k nodes; v0.2 caps frontend-side rendering at
+500 nodes"), `graph.GRAPH_NODE_CAP = 500` and the route passes
+`limit=500` into `list_nodes`. When the returned list saturates the
+cap, the page surfaces a truncation banner ("Capped at 500 — narrow
+the filter or use the dependents query (T3) for larger sets"). Larger
+sets reach the operator via T3 (#882)'s subgraph query.
+
+### Templates
+
+| Template | Purpose |
+| -------- | ------- |
+| `topology/graph.html` | Full-page Cytoscape surface. Extends `base.html`; renders the view toggle, filter bar, status row + layout `<select>`, the `<div id="cy">` mount, the `#node-drawer` slot (shared with the table view), and two `<script type="application/json">` data islands carrying the elements + selected-id payloads. |
+
+### Cross-tenant isolation
+
+Same posture as the tabular surface: every read goes through
+`list_nodes` (substrate-level `WHERE graph_node.tenant_id = :tenant_id`
+first clause) plus a local `_fetch_edges_for_nodes` that joins both
+endpoints with explicit `tenant_id` predicates (defence-in-depth
+matching the T1 drawer's `_fetch_edges` shape). Cross-tenant nodes /
+edges cannot surface even if a future invariant violation introduced
+one.
 
 ## Known issues / open items
 
@@ -803,14 +908,168 @@ pin both invariants.
 - **No dark-mode toggle UI** even though DaisyUI's `dim` theme is
   enabled — out of scope per Initiative #337.
 
+## Topology query overlays + 30s polling-refresh (Task #882)
+
+Initiative [#342](https://github.com/evoila/meho/issues/342) (G10.5
+Topology UI), Task [#882](https://github.com/evoila/meho/issues/882)
+(G10.5-T3) layers dependents/dependencies subgraph + shortest-path
+overlays on the existing `?view=graph` surface (T2 / #881) plus a
+30-second HTMX polling refresh so the rendered view stays in sync
+with the live graph without losing the operator's pan/zoom.
+
+### URL contract (graph branch additions)
+
+| Query | Render |
+| --- | --- |
+| `?view=graph&from=<name>[&from_kind=<kind>][&depth=N]` | Dependents subgraph rooted at `<name>` |
+| `?view=graph&from=<name>&direction=dependencies[&from_kind=<kind>][&depth=N]` | Dependencies subgraph rooted at `<name>` |
+| `?view=graph&from=A&to=B[&from_kind=...&to_kind=...&max_hops=N]` | Shortest path between `A` and `B` (highlighted edges) |
+
+`depth` defaults to `3` (operator-friendly v0.2 value); `max_hops`
+defaults to `8`. `direction` is dual-purpose by branch (sort
+direction on the table, overlay direction on the graph) -- see
+`backend/src/meho_backplane/ui/routes/topology/table.py` module
+docstring for the resolution rules.
+
+### Substrate split (UI-facing helpers, dialect-portable)
+
+| Module | Responsibility |
+| --- | --- |
+| `meho_backplane.ui.routes.topology.queries` | `fetch_dependents_subgraph` / `fetch_dependencies_subgraph` -- bounded BFS over the closed neighbour set, returns `SubgraphResult(nodes, edges, truncated)`. Public `resolve_anchor` resolves `(tenant_id, name [, kind])` into a `GraphNode` row (raises `NodeNotFoundError` / `AmbiguousNodeError`). |
+| `meho_backplane.ui.routes.topology.path_queries` | `fetch_path_subgraph` -- bidirectional BFS shortest-path. Returns `PathSubgraphResult(path_node_ids, nodes, edges, highlighted_edge_ids, total_hops)`. |
+| `meho_backplane.ui.routes.topology.graph` | `render_graph` dispatcher: dispatches to `_render_full_inventory`, `_render_dependents_or_dependencies_overlay`, or `_render_path_overlay` based on `?from=` + `?to=` presence; serves either the full page or the HTMX data-island fragment (on `HX-Request`). |
+
+The UI-facing helpers are intentionally separate from the substrate
+`meho_backplane.topology.query.find_dependents` /
+`find_dependencies` / `find_path` verbs:
+
+1. **Dialect portability** -- the chassis unit-test fixture uses
+   SQLite; the substrate verbs are PG-only (PG `WITH RECURSIVE ...
+   CYCLE`). The UI helpers use plain SQLAlchemy ORM `select(...)`
+   so the unit suite covers the route end-to-end.
+2. **`tenant_id` + `db_session` shape** matches `list_nodes` rather
+   than the substrate's `Operator` requirement.
+3. **Subgraph emission** -- the substrate returns flat closure
+   lists; Cytoscape needs the edges between visited nodes too.
+
+The substrate verbs stay the source of truth for the REST + CLI +
+MCP surfaces.
+
+### Substrate-parity invariants
+
+Every UI BFS module mirrors the substrate's edge-traversal
+predicates so the same closure is reported on both surfaces:
+
+* **Soft-delete exclusion** -- `GraphEdge.last_seen IS NOT NULL`
+  on every edge query, matching the substrate's `_TRAVERSAL_SQL`.
+* **Superseded-edge exclusion** -- edges carrying
+  `properties->>'superseded_by' IS NOT NULL` are dropped from
+  both the dependents/dependencies BFS and the bidirectional
+  path BFS. Mirrors Initiative #364 §6 / Task #595 on the
+  substrate. The portable SQLAlchemy idiom uses
+  `or_(GraphEdge.properties["superseded_by"].is_(None),
+  GraphEdge.properties["superseded_by"] == JSON.NULL)` because
+  PG returns SQL NULL on a missing JSON key while SQLite's JSON1
+  returns the JSON NULL token. Regression tests:
+  `test_dependents_overlay_excludes_superseded_edges` /
+  `test_path_overlay_excludes_superseded_edges`.
+
+A divergence here is a substrate-vs-UI bug: an operator who
+curates supersede annotations on the substrate REST/CLI API would
+see edges in the UI overlay that the API hides, with no way to
+reconcile.
+
+### Tenant-scoping defense in depth
+
+Every overlay edge query enforces the tenant boundary at three
+points: the edge row itself + both endpoint joins (aliased
+`from_alias` / `to_alias` on `GraphNode`). Same posture
+`...graph._fetch_edges_for_nodes` and `...detail._fetch_edges`
+established for the existing surfaces. The cross-tenant isolation
+acceptance criterion (`test_dependents_overlay_isolates_other_tenants_graph`,
+`test_path_overlay_isolates_other_tenants_graph`) covers each
+overlay flavour.
+
+### 30s polling-refresh wiring
+
+The graph view's data-island wrapper carries:
+
+```html
+<div id="topology-graph-data-wrapper"
+     hx-get="{{ refresh_url }}"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML"
+     hx-headers='{"X-CSRF-Token": "..."}'>
+  <script type="application/json" id="topology-graph-data">[...]</script>
+  <script type="application/json" id="topology-graph-selected">"..."</script>
+  <script type="application/json" id="topology-graph-path-nodes">[...]</script>
+</div>
+```
+
+On every 30s tick HTMX issues `GET /ui/topology?view=graph...`
+with `HX-Request: true`; the route returns the
+`topology/_graph_data_island.html` fragment only. The
+`topology-graph.js` controller listens for `htmx:afterSwap` on the
+wrapper, replaces the elements via `cy.batch(...)`, then re-runs
+the active layout with `preserveViewport: true` (the second
+argument to `layoutOptions(name, preserveViewport)`). Passing
+`true` injects `fit: false` and `randomize: false` into the
+layout options so:
+
+* `cose-bilkent` does NOT zoom-to-fit on layout-stop (the default
+  `fit: true` would override any synchronous pan/zoom restore and
+  was the root cause of PR #1049's B2 finding); and
+* node positions are NOT re-randomised every 30s, preserving the
+  operator's mental map of the graph across refreshes.
+
+Initial render and the user-driven layout-switcher pass
+`preserveViewport: false` (re-fit + re-randomize) because both are
+deliberate viewport-changing actions.
+
+### Error surface
+
+| Status | Reason | Template |
+| --- | --- | --- |
+| 404 | Unknown name (or kind-pinned anchor missing in this tenant) | `topology/_graph_overlay_error.html` (full page) / `topology/_graph_overlay_error_fragment.html` (HX-Request) |
+| 409 | Ambiguous bare name resolves to multiple kinds | Same templates as 404 with a kind-disambiguation hint |
+
+The error fragment keeps the polling trigger active so a transient
+hard-delete + re-create recovers automatically on the next tick.
+
+Both statuses are declared on the `GET /ui/topology`
+`router.add_api_route(..., responses={404: ..., 409: ...})` so
+the generated CLI client + downstream OpenAPI consumers see the
+real response set rather than a 200/422-only contract. The
+`direction` query param's OpenAPI schema carries
+`pattern: ^(asc|desc|dependents|dependencies)$` (the union of
+table-sort + graph-overlay values) so the same client generator
+sees the dual-purpose contract instead of a free-form `string`.
+
+### Tests
+
+`backend/tests/test_ui_topology_queries.py` covers every acceptance
+criterion: dependents/dependencies subgraph rendering,
+depth-bounding, path overlay + highlighted edges (with ordered
+path-id assertion), polling endpoint shape (HTMX fragment),
+cross-tenant isolation (both overlay flavours), 404 unknown-name,
+409 ambiguous-name, drawer cross-link to `?from=`, substrate-
+parity superseded-edge exclusion on both overlay flavours, and
+two source-anchored assertions on `topology-graph.js` (polling
+viewport-preservation + `node.highlight` style rule). All pass
+against the SQLite fixture.
+
 ## References
 
 - v0.2 decisions [#9 / #10 / #11](../planning/v0.2-decisions.md).
 - HTMX 2 — https://htmx.org/
+- HTMX `hx-trigger="every Ns"` — https://htmx.org/attributes/hx-trigger/
+- HTMX `htmx:afterSwap` event — https://htmx.org/events/#htmx:afterSwap
 - Jinja2 — https://jinja.palletsprojects.com/
 - Tailwind CSS 4 — https://tailwindcss.com/blog/tailwindcss-v4
 - Tailwind 4 standalone CLI install — https://tailwindcss.com/docs/installation
 - DaisyUI 5 install — https://daisyui.com/docs/install/
 - Alpine.js — https://alpinejs.dev/
 - Cytoscape.js — https://js.cytoscape.org/
+- Cytoscape `cy.pan` / `cy.zoom` — https://js.cytoscape.org/#cy.pan
+- Cytoscape selector classes — https://js.cytoscape.org/#selectors/class
 - FastAPI `StaticFiles` (consumed by T5) — https://fastapi.tiangolo.com/tutorial/static-files/

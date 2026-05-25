@@ -1,0 +1,59 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  G10.5-T3 (#882) overlay error page.
+
+  Rendered when ``?from=`` (and optionally ``?to=``) resolve to a
+  missing node (404) or an ambiguous bare name (409). Surfaces the
+  error message in the standard chrome so the operator stays in the
+  topology surface rather than bouncing to a global error page.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Topology &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Topology overlay</h1>
+      <p class="text-sm opacity-70">
+        The requested overlay anchor could not be resolved.
+      </p>
+    </div>
+    <a class="btn btn-sm btn-ghost" href="/ui/topology?view=graph">
+      Back to full graph
+    </a>
+  </header>
+
+  <div
+    class="alert alert-error"
+    role="alert"
+    data-test="overlay-error"
+    data-error-status="{{ error_status }}"
+  >
+    <div>
+      <h2 class="font-semibold">
+        {% if error_status == 404 %}
+          Node not found
+        {% elif error_status == 409 %}
+          Ambiguous node name
+        {% else %}
+          Overlay error
+        {% endif %}
+        ({{ error_status }})
+      </h2>
+      <p class="text-sm">{{ error_message }}</p>
+      {% if error_status == 409 %}
+        <p class="text-sm mt-2">
+          Pass <code>from_kind=&lt;kind&gt;</code> (or
+          <code>to_kind=&lt;kind&gt;</code>) to disambiguate the
+          anchor; the table view shows each node's kind so you can
+          pick the right one.
+        </p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

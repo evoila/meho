@@ -5252,7 +5252,7 @@
           "ui-topology"
         ],
         "summary": "Ui Topology Table",
-        "description": "``GET /ui/topology[?view=table&sort=...&direction=...&kind=...&q=...]``.\n\n``view`` is accepted but unused in T1 (the only mode is the\ntable); T2 (#881) will branch on ``view`` to render the\nCytoscape graph instead. Documenting the param in the\nsignature now keeps the URL contract forward-compatible.",
+        "description": "Serve the topology UI, branching on ``?view=``. See module\ndocstring for the URL contract + dual-purpose ``direction``\nsemantics (table sort vs graph overlay).",
         "operationId": "ui_topology_table_ui_topology_get",
         "parameters": [
           {
@@ -5269,9 +5269,14 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/_SortDirection",
-              "default": "asc"
-            }
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^(asc|desc|dependents|dependencies)$",
+              "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).",
+              "default": "asc",
+              "title": "Direction"
+            },
+            "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``)."
           },
           {
             "name": "kind",
@@ -5312,10 +5317,87 @@
             "in": "query",
             "required": false,
             "schema": {
+              "$ref": "#/components/schemas/_ViewMode",
+              "default": "table"
+            }
+          },
+          {
+            "name": "selected",
+            "in": "query",
+            "required": false,
+            "schema": {
               "type": "string",
-              "maxLength": 16,
+              "format": "uuid",
               "nullable": true,
-              "title": "View"
+              "title": "Selected"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "From"
+            }
+          },
+          {
+            "name": "from_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "From Kind"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "nullable": true,
+              "title": "To"
+            }
+          },
+          {
+            "name": "to_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "To Kind"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Depth"
+            }
+          },
+          {
+            "name": "max_hops",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 16,
+              "minimum": 1,
+              "nullable": true,
+              "title": "Max Hops"
             }
           }
         ],
@@ -5328,6 +5410,18 @@
                   "type": "string"
                 }
               }
+            }
+          },
+          "404": {
+            "description": "Overlay anchor (``?from=<name>``) or path endpoint (``?from=&to=``) does not resolve in the caller's tenant. Returns the overlay-error fragment.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Overlay anchor or path endpoint is a bare name that resolves to multiple kinds in the caller's tenant (``kind=`` disambiguation required). Returns the overlay-error fragment with the candidate kinds.",
+            "content": {
+              "text/html": {}
             }
           },
           "422": {
@@ -9656,14 +9750,14 @@
         "title": "_SortColumn",
         "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
       },
-      "_SortDirection": {
+      "_ViewMode": {
         "type": "string",
         "enum": [
-          "asc",
-          "desc"
+          "table",
+          "graph"
         ],
-        "title": "_SortDirection",
-        "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
+        "title": "_ViewMode",
+        "description": "Closed enum of view modes exposed on ``GET /ui/topology``.\n\n``table`` is the default (T1 / #880); ``graph`` switches to the\nCytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps\ntemplate URL building stable -- ``str(_ViewMode.GRAPH)`` is\n``\"graph\"`` (not ``\"_ViewMode.GRAPH\"``). An out-of-range value\nfails Pydantic validation (422) at the HTTP boundary so the route\nbody never sees an unknown mode."
       }
     }
   }

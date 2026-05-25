@@ -86,10 +86,21 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 async def _seed_tenant(slug: str = "rdc-internal") -> uuid.UUID:
-    """Insert one ``tenant`` row and return its id."""
+    """Return the tenant row's id, inserting it on the first call.
+
+    Look-up-then-insert -- migration ``0018`` seeds the ``rdc-internal``
+    tenant into the per-worker schema template
+    (:func:`tests.conftest._schema_template_db`); a plain INSERT would
+    trip ``UNIQUE constraint failed: tenant.slug``.
+    """
     sessionmaker = get_sessionmaker()
-    tenant_id = uuid.uuid4()
     async with sessionmaker() as session:
+        existing: uuid.UUID | None = await session.scalar(
+            select(Tenant.id).where(Tenant.slug == slug),
+        )
+        if existing is not None:
+            return existing
+        tenant_id = uuid.uuid4()
         session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
         await session.commit()
     return tenant_id

@@ -201,19 +201,31 @@ def _register_fake() -> None:
 
 
 async def _seed_tenant_and_target(slug: str) -> tuple[uuid.UUID, Target]:
-    """Insert one tenant + one target for it, returning both."""
+    """Insert one tenant + one target for it, returning both.
+
+    Look-up-then-insert on the tenant -- migration ``0018`` seeds the
+    ``rdc-internal`` tenant into the per-worker schema template
+    (:func:`tests.conftest._schema_template_db`); a plain INSERT would
+    trip ``UNIQUE constraint failed: tenant.slug``.
+    """
     sessionmaker = get_sessionmaker()
-    tenant_id = uuid.uuid4()
-    target = Target(
-        id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        name=f"vcenter-{slug}",
-        aliases=[],
-        product="faketopo",
-        host="vc.example.test",
-    )
     async with sessionmaker() as session:
-        session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
+        existing: uuid.UUID | None = await session.scalar(
+            select(Tenant.id).where(Tenant.slug == slug),
+        )
+        if existing is not None:
+            tenant_id = existing
+        else:
+            tenant_id = uuid.uuid4()
+            session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
+        target = Target(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            name=f"vcenter-{slug}",
+            aliases=[],
+            product="faketopo",
+            host="vc.example.test",
+        )
         session.add(target)
         await session.commit()
         await session.refresh(target)

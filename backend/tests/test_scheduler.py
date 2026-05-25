@@ -484,21 +484,21 @@ async def test_corrupt_cron_expression_parks_the_row() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _load_migration_0020() -> ModuleType:
-    """Load migration ``0020`` by file path (digit-prefixed -- not a dotted mod).
+def _load_migration_by_name(name: str) -> ModuleType:
+    """Load an Alembic migration by file basename (digit-prefixed -- not a dotted mod).
 
-    Mirrors :func:`tests.test_db_agent_run._load_migration_0017`.
+    Mirrors :func:`tests.test_db_agent_run._load_migration_0017`. The
+    drift-guard tests below compose the migration history's literal
+    tuples for the status enum (0020 originated, 0021 widened with
+    ``fired``); using a name-parameterised loader keeps the helper
+    open to further widenings (0022+) without copy-pasting the path
+    incantation.
     """
     import importlib.util
     from pathlib import Path
 
-    path = (
-        Path(__file__).resolve().parent.parent
-        / "alembic"
-        / "versions"
-        / "0020_create_scheduled_trigger.py"
-    )
-    spec = importlib.util.spec_from_file_location("_migration_0020", path)
+    path = Path(__file__).resolve().parent.parent / "alembic" / "versions" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_migration_{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -509,18 +509,25 @@ def test_scheduled_trigger_kind_check_matches_enum() -> None:
     """``ScheduledTriggerKind`` values agree with the migration's CHECK list."""
     from meho_backplane.db.models import _SCHEDULED_TRIGGER_KINDS
 
-    migration = _load_migration_0020()
+    migration = _load_migration_by_name("0020_create_scheduled_trigger")
     assert set(_SCHEDULED_TRIGGER_KINDS) == {k.value for k in ScheduledTriggerKind}
     assert set(_SCHEDULED_TRIGGER_KINDS) == set(migration._SCHEDULED_TRIGGER_KINDS)
 
 
 def test_scheduled_trigger_status_check_matches_enum() -> None:
-    """``ScheduledTriggerStatus`` values agree with the migration's CHECK list."""
+    """``ScheduledTriggerStatus`` agrees with the effective migration history.
+
+    0020 shipped ``{active, paused, cancelled}``; 0021 widened the
+    ``CHECK`` to add ``fired`` (the terminal one-off state the
+    dispatcher transitions to after a successful single-fire). The
+    effective vocabulary is therefore the 0021 ``_V2`` literal; the
+    model's :class:`ScheduledTriggerStatus` enum must agree.
+    """
     from meho_backplane.db.models import _SCHEDULED_TRIGGER_STATUSES
 
-    migration = _load_migration_0020()
+    m_0021 = _load_migration_by_name("0021_scheduled_trigger_dispatcher_columns")
     assert set(_SCHEDULED_TRIGGER_STATUSES) == {s.value for s in ScheduledTriggerStatus}
-    assert set(_SCHEDULED_TRIGGER_STATUSES) == set(migration._SCHEDULED_TRIGGER_STATUSES)
+    assert set(_SCHEDULED_TRIGGER_STATUSES) == set(m_0021._SCHEDULED_TRIGGER_STATUSES_V2)
 
 
 # ---------------------------------------------------------------------------

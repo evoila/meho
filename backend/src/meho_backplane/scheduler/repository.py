@@ -120,6 +120,13 @@ async def create_one_off_trigger(
     timestamps; a naive input is treated as UTC.
     """
     run_at_utc = run_at.replace(tzinfo=UTC) if run_at.tzinfo is None else run_at.astimezone(UTC)
+    # ``fire_at`` is the column 0020's discriminated-union CHECK
+    # ``ck_scheduled_trigger_kind_fields`` requires on one-off rows;
+    # ``next_fire_at`` is the column T2's claim query scans. The two
+    # carry the same instant at insert time -- the scheduler reads
+    # ``next_fire_at`` for the scan and ``fire_at`` is the immutable
+    # scheduled instant retained for audit (admin surface shows it,
+    # ``mark_one_off_fired`` does not clear it).
     row = ScheduledTrigger(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -127,6 +134,7 @@ async def create_one_off_trigger(
         kind=ScheduledTriggerKind.ONE_OFF.value,
         cron_expr=None,
         timezone="UTC",
+        fire_at=run_at_utc,
         next_fire_at=run_at_utc,
         status=ScheduledTriggerStatus.ACTIVE.value,
         inputs=inputs,

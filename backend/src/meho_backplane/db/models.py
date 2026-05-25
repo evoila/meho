@@ -3180,11 +3180,18 @@ class ScheduledTriggerStatus(StrEnum):
       without recomputing.
     * :attr:`CANCELLED` -- terminal. The trigger row is retained for
       audit purposes but never fires again.
+    * :attr:`FIRED` -- terminal one-off state. Migration ``0021`` (T2
+      #823) widened the enum so a one-off trigger transitions
+      ``ACTIVE -> FIRED`` after its single dispatch instead of going
+      to ``CANCELLED`` (which carries operator-intent semantics).
+      :class:`ScheduledTrigger` rows in this state are retained for
+      audit (last-fired-at + identity_sub) but never re-dispatched.
     """
 
     ACTIVE = "active"
     PAUSED = "paused"
     CANCELLED = "cancelled"
+    FIRED = "fired"
 
 
 class ScheduledTriggerInFlightPolicy(StrEnum):
@@ -3379,6 +3386,13 @@ class ScheduledTrigger(Base):
     # Discriminated by ``kind`` -- exactly one populated; the DB-side
     # ``ck_scheduled_trigger_kind_fields`` CHECK enforces the invariant.
     cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Per-trigger IANA timezone name. Cron expressions evaluate in this
+    # zone via ``zoneinfo.ZoneInfo`` so an operator scheduling
+    # ``0 9 * * *`` in ``Europe/Sarajevo`` fires at 09:00 local rather
+    # than 09:00 UTC. Migration ``0021`` adds this column with a server
+    # default of ``'UTC'`` for the rows shipped by 0020; the ORM-side
+    # default keeps fresh inserts on the same backstop.
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
     fire_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -3418,6 +3432,29 @@ class ScheduledTrigger(Base):
         DateTime(timezone=True),
         nullable=True,
         default=None,
+    )
+    # JSON payload forwarded as the agent run's initial input by the
+    # dispatcher (T2 #823). Nullable: a trigger that just kicks off an
+    # agent definition with no extra parameters leaves this NULL.
+    # ``none_as_null=True`` keeps SQL NULL distinct from the JSON
+    # literal ``'null'`` -- the same discipline ``event_filter`` uses.
+    inputs: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # Identity ``sub`` the dispatcher impersonates when starting the
+    # agent run. Distinct from :attr:`created_by_sub` because the
+    # operator who created the trigger is not necessarily the identity
+    # the scheduler should fire under at runtime (e.g. a service
+    # principal). Migration ``0021`` adds this column with a server
+    # default of ``'__scheduler__'`` (a sentinel) so the rows shipped
+    # by 0020 remain valid; production triggers should set this
+    # explicitly at create time.
+    identity_sub: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="__scheduler__",
     )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

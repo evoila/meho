@@ -53,13 +53,16 @@ from uuid import UUID
 import structlog
 from prometheus_client import Counter
 
+from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.events import BroadcastEvent
 
 __all__ = [
+    "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
     "BROADCAST_EVENTS_PUBLISHED_TOTAL",
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
+    "publish_agent_announcement",
     "publish_event",
 ]
 
@@ -98,6 +101,24 @@ BROADCAST_EVENTS_PUBLISHED_TOTAL: Counter = Counter(
 BROADCAST_PUBLISH_ERRORS_TOTAL: Counter = Counter(
     "broadcast_publish_errors_total",
     "BroadcastEvent publishes that failed (Valkey unreachable / XADD error / teardown race).",
+)
+
+
+#: Per-phase counter for agent-authored announcement publishes (G6.4-T2
+#: #1092). Labelled by ``phase`` (``"start"`` / ``"update"`` /
+#: ``"completion"``) so dashboards can graph the announce-discipline
+#: cadence per tenant fleet. No paired "errors" counter -- the
+#: ``publish_agent_announcement`` entry point is **fail-loud** (distinct
+#: from :func:`publish_event`'s fail-open contract), so a Valkey teardown
+#: surfaces as a JSON-RPC ``-32603`` Internal Error to the calling
+#: agent rather than as a silent metric increment. The
+#: ``mcp_handler_error`` structlog event from the dispatcher's exception
+#: handler is the operational signal on the failure path; the success
+#: counter is the only metric this entry point emits.
+BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL: Counter = Counter(
+    "broadcast_agent_announcements_total",
+    "Agent-authored AgentAnnouncementEvent publishes (G6.4-T2 fail-loud entry).",
+    labelnames=("phase",),
 )
 
 
@@ -173,3 +194,82 @@ async def publish_event(event: BroadcastEvent) -> None:
         op_class=event.op_class,
         result_status=event.result_status,
     ).inc()
+
+
+async def publish_agent_announcement(event: AgentAnnouncementEvent) -> str:
+    """Fail-loud publish of an agent-authored announcement to the tenant stream.
+
+    Companion to :func:`publish_event` -- same wire shape
+    (``XADD meho:feed:{tenant_id}`` with a single ``event`` field
+    carrying the JSON-serialised model), same ``MAXLEN ~`` trim
+    semantics, same per-tenant stream key. The two differ on a single
+    load-bearing axis: failure semantics.
+
+    Fail-loud vs. fail-open
+    -----------------------
+
+    :func:`publish_event` swallows every exception silently because the
+    audit row is canonical and a request-path failure to log a
+    side-channel broadcast is worse than the operator missing one entry
+    in the feed. **Inverted contract here.**
+
+    An agent-authored announcement is the AGENT's deliberate
+    communication to its operators. A swallowed announcement leaves the
+    agent thinking it told the team while the team never saw it -- the
+    opposite of the team-coordination property the broadcast discipline
+    is meant to provide. The right semantics is:
+
+    1. Publisher raises on any redis-py / Valkey failure.
+    2. The MCP dispatcher (:mod:`meho_backplane.mcp.server`) catches the
+       exception and surfaces it as JSON-RPC ``-32603`` Internal Error.
+    3. The calling agent sees the error and can retry, reroute, or
+       degrade gracefully -- it KNOWS the announcement didn't land.
+
+    The same wire-side stream contract (one ``event`` JSON field per
+    entry) means T1's :func:`meho_backplane.mcp.tools.broadcast.broadcast_recent`
+    surfaces both kinds back to readers via the same ``XRANGE`` -- T1's
+    parser dispatches on the ``event_kind`` field to pick the right
+    model class.
+
+    Parameters
+    ----------
+    event:
+        The frozen :class:`AgentAnnouncementEvent` to publish. Its
+        ``tenant_id`` MUST be the operator's verified JWT-bound tenant;
+        the handler enforces this structurally (no input field could
+        ever ask for another tenant's stream).
+
+    Returns
+    -------
+    str
+        The Valkey stream entry id (``"<ms>-<seq>"``) the ``XADD``
+        wrote. Callers can return this verbatim to the agent as the
+        ``event_id`` in the tools/call response so the agent can
+        round-trip it back through ``meho.broadcast.recent`` as the
+        ``since`` cursor for verification or follow-up reads.
+
+    Raises
+    ------
+    Exception
+        Anything :func:`get_broadcast_client` or :meth:`Redis.xadd`
+        raises propagates verbatim. The dispatcher's generic exception
+        handler maps it to JSON-RPC ``-32603``; the log line
+        (``mcp_handler_error``) carries the exception class for
+        operator triage. No log line is emitted here -- adding one
+        would shadow the dispatcher's structured exception log and
+        violate the "one log line per failure" discipline the chassis
+        observability guide enforces.
+    """
+    client = get_broadcast_client()
+    entry_id = await client.xadd(
+        _stream_key(event.tenant_id),
+        {"event": event.model_dump_json()},
+        maxlen=BROADCAST_MAXLEN,
+        approximate=True,
+    )
+    BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL.labels(phase=event.phase).inc()
+    # ``decode_responses=True`` on the broadcast client (see
+    # :mod:`~meho_backplane.broadcast.client`) makes xadd's return value
+    # ``str``; the cast is documentary rather than runtime-meaningful but
+    # keeps mypy honest about the public contract this function advertises.
+    return str(entry_id)

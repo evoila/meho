@@ -470,16 +470,3 @@ func renderGrantResult(w io.Writer, raw []byte, jsonOut bool, verb string) error
 		verb, entry.ID, entry.PrincipalSub, entry.OpPattern, entry.Verdict, exp)
 	return nil
 }
-
-// marshalGrantBody is a thin wrapper used by test helpers.
-func marshalGrantBody(req grantCreateRequest) ([]byte, error) {
-	return json.Marshal(req)
-}
-
-// callGrantCreate issues POST /api/v1/agents/grants. Used by tests.
-func callGrantCreate(
-	ctx context.Context, backplaneURL string, body []byte,
-) ([]byte, error) {
-	return doAuthedRequest(ctx, backplaneURL, "POST", _grantsBasePath, body)
-}
-

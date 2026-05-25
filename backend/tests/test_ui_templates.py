@@ -90,6 +90,13 @@ def test_static_src_carries_vendored_assets() -> None:
     assert (vendor / "sse.min.js").is_file()
     assert (vendor / "alpine.min.js").is_file()
     assert (vendor / "cytoscape.min.js").is_file()
+    # Cytoscape layout-plugin chain shipped by G10.5-T2 (#881). Load
+    # order is layout-base -> cose-base -> cose-bilkent / dagre; the
+    # topology graph view depends on all four.
+    assert (vendor / "layout-base.js").is_file()
+    assert (vendor / "cose-base.js").is_file()
+    assert (vendor / "cytoscape-cose-bilkent.js").is_file()
+    assert (vendor / "cytoscape-dagre.js").is_file()
     assert (vendor / "daisyui.js").is_file()
     assert (vendor / "VENDOR.md").is_file()
 

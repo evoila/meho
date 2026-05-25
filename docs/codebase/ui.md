@@ -785,9 +785,114 @@ pin both invariants.
 * **Multi-row select is client-side only** — Alpine.js holds the
   selection set. T1 doesn't ship a bulk-action endpoint; the selection
   state is exposed for a future button to consume.
-* **No graph view yet** — `view=table` is the only mode T1 honours.
-  T2 (#881) adds `view=graph` and switches routing on the query
-  parameter.
+
+## Topology graph view (Task #881)
+
+Initiative [#342](https://github.com/evoila/meho/issues/342) (G10.5
+Topology UI), Task [#881](https://github.com/evoila/meho/issues/881)
+(G10.5-T2) layers an interactive Cytoscape.js graph view on top of the
+same `/ui/topology` path via the `?view=graph` branch. The same
+`GET /ui/topology` handler serves both surfaces; one of three response
+shapes is selected per request:
+
+| Query | Header | Response |
+| ----- | ------ | -------- |
+| `view=table` (default) | _none_ | `topology/table.html` full page |
+| `view=table` (default) | `HX-Request: true` | `topology/_table_rows.html` fragment |
+| `view=graph` | _none_ | `topology/graph.html` full page (Cytoscape island) |
+
+The graph view does not have an HTMX-fragment variant — layout
+switches happen client-side via `cy.layout({name}).run()`, and filter
+changes round-trip to the server as a full-page navigation so the URL
+captures the active mode for copy/paste.
+
+### Module layout
+
+| Module | Purpose |
+| ------ | ------- |
+| `meho_backplane.ui.routes.topology.table` | `GET /ui/topology` handler. Branches on `view=` and delegates the `graph` branch to `topology.graph.render_graph`; the `table` branch keeps the T1 tabular rendering. |
+| `meho_backplane.ui.routes.topology.graph` | The `?view=graph` render. Pulls nodes via the substrate `list_nodes` capped at 500 (`GRAPH_NODE_CAP`) and edges via a local SQLite-portable ORM query (the substrate `list_edges` relies on PG `jsonb_typeof` for its conflict predicate; the graph view does not need conflict info, so the local helper is the right factoring). Emits node + edge JSON as a `<script type="application/json">` data island the `topology-graph.js` controller reads on init. |
+
+### Vendored JS
+
+The graph view adds four vendored files alongside the chassis bundle
+(`htmx`, `sse`, `alpine`, `cytoscape`, `daisyui`). All four are
+SHA256-pinned in
+[`backend/src/meho_backplane/ui/static/src/vendor/VENDOR.md`](../../backend/src/meho_backplane/ui/static/src/vendor/VENDOR.md).
+
+| File | Library | Version | Notes |
+| ---- | ------- | ------- | ----- |
+| `layout-base.js` | layout-base | 2.0.1 | Shared layout primitive; exposes `window.layoutBase`. |
+| `cose-base.js` | cose-base | 2.2.0 | Consumes `layoutBase`, exposes `window.coseBase`. |
+| `cytoscape-cose-bilkent.js` | cytoscape-cose-bilkent | 4.1.0 | Default organic layout. Consumes `coseBase`; exposes `window.cytoscapeCoseBilkent`. |
+| `cytoscape-dagre.js` | cytoscape-dagre | 3.0.0 | Hierarchical layout; bundles dagre internally (the 2.x line required a separate `dagre` vendored file). |
+
+Script load order in `graph.html` is **load-bearing** (the UMD
+wrappers consume globals exposed by their predecessors):
+
+```
+cytoscape.min.js → layout-base.js → cose-base.js
+                → cytoscape-cose-bilkent.js
+                → cytoscape-dagre.js
+                → topology-graph.js   (the per-page controller)
+```
+
+All carry `defer` so they execute in document order after the HTML is
+parsed — the chassis CSP posture (zero inline JS) is unchanged.
+
+### Controllers
+
+| File | Purpose |
+| ---- | ------- |
+| `static/src/app/topology-graph.js` | Cytoscape init for the graph view. Registers the two layout plugins once (`cytoscape.use(...)`), reads the elements + selected-id data islands, mounts `<div id="cy">`, wires node-tap → HTMX drawer swap + URL sync, and drives the `cy.layout(...).run()` switcher off the `<select id="topology-graph-layout">` change event. |
+| `static/src/app/topology-table.js` | Cross-link helper for the tabular view. On `DOMContentLoaded` it finds any `<tr data-selected="true">` row (rendered by `_table_rows.html` when the route received `?selected=<id>`), scrolls it into view, and applies a brief outline pulse so the operator's eye catches it. No-op when no row matches. |
+
+### Cross-link contract (table ↔ graph)
+
+The `?selected=<uuid>` query param round-trips selection between the
+two surfaces.
+
+* **Graph → table**: `cy.on('tap', 'node', ...)` opens the drawer
+  (HTMX swap of `/ui/topology/node/<id>` into `#node-drawer`),
+  `history.replaceState`s `?selected=<id>` into the URL, and updates
+  the header's "Show in table" link `href` so a click takes the
+  operator to `/ui/topology?view=table&selected=<id>`. The table page
+  marks the matching row `data-selected="true"`, and
+  `topology-table.js` scrolls + highlights it.
+* **Table → graph**: each row carries a "Graph" link to
+  `/ui/topology?view=graph&selected=<id>`. The graph route emits the
+  id into `#topology-graph-selected`; `topology-graph.js` reads it,
+  centers the matching node on the first `layoutstop`, selects it,
+  and opens the same drawer.
+
+Both directions preserve active filters (`kind`, `q`) so the toggle
+keeps operator state.
+
+### 500-node render cap
+
+Per Initiative #342 work item #6 ("Performance discipline.
+Cytoscape handles ~1k nodes; v0.2 caps frontend-side rendering at
+500 nodes"), `graph.GRAPH_NODE_CAP = 500` and the route passes
+`limit=500` into `list_nodes`. When the returned list saturates the
+cap, the page surfaces a truncation banner ("Capped at 500 — narrow
+the filter or use the dependents query (T3) for larger sets"). Larger
+sets reach the operator via T3 (#882)'s subgraph query.
+
+### Templates
+
+| Template | Purpose |
+| -------- | ------- |
+| `topology/graph.html` | Full-page Cytoscape surface. Extends `base.html`; renders the view toggle, filter bar, status row + layout `<select>`, the `<div id="cy">` mount, the `#node-drawer` slot (shared with the table view), and two `<script type="application/json">` data islands carrying the elements + selected-id payloads. |
+
+### Cross-tenant isolation
+
+Same posture as the tabular surface: every read goes through
+`list_nodes` (substrate-level `WHERE graph_node.tenant_id = :tenant_id`
+first clause) plus a local `_fetch_edges_for_nodes` that joins both
+endpoints with explicit `tenant_id` predicates (defence-in-depth
+matching the T1 drawer's `_fetch_edges` shape). Cross-tenant nodes /
+edges cannot surface even if a future invariant violation introduced
+one.
 
 ## Known issues / open items
 

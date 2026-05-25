@@ -5015,7 +5015,7 @@
           "ui-topology"
         ],
         "summary": "Ui Topology Table",
-        "description": "``GET /ui/topology[?view=table&sort=...&direction=...&kind=...&q=...]``.\n\n``view`` is accepted but unused in T1 (the only mode is the\ntable); T2 (#881) will branch on ``view`` to render the\nCytoscape graph instead. Documenting the param in the\nsignature now keeps the URL contract forward-compatible.",
+        "description": "Serve the topology UI, branching on ``?view=``.\n\nURL contract::\n\n    GET /ui/topology\n        [?view=table|graph\n         &sort=...&direction=...\n         &kind=...&q=...\n         &selected=<uuid>]\n\n``view=graph`` delegates to\n:func:`meho_backplane.ui.routes.topology.graph.render_graph`;\n``view=table`` (the default) keeps the tabular surface T1\nships. ``selected`` (an optional UUID) round-trips the\ncross-link selection between the two surfaces.",
         "operationId": "ui_topology_table_ui_topology_get",
         "parameters": [
           {
@@ -5075,10 +5075,19 @@
             "in": "query",
             "required": false,
             "schema": {
+              "$ref": "#/components/schemas/_ViewMode",
+              "default": "table"
+            }
+          },
+          {
+            "name": "selected",
+            "in": "query",
+            "required": false,
+            "schema": {
               "type": "string",
-              "maxLength": 16,
+              "format": "uuid",
               "nullable": true,
-              "title": "View"
+              "title": "Selected"
             }
           }
         ],
@@ -9327,6 +9336,15 @@
         ],
         "title": "_SortDirection",
         "description": "Sort direction enum -- ``asc`` (default) or ``desc``."
+      },
+      "_ViewMode": {
+        "type": "string",
+        "enum": [
+          "table",
+          "graph"
+        ],
+        "title": "_ViewMode",
+        "description": "Closed enum of view modes exposed on ``GET /ui/topology``.\n\n``table`` is the default (T1 / #880); ``graph`` switches to the\nCytoscape.js surface (T2 / #881). The enum's ``str`` mixin keeps\ntemplate URL building stable -- ``str(_ViewMode.GRAPH)`` is\n``\"graph\"`` (not ``\"_ViewMode.GRAPH\"``). An out-of-range value\nfails Pydantic validation (422) at the HTTP boundary so the route\nbody never sees an unknown mode."
       }
     }
   }

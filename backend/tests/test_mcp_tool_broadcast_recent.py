@@ -940,9 +940,9 @@ class TestBroadcastRecentIntegration:
         op = build_operator(TenantRole.OPERATOR)
         # Publish three events; sleep between to ensure distinct ms timestamps.
         await publish_event(_make_event(op_id="vsphere.vm.op_before"))
-        await __aio_sleep(0.05)
+        await _aio_sleep(0.05)
         cutoff = datetime.now(UTC) - timedelta(milliseconds=10)
-        await __aio_sleep(0.05)
+        await _aio_sleep(0.05)
         await publish_event(_make_event(op_id="vsphere.vm.op_after_1"))
         await publish_event(_make_event(op_id="vsphere.vm.op_after_2"))
 
@@ -957,8 +957,15 @@ class TestBroadcastRecentIntegration:
         assert "vsphere.vm.op_after_2" in op_ids
 
 
-async def __aio_sleep(seconds: float) -> None:
-    """Async sleep used by the integration suite (kept local for clarity)."""
+async def _aio_sleep(seconds: float) -> None:
+    """Async sleep used by the integration suite (kept local for clarity).
+
+    Single-underscore prefix is deliberate: a dunder prefix triggers Python's
+    class-level name mangling (``__foo`` → ``_ClassName__foo``) at the call
+    site, which made this module-level helper unreachable from
+    ``TestBroadcastRecentIntegration`` and raised ``NameError`` in CI before
+    the rename. See: https://docs.python.org/3/reference/expressions.html#atom-identifiers
+    """
     import asyncio
 
     await asyncio.sleep(seconds)

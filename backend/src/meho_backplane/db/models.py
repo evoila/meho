@@ -3493,8 +3493,8 @@ class ApprovalRequestStatus(StrEnum):
       decision audit row. Terminal.
 
     The enum and the ``CHECK (status IN (...))`` constraint on the DB
-    table move in lock-step (migration ``0020``); the drift guard
-    :func:`tests.test_migration_0020_approval_request.test_status_check_matches_enum`
+    table move in lock-step (migration ``0023``); the drift guard
+    :func:`tests.test_migration_0023_approval_request.test_status_check_matches_enum`
     asserts equality at unit-test time.
     """
 
@@ -3505,7 +3505,7 @@ class ApprovalRequestStatus(StrEnum):
 
 
 #: Closed ``approval_request.status`` vocabulary derived from the enum --
-#: kept in sync with migration ``0020``'s ``_APPROVAL_REQUEST_STATUSES``
+#: kept in sync with migration ``0023``'s ``_APPROVAL_REQUEST_STATUSES``
 #: literal. The drift guard asserts equality so the two never diverge.
 _APPROVAL_REQUEST_STATUSES: tuple[str, ...] = tuple(s.value for s in ApprovalRequestStatus)
 

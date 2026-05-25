@@ -4,13 +4,17 @@
 """Durable approval queue for ``requires_approval`` dispatches.
 
 Initiative #803 (G11.2 Agent permission model), Task #817 (T4). When the
-policy gate returns ``"needs_approval"`` for a dispatch, the dispatcher
-creates an :class:`~meho_backplane.db.models.ApprovalRequest` row
-(via :func:`create_pending_request`) instead of executing the op. The row
+G11.2-T3 policy gate resolves
+:attr:`~meho_backplane.db.models.PermissionVerdict.NEEDS_APPROVAL` for a
+dispatch (an agent principal on a ``requires_approval`` / caution /
+dangerous op), the dispatcher creates an
+:class:`~meho_backplane.db.models.ApprovalRequest` row (via
+:func:`create_pending_request`) instead of executing the op. The row
 parks the call durably so a process restart cannot lose the pending
 request. Two REST endpoints (``/api/v1/approvals/{id}/approve`` and
 ``…/reject``) let authorized reviewers decide; approval re-dispatches the
-original call with the original params.
+original call with the original params (gate bypassed via
+``dispatch(..., _approved=True)``).
 
 Audit invariant
 ---------------
@@ -331,11 +335,13 @@ async def approve_request(
     * Writes a synchronous "decision" audit row in the same transaction.
 
     The **actual re-dispatch** happens *after* the caller commits this
-    transaction — see :func:`resume_approved_request`. Separating the
-    decision commit from the re-dispatch means the approval is durable
-    even if the re-dispatch fails (the caller can retry the re-dispatch
-    independently). The route layer calls :func:`resume_approved_request`
-    after committing.
+    transaction — the ``POST /api/v1/approvals/{id}/approve`` route
+    (:mod:`meho_backplane.api.v1.approvals`) calls
+    :func:`~meho_backplane.operations.dispatcher.dispatch` with
+    ``_approved=True`` (which bypasses the policy gate, since the approval
+    is the authorization). Separating the decision commit from the
+    re-dispatch means the approval is durable even if the re-dispatch
+    fails (the caller can retry the re-dispatch independently).
 
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed.

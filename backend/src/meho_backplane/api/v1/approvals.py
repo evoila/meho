@@ -293,7 +293,12 @@ async def approve_approval_request(
             detail="params_hash_mismatch",
         ) from exc
 
-    # Re-dispatch the original op with the approved params.
+    # Re-dispatch the original op with the approved params, bypassing the
+    # policy gate (``_approved=True``): the human approval recorded above is
+    # the authorization. Without the bypass the re-dispatch would be
+    # hard-denied (the reviewer is a human, denied on requires_approval) or
+    # re-queued (an agent re-hits needs-approval), so the approved op would
+    # never execute (#817 DoD: "approval runs the original dispatch").
     from meho_backplane.operations.dispatcher import dispatch
 
     dispatch_result = await dispatch(
@@ -302,6 +307,7 @@ async def approve_approval_request(
         op_id=request.op_id,
         target=None,  # target resolved from connector_id; target_id in params if needed
         params=body.params,
+        _approved=True,
     )
 
     _log.info(

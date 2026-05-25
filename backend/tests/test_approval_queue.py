@@ -712,6 +712,18 @@ async def test_pause_approve_resume_execute(
                 version="1.x",
             )
 
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self,
+            target: Any,
+            op_id: str,
+            params: dict[str, Any],
+        ) -> Any:
+            # Typed op: the registered handler does the work, not this.
+            raise NotImplementedError
+
     register_connector_v2(
         product="apptest",
         version="",
@@ -764,22 +776,20 @@ async def test_pause_approve_resume_execute(
         await s.commit()
     assert row.status == ApprovalRequestStatus.APPROVED.value
 
-    # Step 3: re-dispatch the approved op → should now execute.
+    # Step 3: re-dispatch the approved op via the bypass the approval route
+    # uses (``_approved=True``). The descriptor still has
+    # requires_approval=True, so a naive re-dispatch would re-queue; the
+    # bypass — set only after a human approval — skips the gate so the op
+    # actually executes (#817 DoD: "approval runs the original dispatch").
     result2 = await dispatch(
         operator=operator,
         connector_id="apptest-1.x",
         op_id="apptest.op",
         target=target,
         params=params,
+        _approved=True,
     )
-    # After approval, the op executes -- but note: the op still has
-    # requires_approval=True, so the second dispatch also queues an
-    # approval request. The re-dispatch from the approval route would
-    # normally clear requires_approval or use a bypass flag (out of scope
-    # for T4); this test verifies the first-dispatch pending path is correct.
-    # The second dispatch status is also awaiting_approval because the
-    # descriptor still has requires_approval=True (realistic for v0.2 test).
-    assert result2.status in ("ok", "awaiting_approval")
+    assert result2.status == "ok"
 
     reset_dispatcher_caches()
     clear_registry()

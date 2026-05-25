@@ -113,10 +113,11 @@ async def policy_gate(
     The dispatcher branches on *verdict*:
 
     * ``auto-execute`` — proceed to connector resolution + execution.
-    * ``needs-approval`` — write an audit row in ``pending`` status,
-      return :func:`~meho_backplane.operations._errors.result_pending`
-      to the caller. The durable approval-queue mechanics (G11.2-T4,
-      #817) will turn this into a real pending row + resume path.
+    * ``needs-approval`` — write a durable
+      :class:`~meho_backplane.db.models.ApprovalRequest` row and return an
+      ``awaiting_approval`` result, via
+      :func:`~meho_backplane.operations.approval_queue.create_pending_request`
+      (G11.2-T4, #817). Only agent principals reach this verdict.
     * ``deny`` — write an audit row in ``denied`` status, return
       :func:`~meho_backplane.operations._errors.result_denied` with the
       *reason* string so the agent can reason about the refusal.

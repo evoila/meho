@@ -207,12 +207,6 @@ const (
 	Name      UnderscoreSortColumn = "name"
 )
 
-// Defines values for UnderscoreSortDirection.
-const (
-	Asc  UnderscoreSortDirection = "asc"
-	Desc UnderscoreSortDirection = "desc"
-)
-
 // Defines values for UnderscoreViewMode.
 const (
 	Graph UnderscoreViewMode = "graph"
@@ -2659,9 +2653,6 @@ type UnderscoreEdgeEndpoint struct {
 // “"_SortColumn.NAME"“).
 type UnderscoreSortColumn string
 
-// UnderscoreSortDirection Sort direction enum -- “asc“ (default) or “desc“.
-type UnderscoreSortDirection string
-
 // UnderscoreViewMode Closed enum of view modes exposed on “GET /ui/topology“.
 //
 // “table“ is the default (T1 / #880); “graph“ switches to the
@@ -3151,13 +3142,21 @@ type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
-	Sort      *UnderscoreSortColumn    `form:"sort,omitempty" json:"sort,omitempty"`
-	Direction *UnderscoreSortDirection `form:"direction,omitempty" json:"direction,omitempty"`
-	Kind      *string                  `form:"kind,omitempty" json:"kind,omitempty"`
-	Q         *string                  `form:"q,omitempty" json:"q,omitempty"`
-	Limit     *int                     `form:"limit,omitempty" json:"limit,omitempty"`
-	View      *UnderscoreViewMode      `form:"view,omitempty" json:"view,omitempty"`
-	Selected  *openapi_types.UUID      `form:"selected,omitempty" json:"selected,omitempty"`
+	Sort *UnderscoreSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
+
+	// Direction Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).
+	Direction *string             `form:"direction,omitempty" json:"direction,omitempty"`
+	Kind      *string             `form:"kind,omitempty" json:"kind,omitempty"`
+	Q         *string             `form:"q,omitempty" json:"q,omitempty"`
+	Limit     *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	View      *UnderscoreViewMode `form:"view,omitempty" json:"view,omitempty"`
+	Selected  *openapi_types.UUID `form:"selected,omitempty" json:"selected,omitempty"`
+	From      *string             `form:"from,omitempty" json:"from,omitempty"`
+	FromKind  *string             `form:"from_kind,omitempty" json:"from_kind,omitempty"`
+	To        *string             `form:"to,omitempty" json:"to,omitempty"`
+	ToKind    *string             `form:"to_kind,omitempty" json:"to_kind,omitempty"`
+	Depth     *int                `form:"depth,omitempty" json:"depth,omitempty"`
+	MaxHops   *int                `form:"max_hops,omitempty" json:"max_hops,omitempty"`
 }
 
 // CreateAgentApiV1AgentsPostJSONRequestBody defines body for CreateAgentApiV1AgentsPost for application/json ContentType.
@@ -10613,6 +10612,102 @@ func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTab
 		if params.Selected != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "selected", runtime.ParamLocationQuery, *params.Selected); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "from", runtime.ParamLocationQuery, *params.From); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.FromKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "from_kind", runtime.ParamLocationQuery, *params.FromKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "to", runtime.ParamLocationQuery, *params.To); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ToKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "to_kind", runtime.ParamLocationQuery, *params.ToKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Depth != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "depth", runtime.ParamLocationQuery, *params.Depth); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.MaxHops != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "max_hops", runtime.ParamLocationQuery, *params.MaxHops); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

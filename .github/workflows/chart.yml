@@ -290,7 +290,7 @@ jobs:
         # Required by docker/build-push-action to use buildkit. Same
         # version digest image.yml pins for the same action so the
         # two lanes converge on a single buildx version.
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
 
       - name: Build backplane image locally (load into Docker, not push)
         # ``load: true`` (= ``--output=type=docker``) leaves the image

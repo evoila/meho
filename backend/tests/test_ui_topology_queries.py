@@ -140,6 +140,7 @@ def _seed_node(
     name: str,
     target_id: uuid.UUID | None = None,
     discovered_by: str = "test",
+    soft_deleted: bool = False,
 ) -> uuid.UUID:
     node_id = uuid.uuid4()
 
@@ -156,7 +157,7 @@ def _seed_node(
                     properties={},
                     discovered_by=discovered_by,
                     first_seen=datetime.now(UTC),
-                    last_seen=datetime.now(UTC),
+                    last_seen=None if soft_deleted else datetime.now(UTC),
                 ),
             )
 
@@ -172,6 +173,7 @@ def _seed_edge(
     kind: str = "runs-on",
     source: str = "auto",
     properties: dict[str, object] | None = None,
+    soft_deleted: bool = False,
 ) -> uuid.UUID:
     edge_id = uuid.uuid4()
     edge_properties: dict[str, object] = dict(properties) if properties else {}
@@ -190,7 +192,7 @@ def _seed_edge(
                     properties=edge_properties,
                     discovered_by="test",
                     first_seen=datetime.now(UTC),
-                    last_seen=datetime.now(UTC),
+                    last_seen=None if soft_deleted else datetime.now(UTC),
                 ),
             )
 
@@ -787,6 +789,88 @@ def test_path_overlay_excludes_superseded_edges() -> None:
     # ``properties->>'superseded_by' IS NULL`` predicate on both
     # bidirectional arms.
     assert "no path found" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Substrate parity: soft-deleted nodes/edges (last_seen IS NULL) are
+# INCLUDED in both overlays. The substrate traversal verbs do not filter
+# last_seen -- a soft-deleted row stays reachable (last-refresh-wins;
+# #584). Regression guard against the UI BFS re-introducing a
+# ``last_seen IS NOT NULL`` filter, which would hide rows the substrate
+# REST/CLI/MCP closure still returns. (The full-inventory graph/table/
+# drawer views DO exclude soft-deleted rows -- those mirror list_nodes /
+# list_edges, which filter; only the traversal-parity BFS does not.)
+# ---------------------------------------------------------------------------
+
+
+def test_dependents_overlay_includes_soft_deleted_node() -> None:
+    """A soft-deleted dependent (last_seen NULL) still appears in the overlay.
+
+    vm-1 was dropped by a refresh reconcile -- its row and the edge into
+    host-1 carry ``last_seen IS NULL``. The substrate
+    ``find_dependents("host-1")`` still returns vm-1 (the traversal CTE
+    has no ``last_seen`` predicate; #584), so the UI overlay must too.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    host = _seed_node(tenant_id=_TENANT_A, kind="host", name="host-1")
+    vm = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-1", soft_deleted=True)
+    _seed_edge(
+        tenant_id=_TENANT_A,
+        from_node_id=vm,
+        to_node_id=host,
+        kind="runs-on",
+        soft_deleted=True,
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?view=graph&from=host-1")
+    assert response.status_code == 200, response.text
+
+    elements = _extract_data_island(response.text, "topology-graph-data")
+    assert isinstance(elements, list)
+    nodes = [e for e in elements if isinstance(e, dict) and e.get("group") == "nodes"]
+    node_names = {n["data"]["name"] for n in nodes}
+    assert node_names == {"host-1", "vm-1"}
+
+
+def test_path_overlay_includes_soft_deleted_endpoint() -> None:
+    """The path overlay resolves + routes through a soft-deleted endpoint.
+
+    ``target-app -> vm-1`` where vm-1 *and* the edge are soft-deleted.
+    ``resolve_anchor`` must still find the vm-1 endpoint and the
+    bidirectional BFS must traverse the soft-deleted edge -- mirroring
+    the substrate ``find_path``, which does not filter ``last_seen``
+    (#584).
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    target = _seed_node(tenant_id=_TENANT_A, kind="target", name="target-app")
+    vm = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-1", soft_deleted=True)
+    _seed_edge(
+        tenant_id=_TENANT_A,
+        from_node_id=target,
+        to_node_id=vm,
+        kind="runs-on",
+        soft_deleted=True,
+    )
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?view=graph&from=target-app&to=vm-1")
+    assert response.status_code == 200, response.text
+    assert "no path found" not in response.text
+
+    body = response.text
+    elements = _extract_data_island(body, "topology-graph-data")
+    assert isinstance(elements, list)
+    nodes = [e for e in elements if isinstance(e, dict) and e.get("group") == "nodes"]
+    node_names = {n["data"]["name"] for n in nodes}
+    assert node_names == {"target-app", "vm-1"}
+    edges = [e for e in elements if isinstance(e, dict) and e.get("group") == "edges"]
+    highlighted_edges = [e for e in edges if "highlight" in str(e.get("classes", ""))]
+    assert len(highlighted_edges) == 1
 
 
 # ---------------------------------------------------------------------------

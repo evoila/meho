@@ -133,11 +133,13 @@ than this, the likely cause is a missing/disabled traversal index on
   [topology-annotation.md](./topology-annotation.md).
 - **History (G9.3, [#365](https://github.com/evoila/meho/issues/365)).**
   A refresh that no longer sees a node soft-deletes it (`last_seen`
-  cleared, the row is retained — never SQL-deleted). In G9.1 a
-  soft-deleted node is still reachable by the query verbs (the
-  traversal does not yet filter `last_seen`); soft-delete is purely a
-  retention mechanism for history. Treat the graph as
-  last-refresh-wins: a stale edge persists until the next successful
-  refresh of its owning target re-derives the snapshot. G9.3 ships
-  `meho topology history|diff|timeline` plus the history-aware
-  point-in-time read to query when a resource appeared or disappeared.
+  cleared, the row is retained — never SQL-deleted). A soft-deleted
+  node is still reachable by the traversal query verbs
+  (`find_dependents` / `find_dependencies` / `find_path` do not filter
+  `last_seen`); soft-delete is purely a retention mechanism. Treat the
+  graph as last-refresh-wins: a stale edge persists until the next
+  successful refresh of its owning target re-derives the snapshot. G9.3
+  (now shipped) adds the *separate* `meho topology history|diff|timeline`
+  point-in-time verbs over the retained rows to query when a resource
+  appeared or disappeared — it does not add `last_seen` filtering to the
+  traversal verbs.

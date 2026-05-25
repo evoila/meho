@@ -81,7 +81,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Final, Literal
 
-from sqlalchemy import select
+from sqlalchemy import JSON, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -265,6 +265,15 @@ async def _bfs_neighbours(
 
     The triple tenant-scoping (edge + both endpoints) is the
     defense-in-depth posture. Soft-deleted edges excluded.
+
+    Superseded edges (``properties->>'superseded_by' IS NOT NULL``) are
+    excluded to mirror the G9.1 substrate traversal verbs
+    (:func:`meho_backplane.topology.query.find_dependents` /
+    :func:`~meho_backplane.topology.query.find_dependencies`, see
+    Initiative #364 §6 / Task #595). A tenant that curates supersede
+    annotations would otherwise see edges in the UI overlay that the
+    substrate REST/CLI API hides -- a substrate-vs-UI divergence the
+    operator cannot reconcile.
     """
     if not frontier_ids:
         return []
@@ -280,6 +289,18 @@ async def _bfs_neighbours(
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
             GraphEdge.last_seen.is_not(None),
+            # Mirror the substrate's superseded-edge exclusion -- the
+            # PG raw-SQL ``e.properties->>'superseded_by' IS NULL``
+            # idiom translated to dialect-portable ORM. PG returns SQL
+            # NULL on a missing JSON key (``.is_(None)``); SQLite's
+            # ``JSON1`` returns the JSON NULL token, which SQLAlchemy
+            # exposes via the :data:`JSON.NULL` sentinel. The ``or_``
+            # accepts both so the predicate fires identically on both
+            # dialects.
+            or_(
+                GraphEdge.properties["superseded_by"].is_(None),
+                GraphEdge.properties["superseded_by"] == JSON.NULL,
+            ),
         )
         .order_by(GraphEdge.id)
     )

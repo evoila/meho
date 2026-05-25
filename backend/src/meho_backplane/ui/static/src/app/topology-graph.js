@@ -117,7 +117,21 @@
   // Layout option payload for each supported algorithm. cose-bilkent
   // and dagre carry algorithm-specific knobs the defaults pick poorly
   // for the typical inventory shape (sparse graph, ~50-500 nodes).
-  function layoutOptions(name) {
+  //
+  // ``preserveViewport`` -- when ``true`` the layout is configured to
+  // keep the operator's current pan/zoom and reuse existing node
+  // positions. Used on the 30s polling refresh path (G10.5-T3 #882):
+  //   * ``fit: false`` -- cose-bilkent defaults to ``fit: true``,
+  //     which would re-center+zoom-to-fit asynchronously after the
+  //     layout settles and override any synchronous ``cy.pan/zoom``
+  //     restore the caller does. ``fit: false`` keeps the viewport.
+  //   * ``randomize: false`` -- re-randomising positions on every
+  //     poll tick breaks the "refresh data, keep view" contract
+  //     regardless of pan/zoom restore; deterministic positions
+  //     preserve the operator's mental map across refreshes.
+  // dagre / circle are deterministic and grid-shaped respectively, so
+  // ``fit: false`` is the only knob that matters there.
+  function layoutOptions(name, preserveViewport) {
     if (name === "cose-bilkent") {
       return {
         name: "cose-bilkent",
@@ -128,7 +142,8 @@
         gravity: 0.25,
         numIter: 2500,
         animate: false,
-        randomize: true,
+        fit: !preserveViewport,
+        randomize: !preserveViewport,
       };
     }
     if (name === "dagre") {
@@ -138,10 +153,11 @@
         nodeSep: 40,
         rankSep: 60,
         animate: false,
+        fit: !preserveViewport,
       };
     }
     // circle is built-in; defaults are sane.
-    return { name: "circle", animate: false };
+    return { name: "circle", animate: false, fit: !preserveViewport };
   }
 
   // Push the selected node id back into the page URL so a copy/paste
@@ -184,9 +200,12 @@
   }
 
   // Style extensions for overlays (G10.5-T3 #882). Path overlay
-  // edges with the ``highlight`` class render in red/thick; the
-  // ``root`` node class (on dependents/dependencies subgraphs)
-  // renders with a thicker border so the anchor is obvious.
+  // edges with the ``highlight`` class render in red/thick; path
+  // overlay nodes with the ``highlight`` class get a bold red border
+  // so the path itself is visually picked out from the rest of the
+  // subgraph; the ``root`` node class (on dependents/dependencies
+  // subgraphs) renders with a thicker border so the anchor is
+  // obvious.
   function buildOverlayStyle() {
     return [
       {
@@ -195,6 +214,19 @@
           "width": 3,
           "line-color": "#dc2626",
           "target-arrow-color": "#dc2626",
+        },
+      },
+      {
+        // Path-node highlight (matches the path edges' colour; bolder
+        // border + outline keeps the node visible against the per-
+        // kind background fill). Without this rule the ``highlight``
+        // class added by ``highlightPathNodes`` would be a visual
+        // no-op.
+        selector: "node.highlight",
+        style: {
+          "border-width": 4,
+          "border-color": "#dc2626",
+          "border-opacity": 1,
         },
       },
       {
@@ -253,7 +285,10 @@
       container: container,
       elements: elements,
       style: buildStyle().concat(buildOverlayStyle()),
-      layout: layoutOptions("cose-bilkent"),
+      // Initial render uses the default layout shape -- fit-to-canvas
+      // + randomized starting positions so cose-bilkent finds a clean
+      // arrangement for first-seen data.
+      layout: layoutOptions("cose-bilkent", false),
       wheelSensitivity: 0.2,
       minZoom: 0.1,
       maxZoom: 4,
@@ -288,11 +323,14 @@
       }
     });
 
-    // Layout switcher.
+    // Layout switcher. A deliberate user-driven layout change should
+    // re-fit + re-randomize -- the operator explicitly asked for a
+    // new arrangement, so the cose-bilkent / dagre / circle default
+    // shape is the desired outcome.
     const layoutSelect = document.getElementById("topology-graph-layout");
     if (layoutSelect) {
       layoutSelect.addEventListener("change", function () {
-        cy.layout(layoutOptions(layoutSelect.value)).run();
+        cy.layout(layoutOptions(layoutSelect.value, false)).run();
       });
     }
 
@@ -332,22 +370,21 @@
       if (!Array.isArray(fresh)) {
         return;
       }
-      // Snapshot the current viewport so the layout re-run does not
-      // throw the operator off their pinned position.
-      const pan = cy.pan();
-      const zoom = cy.zoom();
       cy.batch(function () {
         cy.elements().remove();
         cy.add(fresh);
       });
-      // Re-run the layout. The pan + zoom restore below overrides
-      // the layout's centering -- the operator stays exactly where
-      // they were before the refresh.
+      // Re-run the layout with ``preserveViewport=true`` so it lays
+      // out incoming nodes WITHOUT re-fitting the canvas (cose-bilkent
+      // defaults to ``fit: true`` which would zoom-to-fit
+      // asynchronously and override any synchronous pan/zoom restore
+      // a previous version of this code attempted) AND without
+      // re-randomising positions (the operator's mental map of the
+      // graph must survive each 30s tick). This is the "refresh data,
+      // keep view" contract documented in #882.
       const layoutSelectEl = document.getElementById("topology-graph-layout");
       const layoutName = layoutSelectEl ? layoutSelectEl.value : "cose-bilkent";
-      cy.layout(layoutOptions(layoutName)).run();
-      cy.zoom(zoom);
-      cy.pan(pan);
+      cy.layout(layoutOptions(layoutName, true)).run();
       // Re-apply the path highlight if the new payload carries one.
       const newPathNodes = readJsonIsland("topology-graph-path-nodes") || [];
       highlightPathNodes(cy, newPathNodes);

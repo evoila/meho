@@ -3142,19 +3142,21 @@ type UiBroadcastStreamUiBroadcastStreamGetParams struct {
 
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
-	Sort      *UnderscoreSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
-	Direction *string               `form:"direction,omitempty" json:"direction,omitempty"`
-	Kind      *string               `form:"kind,omitempty" json:"kind,omitempty"`
-	Q         *string               `form:"q,omitempty" json:"q,omitempty"`
-	Limit     *int                  `form:"limit,omitempty" json:"limit,omitempty"`
-	View      *UnderscoreViewMode   `form:"view,omitempty" json:"view,omitempty"`
-	Selected  *openapi_types.UUID   `form:"selected,omitempty" json:"selected,omitempty"`
-	From      *string               `form:"from,omitempty" json:"from,omitempty"`
-	FromKind  *string               `form:"from_kind,omitempty" json:"from_kind,omitempty"`
-	To        *string               `form:"to,omitempty" json:"to,omitempty"`
-	ToKind    *string               `form:"to_kind,omitempty" json:"to_kind,omitempty"`
-	Depth     *int                  `form:"depth,omitempty" json:"depth,omitempty"`
-	MaxHops   *int                  `form:"max_hops,omitempty" json:"max_hops,omitempty"`
+	Sort *UnderscoreSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
+
+	// Direction Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).
+	Direction *string             `form:"direction,omitempty" json:"direction,omitempty"`
+	Kind      *string             `form:"kind,omitempty" json:"kind,omitempty"`
+	Q         *string             `form:"q,omitempty" json:"q,omitempty"`
+	Limit     *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	View      *UnderscoreViewMode `form:"view,omitempty" json:"view,omitempty"`
+	Selected  *openapi_types.UUID `form:"selected,omitempty" json:"selected,omitempty"`
+	From      *string             `form:"from,omitempty" json:"from,omitempty"`
+	FromKind  *string             `form:"from_kind,omitempty" json:"from_kind,omitempty"`
+	To        *string             `form:"to,omitempty" json:"to,omitempty"`
+	ToKind    *string             `form:"to_kind,omitempty" json:"to_kind,omitempty"`
+	Depth     *int                `form:"depth,omitempty" json:"depth,omitempty"`
+	MaxHops   *int                `form:"max_hops,omitempty" json:"max_hops,omitempty"`
 }
 
 // CreateAgentApiV1AgentsPostJSONRequestBody defines body for CreateAgentApiV1AgentsPost for application/json ContentType.

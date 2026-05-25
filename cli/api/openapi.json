@@ -5034,9 +5034,12 @@
             "schema": {
               "type": "string",
               "maxLength": 32,
+              "pattern": "^(asc|desc|dependents|dependencies)$",
+              "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``).",
               "default": "asc",
               "title": "Direction"
-            }
+            },
+            "description": "Dual-purpose: ``asc`` / ``desc`` on the table branch (``view=table``), ``dependents`` / ``dependencies`` on the graph overlay branch (``view=graph&from=<name>``)."
           },
           {
             "name": "kind",
@@ -5170,6 +5173,18 @@
                   "type": "string"
                 }
               }
+            }
+          },
+          "404": {
+            "description": "Overlay anchor (``?from=<name>``) or path endpoint (``?from=&to=``) does not resolve in the caller's tenant. Returns the overlay-error fragment.",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "409": {
+            "description": "Overlay anchor or path endpoint is a bare name that resolves to multiple kinds in the caller's tenant (``kind=`` disambiguation required). Returns the overlay-error fragment with the candidate kinds.",
+            "content": {
+              "text/html": {}
             }
           },
           "422": {

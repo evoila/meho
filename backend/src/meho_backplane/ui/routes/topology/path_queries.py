@@ -44,7 +44,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import JSON, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -72,6 +72,12 @@ async def _bidirectional_neighbours(
     ``anchor_id`` is the frontier id the edge touched and
     ``other_endpoint`` is the node on the other side -- regardless of
     edge orientation. Self-loops (``from == to``) are surfaced once.
+
+    Superseded edges (``properties->>'superseded_by' IS NOT NULL``)
+    are excluded to mirror the G9.1 substrate path verb
+    (:func:`meho_backplane.topology.query.find_path`, Initiative #364
+    §6). Operators must see the same reachability in the UI overlay
+    that the substrate REST/CLI API exposes.
     """
     if not frontier_ids:
         return []
@@ -87,6 +93,16 @@ async def _bidirectional_neighbours(
             from_alias.tenant_id == tenant_id,
             to_alias.tenant_id == tenant_id,
             GraphEdge.last_seen.is_not(None),
+            # Substrate parity: drop edges curated as superseded so the
+            # UI path overlay's reachability matches what the CLI/REST
+            # find_path verb returns. The ``or_(.is_(None), ==
+            # JSON.NULL)`` combo handles both PG (SQL NULL on missing
+            # key) and SQLite (JSON NULL token); see the sibling
+            # ``queries._bfs_neighbours`` for the same predicate.
+            or_(
+                GraphEdge.properties["superseded_by"].is_(None),
+                GraphEdge.properties["superseded_by"] == JSON.NULL,
+            ),
             (GraphEdge.from_node_id.in_(frontier_ids)) | (GraphEdge.to_node_id.in_(frontier_ids)),
         )
         .order_by(GraphEdge.id)

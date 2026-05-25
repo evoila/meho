@@ -415,7 +415,28 @@ def build_table_router() -> APIRouter:
     async def _handler(
         request: Request,
         sort: _SortColumn = Query(default=_SortColumn.NAME),
-        direction: str = Query(default=_SortDirection.ASC.value, max_length=32),
+        # ``direction`` is dual-purpose: the table branch consumes
+        # ``asc``/``desc`` (sort order, validated again by
+        # ``_validate_sort_direction``); the graph overlay branch
+        # consumes ``dependents``/``dependencies`` (traversal
+        # direction, validated by ``_resolve_overlay_direction``).
+        # The OpenAPI ``pattern`` constrains the union of accepted
+        # values so the generated CLI client + downstream contract
+        # consumers see the real vocabulary rather than a free-form
+        # ``string``. Out-of-union values 422 at the HTTP boundary --
+        # ``asc``/``desc`` still ride through cleanly when the
+        # operator toggles between table and graph views (the
+        # "preserve filters" contract documented in #881).
+        direction: str = Query(
+            default=_SortDirection.ASC.value,
+            max_length=32,
+            pattern=r"^(asc|desc|dependents|dependencies)$",
+            description=(
+                "Dual-purpose: ``asc`` / ``desc`` on the table branch "
+                "(``view=table``), ``dependents`` / ``dependencies`` on "
+                "the graph overlay branch (``view=graph&from=<name>``)."
+            ),
+        ),
         kind: str | None = Query(default=None, max_length=64),
         q: str | None = Query(default=None, max_length=256),
         limit: int = Query(default=_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
@@ -473,5 +494,31 @@ def build_table_router() -> APIRouter:
         methods=["GET"],
         name="ui_topology_table",
         response_class=HTMLResponse,
+        # The ``?view=graph`` overlay branches (dependents / dependencies
+        # / path) call :func:`render_graph`, which catches
+        # :class:`NodeNotFoundError` / :class:`AmbiguousNodeError` and
+        # returns an ``HTMLResponse(status_code=404|409)`` carrying the
+        # overlay-error fragment. Surfacing those statuses in the
+        # OpenAPI snapshot keeps the generated CLI client + downstream
+        # contract consumers in sync with the runtime behaviour.
+        responses={
+            404: {
+                "description": (
+                    "Overlay anchor (``?from=<name>``) or path endpoint "
+                    "(``?from=&to=``) does not resolve in the caller's "
+                    "tenant. Returns the overlay-error fragment."
+                ),
+                "content": {"text/html": {}},
+            },
+            409: {
+                "description": (
+                    "Overlay anchor or path endpoint is a bare name that "
+                    "resolves to multiple kinds in the caller's tenant "
+                    "(``kind=`` disambiguation required). Returns the "
+                    "overlay-error fragment with the candidate kinds."
+                ),
+                "content": {"text/html": {}},
+            },
+        },
     )
     return router

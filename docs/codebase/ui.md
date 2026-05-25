@@ -955,6 +955,30 @@ The UI-facing helpers are intentionally separate from the substrate
 The substrate verbs stay the source of truth for the REST + CLI +
 MCP surfaces.
 
+### Substrate-parity invariants
+
+Every UI BFS module mirrors the substrate's edge-traversal
+predicates so the same closure is reported on both surfaces:
+
+* **Soft-delete exclusion** -- `GraphEdge.last_seen IS NOT NULL`
+  on every edge query, matching the substrate's `_TRAVERSAL_SQL`.
+* **Superseded-edge exclusion** -- edges carrying
+  `properties->>'superseded_by' IS NOT NULL` are dropped from
+  both the dependents/dependencies BFS and the bidirectional
+  path BFS. Mirrors Initiative #364 §6 / Task #595 on the
+  substrate. The portable SQLAlchemy idiom uses
+  `or_(GraphEdge.properties["superseded_by"].is_(None),
+  GraphEdge.properties["superseded_by"] == JSON.NULL)` because
+  PG returns SQL NULL on a missing JSON key while SQLite's JSON1
+  returns the JSON NULL token. Regression tests:
+  `test_dependents_overlay_excludes_superseded_edges` /
+  `test_path_overlay_excludes_superseded_edges`.
+
+A divergence here is a substrate-vs-UI bug: an operator who
+curates supersede annotations on the substrate REST/CLI API would
+see edges in the UI overlay that the API hides, with no way to
+reconcile.
+
 ### Tenant-scoping defense in depth
 
 Every overlay edge query enforces the tenant boundary at three
@@ -986,9 +1010,21 @@ On every 30s tick HTMX issues `GET /ui/topology?view=graph...`
 with `HX-Request: true`; the route returns the
 `topology/_graph_data_island.html` fragment only. The
 `topology-graph.js` controller listens for `htmx:afterSwap` on the
-wrapper, snapshots `cy.pan()` + `cy.zoom()`, replaces the elements
-via `cy.batch(...)`, re-runs the active layout, then restores the
-pan + zoom so the operator's pinned viewport survives the refresh.
+wrapper, replaces the elements via `cy.batch(...)`, then re-runs
+the active layout with `preserveViewport: true` (the second
+argument to `layoutOptions(name, preserveViewport)`). Passing
+`true` injects `fit: false` and `randomize: false` into the
+layout options so:
+
+* `cose-bilkent` does NOT zoom-to-fit on layout-stop (the default
+  `fit: true` would override any synchronous pan/zoom restore and
+  was the root cause of PR #1049's B2 finding); and
+* node positions are NOT re-randomised every 30s, preserving the
+  operator's mental map of the graph across refreshes.
+
+Initial render and the user-driven layout-switcher pass
+`preserveViewport: false` (re-fit + re-randomize) because both are
+deliberate viewport-changing actions.
 
 ### Error surface
 
@@ -1000,14 +1036,27 @@ pan + zoom so the operator's pinned viewport survives the refresh.
 The error fragment keeps the polling trigger active so a transient
 hard-delete + re-create recovers automatically on the next tick.
 
+Both statuses are declared on the `GET /ui/topology`
+`router.add_api_route(..., responses={404: ..., 409: ...})` so
+the generated CLI client + downstream OpenAPI consumers see the
+real response set rather than a 200/422-only contract. The
+`direction` query param's OpenAPI schema carries
+`pattern: ^(asc|desc|dependents|dependencies)$` (the union of
+table-sort + graph-overlay values) so the same client generator
+sees the dual-purpose contract instead of a free-form `string`.
+
 ### Tests
 
 `backend/tests/test_ui_topology_queries.py` covers every acceptance
 criterion: dependents/dependencies subgraph rendering,
-depth-bounding, path overlay + highlighted edges, polling endpoint
-shape (HTMX fragment), cross-tenant isolation (both overlay
-flavours), 404 unknown-name, 409 ambiguous-name, drawer cross-link
-to `?from=`. 17 tests, all pass against the SQLite fixture.
+depth-bounding, path overlay + highlighted edges (with ordered
+path-id assertion), polling endpoint shape (HTMX fragment),
+cross-tenant isolation (both overlay flavours), 404 unknown-name,
+409 ambiguous-name, drawer cross-link to `?from=`, substrate-
+parity superseded-edge exclusion on both overlay flavours, and
+two source-anchored assertions on `topology-graph.js` (polling
+viewport-preservation + `node.highlight` style rule). All pass
+against the SQLite fixture.
 
 ## References
 

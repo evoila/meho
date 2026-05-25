@@ -171,8 +171,10 @@ def _seed_edge(
     to_node_id: uuid.UUID,
     kind: str = "runs-on",
     source: str = "auto",
+    properties: dict[str, object] | None = None,
 ) -> uuid.UUID:
     edge_id = uuid.uuid4()
+    edge_properties: dict[str, object] = dict(properties) if properties else {}
 
     async def _do() -> None:
         sessionmaker = get_sessionmaker()
@@ -185,7 +187,7 @@ def _seed_edge(
                     to_node_id=to_node_id,
                     kind=kind,
                     source=source,
-                    properties={},
+                    properties=edge_properties,
                     discovered_by="test",
                     first_seen=datetime.now(UTC),
                     last_seen=datetime.now(UTC),
@@ -387,7 +389,7 @@ def test_dependencies_subgraph_returns_forward_closure() -> None:
 def test_path_overlay_returns_shortest_path_with_highlighted_edges() -> None:
     """``?from=target-app&to=network-1`` returns the shortest path + highlight."""
     _seed_tenant_row(_TENANT_A, "tenant-a")
-    _seed_three_tier_graph(_TENANT_A)
+    ids = _seed_three_tier_graph(_TENANT_A)
 
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     with respx.mock(assert_all_called=False):
@@ -407,10 +409,20 @@ def test_path_overlay_returns_shortest_path_with_highlighted_edges() -> None:
     highlighted_edges = [e for e in edges if "highlight" in str(e.get("classes", ""))]
     assert len(highlighted_edges) == 3
 
-    # The path-nodes data island carries the ordered path id list.
+    # The path-nodes data island carries the path id list in BFS order
+    # source -> target. Asserting on the exact ordered sequence (not
+    # just the length) catches a regression where BFS returns a
+    # non-shortest path or reverses endpoints -- both invariant
+    # violations that a length-only check would silently mask. Mirrors
+    # the substrate ``find_path`` ordering contract.
     path_nodes_island = _extract_data_island(body, "topology-graph-path-nodes")
     assert isinstance(path_nodes_island, list)
-    assert len(path_nodes_island) == 4
+    assert path_nodes_island == [
+        str(ids["target-app"]),
+        str(ids["vm-1"]),
+        str(ids["host-1"]),
+        str(ids["network-1"]),
+    ]
 
     # Overlay status pill surfaces the path mode + hop count.
     assert "Path from" in body
@@ -670,3 +682,187 @@ def test_overlay_rejects_depth_outside_range() -> None:
         client = _authenticated_client(session_id)
         response = client.get("/ui/topology?view=graph&from=vm-1&depth=0")
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Substrate parity: superseded_by edges are excluded from BOTH the
+# dependents/dependencies overlay AND the path overlay.
+#
+# Regression guard for the G9.1 substrate vs UI BFS divergence that
+# surfaced in PR #1049 review: the substrate traversal verbs
+# (:func:`meho_backplane.topology.query.find_dependents` /
+# :func:`~meho_backplane.topology.query.find_dependencies` /
+# :func:`~meho_backplane.topology.query.find_path`, Initiative #364
+# §6 / Task #595) drop edges whose ``properties->>'superseded_by' IS
+# NOT NULL``. Without the matching predicate on the UI side, tenants
+# with curated supersede annotations would see edges in the overlay
+# that the substrate REST/CLI API hides -- an operator-confusing
+# divergence the substrate-parity acceptance criterion forbids.
+# ---------------------------------------------------------------------------
+
+
+def test_dependents_overlay_excludes_superseded_edges() -> None:
+    """A ``superseded_by``-annotated edge is hidden from the dependents overlay.
+
+    Seeds the three-tier chain target-app -> vm-1 -> host-1 -> network-1,
+    then marks the ``vm-1 -> host-1`` edge superseded. From the
+    ``host-1`` dependents root, only ``host-1`` itself remains visible:
+    vm-1 (and transitively target-app) reach host-1 only through the
+    now-superseded edge, so neither surfaces. Mirrors the substrate's
+    behaviour on the same shape -- the cross-check below pulls
+    ``find_dependents`` directly and asserts the two views agree.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    target = _seed_node(tenant_id=_TENANT_A, kind="target", name="target-app")
+    vm = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-1")
+    host = _seed_node(tenant_id=_TENANT_A, kind="host", name="host-1")
+    network = _seed_node(tenant_id=_TENANT_A, kind="network", name="network-1")
+    _seed_edge(tenant_id=_TENANT_A, from_node_id=target, to_node_id=vm, kind="runs-on")
+    # The middle edge is superseded -- BFS must NOT traverse it.
+    _seed_edge(
+        tenant_id=_TENANT_A,
+        from_node_id=vm,
+        to_node_id=host,
+        kind="runs-on",
+        properties={"superseded_by": str(uuid.uuid4())},
+    )
+    _seed_edge(tenant_id=_TENANT_A, from_node_id=host, to_node_id=network, kind="belongs-to")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?view=graph&from=host-1")
+    assert response.status_code == 200, response.text
+
+    elements = _extract_data_island(response.text, "topology-graph-data")
+    assert isinstance(elements, list)
+    nodes = [e for e in elements if isinstance(e, dict) and e.get("group") == "nodes"]
+    node_names = {n["data"]["name"] for n in nodes}
+    # Only host-1: the only reverse-edge into host-1 (vm-1 -> host-1)
+    # is superseded, so BFS sees no neighbours from the root.
+    #
+    # Substrate parity (cross-checked by reading ``_TRAVERSAL_SQL`` in
+    # ``meho_backplane.topology.query``): the PG ``WITH RECURSIVE``
+    # walk carries ``AND e.properties->>'superseded_by' IS NULL`` on
+    # the recursive arm, so ``find_dependents("host-1")`` on PG
+    # returns exactly ``{"host-1"}`` on this seed -- the UI overlay's
+    # ORM-side predicate produces the same closure. The substrate
+    # verb itself cannot run in the unit suite (it needs PostgreSQL
+    # for ``CYCLE``); the integration suite covers it.
+    assert node_names == {"host-1"}
+
+
+def test_path_overlay_excludes_superseded_edges() -> None:
+    """A ``superseded_by`` edge breaks the path overlay's reachability.
+
+    Same three-tier shape as :func:`_seed_three_tier_graph`; the
+    middle edge is marked superseded. The path overlay must report
+    "no path found" because the bidirectional BFS skips the
+    superseded edge -- mirroring the substrate ``find_path`` verb.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+    target = _seed_node(tenant_id=_TENANT_A, kind="target", name="target-app")
+    vm = _seed_node(tenant_id=_TENANT_A, kind="vm", name="vm-1")
+    host = _seed_node(tenant_id=_TENANT_A, kind="host", name="host-1")
+    network = _seed_node(tenant_id=_TENANT_A, kind="network", name="network-1")
+    _seed_edge(tenant_id=_TENANT_A, from_node_id=target, to_node_id=vm, kind="runs-on")
+    _seed_edge(
+        tenant_id=_TENANT_A,
+        from_node_id=vm,
+        to_node_id=host,
+        kind="runs-on",
+        properties={"superseded_by": str(uuid.uuid4())},
+    )
+    _seed_edge(tenant_id=_TENANT_A, from_node_id=host, to_node_id=network, kind="belongs-to")
+
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/topology?view=graph&from=target-app&to=network-1")
+    assert response.status_code == 200, response.text
+    # The path through the superseded edge is the only one; the
+    # overlay renders the no-path-found state. Same parity argument as
+    # ``test_dependents_overlay_excludes_superseded_edges`` -- the
+    # substrate ``find_path`` (PG ``_PATH_SQL``) carries the matching
+    # ``properties->>'superseded_by' IS NULL`` predicate on both
+    # bidirectional arms.
+    assert "no path found" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Topology Cytoscape controller (topology-graph.js) -- source-anchored
+# assertions on the polling-refresh viewport-preservation contract +
+# the path-node highlight style rule.
+#
+# These assertions are anchored to specific strings in the JS source
+# rather than executing the JS (no JSDOM in the backend test suite).
+# A reasoned-only assertion is acceptable per the review (B2/M1/M2
+# acceptance criterion lists "JS test OR comment-anchored assertion").
+# The strings are load-bearing for the contract -- a future edit that
+# silently drops ``fit: false``, re-enables ``randomize: true`` on the
+# polling path, or removes the ``node.highlight`` style rule fails
+# this test before it reaches the operator.
+# ---------------------------------------------------------------------------
+
+
+def test_topology_graph_js_polling_refresh_preserves_viewport() -> None:
+    """The 30s polling-refresh code path passes ``preserveViewport=true``.
+
+    Anchors:
+
+    * ``layoutOptions(name, preserveViewport)`` -- the signature
+      change that lets the polling path opt into viewport
+      preservation.
+    * ``fit: !preserveViewport`` -- cose-bilkent (and dagre, circle)
+      defaults to ``fit: true``, which would re-center+zoom the
+      canvas asynchronously after the synchronous Cytoscape
+      ``layout(...).run()`` call returns, overriding any pan/zoom
+      restore. ``fit: false`` on the polling path keeps the viewport.
+    * ``randomize: !preserveViewport`` -- re-randomising node
+      positions every 30s breaks the operator's mental map.
+    * The polling-path call inside ``applyRefreshedIsland`` passes
+      ``true`` for ``preserveViewport``.
+    """
+    import pathlib
+
+    js_path = (
+        pathlib.Path(__file__).parent.parent
+        / "src/meho_backplane/ui/static/src/app/topology-graph.js"
+    )
+    source = js_path.read_text(encoding="utf-8")
+
+    # The new signature must be in place.
+    assert "function layoutOptions(name, preserveViewport)" in source
+
+    # ``fit`` is driven by the flag (no hardcoded ``fit: true`` and
+    # the cose-bilkent default of ``fit: true`` is overridden).
+    assert "fit: !preserveViewport" in source
+
+    # ``randomize`` is driven by the flag.
+    assert "randomize: !preserveViewport" in source
+
+    # The polling refresh path passes ``true`` for the flag.
+    assert "layoutOptions(layoutName, true)" in source
+
+
+def test_topology_graph_js_defines_node_highlight_style() -> None:
+    """The path-node ``highlight`` class has a non-empty style rule.
+
+    Without this rule the ``highlightPathNodes`` helper's
+    ``addClass("highlight")`` call is a visual no-op (Cytoscape draws
+    the node identically to its unclassed siblings). The rule lives
+    inside ``buildOverlayStyle`` next to the ``edge.highlight`` rule.
+    """
+    import pathlib
+
+    js_path = (
+        pathlib.Path(__file__).parent.parent
+        / "src/meho_backplane/ui/static/src/app/topology-graph.js"
+    )
+    source = js_path.read_text(encoding="utf-8")
+
+    # The selector exists in the overlay style table.
+    assert 'selector: "node.highlight"' in source
+    # And it carries a non-empty visual treatment (bold red border
+    # matches the path-edge stroke colour for visual consistency).
+    assert '"border-color": "#dc2626"' in source

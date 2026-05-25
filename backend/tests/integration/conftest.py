@@ -385,7 +385,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
             text(
                 "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "broadcast_override, agent_definition, agent_principal, tenant",
             ),
         )
         # Re-seed two pinned tenant rows so the integration suite
@@ -445,7 +445,7 @@ async def pg_engine_empty_tenant(
             text(
                 "TRUNCATE TABLE agent_run, audit_log, documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
-                "broadcast_override, agent_definition, tenant",
+                "broadcast_override, agent_definition, agent_principal, tenant",
             ),
         )
         await conn.commit()

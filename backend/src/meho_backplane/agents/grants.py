@@ -74,7 +74,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from fnmatch import fnmatch
 
 import structlog
 from sqlalchemy import delete, select
@@ -127,20 +126,14 @@ def _validate_target_scope(target_scope: str | None) -> None:
 def _validate_op_pattern(op_pattern: str) -> None:
     """Raise :exc:`GrantValidationError` when *op_pattern* is structurally invalid.
 
-    The only structural check is that the pattern is non-empty and that
-    ``fnmatch.fnmatch`` can evaluate it without raising. This is a
-    fail-fast guard; operational correctness (does this pattern match
-    what you think it matches?) is the caller's responsibility.
+    The only structural check is that the pattern is non-empty:
+    ``fnmatch`` evaluates any string (an unclosed ``[`` is treated as a
+    literal, never an error), so there is nothing else to fail-fast on.
+    Operational correctness (does this pattern match what you think it
+    matches?) is the caller's responsibility.
     """
     if not op_pattern:
         raise GrantValidationError("op_pattern must be a non-empty string")
-    # Confirm fnmatch can evaluate the pattern without exploding.
-    try:
-        fnmatch("probe.op.id", op_pattern)
-    except Exception as exc:
-        raise GrantValidationError(
-            f"op_pattern {op_pattern!r} is not a valid fnmatch glob: {exc}"
-        ) from exc
 
 
 def _validate_expires_at(expires_at: datetime | None) -> None:

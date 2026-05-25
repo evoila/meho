@@ -6,15 +6,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.47.0",
+    "fastapi>=0.136.3",
+    "uvicorn[standard]>=0.48.0",
     "pydantic[email]>=2.13.4",
     "structlog>=24.1",
     "prometheus-client>=0.20",
     "authlib>=1.3",
     "httpx>=0.27",
     "hvac>=2.4.0",
-    "sqlalchemy[asyncio]>=2.0.49",
+    "sqlalchemy[asyncio]>=2.0.50",
     "asyncpg>=0.29",
     "alembic>=1.13",
     "jsonschema>=4.26.0",
@@ -26,7 +26,7 @@ dependencies = [
     "tenacity>=9.0",
     "asyncssh>=2.18,<3.0",
     "packaging>=24.0",
-    "python-frontmatter>=1.2.0",
+    "python-frontmatter>=1.3.0",
     "jinja2>=3.1.6",
     "google-auth>=2.38",
     "duckdb>=1.4.3",
@@ -40,7 +40,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "ruff>=0.15.13",
+    "ruff>=0.15.14",
     "mypy>=2.1.0",
     "cryptography>=42.0",
     "respx>=0.21",
@@ -105,6 +105,8 @@ select = [
 "tests/test_mcp_tool_meho_status.py" = ["F811"]
 "tests/test_mcp_resource_tenant_info.py" = ["F811"]
 "tests/test_mcp_resource_tenant_feed.py" = ["F811"]
+"tests/test_mcp_resource_tenant_conventions.py" = ["F811"]
+"tests/test_mcp_initialize_instructions.py" = ["F811"]
 # A005 flags any module name that matches a stdlib module by short name,
 # regardless of package path. These two are namespaced under
 # `meho_backplane.*` and are never imported as bare `operator` / `logging`,

@@ -73,6 +73,7 @@ from meho_backplane.conventions.schemas import (
 )
 from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import TenantConvention, TenantConventionHistory
+from meho_backplane.mcp.server import RESOURCES_SUBSCRIBE_ENABLED
 
 __all__ = ["router"]
 
@@ -109,6 +110,64 @@ _OP_ID_HISTORY: Final[str] = "conventions.history"
 #: exactly so a request that passes the path-parse also passes the
 #: pydantic field validator on the create body.
 _SLUG_MAX_LENGTH: Final[int] = 128
+
+
+def _maybe_emit_resource_updated(
+    *,
+    tenant_id: uuid.UUID,
+    slug: str,
+) -> None:
+    """Emit ``notifications/resources/updated`` for a convention edit -- iff subscribe is on.
+
+    Gated by :data:`~meho_backplane.mcp.server.RESOURCES_SUBSCRIBE_ENABLED`
+    -- the single source of truth for whether the server advertises
+    ``capabilities.resources.subscribe`` on ``initialize``. v0.2
+    ships ``False`` and this helper is a no-op; a v0.2.next flip of
+    the constant lights up the emit code path without touching the
+    convention CRUD routes.
+
+    Why the gate matters: emitting the notification while the server
+    is also advertising ``subscribe: false`` would tell a spec-
+    conforming client *"you can subscribe to resource changes"* via
+    the runtime event while the handshake said the opposite. That
+    asymmetry violates MCP 2025-06-18 §"Capability Negotiation"
+    ("Only use capabilities that were successfully negotiated") and
+    risks confused-deputy behaviour on the client side.
+
+    The actual transport for the notification (when the gate flips)
+    is out of scope here -- it requires the long-poll / SSE bridge
+    deferred to v0.2.next. The helper currently structures the call
+    site (one call per write route, one place to add the publish
+    when the bridge lands) and writes a debug log so the v0.2.next
+    audit trail of "which writes WOULD have emitted" is queryable
+    via structlog without needing a code-search pass.
+
+    Per the issue body's MCP-spec citation, the conditional emit
+    pairs with the resource URI template registered in
+    :mod:`meho_backplane.mcp.resources.tenant_conventions`; the
+    ``meho://tenant/{tenant_id}/conventions/{slug}`` URI is what
+    appears in the notification's ``uri`` field per
+    https://modelcontextprotocol.io/specification/2025-06-18/server/resources.
+    """
+    if not RESOURCES_SUBSCRIBE_ENABLED:
+        # v0.2 posture: ``subscribe: false`` on initialize ->
+        # silent no-op here. The branch is intentionally cheap
+        # (one constant read) so leaving the call site in place
+        # has zero runtime cost.
+        return
+    # v0.2.next branch (currently dead-but-staged): emit the
+    # notification through the SSE/long-poll bridge once it lands.
+    # The URI shape MUST match the registered resource template in
+    # ``mcp.resources.tenant_conventions`` -- duplicated string
+    # literal across two files is the lesser evil vs. cross-module
+    # coupling that pulls api/v1 into mcp/resources.
+    uri = f"meho://tenant/{tenant_id}/conventions/{slug}"
+    structlog.get_logger().info(
+        "mcp_resource_updated_emit",
+        uri=uri,
+        tenant_id=str(tenant_id),
+        slug=slug,
+    )
 
 
 def _enforce_budget(body: str, kind: ConventionKind) -> None:
@@ -370,6 +429,10 @@ async def create_convention(
     # Refresh so any DB-side defaults are visible on the returned
     # row (mirrors the broadcast_overrides + memory surfaces).
     await session.refresh(convention)
+    # Conditional MCP resources/updated notification (T4 #316).
+    # No-op while ``resources.subscribe`` is False; structured emit
+    # call site is in place for the v0.2.next subscribe flip.
+    _maybe_emit_resource_updated(tenant_id=operator.tenant_id, slug=body.slug)
     return Convention.model_validate(convention)
 
 
@@ -439,6 +502,10 @@ async def update_convention(
     session.add(history)
     await session.flush()
     await session.refresh(existing)
+    # Conditional MCP resources/updated notification (T4 #316).
+    # No-op while ``resources.subscribe`` is False; structured emit
+    # call site is in place for the v0.2.next subscribe flip.
+    _maybe_emit_resource_updated(tenant_id=operator.tenant_id, slug=slug)
     return Convention.model_validate(existing)
 
 
@@ -512,6 +579,11 @@ async def delete_convention(
             TenantConvention.tenant_id == operator.tenant_id,
         ),
     )
+    # Conditional MCP resources/updated notification (T4 #316).
+    # DELETE is also a resource-state change that subscribing
+    # clients need to refresh on, per MCP 2025-06-18 §Resources.
+    # No-op while ``resources.subscribe`` is False.
+    _maybe_emit_resource_updated(tenant_id=operator.tenant_id, slug=slug)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -6,7 +6,7 @@ G11.2-T6 (#819) under Initiative #803 (the P3 agent identity + RBAC + approval g
 
 A newly-registered agent starts with **no** `agent_permission` rows. Without an explicit grant, the agent operates under `safety_level`-based defaults: safe ops auto-execute, caution ops need approval, dangerous ops are denied. Admin-class ops are never auto-granted.
 
-Operators (`tenant_admin`) issue grants to extend agent access for a specific op-pattern on an optional target scope. Grants are permanent by default; supply `expires_at` to create a **time-bounded elevation** (change window) that reverts automatically when the expiry sweeper runs.
+Operators (`tenant_admin`) issue grants to extend agent access for a specific op-pattern on an optional target scope. Grants are permanent by default; supply `expires_at` to create a **time-bounded elevation** (change window) that reverts automatically: the permission resolver (T3 `auth/permissions.py`) ignores rows past their `expires_at` **immediately at expiry**, and the expiry sweeper deletes them on its periodic tick (the sweep is the durable cleanup; the resolver filter makes the revert exact).
 
 ## Key types
 
@@ -112,8 +112,8 @@ All verbs require `tenant_admin`.
 
 ## Dependencies
 
-- `db/models.py` — `AgentPermission`, `PermissionVerdict` ORM model
-- `alembic/versions/0022_create_agent_permission_grants.py` — table + indexes + CHECK
+- `db/models.py` — `AgentPermission`, `PermissionVerdict` ORM model (owned by T3 #1052; T6 adds the `expires_at` column + index)
+- `alembic/versions/0024_add_agent_permission_expires_at.py` — additive ALTER: `expires_at` column + `agent_permission_expires_at_idx` (the table itself is created by T3's `0022_create_agent_permission`)
 - `memory/audit.py` — `write_internal_audit_row` (used by expiry sweeper)
 - `memory/expiry.py` — pattern precedent for sweeper design
 - `settings.py` — `grant_expiry_enabled`, `grant_expiry_tick_interval_seconds`

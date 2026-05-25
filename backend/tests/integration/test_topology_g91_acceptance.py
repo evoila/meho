@@ -511,18 +511,19 @@ async def test_scenario4_soft_delete_retains_row(stable_connector: None) -> None
     flipped to stop reporting the ``vm`` + ``host`` nodes; a second
     refresh must soft-delete (not hard-delete) them: the rows stay in
     ``graph_node`` with ``last_seen IS NULL``, and the refresh diff
-    counts them as ``removed`` exactly once. G9.3 ships the history
-    surface that queries those retained rows; T8 asserts the row
+    counts them as ``removed`` exactly once. G9.3 (now shipped) provides
+    the history surface that queries those retained rows; T8 asserts the row
     survives soft-delete and that a *re-discovery* revives it (clears
     ``last_seen`` back to a timestamp on the same row, no re-insert).
 
     Note on read-verb visibility: the G9.1-T4 traversal CTE does **not**
     filter ``last_seen IS NULL`` — a soft-deleted node remains reachable
-    by ``find_dependents`` / ``find_dependencies`` until G9.3 layers a
-    history-aware read on top. This test pins the *actual* shipped
+    by ``find_dependents`` / ``find_dependencies`` / ``find_path``.
+    Point-in-time visibility is the separate G9.3 history/diff/timeline
+    surface, not a traversal filter. This test pins the *actual* shipped
     contract (row retained + revivable), not an aspirational
-    invisible-after-delete one; the divergence is recorded as an
-    adjacent finding on #456.
+    invisible-after-delete one; the docs were reconciled to this across
+    all surfaces (codebase/architecture/onboarding + UI BFS) by #584.
     """
     await _insert_target(tenant_id=TENANT_A_ID, name="sd-target")
     sm = get_sessionmaker()
@@ -565,7 +566,7 @@ async def test_scenario4_soft_delete_retains_row(stable_connector: None) -> None
     assert by_name["host-sd-target"] is None
     assert by_name["sd-target"] is not None  # still discovered
 
-    # Actual G9.1 contract: the traversal CTE does not yet filter
+    # Actual G9.1 contract: the traversal CTE does not filter
     # soft-deleted rows, so the dropped nodes are still reachable. The
     # load-bearing acceptance fact is that the rows were *retained*
     # (asserted above) for G9.3 to query — not that they vanish from

@@ -3,8 +3,8 @@
 
 """Create the ``agent_permission`` table for the G11.2-T3 permission model.
 
-Revision ID: 0019
-Revises: 0018
+Revision ID: 0022
+Revises: 0021
 Create Date: 2026-05-25
 
 This migration is the schema substrate of Task #820 (G11.2-T3) under
@@ -23,6 +23,13 @@ What this migration adds
   grants for principal P in tenant T"). The permission resolver loads
   all matching rows into memory, then evaluates op_pattern globs
   in-process.
+* One UNIQUE constraint: ``uq_agent_permission_grant`` -- on
+  ``(tenant_id, principal_sub, op_pattern, target_scope)``. The row is
+  *keyed* by this tuple; a duplicate would feed a nondeterministic
+  verdict selection at resolve time. ``target_scope`` is NOT NULL
+  (default ``'*'``) precisely so this key stays total -- a NULL would
+  let Postgres treat two otherwise-identical any-target rows as
+  distinct and silently defeat the constraint.
 * One CHECK constraint: ``ck_agent_permission_verdict`` -- enforces the
   closed ``verdict IN ('auto-execute', 'needs-approval', 'deny')``
   vocabulary at the DB layer.
@@ -91,8 +98,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0019"
-down_revision: str | None = "0018"
+revision: str = "0022"
+down_revision: str | None = "0021"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -123,8 +130,16 @@ def upgrade() -> None:
         sa.Column("principal_sub", sa.Text(), nullable=False),
         # fnmatch-compatible glob string. "*" = every op.
         sa.Column("op_pattern", sa.Text(), nullable=False),
-        # NULL or "*" = any target; UUID string = exactly one target.
-        sa.Column("target_scope", sa.Text(), nullable=True),
+        # "*" = any target; UUID string = exactly one target. NOT NULL
+        # (default "*") so the uniqueness key below stays total -- a NULL
+        # would let PG treat two otherwise-identical any-target rows as
+        # distinct and silently defeat ``uq_agent_permission_grant``.
+        sa.Column(
+            "target_scope",
+            sa.Text(),
+            nullable=False,
+            server_default=sa.text("'*'"),
+        ),
         # Three-state verdict: "auto-execute" | "needs-approval" | "deny".
         sa.Column("verdict", sa.Text(), nullable=False),
         sa.Column("created_by_sub", sa.Text(), nullable=False),
@@ -139,6 +154,16 @@ def upgrade() -> None:
             sa.DateTime(timezone=True),
             nullable=False,
             server_default=sa.text("now()") if is_postgres else None,
+        ),
+        # The grant is keyed by (tenant, principal, op_pattern,
+        # target_scope); a duplicate would feed a nondeterministic
+        # verdict selection at resolve time.
+        sa.UniqueConstraint(
+            "tenant_id",
+            "principal_sub",
+            "op_pattern",
+            "target_scope",
+            name="uq_agent_permission_grant",
         ),
         # DB-layer closed-vocabulary check on verdict.
         sa.CheckConstraint(

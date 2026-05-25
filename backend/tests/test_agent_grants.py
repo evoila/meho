@@ -227,10 +227,29 @@ async def test_elevation_sweeper_deletes_expired_row() -> None:
     async with get_sessionmaker()() as session:
         from sqlalchemy import select
 
+        from meho_backplane.db.models import AuditLog
+
         result = await session.execute(
             select(AgentPermission).where(AgentPermission.id == saved_id)
         )
         assert result.scalar_one_or_none() is None, "sweeper must delete expired row"
+
+        # The elevation expiry must be audited (#819 AC: "elevation + its
+        # expiry are audited"): one per-tenant sweep row carrying the count.
+        audit_rows = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "/internal/agent-permission/expire",
+                        AuditLog.tenant_id == tenant_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(audit_rows) == 1, "sweeper must write one audit row for the tenant"
+        assert audit_rows[0].payload["expired_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -361,20 +380,28 @@ async def test_invalid_target_scope_uuid_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_wildcard_and_none_target_scope_accepted() -> None:
-    """target_scope=None and target_scope='*' are both valid."""
+    """target_scope=None and target_scope='*' are both valid (both → '*').
+
+    The shared T3 (#1052) ``agent_permission`` model stores ``target_scope``
+    NOT NULL with a ``'*'`` default, so an omitted/None target normalizes
+    to the explicit any-target wildcard ``'*'`` (NULL and ``'*'`` mean the
+    same thing; storing ``'*'`` keeps the uniqueness key total).
+    """
     async with get_sessionmaker()() as session:
         tenant_id = await _seed_tenant(session, "val-wild")
     service = AgentGrantService()
 
-    for scope in (None, "*"):
+    # Distinct op_patterns per case: None and "*" both normalize to "*",
+    # so reusing one op_pattern would collide on uq_agent_permission_grant.
+    for scope, op_pattern in ((None, "none.scope.*"), ("*", "star.scope.*")):
         body = AgentGrantCreate(
             principal_sub="sub",
-            op_pattern="*",
+            op_pattern=op_pattern,
             verdict=GrantVerdict.DENY,
             target_scope=scope,
         )
         created = await service.grant(tenant_id, "admin", body)
-        assert created.target_scope == scope
+        assert created.target_scope == "*"
 
 
 @pytest.mark.asyncio

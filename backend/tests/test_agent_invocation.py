@@ -38,12 +38,17 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from sqlalchemy import select
 
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
+    AgentInvocationError,
     AgentInvoker,
     AgentNotFoundError,
     AgentRunNotFoundError,
+    _finalize_child_run,
+    _record_child_run,
+    _resolve_child_definition,
 )
 from meho_backplane.agent.run import AgentDefinition, AgentRunEventKind, PydanticAgentRun
 from meho_backplane.agents.schemas import AgentDefinitionCreate, AgentModelTier
@@ -53,7 +58,9 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentRunStatus, Tenant
+from meho_backplane.db.models import AgentRun as AgentRunRow
+from meho_backplane.db.models import AgentRunStatus, AgentRunTrigger, Tenant
+from meho_backplane.operations import agent_run as run_lifecycle
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.retrieval.embedding import EMBEDDING_DIMENSION
 from meho_backplane.settings import get_settings
@@ -127,6 +134,8 @@ async def _seed_definition(
     tenant_id: UUID = _TENANT_A,
     enabled: bool = True,
     toolset: dict[str, Any] | None = None,
+    system_prompt: str = "You read secrets via MEHO operations.",
+    turn_budget: int = 5,
 ) -> None:
     """Insert an agent definition for *tenant_id* via the CRUD service."""
     await _seed_tenants()
@@ -138,9 +147,9 @@ async def _seed_definition(
             name=name,
             identity_ref=f"agent:{name}",
             model_tier=AgentModelTier.STANDARD,
-            system_prompt="You read secrets via MEHO operations.",
+            system_prompt=system_prompt,
             toolset=toolset or {},
-            turn_budget=5,
+            turn_budget=turn_budget,
             enabled=enabled,
         ),
     )
@@ -437,3 +446,372 @@ async def test_failed_loop_records_failed_run() -> None:
     outcome = await invoker.run(_make_operator(), "reader", "go")
     assert outcome.status is AgentRunStatus.FAILED
     assert outcome.error is not None
+
+
+# ---------------------------------------------------------------------------
+# Composition wiring (G11.1-T7 #1067) — agent invokes agent via the live invoker
+# ---------------------------------------------------------------------------
+
+
+def _composing_invoker_with(model: FunctionModel) -> AgentInvoker:
+    """An invoker whose seam carries the FunctionModel *and* the real (DB-backed)
+    child resolver + recorder + finalizer — exercises the live composition wiring
+    end to end (the default invoker wires the same three callables)."""
+    return AgentInvoker(
+        runtime=PydanticAgentRun(
+            model_factory=lambda: model,
+            child_agent_resolver=_resolve_child_definition,
+            child_run_recorder=_record_child_run,
+            child_run_finalizer=_finalize_child_run,
+        )
+    )
+
+
+def _parent_invokes_child_once(child_name: str, *, child_marker: str) -> FunctionModel:
+    """A model that, as the parent, invokes *child_name* once then answers; as the
+    child (detected by *child_marker* in its system prompt) answers directly."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        is_child = any(
+            getattr(part, "part_kind", "") == "system-prompt"
+            and child_marker in getattr(part, "content", "")
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if is_child:
+            return ModelResponse(parts=[TextPart("child done")])
+        has_tool_return = any(
+            getattr(part, "part_kind", "") == "tool-return"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not has_tool_return:
+            return ModelResponse(
+                parts=[ToolCallPart("invoke_agent", {"agent_name": child_name, "inputs": "sub"})]
+            )
+        return ModelResponse(parts=[TextPart("parent done")])
+
+    return FunctionModel(fn)
+
+
+def _always_invoke_model(child_name: str) -> FunctionModel:
+    """A model that calls ``invoke_agent`` every turn — a self-recursive cascade
+    only the depth cap or the shared budget can terminate."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[ToolCallPart("invoke_agent", {"agent_name": child_name, "inputs": "recurse"})]
+        )
+
+    return FunctionModel(fn)
+
+
+async def _agent_invoked_rows(tenant_id: UUID) -> list[AgentRunRow]:
+    """All ``agent_run`` rows with ``trigger=agent-invoked`` for *tenant_id*."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(AgentRunRow).where(
+                AgentRunRow.tenant_id == tenant_id,
+                AgentRunRow.trigger == AgentRunTrigger.AGENT_INVOKED.value,
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def test_default_invoker_wires_composition() -> None:
+    """The default invoker builds a runtime with composition wired (#1067).
+
+    The gap #1067 closes: before this, ``AgentInvoker()`` built a bare
+    ``PydanticAgentRun()`` with no child hooks, so ``invoke_agent`` was never
+    registered for a run started via the live surface.
+    """
+    invoker = AgentInvoker()
+    runtime = invoker._runtime
+    assert isinstance(runtime, PydanticAgentRun)
+    assert runtime.child_agent_resolver is _resolve_child_definition
+    assert runtime.child_run_recorder is _record_child_run
+    assert runtime.child_run_finalizer is _finalize_child_run
+
+
+async def test_resolver_scopes_to_tenant_and_enabled() -> None:
+    """The child resolver returns a definition only for an enabled, same-tenant
+    name; disabled / unknown / cross-tenant names resolve to ``None``."""
+    await _seed_definition(name="reader", tenant_id=_TENANT_A, enabled=True)
+    await _seed_definition(name="parked", tenant_id=_TENANT_A, enabled=False)
+    op_a = _make_operator(tenant_id=_TENANT_A)
+
+    resolved = await _resolve_child_definition(op_a, "reader")
+    assert resolved is not None
+    assert resolved.name == "reader"
+
+    assert await _resolve_child_definition(op_a, "parked") is None  # disabled
+    assert await _resolve_child_definition(op_a, "ghost") is None  # unknown
+
+    op_b = _make_operator(tenant_id=_TENANT_B, sub="op-b")
+    assert await _resolve_child_definition(op_b, "reader") is None  # cross-tenant
+
+
+async def test_invoker_composition_persists_child_run_with_lineage() -> None:
+    """A parent run invoked through the live surface invokes a child; the child
+    ``agent_run`` row is persisted with ``trigger=agent-invoked`` and a
+    ``parent_run_id`` pointing at the parent run (cascade tree reconstructable)."""
+    await _seed_definition(
+        name="parent", toolset={"meta_tools": []}, system_prompt="You are the PARENT."
+    )
+    await _seed_definition(
+        name="child", toolset={"meta_tools": []}, system_prompt="You are the CHILD-AGENT."
+    )
+    invoker = _composing_invoker_with(
+        _parent_invokes_child_once("child", child_marker="CHILD-AGENT")
+    )
+
+    outcome = await invoker.run(_make_operator(), "parent", "delegate")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+    assert outcome.output == {"text": "parent done"}
+
+    children = await _agent_invoked_rows(_TENANT_A)
+    assert len(children) == 1
+    child_row = children[0]
+    assert child_row.parent_run_id == outcome.run_id
+    assert child_row.trigger == AgentRunTrigger.AGENT_INVOKED.value
+    assert child_row.agent_definition_id is not None
+    # The finalizer (#1087) closed the child row to its terminal state with the
+    # child loop's output — not left stuck ``running``.
+    assert child_row.status == AgentRunStatus.SUCCEEDED.value
+    assert child_row.output == {"text": "child done"}
+    assert child_row.error is None
+
+
+async def test_invoker_composition_depth_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A self-invoking cascade through the live surface is bounded by
+    ``agent_invoke_max_depth`` — the over-depth call never reaches the recorder."""
+    monkeypatch.setenv("AGENT_INVOKE_MAX_DEPTH", "2")
+    get_settings.cache_clear()
+    await _seed_definition(name="loop", toolset={"meta_tools": []})
+    invoker = _composing_invoker_with(_always_invoke_model("loop"))
+
+    outcome = await invoker.run(_make_operator(), "loop", "start")
+
+    assert outcome.status is AgentRunStatus.FAILED
+    children = await _agent_invoked_rows(_TENANT_A)
+    # depth-1 + depth-2 invocations each recorded a child row; the depth-3
+    # invocation was rejected at the depth check, before the recorder ran
+    # (mirrors the seam-level invariant in test_agent_invoke.py).
+    assert len(children) == 2
+    assert all(c.parent_run_id is not None for c in children)
+
+
+async def test_invoker_composition_budget_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a high depth cap, the shared turn budget terminates the cascade — the
+    run fails and the cascade stops well before the depth cap."""
+    monkeypatch.setenv("AGENT_INVOKE_MAX_DEPTH", "8")
+    get_settings.cache_clear()
+    await _seed_definition(name="loop", toolset={"meta_tools": []}, turn_budget=1)
+    invoker = _composing_invoker_with(_always_invoke_model("loop"))
+
+    outcome = await invoker.run(_make_operator(), "loop", "start")
+
+    assert outcome.status is AgentRunStatus.FAILED
+    children = await _agent_invoked_rows(_TENANT_A)
+    # The shared budget (turn_budget=1) tripped far below the depth cap of 8 —
+    # budget, not depth, bounded the cascade.
+    assert len(children) < 8
+
+
+# ---------------------------------------------------------------------------
+# Child-run finalization (G11.1-T8 #1087) — invoked child rows reach a terminal
+# status (succeeded / failed) through the live AgentInvoker, not stuck running.
+# ---------------------------------------------------------------------------
+
+
+def _parent_invokes_failing_child(child_name: str, *, child_marker: str) -> FunctionModel:
+    """A model where the parent invokes *child_name* once then answers; the child
+    (detected by *child_marker*) loops on an op-less tool call so it exhausts its
+    own turn budget and the child loop fails with ``AgentRunError``."""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        is_child = any(
+            getattr(part, "part_kind", "") == "system-prompt"
+            and child_marker in getattr(part, "content", "")
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if is_child:
+            # Keep emitting an op-less tool call so the child never reaches a
+            # final answer -> its own turn budget trips -> AgentRunError.
+            return ModelResponse(parts=[ToolCallPart("noop_tool", {})])
+        # The failed child surfaces to the parent as a ``retry-prompt`` (the
+        # tool's ModelRetry). The parent invokes the child exactly once, then
+        # recovers on seeing that prompt so the *parent* run still succeeds —
+        # isolating the child's terminal status from the parent's outcome.
+        already_invoked = any(
+            getattr(part, "part_kind", "") == "retry-prompt"
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        if not already_invoked:
+            return ModelResponse(
+                parts=[ToolCallPart("invoke_agent", {"agent_name": child_name, "inputs": "sub"})]
+            )
+        return ModelResponse(parts=[TextPart("parent recovered")])
+
+    return FunctionModel(fn)
+
+
+async def test_invoker_composition_finalizes_failed_child() -> None:
+    """An over-budget child run reaches ``status='failed'`` with the error
+    recorded — the finalizer closes a failed child, it is not stuck ``running``.
+
+    The parent's ``invoke_agent`` of the failing child surfaces as a
+    ``ModelRetry`` the parent recovers from, so the *parent* succeeds while the
+    *child* row is ``failed`` — proving the child lifecycle is finalized
+    independently of the parent's outcome.
+    """
+    await _seed_definition(
+        name="parent", toolset={"meta_tools": []}, system_prompt="You are the PARENT."
+    )
+    await _seed_definition(
+        name="child",
+        toolset={"meta_tools": []},
+        system_prompt="You are the CHILD-AGENT.",
+        turn_budget=1,
+    )
+    invoker = _composing_invoker_with(
+        _parent_invokes_failing_child("child", child_marker="CHILD-AGENT")
+    )
+
+    outcome = await invoker.run(_make_operator(), "parent", "delegate")
+
+    assert outcome.status is AgentRunStatus.SUCCEEDED  # parent recovered
+    children = await _agent_invoked_rows(_TENANT_A)
+    assert len(children) == 1
+    child_row = children[0]
+    assert child_row.status == AgentRunStatus.FAILED.value
+    assert child_row.error is not None
+    assert "turn budget exhausted" in child_row.error
+    assert child_row.output is None
+
+
+async def test_finalize_child_run_swallows_illegal_transition() -> None:
+    """A finalizer call against an already-terminal child row swallows the
+    ``IllegalTransitionError`` (mirrors ``_finalize_run``) — e.g. the row was
+    cancelled mid-flight before the finalizer ran."""
+    await _seed_definition(name="child", toolset={"meta_tools": []})
+    op = _make_operator()
+    # Record a child row (pending -> running), then drive it to a terminal
+    # state out-of-band, simulating a cancel landing before the finalizer runs.
+    child_def = await _resolve_child_definition(op, "child")
+    assert child_def is not None
+    child_run_id = await _record_child_run(operator=op, definition=child_def, parent_run_id=None)
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await run_lifecycle.get_run(session, child_run_id)
+        assert row is not None
+        await run_lifecycle.cancel_run(session, child_run_id, operator=op)
+        await session.commit()
+
+    # The finalizer must not raise even though the row is already terminal.
+    await _finalize_child_run(child_run_id, output="late answer", error=None)
+
+    async with sessionmaker() as session:
+        row = await run_lifecycle.get_run(session, child_run_id)
+        assert row is not None
+        # The cancel's terminal state stands; the finalizer did not overwrite it.
+        assert row.status == AgentRunStatus.CANCELLED.value
+        assert row.output is None
+
+
+# ---------------------------------------------------------------------------
+# G11.2-T2 (#816): autonomous run_scheduled binds the run to the authenticating
+# agent — agent A's credentials must not launch agent B's definition.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_rejects_cross_agent_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduled run fails closed when the definition's identity_ref does not
+    name the authenticated client (no DB run row is created)."""
+    from types import SimpleNamespace
+
+    # The runtime is never reached — the identity guard raises first.
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _final_text("ok")))
+
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=_make_operator(sub="sa-uuid-a")),
+    )
+    # Credentials authenticate client "agent:a" but the named definition
+    # belongs to "agent:b" — cross-agent launch must be refused.
+    monkeypatch.setattr(
+        invoker,
+        "_load_definition",
+        AsyncMock(return_value=SimpleNamespace(name="other-bot", identity_ref="agent:b")),
+    )
+    create_spy = AsyncMock()
+    monkeypatch.setattr(invoker, "_create_run_row", create_spy)
+
+    with pytest.raises(AgentInvocationError, match="do not own definition"):
+        await invoker.run_scheduled(
+            "other-bot",
+            "do the thing",
+            agent_client_id="agent:a",
+            agent_client_secret="s3cr3t",
+        )
+    # Fail-closed before persisting anything.
+    create_spy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_allows_matching_agent_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When identity_ref names the authenticated client, the guard passes and
+    the run is created (stopped at _create_run_row to avoid the full loop)."""
+    from types import SimpleNamespace
+
+    invoker = AgentInvoker(runtime=PydanticAgentRun(model_factory=lambda: _final_text("ok")))
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.get_client_credentials_token",
+        AsyncMock(return_value="agent-token"),
+    )
+    monkeypatch.setattr(
+        "meho_backplane.agent.invocation.verify_jwt_for_audience",
+        AsyncMock(return_value=_make_operator(sub="sa-uuid-a")),
+    )
+    monkeypatch.setattr(
+        invoker,
+        "_load_definition",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                name="a-bot", identity_ref="agent:a", model_tier="standard", id=uuid4()
+            )
+        ),
+    )
+    # Pass the guard, then stop the flow at run-row creation.
+    monkeypatch.setattr(invoker, "_to_agent_definition", lambda entry: object())
+    boom = RuntimeError("stop-after-guard")
+    create_spy = AsyncMock(side_effect=boom)
+    monkeypatch.setattr(invoker, "_create_run_row", create_spy)
+
+    with pytest.raises(RuntimeError, match="stop-after-guard"):
+        await invoker.run_scheduled(
+            "a-bot",
+            "do the thing",
+            agent_client_id="agent:a",
+            agent_client_secret="s3cr3t",
+        )
+    # Guard passed — the run row creation was reached.
+    create_spy.assert_awaited_once()

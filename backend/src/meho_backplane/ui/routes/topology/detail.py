@@ -273,6 +273,41 @@ _require_ui_session_dep = Depends(require_ui_session)
 _get_raw_session_dep = Depends(get_raw_session)
 
 
+def _build_drawer_context(
+    *,
+    node: GraphNode,
+    outgoing: list[_EdgeRow],
+    incoming: list[_EdgeRow],
+    recent_ops: list[AuditLog],
+) -> dict[str, object]:
+    """Assemble the Jinja2 context dict the drawer template renders.
+
+    Extracted so :func:`build_detail_router._handler` stays inside the
+    code-quality function-size budget. The ``dependents_href`` is the
+    "show dependents" link target -- T3 (#882) wired the handler; the
+    URL contract is ``?from=<name>&from_kind=<kind>`` so the
+    dependents subgraph overlay loads with the right anchor.
+
+    ``graph_node.name`` is unconstrained Text (connector-populated);
+    a name containing ``&`` / ``?`` / ``#`` / ``+`` / ``%`` / space
+    would silently corrupt the query string when interpolated raw.
+    :func:`urllib.parse.quote` with ``safe=''`` percent-encodes every
+    byte that is not in the unreserved set, including ``/`` and
+    ``&`` -- the overlay decoder pairs with that on the way in.
+    """
+    return {
+        "node": node,
+        "outgoing_edges": outgoing,
+        "incoming_edges": incoming,
+        "recent_ops": recent_ops,
+        "dependents_href": (
+            f"/ui/topology?view=graph"
+            f"&from={quote(node.name, safe='')}"
+            f"&from_kind={quote(node.kind, safe='')}"
+        ),
+    }
+
+
 def build_detail_router() -> APIRouter:
     """Construct the topology-node-detail :class:`APIRouter`.
 
@@ -335,31 +370,12 @@ def build_detail_router() -> APIRouter:
             target_id=node.target_id,
         )
 
-        context = {
-            "node": node,
-            "outgoing_edges": outgoing,
-            "incoming_edges": incoming,
-            "recent_ops": recent_ops,
-            # The "show dependents" link target. T3 (#882) replaces
-            # the surface with a real handler; the URL contract
-            # ships today so a future hand-off does not need a URL
-            # rename. The dependents view rooted at this node lives
-            # at ``/ui/topology?view=graph&root=<name>`` per the
-            # Initiative #342 work-item #4 / #7 design.
-            #
-            # ``graph_node.name`` is unconstrained Text (connector-
-            # populated); a name containing ``&`` / ``?`` / ``#`` /
-            # ``+`` / ``%`` / space would silently corrupt the query
-            # string when interpolated raw. ``quote(..., safe='')``
-            # percent-encodes every byte that is not in the unreserved
-            # set, including ``/`` and ``&`` -- the dependents view
-            # decoder pairs with that on the way in.
-            "dependents_href": (
-                f"/ui/topology?view=graph"
-                f"&root={quote(node.name, safe='')}"
-                f"&kind={quote(node.kind, safe='')}"
-            ),
-        }
+        context = _build_drawer_context(
+            node=node,
+            outgoing=outgoing,
+            incoming=incoming,
+            recent_ops=recent_ops,
+        )
         return get_templates().TemplateResponse(request, "topology/_drawer.html", context)
 
     router.add_api_route(

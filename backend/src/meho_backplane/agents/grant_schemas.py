@@ -36,10 +36,11 @@ rather than a pydantic-level one.
 from __future__ import annotations
 
 from datetime import datetime
-from enum import StrEnum
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from meho_backplane.db.models import PermissionVerdict
 
 __all__ = [
     "AgentElevationCreate",
@@ -49,18 +50,11 @@ __all__ = [
     "GrantVerdict",
 ]
 
-
-class GrantVerdict(StrEnum):
-    """Closed set of verdicts a grant may carry.
-
-    Mirrors :class:`~meho_backplane.db.models.PermissionVerdict` so
-    the REST / MCP surface never constructs raw string verdicts — callers
-    import this enum and use its members.
-    """
-
-    AUTO_EXECUTE = "auto-execute"
-    NEEDS_APPROVAL = "needs-approval"
-    DENY = "deny"
+#: Collapsed into the single source of truth (#1052/T3): a grant carries
+#: a :class:`~meho_backplane.db.models.PermissionVerdict`. ``GrantVerdict``
+#: is retained as a re-export so the REST / MCP surface imports keep
+#: working without constructing raw string verdicts.
+GrantVerdict = PermissionVerdict
 
 
 class AgentGrantCreate(BaseModel):

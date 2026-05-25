@@ -3,13 +3,13 @@
 
 """Add ``expires_at`` to ``agent_permission`` for G11.2-T6 grant elevation.
 
-Revision ID: 0022
-Revises: 0019
+Revision ID: 0024
+Revises: 0023
 Create Date: 2026-05-25
 
 This migration is the schema substrate of Task #819 (G11.2-T6) under
 Initiative #803 (the P3 agent identity + RBAC + approval gate). It
-extends the ``agent_permission`` table — created by migration ``0019``
+extends the ``agent_permission`` table — created by migration ``0022``
 (G11.2-T3, #820) — with a nullable ``expires_at`` timestamp column and
 a companion index that drives the elevation-expiry sweeper tick.
 
@@ -74,8 +74,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0022"
-down_revision: str | None = "0019"
+revision: str = "0024"
+down_revision: str | None = "0023"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

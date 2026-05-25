@@ -52,8 +52,34 @@
         Tenant inventory of nodes (targets, VMs, hosts, clusters, networks, datastores, ...).
       </p>
     </div>
-    <div class="text-sm opacity-70">
-      <span x-text="'Selected: ' + selected.size" aria-live="polite"></span>
+    <div class="flex items-center gap-3">
+      <div class="text-sm opacity-70">
+        <span x-text="'Selected: ' + selected.size" aria-live="polite"></span>
+      </div>
+      {# ---------- View toggle (table | graph) ----------
+         The graph link carries the active filters + the cross-link
+         selection so a table -> graph toggle preserves operator
+         state. Active mode is rendered as a disabled active button
+         and the other mode as a clickable link. -#}
+      <div class="join" role="tablist" aria-label="View mode">
+        <button
+          type="button"
+          class="btn btn-sm btn-active join-item"
+          role="tab"
+          aria-selected="true"
+          disabled
+        >
+          Table
+        </button>
+        <a
+          class="btn btn-sm join-item"
+          role="tab"
+          aria-selected="false"
+          href="/ui/topology?view=graph{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
+        >
+          Graph
+        </a>
+      </div>
     </div>
   </header>
 
@@ -98,9 +124,15 @@
         </select>
       </label>
       {# Hidden inputs carry the current sort + direction so the next
-         HTMX swap preserves them on top of the filter change. #}
+         HTMX swap preserves them on top of the filter change. The
+         ``selected`` hidden input carries the cross-link selection
+         (the graph surface's "show in table" payload) -- without it,
+         ``hx-include="closest form"`` + ``hx-push-url="true"`` would
+         drop ``?selected=`` from the URL on the first filter keystroke,
+         clearing the row highlight that the cross-link AC requires. #}
       <input type="hidden" name="sort" value="{{ sort.value }}" />
       <input type="hidden" name="direction" value="{{ direction.value }}" />
+      {% if selected_id %}<input type="hidden" name="selected" value="{{ selected_id }}" />{% endif %}
     </div>
   </form>
 
@@ -142,8 +174,8 @@
                 ``urllib.parse.quote(safe='')`` does on the Python side. -#}
             <th>
               <a
-                href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}"
-                hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}"
+                href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
+                hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
                 hx-target="#topology-table-body"
                 hx-swap="outerHTML"
                 hx-push-url="true"
@@ -184,4 +216,11 @@
     </div>
   </aside>
 </section>
+{% endblock %}
+
+{# Surface JS -- scroll-into-view helper for the graph -> table
+   cross-link payload (T2 / #881). Loaded as an external deferred
+   script (not inline) so the chassis CSP posture stays zero-inline. #}
+{% block scripts %}
+  <script src="/ui/static/src/app/topology-table.js" defer></script>
 {% endblock %}

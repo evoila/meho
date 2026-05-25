@@ -35,9 +35,10 @@ Filter coverage
   value derived for HTTP rows — ``f"http.{method.lower()}:{path}"`` for
   ``op_id``. The OR-shaped predicate keeps the substrate honest across both
   write paths.
-* ``result_status`` (one of ``"ok"`` / ``"error"`` / ``"denied"``) maps to
-  ``status_code`` ranges that mirror
-  :func:`~meho_backplane.audit._classify_http_status`.
+* ``result_status`` (one of ``"ok"`` / ``"pending"`` / ``"error"`` /
+  ``"denied"``) maps to ``status_code`` ranges that mirror
+  :func:`~meho_backplane.audit._classify_http_status` (``"pending"`` is
+  the G11.2-T3/T4 202 "awaiting approval" synthetic code).
 * ``agent_session_id`` is a real column (G8.2-T1 #1009, migration ``0014``).
   The filter narrows to ``audit_log.agent_session_id = :agent_session_id``;
   the column is also surfaced on every returned ``AuditEntry`` and drives the
@@ -255,7 +256,15 @@ def _result_status_predicate(result_status: str) -> sa.ColumnElement[bool]:
     rather than a 500.
     """
     if result_status == "ok":
-        return AuditLog.status_code < 400
+        # 202 is the pending synthetic code (G11.2-T3/T4) — a 2xx, but
+        # semantically "awaiting approval", not "ok". Exclude it so the
+        # ``ok`` filter and the ``pending`` filter partition cleanly.
+        return sa.and_(
+            AuditLog.status_code < 400,
+            AuditLog.status_code != 202,
+        )
+    if result_status == "pending":
+        return AuditLog.status_code == 202
     if result_status == "denied":
         return AuditLog.status_code.in_([401, 403])
     if result_status == "error":
@@ -313,14 +322,21 @@ def _build_audit_entry(row: AuditLog, target_name: str | None) -> AuditEntry:
 
 
 def _derive_result_status(status_code: int) -> str:
-    """Same trichotomy as :func:`~meho_backplane.audit._classify_http_status`.
+    """Map a stored ``status_code`` back to the broadcast-shape result_status.
 
     Audit rows do not carry the handler-exception bit, so the post-fact
-    derivation collapses to: 401/403 → denied, other 4xx/5xx → error,
-    everything else → ok.
+    derivation collapses to: 401/403 → denied, 202 → pending (the
+    G11.2-T3/T4 "awaiting approval" synthetic code), other 4xx/5xx →
+    error, everything else → ok. The 202 → ``pending`` arm keeps the
+    audit-query API and the broadcast feed in agreement for the same
+    ``audit_id`` — the dispatcher publishes ``pending`` on the broadcast
+    side, so the read path must derive the same rather than collapsing
+    202 (a 2xx) to ``ok``.
     """
     if status_code in (401, 403):
         return "denied"
+    if status_code == 202:
+        return "pending"
     if status_code >= 400:
         return "error"
     return "ok"

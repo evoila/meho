@@ -752,6 +752,50 @@ async def test_result_status_filter_ok(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_result_status_filter_pending_and_ok_excludes_202(
+    session: AsyncSession,
+) -> None:
+    """202 derives ``pending`` (not ``ok``); the ``ok`` filter excludes it.
+
+    G11.2-T3/T4: a ``needs-approval`` dispatch persists status_code 202.
+    The read path must derive ``pending`` (so the audit-query API agrees
+    with the broadcast feed, which publishes ``pending`` for the same
+    row) rather than collapsing the 202 (a 2xx) into ``ok`` — and the
+    ``ok`` / ``pending`` filters must partition cleanly.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 1, tzinfo=UTC),
+        status_code=200,
+    )
+    await _seed_audit_row(
+        session,
+        tenant_id=tenant_id,
+        occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
+        status_code=202,
+    )
+    await session.commit()
+
+    pending = await query_audit(
+        AuditQueryFilters(result_status="pending"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert [r.status_code for r in pending.rows] == [202]
+    assert pending.rows[0].result_status == "pending"
+
+    ok = await query_audit(
+        AuditQueryFilters(result_status="ok"),
+        tenant_id=tenant_id,
+        session=session,
+    )
+    assert [r.status_code for r in ok.rows] == [200]
+    assert all(r.result_status == "ok" for r in ok.rows)
+
+
+@pytest.mark.asyncio
 async def test_result_status_filter_denied(session: AsyncSession) -> None:
     """``result_status="denied"`` matches 401 + 403 exactly."""
     tenant_id = uuid.uuid4()

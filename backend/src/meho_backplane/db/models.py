@@ -247,6 +247,10 @@ __all__ = [
     "GraphNode",
     "GraphNodeHistory",
     "OperationGroup",
+    "ScheduledTrigger",
+    "ScheduledTriggerInFlightPolicy",
+    "ScheduledTriggerKind",
+    "ScheduledTriggerStatus",
     "Target",
     "Tenant",
     "TenantConvention",
@@ -2923,5 +2927,342 @@ class AgentPrincipal(Base):
             "keycloak_client_id",
             unique=True,
             postgresql_using="btree",
+        ),
+    )
+
+
+class ScheduledTriggerKind(StrEnum):
+    """Closed enum of trigger shapes the G11.3 scheduler dispatches.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1). One
+    :class:`ScheduledTrigger` row carries exactly one of three shapes,
+    selected by this discriminator; the discriminated-union invariant is
+    enforced by the DB-side ``ck_scheduled_trigger_kind_fields`` ``CHECK``
+    that pairs each kind with its mandatory column.
+
+    Members:
+
+    * :attr:`CRON` -- recurring trigger driven by a 5-field cron
+      expression (``cron_expr`` column) interpreted in the row's
+      ``timezone``. The dispatcher (T2 #823) reads the expression via
+      ``croniter`` and materialises ``next_fire_at``.
+    * :attr:`ONE_OFF` -- single-shot trigger at a wall-clock time
+      (``next_fire_at`` column). The dispatcher fires it once then marks
+      ``status = 'fired'``.
+    * :attr:`EVENT` -- event-subscription trigger keyed on a JSONB
+      filter (``event_filter`` column). The transactional outbox (T3
+      #824) matches rows against the filter and dispatches.
+
+    Closed enum -- the vocabulary is fixed at v0.2; widening it is a
+    coordinated DB + model change so the enum and the
+    :data:`_SCHEDULED_TRIGGER_KINDS` literal (and migration ``0018``'s
+    frozen tuple) cannot drift.
+    """
+
+    CRON = "cron"
+    ONE_OFF = "one_off"
+    EVENT = "event"
+
+
+class ScheduledTriggerStatus(StrEnum):
+    """Closed lifecycle status of a :class:`ScheduledTrigger`.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1). The admin
+    surface (T5 #826) walks triggers through this state machine; the
+    dispatcher (T2/T3) only fires rows with :attr:`ACTIVE`.
+
+    Members:
+
+    * :attr:`ACTIVE` -- the trigger is eligible for dispatch.
+    * :attr:`PAUSED` -- temporarily disabled by an operator.
+      ``next_fire_at`` is preserved so resuming reactivates without
+      recomputing.
+    * :attr:`CANCELLED` -- terminal. Operator-initiated; the row is
+      retained for audit purposes but never fires again.
+    * :attr:`FIRED` -- terminal for one-off triggers after the
+      dispatcher fires them. Cron / event triggers never enter this
+      state (cron re-arms by recomputing ``next_fire_at`` after each
+      fire; event triggers re-arm by remaining ``active`` against the
+      outbox stream).
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+    FIRED = "fired"
+
+
+class ScheduledTriggerInFlightPolicy(StrEnum):
+    """Closed policy of what happens to a fired run that gets killed mid-flight.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1) for the column;
+    T4 #825 owns the resume/fail mechanics.
+
+    Members:
+
+    * :attr:`RESUME` -- the dispatcher / lease-reaper (T4) attempts to
+      resume a killed run from its last recorded state. At-least-once
+      semantics; the underlying agent run should be idempotent-friendly.
+    * :attr:`FAIL_INTO_AUDIT` -- the killed run is marked ``failed``
+      with a clean audit row explaining the interruption; the next
+      trigger tick fires a fresh run. The default policy -- requires
+      no extra infrastructure and matches the consumer doc's accepted
+      outcome.
+    """
+
+    RESUME = "resume"
+    FAIL_INTO_AUDIT = "fail_into_audit"
+
+
+#: Closed enum of :attr:`ScheduledTrigger.kind` -- derived from
+#: :class:`ScheduledTriggerKind` so the enum and the DB-layer ``CHECK``
+#: constraint cannot drift. The drift guard in
+#: :mod:`tests.test_db_scheduled_trigger` enforces equality at
+#: unit-test time. Migration ``0018`` records its own frozen literal
+#: tuple of the same shape (an independent snapshot).
+_SCHEDULED_TRIGGER_KINDS: tuple[str, ...] = tuple(k.value for k in ScheduledTriggerKind)
+
+#: Closed enum of :attr:`ScheduledTrigger.status` -- derived from
+#: :class:`ScheduledTriggerStatus`; same lock-step discipline as
+#: :data:`_SCHEDULED_TRIGGER_KINDS`.
+_SCHEDULED_TRIGGER_STATUSES: tuple[str, ...] = tuple(s.value for s in ScheduledTriggerStatus)
+
+#: Closed enum of :attr:`ScheduledTrigger.in_flight_policy` -- derived
+#: from :class:`ScheduledTriggerInFlightPolicy`; same lock-step
+#: discipline as :data:`_SCHEDULED_TRIGGER_KINDS`.
+_SCHEDULED_TRIGGER_IN_FLIGHT_POLICIES: tuple[str, ...] = tuple(
+    p.value for p in ScheduledTriggerInFlightPolicy
+)
+
+#: Discriminated-union invariant: exactly one of the two type-specific
+#: columns (``cron_expr`` for cron, ``event_filter`` for event) carries
+#: the trigger's semantics. One-offs are distinguished by
+#: ``kind = 'one_off'`` + both type columns NULL + a NOT NULL
+#: ``next_fire_at`` (which cron / event rows may also populate after
+#: the dispatcher's first compute-next pass). The
+#: ``(kind = '...' AND col IS NOT NULL AND other_col IS NULL)`` form is
+#: portable across PG and SQLite -- no dialect-specific syntax.
+#: Migration ``0018`` records the literal snapshot; the drift guard in
+#: :mod:`tests.test_db_scheduled_trigger` asserts equality.
+_SCHEDULED_TRIGGER_KIND_FIELDS_CHECK: str = (
+    "("
+    "(kind = 'cron' AND cron_expr IS NOT NULL AND event_filter IS NULL) OR "
+    "(kind = 'one_off' AND cron_expr IS NULL AND event_filter IS NULL "
+    "AND next_fire_at IS NOT NULL) OR "
+    "(kind = 'event' AND event_filter IS NOT NULL AND cron_expr IS NULL)"
+    ")"
+)
+
+
+class ScheduledTrigger(Base):
+    """One row per durable trigger that fires a G11.1 agent run.
+
+    Initiative #804 (G11.3 Scheduler), Task #822 (T1). T1 settles the
+    durability-substrate fork the Initiative left open: **Option A --
+    extend the existing roll-our-own pattern** (asyncio +
+    ``pg_try_advisory_lock``; see :mod:`meho_backplane.topology.scheduler`
+    and :mod:`meho_backplane.memory.expiry` for the precedent). T2 / T3
+    / T4 / T5 build on the storage shape landed here.
+
+    Single-table discriminated union
+    --------------------------------
+
+    A single ``scheduled_trigger`` table stores all three trigger shapes
+    because the dispatcher (T2/T3) scans the table with one "claim the
+    next due row" query. The :attr:`kind` column picks which type-
+    specific column carries the semantics:
+
+    * ``kind = 'cron'`` -> ``cron_expr`` populated, interpreted in
+      ``timezone``. ``next_fire_at`` is materialised by the dispatcher.
+    * ``kind = 'one_off'`` -> no type-specific column; ``next_fire_at``
+      is set at insert time to the desired wall-clock fire time. After
+      the dispatcher fires, ``status`` transitions to ``fired``.
+    * ``kind = 'event'`` -> ``event_filter`` populated. T3 #824 matches
+      transactional-outbox rows against this filter to drive dispatch.
+
+    A DB-side ``CHECK`` constraint (``ck_scheduled_trigger_kind_fields``)
+    enforces the invariant at the substrate boundary.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. PG production gets
+      ``gen_random_uuid()`` via migration ``0018``; the ORM falls back
+      to ``default=uuid.uuid4`` for SQLite dev/test.
+    * ``tenant_id`` -- UUID NOT NULL with a real ``REFERENCES tenant(id)``
+      FK. Clean-slate substrate -- no chassis-era rows -- so the FK is
+      enforced at the DB layer.
+    * ``agent_definition_id`` -- UUID NOT NULL with a real
+      ``REFERENCES agent_definition(id)`` FK. The parent table already
+      exists at HEAD (``0016`` shipped ahead of this work), so the FK
+      is tightened here.
+    * ``kind`` -- Text NOT NULL, closed-enum ``CHECK``.
+    * ``cron_expr`` -- Text nullable. Populated only when
+      ``kind = 'cron'``; parsed via the dispatcher's ``croniter``
+      dependency (T2 #823).
+    * ``timezone`` -- Text NOT NULL DEFAULT ``'UTC'``. IANA tz name
+      used by the dispatcher's cron-evaluator for replica-safe
+      next-fire math. Stored even for one_off / event kinds so the
+      schema is uniform; only cron actually reads it.
+    * ``event_filter`` -- portable JSON -> JSONB nullable, with
+      ``none_as_null=True`` so a Python ``None`` round-trips as SQL
+      NULL (the discriminated-union ``CHECK`` predicates on
+      ``event_filter IS NULL`` for non-event kinds).
+    * ``inputs`` -- portable JSON -> JSONB nullable, with
+      ``none_as_null=True``. Carries the agent run payload / prompt
+      the dispatcher passes into the spawned agent. NULL for triggers
+      whose definition supplies its own inputs.
+    * ``identity_sub`` -- Text NOT NULL. JWT ``sub`` of the agent
+      principal the spawned run executes as. Required so the
+      dispatcher can mint per-fire tokens at run time.
+    * ``status`` -- Text NOT NULL, closed-enum ``CHECK``. Defaults to
+      ``'active'``. The dispatcher only fires ``active`` rows; after a
+      one-off fires it transitions to ``'fired'`` (terminal).
+    * ``in_flight_policy`` -- Text NOT NULL, closed-enum ``CHECK``.
+      Defaults to ``'fail_into_audit'``.
+    * ``next_fire_at`` -- ``timestamptz`` nullable. For cron / event
+      kinds the dispatcher materialises this from ``cron_expr`` /
+      filter matches; for one_off it is set at insert and is the only
+      schedule signal the dispatcher reads. The
+      ``(status, next_fire_at)`` index drives the dispatch claim query.
+    * ``last_fired_at`` -- ``timestamptz`` nullable. Set by the
+      dispatcher after a successful fire; observable via the admin
+      surface (T5).
+    * ``created_by_sub`` -- Text NOT NULL. JWT ``sub`` of the
+      tenant-admin who created the trigger. Distinct from
+      ``identity_sub`` -- the creator may not be the principal the
+      trigger fires as.
+    * ``created_at`` / ``updated_at`` -- ``timestamptz`` NOT NULL.
+      PG-side ``now()`` server defaults via the migration; the ORM
+      also declares ``default=lambda: datetime.now(UTC)`` plus
+      ``onupdate=lambda: datetime.now(UTC)`` on ``updated_at`` so
+      ORM-side edits bump the timestamp.
+
+    Indexes
+    -------
+
+    * ``scheduled_trigger_next_fire_at_idx`` -- b-tree on
+      ``(status, next_fire_at)`` (partial on PG with
+      ``WHERE status = 'active'``). Drives the dispatcher's "what
+      fires next" claim query.
+    * ``scheduled_trigger_tenant_idx`` -- b-tree on
+      ``(tenant_id, kind)``. Drives the admin surface's tenant-scoped
+      list (T5 #826) without sequential-scanning the table.
+
+    The model is storage-only -- no helper / transition logic lives on
+    the class. The dispatcher (T2/T3), policy (T4), and admin (T5)
+    services own every mutation.
+    """
+
+    __tablename__ = "scheduled_trigger"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK -- see class docstring.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Real REFERENCES agent_definition(id) FK -- parent at HEAD via 0016.
+    agent_definition_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("agent_definition.id"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # Discriminated by ``kind`` -- see _SCHEDULED_TRIGGER_KIND_FIELDS_CHECK.
+    cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # IANA tz name; only cron actually reads it but the schema is uniform.
+    timezone: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="UTC",
+    )
+    # ``none_as_null=True`` is load-bearing -- see same kwarg on
+    # ``inputs`` below.
+    event_filter: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # Agent run payload/prompt. ``none_as_null=True`` so the bind path
+    # inserts SQL NULL (not the JSON literal ``'null'``) for unset
+    # inputs -- keeps row introspection clean.
+    inputs: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # JWT ``sub`` the spawned run executes as -- dispatch identity.
+    identity_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=ScheduledTriggerStatus.ACTIVE.value,
+    )
+    in_flight_policy: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT.value,
+    )
+    next_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    last_fired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "scheduled_trigger_next_fire_at_idx",
+            "status",
+            "next_fire_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'active'"),
+        ),
+        Index(
+            "scheduled_trigger_tenant_idx",
+            "tenant_id",
+            "kind",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("kind", _SCHEDULED_TRIGGER_KINDS),
+            name="ck_scheduled_trigger_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _SCHEDULED_TRIGGER_STATUSES),
+            name="ck_scheduled_trigger_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("in_flight_policy", _SCHEDULED_TRIGGER_IN_FLIGHT_POLICIES),
+            name="ck_scheduled_trigger_in_flight_policy",
+        ),
+        # Drift-guarded by tests.test_db_scheduled_trigger which compares
+        # the model's CheckConstraint text against migration 0018's
+        # _KIND_FIELDS_CHECK literal.
+        sa.CheckConstraint(
+            _SCHEDULED_TRIGGER_KIND_FIELDS_CHECK,
+            name="ck_scheduled_trigger_kind_fields",
         ),
     )

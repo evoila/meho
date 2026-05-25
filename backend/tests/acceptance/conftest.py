@@ -182,6 +182,11 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # foreign key constraint``.
     "agent_run",
     "audit_log",
+    # ``scheduled_trigger.tenant_id`` is a real ``REFERENCES tenant(id)``
+    # FK + ``agent_definition_id`` is a real ``REFERENCES
+    # agent_definition(id)`` FK (migration ``0018``, G11.3-T1 #822). PG
+    # rejects truncating either parent unless ``scheduled_trigger`` is in
+    # the same statement.
     "broadcast_override",
     "documents",
     "endpoint_descriptor",
@@ -200,6 +205,7 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     "graph_node",
     "graph_node_history",
     "operation_group",
+    "scheduled_trigger",
     "targets",
     "tenant",
 )

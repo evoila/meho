@@ -430,6 +430,20 @@ class AuditLog(Base):
         nullable=True,
         default=None,
     )
+    # Nullable on purpose — the RFC 8693 acting-party ``sub`` claim
+    # (G11.2-T2 #816). Set only when the inbound token was produced by
+    # a delegation token exchange: ``operator_sub`` carries the
+    # initiating user's ``sub`` and ``actor_sub`` carries the acting
+    # agent's ``sub``. NULL for every direct-user request and every
+    # ``client_credentials`` (autonomous) run — the agent itself is
+    # then both subject and actor, captured solely by ``operator_sub``.
+    # No FK clause; the Keycloak ``sub`` is an opaque issuer-managed
+    # identifier, not a row in this schema. Added by migration ``0018``.
+    actor_sub: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
 
     __table_args__ = (
         Index(
@@ -460,6 +474,11 @@ class AuditLog(Base):
         Index(
             "audit_log_agent_session_id_idx",
             "agent_session_id",
+            postgresql_using="btree",
+        ),
+        Index(
+            "audit_log_actor_sub_idx",
+            "actor_sub",
             postgresql_using="btree",
         ),
     )

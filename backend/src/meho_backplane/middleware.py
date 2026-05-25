@@ -421,6 +421,13 @@ async def verify_jwt_and_bind(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),
         target_id=None,  # slot; resolve_target mutates on success (G0.3-T4)
+        # RFC 8693 actor claim (G11.2-T2 #816). ``None`` for direct-user
+        # and ``client_credentials`` tokens; the agent principal's ``sub``
+        # for delegation tokens. The audit middleware reads this slot and
+        # writes it to ``audit_log.actor_sub`` so every delegated-run
+        # action is attributable to both the initiating human and the
+        # acting agent.
+        actor_sub=operator.actor_sub,
     )
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)

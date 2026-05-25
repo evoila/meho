@@ -206,6 +206,10 @@ async def write_mcp_audit_row(
             id=audit_id,
             occurred_at=datetime.now(UTC),
             operator_sub=operator.sub,
+            # RFC 8693 actor claim (G11.2-T2 #816). Propagated from the
+            # resolved Operator so MCP audit rows carry the same
+            # delegation attribution as chassis HTTP audit rows.
+            actor_sub=operator.actor_sub,
             tenant_id=operator.tenant_id,
             agent_session_id=agent_session_id,
             parent_audit_id=parent_audit_id,

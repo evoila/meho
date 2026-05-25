@@ -29,6 +29,13 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
 * ``tenant_role`` — the operator's role within the tenant. Modelled as
   a closed :class:`TenantRole` enum so the RBAC primitive in T4 can be
   exhaustive (``tenant_admin`` / ``operator`` / ``read_only``).
+* ``actor_sub`` — the RFC 8693 actor claim ``act.sub``, present only
+  when the token was produced by a delegation exchange (``sub``=user,
+  ``act``=agent). ``None`` for every direct-user or
+  ``client_credentials`` token. When set, audit rows record both the
+  delegating subject (``operator_sub``) and the acting agent
+  (``actor_sub``) so every agent action is attributable to the human
+  who initiated it; see G11.2-T2 (#816).
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -88,3 +95,13 @@ class Operator(BaseModel):
     raw_jwt: str = Field(repr=False)
     tenant_id: UUID
     tenant_role: TenantRole
+    # RFC 8693 actor claim (G11.2-T2 #816). Present only when the inbound
+    # token was produced by a delegation token exchange: ``sub``=user who
+    # initiated the run, ``act``=agent acting on their behalf. NULL on
+    # direct-user tokens and ``client_credentials`` tokens. Downstream
+    # consumers (audit middleware, dispatcher audit) must propagate this
+    # to ``audit_log.actor_sub`` so every agent action maps back to its
+    # initiating human. ``Field(default=None)`` keeps the field optional
+    # and backwards-compatible: existing token-construction paths that do
+    # not set it produce the same ``Operator`` shape as before.
+    actor_sub: str | None = Field(default=None, repr=True)

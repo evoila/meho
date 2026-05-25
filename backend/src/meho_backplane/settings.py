@@ -537,6 +537,21 @@ class Settings(BaseModel):
         single-call ids); a missing/empty header then returns a
         JSON-RPC ``-32600`` Invalid Request before dispatch, so no
         audit row is written for the rejected call.
+    agent_token_exchange_client_id:
+        Keycloak ``client_id`` of the agent principal used for both
+        RFC 8693 delegation exchanges and autonomous ``client_credentials``
+        runs (G11.2-T2 #816). Must be a confidential Keycloak client with
+        ``standard-token-exchange`` enabled (delegation) and
+        ``Service accounts enabled`` (client_credentials). See
+        ``docs/cross-repo/keycloak-agent-client.md``. Default ``""``
+        (unset) — the token-exchange helpers raise
+        :class:`~meho_backplane.auth.token_exchange.TokenExchangeError`
+        immediately when empty. Set via ``AGENT_TOKEN_EXCHANGE_CLIENT_ID``.
+    agent_token_exchange_client_secret:
+        Client secret of the agent Keycloak principal. Sourced from Vault
+        in production (same render-into-env chain as other secrets). Never
+        logged. Default ``""`` (unset / fail-fast). Set via
+        ``AGENT_TOKEN_EXCHANGE_CLIENT_SECRET``.
     """
 
     keycloak_issuer_url: HttpUrl
@@ -640,6 +655,19 @@ class Settings(BaseModel):
     # polls). Bounds how long the surface holds an HTTP connection open
     # for a short interactive run before degrading to the pollable shape.
     agent_sync_timeout_seconds: float = Field(default=30.0, gt=0)
+    # G11.2-T2 #816 — RFC 8693 token-exchange + client_credentials.
+    # ``agent_token_exchange_client_id`` is the Keycloak ``client_id`` of
+    # the agent principal used for both the delegation exchange (actor_token
+    # source in :func:`~meho_backplane.auth.token_exchange.exchange_for_delegation`)
+    # and autonomous ``client_credentials`` runs
+    # (:func:`~meho_backplane.auth.token_exchange.get_client_credentials_token`).
+    # ``agent_token_exchange_client_secret`` is the matching secret.
+    # Both default to ``""`` (unset) — the token-exchange paths raise
+    # :class:`~meho_backplane.auth.token_exchange.TokenExchangeError`
+    # immediately when these are empty, so misconfiguration is fail-fast.
+    # Set via ``AGENT_TOKEN_EXCHANGE_CLIENT_ID`` / ``AGENT_TOKEN_EXCHANGE_CLIENT_SECRET``.
+    agent_token_exchange_client_id: str = ""
+    agent_token_exchange_client_secret: str = ""
     mcp_require_session_id: bool = False
 
     @field_validator("broadcast_redis_url")
@@ -812,6 +840,10 @@ def get_settings() -> Settings:
         agent_sync_timeout_seconds=float(
             os.environ.get("AGENT_SYNC_TIMEOUT_SECONDS", "30.0"),
         ),
+        agent_token_exchange_client_id=os.environ.get("AGENT_TOKEN_EXCHANGE_CLIENT_ID", "").strip(),
+        agent_token_exchange_client_secret=os.environ.get(
+            "AGENT_TOKEN_EXCHANGE_CLIENT_SECRET", ""
+        ).strip(),
         mcp_require_session_id=parse_bool_env(
             os.environ.get("MCP_REQUIRE_SESSION_ID"),
         ),

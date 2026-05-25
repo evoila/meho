@@ -663,6 +663,21 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     email = claims.get("email")
     tenant_id = _extract_tenant_id(claims, settings)
     tenant_role = _extract_tenant_role(claims, settings)
+    # RFC 8693 actor claim (G11.2-T2 #816). The ``act`` claim is a JSON
+    # object with a ``sub`` key identifying the acting party (the agent)
+    # when the token was produced by a delegation token exchange. Present
+    # only in delegated-run tokens; absent in direct-user and
+    # ``client_credentials`` tokens. Treat malformed ``act`` (not an
+    # object, or ``sub`` not a non-empty string) as absent rather than
+    # a hard 401 — an agent operator who mis-configures the exchange gets
+    # a NULL actor_sub in audit (still auditable) rather than a complete
+    # 401 rejection of an otherwise valid token.
+    actor_sub: str | None = None
+    act_claim = claims.get("act")
+    if isinstance(act_claim, dict):
+        act_sub_raw = act_claim.get("sub")
+        if isinstance(act_sub_raw, str) and act_sub_raw:
+            actor_sub = act_sub_raw
     try:
         return Operator(
             sub=sub,
@@ -671,6 +686,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             raw_jwt=raw_jwt,
             tenant_id=tenant_id,
             tenant_role=tenant_role,
+            actor_sub=actor_sub,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

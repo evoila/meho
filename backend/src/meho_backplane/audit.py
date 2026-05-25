@@ -301,6 +301,7 @@ async def _write_audit_row(
     *,
     audit_id: uuid.UUID,
     operator_sub: str,
+    actor_sub: str | None,
     tenant_id: uuid.UUID | None,
     target_id: uuid.UUID | None,
     method: str,
@@ -329,6 +330,12 @@ async def _write_audit_row(
     hook references the same id on the
     :class:`~meho_backplane.broadcast.events.BroadcastEvent` it emits
     after the audit commit succeeds.
+
+    ``actor_sub`` is the RFC 8693 actor claim (G11.2-T2 #816). ``None``
+    for direct-user and ``client_credentials`` tokens; the agent's
+    ``sub`` for delegation tokens. Written to
+    ``audit_log.actor_sub`` so audit consumers can answer "which agent
+    acted for which user."
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -336,6 +343,7 @@ async def _write_audit_row(
             id=audit_id,
             occurred_at=datetime.now(UTC),
             operator_sub=operator_sub,
+            actor_sub=actor_sub,
             tenant_id=tenant_id,
             target_id=target_id,
             method=method,
@@ -668,7 +676,17 @@ class AuditMiddleware:
         )
 
         duration_ms = round((time.monotonic() - start) * 1000, 2)
-        operator_sub = structlog.contextvars.get_contextvars().get("operator_sub")
+        _ctx = structlog.contextvars.get_contextvars()
+        operator_sub = _ctx.get("operator_sub")
+        # RFC 8693 actor claim (G11.2-T2 #816). Bound by
+        # ``verify_jwt_and_bind`` when the inbound token carries an
+        # ``act.sub``; ``None`` otherwise. Normalise here: treat any
+        # non-string or empty string as absent so the column stays NULL
+        # for direct-user tokens and ``client_credentials`` tokens.
+        _raw_actor_sub = _ctx.get("actor_sub")
+        actor_sub: str | None = (
+            _raw_actor_sub if isinstance(_raw_actor_sub, str) and _raw_actor_sub else None
+        )
 
         if not isinstance(operator_sub, str) or not operator_sub:
             # No operator to attribute. Skip the audit write entirely
@@ -739,6 +757,7 @@ class AuditMiddleware:
             await _write_audit_row(
                 audit_id=audit_id,
                 operator_sub=operator_sub,
+                actor_sub=actor_sub,
                 tenant_id=tenant_id,
                 target_id=target_id,
                 method=method,

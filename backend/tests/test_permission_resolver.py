@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -105,6 +106,7 @@ async def _insert_permission(
     op_pattern: str,
     verdict: str,
     target_scope: str | None = None,
+    expires_at: datetime | None = None,
 ) -> None:
     """Insert one AgentPermission row for use in a test."""
     async with get_sessionmaker()() as session:
@@ -116,6 +118,7 @@ async def _insert_permission(
                 verdict=verdict,
                 target_scope=target_scope,
                 created_by_sub=_CREATED_BY,
+                expires_at=expires_at,
             )
         )
         await session.commit()
@@ -259,6 +262,35 @@ async def test_dangerous_op_with_no_grant_denies() -> None:
     verdict, reason = await _resolve(safety_level="dangerous")
     assert verdict == PermissionVerdict.DENY
     assert "dangerous" in reason
+
+
+async def test_expired_grant_ignored_by_resolver() -> None:
+    """A grant past its ``expires_at`` no longer counts (G11.2-T6 #819).
+
+    A time-bounded elevation reverts **at expiry**, before the sweeper
+    deletes it: an expired ``deny`` grant on a ``safe`` op is ignored, so
+    the resolver falls back to the ``safe`` default (``auto-execute``).
+    """
+    await _seed_tenant(_TENANT_ID, "t-expired-grant")
+    past = datetime.now(UTC) - timedelta(hours=1)
+    await _insert_permission(op_pattern="*", verdict="deny", expires_at=past)
+    verdict, reason = await _resolve(safety_level="safe")
+    assert verdict == PermissionVerdict.AUTO_EXECUTE
+    assert "safety_level default" in reason
+
+
+async def test_active_time_bounded_grant_honoured() -> None:
+    """A grant with a future ``expires_at`` still counts (G11.2-T6 #819).
+
+    The mirror of the expired case: a future-expiry ``deny`` grant on a
+    ``safe`` op is honoured (the elevation window is still open), so the
+    resolver returns ``deny`` rather than the ``safe`` default.
+    """
+    await _seed_tenant(_TENANT_ID, "t-active-grant")
+    future = datetime.now(UTC) + timedelta(hours=1)
+    await _insert_permission(op_pattern="*", verdict="deny", expires_at=future)
+    verdict, _reason = await _resolve(safety_level="safe")
+    assert verdict == PermissionVerdict.DENY
 
 
 async def test_equal_specificity_tie_breaks_to_most_restrictive() -> None:

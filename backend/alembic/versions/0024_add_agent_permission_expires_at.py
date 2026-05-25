@@ -9,9 +9,10 @@ Create Date: 2026-05-25
 
 This migration is the schema substrate of Task #819 (G11.2-T6) under
 Initiative #803 (the P3 agent identity + RBAC + approval gate). It
-extends the ``agent_permission`` table — created by migration ``0022``
-(G11.2-T3, #820) — with a nullable ``expires_at`` timestamp column and
-a companion index that drives the elevation-expiry sweeper tick.
+extends the ``agent_permission`` table — created by migration
+``0022_create_agent_permission`` (G11.2-T3, #820) — with a nullable
+``expires_at`` timestamp column and a companion index that drives the
+elevation-expiry sweeper tick.
 
 What this migration adds
 ------------------------
@@ -37,22 +38,23 @@ every resolve — unnecessary complexity for a two-column row scan. The
 memory-expiry sweeper (G5.2) uses the same pattern: ``expires_at``
 in-row, one periodic DELETE tick.
 
-**Why this migration is ``0022`` with ``down_revision = "0019"``**
-rather than folded into ``0019``: The grant-management REST surface
-(this PR) and the base permission model (PR #1052 / migration ``0019``)
-shipped in different PRs on the same initiative. Chaining ``0022``
-after ``0019`` lets both PRs merge independently without requiring a
-simultaneous rebase.
+**Why this migration is ``0024`` with ``down_revision = "0023"``**
+rather than folded into ``0022``: The grant-management surface (this
+PR, #1066) and the base permission model (PR #1052 / migration
+``0022_create_agent_permission``) shipped in different PRs on the same
+initiative. Chaining ``0024`` after the current head (``0023``,
+T4's approval-request table) lets both PRs merge independently.
 
-**Why the ADD COLUMN approach**: Migration ``0019`` already creates
-the ``agent_permission`` table with all base columns. This migration
-only extends that table — re-creating it would conflict at apply time
-when both migrations are in the same Alembic history.
+**Why the ADD COLUMN approach**: Migration ``0022`` (G11.2-T3 #820)
+already creates the ``agent_permission`` table with all base columns.
+This migration only extends that table — re-creating it would conflict
+at apply time. (T6 originally shipped its own copy of the table; the
+rebase onto #1052 deleted that duplicate so this is now a pure ALTER.)
 
 Dialect-portability decisions
 -----------------------------
 
-Mirrors the discipline 0001-0019 established:
+Mirrors the discipline 0001-0023 established:
 
 * ``expires_at`` — nullable ``timestamptz`` (PG) / ``DateTime``
   (SQLite); no server default (NULL is the sensible initial value for

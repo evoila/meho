@@ -16,8 +16,9 @@ Acceptance criteria covered:
   tenant A's service calls.
 * **Validation** — past ``expires_at``, invalid ``target_scope`` UUID,
   and empty ``op_pattern`` all raise :exc:`GrantValidationError`.
-* **Migration smoke** — the ``0022`` migration can be applied and
-  rolled back cleanly (via Alembic's SQLite path in the conftest).
+* **Migration smoke** — the ``0024`` ALTER migration (adds
+  ``expires_at``) can be applied and rolled back cleanly (via Alembic's
+  SQLite path in the conftest).
 
 Runs against the conftest SQLite engine (pre-migrated to head).
 """
@@ -419,6 +420,28 @@ async def test_uuid_target_scope_accepted() -> None:
     )
     created = await service.grant(tenant_id, "admin", body)
     assert created.target_scope == target_uuid
+
+
+@pytest.mark.asyncio
+async def test_duplicate_grant_raises_validation_error() -> None:
+    """A duplicate (principal, op_pattern, target_scope) grant fails cleanly.
+
+    The grant is keyed by ``uq_agent_permission_grant`` (T3 #1052). A
+    second identical grant must surface a :exc:`GrantValidationError`
+    (422 at the boundary), not an unhandled IntegrityError → HTTP 500.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "val-dup")
+    service = AgentGrantService()
+    body = AgentGrantCreate(
+        principal_sub="dup-agent",
+        op_pattern="vault.kv.*",
+        verdict=GrantVerdict.NEEDS_APPROVAL,
+        target_scope="*",
+    )
+    await service.grant(tenant_id, "admin", body)
+    with pytest.raises(GrantValidationError, match="already exists"):
+        await service.grant(tenant_id, "admin", body)
 
 
 # ---------------------------------------------------------------------------

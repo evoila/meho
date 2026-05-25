@@ -77,6 +77,7 @@ from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from meho_backplane.agents.grant_schemas import AgentGrantCreate, AgentGrantRead
 from meho_backplane.db.engine import get_sessionmaker
@@ -209,7 +210,20 @@ class AgentGrantService:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             session.add(row)
-            await session.flush()
+            try:
+                await session.flush()
+            except IntegrityError as exc:
+                # A grant is keyed by (tenant, principal, op_pattern,
+                # target_scope) via uq_agent_permission_grant. A duplicate
+                # is an operator error, not a 500 — surface it as a clean
+                # validation failure (422) the way the other guards do.
+                await session.rollback()
+                raise GrantValidationError(
+                    f"a grant for principal {payload.principal_sub!r} on "
+                    f"op_pattern {payload.op_pattern!r} / target_scope "
+                    f"{row.target_scope!r} already exists; revoke it first "
+                    "or revise the existing grant"
+                ) from exc
             await session.refresh(row)
             entry = AgentGrantRead.model_validate(row)
             await session.commit()
